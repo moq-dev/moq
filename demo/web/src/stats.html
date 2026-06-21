@@ -10,82 +10,123 @@
 	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 </head>
 
-<body class="p-4 max-w-6xl mx-auto">
-	<h1 class="text-2xl font-bold mb-1">MoQ Relay Stats</h1>
-	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
-		Live view of every relay publishing a <code>.stats</code> broadcast: the whole cluster at once, not
-		just the relay you're connected to. Enable it with <code>[stats] enabled = true</code> in the relay
-		config.
-	</p>
+<body class="p-4 sm:p-6 max-w-6xl mx-auto">
+	<header class="flex flex-wrap items-center justify-between gap-3 mb-6">
+		<div>
+			<h1 class="text-2xl font-bold leading-tight">MoQ Relay Stats</h1>
+			<p class="text-neutral-500 text-xs">Live cluster activity, auto-discovered under <code>.stats/node</code>.</p>
+		</div>
+		<div class="flex items-center gap-2">
+			<input id="relay-url" type="text" spellcheck="false" placeholder="https://relay…"
+				class="w-64 max-w-full bg-neutral-900 border border-neutral-700 rounded-md px-3 py-1.5 text-white text-sm font-mono focus:outline-none focus:border-emerald-600">
+			<span id="status"
+				class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-neutral-900 border border-neutral-700">connecting…</span>
+		</div>
+	</header>
 
-	<div class="flex flex-wrap items-end gap-3 mb-6">
-		<label class="text-xs text-neutral-400">
-			Relay URL
-			<input id="relay-url" type="text"
-				class="mt-1 block w-96 max-w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
-		</label>
-		<span id="status"
-			class="inline-flex items-center px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">connecting…</span>
-	</div>
-
-	<section class="mb-8">
-		<h2 class="text-lg font-semibold mb-1">Nodes</h2>
-		<p class="text-neutral-500 text-xs mb-3 max-w-3xl">
-			Every relay node publishing <code>.stats</code>, auto-discovered under <code>.stats/node</code>
-			(so this covers a whole cluster, not just one relay).
-			<b class="text-neutral-300">broadcasters</b>/<b class="text-neutral-300">viewers</b>/<b
-				class="text-neutral-300">ingress</b>/<b class="text-neutral-300">egress</b> are external clients;
-			<b class="text-neutral-300">cluster in</b>/<b class="text-neutral-300">cluster out</b> are internal
-			mTLS peer traffic (the relaying between nodes that's otherwise invisible). Click a node to drill in.
-		</p>
-		<div id="nodes" class="overflow-x-auto text-neutral-500 text-sm">searching for nodes…</div>
+	<!-- Cluster summary: six headline numbers, no prose. -->
+	<section id="overview" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Nodes</div>
+			<div id="kpi-nodes" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Broadcasters</div>
+			<div id="kpi-broadcasters" class="text-2xl font-semibold tabular-nums mt-0.5 text-sky-300">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Viewers</div>
+			<div id="kpi-viewers" class="text-2xl font-semibold tabular-nums mt-0.5 text-emerald-300">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Egress</div>
+			<div id="kpi-egress" class="text-2xl font-semibold tabular-nums mt-0.5 text-emerald-400">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Ingress</div>
+			<div id="kpi-ingress" class="text-2xl font-semibold tabular-nums mt-0.5 text-sky-400">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Sessions</div>
+			<div id="kpi-sessions" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
+		</div>
 	</section>
 
-	<section id="node-detail" hidden>
-		<h2 class="text-lg font-semibold mb-1">Node <span id="node-title" class="font-mono text-emerald-400"></span></h2>
-		<p class="text-neutral-500 text-xs mb-4 max-w-3xl">
-			Activity on this node, split by tier and direction. The relay reports external clients (JWT/public)
-			and internal cluster peers (mTLS) separately. The <code>.stats</code> feed itself is excluded
-			throughout. <span id="node-sessions" class="text-neutral-300"></span> · <span id="node-internal-sessions"
-				class="text-neutral-300"></span>
-		</p>
+	<!-- Cluster throughput over time. -->
+	<section class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-6">
+		<div class="flex items-center justify-between mb-2">
+			<h2 class="text-sm font-semibold text-neutral-300">Cluster throughput</h2>
+			<div class="flex items-center gap-4 text-xs">
+				<span class="flex items-center gap-1.5"><span class="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-400"></span>egress <span id="legend-egress" class="font-mono text-neutral-400 tabular-nums">–</span></span>
+				<span class="flex items-center gap-1.5"><span class="inline-block w-2.5 h-2.5 rounded-sm bg-sky-400"></span>ingress <span id="legend-ingress" class="font-mono text-neutral-400 tabular-nums">–</span></span>
+				<span class="flex items-center gap-1.5"><span class="inline-block w-2.5 h-2.5 rounded-sm bg-violet-400"></span>cluster <span id="legend-cluster" class="font-mono text-neutral-400 tabular-nums">–</span></span>
+			</div>
+		</div>
+		<div id="chart-throughput" class="h-44"></div>
+	</section>
 
-		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Broadcasters (external ingress)</h3>
-		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
-			Broadcasts this node ingests from upstream publishers. <b class="text-neutral-300">ingress</b> is
-			capped at one subscription per track, so it's bytes pulled once, not per-viewer.
-		</p>
-		<div id="node-publishers" class="overflow-x-auto text-neutral-500 text-sm">no broadcasters</div>
+	<!-- One card per node; click to drill in. -->
+	<section class="mb-6">
+		<h2 class="text-sm font-semibold text-neutral-300 mb-2">Nodes</h2>
+		<div id="nodes" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-neutral-500 text-sm">searching for nodes…</div>
+	</section>
 
-		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Viewers (external egress)</h3>
-		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
-			Broadcasts this node serves to downstream subscribers. <b class="text-neutral-300">egress</b> is
-			bytes served to viewers; the useful throughput number.
-		</p>
-		<div id="node-subscribers" class="overflow-x-auto text-neutral-500 text-sm">no viewers</div>
+	<section id="node-detail" hidden class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 mb-6">
+		<div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+			<h2 class="text-base font-semibold">Node <span id="node-title" class="font-mono text-emerald-400"></span></h2>
+			<div class="text-xs text-neutral-400 font-mono"><span id="node-sessions"></span> · <span id="node-internal-sessions"></span></div>
+		</div>
 
-		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Cluster ingress (internal / mTLS)</h3>
-		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
-			Broadcasts this node pulls from upstream <em>cluster peers</em> (other relays / the CDN) rather than
-			from real publishers.
-		</p>
-		<div id="node-internal-publishers" class="overflow-x-auto text-neutral-500 text-sm">no cluster ingress</div>
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+			<div>
+				<div class="flex items-center justify-between mb-1">
+					<h3 class="text-xs font-semibold text-neutral-400">External throughput</h3>
+					<div class="flex items-center gap-3 text-[11px]">
+						<span class="flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-sm bg-emerald-400"></span>egress</span>
+						<span class="flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-sm bg-sky-400"></span>ingress</span>
+					</div>
+				</div>
+				<div id="chart-node-external" class="h-32"></div>
+			</div>
+			<div>
+				<div class="flex items-center justify-between mb-1">
+					<h3 class="text-xs font-semibold text-neutral-400">Cluster throughput (mTLS peers)</h3>
+					<div class="flex items-center gap-3 text-[11px]">
+						<span class="flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-sm bg-violet-400"></span>out</span>
+						<span class="flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-sm bg-fuchsia-400"></span>in</span>
+					</div>
+				</div>
+				<div id="chart-node-cluster" class="h-32"></div>
+			</div>
+		</div>
 
-		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Cluster egress (internal / mTLS)</h3>
-		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
-			Broadcasts this node fans out to downstream <em>cluster peers</em>. This is the relaying traffic
-			that never shows up in the external numbers, e.g. a hub bridging nodes.
-		</p>
-		<div id="node-internal-subscribers" class="overflow-x-auto text-neutral-500 text-sm">no cluster egress</div>
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+			<div>
+				<h3 class="text-xs font-semibold text-sky-300 mb-1">Broadcasters <span class="text-neutral-500 font-normal">· ingested from upstream</span></h3>
+				<div id="node-publishers" class="overflow-x-auto text-neutral-500 text-sm">no broadcasters</div>
+			</div>
+			<div>
+				<h3 class="text-xs font-semibold text-emerald-300 mb-1">Viewers <span class="text-neutral-500 font-normal">· served downstream</span></h3>
+				<div id="node-subscribers" class="overflow-x-auto text-neutral-500 text-sm">no viewers</div>
+			</div>
+			<div>
+				<h3 class="text-xs font-semibold text-fuchsia-300 mb-1">Cluster ingress <span class="text-neutral-500 font-normal">· from peer relays</span></h3>
+				<div id="node-internal-publishers" class="overflow-x-auto text-neutral-500 text-sm">none</div>
+			</div>
+			<div>
+				<h3 class="text-xs font-semibold text-violet-300 mb-1">Cluster egress <span class="text-neutral-500 font-normal">· to peer relays</span></h3>
+				<div id="node-internal-subscribers" class="overflow-x-auto text-neutral-500 text-sm">none</div>
+			</div>
+		</div>
 	</section>
 
 	<!-- Dev-only: renders console output inline here. Defined by the
 	     console-overlay Vite plugin; absent from production builds. -->
 	<moq-console class="block mt-8"></moq-console>
 
-	<details class="mt-8">
-		<summary class="text-sm text-neutral-400 cursor-pointer">Raw frames</summary>
-		<pre id="raw" class="text-xs font-mono text-neutral-300 overflow-x-auto mt-2"></pre>
+	<details class="mt-6">
+		<summary class="text-xs text-neutral-500 cursor-pointer hover:text-neutral-300">Raw frames</summary>
+		<pre id="raw" class="text-xs font-mono text-neutral-400 overflow-x-auto mt-2"></pre>
 	</details>
 
 	<div class="prose-doc mt-8">

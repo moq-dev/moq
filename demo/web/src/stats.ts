@@ -22,7 +22,8 @@
  *
  * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
  * "active" = open - closed. The relay only includes currently-live entries, so
- * the latest frame is a snapshot of now.
+ * the latest frame is a snapshot of now. We sample the aggregate on an interval
+ * to derive per-second throughput rates for the charts.
  */
 
 import "./highlight";
@@ -32,6 +33,10 @@ const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 
 // Broadcasts under this prefix are per-node stats broadcasts.
 const STATS_PREFIX = ".stats/node";
+
+// Rolling history window for the charts.
+const SAMPLE_MS = 1000;
+const MAX_SAMPLES = 90;
 
 const $ = <T extends HTMLElement>(id: string): T => {
 	const el = document.getElementById(id);
@@ -196,6 +201,108 @@ function aggregate(stats: NodeStats) {
 	};
 }
 
+const countSessions = (f: SessionFrame) =>
+	Object.values(f).reduce((n, s) => n + active(s.sessions, s.sessions_closed), 0);
+
+// ---- Time-series history ---------------------------------------------------
+
+// One sample captures cumulative byte counters (for rate charts) plus the
+// instantaneous gauges. Keyed by node name, with "" reserved for the
+// cluster-wide aggregate.
+interface Sample {
+	t: number;
+	egress: number; // cumulative external egress bytes
+	ingress: number; // cumulative external ingress bytes
+	clusterOut: number; // cumulative internal egress bytes
+	clusterIn: number; // cumulative internal ingress bytes
+	broadcasters: number;
+	viewers: number;
+	sessions: number;
+}
+
+const history = new Map<string, Sample[]>();
+// Bumped every sample so the chart effects re-render without making the whole
+// history map reactive.
+const clock = new Signals.Signal(0);
+
+function sampleNode(t: number, stats: NodeStats): Sample {
+	const a = aggregate(stats);
+	return {
+		t,
+		egress: a.external.egressBytes,
+		ingress: a.external.ingressBytes,
+		clusterOut: a.internal.egressBytes,
+		clusterIn: a.internal.ingressBytes,
+		broadcasters: a.external.broadcasters,
+		viewers: a.external.viewers,
+		sessions: countSessions(stats.sessions),
+	};
+}
+
+function pushSample(key: string, s: Sample) {
+	const arr = history.get(key) ?? [];
+	arr.push(s);
+	if (arr.length > MAX_SAMPLES) arr.shift();
+	history.set(key, arr);
+}
+
+const sampler = new Signals.Effect();
+sampler.run((effect) => {
+	// Only sample while connected; the interval restarts on reconnect.
+	if (!effect.get(connection.established)) return;
+	effect.interval(() => {
+		const all = nodeStats.peek();
+		const nodes = Object.keys(all);
+		const t = Date.now();
+
+		const agg: Sample = {
+			t,
+			egress: 0,
+			ingress: 0,
+			clusterOut: 0,
+			clusterIn: 0,
+			broadcasters: 0,
+			viewers: 0,
+			sessions: 0,
+		};
+		for (const node of nodes) {
+			const s = sampleNode(t, all[node] as NodeStats);
+			pushSample(node, s);
+			agg.egress += s.egress;
+			agg.ingress += s.ingress;
+			agg.clusterOut += s.clusterOut;
+			agg.clusterIn += s.clusterIn;
+			agg.broadcasters += s.broadcasters;
+			agg.viewers += s.viewers;
+			agg.sessions += s.sessions;
+		}
+		pushSample("", agg);
+
+		// Drop history for nodes that have gone away.
+		for (const key of history.keys()) {
+			if (key !== "" && !nodes.includes(key)) history.delete(key);
+		}
+
+		clock.update((n) => n + 1);
+	}, SAMPLE_MS);
+});
+
+// Convert a cumulative-counter series into a per-second rate series.
+function rateSeries(samples: Sample[], field: keyof Sample): number[] {
+	const out: number[] = [];
+	for (let i = 1; i < samples.length; i++) {
+		const dt = (samples[i].t - samples[i - 1].t) / 1000;
+		const delta = (samples[i][field] as number) - (samples[i - 1][field] as number);
+		out.push(dt > 0 ? Math.max(0, delta / dt) : 0);
+	}
+	return out;
+}
+
+const lastRate = (samples: Sample[], field: keyof Sample): number => {
+	const r = rateSeries(samples, field);
+	return r.length ? (r[r.length - 1] as number) : 0;
+};
+
 // ---- Render ---------------------------------------------------------------
 
 const ui = new Signals.Effect();
@@ -217,14 +324,15 @@ ui.run((effect) => {
 ui.run((effect) => {
 	const status = effect.get(connection.status);
 	const el = $("status");
-	el.textContent = status;
-	const color =
+	const dot = status === "connected" ? "bg-emerald-400" : status === "connecting" ? "bg-amber-400" : "bg-red-400";
+	const tone =
 		status === "connected"
-			? "text-emerald-400 border-emerald-700"
+			? "text-emerald-300 border-emerald-800"
 			: status === "connecting"
-				? "text-amber-400 border-amber-700"
-				: "text-red-400 border-red-700";
-	el.className = `inline-flex items-center px-2 py-1 rounded text-xs bg-neutral-900 border ${color}`;
+				? "text-amber-300 border-amber-800"
+				: "text-red-300 border-red-800";
+	el.className = `inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-neutral-900 border ${tone}`;
+	el.replaceChildren(spanDot(dot), document.createTextNode(status));
 });
 
 // Keep a valid selection: default to the first node, switch away from one that
@@ -236,8 +344,43 @@ ui.run((effect) => {
 	selectedNode.set(nodes[0]);
 });
 
-// Aggregate table: one row per node, click to drill in.
+// Cluster summary cards.
 ui.run((effect) => {
+	effect.get(clock);
+	const all = nodeStats.peek();
+	const nodes = Object.keys(all);
+	const cluster = history.get("") ?? [];
+	const latest = cluster[cluster.length - 1];
+
+	$("kpi-nodes").textContent = String(nodes.length);
+	$("kpi-broadcasters").textContent = String(latest?.broadcasters ?? 0);
+	$("kpi-viewers").textContent = String(latest?.viewers ?? 0);
+	$("kpi-sessions").textContent = String(latest?.sessions ?? 0);
+	$("kpi-egress").textContent = formatRate(lastRate(cluster, "egress"));
+	$("kpi-ingress").textContent = formatRate(lastRate(cluster, "ingress"));
+});
+
+// Cluster throughput chart.
+ui.run((effect) => {
+	effect.get(clock);
+	const cluster = history.get("") ?? [];
+	const egress = rateSeries(cluster, "egress");
+	const ingress = rateSeries(cluster, "ingress");
+	const peer = rateSeries(cluster, "clusterOut");
+
+	renderChart($("chart-throughput"), [
+		{ values: egress, color: "#34d399" }, // emerald-400
+		{ values: ingress, color: "#38bdf8" }, // sky-400
+		{ values: peer, color: "#a78bfa" }, // violet-400
+	]);
+	$("legend-egress").textContent = formatRate(egress[egress.length - 1] ?? 0);
+	$("legend-ingress").textContent = formatRate(ingress[ingress.length - 1] ?? 0);
+	$("legend-cluster").textContent = formatRate(peer[peer.length - 1] ?? 0);
+});
+
+// Node cards: one per node with a live egress sparkline. Click to drill in.
+ui.run((effect) => {
+	effect.get(clock);
 	const all = effect.get(nodeStats);
 	const sel = effect.get(selectedNode);
 	const nodes = Object.keys(all).sort();
@@ -245,30 +388,16 @@ ui.run((effect) => {
 
 	if (nodes.length === 0) {
 		el.textContent = "searching for nodes…";
+		el.className = "text-neutral-500 text-sm";
 		return;
 	}
-
-	const headers = ["node", "broadcasters", "viewers", "ingress", "egress", "cluster in", "cluster out"];
-	const rows = nodes.map((node) => {
-		const a = aggregate(all[node] as NodeStats);
-		return {
-			key: node,
-			cells: [
-				node,
-				String(a.external.broadcasters),
-				String(a.external.viewers),
-				formatBytes(a.external.ingressBytes),
-				formatBytes(a.external.egressBytes),
-				formatBytes(a.internal.ingressBytes),
-				formatBytes(a.internal.egressBytes),
-			],
-		};
-	});
-	renderTable(effect, el, headers, rows, { selected: sel, onClick: (k) => selectedNode.set(k) });
+	el.className = "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3";
+	el.replaceChildren(...nodes.map((node) => nodeCard(effect, node, history.get(node) ?? [], node === sel)));
 });
 
-// Drill-down: the selected node's broadcasts (egress-focused) + sessions.
+// Drill-down for the selected node.
 ui.run((effect) => {
+	effect.get(clock);
 	const all = effect.get(nodeStats);
 	const node = effect.get(selectedNode);
 	const detail = $("node-detail");
@@ -281,6 +410,16 @@ ui.run((effect) => {
 	detail.hidden = false;
 	$("node-title").textContent = node;
 
+	const samples = history.get(node) ?? [];
+	renderChart($("chart-node-external"), [
+		{ values: rateSeries(samples, "egress"), color: "#34d399" },
+		{ values: rateSeries(samples, "ingress"), color: "#38bdf8" },
+	]);
+	renderChart($("chart-node-cluster"), [
+		{ values: rateSeries(samples, "clusterOut"), color: "#a78bfa" },
+		{ values: rateSeries(samples, "clusterIn"), color: "#e879f9" }, // fuchsia-400
+	]);
+
 	// Broadcasters: what this node ingests (from upstream publishers / cluster peers).
 	const ingressRows = (frame: BroadcastFrame) =>
 		Object.keys(frame)
@@ -288,10 +427,7 @@ ui.run((effect) => {
 			.sort()
 			.map((path) => {
 				const i = frame[path] ?? {};
-				return {
-					key: path,
-					cells: [path, formatBytes(i.bytes ?? 0), String(i.frames ?? 0), String(i.groups ?? 0)],
-				};
+				return { key: path, cells: [path, formatBytes(i.bytes ?? 0), String(i.frames ?? 0)] };
 			});
 
 	// Viewers: what this node serves downstream (to subscribers / cluster peers).
@@ -306,71 +442,118 @@ ui.run((effect) => {
 					cells: [
 						path,
 						String(active(e.broadcasts, e.broadcasts_closed)), // viewers / peers
-						String(active(e.subscriptions, e.subscriptions_closed)), // track subs
 						formatBytes(e.bytes ?? 0), // egress
 						String(e.frames ?? 0),
-						String(e.groups ?? 0),
 					],
 				};
 			});
 
-	const inHeaders = ["broadcast", "ingress", "frames", "groups"];
-	const outHeaders = ["broadcast", "viewers", "track subs", "egress", "frames", "groups"];
-
-	renderTable(effect, $("node-publishers"), inHeaders, ingressRows(stats.ingress));
-	renderTable(effect, $("node-subscribers"), outHeaders, egressRows(stats.egress));
+	renderTable($("node-publishers"), ["broadcast", "ingress", "frames"], ingressRows(stats.ingress));
+	renderTable($("node-subscribers"), ["broadcast", "viewers", "egress", "frames"], egressRows(stats.egress));
+	renderTable($("node-internal-publishers"), ["broadcast", "ingress", "frames"], ingressRows(stats.internalIngress));
 	renderTable(
-		effect,
-		$("node-internal-publishers"),
-		["broadcast", "ingress", "frames", "groups"],
-		ingressRows(stats.internalIngress),
-	);
-	renderTable(
-		effect,
 		$("node-internal-subscribers"),
-		["broadcast", "peers", "track subs", "egress", "frames", "groups"],
+		["broadcast", "peers", "egress", "frames"],
 		egressRows(stats.internalEgress),
 	);
 
-	const countSessions = (f: SessionFrame) =>
-		Object.values(f).reduce((n, s) => n + active(s.sessions, s.sessions_closed), 0);
 	const sessions = countSessions(stats.sessions);
 	const internalSessions = countSessions(stats.internalSessions);
-	$("node-sessions").textContent = `${sessions} external session${sessions === 1 ? "" : "s"}`;
-	$("node-internal-sessions").textContent = `${internalSessions} cluster session${internalSessions === 1 ? "" : "s"}`;
+	$("node-sessions").textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
+	$("node-internal-sessions").textContent = `${internalSessions} cluster`;
 });
 
-// Raw frames for everyone who wants the numbers behind the tables.
+// Raw frames for everyone who wants the numbers behind the charts.
 ui.run((effect) => {
 	$("raw").textContent = JSON.stringify(effect.get(nodeStats), null, 2);
 });
 
-// ---- Helpers --------------------------------------------------------------
+// ---- DOM helpers -----------------------------------------------------------
+
+function spanDot(colorClass: string): HTMLSpanElement {
+	const s = document.createElement("span");
+	s.className = `inline-block w-2 h-2 rounded-full ${colorClass}`;
+	return s;
+}
+
+// A clickable card summarizing one node, with a live egress sparkline.
+function nodeCard(effect: Signals.Effect, node: string, samples: Sample[], selected: boolean): HTMLElement {
+	const latest = samples[samples.length - 1];
+	const card = document.createElement("div");
+	card.className = [
+		"rounded-lg border bg-neutral-900/50 p-3 cursor-pointer transition-colors",
+		selected ? "border-emerald-600 ring-1 ring-emerald-600/40" : "border-neutral-800 hover:border-neutral-600",
+	].join(" ");
+	card.tabIndex = 0;
+	card.setAttribute("role", "button");
+
+	const head = document.createElement("div");
+	head.className = "flex items-center justify-between gap-2 mb-2";
+	const name = document.createElement("span");
+	name.className = "font-mono text-sm text-neutral-200 truncate";
+	name.textContent = node;
+	const rate = document.createElement("span");
+	rate.className = "text-sm font-semibold tabular-nums text-emerald-400 whitespace-nowrap";
+	rate.textContent = formatRate(lastRate(samples, "egress"));
+	head.append(name, rate);
+
+	const spark = makeChart([{ values: rateSeries(samples, "egress"), color: "#34d399" }], 200, 36);
+	spark.classList.add("w-full", "h-9", "mb-2");
+
+	const stats = document.createElement("div");
+	stats.className = "flex items-center gap-4 text-xs text-neutral-400";
+	stats.append(
+		stat("broadcasters", latest?.broadcasters ?? 0, "text-sky-300"),
+		stat("viewers", latest?.viewers ?? 0, "text-emerald-300"),
+		stat("sessions", latest?.sessions ?? 0, "text-neutral-200"),
+	);
+
+	card.append(head, spark, stats);
+
+	const activate = () => selectedNode.set(node);
+	effect.event(card, "click", activate);
+	effect.event(card, "keydown", (e) => {
+		if (e.key === "Enter" || e.key === " ") {
+			e.preventDefault();
+			activate();
+		}
+	});
+	return card;
+}
+
+function stat(label: string, value: number, valueClass: string): HTMLElement {
+	const wrap = document.createElement("span");
+	wrap.className = "flex items-center gap-1";
+	const v = document.createElement("span");
+	v.className = `font-semibold tabular-nums ${valueClass}`;
+	v.textContent = String(value);
+	const l = document.createElement("span");
+	l.className = "text-neutral-500";
+	l.textContent = label;
+	wrap.append(v, l);
+	return wrap;
+}
 
 interface Row {
 	key: string;
 	cells: string[];
 }
 
-function renderTable(
-	effect: Signals.Effect,
-	container: HTMLElement,
-	headers: string[],
-	rows: Row[],
-	opts?: { selected?: string; onClick?: (key: string) => void },
-) {
+function renderTable(container: HTMLElement, headers: string[], rows: Row[]) {
 	if (rows.length === 0) {
-		container.textContent = "no active entries";
+		container.textContent = "none";
+		container.className = "text-neutral-600 text-xs italic";
 		return;
 	}
+	container.className = "overflow-x-auto";
 	const table = document.createElement("table");
-	table.className = "w-full text-sm border-collapse";
+	table.className = "w-full text-xs border-collapse";
 
 	const thead = document.createElement("thead");
 	const htr = document.createElement("tr");
 	for (const h of headers) {
 		const th = document.createElement("th");
-		th.className = "text-left font-medium text-neutral-400 px-2 py-1 border-b border-neutral-700";
+		th.className = "text-left font-medium text-neutral-500 px-2 py-1 border-b border-neutral-800";
 		th.textContent = h;
 		htr.appendChild(th);
 	}
@@ -380,24 +563,10 @@ function renderTable(
 	const tbody = document.createElement("tbody");
 	for (const row of rows) {
 		const tr = document.createElement("tr");
-		tr.className = "border-b border-neutral-800";
-		if (opts?.onClick) {
-			tr.classList.add("cursor-pointer", "hover:bg-neutral-800");
-			tr.tabIndex = 0;
-			tr.setAttribute("role", "button");
-			if (row.key === opts.selected) tr.classList.add("bg-neutral-800", "text-emerald-300");
-			const activate = () => opts.onClick?.(row.key);
-			effect.event(tr, "click", activate);
-			effect.event(tr, "keydown", (e) => {
-				if (e.key === "Enter" || e.key === " ") {
-					e.preventDefault();
-					activate();
-				}
-			});
-		}
+		tr.className = "border-b border-neutral-900";
 		for (const cell of row.cells) {
 			const td = document.createElement("td");
-			td.className = "px-2 py-1 font-mono text-neutral-200 whitespace-nowrap";
+			td.className = "px-2 py-1 font-mono text-neutral-300 whitespace-nowrap";
 			td.textContent = cell;
 			tr.appendChild(td);
 		}
@@ -407,9 +576,108 @@ function renderTable(
 	container.replaceChildren(table);
 }
 
+// ---- SVG charts ------------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+interface Series {
+	values: number[];
+	color: string;
+}
+
+// Render a multi-series area/line chart into a host element, filling its width.
+function renderChart(host: HTMLElement, series: Series[]) {
+	const rect = host.getBoundingClientRect();
+	const h = Math.max(1, Math.round(rect.height)) || 120;
+	const svg = makeChart(series, 600, h);
+	svg.classList.add("w-full", "h-full");
+	host.replaceChildren(svg);
+}
+
+// Build an SVG chart in a `vw`×`vh` viewBox. All series share one vertical
+// scale so they're directly comparable. `preserveAspectRatio="none"` lets it
+// stretch to any container width; only straight lines are drawn so the
+// non-uniform scaling stays invisible.
+function makeChart(series: Series[], vw: number, vh: number): SVGSVGElement {
+	const svg = document.createElementNS(SVG_NS, "svg");
+	svg.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
+	svg.setAttribute("preserveAspectRatio", "none");
+
+	const lens = series.map((s) => s.values.length);
+	const maxLen = Math.max(0, ...lens);
+	const maxVal = Math.max(1, ...series.flatMap((s) => s.values));
+
+	// Baseline along the bottom even before data arrives.
+	const baseline = document.createElementNS(SVG_NS, "line");
+	baseline.setAttribute("x1", "0");
+	baseline.setAttribute("y1", String(vh - 1));
+	baseline.setAttribute("x2", String(vw));
+	baseline.setAttribute("y2", String(vh - 1));
+	baseline.setAttribute("stroke", "#404040"); // neutral-700
+	baseline.setAttribute("stroke-width", "1");
+	svg.appendChild(baseline);
+
+	if (maxLen < 2) return svg;
+
+	const pad = 2;
+	const x = (i: number) => (i / (maxLen - 1)) * vw;
+	const y = (v: number) => vh - pad - (v / maxVal) * (vh - 2 * pad);
+
+	series.forEach((s, idx) => {
+		if (s.values.length < 2) return;
+		const pts = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+
+		const gradId = `g${idx}-${Math.round(maxVal)}`;
+		const grad = document.createElementNS(SVG_NS, "linearGradient");
+		grad.setAttribute("id", gradId);
+		grad.setAttribute("x1", "0");
+		grad.setAttribute("y1", "0");
+		grad.setAttribute("x2", "0");
+		grad.setAttribute("y2", "1");
+		for (const [offset, opacity] of [
+			["0%", "0.35"],
+			["100%", "0"],
+		]) {
+			const stop = document.createElementNS(SVG_NS, "stop");
+			stop.setAttribute("offset", offset);
+			stop.setAttribute("stop-color", s.color);
+			stop.setAttribute("stop-opacity", opacity);
+			grad.appendChild(stop);
+		}
+		svg.appendChild(grad);
+
+		const area = document.createElementNS(SVG_NS, "path");
+		area.setAttribute("d", `M0,${vh} L${pts.join(" L")} L${vw},${vh} Z`);
+		area.setAttribute("fill", `url(#${gradId})`);
+		svg.appendChild(area);
+
+		const line = document.createElementNS(SVG_NS, "polyline");
+		line.setAttribute("points", pts.join(" "));
+		line.setAttribute("fill", "none");
+		line.setAttribute("stroke", s.color);
+		line.setAttribute("stroke-width", "1.5");
+		line.setAttribute("vector-effect", "non-scaling-stroke");
+		line.setAttribute("stroke-linejoin", "round");
+		svg.appendChild(line);
+	});
+
+	return svg;
+}
+
+// ---- Formatting ------------------------------------------------------------
+
 function formatBytes(n: number): string {
 	if (n < 1024) return `${n} B`;
 	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
 	if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 	return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+// Throughput as bits/second (Mbps is how operators think about a relay).
+function formatRate(bytesPerSec: number): string {
+	const bits = bytesPerSec * 8;
+	if (bits < 1000) return `${Math.round(bits)} bps`;
+	if (bits < 1_000_000) return `${(bits / 1000).toFixed(0)} kbps`;
+	if (bits < 1_000_000_000) return `${(bits / 1_000_000).toFixed(1)} Mbps`;
+	return `${(bits / 1_000_000_000).toFixed(2)} Gbps`;
 }
