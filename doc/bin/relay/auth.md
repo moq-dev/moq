@@ -236,6 +236,73 @@ peers to discover and dial.
 The `quinn` and `noq` QUIC backends support mTLS; configuring `tls.root` with a
 backend that does not (e.g. `quiche`) is a startup error.
 
+## Internal Listener
+
+For trusted local workers that don't want the overhead of TLS or UDP, the relay
+can bind a second listener that speaks the qmux wire format directly over a plain
+stream. It performs **no token/certificate authentication**: every accepted
+connection is granted full, unrestricted publish and subscribe access on the
+internal tier, exactly like a cluster peer dialing `/`.
+
+A TCP and a Unix-socket listener can each be enabled independently, under
+`[internal.tcp]` and `[internal.uds]`.
+
+### TCP
+
+```toml
+[internal.tcp]
+# Plain-TCP qmux listener. No TLS, no UDP, no auth: anyone who can reach this
+# socket gets full access. Bind it only to a trusted interface.
+listen = "127.0.0.1:4444"
+```
+
+TCP carries no peer identity, so **any local process of any user** can connect.
+Loopback is the safest bind; a private VPC interface is also valid. The relay
+logs a warning when `listen` is not a loopback address but does not refuse to
+start, so firewalling the port is your responsibility.
+
+```bash
+moq publish tcp://127.0.0.1:4444/my-broadcast < video.mp4
+```
+
+### Unix socket (with a uid/gid/pid allowlist)
+
+A Unix socket lets the relay authenticate the connecting process by its kernel
+credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`), so you can restrict access to a
+specific worker user rather than any local process. Requires the relay to be
+built with the `uds` feature.
+
+```toml
+[internal.uds]
+listen = "/run/moq/internal.sock"
+
+# Only accept connections from these credentials. Each list is matched
+# independently (AND across fields, OR within a field); an empty/omitted list
+# imposes no constraint on that field.
+[internal.uds.allow]
+uid = [1001]   # only the worker's user
+# gid = [2000]
+# pid = [12345]
+```
+
+A connection whose credentials fail the allowlist is closed immediately with no
+access granted. A `pid` requirement rejects peers whose PID the platform doesn't
+report (e.g. some macOS versions). With no `allow` list configured the socket is
+unauthenticated (the relay logs a warning), so the socket's filesystem
+permissions become the only gate.
+
+```bash
+moq publish unix:///run/moq/internal.sock --broadcast my-broadcast < video.mp4
+```
+
+### Notes
+
+Both transports are native-only: browsers can't open raw TCP or Unix sockets, so
+the JS client doesn't support them. The plain-stream path has no TLS ALPN, so the
+MoQ version is negotiated in-band via qmux (a transport parameter on the first
+frame) and the exact version is agreed up front. Neither transport reads a path
+from the URL for routing; the grant is always the empty root (everything).
+
 ## Example Configurations
 
 See the [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) directory for complete working configuration files, including authentication setup:

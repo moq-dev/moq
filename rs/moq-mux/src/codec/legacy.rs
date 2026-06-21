@@ -146,6 +146,11 @@ impl<E: CatalogExt> Import<E> {
 		}
 	}
 
+	/// The MoQ track name.
+	pub fn name(&self) -> &str {
+		self.track.name()
+	}
+
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;

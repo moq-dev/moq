@@ -71,6 +71,14 @@ pub enum Error {
 	#[cfg(feature = "websocket")]
 	#[error(transparent)]
 	WebSocket(Arc<crate::websocket::Error>),
+
+	#[cfg(feature = "tcp")]
+	#[error(transparent)]
+	Tcp(Arc<crate::tcp::Error>),
+
+	#[cfg(all(feature = "uds", unix))]
+	#[error(transparent)]
+	Unix(Arc<crate::unix::Error>),
 }
 
 impl Error {
@@ -165,6 +173,20 @@ impl From<crate::websocket::Error> for Error {
 		}
 
 		Self::WebSocket(Arc::new(err))
+	}
+}
+
+#[cfg(feature = "tcp")]
+impl From<crate::tcp::Error> for Error {
+	fn from(err: crate::tcp::Error) -> Self {
+		Self::Tcp(Arc::new(err))
+	}
+}
+
+#[cfg(all(feature = "uds", unix))]
+impl From<crate::unix::Error> for Error {
+	fn from(err: crate::unix::Error) -> Self {
+		Self::Unix(Arc::new(err))
 	}
 }
 

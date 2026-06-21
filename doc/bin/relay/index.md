@@ -57,7 +57,7 @@ nix build github:moq-dev/moq#moq-relay
 
 ```bash
 docker pull moqdev/moq-relay
-docker run -p 4443:4443/udp -v "$(pwd)/relay.toml:/app/relay.toml:ro" moqdev/moq-relay -- --config /app/relay.toml
+docker run -p 4443:4443/udp -v "$(pwd)/relay.toml:/app/relay.toml:ro" moqdev/moq-relay -- /app/relay.toml
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-relay).
@@ -83,11 +83,7 @@ See [localhost.toml](https://github.com/moq-dev/moq/blob/main/demo/relay/localho
 
 ## Running
 
-```bash
-moq-relay --config relay.toml
-```
-
-Or with the config path as the only argument:
+Pass the config path as the only positional argument:
 
 ```bash
 moq-relay relay.toml
