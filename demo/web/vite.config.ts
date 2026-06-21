@@ -14,8 +14,8 @@ export default defineConfig({
 		solidPlugin(),
 		workletInline(),
 		consoleOverlay(),
-		// Open the watch and publish demos each in their own tab.
-		openTabs(["index.html", "publish.html"]),
+		// Open the watch, publish, and stats demos each in their own tab.
+		openTabs(["index.html", "publish.html", "stats.html"]),
 	],
 	build: {
 		target: "esnext",
