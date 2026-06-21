@@ -13,7 +13,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["iroh", "quinn", "websocket"]
+default = ["iroh", "quinn", "websocket", "nvenc", "vaapi"]
 iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
@@ -25,6 +25,12 @@ websocket = ["moq-native/websocket"]
 # extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
 # Enable with `cargo build -p moq-cli --features capture`.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
+# NVENC / VAAPI hardware encoders for `capture` (Linux), on by default. Each just
+# turns on the matching moq-video feature, and only bites when `capture` pulls in
+# moq-video. For a `capture` build with no CUDA / libva system deps, drop them, e.g.
+#   cargo build -p moq-cli --no-default-features --features "iroh quinn websocket capture"
+nvenc = ["moq-video?/nvenc"]
+vaapi = ["moq-video?/vaapi"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

@@ -71,7 +71,10 @@ moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 moq-vaapi = "0.0.2"
-moq-video = { version = "0.0.4", path = "rs/moq-video" }
+# default-features off (the `nvenc` / `vaapi` hardware encoders) so each consumer
+# opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a self-compiler can
+# leave them off to drop the CUDA / libva deps. moq-video itself still defaults them on.
+moq-video = { version = "0.0.4", path = "rs/moq-video", default-features = false }
 qmux = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"

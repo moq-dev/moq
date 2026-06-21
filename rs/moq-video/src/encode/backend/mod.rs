@@ -26,10 +26,10 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "nvenc"))]
 mod nvenc;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
 mod vaapi;
 
 /// An opened video encoder. Feed it frames at the configured resolution; get
@@ -68,13 +68,13 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 	},
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "nvenc"))]
 	Candidate {
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
 	},
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
 		codecs: &[Codec::H264],

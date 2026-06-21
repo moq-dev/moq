@@ -28,7 +28,8 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
-moq-video = { workspace = true }
+# Enable the NVENC / VAAPI hardware encoders (default-off at the workspace level).
+moq-video = { workspace = true, features = ["nvenc", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"

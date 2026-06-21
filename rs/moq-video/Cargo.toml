@@ -15,6 +15,21 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [lib]
 doctest = false
 
+[features]
+# Hardware encoders are enabled by default. Disable them (e.g. `--no-default-features`)
+# for a slimmer self-compiled Linux build that drops the CUDA / libva deps: openh264
+# stays as the always-compiled software fallback and V4L2 capture is unaffected. Both
+# features are no-ops off Linux (their deps are Linux-only).
+default = ["nvenc", "vaapi"]
+# NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + the SDK's
+# `dynamic-loading`), with a libloading probe for the driver libs, so an nvenc build
+# still links GPU-less and starts driverless, falling back to the next encoder.
+nvenc = ["dep:cudarc", "dep:nvidia-video-codec-sdk", "dep:libloading"]
+# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi 0.0.2 hard-links libva (the
+# binary carries NEEDED libva.so.2 / libva-drm.so.2), so disable this feature for a
+# build with no libva dependency. See #1837.
+vaapi = ["dep:moq-vaapi"]
+
 [dependencies]
 anyhow = "1"
 bytes = "1"
@@ -34,28 +49,30 @@ tracing = "0.1"
 yuv = "0.8.14"
 
 [target.'cfg(target_os="linux")'.dependencies]
-# NVENC hardware encoder, always-on for Linux. Everything is dlopen'd at runtime:
-# cudarc loads CUDA, and nvidia-video-codec-sdk's `dynamic-loading` (a fork
-# feature, see the root [patch.crates-io]) loads libnvidia-encode. So the binary
-# links on a GPU-less builder and still starts on machines without the NVIDIA
-# driver, falling back to the next encoder (see backend::open). `cuda-12020` pins
-# the CUDA API version so the build needs no CUDA toolkit.
-cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+# NVENC hardware encoder, behind the default-on `nvenc` feature. Everything is
+# dlopen'd at runtime: cudarc loads CUDA, and nvidia-video-codec-sdk's
+# `dynamic-loading` (a fork feature, see the root [patch.crates-io]) loads
+# libnvidia-encode. So the binary links on a GPU-less builder and still starts on
+# machines without the NVIDIA driver, falling back to the next encoder (see
+# backend::open). `cuda-12020` pins the CUDA API version so the build needs no
+# CUDA toolkit.
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
-libloading = "0.8"
-# Intel/AMD VAAPI hardware encoder, always-on for Linux. As of moq-vaapi 0.0.2
-# libva is dynamically linked via pkg-config (the binary carries NEEDED
-# libva.so.2 / libva-drm.so.2), so a Linux build needs libva at build time and
-# the binary needs it at runtime: a libva-less host fails to load rather than
-# falling back. Switching moq-vaapi to dlopen libva (one portable binary that
-# falls back like the NVENC backend) is tracked in #1837.
-moq-vaapi = { workspace = true }
+libloading = { version = "0.8", optional = true }
+# Intel/AMD VAAPI hardware encoder, behind the default-on `vaapi` feature. As of
+# moq-vaapi 0.0.2 libva is dynamically linked via pkg-config (the binary carries
+# NEEDED libva.so.2 / libva-drm.so.2), so an enabled-vaapi Linux build needs libva
+# at build time and the binary needs it at runtime: a libva-less host fails to load
+# rather than falling back. Disable the `vaapi` feature for a libva-free build, or
+# switch moq-vaapi to dlopen libva (one portable binary that falls back like the
+# NVENC backend); the latter is tracked in #1837.
+moq-vaapi = { workspace = true, optional = true }
 # default-features off so the crate's `cuda-version-from-build-system` default
 # stays off: we pin the CUDA version via our own cudarc dep (cuda-12020) instead,
 # so the build needs no CUDA toolkit.
-nvidia-video-codec-sdk = { version = "0.4", default-features = false, features = ["dynamic-loading"] }
+nvidia-video-codec-sdk = { version = "0.4", optional = true, default-features = false, features = ["dynamic-loading"] }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
 v4l = "0.14"
