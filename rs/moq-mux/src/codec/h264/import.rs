@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use super::Sps;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 /// The wire shape an [`Import`] is processing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +37,7 @@ pub struct Import<E: CatalogExt = ()> {
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
 	zero: Option<tokio::time::Instant>,
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 enum State {
@@ -78,7 +78,7 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			state: State::Pending { mode_hint: None },
 			zero: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -90,7 +90,7 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			state: State::Pending { mode_hint: None },
 			zero: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -258,6 +258,22 @@ impl<E: CatalogExt> Import<E> {
 		}
 	}
 
+	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
+	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The container
+	/// supplies this since the elementary stream alone carries no decode time. No-op until the
+	/// track exists.
+	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
+		let Some(jitter) = self.jitter.observe_reorder(reorder) else {
+			return;
+		};
+		let Some(track) = self.track.as_ref() else {
+			return;
+		};
+		if let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name) {
+			c.jitter = Some(jitter);
+		}
+	}
+
 	fn decode_avc1<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
@@ -407,7 +423,13 @@ impl<E: CatalogExt> Import<E> {
 				// The avc3 track was created eagerly in initialize_avc3; just publish
 				// (or republish) the catalog rendition with the latest config.
 				let track_name = self.track.as_ref().context("avc3 track not created")?.name.clone();
-				self.catalog.lock().video.renditions.insert(track_name, config.clone());
+				// Seed jitter from whatever has accumulated: a dirty start feeds frames before
+				// this first rendition exists, so those per-frame updates would otherwise be
+				// lost. Keep the cached `config` jitter-free so a later jitter change is not
+				// mistaken for a codec reconfiguration.
+				let mut published = config.clone();
+				published.jitter = self.jitter.current();
+				self.catalog.lock().video.renditions.insert(track_name, published);
 				self.config = Some(config);
 				Ok(reconfigured)
 			}

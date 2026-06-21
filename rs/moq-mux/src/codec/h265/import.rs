@@ -1,6 +1,6 @@
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -37,7 +37,7 @@ pub struct Import<E: CatalogExt = ()> {
 	pps: Vec<Bytes>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -52,7 +52,7 @@ impl<E: CatalogExt> Import<E> {
 			vps: Vec::new(),
 			sps: Vec::new(),
 			pps: Vec::new(),
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -67,7 +67,7 @@ impl<E: CatalogExt> Import<E> {
 			vps: Vec::new(),
 			sps: Vec::new(),
 			pps: Vec::new(),
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -101,6 +101,11 @@ impl<E: CatalogExt> Import<E> {
 		}
 
 		let reconfigured = self.config.is_some();
+		// Seed jitter from whatever has accumulated: a dirty start feeds frames before this
+		// first rendition exists, so those per-frame updates would otherwise be lost. The
+		// cached `config` stays jitter-free so a later jitter change is not mistaken for a
+		// codec reconfiguration.
+		let jitter = self.jitter.current();
 		let mut catalog = self.catalog.lock();
 
 		if self.track.is_some() && self.tracks.is_fixed() {
@@ -114,7 +119,9 @@ impl<E: CatalogExt> Import<E> {
 
 		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-		catalog.video.renditions.insert(track.name.clone(), config.clone());
+		let mut published = config.clone();
+		published.jitter = jitter;
+		catalog.video.renditions.insert(track.name.clone(), published);
 
 		self.config = Some(config);
 		self.track =
@@ -173,6 +180,22 @@ impl<E: CatalogExt> Import<E> {
 	/// This can also be used when EOF is detected to flush the final frame.
 	///
 	/// NOTE: The next decode will fail if it doesn't begin with a start code.
+	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
+	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The container
+	/// supplies this since the elementary stream alone carries no decode time. No-op until the
+	/// track exists.
+	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
+		let Some(jitter) = self.jitter.observe_reorder(reorder) else {
+			return;
+		};
+		let Some(track) = self.track.as_ref() else {
+			return;
+		};
+		if let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name) {
+			c.jitter = Some(jitter);
+		}
+	}
+
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
