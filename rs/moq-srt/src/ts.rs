@@ -8,7 +8,7 @@
 //! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
 use bytes::Bytes;
-use moq_mux::container::ts;
+use moq_mux::container::{Frame, ts};
 use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
 
 use crate::Result;
@@ -62,7 +62,8 @@ impl Publisher {
 ///
 /// The mirror of [`Publisher`]: where that demuxes SRT-carried TS into the
 /// origin, this consumes a broadcast from the origin and re-muxes it to TS so an
-/// SRT caller can play it. Pull byte chunks with [`next`](Self::next).
+/// SRT caller can play it. Pull frames with [`next`](Self::next); each carries
+/// the TS bytes plus the media timestamp used to pace delivery.
 pub struct Subscriber {
 	export: ts::Export,
 }
@@ -82,8 +83,9 @@ impl Subscriber {
 		Ok(Some(Self { export }))
 	}
 
-	/// Pull the next MPEG-TS byte chunk, or `None` once the broadcast ends.
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
+	/// Pull the next muxed frame (TS bytes + media timestamp), or `None` once the
+	/// broadcast ends.
+	pub async fn next(&mut self) -> Result<Option<Frame>> {
 		Ok(self.export.next().await?)
 	}
 }

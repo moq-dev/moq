@@ -17,7 +17,7 @@ use axum::{
 };
 use moq_net::{OriginProducer, StatsHandle, Tier};
 
-use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
+use crate::{AuthParams, AuthToken, web::AuthQuery, web::MtlsPeer, web::WebState, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,

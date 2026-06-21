@@ -4,7 +4,7 @@
 //! [`I420`] for the encoder. Two source formats cover essentially all UVC
 //! webcams: YUYV (raw 4:2:2, resampled directly) and MJPEG (decoded to RGB with
 //! the pure-Rust [`zune_jpeg`], then converted). This is the CPU path feeding
-//! openh264 / NVENC; there's no GPU surface here.
+//! NVENC / VAAPI / openh264; there's no GPU surface here.
 
 use v4l::buffer::Type as BufType;
 use v4l::io::mmap::Stream as MmapStream;

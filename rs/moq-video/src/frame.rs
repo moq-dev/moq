@@ -7,11 +7,12 @@
 //! - [`Frame::Texture`] is a Windows Direct3D11 NV12 texture. Media Foundation
 //!   capture produces it on a shared D3D11 device and the hardware encoder MFT
 //!   consumes it on that same device, also zero-copy.
-//! - [`Frame::I420`] is CPU-resident planar I420, for the software path
-//!   (openh264) and platforms without a zero-copy capture.
+//! - [`Frame::I420`] is CPU-resident planar I420, for the CPU encode path and
+//!   platforms without a zero-copy capture.
 //!
-//! A hardware backend takes the GPU frame as-is; a software backend asks for
-//! I420 via [`Frame::to_i420`], which downloads the GPU frame only when needed.
+//! A backend that consumes a GPU surface takes the frame as-is; a CPU encoder
+//! asks for I420 via [`Frame::to_i420`], which downloads the GPU frame only when
+//! needed.
 
 use std::borrow::Cow;
 
@@ -94,6 +95,27 @@ impl I420 {
 			YuvConversionMode::Balanced,
 		)
 		.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height))
+	}
+
+	/// Convert BGRA to I420, BT.601 limited range. `stride` is the source row
+	/// pitch in bytes (>= `width * 4`), so a padded surface maps directly. Used by
+	/// the Windows Desktop Duplication screen-capture path, whose staging texture
+	/// is BGRA with a driver-chosen row pitch.
+	#[cfg(target_os = "windows")]
+	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
+		use yuv::bgra_to_yuv420;
+
+		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
+		bgra_to_yuv420(
+			&mut planar,
+			bgra,
+			stride,
+			YuvRange::Limited,
+			YuvStandardMatrix::Bt601,
+			YuvConversionMode::Balanced,
+		)
+		.map_err(|e| Error::Codec(anyhow::anyhow!("bgra_to_yuv420 failed for {width}x{height}: {e}")))?;
 		Ok(Self::pack(&planar, width, height))
 	}
 
@@ -275,7 +297,7 @@ pub(crate) mod macos {
 			Self { buffer, width, height }
 		}
 
-		/// Download an NV12 surface to packed I420 (the software-encode fallback).
+		/// Download an NV12 surface to packed I420 (the CPU encode path).
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -344,16 +366,52 @@ pub(crate) mod macos {
 pub(crate) mod d3d11 {
 	use std::ptr;
 
+	use windows::Win32::Foundation::HMODULE;
+	use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+	use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
 	use windows::Win32::Graphics::Direct3D11::{
-		D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+		D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ,
+		D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
 		ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 	};
+	use windows::core::Interface;
 
 	use super::I420;
 	use crate::Error;
 
 	fn err(ctx: &str, e: windows::core::Error) -> Error {
 		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
+	}
+
+	/// Create a hardware Direct3D11 device, multithread-protected (Media
+	/// Foundation's internal threads or DXGI duplication and our capture thread
+	/// both touch it). The shared low-level constructor behind the Media
+	/// Foundation device manager and the Desktop Duplication capture path.
+	pub(crate) fn create_device() -> Result<ID3D11Device, Error> {
+		let mut device: Option<ID3D11Device> = None;
+		unsafe {
+			D3D11CreateDevice(
+				None,
+				D3D_DRIVER_TYPE_HARDWARE,
+				HMODULE::default(),
+				D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+				None,
+				D3D11_SDK_VERSION,
+				Some(&mut device),
+				None,
+				None,
+			)
+			.map_err(|e| err("D3D11CreateDevice", e))?;
+		}
+		let device = device.ok_or_else(|| Error::Codec(anyhow::anyhow!("D3D11CreateDevice returned null")))?;
+
+		let multithread = device
+			.cast::<ID3D10Multithread>()
+			.map_err(|e| err("query ID3D10Multithread", e))?;
+		unsafe {
+			let _ = multithread.SetMultithreadProtected(true);
+		}
+		Ok(device)
 	}
 
 	/// A captured GPU texture (NV12) on the Media Foundation source reader's
@@ -389,8 +447,8 @@ pub(crate) mod d3d11 {
 		}
 
 		/// Copy the NV12 texture to a CPU-readable staging texture and
-		/// deinterleave it into packed I420 (the software-encode fallback, e.g.
-		/// openh264 when no hardware encoder is selected).
+		/// deinterleave it into packed I420 (the CPU encode path, when the encoder
+		/// can't consume the GPU texture directly).
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let context = unsafe { self.device.GetImmediateContext() }.map_err(|e| err("GetImmediateContext", e))?;
 

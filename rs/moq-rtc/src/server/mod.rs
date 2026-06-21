@@ -14,6 +14,17 @@ use std::sync::Arc;
 
 use axum::Router;
 
+/// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
+/// to return to the client, plus an opaque resource id for the `Location` header
+/// (the RFC 9725 session resource URL).
+#[derive(Clone, Debug)]
+pub struct Response {
+	/// Opaque id identifying the negotiated session, for the `Location` header.
+	pub resource_id: String,
+	/// The SDP answer body (`Content-Type: application/sdp`).
+	pub answer: String,
+}
+
 /// Configuration shared by both `server publish` and `server subscribe`.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -40,9 +51,7 @@ pub struct Server {
 struct Inner {
 	config: Config,
 	publisher: moq_net::OriginProducer,
-	// Held for `server subscribe`, which is gated until the per-codec
-	// re-packetizers land.
-	#[allow(dead_code)]
+	/// Source for `server subscribe` (WHEP) egress.
 	subscriber: moq_net::OriginConsumer,
 }
 
@@ -72,6 +81,11 @@ impl Server {
 
 	/// Router for `server subscribe` (WHEP). Mount under whichever HTTP path
 	/// the deployment prefers (`/whep`, `/`, ...).
+	///
+	/// The router derives the broadcast name from the request path and performs
+	/// no authentication. To own the route and authorize requests yourself
+	/// (resolving the broadcast name from a verified token), skip the router and
+	/// call [`whep::accept`] directly from your own handler.
 	pub fn subscribe_router(&self) -> Router {
 		whep::router(self.clone())
 	}
@@ -84,7 +98,6 @@ impl Server {
 		&self.inner.publisher
 	}
 
-	#[allow(dead_code)]
 	pub(crate) fn subscriber(&self) -> &moq_net::OriginConsumer {
 		&self.inner.subscriber
 	}

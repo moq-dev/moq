@@ -4,6 +4,8 @@
 //! - WebTransport (HTTP/3)
 //! - Raw QUIC (with ALPN negotiation)
 //! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
+//! - Plain TCP via the `tcp://` scheme (qmux, no TLS; requires `tcp` feature)
+//! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - Iroh P2P (requires `iroh` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
@@ -25,7 +27,11 @@ pub mod noq;
 pub mod quinn;
 mod reconnect;
 mod server;
+#[cfg(feature = "tcp")]
+pub mod tcp;
 pub mod tls;
+#[cfg(all(feature = "uds", unix))]
+pub mod unix;
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;

@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `decode::Consumer` (the counterpart to `moq-audio`'s `AudioConsumer`) that
   subscribes to an H.264 track and returns raw I420 frames. Backends are
   VideoToolbox (macOS) and openh264 (portable software fallback); no ffmpeg.
+- H.264 hardware decode on Windows via Media Foundation. The Microsoft decoder
+  MFT runs synchronously with a Direct3D11 device bound to it, so the decode
+  happens on the GPU through DXVA (NVDEC / Intel / AMD); output textures are
+  downloaded to I420. Requires a GPU: a GPU-less host falls back to openh264.
+- Windows screen capture (`capture::Source::Display`) via DXGI Desktop
+  Duplication. Duplicates a monitor on a Direct3D11 device, copies each desktop
+  frame to a staging texture, and converts BGRA to I420. Whole-monitor capture;
+  select one with a bare index or `display:{index}`. The read loop paces to the
+  target frame rate and re-emits the last frame while the screen is static.
+- H.265 decode: the `decode` module now handles H.265 tracks (hvc1 and hev1)
+  alongside H.264, sharing the same length-prefixed -> Annex-B front end.
+  VideoToolbox (macOS) and Media Foundation (Windows, DXVA) decode it on
+  hardware, pulling VPS/SPS/PPS out of each keyframe to build the format
+  description. There is no software H.265 decoder, so H.265 has no fallback below
+  the hardware path. The macOS VideoToolbox path is verified by an end-to-end
+  HEVC encode -> decode round-trip on Apple silicon; the Windows path is
+  unverified on hardware (the test box had no HEVC decoder MFT installed).
+- H.265 encode via the NVENC backend (Linux, `nvenc` feature). The codec is
+  selected by `encode::Codec`; the NVENC HEVC path shares the H.264 preset / GOP
+  / rate-control setup and emits Annex-B with inline VPS/SPS/PPS. Not yet
+  validated on hardware.
 
 ## [0.0.4](https://github.com/moq-dev/moq/compare/moq-video-v0.0.3...moq-video-v0.0.4) - 2026-06-16
 

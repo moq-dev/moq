@@ -10,18 +10,31 @@
 //! - `m=request`: re-mux a broadcast from the origin back to MPEG-TS and stream
 //!   it to the caller, so a plain SRT player (VLC, ffmpeg) can watch it.
 //!
-//! The library is one high-level entry point: build a [`Config`] and hand it
-//! plus an origin to [`run`]. A relay embeds the gateway by calling
-//! `run(cluster.origin.clone(), config)` alongside its own accept loop; the
-//! bundled `moq-srt` binary instead serves the origin locally or forwards it to
-//! a remote relay (those paths need the `server` feature).
+//! Two entry points, depending on how much control you need over each request:
+//!
+//! - [`run`]: the unauthenticated convenience. Build a [`Config`] and hand it
+//!   plus an origin to [`run`]; it accepts every publisher and subscriber and
+//!   routes by prefix + resource name. A relay embeds this with
+//!   `run(cluster.origin.clone(), config)`.
+//! - [`Server`] / [`Request`]: bring your own auth. Loop on [`Server::accept`],
+//!   inspect [`Request::resource`] / [`Request::stream_id`] (treat the stream id
+//!   as a token if you like), then match on the [`Request`]: accept a [`Publish`]
+//!   into an origin, or accept a [`Subscribe`] out of one, at a path of your
+//!   choosing (or reject it). This is how an embedder (e.g. a relay verifying a
+//!   JWT and scoping the origin per token) plugs its policy in. It mirrors
+//!   `moq-native`'s `Server` / `Request`.
+//!
+//! The bundled `moq-srt` binary serves the origin locally or forwards it to a
+//! remote relay (those paths need the `server` feature).
 //!
 //! Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg
 //! dependency.
 
 mod error;
 mod listen;
+mod server;
 mod ts;
 
 pub use error::{Error, Result};
 pub use listen::{Config, run};
+pub use server::{Publish, Request, Server, Subscribe};

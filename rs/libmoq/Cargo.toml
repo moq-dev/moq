@@ -24,7 +24,8 @@ moq-audio = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true, features = ["serde"] }
-moq-video = { workspace = true }
+# Enable the NVENC / VAAPI hardware encoders (default-off at the workspace level).
+moq-video = { workspace = true, features = ["nvenc", "vaapi"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"

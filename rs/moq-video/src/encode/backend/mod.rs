@@ -9,7 +9,8 @@
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
-//! considered, hardware (platform-gated) before software.
+//! considered, hardware (platform-gated) before the always-available openh264
+//! software fallback.
 
 use bytes::Bytes;
 
@@ -70,7 +71,7 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(all(target_os = "linux", feature = "nvenc"))]
 	Candidate {
 		name: nvenc::NAME,
-		codecs: &[Codec::H264],
+		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
 	},
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
@@ -81,7 +82,8 @@ const HARDWARE: &[Candidate] = &[
 	},
 ];
 
-/// Software fallbacks, all platforms. Only H.264 (openh264) has one; H.265 is
+/// Software fallbacks, all platforms, always available so a box with no usable
+/// hardware encoder can still encode. Only H.264 (openh264) has one; H.265 is
 /// hardware-only. A slice so future software codecs slot in.
 const SOFTWARE: &[Candidate] = &[Candidate {
 	name: openh264::NAME,

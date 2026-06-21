@@ -4,6 +4,10 @@ set fallback
 gst name url='http://localhost:4443' *args:
     cargo build -p moq-gst
 
+    # moqsrc exposes one pad per rendition (video_0, audio_0, ...). Link the video pad
+    # by name so a bare `! decodebin3` can't latch onto the audio pad and leave the
+    # video sink empty; route audio to its own sink so it doesn't stall the session.
     GST_PLUGIN_PATH_1_0="${PWD}/../../target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
-    gst-launch-1.0 -v -e moqsrc url="{{ url }}" broadcast="{{ name }}" {{ args }} \
-    	! decodebin3 ! videoconvert ! autovideosink
+    gst-launch-1.0 -v -e moqsrc name=s url="{{ url }}" broadcast="{{ name }}" {{ args }} \
+    	s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
+    	s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink

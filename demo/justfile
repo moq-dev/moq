@@ -25,10 +25,10 @@ default:
     export MOQ_WEB_HTTP_LISTEN="[::]:$port"
     base="http://localhost:$port"
 
-    bun run concurrently --kill-others --names srv,bbb,web --prefix-colors auto \
+    bun run concurrently --kill-others --names rly,bbb,web --prefix-colors auto \
     	"just relay" \
-    	"just wait $base/certificate.sha256 && just pub bbb $base/anon" \
-    	"just wait $base/certificate.sha256 && just web serve $base/anon"
+    	"just wait $base/certificate.sha256 && just pub bbb $base" \
+    	"just wait $base/certificate.sha256 && just web serve $base"
 
 # Find the first free port at/after `start` (checked on both TCP and UDP).
 # `lsof` isn't available everywhere (e.g. Git Bash on Windows); without it we

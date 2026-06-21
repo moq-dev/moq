@@ -1,10 +1,13 @@
-//! Hardware H.264 decode backend via Apple VideoToolbox (`VTDecompressionSession`).
+//! Hardware H.264 / H.265 decode backend via Apple VideoToolbox
+//! (`VTDecompressionSession`).
 //!
 //! The inverse of the encode VideoToolbox backend. We receive Annex-B access
-//! units (SPS/PPS inline ahead of each keyframe), so we:
-//! - pull SPS/PPS out of the stream and build a `CMVideoFormatDescription`,
-//!   (re)creating the decompression session whenever the parameter sets change;
-//! - repackage the slice NALs as AVCC (4-byte length-prefixed) in a
+//! units (parameter sets inline ahead of each keyframe: SPS/PPS for H.264,
+//! VPS/SPS/PPS for H.265), so we:
+//! - pull the parameter sets out of the stream and build a
+//!   `CMVideoFormatDescription`, (re)creating the decompression session whenever
+//!   they change;
+//! - repackage the slice NALs as AVCC/HVCC (4-byte length-prefixed) in a
 //!   `CMSampleBuffer`, the form VideoToolbox decodes;
 //! - request NV12 output and download it to packed I420 (reusing the same
 //!   `CVPixelBuffer` download as the capture path).
@@ -22,7 +25,7 @@ use moq_mux::codec::annexb::NalIterator;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 use objc2_core_media::{
 	CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreateFromH264ParameterSets,
-	kCMBlockBufferAssureMemoryNowFlag,
+	CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMBlockBufferAssureMemoryNowFlag,
 };
 use objc2_core_video::{
 	CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth, kCVPixelBufferPixelFormatTypeKey,
@@ -32,14 +35,20 @@ use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
 };
 
-use super::Backend;
+use super::{Backend, Codec};
 use crate::Error;
 use crate::frame::I420;
 
 pub(crate) const NAME: &str = "videotoolbox";
 
-const NAL_TYPE_SPS: u8 = 7;
-const NAL_TYPE_PPS: u8 = 8;
+/// A parameter-set NAL we pull out of the stream to (re)build the format
+/// description; `Slice` is everything else (the coded picture data we decode).
+enum NalKind {
+	Vps,
+	Sps,
+	Pps,
+	Slice,
+}
 
 /// Where the C output callback drops decoded frames, drained after each
 /// `decode_frame`. Boxed so its address is a stable refcon for the session.
@@ -50,17 +59,21 @@ struct Sink {
 }
 
 pub(crate) struct VideoToolbox {
-	/// Built lazily once the first SPS+PPS arrive, rebuilt if they change.
+	/// Which codec's parameter sets and format description to build (H.264 needs
+	/// SPS+PPS; H.265 also needs VPS).
+	codec: Codec,
+	/// Built lazily once the parameter sets first arrive, rebuilt if they change.
 	session: Option<CFRetained<VTDecompressionSession>>,
 	/// Format description the current session + samples use (kept in lockstep
 	/// with `session`).
 	format: Option<CFRetained<CMFormatDescription>>,
-	/// Latest SPS/PPS seen, persisted across access units (a delta frame carries
-	/// neither). `built_from` records which pair the live session was built from,
-	/// so a mid-stream parameter-set change triggers a rebuild.
+	/// Latest parameter sets seen, persisted across access units (a delta frame
+	/// carries none). `built_from` records the exact ordered set the live session
+	/// was built from, so a mid-stream parameter-set change triggers a rebuild.
+	vps: Option<Bytes>,
 	sps: Option<Bytes>,
 	pps: Option<Bytes>,
-	built_from: Option<(Bytes, Bytes)>,
+	built_from: Option<Vec<Bytes>>,
 	sink: Box<Sink>,
 }
 
@@ -69,11 +82,15 @@ pub(crate) struct VideoToolbox {
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
-	pub(crate) fn open() -> Result<Box<dyn Backend>, Error> {
-		tracing::info!(decoder = NAME, "opened H.264 decoder");
+	/// Open a decoder for `codec` (H.264 or H.265). The session is built lazily
+	/// once the first keyframe's parameter sets arrive.
+	pub(crate) fn open(codec: Codec) -> Result<Box<dyn Backend>, Error> {
+		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
 		Ok(Box::new(Self {
+			codec,
 			session: None,
 			format: None,
+			vps: None,
 			sps: None,
 			pps: None,
 			built_from: None,
@@ -81,25 +98,40 @@ impl VideoToolbox {
 		}))
 	}
 
+	/// The ordered parameter sets the format description needs, or `None` if any
+	/// required one hasn't been seen yet. H.264: `[SPS, PPS]`; H.265: `[VPS, SPS,
+	/// PPS]`.
+	fn param_sets(&self) -> Option<Vec<Bytes>> {
+		let sps = self.sps.clone()?;
+		let pps = self.pps.clone()?;
+		match self.codec {
+			Codec::H264 => Some(vec![sps, pps]),
+			Codec::H265 => Some(vec![self.vps.clone()?, sps, pps]),
+		}
+	}
+
 	/// (Re)build the decompression session when the parameter sets first appear
-	/// or change. Returns `false` if we still don't have both SPS and PPS.
-	fn ensure_session(&mut self, sps: Option<Bytes>, pps: Option<Bytes>) -> Result<bool, Error> {
+	/// or change. Returns `false` if we still don't have a complete set.
+	fn ensure_session(&mut self, vps: Option<Bytes>, sps: Option<Bytes>, pps: Option<Bytes>) -> Result<bool, Error> {
+		if let Some(vps) = vps {
+			self.vps = Some(vps);
+		}
 		if let Some(sps) = sps {
 			self.sps = Some(sps);
 		}
 		if let Some(pps) = pps {
 			self.pps = Some(pps);
 		}
-		let (Some(sps), Some(pps)) = (self.sps.clone(), self.pps.clone()) else {
+		let Some(params) = self.param_sets() else {
 			return Ok(false);
 		};
 
 		// Reuse the existing session if it was built from these exact sets.
-		if self.session.is_some() && self.built_from.as_ref() == Some(&(sps.clone(), pps.clone())) {
+		if self.session.is_some() && self.built_from.as_ref() == Some(&params) {
 			return Ok(true);
 		}
 
-		let format = create_format_description(&sps, &pps)?;
+		let format = create_format_description(self.codec, &params)?;
 		let attrs = nv12_output_attributes()?;
 
 		let refcon = (&mut *self.sink as *mut Sink).cast::<c_void>();
@@ -126,7 +158,7 @@ impl VideoToolbox {
 
 		self.session = Some(session);
 		self.format = Some(format);
-		self.built_from = Some((sps, pps));
+		self.built_from = Some(params);
 		Ok(true)
 	}
 }
@@ -134,16 +166,19 @@ impl VideoToolbox {
 impl Backend for VideoToolbox {
 	fn decode(&mut self, access_unit: Bytes, _keyframe: bool) -> Result<Vec<I420>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
-		// the VCL slices into AVCC (4-byte length-prefixed) form. `NalIterator`
-		// yields the parameter-set NALs as zero-copy `Bytes` (sub-slices of
-		// `access_unit`), so SPS/PPS need no copy.
+		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
+		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
+		// they need no copy.
+		let codec = self.codec;
+		let mut vps = None;
 		let mut sps = None;
 		let mut pps = None;
 		let mut avcc: Vec<u8> = Vec::with_capacity(access_unit.len());
-		let mut handle = |nal: Bytes| match nal_unit_type(&nal) {
-			NAL_TYPE_SPS => sps = Some(nal),
-			NAL_TYPE_PPS => pps = Some(nal),
-			_ => {
+		let mut handle = |nal: Bytes| match nal_kind(&nal, codec) {
+			NalKind::Vps => vps = Some(nal),
+			NalKind::Sps => sps = Some(nal),
+			NalKind::Pps => pps = Some(nal),
+			NalKind::Slice => {
 				avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
 				avcc.extend_from_slice(&nal);
 			}
@@ -160,7 +195,7 @@ impl Backend for VideoToolbox {
 			handle(nal);
 		}
 
-		if !self.ensure_session(sps, pps)? {
+		if !self.ensure_session(vps, sps, pps)? {
 			// No parameter sets yet (e.g. a delta frame before the first keyframe).
 			return Ok(Vec::new());
 		}
@@ -229,31 +264,53 @@ unsafe extern "C-unwind" fn output_callback(
 	}
 }
 
-/// Build a `CMVideoFormatDescription` from raw SPS and PPS NAL units.
-fn create_format_description(sps: &[u8], pps: &[u8]) -> Result<CFRetained<CMFormatDescription>, Error> {
-	let pointers: [NonNull<u8>; 2] = [
-		NonNull::new(sps.as_ptr() as *mut u8).ok_or_else(|| Error::Codec(anyhow::anyhow!("empty SPS")))?,
-		NonNull::new(pps.as_ptr() as *mut u8).ok_or_else(|| Error::Codec(anyhow::anyhow!("empty PPS")))?,
-	];
-	let sizes: [usize; 2] = [sps.len(), pps.len()];
+/// Build a `CMVideoFormatDescription` from the ordered parameter-set NAL units
+/// (`[SPS, PPS]` for H.264; `[VPS, SPS, PPS]` for H.265).
+fn create_format_description(codec: Codec, params: &[Bytes]) -> Result<CFRetained<CMFormatDescription>, Error> {
+	let pointers: Vec<NonNull<u8>> = params
+		.iter()
+		.map(|p| {
+			NonNull::new(p.as_ptr() as *mut u8).ok_or_else(|| Error::Codec(anyhow::anyhow!("empty parameter set")))
+		})
+		.collect::<Result<_, _>>()?;
+	let sizes: Vec<usize> = params.iter().map(|p| p.len()).collect();
+	let count = params.len();
+	// `pointers` / `sizes` must outlive the call below; keep them named so they're
+	// not dropped while the C function reads through these raw pointers.
+	let pointers_ptr = NonNull::new(pointers.as_ptr() as *mut NonNull<u8>).unwrap();
+	let sizes_ptr = NonNull::new(sizes.as_ptr() as *mut usize).unwrap();
 
 	let mut format_ptr: *const CMFormatDescription = ptr::null();
-	let status = unsafe {
-		CMVideoFormatDescriptionCreateFromH264ParameterSets(
-			None,
-			2,
-			NonNull::new(pointers.as_ptr() as *mut NonNull<u8>).unwrap(),
-			NonNull::new(sizes.as_ptr() as *mut usize).unwrap(),
-			4, // 4-byte NAL length prefixes (AVCC), matching make_sample_buffer
-			NonNull::new(&mut format_ptr).unwrap(),
-		)
+	// 4-byte NAL length prefixes (AVCC/HVCC), matching make_sample_buffer.
+	let status = match codec {
+		Codec::H264 => unsafe {
+			CMVideoFormatDescriptionCreateFromH264ParameterSets(
+				None,
+				count,
+				pointers_ptr,
+				sizes_ptr,
+				4,
+				NonNull::new(&mut format_ptr).unwrap(),
+			)
+		},
+		Codec::H265 => unsafe {
+			CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+				None,
+				count,
+				pointers_ptr,
+				sizes_ptr,
+				4,
+				None, // no extensions
+				NonNull::new(&mut format_ptr).unwrap(),
+			)
+		},
 	};
 	NonNull::new(format_ptr as *mut CMFormatDescription)
 		.filter(|_| status == 0)
 		.map(|p| unsafe { CFRetained::from_raw(p) })
 		.ok_or_else(|| {
 			Error::Codec(anyhow::anyhow!(
-				"CMVideoFormatDescriptionCreateFromH264ParameterSets failed: {status}"
+				"CMVideoFormatDescriptionCreateFrom*ParameterSets failed: {status}"
 			))
 		})
 }
@@ -339,6 +396,24 @@ fn nv12_output_attributes() -> Result<CFRetained<CFDictionary>, Error> {
 	.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build NV12 attributes dictionary")))
 }
 
-fn nal_unit_type(nal: &[u8]) -> u8 {
-	nal.first().map_or(0, |b| b & 0x1f)
+/// Classify a NAL by its header so the parameter sets can be split out. H.264
+/// carries the type in the low 5 bits of one header byte (SPS 7, PPS 8); H.265
+/// uses bits 1..=6 of a two-byte header (VPS 32, SPS 33, PPS 34).
+fn nal_kind(nal: &[u8], codec: Codec) -> NalKind {
+	let Some(&b) = nal.first() else {
+		return NalKind::Slice;
+	};
+	match codec {
+		Codec::H264 => match b & 0x1f {
+			7 => NalKind::Sps,
+			8 => NalKind::Pps,
+			_ => NalKind::Slice,
+		},
+		Codec::H265 => match (b >> 1) & 0x3f {
+			32 => NalKind::Vps,
+			33 => NalKind::Sps,
+			34 => NalKind::Pps,
+			_ => NalKind::Slice,
+		},
+	}
 }

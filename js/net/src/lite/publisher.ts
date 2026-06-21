@@ -6,7 +6,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { TrackSubscriber } from "../track.ts";
 import { error } from "../util/error.ts";
-import { Announce, AnnounceInit, type AnnounceInterest, AnnounceOk } from "./announce.ts";
+import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest, epochNow } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -60,6 +60,13 @@ export class Publisher {
 	// It's a signal so we can live update any announce streams.
 	#broadcasts = new Signal<Map<Path.Valid, Broadcast> | undefined>(new Map());
 
+	// Per-broadcast epoch (ms since 2020-01-01 UTC), stamped when the instance is
+	// published. Mirrors the Rust `BroadcastInfo.epoch` (SystemTime::now at creation):
+	// a newer instance of the same path carries a later epoch, so a consumer can prefer
+	// the newest route. Sent in every ANNOUNCE_BROADCAST (lite-05+), including the
+	// unannounce, so the peer can match the instance that ended.
+	#epochs = new Map<Path.Valid, number>();
+
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
 	// and reuse it for every later TRACK request of the same track. Keyed by
@@ -85,17 +92,27 @@ export class Publisher {
 	 * @param name - The broadcast to publish
 	 */
 	publish(path: Path.Valid, broadcast: Broadcast) {
+		// Stamp the instance epoch at publish time (mirrors Rust's SystemTime::now default).
+		this.#epochs.set(path, epochNow());
 		this.#broadcasts.mutate((broadcasts) => {
 			if (!broadcasts) throw new Error("closed");
 			broadcasts.set(path, broadcast);
 		});
 
-		// Remove the broadcast from the lookup when it's closed.
+		// Remove the broadcast from the lookup when it's closed. Keep the epoch around:
+		// the unannounce announce (sent from the per-stream diff loop after the map change)
+		// still needs it to identify the instance that ended. It's overwritten on the next
+		// publish to the same path, so it can't go stale.
 		void broadcast.closed.finally(() => {
 			this.#broadcasts.mutate((broadcasts) => {
 				broadcasts?.delete(path);
 			});
 		});
+	}
+
+	// The epoch of the broadcast published at `path`, or 0 if it was never seen.
+	#epoch(path: Path.Valid): number {
+		return this.#epochs.get(path) ?? 0;
 	}
 
 	/**
@@ -105,7 +122,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runAnnounce(msg: AnnounceInterest, stream: Stream) {
+	async runAnnounce(msg: AnnounceRequest, stream: Stream) {
 		console.debug(`announce: prefix=${msg.prefix}`);
 
 		// Send initial announcements
@@ -134,7 +151,8 @@ export class Publisher {
 				const ok = new AnnounceOk(this.origin, active.size);
 				await ok.encode(stream.writer, this.version);
 				for (const suffix of active) {
-					const wire = new Announce({ suffix, active: true });
+					const epoch = this.#epoch(Path.join(msg.prefix, suffix));
+					const wire = new AnnounceBroadcast({ suffix, active: true, epoch });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
@@ -142,7 +160,7 @@ export class Publisher {
 			default:
 				// Draft03/04: send individual Announce messages, stamping our origin as a hop.
 				for (const suffix of active) {
-					const wire = new Announce({ suffix, active: true, hops: [this.origin] });
+					const wire = new AnnounceBroadcast({ suffix, active: true, hops: [this.origin] });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
@@ -175,15 +193,18 @@ export class Publisher {
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
 				const hops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
-				const wire = new Announce({ suffix: added, active: true, hops });
+				const epoch = this.#epoch(Path.join(msg.prefix, added));
+				const wire = new AnnounceBroadcast({ suffix: added, active: true, epoch, hops });
 				await wire.encode(stream.writer, this.version);
 			}
 
 			// Announce any removed broadcasts.
 			// Ended announces don't need hops — the peer matches on path only.
+			// They carry the epoch of the instance that ended so the peer can match it.
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
-				const wire = new Announce({ suffix: removed, active: false });
+				const epoch = this.#epoch(Path.join(msg.prefix, removed));
+				const wire = new AnnounceBroadcast({ suffix: removed, active: false, epoch });
 				await wire.encode(stream.writer, this.version);
 			}
 
@@ -348,10 +369,11 @@ export class Publisher {
 			if (!published) throw new Error("not found");
 
 			const info = await published.track(track).info();
+			// The wire no longer carries a cache hint (retention is best-effort, not a
+			// guarantee); the local `info.cache` stays a purely local retention window.
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,
-				cache: info.cache,
 				// This implementation doesn't produce per-frame timestamps yet.
 				timescale: 0,
 				compression: info.compress ? Compression.Deflate : Compression.None,

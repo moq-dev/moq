@@ -22,7 +22,6 @@ use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
-use crate::container::ts::scte35;
 use crate::container::{Consumer, Frame};
 
 /// Per-track video transform that bridges between codec shapes.
@@ -133,20 +132,17 @@ impl ExportSource {
 		})
 	}
 
-	/// Subscribe to a SCTE-35 cue rendition. No codec-shape transform and no
-	/// description: the frames carry the verbatim `splice_info_section` bytes that
-	/// the muxer writes back out as private sections.
-	pub fn for_scte35(
+	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
+	/// No codec-shape transform and no description: the frames are Legacy-framed
+	/// verbatim bytes the muxer writes back out as PES or private sections.
+	pub fn for_stream(
 		broadcast: &moq_net::BroadcastConsumer,
 		name: &str,
-		config: &scte35::Config,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
-		let media: HangContainer = (&config.container).try_into()?;
-
 		Ok(Self {
 			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)?),
-			media: Some(media),
+			media: Some(HangContainer::Legacy),
 			latency,
 			transform: None,
 			description: None,
@@ -226,11 +222,13 @@ impl ExportSource {
 	}
 
 	fn refresh_description(&mut self) {
-		if self.description.is_some() {
-			return;
-		}
+		// Track the transform's record even after it is first set: a mid-stream
+		// reconfiguration rebuilds the avcC/hvcC with a new parameter set, and the
+		// muxer re-injects from this on every keyframe, so a stale record would
+		// carry superseded SPS/PPS.
 		if let Some(transform) = self.transform.as_ref()
 			&& let Some(d) = transform.codec_private()
+			&& self.description.as_ref() != Some(d)
 		{
 			self.description = Some(d.clone());
 		}

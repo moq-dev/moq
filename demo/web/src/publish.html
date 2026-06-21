@@ -4,112 +4,267 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>MoQ Demo</title>
+	<title>MoQ Demo (Publish)</title>
 
 	<link rel="stylesheet" href="index.css">
 	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 </head>
 
-<body>
-	<!-- Always show this banner to flex browser support. -->
-	<moq-publish-support show="always"></moq-publish-support>
+<body class="p-4 max-w-6xl mx-auto">
+	<!-- Only show the support banner when a required feature is missing. -->
+	<moq-publish-support show="warning"></moq-publish-support>
 
-	<!--
-		Use the included Web Component to render a preview and simple controls.
-		See `publish.ts` for an example changing the broadcast based on a query parameter.
+	<h1 class="text-2xl font-bold mb-4">MoQ Publish</h1>
 
-		The relay url is loaded from an environment as it contains a generated JWT authentication token.
-		Feel free to hard-code it if you have public access configured, like `url="https://cdn.moq.dev/anon"`
-		NOTE: `http` performs an insecure certificate check. You must use `https` in production.
-	-->
-	<moq-publish-ui>
-		<moq-publish id="publish" url="%VITE_RELAY_URL%" name="me.hang" simulcast>
-			<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
-
+	<div class="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4 items-start">
+		<!-- Left: preview + player chrome. -->
+		<section>
 			<!--
-				Alternatively, preview a decoded copy of the encoded video, i.e. what a viewer actually
-				receives over the network (codec artifacts and all), at the cost of an extra encode +
-				decode. Add preview="encoded" to <moq-publish> above and use this <canvas> instead of the
-				<video>:
+				announce="source": only advertise the broadcast once a source is picked,
+				so the watch inspector shows no phantom tile while idle.
+
+				The preview renders into the <canvas>. With "Encoded preview" off it shows
+				the raw capture (preview="source"); on, it decodes a copy of the *encoded*
+				video (preview="encoded") so you see exactly what viewers receive, at the
+				cost of an extra encode + decode.
 			-->
-			<!-- <canvas style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"></canvas> -->
-		</moq-publish>
-	</moq-publish-ui>
+			<moq-publish-ui>
+				<moq-publish id="publish" name="me.hang" announce="source" simulcast>
+					<canvas style="width: 100%; height: auto; border-radius: 4px;"></canvas>
+				</moq-publish>
+			</moq-publish-ui>
+		</section>
 
-	<!-- Dev-only: renders console output inline here. Set `level` to lower the
-	     threshold (debug | log | info | warn | error; defaults to warn). Defined
-	     by the console-overlay Vite plugin; absent from production builds. -->
-	<moq-console></moq-console>
+		<!-- Right: encoder settings + metadata + live graphs. -->
+		<aside>
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Source <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">MoQ</span>
+				</h3>
+				<label class="block text-xs text-neutral-400 mb-2">
+					Relay URL
+					<input id="relay-url" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Broadcast name
+					<input id="broadcast-name" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
+				</label>
+			</section>
 
-	<h3>Other demos:</h3>
-	<ul>
-		<li><a href="index.html?broadcast=me.hang" target="_blank" rel="noreferrer" id="watch">Watch your broadcast: <span
-					id="watch-name"></span></a></li>
-		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
-		<li><a href="manual.html">Watch with a manual catalog.</a></li>
-	</ul>
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3 space-y-2">
+				<h3 class="text-sm font-semibold text-neutral-300 flex items-center gap-2">
+					Video encode <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+				</h3>
+				<label class="flex items-center gap-2 text-xs text-neutral-400">
+					<input id="encoded-preview" type="checkbox" class="accent-blue-600">
+					Accurate preview <span class="text-neutral-500">(decode a copy of the stream)</span>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Codec
+					<div class="mt-1 flex items-center gap-2">
+						<select id="codec"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm"></select>
+						<span id="codec-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Max resolution
+					<div class="mt-1 flex items-center gap-2">
+						<select id="resolution"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="" selected>Auto</option>
+							<option value="640x360">360p (640×360)</option>
+							<option value="854x480">480p (854×480)</option>
+							<option value="1280x720">720p (1280×720)</option>
+							<option value="1920x1080">1080p (1920×1080)</option>
+						</select>
+						<span id="resolution-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Frame rate (fps)
+					<div class="mt-1 flex items-center gap-2">
+						<input id="framerate" type="number" min="1" max="120" placeholder="auto"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						<span id="framerate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Target bitrate (kbps)
+					<div class="mt-1 flex items-center gap-2">
+						<input id="bitrate" type="number" min="50" max="20000" step="50" placeholder="auto"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						<span id="bitrate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Keyframe interval (ms)
+					<div class="mt-1 flex items-center gap-2">
+						<input id="keyframe" type="number" min="100" max="10000" step="100" placeholder="auto"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						<span id="keyframe-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+			</section>
 
-	<h3>Tips:</h3>
-	<p>
-		This page creates a broadcast called `me.hang` by default.
-		You can use <a href="index.html?broadcast=notme.hang">query parameters</a> to use a different broadcast name and create
-		multiple broadcasts.
-	</p>
-	<p>
-		Reusing the same broadcast path means viewers will automatically reconnect to the new session.
-		Try reloading the page and broadcasting again; viewers will automatically reconnect.
-	</p>
-	<hr />
-	<p>
-		Media only flows over the network when requested!
-		Connecting to a relay means the broadcast is advertised as available, but nothing is transferred until there's
-		at least one viewer per track.
-		If there's multiple viewers, the relay will fan out the media to all of them.
-	</p>
-	<p>
-		You can create a broadcaster via the provided <code class="language-html">&lt;moq-publish&gt;</code> <a
-			href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
-		Either modify HTML attributes like <code
-			class="language-html">&lt;moq-publish source="camera" audio /&gt;</code>
-		or access the element's Javascript API:
-	<pre><code class="language-typescript">const publish = document.getElementById("publish");
-publish.broadcast.audio.enabled.set(true);</code></pre>
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3 space-y-2">
+				<h3 class="text-sm font-semibold text-neutral-300 flex items-center gap-2">
+					Audio encode <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+				</h3>
+				<label class="block text-xs text-neutral-400">
+					Codec
+					<div class="mt-1 flex items-center gap-2">
+						<select id="audio-codec"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="opus" selected>Opus</option>
+						</select>
+						<span id="audiocodec-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Sample rate (Hz)
+					<div class="mt-1 flex items-center gap-2">
+						<select id="samplerate"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="" selected>Auto</option>
+							<option value="48000">48000</option>
+							<option value="24000">24000</option>
+							<option value="16000">16000</option>
+						</select>
+						<span id="samplerate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Channels
+					<div class="mt-1 flex items-center gap-2">
+						<select id="channels"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="" selected>Auto</option>
+							<option value="1">1 (mono)</option>
+							<option value="2">2 (stereo)</option>
+						</select>
+						<span id="channels-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
+				</label>
+				<details id="opus-advanced" class="text-xs text-neutral-400">
+					<summary class="cursor-pointer text-neutral-300">Opus options</summary>
+					<div class="mt-2 space-y-2">
+						<label class="block">
+							Bitrate (kbps)
+							<div class="mt-1 flex items-center gap-2">
+								<input id="opus-bitrate" type="number" min="6" max="510" step="2" placeholder="auto"
+									class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<span id="opusbitrate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+							</div>
+						</label>
+						<label class="block">
+							Frame duration
+							<select id="opus-frame-duration"
+								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<option value="" selected>Auto</option>
+								<option value="2.5">2.5 ms</option>
+								<option value="5">5 ms</option>
+								<option value="10">10 ms</option>
+								<option value="20">20 ms</option>
+								<option value="40">40 ms</option>
+								<option value="60">60 ms</option>
+							</select>
+						</label>
+						<label class="block">
+							Complexity (0-10)
+							<input id="opus-complexity" type="number" min="0" max="10" step="1" placeholder="auto"
+								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						</label>
+						<label class="flex items-center gap-2">
+							<input id="opus-fec" type="checkbox" class="accent-blue-600"> In-band FEC
+						</label>
+						<label class="block">
+							Expected packet loss (%)
+							<input id="opus-plc" type="number" min="0" max="100" step="1" placeholder="auto"
+								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						</label>
+						<label class="flex items-center gap-2">
+							<input id="opus-dtx" type="checkbox" class="accent-blue-600"> DTX (discontinuous transmission)
+						</label>
+					</div>
+				</details>
+				<label class="block text-xs text-neutral-400">
+					Gain
+					<div class="mt-1 flex items-center gap-2">
+						<input id="volume" type="range" min="0" max="2" step="0.05" value="1" class="flex-1 min-w-0 accent-blue-600">
+						<span id="volume-actual" class="shrink-0 w-24 text-right font-mono text-xs text-neutral-400"></span>
+					</div>
+				</label>
+			</section>
 
-	And of course you can use the Javascript API directly instead of the Web Component.
-	It's a bit more complicated and subject to change, but it gives you more control.
-	</p>
-	<hr>
-	<p>
-		You're not limited to web publishing either.
-		Try running <code class="language-bash">just pub tos</code> in a new terminal and then <a
-			href="index.html?broadcast=tos.hang" target="_blank">watch robots bang</a>.
-		This uses ffmpeg to produce a fragmented MP4 file piped over stdout then sent over the network.
-		Yeah it's pretty gross.
-	</p>
-	<p>
-		If you want to do things more efficiently, you can use the
-		<a href="https://doc.moq.dev/app/gstreamer">GStreamer plugin</a>.
-		It's pretty crude and doesn't handle all pipeline events; contributions welcome!
-	</p>
-	<hr />
-	<p>
-		The <code class="language-html">simulcast</code> attribute makes this page publish two renditions of the same
-		video: `video/hd` at the captured resolution and `video/sd` at a fraction of the source resolution (around 480p from a 1080p source).
-		Each rendition is a separate track, so it only costs bandwidth when a viewer requests it.
-		Tiny thumbnails download the small one; big players download the big one.
-	</p>
-	<p>
-		To see it in action, <a href="index.html?broadcast=me.hang" target="_blank" rel="noreferrer">watch your
-			broadcast</a> in another tab and drag the player's resize handle.
-		The "Quality" dropdown shows which rendition is active; leave it on Auto and watch it hop.
-		You can also toggle it from Javascript with <code class="language-typescript">publish.simulcast = false</code>.
-	</p>
-	<hr />
-	<p>
-		This demo uses `http://` so it's not secure.
-		It works by fetching the certificate hash (via HTTP) and providing that to WebTransport, which requires HTTPS.
-		To run this in production, you'll need a valid certificate (ex. letsencrypt) and to use `https://`.
-	</p>
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Metadata <code class="text-xs text-neutral-400">meta.json</code>
+					<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">MoQ</span>
+				</h3>
+				<textarea id="metadata" rows="4" spellcheck="false"
+					class="w-full font-mono text-xs bg-neutral-800 border border-neutral-700 rounded p-2 text-white">{ "title": "My Broadcast", "location": "earth", "note": "edit me" }</textarea>
+				<button id="send-meta" type="button" disabled
+					class="mt-2 px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-default text-white border border-blue-500 text-sm">
+					Update
+				</button>
+			</section>
+
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Network <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">WebTransport</span>
+				</h3>
+				<div id="publish-graphs" class="space-y-2"></div>
+			</section>
+		</aside>
+	</div>
+
+	<!-- Dev-only: renders console output inline here. Defined by the
+	     console-overlay Vite plugin; absent from production builds. -->
+	<moq-console class="block mt-8"></moq-console>
+
+	<footer class="prose-doc mt-8">
+		<h3>How it works:</h3>
+		<p>
+			Capture, encoding, and publishing are owned by the
+			<code class="language-html">&lt;moq-publish-ui&gt;</code> web component. The side panel writes the
+			encoder signals directly &ndash; codec, bitrate, resolution, frame rate, and the full Opus config
+			are all editable live:
+		</p>
+		<pre><code class="language-typescript">const publish = document.getElementById("publish");
+publish.broadcast.video.hd.config.set({ maxBitrate: 2_000_000, frameRate: 30 });
+publish.broadcast.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pre>
+		<p>
+			Each setting defaults to "auto" (the field is omitted, so the encoder picks); the negotiated value
+			appears to the right once you go live. Codec support is probed with
+			<code class="language-typescript">VideoEncoder.isConfigSupported</code>; unsupported options are
+			disabled. The <code>simulcast</code> attribute also publishes a smaller <code>video/sd</code>
+			rendition (the panel tunes <code>video/hd</code>); the <a href="index.html">watch inspector</a>
+			picks whichever fits the player size.
+		</p>
+		<p>
+			The metadata editor serves a custom <code class="language-typescript">meta.json</code> track <em>within</em> the
+			broadcast via <code class="language-typescript">broadcast.net</code>; the watch inspector subscribes and reads it back live.
+		</p>
+		<p>
+			You're not limited to the browser. Try <code class="language-bash">just pub tos</code> in a terminal
+			and watch it appear as a tile, or use the
+			<a href="https://doc.moq.dev/app/gstreamer">GStreamer plugin</a> for native pipelines.
+		</p>
+		<p>
+			This demo uses <code>http</code> so it's extra not secure: it insecurely fetches the certificate
+			hash and tells WebTransport to trust it. In production you'll need a real certificate (ex.
+			LetsEncrypt) and <code>https</code>.
+		</p>
+
+		<h3>Other demos:</h3>
+		<ul>
+			<li><a href="index.html" target="_blank" rel="noreferrer">Watch broadcasts.</a></li>
+			<li><a href="stats.html">Relay stats dashboard.</a></li>
+		</ul>
+	</footer>
 </body>
 
 <script type="module" src="publish.ts"></script>

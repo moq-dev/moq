@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 doctest = false
 
 [features]
-default = ["quinn", "aws-lc-rs", "websocket"]
+default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
@@ -26,6 +26,11 @@ aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["dep:qmux"]
+# Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
+tcp = ["dep:qmux"]
+# Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
+# inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
+uds = ["tcp", "qmux/uds"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 android-logcat = ["dep:tracing-android"]
 
@@ -39,7 +44,7 @@ humantime-serde = "1.1"
 moq-net = { workspace = true, features = ["serde"] }
 notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
-qmux = { workspace = true, features = ["wss", "tls"], optional = true }
+qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
 rand = "0.10.1"
 rcgen = { version = "0.14", default-features = false, optional = true }

@@ -58,11 +58,15 @@ Lists `moqsink` and `moqsrc`. As a one-liner: `nix run github:moq-dev/moq#moq-gs
 
 ```bash
 nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
-  moqsrc url=https://cdn.moq.dev/demo broadcast=bbb.hang \
-  ! decodebin3 ! videoconvert ! autovideosink
+  moqsrc name=s url=https://cdn.moq.dev/demo broadcast=bbb.hang \
+  s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
+  s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink
 ```
 
-Audio-only variant: swap the tail for `! decodebin3 ! audioconvert ! autoaudiosink`.
+`bbb.hang` carries both video and audio, so each is linked by pad name (`video_0` /
+`audio_0`). For video only, drop the `s.audio_0` branch; the audio pad simply stays
+unlinked. The terse `moqsrc ! decodebin3 ! ...` form links just the first pad GStreamer
+offers, which on a multi-track broadcast may be the audio one, so prefer naming the pad.
 
 ### Publish your own broadcast
 
@@ -185,6 +189,22 @@ gst-launch-1.0 -v -e \
     ! decodebin3 ! videoconvert ! autovideosink
 ```
 
+::: warning
+`moqsrc` exposes one source pad per rendition: `video_0`, `audio_0`, and so on
+(see [moqsrc pads](#moqsrc-subscribe)). The single-branch `moqsrc ! decodebin3 ...`
+above only links the *first* pad GStreamer offers, so on a broadcast with both video
+and audio it may pick up the audio pad and a video-only sink chain then renders nothing.
+Link the pad you want by name, and route the rest to a sink so they don't stall:
+
+```bash
+gst-launch-1.0 -v -e moqsrc name=s url="http://localhost:4443" broadcast="bbb" \
+  s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
+  s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink
+```
+
+The first pad of each kind is always `video_0` / `audio_0` regardless of catalog order.
+:::
+
 ## Supported Codecs
 
 ### moqsink (publish)
@@ -202,6 +222,13 @@ gst-launch-1.0 -v -e \
 ### moqsrc (subscribe)
 
 Outputs the same caps based on the catalog, compatible with `decodebin3`.
+
+One source pad is created per rendition, named after its kind: `video_0`, `video_1`,
+`audio_0`, and so on. The first pad of each kind is always numbered `0`, so a
+`gst-launch` pipeline can link the stream it wants by name (`moqsrc name=s s.video_0 ! ...`)
+no matter which rendition the catalog announces first. Pads appear once their rendition
+shows up in the catalog (sometimes-pads), so an application links them from a
+`pad-added` handler.
 
 ## Debugging
 

@@ -136,6 +136,12 @@ impl Server {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
+				// We report send bitrate; a server never advertises a request Path.
+				let our_setup = lite::Setup {
+					probe: lite::ProbeLevel::Report,
+					path: None,
+				};
+
 				// Server side never blocks on the initial set; discard the synced receiver.
 				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
@@ -144,6 +150,7 @@ impl Server {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
+					our_setup,
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
@@ -160,6 +167,7 @@ impl Server {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite04,
+					lite::Setup::default(),
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
@@ -177,6 +185,7 @@ impl Server {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite03,
+					lite::Setup::default(),
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
@@ -227,6 +236,9 @@ impl Server {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					v,
+					// This path only handles versions negotiated via the bidi SETUP exchange
+					// (pre-lite-05), which have no Setup Stream.
+					lite::Setup::default(),
 				)?;
 				recv_bw
 			}

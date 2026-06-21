@@ -20,10 +20,17 @@
 //! in another process: build a [`Server`] over your own
 //! [`OriginProducer`](moq_net::OriginProducer) /
 //! [`OriginConsumer`](moq_net::OriginConsumer) and merge
-//! [`Server::publish_router`] into your own axum app, or dial out with
-//! [`Client`]. That lean build skips the standalone binary's deps
-//! (axum-server, clap, moq-native, rustls, sd-notify, tower-http), which the
-//! `server` feature (on by default) pulls back in for the `moq-rtc` binary.
+//! [`Server::publish_router`] / [`Server::subscribe_router`] into your own axum
+//! app, or dial out with [`Client`]. That lean build skips the standalone
+//! binary's deps (axum-server, clap, moq-native, rustls, sd-notify, tower-http),
+//! which the `server` feature (on by default) pulls back in for the `moq-rtc`
+//! binary.
+//!
+//! The bundled routers are unauthenticated: they derive the broadcast name from
+//! the request path. To own the HTTP route and authorize requests yourself
+//! (resolving the broadcast name from a verified token), skip the routers and
+//! call [`whip::accept`] (ingest) / [`whep::accept`] (egress) from your own
+//! handler.
 //!
 //! ## Bitstream gotcha
 //!
@@ -43,4 +50,4 @@ pub mod session;
 
 pub use client::Client;
 pub use error::*;
-pub use server::{Server, whip};
+pub use server::{Response, Server, whep, whip};

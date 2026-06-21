@@ -31,7 +31,6 @@ test("TrackInfo round-trips on draft-05", async () => {
 	const info = new TrackInfo({
 		priority: 7,
 		ordered: false,
-		cache: 10000,
 		timescale: 90000,
 		compression: Compression.Deflate,
 	});
@@ -39,7 +38,6 @@ test("TrackInfo round-trips on draft-05", async () => {
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05_WIP);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(false);
-	expect(got.cache).toBe(10000);
 	expect(got.timescale).toBe(90000);
 	expect(got.compression).toBe(Compression.Deflate);
 });
