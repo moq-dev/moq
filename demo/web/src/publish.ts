@@ -372,3 +372,12 @@ viz.interval(() => {
 	const rtt = conn?.rtt?.peek() as unknown as number | undefined;
 	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 }, 250);
+
+// Vite re-evaluates this module on hot reload, dropping the references to the
+// module-scoped effects above. Close them on dispose so they don't get garbage
+// collected unclosed (which the signals library warns about).
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => {
+		for (const effect of [ui, viz]) effect.close();
+	});
+}

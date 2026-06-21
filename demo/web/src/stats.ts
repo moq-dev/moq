@@ -709,3 +709,13 @@ function formatRate(bytesPerSec: number): string {
 	if (bits < 1_000_000_000) return `${(bits / 1_000_000).toFixed(1)} Mbps`;
 	return `${(bits / 1_000_000_000).toFixed(2)} Gbps`;
 }
+
+// Vite re-evaluates this module on hot reload, dropping the references to the
+// module-scoped effects/connection above. Close them on dispose so they don't
+// get garbage collected unclosed (which the signals library warns about).
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => {
+		for (const effect of [discovery, sampler, ui]) effect.close();
+		connection.close();
+	});
+}
