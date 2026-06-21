@@ -1,9 +1,10 @@
 //! MPEG-TS muxer.
 //!
-//! [`Export`] subscribes to a MoQ broadcast and produces a single MPEG-TS byte
-//! stream: PAT/PMT program tables followed by one PES packet per media frame,
-//! packetized into 188-byte TS packets. Video is carried as Annex-B, audio as
-//! ADTS AAC.
+//! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS, yielding one
+//! [`Frame`] per media frame: PAT/PMT program tables followed by one PES packet,
+//! packetized into 188-byte TS packets. Each frame keeps its media timestamp so
+//! the caller can pace delivery on the media clock. Video is carried as Annex-B,
+//! audio as ADTS AAC.
 //!
 //! Video flows through [`ExportSource`], which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
@@ -47,9 +48,11 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
-/// Use [`next`](Self::next) to pull byte chunks: the first chunk is PAT+PMT, then
-/// each subsequent chunk is the TS packets for one media frame (preceded by a
-/// fresh PAT+PMT at video keyframes). Returns `None` when the broadcast ends.
+/// Use [`next`](Self::next) to pull one [`Frame`] per media frame: its `payload`
+/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag.
+/// The leading PAT/PMT rides on the first frame (so it inherits a real
+/// timestamp), and is re-emitted at video keyframes and periodically for
+/// mid-stream tune-in. Returns `None` when the broadcast ends.
 pub struct Export<E: scte35::Catalog = ()> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<crate::catalog::Consumer<E>>,
@@ -159,12 +162,19 @@ impl<E: scte35::Catalog> Export<E> {
 		self
 	}
 
-	/// Get the next byte chunk.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
+	/// Get the next muxed frame.
+	///
+	/// Each [`Frame`] carries the TS packets for one media frame in `payload`,
+	/// stamped with that frame's media `timestamp` and `keyframe` flag so a
+	/// transport can pace delivery on the media clock. The leading PAT/PMT rides
+	/// on the first frame (inheriting its timestamp), and is re-emitted at video
+	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
+	/// broadcast ends. `duration` is always `None`: the muxer has no use for it.
+	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -207,8 +217,10 @@ impl<E: scte35::Catalog> Export<E> {
 			}
 		}
 
-		// 3. Emit the program tables once the layout is resolved and every
-		// track's codec config is ready.
+		// 3. Build the program tables once the layout is resolved and every
+		// track's codec config is ready. The tables aren't emitted here: PSI has
+		// no media time of its own, so `write_frame` prepends them to the first
+		// frame instead, letting the leading PAT/PMT inherit a real timestamp.
 		if self.psi.is_none() {
 			if self.tracks.is_empty() {
 				// No tracks yet. If the catalog is also done, the broadcast is empty.
@@ -226,15 +238,14 @@ impl<E: scte35::Catalog> Export<E> {
 				return Poll::Pending;
 			}
 			self.build_psi()?;
-			let header = self.write_psi()?;
-			return Poll::Ready(Ok(Some(header)));
 		}
 
-		// 4. Emit the smallest-timestamp pending frame as a PES packet.
+		// 4. Emit the smallest-timestamp pending frame as a PES packet (the first
+		// one carries the buffered PAT/PMT).
 		if let Some(name) = self.pick_next_track() {
 			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
-			let chunk = self.write_frame(&name, frame)?;
-			return Poll::Ready(Ok(Some(chunk)));
+			let out = self.write_frame(&name, frame)?;
+			return Poll::Ready(Ok(Some(out)));
 		}
 
 		// 5. End of stream once every track has drained and the catalog is closed.
@@ -444,18 +455,7 @@ impl<E: scte35::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Serialize a fresh PAT + PMT into a chunk.
-	fn write_psi(&mut self) -> anyhow::Result<Bytes> {
-		let psi = self.psi.as_ref().context("PSI not built")?;
-		let pat = TsPayload::Pat(psi.pat.clone());
-		let pmt = TsPayload::Pmt(psi.pmt.clone());
-
-		let mut out = Vec::with_capacity(2 * TsPacket::SIZE);
-		self.write_packet(&mut out, Pid::PAT, None, pat)?;
-		self.write_packet(&mut out, PMT_PID, None, pmt)?;
-		Ok(Bytes::from(out))
-	}
-
+	/// Name of the track whose pending frame has the smallest timestamp.
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
@@ -464,14 +464,18 @@ impl<E: scte35::Catalog> Export<E> {
 			.map(|(n, _)| n)
 	}
 
-	/// Packetize one media frame into a chunk, re-emitting PAT/PMT before video
-	/// keyframes (and periodically) so receivers can tune in mid-stream.
-	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Bytes> {
+	/// Packetize one media frame into an output [`Frame`], re-emitting PAT/PMT
+	/// before video keyframes (and periodically) so receivers can tune in
+	/// mid-stream. The returned frame keeps the source `timestamp` and `keyframe`
+	/// flag so the caller can pace it.
+	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Frame> {
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
 		let is_pcr = self.psi.as_ref().is_some_and(|p| p.pcr_pid == pid);
 		let is_video = matches!(kind, Kind::Video(_));
+		let timestamp = frame.timestamp;
+		let keyframe = frame.keyframe;
 
 		// Build the elementary-stream payload for this frame. Video needs the
 		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. SCTE-35
@@ -525,7 +529,12 @@ impl<E: scte35::Catalog> Export<E> {
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		Ok(Bytes::from(out))
+		Ok(Frame {
+			timestamp,
+			duration: None,
+			payload: Bytes::from(out),
+			keyframe,
+		})
 	}
 
 	/// Packetize a PES payload into 188-byte TS packets.

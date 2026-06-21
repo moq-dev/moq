@@ -4401,6 +4401,7 @@ dependencies = [
  "cudarc",
  "dispatch2",
  "hang",
+ "libloading 0.8.9",
  "moq-mux",
  "moq-net",
  "moq-vaapi",
@@ -5012,11 +5013,11 @@ dependencies = [
 [[package]]
 name = "nvidia-video-codec-sdk"
 version = "0.4.0"
-source = "git+https://github.com/kixelated/nvidia-video-codec-sdk.git?branch=dynamic-loading#c607b8fea8bbe5761b594e76e5774e2a83bc0e0d"
+source = "git+https://github.com/kixelated/nvidia-video-codec-sdk.git?branch=dynamic-loading#72f6eca3a0d66a18667a4e498b712e9ffd311f22"
 dependencies = [
  "cudarc",
  "lazy_static",
- "libloading 0.9.0",
+ "libloading 0.8.9",
 ]
 
 [[package]]

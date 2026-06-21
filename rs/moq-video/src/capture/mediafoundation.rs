@@ -6,7 +6,7 @@
 //! GPU-resident NV12 texture ([`Frame::Texture`]) that the hardware encoder MFT
 //! consumes zero-copy. Without a GPU (e.g. a headless VM) it falls back to the
 //! source reader's software video processor, copying each sample to a packed CPU
-//! [`I420`] ([`Frame::I420`]) for openh264.
+//! [`I420`] ([`Frame::I420`]) the encoder uploads.
 
 use std::ffi::c_void;
 use std::ptr;

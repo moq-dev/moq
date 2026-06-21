@@ -51,7 +51,9 @@ Here's a list of currently supported ALPNs:
 See the Compatibility section below for more details about `moq-transport` support.
 
 Once the QUIC or WebTransport connection is established, there is a minimal MoQ handshake.
-The `SETUP` message is primarily used to negotiate extensions, then you're off to the races!
+Each endpoint sends a single `SETUP` message advertising its capabilities (for example whether it can probe the available bitrate), then you're off to the races.
+The two `SETUP` messages are independent, so neither side waits for the other before getting started.
+Transports that don't carry a request URI (native QUIC, or qmux over TCP/TLS) also use `SETUP` to carry the path the client wants to reach.
 
 ### Announcements
 
@@ -66,6 +68,9 @@ The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to dis
 
 The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
 This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
+
+Each broadcast also carries an **epoch** identifying its instance.
+When the same broadcast is announced over multiple routes (or republished after going away), the epoch lets everyone converge on the newest instance instead of picking arbitrarily.
 
 ### Subscriptions
 
@@ -102,8 +107,8 @@ Each Subscription consists of a few properties:
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Group Timeout**: The maximum duration to keep old groups in cache/transit. Defaults to 30 seconds.
 
-The publisher also caps how long it retains old groups via a per-track **cache** age, announced in `SUBSCRIBE_OK` so relays re-serve with the same window.
-A subscriber's Group Timeout can only be smaller than this cache age, since a group can't be waited for longer than it's kept around.
+The publisher also keeps old groups around for a best-effort **cache** window so relays and late subscribers can still fetch them.
+This is a local hint rather than a guarantee carried on the wire, and a subscriber's Group Timeout is bounded by it: a group can't be waited for longer than it's actually kept around.
 
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:

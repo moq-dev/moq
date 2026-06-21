@@ -16,6 +16,7 @@ mod priority;
 mod probe;
 mod publisher;
 mod session;
+mod setup;
 mod stream;
 mod subscribe;
 mod subscriber;
@@ -35,6 +36,8 @@ pub use parameters::*;
 pub use probe::*;
 use publisher::*;
 pub(super) use session::*;
+#[allow(unused_imports)]
+pub use setup::*;
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
