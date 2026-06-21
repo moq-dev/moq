@@ -1,20 +1,14 @@
 //! Shared Media Foundation / COM helpers used by the capture source, the
 //! hardware encoder backend, and the hardware decoder backend on Windows.
 
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
-use windows::Win32::Graphics::Direct3D11::{
-	D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
-	ID3D11Device,
-};
+use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Media::MediaFoundation::{
 	IMFDXGIDeviceManager, MF_VERSION, MFCreateDXGIDeviceManager, MFSTARTUP_FULL, MFShutdown, MFStartup,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-use windows::core::Interface;
 
 use crate::Error;
+use crate::frame::d3d11;
 
 /// Wrap a `windows` error with context as a codec error.
 pub(crate) fn mf_err(ctx: &str, e: windows::core::Error) -> Error {
@@ -37,33 +31,11 @@ pub(crate) fn unpack_2x32(v: u64) -> (u32, u32) {
 
 /// Create a hardware Direct3D11 device plus a DXGI device manager wrapping it,
 /// the pairing every Media Foundation GPU path needs (a capture source reader, a
-/// hardware encoder MFT, or a hardware decoder MFT). The device is marked
-/// multithread-protected because Media Foundation's internal worker threads and
-/// our blocking thread both touch it.
+/// hardware encoder MFT, or a hardware decoder MFT). The device comes from the
+/// shared [`d3d11::create_device`] (multithread-protected); this adds the Media
+/// Foundation manager on top.
 pub(crate) fn create_d3d_device() -> Result<(ID3D11Device, IMFDXGIDeviceManager), Error> {
-	let mut device: Option<ID3D11Device> = None;
-	unsafe {
-		D3D11CreateDevice(
-			None,
-			D3D_DRIVER_TYPE_HARDWARE,
-			HMODULE::default(),
-			D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-			None,
-			D3D11_SDK_VERSION,
-			Some(&mut device),
-			None,
-			None,
-		)
-		.map_err(|e| mf_err("D3D11CreateDevice", e))?;
-	}
-	let device = device.ok_or_else(|| Error::Codec(anyhow::anyhow!("D3D11CreateDevice returned null")))?;
-
-	let multithread = device
-		.cast::<ID3D10Multithread>()
-		.map_err(|e| mf_err("query ID3D10Multithread", e))?;
-	unsafe {
-		let _ = multithread.SetMultithreadProtected(true);
-	}
+	let device = d3d11::create_device()?;
 
 	let mut token: u32 = 0;
 	let mut manager: Option<IMFDXGIDeviceManager> = None;

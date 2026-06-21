@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MFT runs synchronously with a Direct3D11 device bound to it, so the decode
   happens on the GPU through DXVA (NVDEC / Intel / AMD); output textures are
   downloaded to I420. Requires a GPU: a GPU-less host falls back to openh264.
+- Windows screen capture (`capture::Source::Display`) via DXGI Desktop
+  Duplication. Duplicates a monitor on a Direct3D11 device, copies each desktop
+  frame to a staging texture, and converts BGRA to I420. Whole-monitor capture;
+  select one with a bare index or `display:{index}`. The read loop paces to the
+  target frame rate and re-emits the last frame while the screen is static.
 - H.265 encode via the NVENC backend (Linux, `nvenc` feature). The codec is
   selected by `encode::Codec`; the NVENC HEVC path shares the H.264 preset / GOP
   / rate-control setup and emits Annex-B with inline VPS/SPS/PPS. Not yet

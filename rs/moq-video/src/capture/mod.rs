@@ -3,7 +3,8 @@
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 //! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420).
-//! - Windows camera -> native Media Foundation (`IMFSourceReader` -> CPU I420).
+//! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
+//!   DXGI Desktop Duplication (BGRA -> CPU I420).
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
@@ -30,6 +31,10 @@ mod v4l2;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
+// DXGI Desktop Duplication screen capture on Windows.
+#[cfg(target_os = "windows")]
+mod desktopduplication;
+
 // Blocking-device -> async-channel bridge used by V4L2 / Media Foundation.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod pump;
@@ -41,7 +46,7 @@ pub enum Source {
 	/// A camera / webcam.
 	#[default]
 	Camera,
-	/// A display (whole-screen capture). macOS only for now.
+	/// A display (whole-screen capture). macOS and Windows.
 	Display,
 }
 
@@ -165,10 +170,14 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 			{
 				screencapture::open(config).await
 			}
-			#[cfg(not(target_os = "macos"))]
+			#[cfg(target_os = "windows")]
+			{
+				desktopduplication::open(config).await
+			}
+			#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 			{
 				Err(Error::Codec(anyhow::anyhow!(
-					"screen capture is only supported on macOS"
+					"screen capture is not supported on this platform"
 				)))
 			}
 		}

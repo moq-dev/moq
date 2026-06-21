@@ -17,7 +17,9 @@ Per-platform, picked at compile time:
 - **macOS**: AVFoundation (camera) and ScreenCaptureKit (display), yielding
   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 - **Linux**: native V4L2 (camera; YUYV resampled, MJPEG via `zune-jpeg`).
-- **Windows**: native Media Foundation (`IMFSourceReader` -> CPU I420).
+- **Windows**: native Media Foundation (camera; `IMFSourceReader`) and DXGI
+  Desktop Duplication (display; BGRA -> CPU I420). Display capture is
+  whole-monitor; select one with a bare index or `display:{index}`.
 
 ## Encode
 
