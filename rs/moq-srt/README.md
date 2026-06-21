@@ -17,10 +17,11 @@ Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg dependency.
 
 ## Library
 
-The whole surface is `Config` + `run`. A relay embeds ingest by calling `run`
-against its own origin, so the ingested media is published locally with no extra
-hop. Depend on it with `default-features = false` to skip the binary's relay
-client/server and CLI dependencies:
+Two entry points. `Config` + `run` is the unauthenticated convenience: a relay
+embeds ingest by calling `run` against its own origin, so the ingested media is
+published locally with no extra hop. For auth, drive `Server` / `Request`
+directly (see [Auth](#auth) below). Depend on it with `default-features = false`
+to skip the binary's relay client/server and CLI dependencies:
 
 ```toml
 moq-srt = { version = "0.0.1", default-features = false }
@@ -89,6 +90,26 @@ a path, so any number of players can pull the same broadcast.
 
 ## Auth
 
-The listener is currently unauthenticated: anyone who can reach the UDP port can
-publish or request any broadcast. Gate it with a host firewall or a private
-network. SRT passphrase encryption and token checks are the planned next step.
+`run` is unauthenticated: anyone who can reach the UDP port can publish or
+request any broadcast. Gate it with a host firewall or a private network, or
+bring your own auth by driving `Server` / `Request` directly, mirroring
+`moq-native`'s `Server` / `Request`:
+
+```rust
+let mut server = moq_srt::Server::bind("0.0.0.0:9000".parse()?, None).await?;
+while let Some(request) = server.accept().await {
+    // Inspect `request.resource()` / `request.stream_id()` (treat the stream id
+    // as a token if you like), verify it, and pick the broadcast path.
+    match request {
+        moq_srt::Request::Publish(publish) => {
+            tokio::spawn(publish.accept(&origin, "live/cam0"));
+        }
+        moq_srt::Request::Subscribe(subscribe) => {
+            tokio::spawn(subscribe.accept(&consumer, "live/cam0"));
+        }
+    }
+    // ...or `request`'s `reject()` to deny it.
+}
+```
+
+SRT passphrase encryption is a separate, planned next step.

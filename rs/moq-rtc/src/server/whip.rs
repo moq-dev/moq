@@ -16,16 +16,7 @@ use str0m::{Candidate, Rtc};
 
 use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
 
-/// The result of [`accept`]: the SDP answer to return to the client, plus an
-/// opaque resource id for the WHIP `Location` header (the RFC 9725 session
-/// resource URL).
-#[derive(Clone, Debug)]
-pub struct Response {
-	/// Opaque id identifying the negotiated session, for the `Location` header.
-	pub resource_id: String,
-	/// The SDP answer body (`Content-Type: application/sdp`).
-	pub answer: String,
-}
+pub use crate::server::Response;
 
 /// Build the WHIP axum router.
 pub fn router(server: Server) -> Router {

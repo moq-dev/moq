@@ -8,21 +8,24 @@ use axum::{
 	body::Bytes,
 	extract::{Path, State},
 	http::{HeaderMap, HeaderValue, StatusCode, header},
-	response::{IntoResponse, Response},
+	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
 use str0m::Candidate;
 
 use crate::{Error, Result, egress::EgressSource, sdp, server::Server, session};
 
+pub use crate::server::Response;
+
+/// Build the WHEP axum router.
 pub fn router(server: Server) -> Router {
 	Router::new().route("/{*path}", post(handle)).with_state(server)
 }
 
-async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, body: Bytes) -> HttpResponse {
 	let (server, path) = (server.0, path.0);
 	match accept_offer(&server, &path, &headers, body).await {
-		Ok((resource_id, answer)) => {
+		Ok(Response { resource_id, answer }) => {
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
 			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
@@ -37,19 +40,41 @@ async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, b
 	}
 }
 
-async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<(String, String)> {
+/// Router glue: enforce the WHEP `Content-Type` then hand the raw offer to
+/// [`accept`], using the request path as the (unauthenticated) broadcast name.
+async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
 	if !is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
-	let sdp = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	let offer = sdp::parse_offer(sdp)?;
+	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
+	accept(server, path, offer).await
+}
+
+/// Accept a WHEP SDP offer and egress the MoQ broadcast `broadcast` (a path
+/// relative to the subscribe origin's root) to the negotiated WebRTC peer.
+///
+/// This is the negotiation core behind [`router`], exposed so an embedder can own
+/// the HTTP route and authentication: verify the request, resolve the authorized
+/// broadcast name, then hand the raw SDP offer here. It parses the offer, resolves
+/// the broadcast on the subscribe origin, restricts the answer to the codecs the
+/// catalog actually has, binds the ICE socket, spawns the MoQ->RTP session, and
+/// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
+/// header. Mirrors [`whip::accept`](super::whip::accept).
+///
+/// `offer` is the raw SDP body; the caller is responsible for checking the
+/// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
+/// on a malformed offer, and surfaces a not-announced broadcast (or one outside
+/// the subscribe origin's scope) as [`Error::Other`].
+pub async fn accept(server: &Server, broadcast: impl moq_net::AsPath, offer: &str) -> Result<Response> {
+	let offer = sdp::parse_offer(offer)?;
 
 	// Look up the MoQ broadcast on the subscriber origin. `request_broadcast` resolves an
 	// already-announced broadcast immediately and falls back to a dynamic handler if the
 	// origin has one; with neither, it fails fast and the WHEP client retries (typical).
-	let consumer = async { server.subscriber().request_broadcast(path)?.await }
+	let broadcast = broadcast.as_path().to_string();
+	let consumer = async { server.subscriber().request_broadcast(&broadcast)?.await }
 		.await
-		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {path} not announced")))?;
+		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {broadcast} not announced")))?;
 
 	let source = EgressSource::new(consumer).await?;
 	let codecs = source.catalog_codecs();
@@ -79,7 +104,10 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 		}
 	});
 
-	Ok((resource_id, sdp::render_answer(&answer)))
+	Ok(Response {
+		resource_id,
+		answer: sdp::render_answer(&answer),
+	})
 }
 
 fn is_sdp(headers: &HeaderMap) -> bool {

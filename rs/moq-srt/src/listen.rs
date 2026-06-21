@@ -1,45 +1,38 @@
-//! SRT listener and stream-id routing.
+//! SRT listener configuration and the unauthenticated `run` convenience.
 //!
 //! SRT is a thin reliability/encryption layer over a UDP datagram stream whose
-//! payload, by overwhelming convention, is MPEG-TS. We run an SRT listener and
-//! route each incoming connection by its stream id, in one of two directions:
+//! payload, by overwhelming convention, is MPEG-TS. [`run`] drives a [`Server`]:
+//! it accepts every connection and routes each by its stream-id `m=` mode, in one
+//! of two directions:
 //!
-//! - `m=publish` (the default): ingest. Pump the caller's TS payload through
-//!   [`crate::ts::Publisher`] into the origin as a broadcast.
-//! - `m=request`: egress. Re-mux the requested broadcast back to MPEG-TS with
-//!   [`crate::ts::Subscriber`] and stream it to the caller, so VLC / ffmpeg can
-//!   play `srt://host:port?streamid=#!::r=<broadcast>,m=request`.
+//! - `m=publish` (the default): ingest. Pump the caller's TS payload into the
+//!   origin as a broadcast.
+//! - `m=request`: egress. Re-mux the requested broadcast back to MPEG-TS and
+//!   stream it to the caller, so VLC / ffmpeg can play
+//!   `srt://host:port?streamid=#!::r=<broadcast>,m=request`.
 //!
-//! Routing: SRT's recommended stream-id form is `#!::r=<resource>,m=<mode>`. We
-//! extract the `r=` resource when present and otherwise fall back to the raw
-//! stream-id string; the `m=` mode picks the direction (absent / non-`request`
-//! means ingest). The optional [`prefix`](Config::prefix) is prepended so a
-//! single listener can namespace all of its streams (e.g. prefix `live/` +
-//! stream id `cam0` -> broadcast `live/cam0`).
+//! Routing: SRT's recommended stream-id form is `#!::r=<resource>,m=<mode>`. The
+//! `r=` resource (or the raw stream id, for OBS-style clients) names the
+//! broadcast, and the optional [`prefix`](Config::prefix) is prepended so a
+//! single listener can namespace all of its streams (e.g. prefix `live/` + stream
+//! id `cam0` -> broadcast `live/cam0`).
 //!
-//! Auth: this listener is currently unauthenticated. Anyone who can reach the
-//! UDP port can publish or request any broadcast, so gate it with the host
-//! firewall / a private network. SRT passphrase encryption and token checks are
-//! the obvious next step (see `request.accept(Some(KeySettings))`).
+//! Auth: [`run`] is unauthenticated. Anyone who can reach the UDP port can
+//! publish or request any broadcast, so gate it with the host firewall / a
+//! private network. To gate access (e.g. verify the stream id as a JWT) or to
+//! scope the origin per client, drive [`Server`] directly: loop on
+//! [`Server::accept`], match the [`Request`], and call accept/reject after making
+//! your own decision.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
-use moq_net::{OriginConsumer, OriginProducer};
-use srt_tokio::SrtListener;
-use srt_tokio::access::{
-	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
-};
-use srt_tokio::options::StreamId;
+use moq_net::OriginProducer;
 
-use crate::{Error, Result};
-
-/// SRT payload size for egress: 7 MPEG-TS packets (7 x 188), the de-facto
-/// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
-const SRT_PAYLOAD: usize = 7 * 188;
+use crate::Result;
+use crate::server::{Request, Server};
 
 /// SRT gateway configuration.
 ///
@@ -76,6 +69,13 @@ impl Default for Config {
 /// Run the SRT gateway until it fails, publishing `m=publish` connections into
 /// `origin` and serving `m=request` connections out of it.
 ///
+/// This is the unauthenticated convenience entry point: it accepts every
+/// publisher and subscriber and routes by [`prefix`](Config::prefix) + resource
+/// name. Subscribe requests are served from `origin.consume()`, so anything in
+/// the origin (SRT ingests and otherwise) can be pulled back out over SRT. To
+/// gate access (e.g. verify the stream id as a JWT) or to scope the origin per
+/// client, drive [`Server`] directly.
+///
 /// Stays pending forever (rather than resolving) when SRT is disabled, so it
 /// composes cleanly inside a `tokio::select!` alongside a relay's other
 /// long-running tasks.
@@ -86,7 +86,7 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 		unreachable!("pending future never resolves");
 	};
 
-	let (_listener, mut incoming) = SrtListener::builder().latency(config.latency).bind(listen).await?;
+	let mut server = Server::bind(listen, config.latency).await?;
 	tracing::info!(%listen, prefix = %config.prefix, "SRT listening");
 
 	// Read side of the origin, used to serve `m=request` callers their broadcast.
@@ -97,75 +97,54 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 	// RTMP stream key) instead of being silently parked as a backup that could
 	// take over the path when the first publisher drops.
 	let active = ActivePaths::default();
+	let prefix = Arc::new(config.prefix);
 
-	while let Some(request) = incoming.incoming().next().await {
-		let remote = request.remote();
-		let Some(route) = resolve_route(&config.prefix, request.stream_id()) else {
-			tracing::warn!(%remote, stream_id = ?request.stream_id(), "rejecting SRT: no usable stream id");
-			reject(request, ServerRejectReason::BadRequest, remote).await;
-			continue;
-		};
-
-		// `m=request` reads a broadcast out; everything else publishes one in.
-		if route.mode == ConnectionMode::Request {
-			let path = route.path;
-			let consumer = consumer.clone();
-			tokio::spawn(async move {
-				let socket = match request.accept(None).await {
-					Ok(socket) => socket,
-					Err(err) => {
-						tracing::warn!(%remote, %err, "SRT accept failed");
+	while let Some(request) = server.accept().await {
+		let prefix = prefix.clone();
+		match request {
+			Request::Publish(publish) => {
+				let origin = origin.clone();
+				let active = active.clone();
+				// Each connection runs on its own task: `accept` pumps media for the
+				// whole connection lifetime, so handling it inline would serialize
+				// publishers.
+				tokio::spawn(async move {
+					let peer = publish.peer();
+					let path = format!("{prefix}{}", publish.resource());
+					// Claim the path before accepting; the guard releases it when the
+					// connection task ends (success, error, or panic).
+					let Some(_guard) = active.claim(&path) else {
+						tracing::warn!(%peer, %path, "rejecting SRT publish: path already being ingested");
+						let _ = publish.reject().await;
 						return;
+					};
+					if let Err(err) = publish.accept(&origin, &path).await {
+						tracing::warn!(%peer, %path, %err, "SRT ingest ended with error");
+					} else {
+						tracing::info!(%peer, %path, "SRT ingest ended");
 					}
-				};
-				tracing::info!(%remote, %path, "SRT request accepted");
-				if let Err(err) = serve_request(consumer, &path, socket).await {
-					tracing::warn!(%remote, %path, %err, "SRT request ended with error");
-				} else {
-					tracing::info!(%remote, %path, "SRT request ended");
-				}
-			});
-			continue;
-		}
-
-		// Claim the path before accepting; the guard releases it when the
-		// connection task ends (success, error, or panic).
-		let Some(guard) = active.claim(&route.path) else {
-			tracing::warn!(%remote, path = %route.path, "rejecting SRT: path already being ingested");
-			reject(request, ServerRejectReason::Forbidden, remote).await;
-			continue;
-		};
-
-		let path = route.path;
-		let origin = origin.clone();
-		tokio::spawn(async move {
-			let _guard = guard;
-			let socket = match request.accept(None).await {
-				Ok(socket) => socket,
-				Err(err) => {
-					tracing::warn!(%remote, %err, "SRT accept failed");
-					return;
-				}
-			};
-			tracing::info!(%remote, %path, "SRT connection accepted");
-			if let Err(err) = serve_publish(origin, &path, socket).await {
-				tracing::warn!(%remote, %path, %err, "SRT ingest ended with error");
-			} else {
-				tracing::info!(%remote, %path, "SRT ingest ended");
+				});
 			}
-		});
+			Request::Subscribe(subscribe) => {
+				let consumer = consumer.clone();
+				// Many viewers can request the same path concurrently, so subscribes
+				// don't claim an `ActivePaths` slot.
+				tokio::spawn(async move {
+					let peer = subscribe.peer();
+					let path = format!("{prefix}{}", subscribe.resource());
+					if let Err(err) = subscribe.accept(&consumer, &path).await {
+						tracing::warn!(%peer, %path, %err, "SRT request ended with error");
+					} else {
+						tracing::info!(%peer, %path, "SRT request ended");
+					}
+				});
+			}
+		}
 	}
 
-	Err(Error::from(anyhow::anyhow!(
+	Err(crate::Error::from(anyhow::anyhow!(
 		"SRT listener stopped accepting connections"
 	)))
-}
-
-/// Reject a connection request, logging (but not propagating) a send failure.
-async fn reject(request: srt_tokio::ConnectionRequest, reason: ServerRejectReason, remote: SocketAddr) {
-	if let Err(err) = request.reject(RejectReason::Server(reason)).await {
-		tracing::debug!(%remote, %err, "failed to send SRT rejection");
-	}
 }
 
 /// The set of broadcast paths with a live ingest, used to reject duplicate
@@ -200,167 +179,9 @@ impl Drop for PathGuard {
 	}
 }
 
-/// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
-async fn serve_publish(origin: OriginProducer, path: &str, mut socket: srt_tokio::SrtSocket) -> Result<()> {
-	use futures::TryStreamExt;
-
-	let mut publisher = crate::ts::Publisher::new(&origin, path)?;
-	while let Some((_instant, bytes)) = socket.try_next().await? {
-		publisher.feed(bytes)?;
-	}
-	publisher.finish()?;
-	Ok(())
-}
-
-/// Mux the requested broadcast back to MPEG-TS and stream it to the SRT caller
-/// (`m=request`).
-///
-/// Waits for the broadcast to be announced (so a caller may connect before the
-/// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
-/// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_request(origin: OriginConsumer, path: &str, mut socket: srt_tokio::SrtSocket) -> Result<()> {
-	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
-	// parks forever for a stream that is never published, and nothing else polls the
-	// socket during that wait, so without this a caller who requests a non-existent
-	// stream (or hangs up before it starts) would leak this task and its socket.
-	let subscriber = tokio::select! {
-		biased;
-		_ = wait_closed(&mut socket) => {
-			tracing::debug!(%path, "SRT request closed before its broadcast was available");
-			return Ok(());
-		}
-		subscriber = crate::ts::Subscriber::new(&origin, path) => subscriber?,
-	};
-
-	let Some(mut subscriber) = subscriber else {
-		tracing::warn!(%path, "SRT request for an unroutable broadcast");
-		return Ok(());
-	};
-
-	// MPEG-TS is a continuous byte stream, so we coalesce the muxer's per-frame
-	// chunks and slice them on a fixed boundary rather than preserving them.
-	let mut buffer = bytes::BytesMut::new();
-	while let Some(chunk) = subscriber.next().await? {
-		buffer.extend_from_slice(&chunk);
-		while buffer.len() >= SRT_PAYLOAD {
-			let payload = buffer.split_to(SRT_PAYLOAD).freeze();
-			socket.send((Instant::now(), payload)).await?;
-		}
-	}
-
-	if !buffer.is_empty() {
-		socket.send((Instant::now(), buffer.freeze())).await?;
-	}
-	socket.close().await?;
-
-	Ok(())
-}
-
-/// Resolve once the SRT caller hangs up (a clean close or an error), draining and
-/// ignoring any unexpected inbound packets. A request caller normally sends
-/// nothing, so this is purely a disconnect signal to race against the announce wait.
-async fn wait_closed(socket: &mut srt_tokio::SrtSocket) {
-	use futures::TryStreamExt;
-	while let Ok(Some(_)) = socket.try_next().await {}
-}
-
-/// A routing decision derived from an SRT connection's stream id.
-struct Route {
-	/// Broadcast path (with [`Config::prefix`] applied) to publish into or read from.
-	path: String,
-	/// Direction: `Request` serves a broadcast out, anything else ingests one in.
-	mode: ConnectionMode,
-}
-
-/// Derive a [`Route`] from an SRT stream id, applying `prefix`.
-///
-/// Prefers the standard `#!::r=<resource>,m=<mode>` form, then falls back to the
-/// raw stream-id string (always treated as ingest). Returns `None` when there's
-/// nothing usable to route on.
-fn resolve_route(prefix: &str, stream_id: Option<&StreamId>) -> Option<Route> {
-	let raw = stream_id?.as_str().trim();
-
-	// Standard SRT access-control form: `#!::r=<resource>,m=<mode>,...`. Absent
-	// `m=` defaults to publish, matching a bare stream id and OBS-style ingest.
-	let mut resource = None;
-	let mut mode = ConnectionMode::Publish;
-	if let Ok(acl) = raw.parse::<AccessControlList>() {
-		for entry in acl.0 {
-			match StandardAccessControlEntry::try_from(entry) {
-				Ok(StandardAccessControlEntry::ResourceName(name)) if !name.is_empty() => resource = Some(name),
-				Ok(StandardAccessControlEntry::Mode(m)) => mode = m,
-				_ => {}
-			}
-		}
-	}
-
-	// Fall back to the raw stream id (e.g. OBS-style `app/key`), but never to an
-	// unparsed `#!::` control string.
-	let name = match resource {
-		Some(name) => name,
-		None if raw.is_empty() || raw.starts_with("#!::") => return None,
-		None => raw.to_string(),
-	};
-
-	Some(Route {
-		path: format!("{prefix}{name}"),
-		mode,
-	})
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	fn sid(s: &str) -> StreamId {
-		StreamId::try_from(s.as_bytes().to_vec()).unwrap()
-	}
-
-	fn route(prefix: &str, s: &str) -> Option<Route> {
-		resolve_route(prefix, Some(&sid(s)))
-	}
-
-	#[test]
-	fn standard_resource_form() {
-		let r = route("", "#!::r=live/cam0,m=publish").unwrap();
-		assert_eq!(r.path, "live/cam0");
-		assert_eq!(r.mode, ConnectionMode::Publish);
-	}
-
-	#[test]
-	fn request_mode_is_egress() {
-		let r = route("", "#!::r=live/cam0,m=request").unwrap();
-		assert_eq!(r.path, "live/cam0");
-		assert_eq!(r.mode, ConnectionMode::Request);
-	}
-
-	#[test]
-	fn absent_mode_defaults_to_publish() {
-		// Both a bare stream id and an `r=`-only ACL ingest by default.
-		assert_eq!(route("", "app/key").unwrap().mode, ConnectionMode::Publish);
-		assert_eq!(route("", "#!::r=cam0").unwrap().mode, ConnectionMode::Publish);
-	}
-
-	#[test]
-	fn raw_stream_id() {
-		let r = route("", "app/key").unwrap();
-		assert_eq!(r.path, "app/key");
-		assert_eq!(r.mode, ConnectionMode::Publish);
-	}
-
-	#[test]
-	fn prefix_is_prepended() {
-		assert_eq!(route("live/", "cam0").unwrap().path, "live/cam0");
-		// Prefix applies to egress requests too.
-		assert_eq!(route("live/", "#!::r=cam0,m=request").unwrap().path, "live/cam0");
-	}
-
-	#[test]
-	fn missing_or_empty_is_rejected() {
-		assert!(resolve_route("", None).is_none());
-		assert!(route("", "").is_none());
-		assert!(route("", "#!::").is_none());
-	}
 
 	#[test]
 	fn active_paths_rejects_duplicates_and_releases_on_drop() {
