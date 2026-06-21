@@ -13,6 +13,9 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
+# Disk and remote cache tiers (object_store). Off by default so RAM-only and
+# wasm builds stay dependency-free.
+cache-tiered = ["dep:object_store"]
 # Legacy no-op: serde is now unconditional (stats publishing requires it).
 serde = []
 
@@ -22,6 +25,7 @@ flate2 = { workspace = true }
 futures = "0.3"
 kio = { workspace = true }
 num_enum = "0.7"
+object_store = { workspace = true, optional = true }
 rand = "0.10.1"
 serde = { workspace = true, features = ["rc"] }
 serde_json = "1"

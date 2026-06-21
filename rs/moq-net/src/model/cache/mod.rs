@@ -31,6 +31,10 @@ use super::{Timescale, Timestamp};
 pub mod index;
 pub mod segment;
 
+/// Disk and remote tiers backed by object_store. Requires the `cache-tiered` feature.
+#[cfg(feature = "cache-tiered")]
+pub mod store;
+
 /// A cache bound, as a duration, a byte count, or both (the first to trip wins).
 ///
 /// All-`None` means "no threshold": as a high watermark that is unbounded (never flush), as a low

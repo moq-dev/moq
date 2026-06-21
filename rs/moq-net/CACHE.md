@@ -13,11 +13,14 @@
 > - the **track wiring**: `cache::Group::read` / `produce` bridge a cached group to/from the live
 >   group model; `TrackProducer::with_cache(cache::Producer)` spawns a subscriber that drains
 >   finished groups into the cache; `TrackConsumer::with_cache(cache::Consumer)` makes `get_group`
->   and `fetch_group` resolve from the cache on a live miss.
+>   and `fetch_group` resolve from the cache on a live miss;
+> - the **disk/remote tier I/O** (`store.rs`, behind the `cache-tiered` feature): `cache::store::Store`
+>   over an `object_store` disk tier and optional remote tier. `flush` encodes a band and `put`s it
+>   as a disk segment; `get` ranged-reads a located blob; `compact` rolls the oldest disk segments
+>   up into one remote object (or evicts them with no remote), driven by the index.
 >
-> Still design: the tier **I/O** (object_store `put`/`get_range`/`delete` wiring the index and
-> rollup to real storage, feature-gated) and removing the wire field `TrackInfo.cache`. Targets
-> `dev`.
+> Still design: removing the wire field `TrackInfo.cache`, and threading a `CacheConfig` onto the
+> tracks a relay auto-creates (the Origin follow-up). Targets `dev`.
 
 A per-track group cache. It lets a relay or edge retain recent groups past the live window and
 serve them back on a FETCH, optionally spilling to local disk or remote object storage. This is

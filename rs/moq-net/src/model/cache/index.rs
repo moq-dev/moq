@@ -205,6 +205,14 @@ impl Index {
 		self.segments.retain(|id, _| !promoted.contains(id));
 		new_id
 	}
+
+	/// Drop a set of segments and the group locations pointing at them. Used to evict from the
+	/// disk tier when there is no remote tier to promote into.
+	pub fn evict(&mut self, segments: &[SegmentId]) {
+		let drop: HashSet<SegmentId> = segments.iter().copied().collect();
+		self.groups.retain(|_, loc| !drop.contains(&loc.segment));
+		self.segments.retain(|id, _| !drop.contains(id));
+	}
 }
 
 #[cfg(test)]
@@ -349,6 +357,18 @@ mod tests {
 		// Disk dropped the two promoted segments; remote gained one.
 		assert_eq!(index.segment_count(Tier::Disk), 1);
 		assert_eq!(index.segment_count(Tier::Remote), 1);
+	}
+
+	#[test]
+	fn evict_drops_segments_and_their_locations() {
+		let mut index = Index::new();
+		let a = index.add(Tier::Disk, &Segment::open(encoded(&[group(0, 10, 0)])).unwrap());
+		index.add(Tier::Disk, &Segment::open(encoded(&[group(1, 10, 1)])).unwrap());
+
+		index.evict(&[a]);
+		assert!(index.locate(0).is_none(), "evicted segment's groups are gone");
+		assert!(index.locate(1).is_some(), "other segment untouched");
+		assert_eq!(index.segment_count(Tier::Disk), 1);
 	}
 
 	#[test]
