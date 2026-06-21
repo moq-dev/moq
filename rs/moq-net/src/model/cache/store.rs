@@ -52,7 +52,12 @@ impl Store {
 
 	fn store_of(&self, tier: Tier) -> &Arc<dyn ObjectStore> {
 		match tier {
-			Tier::Remote => self.remote.as_ref().unwrap_or(&self.disk),
+			// A remote location is only ever recorded when a remote tier is configured (see
+			// `compact`), so this never falls back.
+			Tier::Remote => self
+				.remote
+				.as_ref()
+				.expect("a remote location implies a configured remote tier"),
 			Tier::Disk => &self.disk,
 		}
 	}
@@ -72,10 +77,13 @@ impl Store {
 		}
 		let bytes = segment::encode(&batch)?;
 		let segment = Segment::open(bytes.clone())?;
-		let id = self.index.add(Tier::Disk, &segment);
+		// Write the object before recording it, so a failed put leaves the index unchanged.
+		let id = self.index.next_id();
 		self.disk
 			.put(&self.key(Tier::Disk, id), PutPayload::from_bytes(bytes))
 			.await?;
+		let added = self.index.add(Tier::Disk, &segment);
+		debug_assert_eq!(added, id, "index id drifted from the written key");
 		self.compact().await
 	}
 
@@ -84,7 +92,8 @@ impl Store {
 		let Some(loc) = self.index.locate(sequence) else {
 			return Ok(None);
 		};
-		let range: Range<u64> = loc.offset..loc.offset + loc.length;
+		let end = loc.offset.checked_add(loc.length).ok_or(segment::Error::Truncated)?;
+		let range: Range<u64> = loc.offset..end;
 		let bytes = self
 			.store_of(loc.tier)
 			.get_range(&self.key(loc.tier, loc.segment), range)
@@ -102,18 +111,24 @@ impl Store {
 
 		match self.remote.clone() {
 			Some(remote) => {
-				// Read the promoted disk segments whole, roll them into one, write it remotely,
-				// repoint the index, then delete the disk objects.
+				// Read the promoted disk segments whole and roll them into one.
 				let mut segments = Vec::with_capacity(promoted.len());
 				for id in &promoted {
 					let bytes = self.disk.get(&self.key(Tier::Disk, *id)).await?.bytes().await?;
 					segments.push(bytes);
 				}
 				let rolled = segment::rollup(&segments)?;
-				let new_id = self.index.apply_promotion(&promoted, &Segment::open(rolled.clone())?);
+				let rolled_segment = Segment::open(rolled.clone())?;
+				// Upload the remote object before repointing the index, so a failed put leaves the
+				// index (still pointing at the disk segments) intact.
+				let new_id = self.index.next_id();
 				remote
 					.put(&self.key(Tier::Remote, new_id), PutPayload::from_bytes(rolled))
 					.await?;
+				let applied = self.index.apply_promotion(&promoted, &rolled_segment);
+				debug_assert_eq!(applied, new_id, "index id drifted from the uploaded key");
+				// Best-effort cleanup; an index now pointing at remote makes any leftover disk
+				// objects orphans, not inconsistency.
 				for id in &promoted {
 					self.disk.delete(&self.key(Tier::Disk, *id)).await?;
 				}

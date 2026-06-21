@@ -695,13 +695,18 @@ impl TrackProducer {
 	/// Fill `cache` with this track's groups as they are produced, so a [`TrackConsumer`] sharing
 	/// the cache (via [`cache::Producer::consume`]) can serve them without a wire fetch.
 	///
-	/// Spawns an internal subscriber that drains each finished group into the cache. That
-	/// subscription keeps the track active while caching, so the track stays alive until it ends
-	/// or the cache is dropped, independent of downstream demand.
+	/// Spawns an internal subscriber that drains each finished group into the cache. Two caveats
+	/// follow from that, both being addressed in the cache design (see `rs/moq-net/CACHE.md`):
+	///
+	/// - The subscriber counts as a consumer, so [`unused`](Self::unused) never resolves while a
+	///   cache is attached. A relay that drops idle tracks via demand will not drop a cached one;
+	///   it stays alive until it ends or the producer is dropped. Intended for "keep recording
+	///   when idle", but it disables demand-driven teardown for this track.
+	/// - Groups are drained in arrival order and [`cache::Group::read`] resolves only once a group
+	///   finishes, so a stalled group head-of-line-blocks the caching of later finished ones.
 	pub fn with_cache(self, mut cache: cache::Producer) -> Self {
 		let mut subscriber = self.subscribe(None);
 		web_async::spawn(async move {
-			// Groups are drained in arrival order; `Group::read` resolves once each finishes.
 			// A drained band (over the RAM watermark) is dropped here until a disk tier consumes it.
 			while let Ok(Some(group)) = subscriber.recv_group().await {
 				if let Ok(group) = cache::Group::read(group).await {
@@ -1066,16 +1071,23 @@ impl TrackConsumer {
 		match state.poll_fetch(sequence) {
 			// Cached live: the pending resolves immediately from state, no handler needed.
 			Poll::Ready(Ok(_)) => {}
-			// Live miss. Serve from the read-through cache if present (faster than waiting on a
-			// handler, and the only option when there is none); otherwise keep the live behavior.
+			// Live miss. Serve from the read-through cache if it holds the group and it rebuilds
+			// at the track's timescale (faster than waiting on a handler, and the only option when
+			// there is none). A rebuild error is treated as a miss, consistent with `get_group`,
+			// falling through to the live behavior.
 			other => {
-				if let Some(cached) = self.cache.as_ref().and_then(|c| c.get(sequence)) {
-					let timescale = state.info.as_ref().and_then(|info| info.timescale);
+				let timescale = state.info.as_ref().and_then(|info| info.timescale);
+				if let Some(group) = self
+					.cache
+					.as_ref()
+					.and_then(|c| c.get(sequence))
+					.and_then(|g| g.produce(timescale).ok())
+				{
 					drop(state);
 					return Ok(kio::Pending::new(TrackFetch {
 						state: self.state.clone(),
 						sequence,
-						cached: Some((cached, timescale)),
+						cached: Some(group),
 					}));
 				}
 				match other {
@@ -1228,18 +1240,19 @@ impl GroupRequest {
 pub struct TrackFetch {
 	state: kio::Consumer<TrackState>,
 	sequence: u64,
-	/// A group pre-resolved from the read-through cache, with the track's timescale to rebuild it.
-	/// When set, the fetch resolves from here instead of polling the live state.
-	cached: Option<(cache::Group, Option<Timescale>)>,
+	/// A group already rebuilt from the read-through cache. When set, the fetch resolves from it
+	/// instead of polling the live state.
+	cached: Option<GroupConsumer>,
 }
 
 impl kio::Future for TrackFetch {
 	type Output = Result<GroupConsumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		// A cache hit resolves immediately, rebuilding the group at the track's timescale.
-		if let Some((group, timescale)) = &self.cached {
-			return Poll::Ready(group.produce(*timescale));
+		// A cache hit resolves immediately. `poll` returns `Ready` on first call, so the clone
+		// happens once.
+		if let Some(group) = &self.cached {
+			return Poll::Ready(Ok(group.clone()));
 		}
 		// `poll_fetch` already yields a `Result<GroupConsumer>` (group, or NotFound /
 		// abort); the outer error is the channel closing without one.

@@ -45,6 +45,7 @@ pub enum Error {
 
 /// One row of a segment's footer: where a group lives and its summary, without decoding the blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GroupEntry {
 	/// The group's sequence number within its track.
 	pub sequence: u64,

@@ -67,6 +67,13 @@ impl Index {
 		Self::default()
 	}
 
+	/// The id the next [`add`](Self::add) (or [`apply_promotion`](Self::apply_promotion)) will
+	/// assign. A caller can put the object under this key *before* recording it, so a failed write
+	/// leaves the index unchanged.
+	pub fn next_id(&self) -> SegmentId {
+		self.next_id
+	}
+
 	/// Record a freshly written `segment` on `tier`, returning its new id. Each group in the
 	/// segment becomes locatable; an already-present sequence is repointed to this segment (this
 	/// is how [`apply_promotion`](Self::apply_promotion) moves sequences to the remote tier).
@@ -114,12 +121,14 @@ impl Index {
 		self.groups.get(&sequence).copied()
 	}
 
-	/// Total bytes stored in `tier`.
+	/// Total bytes stored in `tier`. Test-only accounting (promotion uses `stats`).
+	#[cfg(test)]
 	pub fn bytes(&self, tier: Tier) -> u64 {
 		self.segments.values().filter(|m| m.tier == tier).map(|m| m.bytes).sum()
 	}
 
-	/// Number of segments in `tier`.
+	/// Number of segments in `tier`. Test-only.
+	#[cfg(test)]
 	pub fn segment_count(&self, tier: Tier) -> usize {
 		self.segments.values().filter(|m| m.tier == tier).count()
 	}
@@ -177,6 +186,11 @@ impl Index {
 	/// The oldest disk segments to promote so the disk tier returns within `bounds`. Empty unless
 	/// the disk tier is over its high watermark; otherwise the oldest segments are selected until
 	/// what remains is within the low watermark, oldest first (the order to roll them up in).
+	///
+	/// The single newest disk segment is never selected, mirroring the RAM tier's "keep the latest
+	/// group" rule. Without this, an unset low watermark (a floor of zero) would drain the whole
+	/// disk tier on one over-max trip, which for the no-remote eviction path is data loss of even
+	/// the most recent flushed groups.
 	pub fn promotion(&self, bounds: Bounds) -> Vec<SegmentId> {
 		let disk = self.tier_segments(Tier::Disk);
 		if !Self::over_max(self.stats(&disk), bounds.max) {
@@ -185,8 +199,8 @@ impl Index {
 
 		let mut promote = Vec::new();
 		let mut remaining = disk;
-		while !remaining.is_empty() && Self::above_min(self.stats(&remaining), bounds.min) {
-			// Promote the oldest; recompute against what is left.
+		// Keep at least the newest segment (`len() > 1`), oldest-first.
+		while remaining.len() > 1 && Self::above_min(self.stats(&remaining), bounds.min) {
 			promote.push(remaining.remove(0));
 		}
 		promote

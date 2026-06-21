@@ -28,7 +28,11 @@ use bytes::Bytes;
 
 use super::{Timescale, Timestamp};
 
-pub mod index;
+// Internal orchestration for the disk/remote tiers; not part of the public surface, and only
+// needed (and only compiled) with those tiers.
+#[cfg(feature = "cache-tiered")]
+mod index;
+
 pub mod segment;
 
 /// Disk and remote tiers backed by object_store. Requires the `cache-tiered` feature.
