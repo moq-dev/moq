@@ -381,16 +381,20 @@ ui.run((effect) => {
 // in the catalog's `metadata` list. We read the active broadcast off
 // `broadcast.output.active`, subscribe to that track, and decode the JSON value,
 // re-subscribing whenever the broadcast (or the advertised track) changes.
+// Memoize the advertised track name so the subscription below only re-runs when it
+// (or the active broadcast) changes, not on every catalog frame (e.g. a live
+// encoder-setting tweak rewrites the catalog).
+const metaTrackName = ui.computed((effect) => {
+	const watch = effect.get(activeWatch);
+	if (!watch) return undefined;
+	const catalog = effect.get(watch.broadcast.output.catalog) as { metadata?: string[] } | undefined;
+	return catalog?.metadata?.[0];
+});
+
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	if (!watch) {
-		metaSignal.set(undefined);
-		return;
-	}
-
-	const broadcast = effect.get(watch.broadcast.output.active);
-	const catalog = effect.get(watch.broadcast.output.catalog) as { metadata?: string[] } | undefined;
-	const trackName = catalog?.metadata?.[0];
+	const broadcast = watch ? effect.get(watch.broadcast.output.active) : undefined;
+	const trackName = effect.get(metaTrackName);
 	if (!broadcast || !trackName) {
 		metaSignal.set(undefined);
 		return;
