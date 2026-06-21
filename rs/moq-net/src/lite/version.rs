@@ -43,6 +43,18 @@ impl Version {
 			_ => true,
 		}
 	}
+
+	/// Whether ANNOUNCE_BROADCAST carries a per-broadcast Epoch varint (after the
+	/// suffix, before the hop chain). Added in lite-05 so a consumer can tell a newer
+	/// instance of a broadcast from an older one. Older versions omit the field.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_broadcast_epoch(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
+			_ => true,
+		}
+	}
 }
 
 impl fmt::Display for Version {

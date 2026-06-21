@@ -51,8 +51,6 @@ pub struct TrackInfo {
 	pub priority: u8,
 	/// The publisher's group ordering preference (newest-first when `false`).
 	pub ordered: bool,
-	/// The minimum age the publisher guarantees to keep an old group around.
-	pub cache: std::time::Duration,
 	/// Per-frame timestamp scale, or `None` if frames carry no timestamps. On the
 	/// wire `None` is `0` and `Some(n)` is `n`.
 	pub timescale: Option<Timescale>,
@@ -68,14 +66,12 @@ impl Message for TrackInfo {
 
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
-		let cache = std::time::Duration::decode(r, version)?;
 		let timescale = Timescale::new(u64::decode(r, version)?).ok();
 		let compression = Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			priority,
 			ordered,
-			cache,
 			timescale,
 			compression,
 		})
@@ -88,7 +84,6 @@ impl Message for TrackInfo {
 
 		self.priority.encode(w, version)?;
 		(self.ordered as u8).encode(w, version)?;
-		self.cache.encode(w, version)?;
 		self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
 		self.compression.to_code().encode(w, version)?;
 		Ok(())
@@ -103,7 +98,6 @@ mod test {
 		TrackInfo {
 			priority: 7,
 			ordered: false,
-			cache: std::time::Duration::from_secs(10),
 			timescale: Some(Timescale::MICRO),
 			compression: Compression::Deflate,
 		}
@@ -121,7 +115,6 @@ mod test {
 		let got = info_roundtrip(Version::Lite05Wip, &info_sample());
 		assert_eq!(got.priority, 7);
 		assert!(!got.ordered);
-		assert_eq!(got.cache, std::time::Duration::from_secs(10));
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
 		assert_eq!(got.compression, Compression::Deflate);
 	}
