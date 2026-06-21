@@ -1,9 +1,12 @@
-//! Hardware H.264 backend via NVIDIA NVENC (`nvidia-video-codec-sdk` + cudarc).
+//! Hardware H.264 / H.265 backend via NVIDIA NVENC (`nvidia-video-codec-sdk` +
+//! cudarc).
 //!
 //! Linux only, always-on (cfg-gated). The NVENC API lives in the driver
 //! (`libnvidia-encode.so`) and cudarc loads CUDA dynamically, so this is not a
 //! build-time dependency on the CUDA toolkit. NVENC emits Annex-B with in-band
-//! SPS/PPS, matching avc3 mode directly.
+//! parameter sets (SPS/PPS for H.264, VPS/SPS/PPS for H.265), matching the
+//! inline avc3 / hev1 mode directly. The codec is chosen by [`Config::codec`];
+//! only the codec GUID differs, the preset / GOP / rate-control setup is shared.
 //!
 //! NOT YET VALIDATED ON HARDWARE. Two things need checking on a real Linux+GPU
 //! box before this ships in releases:
@@ -12,23 +15,35 @@
 //!      are safe). Non-aligned widths would need pitched writes via the `sys`
 //!      lock API. We warn at open if the width looks risky.
 //!   2. The exact `NV_ENC_CONFIG` field set for rate control / GOP.
+//!   3. H.265: that the HEVC GUID path emits Annex-B with VPS/SPS/PPS inline
+//!      ahead of each IDR (the hev1 importer relies on it, as it does for the
+//!      VideoToolbox H.265 backend).
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
-	NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_TYPE, NV_ENC_PRESET_P4_GUID,
-	NV_ENC_TUNING_INFO,
+	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_TYPE,
+	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
 };
 use nvidia_video_codec_sdk::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
 use crate::frame::Frame;
 
 pub(crate) const NAME: &str = "nvenc";
+
+/// The NVENC codec GUID for a requested [`Codec`]. The presets, GOP, and rate
+/// control are codec-agnostic, so this is the only codec-dependent input.
+fn codec_guid(codec: Codec) -> GUID {
+	match codec {
+		Codec::H264 => NV_ENC_CODEC_H264_GUID,
+		Codec::H265 => NV_ENC_CODEC_HEVC_GUID,
+	}
+}
 
 pub(crate) struct Nvenc {
 	session: Session,
@@ -66,6 +81,8 @@ impl Nvenc {
 		}
 
 		// cudarc 0.19's DriverError is Debug-only (no Display), so format with `{e:?}`.
+		let codec_guid = codec_guid(config.codec);
+
 		let cuda = CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e:?}")))?;
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC init: {e}")))?;
@@ -73,7 +90,7 @@ impl Nvenc {
 		// Start from the low-latency P4 preset, then set bitrate and GOP.
 		let mut preset = encoder
 			.get_preset_config(
-				NV_ENC_CODEC_H264_GUID,
+				codec_guid,
 				NV_ENC_PRESET_P4_GUID,
 				NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY,
 			)
@@ -85,7 +102,7 @@ impl Nvenc {
 		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
 		cfg.rcParams.averageBitRate = config.resolved_bitrate().min(u32::MAX as u64) as u32;
 
-		let mut init = EncoderInitParams::new(NV_ENC_CODEC_H264_GUID, config.width, config.height);
+		let mut init = EncoderInitParams::new(codec_guid, config.width, config.height);
 		init.preset_guid(NV_ENC_PRESET_P4_GUID)
 			.tuning_info(NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY)
 			.framerate(config.framerate, 1)
@@ -98,9 +115,10 @@ impl Nvenc {
 
 		tracing::info!(
 			encoder = NAME,
+			codec = ?config.codec,
 			width = config.width,
 			height = config.height,
-			"opened H.264 encoder"
+			"opened encoder"
 		);
 		Ok(Box::new(Self {
 			session,

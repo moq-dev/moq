@@ -1,23 +1,55 @@
 # moq-video
 
-Native video capture, encoding, and publishing for [Media over QUIC](https://github.com/moq-dev/moq).
+Native video capture, encoding, decoding, and publishing for
+[Media over QUIC](https://github.com/moq-dev/moq).
 
-Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio). Built on
-[`ffmpeg-next`](https://crates.io/crates/ffmpeg-next), but the public API is
-ffmpeg-free at the signature level (capture/encode internals that traffic in
-ffmpeg frames are private), so an `ffmpeg-next` bump isn't a breaking change.
+The video counterpart to [`moq-audio`](https://crates.io/crates/moq-audio).
+Everything is native per-platform code with no ffmpeg dependency: capture, color
+conversion, and the codec backends are all in-tree or thin wrappers over system
+frameworks / vendored static libs. The public API is codec-agnostic, so no
+signature, type, or error variant names a backend or a capture implementation;
+swapping or bumping a backend crate is not a breaking change.
+
+## Capture
+
+Per-platform, picked at compile time:
+
+- **macOS**: AVFoundation (camera) and ScreenCaptureKit (display), yielding
+  zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
+- **Linux**: native V4L2 (camera; YUYV resampled, MJPEG via `zune-jpeg`).
+- **Windows**: native Media Foundation (`IMFSourceReader` -> CPU I420).
+
+## Encode
+
+The codec is chosen via `encode::Codec`. Backends are tried in order (hardware
+first, then software) and the first that opens wins; `encode::Kind` narrows the
+choice (`Auto` / `Hardware` / `Software` / a named backend).
+
+| Codec | Software | macOS | Windows | Linux |
+|---|---|---|---|---|
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation | NVENC (`nvenc`), VAAPI (`vaapi`) |
+| H.265 | none | VideoToolbox | Media Foundation | NVENC (`nvenc`) |
+
+Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
+H.265), so the matching `moq_mux::codec` importer handles framing and catalog
+registration directly. There is no software H.265 encoder (it's hardware-only).
 
 Two public entry points:
 
-- `encode::publish_capture(broadcast, catalog, capture::Config, encode::Options)`
-  captures a webcam (libavdevice: avfoundation / v4l2 / dshow), H.264-encodes it
-  (preferring a hardware encoder, falling back to `libx264`), and publishes on
-  demand: the camera opens only while a subscriber is watching. Screen capture
-  would slot into the same `capture` module.
-- `encode::Producer` publishes H.264 you encoded yourself, handling the catalog
-  and framing via `moq_mux::codec::h264::Import`.
+- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
+  demand: the track and catalog are advertised up front, but the camera opens
+  only while a subscriber is watching and is released when the last one leaves.
+- `encode::Producer` publishes packets you encoded yourself, handling the catalog
+  and framing.
 
-Requires a system FFmpeg (libav\*).
+The NVENC and VAAPI backends are Linux-only and gated behind their respective
+features. Both `dlopen` the vendor driver at runtime (and fall back to software
+where the driver is absent), so a feature-enabled binary still links on a
+GPU-less builder and still starts on a GPU-less machine.
 
-The `decode` (consume) side, mirror of `moq-audio`'s `AudioConsumer`, is not
-implemented yet.
+## Decode
+
+`decode::Consumer` (the mirror of `moq-audio`'s `AudioConsumer`) subscribes to an
+H.264 track and returns raw I420 frames. Backends are VideoToolbox (macOS) and
+openh264 (portable software fallback). H.264 only for now; a non-H.264 rendition
+yields `Error::UnsupportedCodec`.

@@ -71,7 +71,7 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(target_os = "linux")]
 	Candidate {
 		name: nvenc::NAME,
-		codecs: &[Codec::H264],
+		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
 	},
 	#[cfg(target_os = "linux")]
