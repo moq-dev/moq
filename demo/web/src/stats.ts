@@ -246,6 +246,11 @@ function pushSample(key: string, s: Sample) {
 	history.set(key, arr);
 }
 
+// The set of nodes in the most recent cluster-aggregate sample. The aggregate
+// sums cumulative per-node counters, so when membership changes the summed
+// baseline jumps; we reset the aggregate series rather than splice the jump in.
+let clusterMembership = "";
+
 const sampler = new Signals.Effect();
 sampler.run((effect) => {
 	// Only sample while connected; the interval restarts on reconnect. Drop the
@@ -253,12 +258,13 @@ sampler.run((effect) => {
 	// samples onto stale ones across the downtime gap.
 	if (!effect.get(connection.established)) {
 		history.clear();
+		clusterMembership = "";
 		clock.update((n) => n + 1);
 		return;
 	}
 	effect.interval(() => {
 		const all = nodeStats.peek();
-		const nodes = Object.keys(all);
+		const nodes = Object.keys(all).sort();
 		const t = Date.now();
 
 		const agg: Sample = {
@@ -281,6 +287,13 @@ sampler.run((effect) => {
 			agg.broadcasters += s.broadcasters;
 			agg.viewers += s.viewers;
 			agg.sessions += s.sessions;
+		}
+		// A changed node set makes this aggregate's baseline incompatible with the
+		// previous one, so start the cluster series fresh instead of splicing.
+		const membership = nodes.join("\0");
+		if (membership !== clusterMembership) {
+			history.delete("");
+			clusterMembership = membership;
 		}
 		pushSample("", agg);
 
@@ -385,9 +398,11 @@ ui.run((effect) => {
 });
 
 // Node cards: one per node with a live egress sparkline. Click to drill in.
+// Driven by `clock` (sampled cadence), not raw `nodeStats` frames, so cards
+// don't rebuild (and drop focus) on every incoming frame.
 ui.run((effect) => {
 	effect.get(clock);
-	const all = effect.get(nodeStats);
+	const all = nodeStats.peek();
 	const sel = effect.get(selectedNode);
 	const nodes = Object.keys(all).sort();
 	const el = $("nodes");
