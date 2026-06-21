@@ -9,7 +9,7 @@ use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::formats::YUVSource;
 
-use super::Backend;
+use super::{Backend, Codec};
 use crate::Error;
 use crate::frame::I420;
 
@@ -20,7 +20,9 @@ pub(crate) struct Openh264 {
 }
 
 impl Openh264 {
-	pub(crate) fn open() -> Result<Box<dyn Backend>, Error> {
+	/// openh264 decodes H.264 only; the backend selector never routes another
+	/// codec here, so `codec` is accepted for signature parity and ignored.
+	pub(crate) fn open(_codec: Codec) -> Result<Box<dyn Backend>, Error> {
 		let decoder = Decoder::with_api_config(OpenH264API::from_source(), DecoderConfig::new())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decoder init: {e}")))?;
 

@@ -52,14 +52,16 @@ GPU-less builder and still starts on a GPU-less machine.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq-audio`'s `AudioConsumer`) subscribes to an
-H.264 track and returns raw I420 frames. Backends are tried hardware-first, like
-encode:
+H.264 or H.265 track and returns raw I420 frames. Backends are tried
+hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|
 | H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | openh264 |
+| H.265 | none | none | Media Foundation (DXVA) | none |
 
 On Windows the Microsoft decoder MFT runs synchronously with a Direct3D11 device
-bound to it, so the decode happens on the GPU through DXVA (NVDEC / Intel / AMD);
-a GPU-less host falls back to openh264. H.264 only for now; a non-H.264 rendition
-yields `Error::UnsupportedCodec`.
+bound to it, so the decode happens on the GPU through DXVA (NVDEC / Intel / AMD).
+H.264 falls back to openh264 on a GPU-less host; H.265 has no software decoder, so
+it needs the GPU path (and an HEVC decoder MFT: the inbox HEVC Video Extensions or
+a vendor one). A non-H.264/H.265 rendition yields `Error::UnsupportedCodec`.

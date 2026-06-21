@@ -1,4 +1,5 @@
-//! Hardware H.264 decode backend via the Media Foundation decoder MFT + DXVA.
+//! Hardware H.264 / H.265 decode backend via the Media Foundation decoder MFT +
+//! DXVA.
 //!
 //! The inverse of the encode Media Foundation backend, and the Windows
 //! counterpart to the macOS VideoToolbox decode backend. Unlike encoders, the
@@ -6,8 +7,10 @@
 //! MFTs; the portable hardware path is the Microsoft decoder MFT driven
 //! synchronously with a Direct3D11 device manager bound to it, which routes the
 //! actual decode to DXVA (NVDEC / Intel / AMD). We require that device: if it
-//! can't be created (a GPU-less host), `open` fails and the caller falls back to
-//! openh264, so this backend is always genuinely hardware.
+//! can't be created (a GPU-less host), `open` fails. H.265 additionally needs an
+//! HEVC decoder MFT present (the inbox HEVC Video Extensions or a vendor MFT);
+//! absent that, `open` fails too. For H.264 the caller then falls back to
+//! openh264; H.265 has no software fallback, so it simply has no decoder.
 //!
 //! Each Annex-B access unit goes in as an `IMFSample`; decoded NV12 comes back as
 //! a GPU texture (the DXVA decoder owns the output pool) that we download and
@@ -33,11 +36,12 @@ use windows::Win32::Media::MediaFoundation::{
 	MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
 	MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
 	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
+	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+	MFVideoFormat_NV12,
 };
 use windows::core::{GUID, Interface};
 
-use super::Backend;
+use super::{Backend, Codec};
 use crate::Error;
 use crate::frame::I420;
 use crate::frame::d3d11::Texture;
@@ -54,6 +58,9 @@ const NOMINAL_FPS: i64 = 30;
 
 pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
+	/// The Media Foundation input subtype (`MFVideoFormat_H264` / `_HEVC`), kept
+	/// for `set_input_type`.
+	input_subtype: GUID,
 	/// The DXVA device backing the decoder; also the device the output textures
 	/// live on, so the I420 download runs on the device that owns them.
 	device: ID3D11Device,
@@ -80,9 +87,13 @@ pub(crate) struct MediaFoundation {
 unsafe impl Send for MediaFoundation {}
 
 impl MediaFoundation {
-	pub(crate) fn open() -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(codec: Codec) -> Result<Box<dyn Backend>, Error> {
+		let (input_subtype, label) = match codec {
+			Codec::H264 => (MFVideoFormat_H264, "H.264"),
+			Codec::H265 => (MFVideoFormat_HEVC, "H.265"),
+		};
 		let com = ComGuard::new()?;
-		let transform = enumerate_decoder(MFVideoFormat_H264)?;
+		let transform = enumerate_decoder(input_subtype)?;
 
 		// A hardware (DXVA) decode needs a D3D manager; failing here (no GPU) drops
 		// us to the openh264 fallback, keeping this backend hardware-only.
@@ -104,6 +115,7 @@ impl MediaFoundation {
 
 		let backend = Self {
 			transform,
+			input_subtype,
 			device,
 			width: 0,
 			height: 0,
@@ -126,12 +138,12 @@ impl MediaFoundation {
 			let _ = backend.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 		}
 
-		tracing::info!(decoder = NAME, "opened H.264 decoder");
+		tracing::info!(decoder = NAME, codec = label, "opened decoder");
 		Ok(Box::new(backend))
 	}
 
-	/// Describe the input as H.264; the MFT parses the bitstream for the rest
-	/// (the picture size shows up later on the output type).
+	/// Describe the input as the coded format (H.264 / H.265); the MFT parses the
+	/// bitstream for the rest (the picture size shows up later on the output type).
 	fn set_input_type(&self) -> Result<(), Error> {
 		let media = unsafe { MFCreateMediaType().map_err(|e| mf_err("create input type", e))? };
 		unsafe {
@@ -139,7 +151,7 @@ impl MediaFoundation {
 				.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
 				.map_err(|e| mf_err("input major type", e))?;
 			media
-				.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+				.SetGUID(&MF_MT_SUBTYPE, &self.input_subtype)
 				.map_err(|e| mf_err("input subtype", e))?;
 			self.transform
 				.SetInputType(0, &media, 0)

@@ -1,13 +1,14 @@
-//! Subscribe to an H.264 track and decode it to raw frames.
+//! Subscribe to an H.264 or H.265 track and decode it to raw frames.
 //!
 //! The decode counterpart to [`encode`](crate::encode), and the mirror of
-//! `moq-audio`'s `AudioConsumer`. [`Consumer`] subscribes to a moq-mux H.264
-//! track and hands back decoded [`Frame`]s; a native backend does the work
+//! `moq-audio`'s `AudioConsumer`. [`Consumer`] subscribes to a moq-mux H.264 or
+//! H.265 track and hands back decoded [`Frame`]s; a native backend does the work
 //! (VideoToolbox on macOS, Media Foundation / DXVA on Windows, openh264
-//! everywhere as the software fallback).
+//! everywhere as the software fallback for H.264).
 //!
-//! Only H.264 is supported: it's symmetric with what [`encode`](crate::encode)
-//! produces. A non-H.264 rendition yields [`Error::UnsupportedCodec`](crate::Error).
+//! H.264 and H.265 are supported, symmetric with what [`encode`](crate::encode)
+//! produces. H.265 is hardware-only (no software fallback). Any other codec
+//! yields [`Error::UnsupportedCodec`](crate::Error).
 
 use bytes::Bytes;
 

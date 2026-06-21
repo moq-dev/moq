@@ -32,7 +32,7 @@ use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
 };
 
-use super::Backend;
+use super::{Backend, Codec};
 use crate::Error;
 use crate::frame::I420;
 
@@ -69,7 +69,9 @@ pub(crate) struct VideoToolbox {
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
-	pub(crate) fn open() -> Result<Box<dyn Backend>, Error> {
+	/// The VideoToolbox decode backend handles H.264 only for now; the selector
+	/// never routes H.265 here, so `codec` is accepted for signature parity.
+	pub(crate) fn open(_codec: Codec) -> Result<Box<dyn Backend>, Error> {
 		tracing::info!(decoder = NAME, "opened H.264 decoder");
 		Ok(Box::new(Self {
 			session: None,
