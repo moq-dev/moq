@@ -4401,6 +4401,7 @@ dependencies = [
  "cudarc",
  "dispatch2",
  "hang",
+ "libloading 0.9.0",
  "moq-mux",
  "moq-net",
  "moq-vaapi",

@@ -8,6 +8,12 @@
 //! inline avc3 / hev1 mode directly. The codec is chosen by [`Config::codec`];
 //! only the codec GUID differs, the preset / GOP / rate-control setup is shared.
 //!
+//! A driverless box never reaches NVENC: [`open`](Self::open) first
+//! `dlopen`-probes libcuda / libnvidia-encode and returns an error if they're
+//! absent, so [`backend::open`](super::open) falls back to software instead of
+//! aborting (cudarc / the SDK `panic!` on a missing dlopen target, and the
+//! workspace builds `panic = "abort"`).
+//!
 //! NOT YET VALIDATED ON HARDWARE. Two things need checking on a real Linux+GPU
 //! box before this ships in releases:
 //!   1. The safe wrapper's input buffer does a flat `write`, which only matches
@@ -45,6 +51,38 @@ fn codec_guid(codec: Codec) -> GUID {
 	}
 }
 
+/// Fail (cleanly) if the NVIDIA driver libraries NVENC needs aren't present.
+///
+/// cudarc and the SDK both resolve their entry points via `dlopen` and `panic!`
+/// when the library is missing, rather than returning an error. The workspace
+/// builds with `panic = "abort"`, so reaching that panic would abort the whole
+/// process instead of letting [`open`](super::open) fall back to software. We
+/// `dlopen` the libraries here first: if they load we let cudarc proceed (a
+/// driver-present-but-GPU-absent box then fails with a normal `CUresult` error,
+/// which is handled); if they don't, we return an `Err` so the fallback chain
+/// moves on to openh264.
+fn driver_available() -> Result<(), Error> {
+	// One probe per library; cudarc searches `cuda`/`nvcuda`, the SDK loads
+	// `libnvidia-encode`. Try the versioned soname (what's installed at runtime)
+	// and the bare name (dev symlink).
+	fn any(names: &[&str]) -> bool {
+		// SAFETY: loading a shared library runs its initializers; these are the
+		// NVIDIA driver libs, which are safe to load. We drop the handle right
+		// away (this is a presence probe), reloaded for real by cudarc/the SDK.
+		names.iter().any(|n| unsafe { libloading::Library::new(*n).is_ok() })
+	}
+
+	if !any(&["libcuda.so.1", "libcuda.so"]) {
+		return Err(Error::Codec(anyhow::anyhow!("nvenc unavailable: libcuda not found")));
+	}
+	if !any(&["libnvidia-encode.so.1", "libnvidia-encode.so"]) {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"nvenc unavailable: libnvidia-encode not found"
+		)));
+	}
+	Ok(())
+}
+
 pub(crate) struct Nvenc {
 	session: Session,
 	// Keep the CUDA context alive for as long as the session uses it.
@@ -57,6 +95,11 @@ unsafe impl Send for Nvenc {}
 
 impl Nvenc {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		// Bail before touching cudarc if the driver libs are absent: their dlopen
+		// shims panic on a miss, and `panic = "abort"` would take the process down
+		// instead of falling back to software.
+		driver_available()?;
+
 		if config.width % 64 != 0 {
 			// Flat writes assume pitch == width; NVENC aligns pitch, so a
 			// non-64-aligned width risks corrupting the encoded chroma. Fail so

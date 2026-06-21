@@ -26,7 +26,7 @@ doctest = false
 # links on a GPU-less builder and still starts on machines without the NVIDIA
 # driver, falling back to software (see backend::open). `cuda-12020` pins the CUDA
 # API version so the build needs no CUDA toolkit.
-nvenc = ["dep:nvidia-video-codec-sdk", "nvidia-video-codec-sdk/dynamic-loading", "cudarc/fallback-dynamic-loading", "cudarc/cuda-12020"]
+nvenc = ["dep:nvidia-video-codec-sdk", "nvidia-video-codec-sdk/dynamic-loading", "cudarc/fallback-dynamic-loading", "cudarc/cuda-12020", "dep:libloading"]
 # Intel/AMD VAAPI hardware encoder (Linux). Off by default; enable for a build
 # that should use VAAPI where present. The `moq-vaapi` crate (moq-dev/vaapi) builds
 # against its own vendored libva headers and dlopen's libva at runtime, so a
@@ -41,6 +41,11 @@ bytes = "1"
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver"] }
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
+# Probe for libcuda / libnvidia-encode before NVENC init (nvenc feature). cudarc
+# and the SDK `panic!` when their dlopen target is missing, and the workspace
+# builds with `panic = "abort"`, so a driverless box must be detected up front
+# (clean Err -> software fallback) instead of aborting the process.
+libloading = { version = "0.9", optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # VAAPI H.264 encoder, gated behind the `vaapi` feature + a linux cfg. Listed here

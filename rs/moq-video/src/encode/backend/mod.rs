@@ -120,3 +120,22 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 
 	Err(Error::NoEncoder(tried.join(", ")))
 }
+
+#[cfg(all(test, target_os = "linux", feature = "nvenc"))]
+mod tests {
+	use super::super::encoder::{Codec, Config, Kind};
+
+	/// `Kind::Auto` (the default for `publish_capture`) must fall back to software
+	/// on a box without the NVIDIA driver, not abort. cudarc panics on a missing
+	/// libcuda and the workspace builds `panic = "abort"`, so before the driver
+	/// probe in `nvenc::open` this aborted the process; `open` should return the
+	/// openh264 backend instead. (On a real GPU box NVENC opens and this is still
+	/// Ok, so the assertion holds either way; it guards the panic regression.)
+	#[test]
+	fn auto_h264_falls_back_without_driver() {
+		let mut config = Config::new(320, 240, 30);
+		config.codec = Codec::H264;
+		config.kind = Kind::Auto;
+		assert!(super::open(&config).is_ok());
+	}
+}
