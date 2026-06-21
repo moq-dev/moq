@@ -334,6 +334,75 @@ async fn export_avc1_out_of_band_reassembles() {
 	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
 }
 
+/// A real broadcast contribution feed (Ateme Kyrion, H.264 1080i with ~86 B-frames)
+/// must come out of the exporter with an authored decode timeline. Without it players
+/// see PTS-only video and choke on the out-of-order decode times (`ffplay +igndts`).
+/// Assert the video PES carry a DTS that is strictly increasing in decode order and
+/// never after the PTS, and that the reorder was real (some authored DTS, non-monotonic
+/// PTS in the source).
+#[tokio::test(start_paused = true)]
+async fn export_bframe_video_authors_dts() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	// `import` and `catalog` stay alive: retained tracks the exporter subscribes to.
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	// Collect (pts, dts) for the H.264 video PID in transport (decode) order.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut video_pid = None;
+	let mut pts = Vec::new();
+	let mut authored = 0usize;
+	let mut effective = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		match packet.payload {
+			Some(TsPayload::Pmt(pmt)) => {
+				if video_pid.is_none() {
+					video_pid = pmt
+						.es_info
+						.iter()
+						.find(|e| e.stream_type == StreamType::H264)
+						.map(|e| e.elementary_pid);
+				}
+			}
+			Some(TsPayload::PesStart(pes)) if Some(packet.header.pid) == video_pid => {
+				let p = pes.header.pts.expect("video PES carried no PTS").as_u64();
+				let d = pes.header.dts.map(|t| t.as_u64());
+				if d.is_some() {
+					authored += 1;
+				}
+				effective.push(d.unwrap_or(p));
+				pts.push(p);
+			}
+			_ => {}
+		}
+	}
+
+	assert!(video_pid.is_some(), "missing H.264 video PMT entry");
+	assert!(pts.len() > 50, "expected the full feed, got {} frames", pts.len());
+	// The source is genuinely reordered: PTS dips in decode order (B-frames).
+	assert!(
+		pts.windows(2).any(|w| w[1] < w[0]),
+		"fixture must carry reordered B-frames"
+	);
+	// The exporter authored a decode timeline (the decode clock trails the PTS).
+	assert!(authored > 0, "no DTS authored for a B-frame stream");
+	// That timeline is strictly increasing and never after presentation.
+	for (i, win) in effective.windows(2).enumerate() {
+		assert!(win[1] > win[0], "DTS not strictly increasing at frame {i}: {win:?}");
+	}
+	for (i, (&d, &p)) in effective.iter().zip(pts.iter()).enumerate() {
+		assert!(d <= p, "DTS {d} after PTS {p} at frame {i}");
+	}
+}
+
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast
 /// that also carries a `.scte35` cue track, export to TS, re-import, and assert
 /// the splice_info_section came back byte-for-byte. The PMT must advertise the

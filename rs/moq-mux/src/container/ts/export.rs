@@ -74,6 +74,9 @@ struct Track {
 	/// PMT ES-level descriptors to re-announce, captured verbatim on import (language,
 	/// registration, ...). Empty for non-TS sources; AC-3/E-AC-3 then synthesize one.
 	descriptors: Vec<catalog::Descriptor>,
+	/// Last decode timestamp (90 kHz) authored for this track, so the decode clock stays
+	/// monotonic across reordered (B-frame) video. Only video uses it.
+	last_dts: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -117,6 +120,9 @@ struct PesUnit {
 	is_video: bool,
 	keyframe: bool,
 	timestamp: crate::container::Timestamp,
+	/// Authored decode timestamp (90 kHz ticks) for a reordered (B-frame) video frame.
+	/// `Some` only when it differs from the PTS; the PES then carries both PTS and DTS.
+	dts: Option<u64>,
 	/// Explicit PES stream_id (verbatim PES); `None` derives it from `is_video`.
 	stream_id: Option<u8>,
 }
@@ -405,6 +411,7 @@ impl<E: catalog::Catalog> Export<E> {
 				pid,
 				kind,
 				descriptors,
+				last_dts: None,
 			},
 		);
 	}
@@ -592,6 +599,15 @@ impl<E: catalog::Catalog> Export<E> {
 			} => None,
 		};
 
+		// Author a monotonic decode timeline for reordered video (B-frames). Other kinds
+		// never reorder, so DTS == PTS and the PES stays PTS-only.
+		let dts = if is_video {
+			let pts = to_ts_timestamp(frame.timestamp)?.as_u64();
+			author_dts(pts, &mut self.tracks.get_mut(name).context("missing track")?.last_dts)
+		} else {
+			None
+		};
+
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
 		// Refresh PSI at keyframes or after the interval lapses.
@@ -626,6 +642,7 @@ impl<E: catalog::Catalog> Export<E> {
 					is_video,
 					keyframe: frame.keyframe,
 					timestamp: frame.timestamp,
+					dts,
 					stream_id,
 				};
 				self.write_pes(&mut out, &unit, &es_payload)?;
@@ -637,6 +654,11 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Packetize a PES payload into 188-byte TS packets.
 	fn write_pes(&mut self, out: &mut Vec<u8>, unit: &PesUnit, payload: &[u8]) -> anyhow::Result<()> {
 		let pts = to_ts_timestamp(unit.timestamp)?;
+		// A reordered video frame carries DTS (90 kHz ticks) alongside PTS; else PTS-only.
+		let dts = unit
+			.dts
+			.map(|t| TsTimestamp::new(t).map_err(anyhow::Error::msg))
+			.transpose()?;
 		let stream_id = match unit.stream_id {
 			Some(id) => StreamId::new(id),
 			None if unit.is_video => StreamId::new(StreamId::VIDEO_MIN),
@@ -649,9 +671,12 @@ impl<E: catalog::Catalog> Export<E> {
 			copyright: false,
 			original_or_copy: false,
 			pts: Some(pts),
-			dts: None,
+			dts,
 			escr: None,
 		};
+
+		// The optional PES header grows by 5 bytes when it also carries a DTS.
+		let optional_len = PES_OPTIONAL_LEN + if dts.is_some() { PES_DTS_LEN } else { 0 };
 
 		// `pes_packet_len` counts the optional header plus the payload (not the
 		// 6-byte fixed prefix). Unbounded for video (0); bounded for audio when
@@ -659,8 +684,11 @@ impl<E: catalog::Catalog> Export<E> {
 		let pes_packet_len = if unit.is_video {
 			0
 		} else {
-			u16::try_from(PES_OPTIONAL_LEN + payload.len()).unwrap_or(0)
+			u16::try_from(optional_len + payload.len()).unwrap_or(0)
 		};
+
+		// PCR follows the decode clock, so a B-frame stream advertises DTS (not PTS) here.
+		let pcr = dts.unwrap_or(pts);
 
 		let mut offset = 0;
 		let mut first = true;
@@ -670,7 +698,7 @@ impl<E: catalog::Catalog> Export<E> {
 					discontinuity_indicator: false,
 					random_access_indicator: unit.keyframe,
 					es_priority_indicator: false,
-					pcr: if unit.is_pcr { Some(pts.into()) } else { None },
+					pcr: if unit.is_pcr { Some(pcr.into()) } else { None },
 					opcr: None,
 					splice_countdown: None,
 					transport_private_data: Vec::new(),
@@ -680,7 +708,7 @@ impl<E: catalog::Catalog> Export<E> {
 				None
 			};
 
-			let header_len = if first { PES_HEADER_LEN } else { 0 };
+			let header_len = if first { 6 + optional_len } else { 0 };
 			let af_len = adaptation.as_ref().map(adaptation_size).unwrap_or(0);
 			let avail = TsBytes::MAX_SIZE - header_len - af_len;
 			let take = avail.min(payload.len() - offset);
@@ -781,8 +809,14 @@ impl<E: catalog::Catalog> Export<E> {
 
 /// Optional PES header region carrying PTS only: 2 flag bytes + 1 length byte + 5 PTS bytes.
 const PES_OPTIONAL_LEN: usize = 3 + 5;
-/// Full on-wire PES header for the first packet: 6-byte fixed prefix + optional region.
-const PES_HEADER_LEN: usize = 6 + PES_OPTIONAL_LEN;
+/// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
+const PES_DTS_LEN: usize = 5;
+/// Decode-clock reserve (90 kHz ticks, 0.25 s): how far before its PTS a video frame is
+/// scheduled to decode, leaving room for reordered (B-)frames to slot under their PTS. See
+/// [`author_dts`]. This is decode lead time, not presentation latency (frames still show at
+/// their PTS), so it is nearly free; it only needs to exceed the largest reorder span
+/// (max consecutive B-frames x frame duration), which it does for broadcast contribution.
+const DTS_RESERVE: u64 = 90_000 / 4;
 
 fn psi_interval() -> crate::container::Timestamp {
 	crate::container::Timestamp::try_from(PSI_INTERVAL).unwrap_or(crate::container::Timestamp::ZERO)
@@ -888,9 +922,92 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 	}
 }
 
+/// Author a monotonic decode timestamp (DTS, 90 kHz) for a video frame.
+///
+/// [`Frame`] carries only a presentation timestamp (PTS) and frames reach the muxer in
+/// decode order (MoQ groups and frames are delivered in decode order), so a B-frame stream
+/// arrives with valid but non-monotonic PTS and no decode time. MPEG-TS players need a
+/// monotonic DTS to schedule decoding; without it they choke on the out-of-order PTS (the
+/// `ffplay -fflags +igndts` workaround).
+///
+/// Since decode order is already the delivery order, the only job is to keep DTS strictly
+/// increasing. We run a decode clock [`DTS_RESERVE`] ticks behind the PTS and never let it
+/// go backwards: a reordered frame whose PTS dips below the clock is nudged one tick past
+/// the last DTS instead. The reserve gives the reorder room to land under each frame's own
+/// PTS (`DTS <= PTS`) for broadcast B-frame spans. `last` is the previous DTS, updated in
+/// place. Returns `None` when the DTS equals the PTS, so the PES stays PTS-only.
+fn author_dts(pts: u64, last: &mut Option<u64>) -> Option<u64> {
+	let mut dts = pts.saturating_sub(DTS_RESERVE);
+	if let Some(prev) = *last
+		&& dts <= prev
+	{
+		dts = prev + 1;
+	}
+	// Wrap into the 33-bit field, matching the PTS in `to_ts_timestamp`.
+	dts &= (1 << 33) - 1;
+	*last = Some(dts);
+	(dts != pts).then_some(dts)
+}
+
 #[cfg(test)]
 mod tests {
-	use super::is_complete_section;
+	use super::{DTS_RESERVE, author_dts, is_complete_section};
+
+	/// Push a decode-order PTS stream (90 kHz) through the decode clock and return the
+	/// effective DTS per frame (the authored DTS, or the PTS when none is authored).
+	fn run_clock(pts: &[u64]) -> Vec<u64> {
+		let mut last = None;
+		pts.iter().map(|&p| author_dts(p, &mut last).unwrap_or(p)).collect()
+	}
+
+	/// Decode-order PTS for a constant-frame-rate display timeline with `b` B-frames between
+	/// each pair of reference frames (the common broadcast structure: references pulled ahead
+	/// of the B-frames they predict). `base` keeps the timeline off zero, like a real feed's
+	/// initial PTS offset.
+	fn decode_order(refs: usize, b: usize, dur: u64, base: u64) -> Vec<u64> {
+		let pts = |display: usize| base + display as u64 * dur;
+		let span = b + 1;
+		let mut out = vec![pts(0)]; // first reference (keyframe) at display 0
+		for g in 1..refs {
+			let reference = g * span;
+			out.push(pts(reference)); // reference, decoded before its B-frames
+			for j in 1..=b {
+				out.push(pts(reference - span + j)); // the B-frames between the two references
+			}
+		}
+		out
+	}
+
+	#[test]
+	fn dts_is_monotonic_and_under_pts() {
+		// 25 fps, 10 s offset; cover single B-frames and a 3-deep run (kyrion-like).
+		for b in [1, 3] {
+			let pts = decode_order(40, b, 3_600, 10_000_000);
+			let dts = run_clock(&pts);
+
+			// The fixture genuinely reorders (PTS dips in decode order).
+			assert!(pts.windows(2).any(|w| w[1] < w[0]), "b={b}: stream must reorder PTS");
+			// Decode timeline is strictly increasing and never after presentation.
+			for (i, win) in dts.windows(2).enumerate() {
+				assert!(win[1] > win[0], "b={b}: DTS not strictly increasing at {i}: {win:?}");
+			}
+			for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
+				assert!(d <= p, "b={b}: DTS {d} after PTS {p} at {i}");
+			}
+		}
+	}
+
+	#[test]
+	fn dts_without_reorder_trails_pts_by_the_reserve() {
+		// A monotonic (no-B) stream: every frame decodes one reserve ahead of its PTS, which
+		// is decode lead time, not added latency (presentation is still at the PTS).
+		let pts: Vec<u64> = (0..40).map(|i| 10_000_000 + i * 3_600).collect();
+		let mut last = None;
+		for &p in &pts {
+			let dts = author_dts(p, &mut last).expect("reserve makes DTS differ from PTS");
+			assert_eq!(dts, p - DTS_RESERVE, "DTS should trail PTS by exactly the reserve");
+		}
+	}
 
 	#[test]
 	fn section_validation() {
