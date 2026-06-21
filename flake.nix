@@ -92,6 +92,7 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-nextest
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
@@ -238,10 +239,10 @@
         # build via crane `buildPackage` (see `packages` above / release-*.yml).
         #
         # On the self-hosted runner those cargo checks transparently reuse a
-        # per-crate compiler cache (rustc is wrapped by sccache via the runner
-        # environment), so a Cargo.lock change recompiles only the changed crate
-        # + its reverse-deps. That's a runner-side concern -- nothing here or in
-        # the workflows configures it.
+        # persistent CARGO_TARGET_DIR (set in the runner environment), so a
+        # Cargo.lock change recompiles only the changed crate + its reverse-deps
+        # and unchanged crates are reused across jobs. That's a runner-side
+        # concern -- nothing here or in the workflows configures it.
         checks = { };
       }
     );

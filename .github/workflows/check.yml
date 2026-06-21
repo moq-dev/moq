@@ -56,43 +56,17 @@ jobs:
         uses: DeterminateSystems/flake-checker-action@9ee1c5473f1abdfb299f6c4f0fab813147c97fe3 # main
 
       # GitHub-hosted fallback caches Rust via the Actions cache. The self-hosted
-      # box runs the heavy Rust CI (clippy/doc/test) as crane derivations via
-      # `nix flake check`, so deps cache in /nix/store and there's no persistent
-      # CARGO_TARGET_DIR to manage -- the residual `cargo check`s use the
-      # workspace ./target, which the runner wipes per job.
+      # box runs the heavy Rust CI (clippy/doc/test) as plain cargo, reusing a
+      # persistent CARGO_TARGET_DIR set in the runner environment (not here), so
+      # unchanged crates are reused across jobs; the checkout's ./target is unused.
       - name: Rust Cache
         if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
 
-      # Mark a baseline so the post-run assertion can tell whether anything wrote
-      # under the old persistent target dir (i.e. a CARGO_TARGET_DIR override
-      # leaked back in and would re-grow an unbounded tree).
-      - name: Target-dir baseline
-        if: runner.environment == 'self-hosted'
-        run: touch "$RUNNER_TEMP/target-baseline"
-
       # `just ci` calls `just changed` internally to skip unchanged scopes.
       # Login shell so /etc/profile.d puts Nix on PATH; Actions shells don't by
       # default. Harmless on the hosted fallback.
       - run: nix develop --command just ci
         shell: bash -leo pipefail {0}
-
-      # Invariant: nothing should write to the old persistent target dir anymore.
-      # Fails loudly if a CARGO_TARGET_DIR override sneaks back in. Scope it to
-      # *this* repo's old per-runner dir (moq-$RUNNER_NAME) -- the box's
-      # $HOME/cargo-target is shared with other repos (e.g. moq-pro) and runners,
-      # whose jobs may run concurrently and legitimately still write there.
-      - name: Assert the persistent target dir stayed unused
-        if: runner.environment == 'self-hosted'
-        run: |
-          target="$HOME/cargo-target/moq-$RUNNER_NAME"
-          mkdir -p "$target"
-          leaked=$(find "$target" -type f -newer "$RUNNER_TEMP/target-baseline" 2>/dev/null | head)
-          if [ -n "$leaked" ]; then
-            echo "::error::cargo wrote to $target; a CARGO_TARGET_DIR override leaked back in"
-            echo "$leaked"
-            exit 1
-          fi
-          echo "OK: $target untouched this run"
