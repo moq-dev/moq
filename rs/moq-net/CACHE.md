@@ -162,12 +162,85 @@ independent:
 
 ## Per-binary use
 
-- **moq-cli:** no cache, or a small RAM-only `CacheConfig` for a single track.
+- **moq-cli:** no cache, or a small RAM-only `CacheConfig` for a single track. See "moq-cli
+  flags" below for the concrete surface.
 - **moq-relay:** one `CacheConfig` template applied to every track it creates. Threading that
   config onto the tracks moq-net auto-creates during fan-out is the Origin follow-up; here it is
   just `TrackProducer::with_cache(config)`. A relay RAM cache that spills to disk or S3 becomes
   configuration, not code.
 - **moq-edge:** the same, plus its own dynamic-handler business logic on top.
+
+## moq-cli flags
+
+The cache is most useful on the commands that run a local origin and serve a broadcast back
+(`moq serve`, `moq accept`), so a flattened `CacheArgs` group lands on those. The flags map onto
+the `[min, max]` bounds and the tier cascade; an absent `--cache-ram` means no cache (today's
+behavior). This is the proposed surface; wiring it waits on the `moq_net::CacheConfig` API.
+
+```rust
+/// Retain recent groups so late subscribers and FETCHes get old content.
+/// Absent `--cache-ram` leaves caching off.
+#[derive(clap::Args, Clone, Default)]
+pub struct CacheArgs {
+    /// Keep up to this much of each track's recent groups in RAM (high watermark).
+    /// Setting it enables the cache. e.g. `30s`.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub cache_ram: Option<Duration>,
+
+    /// RAM low watermark; a flush drains down to this, and the band between the two
+    /// becomes one segment. Defaults to two-thirds of `--cache-ram`.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub cache_ram_min: Option<Duration>,
+
+    /// Also retain on local disk at this path (spill from RAM).
+    #[arg(long)]
+    pub cache_disk: Option<PathBuf>,
+
+    /// How long to keep groups on disk before rolling up to remote (or dropping if
+    /// no remote tier). e.g. `5m`.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub cache_disk_age: Option<Duration>,
+
+    /// Also retain in remote object storage, e.g. `s3://bucket/prefix`.
+    #[arg(long)]
+    pub cache_remote: Option<Url>,
+
+    /// How long to keep groups in remote storage. Omit to keep forever.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub cache_remote_age: Option<Duration>,
+
+    /// Flush a partial RAM band after this long even below the high watermark, so a
+    /// low data-rate track still spills. Mostly redundant with a duration `--cache-ram`.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub cache_interval: Option<Duration>,
+}
+```
+
+`CacheArgs` flattens into `Serve` and `Accept` (the relay-running commands), e.g.
+
+```text
+moq serve --broadcast bbb --cache-ram 30s --cache-disk /var/cache/moq --cache-disk-age 5m \
+          --cache-remote s3://moq-archive/bbb --cache-remote-age 30d  fmp4 < bbb.mp4
+```
+
+and converts to the config the producer takes:
+
+```rust
+impl CacheArgs {
+    /// None when `--cache-ram` is unset (caching disabled).
+    pub fn config(&self) -> Option<moq_net::CacheConfig> { /* map flags -> bounds + tiers */ }
+}
+
+// in run_serve / run_accept, for each track produced:
+if let Some(config) = cache.config() {
+    producer = producer.with_cache(config.clone());
+}
+```
+
+Notes: byte-budget variants (`--cache-ram-bytes`, etc.) are additive later; duration bounds
+cover the common case. moq-cli parses straight from clap (no TOML merge), so plain
+`Option<Duration>` is fine here. The relay (`rs/moq-relay`), which does merge TOML, would carry
+the same flags under its `Option<T>` clobber rule.
 
 ## Open questions
 
