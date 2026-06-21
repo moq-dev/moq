@@ -248,8 +248,14 @@ function pushSample(key: string, s: Sample) {
 
 const sampler = new Signals.Effect();
 sampler.run((effect) => {
-	// Only sample while connected; the interval restarts on reconnect.
-	if (!effect.get(connection.established)) return;
+	// Only sample while connected; the interval restarts on reconnect. Drop the
+	// rolling history when disconnected so a reconnect doesn't splice new
+	// samples onto stale ones across the downtime gap.
+	if (!effect.get(connection.established)) {
+		history.clear();
+		clock.update((n) => n + 1);
+		return;
+	}
 	effect.interval(() => {
 		const all = nodeStats.peek();
 		const nodes = Object.keys(all);
@@ -580,6 +586,12 @@ function renderTable(container: HTMLElement, headers: string[], rows: Row[]) {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+// Monotonic counter for gradient element ids. SVG ids are document-global and
+// every chart re-renders into the same page, so the id must be unique per
+// gradient instance, not derived from the series (which collides across charts
+// and would make `url(#id)` resolve to the wrong gradient).
+let gradSeq = 0;
+
 interface Series {
 	values: number[];
 	color: string;
@@ -588,7 +600,8 @@ interface Series {
 // Render a multi-series area/line chart into a host element, filling its width.
 function renderChart(host: HTMLElement, series: Series[]) {
 	const rect = host.getBoundingClientRect();
-	const h = Math.max(1, Math.round(rect.height)) || 120;
+	// Fall back to a sane height if the host hasn't been laid out yet (0px).
+	const h = Math.round(rect.height) || 120;
 	const svg = makeChart(series, 600, h);
 	svg.classList.add("w-full", "h-full");
 	host.replaceChildren(svg);
@@ -623,11 +636,11 @@ function makeChart(series: Series[], vw: number, vh: number): SVGSVGElement {
 	const x = (i: number) => (i / (maxLen - 1)) * vw;
 	const y = (v: number) => vh - pad - (v / maxVal) * (vh - 2 * pad);
 
-	series.forEach((s, idx) => {
-		if (s.values.length < 2) return;
+	for (const s of series) {
+		if (s.values.length < 2) continue;
 		const pts = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
 
-		const gradId = `g${idx}-${Math.round(maxVal)}`;
+		const gradId = `moq-grad-${gradSeq++}`;
 		const grad = document.createElementNS(SVG_NS, "linearGradient");
 		grad.setAttribute("id", gradId);
 		grad.setAttribute("x1", "0");
@@ -659,7 +672,7 @@ function makeChart(series: Series[], vw: number, vh: number): SVGSVGElement {
 		line.setAttribute("vector-effect", "non-scaling-stroke");
 		line.setAttribute("stroke-linejoin", "round");
 		svg.appendChild(line);
-	});
+	}
 
 	return svg;
 }
