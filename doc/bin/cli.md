@@ -175,6 +175,13 @@ rather than mis-described. The catalog describes the codec honestly so a
 subscriber that can decode it (typically TS gear) picks it up; browsers cannot
 play these codecs and should skip the rendition.
 
+Elementary streams the CLI does not decode (SCTE-35 cues, teletext, DVB
+subtitles, private data, ...) are carried verbatim too, one MoQ track per PID,
+described in the catalog `mpegts` section. They survive `publish ts | relay |
+subscribe --format ts` end-to-end with their original PIDs, PMT descriptors, and
+PES stream_ids, so a contribution feed keeps its ancillary streams. The relay
+forwards them transparently and never parses the payload.
+
 ### FLV
 
 Ingest an FLV stream from FFmpeg and play one back out:
