@@ -132,14 +132,13 @@ The `moq-cli` package provides a command-line tool (binary name: `moq-cli`):
 # Install
 cargo install moq-cli
 
-# Publish a video file
-moq-cli publish video.mp4
+# Publish a video file (remux to MPEG-TS and pipe it in)
+ffmpeg -i input.mp4 -c copy -f mpegts - | \
+    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
-
-# Custom encoding settings
-moq-cli publish --codec h264 --bitrate 2000000 video.mp4
+ffmpeg -i input.mp4 -f mpegts - | \
+    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 See `moq-cli --help` for all options, or [FFmpeg documentation](/bin/cli).

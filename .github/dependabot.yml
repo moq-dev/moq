@@ -32,6 +32,13 @@ updates:
       cargo:
         patterns:
           - "*"
+    ignore:
+      # reqwest-middleware 0.5 requires reqwest 0.13, but http-cache-reqwest's
+      # latest stable (0.16) still pins reqwest 0.12 / reqwest-middleware 0.4.
+      # The only pairing is http-cache-reqwest 1.0.0-alpha (pre-release), so we
+      # hold reqwest-middleware at 0.4 until that line ships stable.
+      - dependency-name: "reqwest-middleware"
+        versions: [">=0.5"]
 
   - package-ecosystem: "bun"
     directory: "/"

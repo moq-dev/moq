@@ -717,9 +717,9 @@ dependencies = [
 
 [[package]]
 name = "boytacean"
-version = "0.11.5"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44a774c104e597a24d60ea21e7b949ad19e4aa7a39590dd1467f517066bbed42"
+checksum = "333afc1e8f6a0bbba0a916346a2fca124c153b6ec42f5c8d795c05126503ee0b"
 dependencies = [
  "boytacean-common",
  "boytacean-encoding",
@@ -731,15 +731,15 @@ dependencies = [
 
 [[package]]
 name = "boytacean-common"
-version = "0.11.5"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d51a26a3d429ea3a419c67122eff610fbc96e59d75544f77d677f4e39c094940"
+checksum = "9fe79b9ef2249700e02747de11cbc048870767705b8c31615a820bda6d94f81f"
 
 [[package]]
 name = "boytacean-encoding"
-version = "0.11.5"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2bfc97163003de6037ab40296d0f5c2e50fe1b76c626e75cedd8f2017346b13"
+checksum = "e7edc2850784c0e2b0a55e7d4e7823ef60c4493be021c13f6010fca19d75edfa"
 dependencies = [
  "boytacean-common",
  "boytacean-hashing",
@@ -747,9 +747,9 @@ dependencies = [
 
 [[package]]
 name = "boytacean-hashing"
-version = "0.11.5"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4d1f207e18fc7559267427e86a9e45997d242ea6fa10ae41a617053eb5d9eb4"
+checksum = "221540d0cb3bc7222b46c061e330ce05622ed739ed2f7247864ab7ec5f63dfa3"
 dependencies = [
  "boytacean-common",
 ]
@@ -4025,7 +4025,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.33"
+version = "0.7.34"
 dependencies = [
  "anyhow",
  "axum",
@@ -4163,6 +4163,7 @@ dependencies = [
  "scuffle-h265",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5991,9 +5992,9 @@ dependencies = [
 
 [[package]]
 name = "qmux"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da3c294405b759583a70c2fa68fd506f094baa5723412f578151b4ed56a87086"
+checksum = "f466003646aebc080ad4237b5a4c00ea435eaba1be04496ab780ced381c3395f"
 dependencies = [
  "bytes",
  "futures",

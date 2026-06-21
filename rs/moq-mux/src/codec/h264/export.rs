@@ -234,7 +234,7 @@ mod tests {
 
 	/// Build a minimal avcC carrying one SPS + one PPS.
 	fn build_avcc(sps: &[u8], pps: &[u8]) -> Bytes {
-		super::super::build_avcc(&Bytes::copy_from_slice(sps), &Bytes::copy_from_slice(pps)).unwrap()
+		super::super::build_avcc(&[Bytes::copy_from_slice(sps)], &[Bytes::copy_from_slice(pps)]).unwrap()
 	}
 
 	/// Write a length-prefixed (4-byte) NAL frame onto a moq-net group via

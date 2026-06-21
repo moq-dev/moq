@@ -27,9 +27,15 @@ pub struct Split {
 	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
 	tail: BytesMut,
 	current: Au,
-	vps: Option<Bytes>,
-	sps: Option<Bytes>,
-	pps: Option<Bytes>,
+	/// Retained VPS NALs from the latest keyframe that carried them, re-injected
+	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
+	/// different set, so a mid-stream reinit drops the superseded ones.
+	vps: Vec<Bytes>,
+	/// Retained SPS NALs. See [`vps`](Self::vps).
+	sps: Vec<Bytes>,
+	/// Retained PPS NALs. A keyframe may carry several (slices reference them by
+	/// id); all are kept and re-injected, but a new GOP's set supersedes them.
+	pps: Vec<Bytes>,
 	zero: Option<tokio::time::Instant>,
 	pending: Vec<crate::container::Frame>,
 }
@@ -39,9 +45,12 @@ struct Au {
 	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
-	contains_vps: bool,
-	contains_sps: bool,
-	contains_pps: bool,
+	/// VPS NALs already inline in this access unit, so re-injection skips them.
+	vps_seen: Vec<Bytes>,
+	/// SPS NALs already inline in this access unit.
+	sps_seen: Vec<Bytes>,
+	/// PPS NALs already inline in this access unit.
+	pps_seen: Vec<Bytes>,
 }
 
 impl Default for Split {
@@ -56,9 +65,9 @@ impl Split {
 		Self {
 			tail: BytesMut::new(),
 			current: Au::default(),
-			vps: None,
-			sps: None,
-			pps: None,
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
 			zero: None,
 			pending: Vec::new(),
 		}
@@ -119,31 +128,15 @@ impl Split {
 		match nal_type {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
-				self.vps = Some(nal.clone());
-				self.current.contains_vps = true;
+				crate::codec::annexb::push_distinct(&mut self.current.vps_seen, &nal);
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
-
-				// SPS changed mid-stream. Cached PPS is tied to the old SPS and
-				// may already have been appended to current.chunks earlier in
-				// this AU; reset so the new VPS+SPS+PPS triple is the only
-				// parameter set we emit.
-				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
-					self.pps = None;
-					self.current.chunks.clear();
-					self.current.contains_vps = false;
-					self.current.contains_sps = false;
-					self.current.contains_pps = false;
-				}
-
-				self.sps = Some(nal.clone());
-				self.current.contains_sps = true;
+				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
-				self.pps = Some(nal.clone());
-				self.current.contains_pps = true;
+				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
@@ -155,28 +148,23 @@ impl Split {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
-				// Insert cached VPS/SPS/PPS before keyframes if not already present.
-				if !self.current.contains_vps
-					&& let Some(vps) = self.vps.clone()
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(&vps);
-					self.current.contains_vps = true;
-				}
-				if !self.current.contains_sps
-					&& let Some(sps) = self.sps.clone()
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(&sps);
-					self.current.contains_sps = true;
-				}
-				if !self.current.contains_pps
-					&& let Some(pps) = self.pps.clone()
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(&pps);
-					self.current.contains_pps = true;
-				}
+				// Adopt this keyframe's inline set (dropping any the new GOP no longer
+				// uses), or re-inject the retained set if the keyframe carried none.
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.vps,
+					&mut self.current.vps_seen,
+				);
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.sps,
+					&mut self.current.sps_seen,
+				);
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.pps,
+					&mut self.current.pps_seen,
+				);
 
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
@@ -218,9 +206,9 @@ impl Split {
 		let keyframe = self.current.contains_idr;
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
-		self.current.contains_vps = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
+		self.current.vps_seen.clear();
+		self.current.sps_seen.clear();
+		self.current.pps_seen.clear();
 
 		self.pending.push(crate::container::Frame {
 			timestamp: pts,
@@ -322,5 +310,47 @@ mod tests {
 		assert!(contains(&frames[0].payload, VPS));
 		assert!(contains(&frames[0].payload, SPS));
 		assert!(contains(&frames[0].payload, PPS));
+	}
+
+	/// A source that defines two PPS (and is otherwise normal) once, then sends a
+	/// bare IDR: both cached PPS must be re-injected on the keyframe, not just the
+	/// last one. Regression for the multi-PPS collapse.
+	#[tokio::test(start_paused = true)]
+	async fn reinjects_all_cached_pps_on_keyframe() {
+		const PPS1: &[u8] = &[0x44, 0x01, 0xc1]; // second PPS, type 34
+
+		let mut split = Split::new();
+		let first = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, PPS1, IDR]), ts());
+		assert_eq!(first.len(), 1);
+		assert!(first[0].keyframe);
+
+		// Bare IDR: the splitter re-injects VPS + SPS + both PPS in order.
+		let second = decode_one(&mut split, &mut annexb(&[IDR]), ts());
+		assert_eq!(second.len(), 1);
+		assert!(second[0].keyframe);
+		assert_eq!(
+			second[0].payload.as_ref(),
+			annexb(&[VPS, SPS, PPS, PPS1, IDR]).freeze().as_ref()
+		);
+	}
+
+	/// A keyframe that presents a smaller parameter set than a prior one reinits
+	/// the retained set: the dropped PPS must not be re-injected on later bare
+	/// keyframes.
+	#[tokio::test(start_paused = true)]
+	async fn reinit_drops_superseded_pps_on_keyframe() {
+		const PPS1: &[u8] = &[0x44, 0x01, 0xc1];
+
+		let mut split = Split::new();
+		let _ = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, PPS1, IDR]), ts());
+		let _ = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, IDR]), ts());
+		let third = decode_one(&mut split, &mut annexb(&[IDR]), ts());
+
+		assert_eq!(third.len(), 1);
+		assert!(third[0].keyframe);
+		assert_eq!(
+			third[0].payload.as_ref(),
+			annexb(&[VPS, SPS, PPS, IDR]).freeze().as_ref()
+		);
 	}
 }

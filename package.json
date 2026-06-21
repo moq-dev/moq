@@ -2,8 +2,8 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.15",
-		"concurrently": "^9.2.1",
+		"@biomejs/biome": "^2.4.16",
+		"concurrently": "^10.0.3",
 		"publint": "^0.3.21",
 		"remark-cli": "^12.0.1",
 		"remark-frontmatter": "^5.0.0",
