@@ -79,7 +79,7 @@ impl Config {
 	/// (if `file` is set) → CLI args re-applied so explicit flags / env vars
 	/// override TOML.
 	///
-	/// # Pitfall (see `CLAUDE.md` and `tests` below)
+	/// # Pitfall (see `rs/CLAUDE.md` and `tests` below)
 	///
 	/// The final `update_from` re-runs the clap parser over `args`. For
 	/// fields typed as bare `bool`, an absent CLI flag writes

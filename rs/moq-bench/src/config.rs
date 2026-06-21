@@ -102,7 +102,7 @@ impl Config {
 	///
 	/// Every overridable field is `Option<T>`, so an absent CLI flag leaves the
 	/// TOML value untouched during the final `update_from` re-parse. See
-	/// `CLAUDE.md` for why bare fields would silently clobber the TOML.
+	/// `rs/CLAUDE.md` for why bare fields would silently clobber the TOML.
 	pub(crate) fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
 	where
 		I: IntoIterator<Item = T>,
