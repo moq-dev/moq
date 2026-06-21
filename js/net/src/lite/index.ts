@@ -5,6 +5,7 @@ export * from "./goaway.ts";
 export * from "./group.ts";
 export * from "./probe.ts";
 export * from "./session.ts";
+export * from "./setup.ts";
 export * from "./stream.ts";
 export * from "./subscribe.ts";
 export * from "./track.ts";

@@ -44,6 +44,21 @@ export function hasBroadcastEpoch(version: Version): boolean {
 	}
 }
 
+/// Whether the session opens a unidirectional Setup Stream carrying a single SETUP message
+/// (capabilities + optional Path). Added in lite-05; older drafts have no Setup Stream.
+export function hasSetupStream(version: Version): boolean {
+	// Explicitly list older versions so future versions default to having the stream.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

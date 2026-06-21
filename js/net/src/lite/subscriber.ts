@@ -14,6 +14,7 @@ import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
+import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -92,6 +93,10 @@ export class Subscriber {
 	// RTT producer (Lite04+ only).
 	#rtt?: Signal<Time.Milli | undefined>;
 
+	// The peer's SETUP (lite-05+), undefined until it arrives. Gates opening the PROBE
+	// stream on the peer having advertised Probe >= Report.
+	#peerSetup?: Signal<Setup | undefined>;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -99,6 +104,7 @@ export class Subscriber {
 	 * @param origin - Origin id shared with the Publisher
 	 * @param recvBandwidth - Optional bandwidth producer for PROBE
 	 * @param rtt - Optional RTT signal for PROBE
+	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 *
 	 * @internal
 	 */
@@ -108,12 +114,14 @@ export class Subscriber {
 		origin: Origin,
 		recvBandwidth?: Bandwidth,
 		rtt?: Signal<Time.Milli | undefined>,
+		peerSetup?: Signal<Setup | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
 		this.#recvBandwidth = recvBandwidth;
 		this.#rtt = rtt;
+		this.#peerSetup = peerSetup;
 	}
 
 	/**
@@ -531,9 +539,27 @@ export class Subscriber {
 	 *
 	 * @internal
 	 */
+	// Await the peer's advertised probe level, blocking until its SETUP arrives. The peer
+	// MUST send exactly one SETUP, so this resolves once that stream is read.
+	async #peerProbeLevel(peerSetup: Signal<Setup | undefined>): Promise<ProbeLevel> {
+		let setup = peerSetup.peek();
+		while (setup === undefined) {
+			setup = await peerSetup.next();
+		}
+		return setup.probe;
+	}
+
 	async runProbe(): Promise<void> {
 		if (!this.#recvBandwidth) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
+
+		// Lite-05+ gates the PROBE stream on the peer advertising Probe >= Report in its
+		// SETUP. Wait for the SETUP, then bail if the peer can't report bitrate. Older
+		// drafts have no SETUP, so they keep probing unconditionally.
+		if (this.#peerSetup) {
+			const probe = await this.#peerProbeLevel(this.#peerSetup);
+			if (probe < ProbeLevel.Report) return;
+		}
 
 		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
 		// transport hiccup) MUST NOT tear down the connection. On error, drop the

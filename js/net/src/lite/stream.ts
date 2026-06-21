@@ -19,3 +19,17 @@ export const StreamId = {
 	ClientCompat: 0x20,
 	ServerCompat: 0x21,
 } as const;
+
+/**
+ * The type prefix on a unidirectional data stream, read/written as a single byte.
+ *
+ * `Group` is the per-group frame stream. `Setup` (lite-05+) carries the single SETUP
+ * message advertising this endpoint's capabilities.
+ */
+export const DataType = {
+	Group: 0,
+	Setup: 1,
+} as const;
+
+/** A unidirectional data-stream type. See {@link DataType}. */
+export type DataType = (typeof DataType)[keyof typeof DataType];
