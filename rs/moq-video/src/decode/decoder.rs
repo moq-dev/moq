@@ -158,7 +158,7 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
 	use super::backend::{self, Codec};
-	use crate::encode::{Codec as EncodeCodec, Config as EncodeConfig, Encoder, Kind as EncodeKind};
+	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind};
 	use crate::frame::I420;
 
 	/// A mid-gray RGBA frame: encodable without a camera.
@@ -251,7 +251,7 @@ mod tests {
 	fn mediafoundation_hevc_round_trip() {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			codec: EncodeCodec::H265,
+			codec: crate::encode::Codec::H265,
 			..EncodeConfig::new(320, 240, 30)
 		});
 		let Ok(encoder) = encoder else {
