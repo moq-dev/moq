@@ -329,9 +329,9 @@ mod tests {
 		let g0 = group(0, 100, 0);
 		let g1 = group(1, 100, 1);
 		let g2 = group(2, 100, 2);
-		let s0 = index.add(Tier::Disk, &Segment::open(encoded(&[g0.clone()])).unwrap());
-		let s1 = index.add(Tier::Disk, &Segment::open(encoded(&[g1.clone()])).unwrap());
-		index.add(Tier::Disk, &Segment::open(encoded(&[g2.clone()])).unwrap());
+		let s0 = index.add(Tier::Disk, &Segment::open(encoded(std::slice::from_ref(&g0))).unwrap());
+		let s1 = index.add(Tier::Disk, &Segment::open(encoded(std::slice::from_ref(&g1))).unwrap());
+		index.add(Tier::Disk, &Segment::open(encoded(std::slice::from_ref(&g2))).unwrap());
 
 		// Roll up the two oldest disk segments into one remote object.
 		let promoted = [s0, s1];
@@ -373,7 +373,7 @@ mod tests {
 
 		// Promote sequences 0 and 1 into one remote object.
 		let promoted = [index.locate(0).unwrap().segment, index.locate(1).unwrap().segment];
-		let rolled = segment::rollup(&[encoded(&[groups[0].clone()]), encoded(&[groups[1].clone()])]).unwrap();
+		let rolled = segment::rollup(&[encoded(std::slice::from_ref(&groups[0])), encoded(std::slice::from_ref(&groups[1]))]).unwrap();
 		let remote_id = index.apply_promotion(&promoted, &Segment::open(rolled.clone()).unwrap());
 		store.objects.insert(remote_id, rolled);
 
