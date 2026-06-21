@@ -373,7 +373,11 @@ mod tests {
 
 		// Promote sequences 0 and 1 into one remote object.
 		let promoted = [index.locate(0).unwrap().segment, index.locate(1).unwrap().segment];
-		let rolled = segment::rollup(&[encoded(std::slice::from_ref(&groups[0])), encoded(std::slice::from_ref(&groups[1]))]).unwrap();
+		let rolled = segment::rollup(&[
+			encoded(std::slice::from_ref(&groups[0])),
+			encoded(std::slice::from_ref(&groups[1])),
+		])
+		.unwrap();
 		let remote_id = index.apply_promotion(&promoted, &Segment::open(rolled.clone()).unwrap());
 		store.objects.insert(remote_id, rolled);
 
