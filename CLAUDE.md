@@ -98,6 +98,18 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
 ```
 
+## Per-Directory Guides
+
+Language-specific conventions, crate/package maps, and patterns live in nested `CLAUDE.md` files that load automatically when you work under that directory. Before writing code in one of these areas, read its guide (your editor loads it for you, but check it explicitly if you are reasoning about the area without opening a file in it):
+
+- **`rs/CLAUDE.md`** - Rust workspace: crate map, Producer/Consumer model, `poll_*` plumbing, error handling, config/TOML merge, Version matching, testing.
+- **`js/CLAUDE.md`** - TypeScript/JS workspace: package map, the signals + Effect reactivity model and its lifecycle rules, Web Components UI, `bun`/Biome tooling.
+- **`py/CLAUDE.md`** - Python wrappers: the `moq-ffi` (generated bindings) vs `moq-rs` (ergonomic) split and the `moq` public surface.
+
+The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi` (mirrored to external repos); see each directory's `README.md` rather than a dedicated guide.
+
+This root file holds only cross-cutting rules that apply everywhere (writing style, branch targeting, cross-package sync, public-API scrutiny, comment/doc conventions).
+
 ## Dependencies
 
 - When adding new dependencies, always use the **newest stable version** available.
@@ -110,29 +122,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
 4. Consult `doc/` for documentation and the [IETF datatracker](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for specification drafts when working on protocol-level code
 
-## Version Matching Convention
-
-When matching on `Version` enums, default to the **newest** draft behavior so future versions default forward. Explicitly list older versions:
-
-```rust
-// CORRECT: future versions get draft-17+ behavior
-match version {
-    Version::Draft14 | Version::Draft15 | Version::Draft16 => { /* old behavior */ }
-    _ => { /* newest/draft-17 behavior */ }
-}
-```
-
 ## Writing Style
 
 - **No em dashes (—)** in code, comments, doc comments, commit messages, or any prose. Use a period and start a new sentence, or use a comma/parenthesis if the clauses are tightly bound.
-
-## Rust Conventions
-
-- **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
-- Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
-- **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
-- **Prefer `if let` / `let ... else` over an unwrapping `match`**: a `match` whose only job is to unwrap (`Ok(v) => v` / `Some(v) => v`) reads cleaner as `if let Some(v) = x { ... }` or `let Some(v) = x else { ... };`. Matching on an `Option`/`Result` just to bind the inner value is the tell. Keep `match` when both arms do real work or you need the `Err` / `None` payload.
-- **`poll_*` plumbing**: a `Poll::Pending => Poll::Pending` arm usually means `ready!(...)` will collapse the match. And `.map_err(Into::into)` on a fallible result is usually better as `Ok(x?)` (the `?` does the `From` conversion). These compose: `let v = ready!(inner.poll_next(cx))?;` in a `fn -> Poll<Result<...>>` both unwraps the `Poll` and converts the error.
 
 ## Comment Conventions
 
@@ -163,15 +155,12 @@ This applies whenever you add or widen a `pub` item, especially in library crate
 
 ## Tooling
 
-- **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
+Language-specific tooling (TypeScript/`bun`/Biome, JS async patterns, Web Components UI, Rust/`cargo`) lives in the per-directory guides. See [Per-Directory Guides](#per-directory-guides).
+
 - **Common**: Use `just` for common development tasks
-- **Rust**: Use `cargo` for Rust-specific operations
-- **Formatting/Linting**: Biome for JS/TS formatting and linting
-- **UI**: Plain Web Components in `@moq/watch/ui` and `@moq/publish/ui`, built directly on `@moq/signals`
 - **Builds**: Nix flake for reproducible builds (optional)
 - **Local-first**: When work can live in a `just` recipe (invoked via `nix develop --command`) or as logic in a GitHub Actions workflow step, prefer the recipe. The same code then runs reproducibly on a developer machine and in CI, and is debuggable locally without pushing commits. Workflow YAML should mostly delegate to `just`; reach for plugins (`dorny/paths-filter`, custom actions, etc.) only when a recipe genuinely can't express the logic.
 - **CI**: Prefer building release artifacts inside Nix (`nix build .#pkg`) over relying on runner-provided toolchains and `apt`/`brew` packages. Pinning the build environment in `flake.lock` makes artifacts deterministic and decouples them from drift in GitHub Actions runner images. Reach for the runner-native toolchain only when Nix doesn't fit (e.g. Windows runners).
-- **JS async patterns**: Use `Effect.interval()`, `Effect.timer()`, and `Effect.event()` helpers from `@moq/signals` instead of raw `setInterval`, `setTimeout`, `addEventListener`. These handle cleanup automatically when the Effect is closed.
 
 ## Testing Approach
 
