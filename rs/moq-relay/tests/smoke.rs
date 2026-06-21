@@ -7,12 +7,10 @@
 //! "axum-only-advertises-bare-`webtransport`" bug that silently downgraded
 //! relay clients to moq-lite-02.
 
-use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
+use std::{net::TcpListener, time::Duration};
 
 use moq_native::moq_net::{self, Origin};
-use moq_relay::{
-	AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, WebState, run_internal,
-};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, run_internal};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -70,15 +68,7 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	web_config.ws = true;
 	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
-	let web = Web::new(
-		WebState {
-			auth,
-			cluster,
-			tls_info: server.tls_info(),
-			conn_id: AtomicU64::new(0),
-		},
-		web_config,
-	);
+	let web = Web::new(auth, cluster, server.tls_info(), web_config);
 
 	let handle = tokio::spawn(async move {
 		// `Web::run` only returns on error; in tests we abort it at teardown.

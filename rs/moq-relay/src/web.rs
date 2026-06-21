@@ -99,31 +99,55 @@ pub struct HttpsConfig {
 	pub root: Vec<PathBuf>,
 }
 
-/// Shared state passed to all web handler routes.
-pub struct WebState {
+/// Shared state passed to all web handler routes. An internal detail: callers
+/// build a [`Web`] from its parts via [`Web::new`] rather than constructing this.
+pub(crate) struct WebState {
 	/// The authenticator for verifying incoming requests.
-	pub auth: Auth,
+	pub(crate) auth: Auth,
 	/// The cluster state for resolving origins.
-	pub cluster: Cluster,
+	pub(crate) cluster: Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
-	pub tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
+	pub(crate) tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
-	pub conn_id: AtomicU64,
+	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	pub(crate) conn_id: AtomicU64,
 }
 
 /// Run a HTTP server using Axum
 pub struct Web {
-	state: WebState,
+	state: Arc<WebState>,
 	config: WebConfig,
 }
 
 impl Web {
-	pub fn new(state: WebState, config: WebConfig) -> Self {
+	/// Build a web server from its parts. `tls_info` is the relay's TLS
+	/// certificate info (e.g. `server.tls_info()`), served at
+	/// `/certificate.sha256`.
+	pub fn new(
+		auth: Auth,
+		cluster: Cluster,
+		tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
+		config: WebConfig,
+	) -> Self {
+		let state = Arc::new(WebState {
+			auth,
+			cluster,
+			tls_info,
+			conn_id: AtomicU64::new(0),
+		});
 		Self { state, config }
 	}
 
-	/// Runs the HTTP and/or HTTPS listeners until they shut down.
-	pub async fn run(self) -> anyhow::Result<()> {
+	/// Build the default web router with `state` applied, returning a
+	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` extra
+	/// routes) before handing it to [`serve`](Self::serve).
+	///
+	/// Includes the WebSocket polyfill catch-all (`/{*path}`, when
+	/// `config.ws`) and CORS scoped to its own GET routes, but NOT the
+	/// landing-page fallback (that is global, so [`serve`](Self::serve) sets it
+	/// once across the merged router). Extra routes a caller merges in keep their
+	/// own layers and bring their own CORS as needed (e.g. a WHIP POST endpoint).
+	pub fn routes(&self) -> Router {
 		let app = Router::new()
 			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
@@ -138,13 +162,22 @@ impl Web {
 			false => app,
 		};
 
-		let app = app
-			.fallback(serve_landing)
-			.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
-			.with_state(Arc::new(self.state))
-			.into_make_service();
+		app.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
+			.with_state(self.state.clone())
+	}
 
-		let http = if let Some(listen) = self.config.http.listen {
+	/// Serve `app` on the configured HTTP/HTTPS listeners until they shut down.
+	///
+	/// Applies the landing-page fallback (so an unmatched route renders the
+	/// informational page rather than a bare 404) and owns the listener +
+	/// TLS machinery: optional mTLS client-cert extraction and hot cert
+	/// reload. The caller builds `app` from [`routes`](Self::routes) plus any
+	/// extra routes it merged in.
+	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
+		let config = self.config;
+		let app = app.fallback(serve_landing).into_make_service();
+
+		let http = if let Some(listen) = config.http.listen {
 			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
 			// too, even on Windows where `[::]` is IPv6-only by default.
 			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
@@ -154,13 +187,13 @@ impl Web {
 			None
 		};
 
-		let https = if let Some(listen) = self.config.https.listen {
-			let cert = self.config.https.cert.expect("missing https.cert");
-			let key = self.config.https.key.expect("missing https.key");
-			let root = self.config.https.root.clone();
+		let https = if let Some(listen) = config.https.listen {
+			let cert = config.https.cert.expect("missing https.cert");
+			let key = config.https.key.expect("missing https.key");
+			let root = config.https.root.clone();
 
-			let config = build_https_config(&cert, &key, &root).await?;
-			let rustls_config = RustlsConfig::from_config(Arc::new(config));
+			let tls = build_https_config(&cert, &key, &root).await?;
+			let rustls_config = RustlsConfig::from_config(Arc::new(tls));
 
 			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
@@ -185,6 +218,14 @@ impl Web {
 		};
 
 		Ok(())
+	}
+
+	/// Runs the default router on the configured listeners until they shut
+	/// down. Convenience for the standalone binary; equivalent to
+	/// `web.serve(web.routes())`.
+	pub async fn run(self) -> anyhow::Result<()> {
+		let app = self.routes();
+		self.serve(app).await
 	}
 }
 

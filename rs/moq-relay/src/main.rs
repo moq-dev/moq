@@ -56,15 +56,7 @@ async fn main() -> anyhow::Result<()> {
 	let cluster = cluster.with_stats(stats);
 
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-	let web = Web::new(
-		WebState {
-			auth: auth.clone(),
-			cluster: cluster.clone(),
-			tls_info: server.tls_info(),
-			conn_id: Default::default(),
-		},
-		config.web,
-	);
+	let web = Web::new(auth.clone(), cluster.clone(), server.tls_info(), config.web);
 
 	tracing::info!(%addr, "listening");
 
