@@ -124,11 +124,7 @@ pub fn start<S: web_transport_trait::Session>(
 }
 
 /// Open a unidirectional Setup Stream, send our single SETUP message, and FIN.
-async fn send_setup<S: web_transport_trait::Session>(
-	session: &S,
-	setup: Setup,
-	version: Version,
-) -> Result<(), Error> {
+async fn send_setup<S: web_transport_trait::Session>(session: &S, setup: Setup, version: Version) -> Result<(), Error> {
 	let stream = session.open_uni().await.map_err(Error::from_transport)?;
 	let mut writer = Writer::new(stream, version);
 	writer.encode(&super::DataType::Setup).await?;

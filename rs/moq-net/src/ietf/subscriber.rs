@@ -462,7 +462,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.expect("an empty hop chain has room for one entry");
 				// moq-transport carries no broadcast epoch on the wire; stamp the current
 				// time so the instance is still ordered against any future re-announce.
-				let broadcast = BroadcastInfo { hops, ..Default::default() }.produce();
+				let broadcast = BroadcastInfo {
+					hops,
+					..Default::default()
+				}
+				.produce();
 
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a

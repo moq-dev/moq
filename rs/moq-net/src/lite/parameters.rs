@@ -27,7 +27,9 @@ impl Parameters {
 	pub fn set_varint(&mut self, id: u64, value: u64) {
 		let mut buf = Vec::new();
 		// Infallible: writing into a Vec never runs short.
-		value.encode(&mut buf, Version::Lite05Wip).expect("varint encode into Vec");
+		value
+			.encode(&mut buf, Version::Lite05Wip)
+			.expect("varint encode into Vec");
 		self.0.insert(id, buf);
 	}
 

@@ -235,7 +235,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let abs = self.origin.absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information or an epoch; the broadcast starts with
 					// an empty chain and a zero epoch (decoded as the 2020 base instant).
-					if self.start_announce(path.clone(), crate::OriginList::new(), 0, responder_origin, &mut producers)? {
+					if self.start_announce(
+						path.clone(),
+						crate::OriginList::new(),
+						0,
+						responder_origin,
+						&mut producers,
+					)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}

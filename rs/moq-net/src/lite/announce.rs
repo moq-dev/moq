@@ -315,7 +315,10 @@ mod tests {
 		let version = Version::Lite04;
 		let mut slice = encode_forged_restart(version);
 		assert!(
-			matches!(AnnounceBroadcast::decode(&mut slice, version), Err(DecodeError::InvalidValue)),
+			matches!(
+				AnnounceBroadcast::decode(&mut slice, version),
+				Err(DecodeError::InvalidValue)
+			),
 			"restart status must be rejected before lite-05"
 		);
 	}

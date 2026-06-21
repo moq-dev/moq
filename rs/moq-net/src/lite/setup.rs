@@ -68,7 +68,10 @@ impl Message for Setup {
 		}
 
 		let params = Parameters::decode(r, version)?;
-		let probe = params.get_varint(PARAM_PROBE)?.map(ProbeLevel::from_code).unwrap_or_default();
+		let probe = params
+			.get_varint(PARAM_PROBE)?
+			.map(ProbeLevel::from_code)
+			.unwrap_or_default();
 		let path = match params.get_bytes(PARAM_PATH) {
 			Some(bytes) => {
 				let s = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?;
@@ -198,6 +201,9 @@ mod tests {
 	fn rejects_before_lite05() {
 		let msg = Setup::default();
 		let mut buf = bytes::BytesMut::new();
-		assert!(matches!(msg.encode(&mut buf, Version::Lite04), Err(EncodeError::Version)));
+		assert!(matches!(
+			msg.encode(&mut buf, Version::Lite04),
+			Err(EncodeError::Version)
+		));
 	}
 }
