@@ -12,9 +12,11 @@ or remote object storage. This is the moq-net mechanism the `moq-archive` crate 
 
 These come from design review and pin down the shape:
 
-- **Owned by `TrackProducer` only.** The cache is local policy set by whoever holds the
-  producer (the relay or edge), never by the original publisher and never carried on the wire.
-  This is why `TrackInfo.cache` goes away (see "Removing TrackInfo.cache").
+- **Local, not on the wire.** The cache is local policy set by whoever holds a track endpoint
+  (the relay or edge), never by the original publisher and never carried on the wire. This is
+  why `TrackInfo.cache` goes away (see "Removing TrackInfo.cache"). The handle is **shareable**:
+  one cache can back both a track's `TrackProducer` and its `TrackConsumer` (see "Attaching to a
+  producer or a consumer").
 - **Per-track bounds, no shared LRU.** Each track keeps a `[min, max]` window of its own recent
   groups. There is no cross-track accounting, so no shared lock and no contention. The cost is
   that there is no global RAM ceiling; total footprint is the sum of per-track `max` across
@@ -128,25 +130,61 @@ cloud stack. The on-tier bytes reuse the `moq-archive` segment plus manifest for
 cache and the archive crate agree byte-for-byte and a relay's spilled data is directly readable
 by an archive node.
 
-## Integration with TrackProducer / TrackState
+## Attaching to a producer or a consumer
 
-Today `TrackState.groups` is the inline per-track cache, bounded by the `TrackInfo.cache`
-duration. With a `CacheConfig` attached:
-
-- finished groups beyond `ram.min` move from the inline buffer into the cache's RAM tier;
-- a `get_group` or `dynamic()` miss consults the cache (RAM, then disk, then remote) before
-  failing with `NotFound`;
-- nothing reads `TrackInfo.cache` any more.
-
-The attach point is one local method:
+The cache is a `Cache` handle built from a `CacheConfig`. It is cloneable and a clone shares the
+same store (RAM tier and disk/remote tiers), so **one cache can back both a track's producer and
+its consumer**.
 
 ```rust
+/// A live, shareable per-track store. Clone shares the underlying tiers.
+#[derive(Clone)]
+pub struct Cache { /* Arc inside */ }
+impl Cache { pub fn new(config: CacheConfig) -> Self; }
+impl From<CacheConfig> for Cache { /* Cache::new */ }
+
 impl TrackProducer {
-    /// Attach a local cache. Retains and serves groups per `config`, independent of any
-    /// retention the original publisher set.
-    pub fn with_cache(self, config: CacheConfig) -> Self;
+    /// Retain and serve groups this producer creates, per the cache. Independent of any
+    /// retention the original publisher set. Accepts a `Cache` or a `CacheConfig`.
+    pub fn with_cache(self, cache: impl Into<Cache>) -> Self;
+}
+
+impl TrackConsumer {
+    /// Back this consumer's `fetch_group` / `get_group` with the cache: hits resolve locally,
+    /// and groups read off the wire populate it.
+    pub fn with_cache(self, cache: impl Into<Cache>) -> Self;
 }
 ```
+
+Sharing one store across both endpoints of a track:
+
+```rust
+let cache = Cache::new(config);
+let producer = producer.with_cache(cache.clone());
+let consumer = consumer.with_cache(cache);   // same groups, one set of tiers
+```
+
+### Producer side
+`TrackState.groups` (today's inline buffer, bounded by the now-removed `TrackInfo.cache`) is
+backed by the cache: finished groups beyond `ram.min` move into the RAM tier, and a `get_group`
+or `dynamic()` miss consults the cache (RAM, then disk, then remote) before `NotFound`.
+
+### Consumer side (fetch)
+`TrackConsumer::fetch_group(seq)` and `get_group(seq)` check the cache first:
+
+- **hit** (RAM, disk, or remote) resolves the `kio::Pending` locally with no wire FETCH (RAM
+  synchronously, disk/remote after the ranged read);
+- **miss** falls through to the normal wire FETCH, and the result is inserted into the cache so a
+  repeat is local.
+
+Groups arriving on a live `subscribe` also populate the cache, so a consumer that watched a
+track can later fetch its recent groups without going back upstream. This is exactly the
+archive's serve path: a cache-backed `TrackConsumer`, with no live upstream, answers FETCH
+straight from disk/remote.
+
+A shared cache makes the two directions symmetric: groups a producer creates are fetchable
+through a consumer of the same track, and groups a consumer pulled off the wire are servable by
+the producer. Inserts dedup by sequence, so attaching one cache to both sides is safe.
 
 ## Removing TrackInfo.cache
 
@@ -228,12 +266,15 @@ and converts to the config the producer takes:
 ```rust
 impl CacheArgs {
     /// None when `--cache-ram` is unset (caching disabled).
-    pub fn config(&self) -> Option<moq_net::CacheConfig> { /* map flags -> bounds + tiers */ }
+    pub fn cache(&self) -> Option<moq_net::Cache> { /* flags -> CacheConfig -> Cache::new */ }
 }
 
-// in run_serve / run_accept, for each track produced:
-if let Some(config) = cache.config() {
-    producer = producer.with_cache(config.clone());
+// in run_serve / run_accept: build the shared store once, then hand a clone to each endpoint.
+let cache = args.cache();
+if let Some(cache) = &cache {
+    producer = producer.with_cache(cache.clone());
+    // a TrackConsumer of the same track also takes cache.clone(), so its fetch_group is
+    // served locally (RAM, then disk/remote).
 }
 ```
 
