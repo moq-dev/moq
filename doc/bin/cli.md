@@ -107,6 +107,16 @@ moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --n
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --codec h265
 ```
 
+On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders are compiled in by
+default and link the CUDA / libva system libraries. To build `capture` without
+them (software openh264 + V4L2 capture only, no CUDA/libva dependency), drop the
+default features:
+
+```bash
+cargo build --release -p moq-cli --no-default-features \
+    --features "iroh quinn websocket capture"
+```
+
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
 Linux, Media Foundation on Windows). The codec is chosen with `--codec`
 (`h264` default, or `h265`). For H.264 it picks a hardware encoder
