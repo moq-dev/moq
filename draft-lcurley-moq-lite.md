@@ -118,7 +118,7 @@ These announcements are live and can change over time, allowing for dynamic orig
 A broadcast consists of any number of Tracks.
 The contents, relationships, and encoding of tracks are determined by the application.
 
-Each broadcast carries an opaque `Epoch` that orders its instances, larger meaning newer (see [ANNOUNCE_BROADCAST](#announce-broadcast)).
+Each broadcast carries an `Epoch` that orders its instances, larger meaning newer (see [ANNOUNCE_BROADCAST](#announce-broadcast)).
 When a subscriber discovers the same broadcast from more than one publisher — most commonly a reconnecting publisher whose new session overlaps a not-yet-expired prior one — it uses the Epoch to route subscriptions to the newest instance instead of waiting for the stale one to time out.
 
 ## Track
@@ -706,8 +706,9 @@ A flag indicating the announce status.
 This is combined with the broadcast path prefix to form the full broadcast path.
 
 **Epoch**:
-An opaque value identifying this instance of the broadcast.
-Its meaning is application-defined; moq-lite requires only that a newer instance of the same broadcast carries a larger value than an older one (for example a timestamp, but any monotonically increasing counter works).
+The time at which the origin publisher created this instance of the broadcast, in seconds since 2020-01-01T00:00:00Z (ignoring leap seconds).
+The reference point is 2020 rather than the Unix epoch so that current timestamps stay within a 4-byte varint instead of needing 8.
+A newer instance of the same broadcast therefore carries a larger value than an older one.
 It is assigned once by the origin publisher, and relays MUST forward it unchanged; unlike the Hop ID list it is not modified along the path.
 
 When the subscriber learns of the same broadcast (same path) from more than one current `active` advertisement — for example a reconnecting publisher whose new session races the not-yet-timed-out session of a prior instance — it SHOULD route subscriptions to the advertisement with the larger Epoch, and use total path length (see Hop Count) only to break ties between equal Epochs.
@@ -715,7 +716,7 @@ This lets a subscriber switch to a freshly reconnected publisher immediately, ra
 For an `ended` advertisement, the Epoch identifies which instance ended: a subscriber that has already moved to a larger Epoch MAY ignore an `ended` carrying a smaller one.
 A value of 0 means the publisher does not assign an Epoch; such advertisements are resolved by path length alone.
 
-The Epoch is a variable-length integer, so smaller values are more compact on the wire; a publisher deriving it from a timestamp SHOULD measure from a recent reference point (e.g. seconds since 2020) rather than the Unix epoch to keep the value within a 4-byte varint.
+A publisher with a sufficiently accurate clock can derive the Epoch directly; ordering only requires that successive instances of the same broadcast have increasing timestamps, so a publisher whose clock is coarse or skewed MUST ensure a reconnecting instance never reports a smaller value than a prior one.
 
 **Hop Count**:
 The number of Hop ID entries that follow, NOT including the publisher's own `Hop ID` from ANNOUNCE_OK.
@@ -1071,7 +1072,7 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 # Appendix A: Changelog
 
 ## moq-lite-05
-- Added an `Epoch` field to ANNOUNCE_BROADCAST (a varint, before the Hop ID list): an opaque, application-defined value ordering instances of a broadcast, where larger means newer. It is origin-assigned and forwarded unchanged by relays. Subscribers resolve duplicate advertisements of the same broadcast by largest `Epoch` first (path length only breaks ties), so a reconnecting publisher can take over immediately instead of waiting for the stale session to time out.
+- Added an `Epoch` field to ANNOUNCE_BROADCAST (a varint, before the Hop ID list): the time the origin publisher created this instance of the broadcast, in seconds since 2020-01-01T00:00:00Z (the 2020 reference point keeps current timestamps within a 4-byte varint), where larger means newer. It is origin-assigned and forwarded unchanged by relays. Subscribers resolve duplicate advertisements of the same broadcast by largest `Epoch` first (path length only breaks ties), so a reconnecting publisher can take over immediately instead of waiting for the stale session to time out.
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST (the subscriber's request to receive announcements) and ANNOUNCE to ANNOUNCE_BROADCAST (the publisher's per-broadcast advertisement). ANNOUNCE_OK is unchanged. Wire format otherwise unchanged.
 - Added a SETUP message, sent once on a unidirectional Setup Stream (0x1) at the start of the session and FIN'd immediately. It carries a list of Setup Parameters for negotiating optional capabilities and extensions per-hop, replacing the prior stream-probing approach (version is still negotiated via ALPN, not SETUP). Endpoints keep exchanging non-Setup streams without waiting for SETUP, buffering only a stream whose encoding a negotiated extension would change; unknown stream types are still reset as a fallback.
 - Added a SETUP `Probe` parameter advertising the publisher's capability level: `None`, `Report` (measure and report the estimated bitrate), or `Increase` (additionally pad to probe for bandwidth above the current sending rate). The levels are nested since probing without measuring is meaningless. A subscriber must not rely on a level the publisher did not advertise.
