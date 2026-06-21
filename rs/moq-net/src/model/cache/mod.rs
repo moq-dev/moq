@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use super::Timestamp;
+use super::{Timescale, Timestamp};
 
 pub mod index;
 pub mod segment;
@@ -134,6 +134,42 @@ impl Group {
 	/// The last frame's media timestamp, if any. Used as the group's upper time bound.
 	pub fn ts_last(&self) -> Option<Timestamp> {
 		self.frames.last().and_then(|f| f.timestamp)
+	}
+
+	/// Drain a live [`GroupConsumer`](crate::GroupConsumer) into a cached group, reading every
+	/// frame's payload and timestamp. Resolves once the group is finished, so this is how the
+	/// producer side snapshots a finished group for caching.
+	pub async fn read(mut group: crate::GroupConsumer) -> Result<Self, crate::Error> {
+		let sequence = group.sequence;
+		let mut frames = Vec::new();
+		while let Some(mut frame) = group.next_frame().await? {
+			let timestamp = frame.timestamp;
+			let payload = frame.read_all().await?;
+			frames.push(Frame { timestamp, payload });
+		}
+		Ok(Self { sequence, frames })
+	}
+
+	/// Rebuild a live [`GroupConsumer`](crate::GroupConsumer) from this cached group, for serving a
+	/// fetch. `timescale` must match the track's: each frame timestamp is validated against it.
+	pub fn produce(&self, timescale: impl Into<Option<Timescale>>) -> Result<crate::GroupConsumer, crate::Error> {
+		let mut producer = crate::GroupProducer::new(
+			crate::Group {
+				sequence: self.sequence,
+			},
+			timescale.into(),
+		);
+		for frame in &self.frames {
+			let info = crate::Frame {
+				size: frame.payload.len() as u64,
+				timestamp: frame.timestamp,
+			};
+			let mut chunk = producer.create_frame(info)?;
+			chunk.write(frame.payload.clone())?;
+			chunk.finish()?;
+		}
+		producer.finish()?;
+		Ok(producer.consume())
 	}
 }
 
@@ -516,5 +552,45 @@ mod tests {
 		producer.insert(plain(0, 1));
 		assert!(!producer.is_empty());
 		assert_eq!(producer.len(), 1);
+	}
+
+	#[tokio::test]
+	async fn bridge_round_trips_a_live_group() {
+		// Build a live timed group, drain it into a cached group, rebuild a live one, drain again,
+		// and confirm the two cached snapshots match (payloads and per-frame timestamps survive).
+		let scale = Timescale::new(1_000_000).unwrap();
+		let mut live = crate::GroupProducer::new(crate::Group { sequence: 4 }, Some(scale));
+		for (i, payload) in [b"hello".as_slice(), b"world".as_slice()].into_iter().enumerate() {
+			let info = crate::Frame {
+				size: payload.len() as u64,
+				timestamp: Some(Timestamp::new(i as u64 * 1000, scale).unwrap()),
+			};
+			let mut frame = live.create_frame(info).unwrap();
+			frame.write(Bytes::copy_from_slice(payload)).unwrap();
+			frame.finish().unwrap();
+		}
+		live.finish().unwrap();
+
+		let cached = Group::read(live.consume()).await.unwrap();
+		assert_eq!(cached.sequence, 4);
+		assert_eq!(cached.frames.len(), 2);
+		assert_eq!(cached.frames[0].payload, Bytes::from_static(b"hello"));
+		assert_eq!(cached.frames[1].timestamp, Some(Timestamp::new(1000, scale).unwrap()));
+
+		let rebuilt = Group::read(cached.produce(scale).unwrap()).await.unwrap();
+		assert_eq!(cached, rebuilt);
+	}
+
+	#[tokio::test]
+	async fn bridge_untimed_group() {
+		// An untimed track (no timescale, no frame timestamps) round-trips too.
+		let mut live = crate::GroupProducer::new(crate::Group { sequence: 0 }, None);
+		live.write_frame(Bytes::from_static(b"data")).unwrap();
+		live.finish().unwrap();
+
+		let cached = Group::read(live.consume()).await.unwrap();
+		assert_eq!(cached.frames.len(), 1);
+		assert_eq!(cached.frames[0].timestamp, None);
+		assert_eq!(Group::read(cached.produce(None).unwrap()).await.unwrap(), cached);
 	}
 }
