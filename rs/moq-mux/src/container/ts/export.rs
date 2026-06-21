@@ -821,11 +821,12 @@ const PES_DTS_LEN: usize = 5;
 /// decode. It must exceed the stream's reorder depth (how many frames a reference is decoded
 /// ahead of the B-frames that depend on it), which open-GOP / B-pyramid structures push past
 /// the raw consecutive-B count: a real 1080i contribution feed (kyrion) reorders 5 frames
-/// deep with only 3 consecutive B-frames. 8 covers that plus typical pyramids; a deeper
-/// stream still gets a monotonic DTS (the `+igndts` fix), just not guaranteed `DTS <= PTS`.
-/// Sizing the reserve in frames (via the measured frame duration) keeps the advertised decode
-/// buffer to a few frames instead of a fixed wall-clock slab. See [`DtsClock`].
-const RESERVE_FRAMES: u64 = 8;
+/// deep with only 3 consecutive B-frames. 16 covers that with wide headroom for deep pyramids;
+/// a deeper stream still gets a monotonic DTS (the `+igndts` fix), just not guaranteed
+/// `DTS <= PTS`. This is decode lead time, not presentation latency (frames still show at their
+/// PTS), and sizing it in frames (via the measured frame duration) keeps the advertised decode
+/// buffer proportional to the frame rate rather than a fixed wall-clock slab. See [`DtsClock`].
+const RESERVE_FRAMES: u64 = 16;
 
 fn psi_interval() -> crate::container::Timestamp {
 	crate::container::Timestamp::try_from(PSI_INTERVAL).unwrap_or(crate::container::Timestamp::ZERO)
