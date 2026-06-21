@@ -7,8 +7,8 @@
 //! keyframe) and returns zero or more decoded [`I420`] frames.
 //!
 //! [`open`] picks the best backend for a [`Kind`](super::Kind), trying hardware
-//! candidates (platform-gated) before the openh264 software fallback, exactly
-//! like the encode side.
+//! candidates (platform-gated: VideoToolbox on macOS, Media Foundation / DXVA on
+//! Windows) before the openh264 software fallback, exactly like the encode side.
 
 use bytes::Bytes;
 
@@ -20,6 +20,9 @@ mod openh264;
 
 #[cfg(target_os = "macos")]
 mod videotoolbox;
+
+#[cfg(target_os = "windows")]
+mod mediafoundation;
 
 /// An opened H.264 decoder. Feed it Annex-B access units in decode order; get
 /// back zero or more raw I420 frames (zero while the decoder is still buffering,
@@ -47,6 +50,11 @@ const HARDWARE: &[Candidate] = &[
 	Candidate {
 		name: videotoolbox::NAME,
 		open: videotoolbox::VideoToolbox::open,
+	},
+	#[cfg(target_os = "windows")]
+	Candidate {
+		name: mediafoundation::NAME,
+		open: mediafoundation::MediaFoundation::open,
 	},
 ];
 

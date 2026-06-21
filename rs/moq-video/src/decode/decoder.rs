@@ -169,11 +169,24 @@ mod tests {
 		}
 
 		assert!(!decoded.is_empty(), "decoder produced no frames");
+		let luma = 320 * 240;
 		for i420 in &decoded {
 			assert_eq!(i420.width, 320);
 			assert_eq!(i420.height, 240);
 			// Tightly-packed I420: luma + two quarter-size chroma planes.
-			assert_eq!(i420.data.len(), 320 * 240 * 3 / 2);
+			assert_eq!(i420.data.len(), luma * 3 / 2);
+
+			// Mid-gray RGBA (0x80) encodes to a flat picture: BT.601 limited-range
+			// luma near 125 and neutral chroma near 128. Averaging each plane
+			// catches plane swaps, stride bugs, and a misread Y/UV split that an
+			// exact size check would miss.
+			let avg = |plane: &[u8]| plane.iter().map(|&b| b as u32).sum::<u32>() / plane.len() as u32;
+			let y = avg(&i420.data[..luma]);
+			let u = avg(&i420.data[luma..luma + luma / 4]);
+			let v = avg(&i420.data[luma + luma / 4..]);
+			assert!((110..=140).contains(&y), "luma {y} off for a gray frame");
+			assert!((118..=138).contains(&u), "u {u} off for a gray frame");
+			assert!((118..=138).contains(&v), "v {v} off for a gray frame");
 		}
 	}
 
@@ -186,5 +199,17 @@ mod tests {
 	#[test]
 	fn videotoolbox_round_trip() {
 		round_trip(&super::Kind::Named("videotoolbox".into()), "videotoolbox");
+	}
+
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn mediafoundation_round_trip() {
+		// Requires a hardware decoder MFT (GPU). Skip on machines without one
+		// rather than fail: CI runners are often headless.
+		if backend::open(&super::Kind::Named("mediafoundation".into())).is_err() {
+			eprintln!("skipping: no Media Foundation hardware decoder available");
+			return;
+		}
+		round_trip(&super::Kind::Named("mediafoundation".into()), "mediafoundation");
 	}
 }

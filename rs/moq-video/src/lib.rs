@@ -19,8 +19,9 @@
 //!     released when the last one leaves.
 //!   - [`encode::Producer`] publishes packets you encoded yourself.
 //! - [`decode`] subscribes to an H.264 track and decodes it to raw I420 frames
-//!   with a native backend (VideoToolbox / openh264). [`decode::Consumer`] is the
-//!   mirror of `moq-audio`'s `AudioConsumer`.
+//!   with a native backend (VideoToolbox on macOS, Media Foundation / DXVA on
+//!   Windows, openh264 software fallback). [`decode::Consumer`] is the mirror of
+//!   `moq-audio`'s `AudioConsumer`.
 //!
 //! ## API stability
 //!

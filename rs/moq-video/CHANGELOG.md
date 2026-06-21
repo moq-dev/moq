@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `decode::Consumer` (the counterpart to `moq-audio`'s `AudioConsumer`) that
   subscribes to an H.264 track and returns raw I420 frames. Backends are
   VideoToolbox (macOS) and openh264 (portable software fallback); no ffmpeg.
+- H.264 hardware decode on Windows via Media Foundation. The Microsoft decoder
+  MFT runs synchronously with a Direct3D11 device bound to it, so the decode
+  happens on the GPU through DXVA (NVDEC / Intel / AMD); output textures are
+  downloaded to I420. Requires a GPU: a GPU-less host falls back to openh264.
 - H.265 encode via the NVENC backend (Linux, `nvenc` feature). The codec is
   selected by `encode::Codec`; the NVENC HEVC path shares the H.264 preset / GOP
   / rate-control setup and emits Annex-B with inline VPS/SPS/PPS. Not yet

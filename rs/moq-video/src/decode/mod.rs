@@ -3,7 +3,8 @@
 //! The decode counterpart to [`encode`](crate::encode), and the mirror of
 //! `moq-audio`'s `AudioConsumer`. [`Consumer`] subscribes to a moq-mux H.264
 //! track and hands back decoded [`Frame`]s; a native backend does the work
-//! (VideoToolbox on macOS, openh264 everywhere as the software fallback).
+//! (VideoToolbox on macOS, Media Foundation / DXVA on Windows, openh264
+//! everywhere as the software fallback).
 //!
 //! Only H.264 is supported: it's symmetric with what [`encode`](crate::encode)
 //! produces. A non-H.264 rendition yields [`Error::UnsupportedCodec`](crate::Error).
