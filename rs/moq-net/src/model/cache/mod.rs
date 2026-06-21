@@ -15,8 +15,9 @@
 //!
 //! The `segment` submodule is the on-disk byte format used by the disk and remote tiers (a band
 //! of groups serialized as one self-describing object) plus the rollup that concatenates several
-//! small segments into one larger object. The tier I/O (object_store) and the
-//! [`crate::TrackProducer`] / [`crate::TrackConsumer`] wiring are not implemented yet; see
+//! small segments into one larger object. `Group::read` / `Group::produce` bridge a cached group
+//! to and from the live group model, and `TrackProducer::with_cache` / `TrackConsumer::with_cache`
+//! wire the cache into the track types. The tier I/O (object_store) is the remaining piece; see
 //! `rs/moq-net/CACHE.md`.
 
 use std::collections::BTreeMap;
