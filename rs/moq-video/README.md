@@ -58,10 +58,13 @@ hardware-first, like encode:
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|
 | H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | openh264 |
-| H.265 | none | none | Media Foundation (DXVA) | none |
+| H.265 | none | VideoToolbox | Media Foundation (DXVA) | none |
 
-On Windows the Microsoft decoder MFT runs synchronously with a Direct3D11 device
-bound to it, so the decode happens on the GPU through DXVA (NVDEC / Intel / AMD).
-H.264 falls back to openh264 on a GPU-less host; H.265 has no software decoder, so
-it needs the GPU path (and an HEVC decoder MFT: the inbox HEVC Video Extensions or
-a vendor one). A non-H.264/H.265 rendition yields `Error::UnsupportedCodec`.
+On macOS VideoToolbox decodes both codecs on hardware, pulling the parameter sets
+(SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
+description. On Windows the Microsoft decoder MFT runs synchronously with a
+Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
+(NVDEC / Intel / AMD). H.264 falls back to openh264 on a GPU-less host; H.265 has
+no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
+the inbox HEVC Video Extensions or a vendor one). A non-H.264/H.265 rendition
+yields `Error::UnsupportedCodec`.

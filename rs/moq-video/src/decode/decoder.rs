@@ -230,6 +230,27 @@ mod tests {
 		round_trip(h264_software_encoder(), decoder, "videotoolbox");
 	}
 
+	/// H.265 has no software path, so the HEVC round-trip rides VideoToolbox on
+	/// both ends: hardware HEVC encode emitting hev1 (inline VPS/SPS/PPS) and
+	/// hardware HEVC decode. Skips cleanly on a Mac without HEVC hardware (older
+	/// Intel models predating the HEVC encoder).
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_hevc_round_trip() {
+		let encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Named("videotoolbox".into()),
+			codec: crate::encode::Codec::H265,
+			..EncodeConfig::new(320, 240, 30)
+		});
+		let Ok(encoder) = encoder else {
+			eprintln!("skipping: no VideoToolbox H.265 hardware encoder available");
+			return;
+		};
+		let decoder =
+			backend::open(Codec::H265, &super::Kind::Named("videotoolbox".into())).expect("videotoolbox H.265 decoder");
+		round_trip(encoder, decoder, "videotoolbox");
+	}
+
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn mediafoundation_round_trip() {

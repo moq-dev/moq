@@ -71,7 +71,7 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(target_os = "macos")]
 	Candidate {
 		name: videotoolbox::NAME,
-		supports: |c| matches!(c, Codec::H264),
+		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: videotoolbox::VideoToolbox::open,
 	},
 	#[cfg(target_os = "windows")]

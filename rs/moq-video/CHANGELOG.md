@@ -23,12 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   select one with a bare index or `display:{index}`. The read loop paces to the
   target frame rate and re-emits the last frame while the screen is static.
 - H.265 decode: the `decode` module now handles H.265 tracks (hvc1 and hev1)
-  alongside H.264, sharing the same length-prefixed -> Annex-B front end. The
-  Windows Media Foundation backend decodes it (DXVA) when an HEVC decoder MFT is
-  present. There is no software H.265 decoder, so H.265 has no fallback below the
-  hardware path. The HEVC decode path is unverified on hardware (the test box had
-  no HEVC decoder MFT installed); the shared front end is exercised by the H.264
-  hardware round-trip.
+  alongside H.264, sharing the same length-prefixed -> Annex-B front end.
+  VideoToolbox (macOS) and Media Foundation (Windows, DXVA) decode it on
+  hardware, pulling VPS/SPS/PPS out of each keyframe to build the format
+  description. There is no software H.265 decoder, so H.265 has no fallback below
+  the hardware path. The macOS VideoToolbox path is verified by an end-to-end
+  HEVC encode -> decode round-trip on Apple silicon; the Windows path is
+  unverified on hardware (the test box had no HEVC decoder MFT installed).
 - H.265 encode via the NVENC backend (Linux, `nvenc` feature). The codec is
   selected by `encode::Codec`; the NVENC HEVC path shares the H.264 preset / GOP
   / rate-control setup and emits Annex-B with inline VPS/SPS/PPS. Not yet
