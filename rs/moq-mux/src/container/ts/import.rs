@@ -472,6 +472,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let data_len = pes_data_len(&pes.header, pes.pes_packet_len);
 		let mut pending = Pending {
 			pts: pes.header.pts.map(|t| t.as_u64()),
+			dts: pes.header.dts.map(|t| t.as_u64()),
 			stream_id: pes.header.stream_id.as_u8(),
 			data: Vec::with_capacity(pes.data.len()),
 			data_len,
@@ -586,6 +587,9 @@ impl<E: catalog::Catalog> Import<E> {
 struct Pending {
 	/// Raw 90 kHz PTS, before wrap-unwrapping.
 	pts: Option<u64>,
+	/// Raw 90 kHz DTS, before wrap-unwrapping. Present on reordered (B-frame) video; its
+	/// distance below the PTS is the reorder delay published as the catalog jitter.
+	dts: Option<u64>,
 	/// PES stream_id, preserved for verbatim PES carriage.
 	stream_id: u8,
 	data: Vec<u8>,
@@ -981,12 +985,23 @@ impl<E: catalog::Catalog> Stream<E> {
 	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<()> {
 		match self {
 			Stream::H264 { import, unwrap } => {
+				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decode_frame(&mut pending.data.as_slice(), pts)
+				import.decode_frame(&mut pending.data.as_slice(), pts)?;
+				// After decode_frame, so the track (and its catalog rendition) exists.
+				if let Some(reorder) = reorder {
+					import.observe_reorder(reorder);
+				}
+				Ok(())
 			}
 			Stream::H265 { import, unwrap } => {
+				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decode_frame(&mut pending.data.as_slice(), pts)
+				import.decode_frame(&mut pending.data.as_slice(), pts)?;
+				if let Some(reorder) = reorder {
+					import.observe_reorder(reorder);
+				}
+				Ok(())
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Legacy(stream) => stream.write(pending),
@@ -1296,6 +1311,22 @@ fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option
 	};
 	let extended = unwrap.unwrap(raw);
 	Ok(Some(Timestamp::from_scale(extended, 90_000)?))
+}
+
+/// The reorder delay `PTS - DTS` for one PES, as a microsecond [`Timestamp`]. `None` unless
+/// both stamps are present and the gap is a plausible reorder (a few seconds); a larger or
+/// negative gap is a discontinuity or bad DTS, ignored so it can't inflate the jitter. Both
+/// are raw 90 kHz, so the subtraction is done modulo the 33-bit field to stay correct across
+/// the wrap.
+fn reorder_delay(pts: Option<u64>, dts: Option<u64>) -> Option<Timestamp> {
+	const FIELD: u64 = 1 << 33;
+	const MAX_REORDER_TICKS: u64 = 90_000 * 2; // 2 s; broadcast reorder is well under this.
+	let (pts, dts) = (pts?, dts?);
+	let delay = pts.wrapping_sub(dts) & (FIELD - 1);
+	if delay == 0 || delay > MAX_REORDER_TICKS {
+		return None;
+	}
+	Timestamp::from_scale(delay, 90_000).ok()
 }
 
 /// Tracks the wrap-around of the 33-bit, 90 kHz PTS field so timestamps stay
