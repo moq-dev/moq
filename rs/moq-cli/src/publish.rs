@@ -226,8 +226,10 @@ mod tests {
 	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
 	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
 	/// PES stream_id, and byte-exact payloads.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn ts_verbatim_streams_round_trip_through_cli() {
+		// Paused time auto-advances when the exporter parks, so the `drain` timeouts
+		// fire instantly instead of waiting on the wall clock.
 		let input = manufacture_input().await;
 
 		// Publish side: `Publish::new(Ts)` builds a `ts::Import<Ext>`, so the verbatim
