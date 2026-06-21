@@ -1595,7 +1595,7 @@ mod test {
 	}
 
 	// An extended catalog detects the CUEI PID, advertises a cue track, and the
-	// section is published (a `Catalog<scte35::Ext>` carries the rendition).
+	// section is published (a `Catalog<catalog::Ext>` carries the rendition).
 	#[test]
 	fn scte35_extension_catalogs_the_cue_track() {
 		use crate::catalog::hang::Catalog;
@@ -2039,7 +2039,7 @@ mod test {
 		const SECTION_PID: u16 = 0x0021;
 
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		// scte35::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
+		// catalog::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());

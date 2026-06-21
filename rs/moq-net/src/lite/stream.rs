@@ -34,7 +34,10 @@ impl Encode<Version> for ControlType {
 #[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u64)]
 pub enum DataType {
+	/// A group of frames (the only data stream on every version).
 	Group = 0,
+	/// The lite-05+ SETUP stream: one SETUP message, then FIN.
+	Setup = 1,
 }
 
 impl Decode<Version> for DataType {

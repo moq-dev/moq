@@ -9,7 +9,8 @@
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
-//! considered, hardware (platform-gated) before software.
+//! considered, hardware (platform-gated) before the always-available openh264
+//! software fallback.
 
 use bytes::Bytes;
 
@@ -25,10 +26,10 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
+#[cfg(target_os = "linux")]
 mod nvenc;
 
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[cfg(target_os = "linux")]
 mod vaapi;
 
 /// An opened video encoder. Feed it frames at the configured resolution; get
@@ -67,13 +68,13 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "nvenc"))]
+	#[cfg(target_os = "linux")]
 	Candidate {
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[cfg(target_os = "linux")]
 	Candidate {
 		name: vaapi::NAME,
 		codecs: &[Codec::H264],
@@ -81,7 +82,8 @@ const HARDWARE: &[Candidate] = &[
 	},
 ];
 
-/// Software fallbacks, all platforms. Only H.264 (openh264) has one; H.265 is
+/// Software fallbacks, all platforms, always available so a box with no usable
+/// hardware encoder can still encode. Only H.264 (openh264) has one; H.265 is
 /// hardware-only. A slice so future software codecs slot in.
 const SOFTWARE: &[Candidate] = &[Candidate {
 	name: openh264::NAME,

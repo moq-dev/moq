@@ -39,6 +39,9 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// to opt out.
 	pub stats: StatsHandle,
 	pub version: Version,
+	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
+	/// stream is read; the probe stream waits on it before opening.
+	pub peer_setup: super::PeerSetup,
 }
 
 #[derive(Clone)]
@@ -66,6 +69,8 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
+	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
+	peer_setup: super::PeerSetup,
 }
 
 #[derive(Clone)]
@@ -97,6 +102,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
+			peer_setup: config.peer_setup,
 		}
 	}
 
@@ -134,12 +140,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let res = match kind {
 			lite::DataType::Group => self.recv_group(&mut stream).await,
+			lite::DataType::Setup => self.recv_setup(&mut stream).await,
 		};
 
 		if let Err(err) = res {
 			stream.abort(&err);
 		}
 
+		Ok(())
+	}
+
+	/// Read the peer's single SETUP message off its Setup Stream and record it, so
+	/// capability-gated streams (PROBE) can consult it. lite-05+ only.
+	async fn recv_setup(&self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
+		if !self.version.has_setup_stream() {
+			return Err(Error::UnexpectedStream);
+		}
+		let setup = stream.decode::<lite::Setup>().await?;
+		tracing::debug!(?setup, "received peer setup");
+		self.peer_setup.set(setup);
 		Ok(())
 	}
 
@@ -174,7 +193,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Ask the peer to filter out announces that already passed through us, so
 		// reflected announces (the simple loop case) never hit the wire. Lite03
 		// peers ignore this field, in which case start_announce below still drops.
-		let msg = lite::AnnounceInterest {
+		let msg = lite::AnnounceRequest {
 			prefix: prefix.as_path(),
 			exclude_hop: self.self_origin.id,
 		};
@@ -214,8 +233,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
-					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
-					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
+					// Lite01/02 don't carry hop information or an epoch; the broadcast starts with
+					// an empty chain and a zero epoch (decoded as the 2020 base instant).
+					if self.start_announce(
+						path.clone(),
+						crate::OriginList::new(),
+						0,
+						responder_origin,
+						&mut producers,
+					)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -245,16 +271,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
+		while let Some(announce) = stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await? {
 			match announce {
-				lite::Announce::Active { suffix, hops } => {
+				lite::AnnounceBroadcast::Active { suffix, epoch, hops } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
 					if lite::restart_supported(self.version) && producers.contains_key(&path) {
 						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Older versions fall through to start_announce,
 						// which rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
+						if self.restart_announce(path.clone(), hops, epoch, responder_origin, &mut producers)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -262,7 +288,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, epoch, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -274,7 +300,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						}
 					}
 				}
-				lite::Announce::Ended { suffix, .. } => {
+				lite::AnnounceBroadcast::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
@@ -308,6 +334,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
 		};
+
+		// lite-05+ negotiates probing: only open a PROBE stream if the peer advertised it
+		// (Report or higher) in its SETUP. Older versions have no SETUP, so probe is always
+		// available there.
+		if self.version.has_setup_stream() && self.peer_setup.probe_level().await < lite::ProbeLevel::Report {
+			tracing::debug!("peer does not support probing; skipping probe stream");
+			return Ok(());
+		}
 
 		loop {
 			// Wait until at least one consumer is interested in the estimate.
@@ -353,6 +387,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
+		// Broadcast instance epoch from ANNOUNCE_BROADCAST (wire value, 0 on pre-lite-05).
+		epoch: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
@@ -409,7 +445,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = BroadcastInfo { hops }.produce();
+		let broadcast = BroadcastInfo {
+			hops,
+			epoch: BroadcastInfo::epoch_from_wire(epoch),
+		}
+		.produce();
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -441,6 +481,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
+		// Broadcast instance epoch from ANNOUNCE_BROADCAST (wire value, 0 on pre-lite-05).
+		epoch: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
@@ -461,7 +503,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
-		let broadcast = BroadcastInfo { hops }.produce();
+		let broadcast = BroadcastInfo {
+			hops,
+			epoch: BroadcastInfo::epoch_from_wire(epoch),
+		}
+		.produce();
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
@@ -950,10 +996,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 
+		// The wire no longer carries a cache hint (the publisher's retention is now
+		// best-effort, not a guarantee), so the local retention window falls back to
+		// the model default.
 		let model = crate::TrackInfo {
 			compress: info.compression != Compression::None,
 			timescale: info.timescale,
-			cache: info.cache,
+			cache: crate::DEFAULT_CACHE,
 			priority: info.priority,
 			ordered: info.ordered,
 		};

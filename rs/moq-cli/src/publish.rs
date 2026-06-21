@@ -366,14 +366,14 @@ mod tests {
 	const VERBATIM_PES_PID: u16 = 0x104;
 	const VERBATIM_PES_STREAM_ID: u8 = 0xC0;
 
-	/// Drain an exporter, concatenating every chunk until output stops. The producers
-	/// stay alive (retained tracks), so the stream never hard-ends; pull until a
+	/// Drain an exporter, concatenating every frame's payload until output stops. The
+	/// producers stay alive (retained tracks), so the stream never hard-ends; pull until a
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
 	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
 		let mut out = Vec::new();
 		while let Ok(res) = tokio::time::timeout(Duration::from_millis(500), exporter.next()).await {
 			match res.expect("exporter error") {
-				Some(chunk) => out.extend_from_slice(&chunk),
+				Some(frame) => out.extend_from_slice(&frame.payload),
 				None => break,
 			}
 		}

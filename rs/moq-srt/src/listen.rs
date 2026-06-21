@@ -238,18 +238,36 @@ async fn serve_request(origin: OriginConsumer, path: &str, mut socket: srt_tokio
 	};
 
 	// MPEG-TS is a continuous byte stream, so we coalesce the muxer's per-frame
-	// chunks and slice them on a fixed boundary rather than preserving them.
+	// output and slice it on a fixed boundary rather than preserving frames.
+	//
+	// Pace on the media clock: stamp each SRT payload with the media time of the
+	// frame it carries, anchored to when the first frame went out. SRT's TSBPD
+	// reconstructs that inter-frame spacing at the receiver, so a tune-in keyframe
+	// burst is released at the media rate instead of all at once. (The Instant
+	// passed to `send` is the packet's origin time feeding TSBPD, not a "send now"
+	// instruction; `Instant::now()` would collapse the spacing into a burst.)
+	//
+	// We pace on the frame's presentation timestamp (the only clock the muxer
+	// exposes) while frames transmit in decode order, so a B-frame stream's
+	// per-GOP reorder leaves `send_at` slightly non-monotonic. That's harmless:
+	// `saturating_sub` keeps it >= the anchor, and the receiver reorders from the
+	// PTS/DTS carried inside the TS payload regardless.
+	let anchor = Instant::now();
+	let mut base = None;
+	let mut send_at = anchor;
 	let mut buffer = bytes::BytesMut::new();
-	while let Some(chunk) = subscriber.next().await? {
-		buffer.extend_from_slice(&chunk);
+	while let Some(frame) = subscriber.next().await? {
+		let origin = *base.get_or_insert(frame.timestamp);
+		send_at = anchor + Duration::from(frame.timestamp).saturating_sub(Duration::from(origin));
+
+		buffer.extend_from_slice(&frame.payload);
 		while buffer.len() >= SRT_PAYLOAD {
-			let payload = buffer.split_to(SRT_PAYLOAD).freeze();
-			socket.send((Instant::now(), payload)).await?;
+			socket.send((send_at, buffer.split_to(SRT_PAYLOAD).freeze())).await?;
 		}
 	}
 
 	if !buffer.is_empty() {
-		socket.send((Instant::now(), buffer.freeze())).await?;
+		socket.send((send_at, buffer.freeze())).await?;
 	}
 	socket.close().await?;
 

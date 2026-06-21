@@ -1,7 +1,7 @@
 //! Hardware H.264 / H.265 backend via NVIDIA NVENC (`nvidia-video-codec-sdk` +
 //! cudarc).
 //!
-//! Linux only, behind the `nvenc` feature. The NVENC API lives in the driver
+//! Linux only, always-on (cfg-gated). The NVENC API lives in the driver
 //! (`libnvidia-encode.so`) and cudarc loads CUDA dynamically, so this is not a
 //! build-time dependency on the CUDA toolkit. NVENC emits Annex-B with in-band
 //! parameter sets (SPS/PPS for H.264, VPS/SPS/PPS for H.265), matching the
@@ -65,6 +65,18 @@ impl Nvenc {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"nvenc requires a width that is a multiple of 64 (got {})",
 				config.width
+			)));
+		}
+
+		// cudarc and the NVENC SDK dlopen their driver libraries lazily and
+		// *panic* (which aborts the process, since release builds set
+		// `panic = "abort"`) when a library is missing, e.g. on a host with no
+		// NVIDIA driver. With hardware encoders always-on, `Kind::Auto` (the
+		// default) hits this on every GPU-less Linux box, so probe the libraries
+		// up front and return an error to fall back to the next encoder.
+		if !driver_libs_present() {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"NVIDIA driver libraries not found (libcuda / libnvidia-encode); NVENC unavailable"
 			)));
 		}
 
@@ -174,5 +186,45 @@ impl Backend for Nvenc {
 
 	fn name(&self) -> &str {
 		NAME
+	}
+}
+
+/// Whether both NVIDIA driver libraries NVENC needs can be dlopen'd: libcuda
+/// (used by cudarc) and libnvidia-encode (the NVENC API). Each crate loads its
+/// library lazily and panics if it's absent, so we probe the same names here
+/// first and turn a missing driver into a recoverable `Err`.
+fn driver_libs_present() -> bool {
+	// libcuda is the CUDA driver API; matches cudarc's "cuda" search.
+	const CUDA: &[&str] = &["libcuda.so.1", "libcuda.so"];
+	// Matches the NVENC SDK's own dynamic-loading candidate list.
+	const NVENC: &[&str] = &["libnvidia-encode.so.1", "libnvidia-encode.so"];
+
+	// SAFETY: we only open the library to test presence and immediately drop the
+	// handle; we never call into it. Loading runs the library's initializers,
+	// which is sound for these driver libs.
+	let loadable = |names: &[&str]| {
+		names
+			.iter()
+			.any(|name| unsafe { libloading::Library::new(*name) }.is_ok())
+	};
+	loadable(CUDA) && loadable(NVENC)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::encode::Config;
+
+	/// On a host without the NVIDIA driver, opening NVENC must return an `Err`
+	/// (so `Kind::Auto` falls back) rather than panicking in cudarc / the NVENC
+	/// SDK loader. On a box that does have the driver this is a no-op.
+	#[test]
+	fn missing_driver_errors_instead_of_panicking() {
+		if driver_libs_present() {
+			return; // real driver present: open() would legitimately try to run
+		}
+		// width % 64 == 0 so we get past the pitch guard to the driver probe.
+		let config = Config::new(1920, 1080, 30);
+		assert!(Nvenc::open(&config).is_err());
 	}
 }

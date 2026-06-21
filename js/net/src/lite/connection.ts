@@ -4,19 +4,20 @@ import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
-import { type Reader, Readers, Stream } from "../stream.ts";
+import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
-import { AnnounceInterest } from "./announce.ts";
+import { AnnounceRequest } from "./announce.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { type Origin, randomOrigin } from "./origin.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { StreamId } from "./stream.ts";
+import { ProbeLevel, Setup } from "./setup.ts";
+import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { Version, versionName } from "./version.ts";
+import { hasSetupStream, Version, versionName } from "./version.ts";
 
 const SEND_BW_POLL_INTERVAL = 100; // ms
 
@@ -60,6 +61,11 @@ export class Connection implements Established {
 	 * chains) and Subscriber (available for optional self-filtering on announces). */
 	readonly origin: Origin;
 
+	// The peer's SETUP, recorded once its Setup stream is read (lite-05+). Streams whose
+	// encoding depends on a negotiated capability (e.g. PROBE) wait on this. undefined
+	// until the peer's SETUP arrives; stays undefined forever on older drafts.
+	#peerSetup = new Signal<Setup | undefined>(undefined);
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -92,7 +98,14 @@ export class Connection implements Established {
 
 		this.origin = randomOrigin();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.origin, this.recvBandwidth, this.rtt);
+		this.#subscriber = new Subscriber(
+			this.#quic,
+			this.#version,
+			this.origin,
+			this.recvBandwidth,
+			this.rtt,
+			this.#peerSetup,
+		);
 
 		this.#run();
 	}
@@ -114,6 +127,10 @@ export class Connection implements Established {
 
 	async #run(): Promise<void> {
 		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
+
+		if (hasSetupStream(this.#version)) {
+			tasks.push(this.#sendSetup());
+		}
 
 		if (this.sendBandwidth) {
 			tasks.push(this.#runSendBandwidth(this.sendBandwidth));
@@ -159,6 +176,22 @@ export class Connection implements Established {
 		}
 	}
 
+	// Open the unidirectional Setup Stream, send our single SETUP, and FIN (lite-05+).
+	// The browser uses WebTransport, which carries the request URI, so we advertise no
+	// path and leave routing to the URL. We advertise probe = Report (we measure and
+	// report bitrate over the PROBE stream, but don't actively pad the connection).
+	async #sendSetup(): Promise<void> {
+		const writer = await Writer.open(this.#quic);
+		try {
+			await writer.u8(DataType.Setup);
+			await new Setup(ProbeLevel.Report).encode(writer, this.#version);
+			writer.close();
+		} catch (err: unknown) {
+			writer.reset(err);
+			throw err;
+		}
+	}
+
 	async #runBidis() {
 		for (;;) {
 			const stream = await Stream.accept(this.#quic);
@@ -180,7 +213,7 @@ export class Connection implements Established {
 		if (typ === StreamId.Session) {
 			throw new Error("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
-			const msg = await AnnounceInterest.decode(stream.reader, this.#version);
+			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
@@ -217,9 +250,14 @@ export class Connection implements Established {
 
 	async #runUni(stream: Reader) {
 		const typ = await stream.u8();
-		if (typ === 0) {
+		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream);
 			await this.#subscriber.runGroup(msg, stream);
+		} else if (typ === DataType.Setup) {
+			// The peer sends exactly one SETUP, then FINs. Record it so capability-gated
+			// streams (e.g. PROBE) can react, then drain to the FIN.
+			const setup = await Setup.decode(stream, this.#version);
+			this.#peerSetup.set(setup);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
