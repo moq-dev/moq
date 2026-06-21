@@ -455,7 +455,7 @@ impl<E: scte35::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Serialize a fresh PAT + PMT into a chunk.
+	/// Name of the track whose pending frame has the smallest timestamp.
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()

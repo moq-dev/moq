@@ -246,6 +246,12 @@ async fn serve_request(origin: OriginConsumer, path: &str, mut socket: srt_tokio
 	// burst is released at the media rate instead of all at once. (The Instant
 	// passed to `send` is the packet's origin time feeding TSBPD, not a "send now"
 	// instruction; `Instant::now()` would collapse the spacing into a burst.)
+	//
+	// We pace on the frame's presentation timestamp (the only clock the muxer
+	// exposes) while frames transmit in decode order, so a B-frame stream's
+	// per-GOP reorder leaves `send_at` slightly non-monotonic. That's harmless:
+	// `saturating_sub` keeps it >= the anchor, and the receiver reorders from the
+	// PTS/DTS carried inside the TS payload regardless.
 	let anchor = Instant::now();
 	let mut base = None;
 	let mut send_at = anchor;
