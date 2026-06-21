@@ -43,7 +43,7 @@ capture still pulls in `libav*`. This proposal replaces encode **and** capture.
 |---|---|---|---|
 | VideoToolbox (macOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
 | NVENC (NVIDIA) | [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) (0.4) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), loaded at runtime. No build-time SDK linking. |
-| VAAPI (Intel/AMD) | [`moq-vaapi`](../moq-vaapi) (in-tree; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | `dlopen`s `libva` at runtime; libva `dlopen`s the GPU driver. Build needs libva headers for bindgen. |
+| VAAPI (Intel/AMD) | [`moq-vaapi`](https://crates.io/crates/moq-vaapi) `0.0.2` (published; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | As of 0.0.2 *links* `libva` (`NEEDED libva.so.2`), build needs libva-dev; `dlopen` (no NEEDED, no build dep) is intended but not yet realized, see #1837. |
 | Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
 
 Decisions and rationale:
@@ -259,7 +259,9 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 - **Linux**: one binary that
 
   - `dlopen`s `libnvidia-encode` if an NVIDIA driver is present (no build dep),
-  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev),
+  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev) — *intended*;
+    moq-vaapi 0.0.2 currently links libva instead, so this isn't realized yet
+    (see #1837),
   - falls back to the always-compiled-in openh264 when no GPU encoder is usable.
 
   That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
@@ -391,6 +393,13 @@ actively-maintained fork (Discord ships it for Go Live) that bumps to cros-libva
 links on a libva-less builder and loads on a libva-less machine, falling back to
 software (see `backend::open`). The build still needs libva *headers* for
 cros-libva's bindgen, so `libva` is in the nix devShell.
+
+> **Status (moq-vaapi 0.0.2): not yet realized.** The published `moq-vaapi` crate
+> we depend on today *links* libva via `pkg_config` (its `build.rs` probes `libva`
+> and `libva-drm`), so the binary carries `NEEDED libva.so.2` / `libva-drm.so.2`
+> and needs libva at both build and run time; a libva-less host fails to load
+> rather than falling back. Restoring the `dlopen` path in `moq-vaapi` (so this
+> section holds) is tracked in #1837.
 
 **Input is an NV12 surface upload, not zero-copy dmabuf.** The encoder wants an
 NV12 VA surface, but UVC webcams deliver YUYV/MJPEG (decoded to CPU I420); they

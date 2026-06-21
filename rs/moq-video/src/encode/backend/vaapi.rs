@@ -2,9 +2,16 @@
 //!
 //! `moq-vaapi` is a focused VA-API H.264 encoder vendored and trimmed from
 //! cros-libva + discord/cros-codecs. It takes tightly-packed NV12 and emits an
-//! Annex-B elementary stream with in-band SPS/PPS, matching avc3 mode. libva is
-//! dlopen'd at runtime, so this links without libva and the binary loads on
-//! machines without it, falling back to software (see [`backend::open`]).
+//! Annex-B elementary stream with in-band SPS/PPS, matching avc3 mode.
+//!
+//! As of moq-vaapi 0.0.2 libva is dynamically *linked* (the binary carries
+//! `NEEDED libva.so.2` / `libva-drm.so.2`), so a VAAPI-enabled Linux build needs
+//! libva present at runtime: a libva-less host fails to load the binary, before
+//! [`backend::open`](super::open) can fall back. A present-but-unusable VA stack
+//! (no render node, no usable driver) *does* fall back: `Encoder::new` returns an
+//! error and `backend::open` moves on to openh264. Making moq-vaapi `dlopen` libva
+//! (one portable binary that loads and falls back on a libva-less box, like the
+//! NVENC backend) is tracked in #1837.
 //!
 //! Our captures hand us CPU I420 (webcams deliver YUYV/MJPEG, decoded to I420),
 //! so each frame is interleaved to NV12 before encoding.

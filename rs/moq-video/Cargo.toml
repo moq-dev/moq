@@ -45,10 +45,12 @@ cudarc = { version = "0.19", default-features = false, features = ["driver", "fa
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
 libloading = "0.8"
-# Intel/AMD VAAPI hardware encoder, always-on for Linux. Builds against its own
-# vendored libva headers and dlopen's libva at runtime, so it builds without
-# system libva-dev and still loads on machines without libva, falling back to the
-# next encoder (see backend::open).
+# Intel/AMD VAAPI hardware encoder, always-on for Linux. As of moq-vaapi 0.0.2
+# libva is dynamically linked via pkg-config (the binary carries NEEDED
+# libva.so.2 / libva-drm.so.2), so a Linux build needs libva at build time and
+# the binary needs it at runtime: a libva-less host fails to load rather than
+# falling back. Switching moq-vaapi to dlopen libva (one portable binary that
+# falls back like the NVENC backend) is tracked in #1837.
 moq-vaapi = { workspace = true }
 # default-features off so the crate's `cuda-version-from-build-system` default
 # stays off: we pin the CUDA version via our own cudarc dep (cuda-12020) instead,
