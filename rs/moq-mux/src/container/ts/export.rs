@@ -120,8 +120,9 @@ struct PesUnit {
 	is_video: bool,
 	keyframe: bool,
 	timestamp: crate::container::Timestamp,
-	/// Authored decode timestamp (90 kHz ticks) for a reordered (B-frame) video frame.
-	/// `Some` only when it differs from the PTS; the PES then carries both PTS and DTS.
+	/// Authored decode timestamp for a reordered (B-frame) video frame, in continuous
+	/// (unwrapped) 90 kHz ticks (wrapped to the wire field in `write_pes`). `Some` only when
+	/// it differs from the PTS; the PES then carries both PTS and DTS.
 	dts: Option<u64>,
 	/// Explicit PES stream_id (verbatim PES); `None` derives it from `is_video`.
 	stream_id: Option<u8>,
@@ -602,7 +603,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// Author a monotonic decode timeline for reordered video (B-frames). Other kinds
 		// never reorder, so DTS == PTS and the PES stays PTS-only.
 		let dts = if is_video {
-			let pts = to_ts_timestamp(frame.timestamp)?.as_u64();
+			let pts = to_ticks(frame.timestamp);
 			author_dts(pts, &mut self.tracks.get_mut(name).context("missing track")?.last_dts)
 		} else {
 			None
@@ -654,10 +655,11 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Packetize a PES payload into 188-byte TS packets.
 	fn write_pes(&mut self, out: &mut Vec<u8>, unit: &PesUnit, payload: &[u8]) -> anyhow::Result<()> {
 		let pts = to_ts_timestamp(unit.timestamp)?;
-		// A reordered video frame carries DTS (90 kHz ticks) alongside PTS; else PTS-only.
+		// A reordered video frame carries DTS alongside PTS; else PTS-only. The decode clock
+		// is continuous ticks, so wrap into the 33-bit wire field here, like the PTS.
 		let dts = unit
 			.dts
-			.map(|t| TsTimestamp::new(t).map_err(anyhow::Error::msg))
+			.map(|t| TsTimestamp::new(t & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg))
 			.transpose()?;
 		let stream_id = match unit.stream_id {
 			Some(id) => StreamId::new(id),
@@ -811,12 +813,12 @@ impl<E: catalog::Catalog> Export<E> {
 const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
 const PES_DTS_LEN: usize = 5;
-/// Decode-clock reserve (90 kHz ticks, 0.25 s): how far before its PTS a video frame is
+/// Decode-clock reserve (90 kHz ticks, 1 s): how far before its PTS a video frame is
 /// scheduled to decode, leaving room for reordered (B-)frames to slot under their PTS. See
 /// [`author_dts`]. This is decode lead time, not presentation latency (frames still show at
 /// their PTS), so it is nearly free; it only needs to exceed the largest reorder span
-/// (max consecutive B-frames x frame duration), which it does for broadcast contribution.
-const DTS_RESERVE: u64 = 90_000 / 4;
+/// (max consecutive B-frames x frame duration), and 1 s covers any broadcast structure.
+const DTS_RESERVE: u64 = 90_000;
 
 fn psi_interval() -> crate::container::Timestamp {
 	crate::container::Timestamp::try_from(PSI_INTERVAL).unwrap_or(crate::container::Timestamp::ZERO)
@@ -828,11 +830,19 @@ fn adaptation_size(af: &AdaptationField) -> usize {
 	2 + if af.pcr.is_some() { 6 } else { 0 }
 }
 
+/// The 33-bit wire timestamp field (90 kHz). DTS and PTS both wrap into it.
+const TS_TIMESTAMP_MASK: u64 = (1 << 33) - 1;
+
+/// Continuous (unwrapped) 90 kHz tick count for a media timestamp. The decode clock runs in
+/// this domain so it never wraps mid-stream (the source timestamps are already unwrapped);
+/// [`to_ts_timestamp`] masks to the 33-bit wire field only at emission.
+fn to_ticks(timestamp: crate::container::Timestamp) -> u64 {
+	(timestamp.as_micros() * 90_000 / 1_000_000) as u64
+}
+
 fn to_ts_timestamp(timestamp: crate::container::Timestamp) -> anyhow::Result<TsTimestamp> {
-	// micros -> 90 kHz, wrapped into the 33-bit field.
-	let micros = timestamp.as_micros();
-	let ticks = (micros * 90_000 / 1_000_000) as u64 & ((1 << 33) - 1);
-	TsTimestamp::new(ticks).map_err(anyhow::Error::msg)
+	// Continuous 90 kHz ticks, wrapped into the 33-bit field.
+	TsTimestamp::new(to_ticks(timestamp) & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg)
 }
 
 fn video_kind(config: &VideoConfig, name: &str) -> anyhow::Result<Kind> {
@@ -922,7 +932,7 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 	}
 }
 
-/// Author a monotonic decode timestamp (DTS, 90 kHz) for a video frame.
+/// Author a monotonic decode timestamp (DTS) for a video frame, in continuous 90 kHz ticks.
 ///
 /// [`Frame`] carries only a presentation timestamp (PTS) and frames reach the muxer in
 /// decode order (MoQ groups and frames are delivered in decode order), so a B-frame stream
@@ -934,8 +944,12 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 /// increasing. We run a decode clock [`DTS_RESERVE`] ticks behind the PTS and never let it
 /// go backwards: a reordered frame whose PTS dips below the clock is nudged one tick past
 /// the last DTS instead. The reserve gives the reorder room to land under each frame's own
-/// PTS (`DTS <= PTS`) for broadcast B-frame spans. `last` is the previous DTS, updated in
-/// place. Returns `None` when the DTS equals the PTS, so the PES stays PTS-only.
+/// PTS (`DTS <= PTS`) for broadcast B-frame spans.
+///
+/// `pts` and `last` are continuous (unwrapped) ticks, so the clock never wraps mid-stream;
+/// the 33-bit wire wrap happens once at emission in [`write_pes`]. `last` is the previous
+/// DTS, updated in place. Returns `None` when the DTS equals the PTS, so the PES stays
+/// PTS-only.
 fn author_dts(pts: u64, last: &mut Option<u64>) -> Option<u64> {
 	let mut dts = pts.saturating_sub(DTS_RESERVE);
 	if let Some(prev) = *last
@@ -943,8 +957,6 @@ fn author_dts(pts: u64, last: &mut Option<u64>) -> Option<u64> {
 	{
 		dts = prev + 1;
 	}
-	// Wrap into the 33-bit field, matching the PTS in `to_ts_timestamp`.
-	dts &= (1 << 33) - 1;
 	*last = Some(dts);
 	(dts != pts).then_some(dts)
 }
@@ -994,6 +1006,27 @@ mod tests {
 			for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
 				assert!(d <= p, "b={b}: DTS {d} after PTS {p} at {i}");
 			}
+		}
+	}
+
+	#[test]
+	fn dts_clock_survives_33bit_wrap() {
+		// The decode clock runs in continuous ticks, so it must stay monotonic and under PTS
+		// even as the source timeline crosses the 33-bit wire boundary (~26.5 h). The wrap is
+		// applied only at emission, so here the authored DTS keeps climbing past 1 << 33.
+		let wrap = 1u64 << 33;
+		let pts = decode_order(40, 3, 3_600, wrap - 20 * 3_600);
+		let dts = run_clock(&pts);
+
+		assert!(pts.iter().any(|&p| p >= wrap), "test must cross the wrap boundary");
+		for (i, win) in dts.windows(2).enumerate() {
+			assert!(
+				win[1] > win[0],
+				"DTS not strictly increasing across wrap at {i}: {win:?}"
+			);
+		}
+		for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
+			assert!(d <= p, "DTS {d} after PTS {p} across wrap at {i}");
 		}
 	}
 
