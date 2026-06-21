@@ -408,34 +408,32 @@ broadcast through an archive-owned `BroadcastProducer`, re-`accept`ing every `re
 re-`subscribe`ing upstream), i.e. reimplementing the relay's fan-out around the archive. That
 is the "wire a fallback chain" cost, and it is large.
 
-### C. The moq-net seam (what actually makes the relay one line)
+### C. The moq-net seam: a concrete per-track cache (no trait, no callback)
 
-Give moq-net a pluggable cache backend that it consults on a miss and notifies on eviction,
-attached where it already owns the per-track RAM cache (the origin, flowing down to each
-`TrackProducer`). The archive implements the trait; the relay attaches it once.
+Rather than a `Cache` trait moq-net calls back into (rejected in review: no inversion of
+control), the storage lives in a concrete `CacheConfig` value owned by each `TrackProducer`.
+moq-net retains and serves groups itself, spilling to disk or remote object storage per the
+config. The relay attaches a config; the archive crate just provides the tier setup and reads
+the spilled segments. See [`../moq-net/CACHE.md`](../moq-net/CACHE.md) for the full spike.
 
 ```rust
-// moq-net (new): the one hook the relay can't get from outside is *when* a group is evicted.
-pub trait Cache: Send + Sync + 'static {
-    /// A group aged out of the RAM cache. Persist it (called with the finished group).
-    fn store(&self, track: &TrackInfo, group: GroupConsumer);
+// moq-net (new): local cache policy, per-track, never on the wire.
+let config = moq_net::CacheConfig {
+    ram: bounds(20.s(), 30.s()),          // keep 20-30s in RAM
+    disk: Some(disk_tier(path, 4.m(), 5.m())),
+    remote: Some(remote_tier(s3, 30.days())),
+    ..Default::default()
+};
 
-    /// A consumer fetched a group not in RAM. Produce it from storage into `request`,
-    /// or return it unserved so moq-net falls through to the upstream wire FETCH.
-    async fn fetch(&self, track: &TrackInfo, request: GroupRequest);
-}
-
-impl moq_net::Cache for Archive { /* store -> writer, fetch -> reader */ }
-
-// moq-relay: the entire integration.
-let origin = Origin::random().produce().with_cache(archive);
+// each track the relay creates: producer.with_cache(config.clone())
 ```
 
-Now the relay keeps working at the origin level, the per-track plumbing stays inside moq-net,
-and the archive transparently catches evictions (the natural flush trigger) and serves misses
-before they cost an upstream round-trip. This is the recommended shape; it makes the public
-`Archive` a `Cache` impl plus the standalone `record`/`serve` helpers from scenario A, rather
-than the chain wiring. Decision needed before the API is locked (see open question 1).
+Retention is per-track `[min, max]` bounds with a watermark flush (the `max - min` band becomes
+one segment, so audio does not produce a file per frame). There is no eviction callback: the
+archive learns what to persist because moq-net writes the spilled segments directly in the
+shared on-tier format. This keeps the relay declarative (config, not loops) and keeps storage
+concerns out of moq-net's behavior surface. Decision settled; the open API work is threading one
+config onto the tracks moq-net auto-creates during fan-out (the Origin follow-up).
 
 ## Binary
 
@@ -462,11 +460,11 @@ returns `NotFound`.
 
 ## Open questions
 
-1. **moq-net integration (the big one).** Should the cache-fallback-plus-record behavior live
-   inside `moq_net::TrackProducer` / `TrackConsumer` instead of being wired as a chain by the
-   caller? Friendlier API and moq-net would know exactly when a group leaves its RAM cache (the
-   natural flush trigger), at the cost of putting storage concerns in the core wire types. See
-   the architecture section. Decide before locking the public API.
+1. **moq-net integration.** Settled on a concrete per-track `CacheConfig` owned by
+   `TrackProducer` (no trait, no callback); see scenario C and [`../moq-net/CACHE.md`](../moq-net/CACHE.md).
+   The remaining work is on the moq-net side: threading one config onto the tracks moq-net
+   auto-creates during fan-out, removing `TrackInfo.cache`, and (separately) the Origin split
+   that lets a relay register dynamic broadcast/track handlers.
 2. **Restart/recovery.** Rebuild the in-RAM `BTreeMap` from each track manifest on startup;
    refetch segment footers lazily. Crash-consistency: write the segment object (footer last)
    before appending to the manifest, so a half-written segment is simply unreferenced and a
