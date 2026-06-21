@@ -66,10 +66,10 @@ async fn drain_with<E: scte35::Catalog>(mut exporter: Export<E>) -> BytesMut {
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
-		let Some(chunk) = res.expect("exporter error") else {
+		let Some(frame) = res.expect("exporter error") else {
 			break;
 		};
-		out.extend_from_slice(&chunk);
+		out.extend_from_slice(&frame.payload);
 	}
 	out
 }

@@ -212,7 +212,7 @@ async fn import_export_import_roundtrip() {
 	let mut out = BytesMut::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 		match res.expect("exporter error") {
-			Some(chunk) => out.extend_from_slice(&chunk),
+			Some(frame) => out.extend_from_slice(&frame.payload),
 			None => break,
 		}
 	}
