@@ -13,9 +13,11 @@
 //! `Consumer` is `Clone` and shares the same store, so one cache backs both a track's producer and
 //! its consumer.
 //!
-//! The disk and remote tiers and the [`crate::TrackProducer`] / [`crate::TrackConsumer`] wiring
-//! are not implemented yet; see `rs/moq-net/CACHE.md`. This module is the RAM tier and the
-//! eviction policy it builds on.
+//! The `segment` submodule is the on-disk byte format used by the disk and remote tiers (a band
+//! of groups serialized as one self-describing object) plus the rollup that concatenates several
+//! small segments into one larger object. The tier I/O (object_store) and the
+//! [`crate::TrackProducer`] / [`crate::TrackConsumer`] wiring are not implemented yet; see
+//! `rs/moq-net/CACHE.md`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +26,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::Timestamp;
+
+pub mod segment;
 
 /// A cache bound, as a duration, a byte count, or both (the first to trip wins).
 ///
@@ -54,7 +58,7 @@ impl Limit {
 		}
 	}
 
-	/// Whether either set threshold is unset (so the limit imposes no ceiling).
+	/// Whether both thresholds are unset (so the limit imposes no ceiling).
 	fn is_unset(&self) -> bool {
 		self.duration.is_none() && self.bytes.is_none()
 	}
@@ -97,23 +101,38 @@ impl Config {
 	}
 }
 
-/// One cached group: enough to re-serve it or serialize it to a lower tier.
+/// One frame within a cached group: its optional media timestamp and its payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+	/// The frame's media timestamp, if the track carries them.
+	pub timestamp: Option<Timestamp>,
+	/// The frame's payload bytes.
+	pub payload: Bytes,
+}
+
+/// One cached group: its sequence and frames, enough to re-serve it or serialize it to a tier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
 	/// The group's sequence number within its track.
 	pub sequence: u64,
 	/// The group's frames, in order.
-	pub frames: Vec<Bytes>,
-	/// Media timestamp of the first frame, if known. Drives the duration bound.
-	pub ts_first: Option<Timestamp>,
-	/// Media timestamp of the last frame, if known. Drives the duration bound.
-	pub ts_last: Option<Timestamp>,
+	pub frames: Vec<Frame>,
 }
 
 impl Group {
 	/// Total size of the group's frame payloads in bytes.
 	pub fn size(&self) -> u64 {
-		self.frames.iter().map(|f| f.len() as u64).sum()
+		self.frames.iter().map(|f| f.payload.len() as u64).sum()
+	}
+
+	/// The first frame's media timestamp, if any. Used as the group's lower time bound.
+	pub fn ts_first(&self) -> Option<Timestamp> {
+		self.frames.first().and_then(|f| f.timestamp)
+	}
+
+	/// The last frame's media timestamp, if any. Used as the group's upper time bound.
+	pub fn ts_last(&self) -> Option<Timestamp> {
+		self.frames.last().and_then(|f| f.timestamp)
 	}
 }
 
@@ -134,8 +153,8 @@ impl State {
 	/// Zero unless both ends carry a timestamp, so a track without media timestamps applies no
 	/// duration pressure (byte bounds still apply).
 	fn span(&self) -> Duration {
-		let first = self.ram.values().next().and_then(|g| g.ts_first);
-		let last = self.ram.values().next_back().and_then(|g| g.ts_last);
+		let first = self.ram.values().next().and_then(|g| g.ts_first());
+		let last = self.ram.values().next_back().and_then(|g| g.ts_last());
 		match (first, last) {
 			(Some(a), Some(b)) => Duration::from(b).saturating_sub(Duration::from(a)),
 			_ => Duration::ZERO,
@@ -283,25 +302,44 @@ impl Consumer {
 mod tests {
 	use super::*;
 
-	/// A group of `count` frames of `each` bytes, at sequence `seq`, spanning `[ts0, ts1]` micros.
-	fn group(seq: u64, count: usize, each: usize, ts: Option<(u64, u64)>) -> Group {
-		Group {
-			sequence: seq,
-			frames: vec![Bytes::from(vec![0u8; each]); count],
-			ts_first: ts.map(|(a, _)| Timestamp::from_micros(a).unwrap()),
-			ts_last: ts.map(|(_, b)| Timestamp::from_micros(b).unwrap()),
+	/// A frame of `bytes` zero bytes at an optional micros timestamp.
+	fn frame(bytes: usize, ts_micros: Option<u64>) -> Frame {
+		Frame {
+			timestamp: ts_micros.map(|t| Timestamp::from_micros(t).unwrap()),
+			payload: Bytes::from(vec![0u8; bytes]),
 		}
 	}
 
-	/// A small group with no timestamps at the given sequence.
+	/// A one-frame group with no timestamp at the given sequence.
 	fn plain(seq: u64, bytes: usize) -> Group {
-		group(seq, 1, bytes, None)
+		Group {
+			sequence: seq,
+			frames: vec![frame(bytes, None)],
+		}
+	}
+
+	/// A two-frame group spanning `[t0, t1]` micros, total `bytes`.
+	fn timed(seq: u64, bytes: usize, t0: u64, t1: u64) -> Group {
+		Group {
+			sequence: seq,
+			frames: vec![frame(bytes / 2, Some(t0)), frame(bytes - bytes / 2, Some(t1))],
+		}
 	}
 
 	#[test]
 	fn size_sums_frame_bytes() {
-		let g = group(0, 3, 10, None);
+		let g = Group {
+			sequence: 0,
+			frames: vec![frame(10, None), frame(10, None), frame(10, None)],
+		};
 		assert_eq!(g.size(), 30);
+	}
+
+	#[test]
+	fn ts_first_and_last() {
+		let g = timed(0, 8, 100, 900);
+		assert_eq!(g.ts_first(), Some(Timestamp::from_micros(100).unwrap()));
+		assert_eq!(g.ts_last(), Some(Timestamp::from_micros(900).unwrap()));
 	}
 
 	#[test]
@@ -424,10 +462,9 @@ mod tests {
 		// seq 0: [0,1]s, seq 1: [1,2]s, seq 2: [2,3]s, seq 3: [3,4]s
 		for seq in 0..4u64 {
 			let t0 = seq * 1_000_000;
-			producer.insert(group(seq, 1, 10, Some((t0, t0 + 1_000_000))));
+			producer.insert(timed(seq, 10, t0, t0 + 1_000_000));
 		}
 
-		// The window cannot span more than ~2s, so the oldest groups were evicted.
 		assert!(consumer.contains(3), "latest kept");
 		assert!(!consumer.contains(0), "oldest evicted");
 		assert!(producer.len() <= 2, "len was {}", producer.len());
@@ -465,7 +502,6 @@ mod tests {
 		for seq in 10..14 {
 			producer.insert(plain(seq, 20));
 		}
-		// Now insert a much older sequence; the band drains oldest-first.
 		let batch = producer.insert(plain(0, 20));
 		assert!(batch.is_some());
 		assert_eq!(producer.latest(), Some(13));

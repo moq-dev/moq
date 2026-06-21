@@ -1,9 +1,15 @@
 # moq-net track cache (spike)
 
-> Status: the RAM tier and eviction policy are implemented in `src/model/cache.rs` (module
-> `moq_net::cache`, with unit tests). The disk/remote tiers and the `TrackProducer` /
-> `TrackConsumer` wiring are still design. Targets `dev`: it removes a public/wire field
-> (`TrackInfo.cache`) and adds local API to the track endpoints.
+> Status: implemented in `src/model/cache/` (module `moq_net::cache`, with unit tests):
+> - the RAM tier and watermark eviction policy (`mod.rs`);
+> - the on-disk **segment byte format** and **rollup** compaction (`segment.rs`): lossless
+>   per-frame encode/decode (raw timestamp value+scale, so any timescale round-trips), a
+>   self-describing footer offset table read from a fixed trailer, and `rollup` to concatenate
+>   small segments into one larger object.
+>
+> Still design: the tier I/O (object_store `put`/`get_range` + the disk-tier watermark and the
+> seq->location index) and the `TrackProducer` / `TrackConsumer` wiring. Targets `dev`: it
+> removes a public/wire field (`TrackInfo.cache`) and adds local API to the track endpoints.
 
 A per-track group cache. It lets a relay or edge retain recent groups past the live window and
 serve them back on a FETCH, optionally spilling to local disk or remote object storage. This is
