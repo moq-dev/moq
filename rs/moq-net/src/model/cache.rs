@@ -3,15 +3,15 @@
 //! A cache is local policy attached to a single track, independent of any retention the original
 //! publisher set (it is never carried on the wire). It keeps a `[min, max]` window of recent
 //! groups in RAM. When an insert pushes the window past the high watermark (`max`), the oldest
-//! groups down to the low watermark (`min`) are drained as one [`Batch`], which the caller hands
-//! to the next tier (disk or remote object storage). Draining a whole band at once is what keeps
-//! a low-latency track (audio makes a group per frame) from producing one tiny object per group;
-//! an LRU, which evicts a single item the instant the budget trips, cannot batch.
+//! groups down to the low watermark (`min`) are drained as one `Batch`, which the caller hands to
+//! the next tier (disk or remote object storage). Draining a whole band at once is what keeps a
+//! low-latency track (audio makes a group per frame) from producing one tiny object per group; an
+//! LRU, which evicts a single item the instant the budget trips, cannot batch.
 //!
-//! The cache is split into a write half ([`Producer`]) and a read half ([`Consumer`]), mirroring
-//! the rest of moq-net. [`Producer`] is intentionally not `Clone` (a single writer fills the
-//! cache); [`Consumer`] is `Clone` and shares the same store, so one cache backs both a track's
-//! producer and its consumer.
+//! The cache is split into a write half (`Producer`) and a read half (`Consumer`), mirroring the
+//! rest of moq-net. `Producer` is intentionally not `Clone` (a single writer fills the cache);
+//! `Consumer` is `Clone` and shares the same store, so one cache backs both a track's producer and
+//! its consumer.
 //!
 //! The disk and remote tiers and the [`crate::TrackProducer`] / [`crate::TrackConsumer`] wiring
 //! are not implemented yet; see `rs/moq-net/CACHE.md`. This module is the RAM tier and the
