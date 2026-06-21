@@ -74,9 +74,9 @@ struct Track {
 	/// PMT ES-level descriptors to re-announce, captured verbatim on import (language,
 	/// registration, ...). Empty for non-TS sources; AC-3/E-AC-3 then synthesize one.
 	descriptors: Vec<catalog::Descriptor>,
-	/// Last decode timestamp (90 kHz) authored for this track, so the decode clock stays
-	/// monotonic across reordered (B-frame) video. Only video uses it.
-	last_dts: Option<u64>,
+	/// Decode-clock state for reordered (B-frame) video, authoring a monotonic DTS. Only
+	/// video drives it; audio and verbatim streams leave it untouched.
+	dts_clock: DtsClock,
 }
 
 #[derive(Clone)]
@@ -412,7 +412,7 @@ impl<E: catalog::Catalog> Export<E> {
 				pid,
 				kind,
 				descriptors,
-				last_dts: None,
+				dts_clock: DtsClock::default(),
 			},
 		);
 	}
@@ -604,7 +604,11 @@ impl<E: catalog::Catalog> Export<E> {
 		// never reorder, so DTS == PTS and the PES stays PTS-only.
 		let dts = if is_video {
 			let pts = to_ticks(frame.timestamp);
-			author_dts(pts, &mut self.tracks.get_mut(name).context("missing track")?.last_dts)
+			self.tracks
+				.get_mut(name)
+				.context("missing track")?
+				.dts_clock
+				.author(pts)
 		} else {
 			None
 		};
@@ -813,12 +817,15 @@ impl<E: catalog::Catalog> Export<E> {
 const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
 const PES_DTS_LEN: usize = 5;
-/// Decode-clock reserve (90 kHz ticks, 1 s): how far before its PTS a video frame is
-/// scheduled to decode, leaving room for reordered (B-)frames to slot under their PTS. See
-/// [`author_dts`]. This is decode lead time, not presentation latency (frames still show at
-/// their PTS), so it is nearly free; it only needs to exceed the largest reorder span
-/// (max consecutive B-frames x frame duration), and 1 s covers any broadcast structure.
-const DTS_RESERVE: u64 = 90_000;
+/// Decode-clock lead, in frames: how far ahead of its PTS each video frame is scheduled to
+/// decode. It must exceed the stream's reorder depth (how many frames a reference is decoded
+/// ahead of the B-frames that depend on it), which open-GOP / B-pyramid structures push past
+/// the raw consecutive-B count: a real 1080i contribution feed (kyrion) reorders 5 frames
+/// deep with only 3 consecutive B-frames. 8 covers that plus typical pyramids; a deeper
+/// stream still gets a monotonic DTS (the `+igndts` fix), just not guaranteed `DTS <= PTS`.
+/// Sizing the reserve in frames (via the measured frame duration) keeps the advertised decode
+/// buffer to a few frames instead of a fixed wall-clock slab. See [`DtsClock`].
+const RESERVE_FRAMES: u64 = 8;
 
 fn psi_interval() -> crate::container::Timestamp {
 	crate::container::Timestamp::try_from(PSI_INTERVAL).unwrap_or(crate::container::Timestamp::ZERO)
@@ -932,7 +939,7 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 	}
 }
 
-/// Author a monotonic decode timestamp (DTS) for a video frame, in continuous 90 kHz ticks.
+/// Authors a monotonic decode timestamp (DTS) for a reordered (B-frame) video track.
 ///
 /// [`Frame`] carries only a presentation timestamp (PTS) and frames reach the muxer in
 /// decode order (MoQ groups and frames are delivered in decode order), so a B-frame stream
@@ -941,35 +948,58 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 /// `ffplay -fflags +igndts` workaround).
 ///
 /// Since decode order is already the delivery order, the only job is to keep DTS strictly
-/// increasing. We run a decode clock [`DTS_RESERVE`] ticks behind the PTS and never let it
-/// go backwards: a reordered frame whose PTS dips below the clock is nudged one tick past
-/// the last DTS instead. The reserve gives the reorder room to land under each frame's own
-/// PTS (`DTS <= PTS`) for broadcast B-frame spans.
+/// increasing. The clock runs [`RESERVE_FRAMES`] frame-durations behind the PTS and never
+/// goes backwards: a reordered frame whose PTS dips below the clock is nudged one tick past
+/// the last DTS. The reserve gives the reorder room to land under each frame's own PTS
+/// (`DTS <= PTS`); sizing it in frames (from the measured duration) keeps the advertised
+/// decode buffer to a few frames rather than a fixed wall-clock slab.
 ///
-/// `pts` and `last` are continuous (unwrapped) ticks, so the clock never wraps mid-stream;
-/// the 33-bit wire wrap happens once at emission in [`write_pes`]. `last` is the previous
-/// DTS, updated in place. Returns `None` when the DTS equals the PTS, so the PES stays
-/// PTS-only.
-fn author_dts(pts: u64, last: &mut Option<u64>) -> Option<u64> {
-	let mut dts = pts.saturating_sub(DTS_RESERVE);
-	if let Some(prev) = *last
-		&& dts <= prev
-	{
-		dts = prev + 1;
+/// All values are continuous (unwrapped) 90 kHz ticks, so the clock never wraps mid-stream;
+/// the 33-bit wire wrap happens once at emission in [`write_pes`].
+#[derive(Default)]
+struct DtsClock {
+	/// Previous PTS, to measure the frame duration from successive gaps.
+	last_pts: Option<u64>,
+	/// Smallest positive PTS gap seen = one frame duration (adjacent frames differ by one).
+	frame_dur: Option<u64>,
+	/// Previous authored DTS, keeping the clock strictly increasing.
+	last_dts: Option<u64>,
+}
+
+impl DtsClock {
+	/// Author the DTS for the next frame (PTS in continuous ticks, decode order). Returns
+	/// `None` when the DTS equals the PTS, so the PES stays PTS-only.
+	fn author(&mut self, pts: u64) -> Option<u64> {
+		// Learn the frame duration from the smallest positive gap between successive PTS.
+		if let Some(prev) = self.last_pts {
+			let gap = pts.abs_diff(prev);
+			if gap > 0 {
+				self.frame_dur = Some(self.frame_dur.map_or(gap, |dur| dur.min(gap)));
+			}
+		}
+		self.last_pts = Some(pts);
+
+		let reserve = self.frame_dur.map_or(0, |dur| RESERVE_FRAMES * dur);
+		let mut dts = pts.saturating_sub(reserve);
+		if let Some(prev) = self.last_dts
+			&& dts <= prev
+		{
+			dts = prev + 1;
+		}
+		self.last_dts = Some(dts);
+		(dts != pts).then_some(dts)
 	}
-	*last = Some(dts);
-	(dts != pts).then_some(dts)
 }
 
 #[cfg(test)]
 mod tests {
-	use super::{DTS_RESERVE, author_dts, is_complete_section};
+	use super::{DtsClock, RESERVE_FRAMES, is_complete_section};
 
 	/// Push a decode-order PTS stream (90 kHz) through the decode clock and return the
 	/// effective DTS per frame (the authored DTS, or the PTS when none is authored).
 	fn run_clock(pts: &[u64]) -> Vec<u64> {
-		let mut last = None;
-		pts.iter().map(|&p| author_dts(p, &mut last).unwrap_or(p)).collect()
+		let mut clock = DtsClock::default();
+		pts.iter().map(|&p| clock.author(p).unwrap_or(p)).collect()
 	}
 
 	/// Decode-order PTS for a constant-frame-rate display timeline with `b` B-frames between
@@ -992,8 +1022,9 @@ mod tests {
 
 	#[test]
 	fn dts_is_monotonic_and_under_pts() {
-		// 25 fps, 10 s offset; cover single B-frames and a 3-deep run (kyrion-like).
-		for b in [1, 3] {
+		// 25 fps, 10 s offset; cover up to RESERVE_FRAMES - 1 consecutive B-frames (the most
+		// the reserve is sized for), which spans broadcast contribution (kyrion is 3-deep).
+		for b in 1..RESERVE_FRAMES as usize {
 			let pts = decode_order(40, b, 3_600, 10_000_000);
 			let dts = run_clock(&pts);
 
@@ -1031,15 +1062,25 @@ mod tests {
 	}
 
 	#[test]
-	fn dts_without_reorder_trails_pts_by_the_reserve() {
-		// A monotonic (no-B) stream: every frame decodes one reserve ahead of its PTS, which
-		// is decode lead time, not added latency (presentation is still at the PTS).
-		let pts: Vec<u64> = (0..40).map(|i| 10_000_000 + i * 3_600).collect();
-		let mut last = None;
-		for &p in &pts {
-			let dts = author_dts(p, &mut last).expect("reserve makes DTS differ from PTS");
-			assert_eq!(dts, p - DTS_RESERVE, "DTS should trail PTS by exactly the reserve");
+	fn dts_without_reorder_settles_to_frame_based_reserve() {
+		// A monotonic (no-B) stream stays strictly increasing and under PTS, and once the
+		// frame duration is learned the clock settles to trailing the PTS by RESERVE_FRAMES
+		// frames (decode lead time, not added latency: presentation is still at the PTS).
+		let dur = 3_600u64;
+		let pts: Vec<u64> = (0..40).map(|i| 10_000_000 + i * dur).collect();
+		let dts = run_clock(&pts);
+
+		for (i, win) in dts.windows(2).enumerate() {
+			assert!(win[1] > win[0], "DTS not strictly increasing at {i}: {win:?}");
 		}
+		for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
+			assert!(d <= p, "DTS {d} after PTS {p} at {i}");
+		}
+		assert_eq!(
+			pts.last().unwrap() - dts.last().unwrap(),
+			RESERVE_FRAMES * dur,
+			"settled decode lead should be RESERVE_FRAMES frames"
+		);
 	}
 
 	#[test]
