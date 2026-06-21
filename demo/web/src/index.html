@@ -126,9 +126,9 @@ watch.broadcast.output.catalog.subscribe((catalog) =&gt; { /* video/audio config
 watch.backend.video.output.stats.subscribe((stats) =&gt; { /* decoded frames, bytes */ });</code></pre>
 		</p>
 		<p>
-			The metadata panel reads a custom <code>meta</code> section carried <em>within</em> the
-			broadcast's catalog (see the <a href="publish.html">publish demo</a>), which arrives with every
-			catalog frame, reconstructed from a snapshot plus merge-patch deltas via
+			The metadata panel subscribes to a custom <code>meta.json</code> track carried <em>within</em> the
+			broadcast (see the <a href="publish.html">publish demo</a>), advertised in the catalog's
+			<code>metadata</code> list and reconstructed from a snapshot plus merge-patch deltas via
 			<code class="language-typescript">@moq/json</code>.
 		</p>
 		<p>

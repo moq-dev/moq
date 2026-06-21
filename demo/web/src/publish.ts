@@ -18,7 +18,7 @@
 import "./highlight";
 import "@moq/publish/element"; // defines <moq-publish>
 import "@moq/publish/ui"; // defines <moq-publish-ui>
-import { type Audio, Net, Signals } from "@moq/publish";
+import { type Audio, Json, Net, Signals } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
 import { formatBitrate, formatFps, graph } from "./viz";
@@ -300,23 +300,42 @@ ui.run((effect) => {
 // Custom metadata carried within the broadcast
 // ---------------------------------------------------------------------------
 //
-// We carry the metadata as a custom `meta` section *inside* the broadcast's
-// catalog rather than as a separate track. The hang catalog is a loose schema,
-// so the extra key passes through validation untouched: base consumers ignore
-// it, and the watch inspector reads it straight off `broadcast.output.catalog`.
-// `catalog.mutate` edits only the `meta` key, so it composes with the base
-// `video`/`audio` sections the encoders own.
+// We serve the metadata as a separate `meta.json` track *within* the broadcast,
+// using `broadcast.net` (the underlying producer the element exposes). `net` is
+// recreated on each (re)connection, so an effect (re)creates the track and seeds
+// it with the latest value; a long cache window lets a late viewer replay the
+// most recent snapshot. The track is advertised in the catalog's `metadata` list
+// so the watch side knows to subscribe.
+const META_TRACK = "meta.json";
 
-// A custom catalog section is anything outside the base video/audio keys.
-type MetaCatalog = { meta?: unknown };
+// The latest metadata, retained across reconnects so each fresh track is seeded with it.
+let currentMeta: unknown = { title: "My Broadcast", location: "earth", note: "edit me" };
+let activeMeta: Json.Producer<unknown> | undefined;
 
 const setMeta = (value: unknown) => {
-	publish.broadcast.catalog.mutate((catalog) => {
-		(catalog as typeof catalog & MetaCatalog).meta = value;
-	});
+	currentMeta = value;
+	activeMeta?.update(value);
 };
 
-setMeta({ title: "My Broadcast", location: "earth", note: "edit me" });
+new Signals.Effect().run((effect) => {
+	const net = effect.get(publish.broadcast.net);
+	if (!net) return;
+
+	// A day-long cache so a viewer joining long after the last edit still replays the value.
+	const track = net.createTrack(META_TRACK, { cache: 86_400_000 });
+	effect.cleanup(() => track.close());
+
+	const producer = new Json.Producer<unknown>(track);
+	producer.update(currentMeta);
+	activeMeta = producer;
+	effect.cleanup(() => {
+		if (activeMeta === producer) activeMeta = undefined;
+	});
+});
+
+publish.broadcast.catalog.mutate((catalog) => {
+	(catalog as typeof catalog & { metadata?: string[] }).metadata = [META_TRACK];
+});
 
 const metaTextEl = $<HTMLTextAreaElement>("metadata");
 const metaBtn = $<HTMLButtonElement>("send-meta");
@@ -327,8 +346,8 @@ metaTextEl.addEventListener("input", () => {
 
 metaBtn.addEventListener("click", () => {
 	try {
-		// mutate() re-publishes the catalog; the CatalogProducer emits a snapshot
-		// to seed late joiners, then merge-patch deltas, a no-op if unchanged.
+		// Publishes a fresh snapshot on the meta.json track (a no-op if unchanged); the
+		// cache window seeds late joiners.
 		setMeta(JSON.parse(metaTextEl.value));
 		metaTextEl.setCustomValidity("");
 		metaBtn.disabled = true;

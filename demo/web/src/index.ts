@@ -11,15 +11,15 @@
  * active (and is the user gesture that lets its audio start); every other tile
  * is muted.
  *
- * The per-stream metadata is carried in a custom `meta` section of the active
- * broadcast's catalog, read straight off the tile's `broadcast.output.catalog`
- * signal so it follows the broadcast across reconnects.
+ * The per-stream metadata rides on a separate `meta.json` track within the active
+ * broadcast (advertised in the catalog's `metadata` list); we subscribe to it off
+ * the tile's `broadcast.output.active` consumer and decode it with @moq/json.
  */
 
 import "./highlight";
 import "@moq/watch/element"; // defines <moq-watch>
 import "@moq/watch/ui"; // defines <moq-watch-ui>
-import { Net, Signals } from "@moq/watch";
+import { Json, Net, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";
@@ -57,8 +57,8 @@ const active = new Signals.Signal<string | undefined>(undefined);
 // The right-hand stats panel reads everything off this.
 const activeWatch = new Signals.Signal<MoqWatch | undefined>(undefined);
 
-// The metadata carried in the active catalog's custom `meta` section, or
-// undefined when the broadcast advertises none.
+// The decoded value of the active broadcast's `meta.json` track, or undefined when
+// the broadcast advertises none.
 const metaSignal = new Signals.Signal<unknown>(undefined);
 
 // The relay URL, editable at runtime. Both the discovery connection and every
@@ -377,15 +377,42 @@ ui.run((effect) => {
 // Metadata
 // ---------------------------------------------------------------------------
 //
-// The publish demo carries its metadata in a custom `meta` section *inside* the
-// broadcast's catalog (the hang catalog is a loose schema, so the extra key
-// passes through and base consumers ignore it). We read it straight off the
-// active catalog signal, so it updates with every catalog frame and follows the
-// broadcast across reconnects without a separate subscription.
+// The publish demo serves its metadata as a separate `meta.json` track, advertised
+// in the catalog's `metadata` list. We read the active broadcast off
+// `broadcast.output.active`, subscribe to that track, and decode the JSON value,
+// re-subscribing whenever the broadcast (or the advertised track) changes.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const catalog = watch ? (effect.get(watch.broadcast.output.catalog) as { meta?: unknown } | undefined) : undefined;
-	metaSignal.set(catalog?.meta);
+	if (!watch) {
+		metaSignal.set(undefined);
+		return;
+	}
+
+	const broadcast = effect.get(watch.broadcast.output.active);
+	const catalog = effect.get(watch.broadcast.output.catalog) as { metadata?: string[] } | undefined;
+	const trackName = catalog?.metadata?.[0];
+	if (!broadcast || !trackName) {
+		metaSignal.set(undefined);
+		return;
+	}
+
+	const track = broadcast.track(trackName).subscribe();
+	effect.cleanup(() => track.close());
+	const consumer = new Json.Consumer<unknown>(track);
+
+	effect.spawn(async () => {
+		try {
+			for (;;) {
+				const value = await Promise.race([effect.cancel, consumer.next()]);
+				if (value === undefined) break;
+				metaSignal.set(value);
+			}
+		} catch (err) {
+			console.warn("error reading metadata", err);
+		} finally {
+			metaSignal.set(undefined);
+		}
+	});
 });
 
 // Metadata view - only shown when the active broadcast is live AND has actually

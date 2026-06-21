@@ -245,8 +245,8 @@ publish.broadcast.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pr
 			picks whichever fits the player size.
 		</p>
 		<p>
-			The metadata editor carries a custom JSON section <em>within</em> the broadcast's catalog via
-			<code class="language-typescript">catalog.mutate</code>; the watch inspector reads it back live.
+			The metadata editor serves a custom <code class="language-typescript">meta.json</code> track <em>within</em> the
+			broadcast via <code class="language-typescript">broadcast.net</code>; the watch inspector subscribes and reads it back live.
 		</p>
 		<p>
 			You're not limited to the browser. Try <code class="language-bash">just pub tos</code> in a terminal
