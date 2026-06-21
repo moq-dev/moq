@@ -1,12 +1,18 @@
 # moq-net track cache (spike)
 
-> Status: design spike, no implementation yet. Targets `dev`: it removes a public/wire field
-> (`TrackInfo.cache`) and adds local API to `TrackProducer`.
+> Status: the RAM tier and eviction policy are implemented in `src/model/cache.rs` (module
+> `moq_net::cache`, with unit tests). The disk/remote tiers and the `TrackProducer` /
+> `TrackConsumer` wiring are still design. Targets `dev`: it removes a public/wire field
+> (`TrackInfo.cache`) and adds local API to the track endpoints.
 
-A per-track group cache owned by a `TrackProducer`. It lets a relay or edge retain recent
-groups past the live window and serve them back on a FETCH, optionally spilling to local disk
-or remote object storage. This is the moq-net mechanism the `moq-archive` crate builds on (see
-`../moq-archive/DESIGN.md`); the on-tier byte format is shared with that crate.
+A per-track group cache. It lets a relay or edge retain recent groups past the live window and
+serve them back on a FETCH, optionally spilling to local disk or remote object storage. This is
+the moq-net mechanism the `moq-archive` crate builds on (see `../moq-archive/DESIGN.md`); the
+on-tier byte format is shared with that crate.
+
+The implemented surface follows moq-net's produce/consume split: `cache::Config::produce()`
+yields a `cache::Producer` (the write half, not `Clone`), and `Producer::consume()` yields a
+`cache::Consumer` (the read half, `Clone`). Names below are the real ones.
 
 ## Principles
 
@@ -21,7 +27,7 @@ These come from design review and pin down the shape:
   groups. There is no cross-track accounting, so no shared lock and no contention. The cost is
   that there is no global RAM ceiling; total footprint is the sum of per-track `max` across
   live tracks. A global backstop, if ever needed, is additive and not part of v1.
-- **No traits, no callbacks.** `Cache` is a concrete value you configure and attach. moq-net
+- **No traits, no callbacks.** The cache is concrete values you configure and attach (`cache::Producer` / `cache::Consumer`). moq-net
   owns all behavior. The disk and remote backends are an internal, configured `object_store`,
   not a consumer-implemented extension point.
 - **Watermark flush, not per-item eviction.** Groups accumulate to the high watermark, then a
@@ -35,24 +41,31 @@ These come from design review and pin down the shape:
 Per track, on both size and duration, whichever trips first:
 
 ```rust
-/// Local cache policy for a single TrackProducer. Not on the wire, not in TrackInfo.
+// module moq_net::cache
+
+/// Local cache policy for a single track. Not on the wire, not in TrackInfo.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct CacheConfig {
+pub struct Config {
     pub ram: Bounds,                // keep >= min in RAM; flush the band once > max
-    pub disk: Option<Tier>,         // local object_store + its own Bounds
-    pub remote: Option<Tier>,       // remote object_store + its own Bounds
-    pub interval: Option<Duration>, // max wall-clock before a partial band flushes anyway
+    // forthcoming: disk + remote tiers (object_store, feature-gated) and an interval backstop.
 }
 
 /// A low/high watermark. The gap (max - min) is the flush batch size.
 pub struct Bounds { pub min: Limit, pub max: Limit }
 
 /// A bound expressed as a duration, a byte count, or both (first to trip wins).
+/// All-None means unbounded as a high watermark, floor-zero as a low watermark.
 pub struct Limit { pub duration: Option<Duration>, pub bytes: Option<u64> }
+```
 
-/// A persistent tier: an object_store plus its own retention bounds.
+The implemented `cache::Config` has only `ram` so far (it is `#[non_exhaustive]`, so adding
+`disk` / `remote` / `interval` later is additive). The forthcoming tier shape:
+
+```rust
+// forthcoming
 pub struct Tier { pub store: /* path or url */ (), pub bounds: Bounds }
+// Config gains: disk: Option<Tier>, remote: Option<Tier>, interval: Option<Duration>
 ```
 
 The flush batch is implicitly `max - min`, so the bounds map straight onto the tiering the
@@ -77,7 +90,7 @@ Each track owns a small buffer plus an index of what has been flushed where:
 
 ```rust
 struct TrackCache {
-    ram: VecDeque<CachedGroup>,        // recent groups, ordered by sequence
+    ram: BTreeMap<u64, cache::Group>,  // recent groups, keyed by sequence
     ram_bytes: u64,
     flushed: BTreeMap<u64, Location>,  // sequence -> (tier, object key, offset) for serving
     last_flush: Instant,
@@ -132,55 +145,62 @@ by an archive node.
 
 ## Attaching to a producer or a consumer
 
-The cache is a `Cache` handle built from a `CacheConfig`. It is cloneable and a clone shares the
-same store (RAM tier and disk/remote tiers), so **one cache can back both a track's producer and
-its consumer**.
+The cache splits into a write half and a read half, like the rest of moq-net. `cache::Producer`
+fills the cache and is **not `Clone`** (a single writer); `cache::Consumer` is `Clone` and shares
+the same store. `Producer::consume()` derives a reader, so **one cache backs both a track's
+producer and its consumer**.
 
 ```rust
-/// A live, shareable per-track store. Clone shares the underlying tiers.
-#[derive(Clone)]
-pub struct Cache { /* Arc inside */ }
-impl Cache { pub fn new(config: CacheConfig) -> Self; }
-impl From<CacheConfig> for Cache { /* Cache::new */ }
+// implemented (RAM tier) in moq_net::cache
+let writer: cache::Producer = config.produce();   // not Clone
+let reader: cache::Consumer = writer.consume();    // Clone; shares the store
 
+writer.insert(group);            // -> Option<Batch> (band to persist to the next tier)
+reader.get(sequence);            // -> Option<cache::Group>
+```
+
+The forthcoming track wiring hands each endpoint the matching half:
+
+```rust
+// forthcoming
 impl TrackProducer {
-    /// Retain and serve groups this producer creates, per the cache. Independent of any
-    /// retention the original publisher set. Accepts a `Cache` or a `CacheConfig`.
-    pub fn with_cache(self, cache: impl Into<Cache>) -> Self;
+    /// Fill `cache` with groups this producer creates and serve them on a miss.
+    pub fn with_cache(self, cache: cache::Producer) -> Self;
 }
-
 impl TrackConsumer {
-    /// Back this consumer's `fetch_group` / `get_group` with the cache: hits resolve locally,
-    /// and groups read off the wire populate it.
-    pub fn with_cache(self, cache: impl Into<Cache>) -> Self;
+    /// Back fetch_group / get_group with `cache`: hits resolve locally.
+    pub fn with_cache(self, cache: cache::Consumer) -> Self;
 }
 ```
 
 Sharing one store across both endpoints of a track:
 
 ```rust
-let cache = Cache::new(config);
-let producer = producer.with_cache(cache.clone());
-let consumer = consumer.with_cache(cache);   // same groups, one set of tiers
+let writer = config.produce();
+let reader = writer.consume();
+let producer = producer.with_cache(writer);   // fills the cache
+let consumer = consumer.with_cache(reader);   // fetches from it, same groups
 ```
+
+`cache::Producer` being non-`Clone` is also a deliberate step toward making `TrackProducer`
+non-`Clone`: a single writer per track.
 
 ### Producer side
 `TrackState.groups` (today's inline buffer, bounded by the now-removed `TrackInfo.cache`) is
 backed by the cache: finished groups beyond `ram.min` move into the RAM tier, and a `get_group`
 or `dynamic()` miss consults the cache (RAM, then disk, then remote) before `NotFound`.
 
-### Consumer side (fetch)
-`TrackConsumer::fetch_group(seq)` and `get_group(seq)` check the cache first:
+### Consumer side (fetch vs populate)
+Reading and populating are different halves, which is what the produce/consume split buys:
 
-- **hit** (RAM, disk, or remote) resolves the `kio::Pending` locally with no wire FETCH (RAM
-  synchronously, disk/remote after the ranged read);
-- **miss** falls through to the normal wire FETCH, and the result is inserted into the cache so a
-  repeat is local.
-
-Groups arriving on a live `subscribe` also populate the cache, so a consumer that watched a
-track can later fetch its recent groups without going back upstream. This is exactly the
-archive's serve path: a cache-backed `TrackConsumer`, with no live upstream, answers FETCH
-straight from disk/remote.
+- A `TrackConsumer` given a `cache::Consumer` (read half) checks the cache first on
+  `fetch_group(seq)` / `get_group(seq)`: a **hit** resolves the `kio::Pending` locally with no
+  wire FETCH (RAM synchronously, disk/remote after the ranged read); a **miss** falls through to
+  the wire.
+- To *populate* the cache (insert groups read off the wire or off a live `subscribe`), a consumer
+  takes a `cache::Producer` (write half) instead. This is the archive's record-and-serve path: a
+  cache-backed consumer with no live upstream fills tiers as it reads and answers FETCH straight
+  from them.
 
 A shared cache makes the two directions symmetric: groups a producer creates are fetchable
 through a consumer of the same track, and groups a consumer pulled off the wire are servable by
@@ -200,11 +220,11 @@ independent:
 
 ## Per-binary use
 
-- **moq-cli:** no cache, or a small RAM-only `CacheConfig` for a single track. See "moq-cli
+- **moq-cli:** no cache, or a small RAM-only `cache::Config` for a single track. See "moq-cli
   flags" below for the concrete surface.
-- **moq-relay:** one `CacheConfig` template applied to every track it creates. Threading that
+- **moq-relay:** one `cache::Config` template applied to every track it creates. Threading that
   config onto the tracks moq-net auto-creates during fan-out is the Origin follow-up; here it is
-  just `TrackProducer::with_cache(config)`. A relay RAM cache that spills to disk or S3 becomes
+  just `TrackProducer::with_cache(writer)`. A relay RAM cache that spills to disk or S3 becomes
   configuration, not code.
 - **moq-edge:** the same, plus its own dynamic-handler business logic on top.
 
@@ -213,7 +233,7 @@ independent:
 The cache is most useful on the commands that run a local origin and serve a broadcast back
 (`moq serve`, `moq accept`), so a flattened `CacheArgs` group lands on those. The flags map onto
 the `[min, max]` bounds and the tier cascade; an absent `--cache-ram` means no cache (today's
-behavior). This is the proposed surface; wiring it waits on the `moq_net::CacheConfig` API.
+behavior). This is the proposed surface; wiring it waits on the track-endpoint `with_cache` API.
 
 ```rust
 /// Retain recent groups so late subscribers and FETCHes get old content.
@@ -261,20 +281,20 @@ moq serve --broadcast bbb --cache-ram 30s --cache-disk /var/cache/moq --cache-di
           --cache-remote s3://moq-archive/bbb --cache-remote-age 30d  fmp4 < bbb.mp4
 ```
 
-and converts to the config the producer takes:
+and converts to a `cache::Config` whose halves go to each endpoint:
 
 ```rust
 impl CacheArgs {
     /// None when `--cache-ram` is unset (caching disabled).
-    pub fn cache(&self) -> Option<moq_net::Cache> { /* flags -> CacheConfig -> Cache::new */ }
+    pub fn config(&self) -> Option<moq_net::cache::Config> { /* flags -> bounds (+ tiers) */ }
 }
 
-// in run_serve / run_accept: build the shared store once, then hand a clone to each endpoint.
-let cache = args.cache();
-if let Some(cache) = &cache {
-    producer = producer.with_cache(cache.clone());
-    // a TrackConsumer of the same track also takes cache.clone(), so its fetch_group is
-    // served locally (RAM, then disk/remote).
+// in run_serve / run_accept: produce the writer once, derive a reader, hand one to each endpoint.
+if let Some(config) = args.config() {
+    let writer = config.produce();
+    let reader = writer.consume();   // same store; serves fetch_group locally
+    producer = producer.with_cache(writer);
+    // a TrackConsumer of the same track takes `reader`.
 }
 ```
 

@@ -8,6 +8,10 @@ mod subscription;
 mod time;
 mod track;
 
+/// Per-track group cache (RAM tier and eviction policy). Namespaced: `cache::Producer`,
+/// `cache::Consumer`, `cache::Config`.
+pub mod cache;
+
 pub use bandwidth::*;
 pub use broadcast::*;
 pub use compression::*;

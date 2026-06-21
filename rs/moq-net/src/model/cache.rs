@@ -1,0 +1,483 @@
+//! Per-track group cache: a bounded RAM window that evicts in batches.
+//!
+//! A cache is local policy attached to a single track, independent of any retention the original
+//! publisher set (it is never carried on the wire). It keeps a `[min, max]` window of recent
+//! groups in RAM. When an insert pushes the window past the high watermark (`max`), the oldest
+//! groups down to the low watermark (`min`) are drained as one [`Batch`], which the caller hands
+//! to the next tier (disk or remote object storage). Draining a whole band at once is what keeps
+//! a low-latency track (audio makes a group per frame) from producing one tiny object per group;
+//! an LRU, which evicts a single item the instant the budget trips, cannot batch.
+//!
+//! The cache is split into a write half ([`Producer`]) and a read half ([`Consumer`]), mirroring
+//! the rest of moq-net. [`Producer`] is intentionally not `Clone` (a single writer fills the
+//! cache); [`Consumer`] is `Clone` and shares the same store, so one cache backs both a track's
+//! producer and its consumer.
+//!
+//! The disk and remote tiers and the [`crate::TrackProducer`] / [`crate::TrackConsumer`] wiring
+//! are not implemented yet; see `rs/moq-net/CACHE.md`. This module is the RAM tier and the
+//! eviction policy it builds on.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bytes::Bytes;
+
+use super::Timestamp;
+
+/// A cache bound, as a duration, a byte count, or both (the first to trip wins).
+///
+/// All-`None` means "no threshold": as a high watermark that is unbounded (never flush), as a low
+/// watermark that is a floor of zero (drain everything but the latest group).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Limit {
+	/// Bound on the span between the oldest and newest buffered group's media timestamps.
+	pub duration: Option<Duration>,
+	/// Bound on the total bytes of buffered group frames.
+	pub bytes: Option<u64>,
+}
+
+impl Limit {
+	/// A duration-only limit.
+	pub fn duration(duration: Duration) -> Self {
+		Self {
+			duration: Some(duration),
+			bytes: None,
+		}
+	}
+
+	/// A byte-only limit.
+	pub fn bytes(bytes: u64) -> Self {
+		Self {
+			duration: None,
+			bytes: Some(bytes),
+		}
+	}
+
+	/// Whether either set threshold is unset (so the limit imposes no ceiling).
+	fn is_unset(&self) -> bool {
+		self.duration.is_none() && self.bytes.is_none()
+	}
+}
+
+/// A low/high watermark pair. The gap between them is the flush batch size.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bounds {
+	/// Low watermark: a flush drains down to this.
+	pub min: Limit,
+	/// High watermark: exceeding it triggers a flush.
+	pub max: Limit,
+}
+
+impl Bounds {
+	/// Build bounds from a low and high watermark.
+	pub fn new(min: Limit, max: Limit) -> Self {
+		Self { min, max }
+	}
+}
+
+/// Local cache policy for a single track. Not carried on the wire.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// Bounds on the RAM tier.
+	pub ram: Bounds,
+	// Disk and remote tiers are forthcoming (object_store-backed, feature-gated).
+}
+
+impl Config {
+	/// Build a [`Config`] with the given RAM bounds.
+	pub fn new(ram: Bounds) -> Self {
+		Self { ram }
+	}
+
+	/// Start an empty cache with this policy, returning its write half.
+	pub fn produce(self) -> Producer {
+		Producer::new(self)
+	}
+}
+
+/// One cached group: enough to re-serve it or serialize it to a lower tier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+	/// The group's sequence number within its track.
+	pub sequence: u64,
+	/// The group's frames, in order.
+	pub frames: Vec<Bytes>,
+	/// Media timestamp of the first frame, if known. Drives the duration bound.
+	pub ts_first: Option<Timestamp>,
+	/// Media timestamp of the last frame, if known. Drives the duration bound.
+	pub ts_last: Option<Timestamp>,
+}
+
+impl Group {
+	/// Total size of the group's frame payloads in bytes.
+	pub fn size(&self) -> u64 {
+		self.frames.iter().map(|f| f.len() as u64).sum()
+	}
+}
+
+/// A band of groups drained from a tier in one flush, oldest first. The caller persists it to the
+/// next tier as a single segment.
+pub type Batch = Vec<Group>;
+
+/// The shared store behind a [`Producer`] and its [`Consumer`]s.
+struct State {
+	config: Config,
+	/// Groups keyed by sequence, so the first entry is the oldest and the last is the latest.
+	ram: BTreeMap<u64, Group>,
+	ram_bytes: u64,
+}
+
+impl State {
+	/// The time span between the oldest group's first frame and the newest group's last frame.
+	/// Zero unless both ends carry a timestamp, so a track without media timestamps applies no
+	/// duration pressure (byte bounds still apply).
+	fn span(&self) -> Duration {
+		let first = self.ram.values().next().and_then(|g| g.ts_first);
+		let last = self.ram.values().next_back().and_then(|g| g.ts_last);
+		match (first, last) {
+			(Some(a), Some(b)) => Duration::from(b).saturating_sub(Duration::from(a)),
+			_ => Duration::ZERO,
+		}
+	}
+
+	/// Whether the current contents exceed `limit`. An unset limit is treated as a floor of zero
+	/// (any content exceeds it), which is what makes a flush with no `min` drain to just the
+	/// latest group.
+	fn exceeds(&self, limit: Limit) -> bool {
+		if limit.is_unset() {
+			return !self.ram.is_empty();
+		}
+		limit.bytes.is_some_and(|b| self.ram_bytes > b) || limit.duration.is_some_and(|d| self.span() > d)
+	}
+
+	/// Whether the high watermark is tripped. An unset high watermark is unbounded (never trips).
+	fn over_max(&self) -> bool {
+		!self.config.ram.max.is_unset() && self.exceeds(self.config.ram.max)
+	}
+
+	fn insert(&mut self, group: Group) -> Option<Batch> {
+		let size = group.size();
+		if let Some(old) = self.ram.insert(group.sequence, group) {
+			self.ram_bytes -= old.size();
+		}
+		self.ram_bytes += size;
+		self.flush()
+	}
+
+	/// If over the high watermark, drain the oldest groups down to the low watermark, keeping the
+	/// latest group always. Returns the drained band, oldest first, or `None` if nothing flushed.
+	fn flush(&mut self) -> Option<Batch> {
+		if !self.over_max() {
+			return None;
+		}
+
+		let mut batch = Batch::new();
+		// Drain oldest-first while still above the low watermark, but never the latest group: a
+		// new subscriber and the live edge need it, and it is the likeliest next fetch.
+		while self.ram.len() > 1 && self.exceeds(self.config.ram.min) {
+			let oldest = *self.ram.keys().next().expect("non-empty");
+			let latest = *self.ram.keys().next_back().expect("non-empty");
+			if oldest == latest {
+				break;
+			}
+			let group = self.ram.remove(&oldest).expect("just observed");
+			self.ram_bytes -= group.size();
+			batch.push(group);
+		}
+
+		(!batch.is_empty()).then_some(batch)
+	}
+}
+
+/// The write half of a track cache. Insert finished groups; not `Clone` (a single writer fills
+/// the cache). Call [`consume`](Self::consume) for a read handle.
+pub struct Producer {
+	state: Arc<Mutex<State>>,
+}
+
+impl Producer {
+	fn new(config: Config) -> Self {
+		Self {
+			state: Arc::new(Mutex::new(State {
+				config,
+				ram: BTreeMap::new(),
+				ram_bytes: 0,
+			})),
+		}
+	}
+
+	/// Insert a finished group.
+	///
+	/// Returns a [`Batch`] when this insert pushed the RAM tier over its high watermark: the band
+	/// drained down to the low watermark, which the caller persists to the next tier. `None` when
+	/// nothing was evicted. A RAM-only cache ignores the return (the band is simply dropped).
+	pub fn insert(&mut self, group: Group) -> Option<Batch> {
+		self.state.lock().expect("cache poisoned").insert(group)
+	}
+
+	/// A read handle sharing this cache's store.
+	pub fn consume(&self) -> Consumer {
+		Consumer {
+			state: self.state.clone(),
+		}
+	}
+
+	/// The highest sequence currently buffered in RAM, if any.
+	pub fn latest(&self) -> Option<u64> {
+		self.state
+			.lock()
+			.expect("cache poisoned")
+			.ram
+			.keys()
+			.next_back()
+			.copied()
+	}
+
+	/// The number of groups currently buffered in RAM.
+	pub fn len(&self) -> usize {
+		self.state.lock().expect("cache poisoned").ram.len()
+	}
+
+	/// Whether the RAM tier is empty.
+	pub fn is_empty(&self) -> bool {
+		self.len() == 0
+	}
+}
+
+/// The read half of a track cache. `Clone` shares the same store, so several readers (and a
+/// matching [`Producer`]) cache the same groups. Backs a track's `fetch`.
+#[derive(Clone)]
+pub struct Consumer {
+	state: Arc<Mutex<State>>,
+}
+
+impl Consumer {
+	/// Fetch a cached group by sequence, or `None` if it is not in the RAM tier.
+	///
+	/// The returned [`Group`] is an owned copy (frame `Bytes` are reference-counted, so this is
+	/// cheap), so a later eviction never invalidates a fetch already in flight.
+	pub fn get(&self, sequence: u64) -> Option<Group> {
+		self.state.lock().expect("cache poisoned").ram.get(&sequence).cloned()
+	}
+
+	/// Whether a group with this sequence is currently in the RAM tier.
+	pub fn contains(&self, sequence: u64) -> bool {
+		self.state.lock().expect("cache poisoned").ram.contains_key(&sequence)
+	}
+
+	/// The highest sequence currently buffered in RAM, if any.
+	pub fn latest(&self) -> Option<u64> {
+		self.state
+			.lock()
+			.expect("cache poisoned")
+			.ram
+			.keys()
+			.next_back()
+			.copied()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A group of `count` frames of `each` bytes, at sequence `seq`, spanning `[ts0, ts1]` micros.
+	fn group(seq: u64, count: usize, each: usize, ts: Option<(u64, u64)>) -> Group {
+		Group {
+			sequence: seq,
+			frames: vec![Bytes::from(vec![0u8; each]); count],
+			ts_first: ts.map(|(a, _)| Timestamp::from_micros(a).unwrap()),
+			ts_last: ts.map(|(_, b)| Timestamp::from_micros(b).unwrap()),
+		}
+	}
+
+	/// A small group with no timestamps at the given sequence.
+	fn plain(seq: u64, bytes: usize) -> Group {
+		group(seq, 1, bytes, None)
+	}
+
+	#[test]
+	fn size_sums_frame_bytes() {
+		let g = group(0, 3, 10, None);
+		assert_eq!(g.size(), 30);
+	}
+
+	#[test]
+	fn insert_and_get() {
+		let mut producer = Config::default().produce();
+		let consumer = producer.consume();
+
+		assert!(consumer.get(5).is_none());
+		producer.insert(plain(5, 100));
+		assert_eq!(consumer.get(5).map(|g| g.size()), Some(100));
+		assert!(consumer.get(6).is_none());
+	}
+
+	#[test]
+	fn consumer_sees_producer_inserts() {
+		// A cloned consumer observes inserts on the shared store.
+		let mut producer = Config::default().produce();
+		let a = producer.consume();
+		let b = a.clone();
+
+		producer.insert(plain(1, 10));
+		assert!(a.contains(1));
+		assert!(b.contains(1));
+	}
+
+	#[test]
+	fn dedup_by_sequence() {
+		// Re-inserting a sequence replaces it and keeps byte accounting correct.
+		let mut producer = Config::default().produce();
+		let consumer = producer.consume();
+
+		producer.insert(plain(1, 100));
+		producer.insert(plain(1, 30));
+		assert_eq!(producer.len(), 1);
+		assert_eq!(consumer.get(1).map(|g| g.size()), Some(30));
+	}
+
+	#[test]
+	fn unbounded_when_no_max_never_flushes() {
+		let mut producer = Config::default().produce();
+		let mut flushed = None;
+		for seq in 0..100 {
+			flushed = flushed.or(producer.insert(plain(seq, 1000)));
+		}
+		assert!(flushed.is_none());
+		assert_eq!(producer.len(), 100);
+	}
+
+	#[test]
+	fn byte_high_watermark_flushes_batch_to_low() {
+		// Keep 60 bytes, flush once over 100. Groups of 20 bytes: the 6th insert (120 bytes)
+		// trips the high watermark and drains the three oldest down to the 60-byte low watermark.
+		let bounds = Bounds::new(Limit::bytes(60), Limit::bytes(100));
+		let mut producer = Config::new(bounds).produce();
+
+		let mut batches: Vec<Batch> = Vec::new();
+		for seq in 0..=5 {
+			if let Some(batch) = producer.insert(plain(seq, 20)) {
+				batches.push(batch);
+			}
+		}
+
+		// Exactly one flush, draining the three oldest groups as one oldest-first band.
+		assert_eq!(batches.len(), 1);
+		let drained: Vec<u64> = batches[0].iter().map(|g| g.sequence).collect();
+		assert_eq!(drained, vec![0, 1, 2]);
+		// The low watermark (60 bytes = 3 groups) is retained, latest included.
+		assert_eq!(producer.len(), 3);
+		assert_eq!(producer.latest(), Some(5));
+	}
+
+	#[test]
+	fn settles_within_the_band() {
+		// Steady state stays between the low and high watermarks (hysteresis), never above max.
+		let bounds = Bounds::new(Limit::bytes(60), Limit::bytes(100));
+		let mut producer = Config::new(bounds).produce();
+		for seq in 0..50 {
+			producer.insert(plain(seq, 20));
+			assert!(producer.len() <= 5, "exceeded high watermark: {}", producer.len());
+		}
+		assert!(producer.len() >= 3, "below low watermark: {}", producer.len());
+		assert_eq!(producer.latest(), Some(49));
+	}
+
+	#[test]
+	fn flush_keeps_latest_even_when_oversized() {
+		// A single group larger than the whole budget is still retained (never evict the latest).
+		let bounds = Bounds::new(Limit::bytes(10), Limit::bytes(50));
+		let mut producer = Config::new(bounds).produce();
+
+		let batch = producer.insert(plain(0, 1000));
+		assert!(batch.is_none());
+		assert_eq!(producer.len(), 1);
+		assert_eq!(producer.latest(), Some(0));
+	}
+
+	#[test]
+	fn min_unset_drains_to_just_the_latest() {
+		// High watermark set, low watermark unset -> flush keeps only the latest group.
+		let bounds = Bounds::new(Limit::default(), Limit::bytes(50));
+		let mut producer = Config::new(bounds).produce();
+
+		for seq in 0..5 {
+			producer.insert(plain(seq, 20));
+		}
+		assert_eq!(producer.len(), 1);
+		assert_eq!(producer.latest(), Some(4));
+	}
+
+	#[test]
+	fn duration_high_watermark_evicts_by_timespan() {
+		// Keep 2s, flush down to 1s. Each group spans 1s of media time.
+		let bounds = Bounds::new(
+			Limit::duration(Duration::from_secs(1)),
+			Limit::duration(Duration::from_secs(2)),
+		);
+		let mut producer = Config::new(bounds).produce();
+		let consumer = producer.consume();
+
+		// seq 0: [0,1]s, seq 1: [1,2]s, seq 2: [2,3]s, seq 3: [3,4]s
+		for seq in 0..4u64 {
+			let t0 = seq * 1_000_000;
+			producer.insert(group(seq, 1, 10, Some((t0, t0 + 1_000_000))));
+		}
+
+		// The window cannot span more than ~2s, so the oldest groups were evicted.
+		assert!(consumer.contains(3), "latest kept");
+		assert!(!consumer.contains(0), "oldest evicted");
+		assert!(producer.len() <= 2, "len was {}", producer.len());
+	}
+
+	#[test]
+	fn no_duration_pressure_without_timestamps() {
+		// A duration bound with timestamp-less groups never flushes (byte bounds would still).
+		let bounds = Bounds::new(
+			Limit::duration(Duration::from_secs(1)),
+			Limit::duration(Duration::from_secs(2)),
+		);
+		let mut producer = Config::new(bounds).produce();
+		for seq in 0..20 {
+			assert!(producer.insert(plain(seq, 1000)).is_none());
+		}
+		assert_eq!(producer.len(), 20);
+	}
+
+	#[test]
+	fn latest_tracks_highest_sequence_out_of_order() {
+		let mut producer = Config::default().produce();
+		producer.insert(plain(5, 1));
+		producer.insert(plain(2, 1));
+		producer.insert(plain(9, 1));
+		producer.insert(plain(7, 1));
+		assert_eq!(producer.latest(), Some(9));
+	}
+
+	#[test]
+	fn out_of_order_old_insert_can_flush_immediately() {
+		// Inserting a stale (low) sequence into a full cache evicts it (or an older one) at once.
+		let bounds = Bounds::new(Limit::bytes(40), Limit::bytes(50));
+		let mut producer = Config::new(bounds).produce();
+		for seq in 10..14 {
+			producer.insert(plain(seq, 20));
+		}
+		// Now insert a much older sequence; the band drains oldest-first.
+		let batch = producer.insert(plain(0, 20));
+		assert!(batch.is_some());
+		assert_eq!(producer.latest(), Some(13));
+		assert!(!producer.consume().contains(0), "stale insert flushed first");
+	}
+
+	#[test]
+	fn is_empty_and_len() {
+		let mut producer = Config::default().produce();
+		assert!(producer.is_empty());
+		producer.insert(plain(0, 1));
+		assert!(!producer.is_empty());
+		assert_eq!(producer.len(), 1);
+	}
+}
