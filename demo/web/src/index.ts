@@ -347,20 +347,12 @@ ui.run((effect) => {
 });
 
 // Network section: only shown while connected to the relay with an active tile.
+// The throughput (video + audio bitrate) lives in the graph below, so there are
+// no static rows here.
 ui.run((effect) => {
 	const connected = effect.get(connection.status) === "connected";
 	const watch = effect.get(activeWatch);
-	const section = $("network-section");
-	if (!connected || !watch) {
-		section.hidden = true;
-		return;
-	}
-	section.hidden = false;
-
-	const video = effect.get(watch.backend.video.stats);
-	const audio = effect.get(watch.backend.audio.stats);
-	const bytes = (video?.bytesReceived ?? 0) + (audio?.bytesReceived ?? 0);
-	renderRows($("network-info"), [["bytes received", bytes > 0 ? formatBytes(bytes) : undefined]]);
+	$("network-section").hidden = !connected || !watch;
 });
 
 // Raw catalog (collapsible) - only rendered once the active catalog arrives.
@@ -445,12 +437,12 @@ ui.run((effect) => {
 
 const viz = new Signals.Effect();
 
-// Video bitrate is video-only; the Network "Throughput" graph is video + audio.
+// This video bitrate is video-only; the Network section's "Bitrate" graph is video + audio.
 const bitrateGraph = graph(viz, "Bitrate", { color: "#a855f7", format: formatBitrate });
 const fpsGraph = graph(viz, "Frame rate", { color: "#facc15", format: formatFps });
 $("video-graphs").append(bitrateGraph.el, fpsGraph.el);
 
-const throughputGraph = graph(viz, "Throughput", { color: "#34d399", format: formatBitrate });
+const throughputGraph = graph(viz, "Bitrate", { color: "#34d399", format: formatBitrate });
 const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${Math.round(v)} ms` });
 $("network-graphs").append(throughputGraph.el, rttGraph.el);
 
@@ -528,8 +520,14 @@ function setPill(statusId: string, textId: string, label: string, state: "ok" | 
 	dot.className = `dot w-2 h-2 rounded-full ${color}`;
 }
 
-function formatBytes(n: number): string {
-	if (n < 1024) return `${n} B`;
-	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-	return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+// Vite re-evaluates this module on hot reload, dropping the references to the
+// module-scoped effects/connection above. Close them on dispose so they don't
+// get garbage collected unclosed (which the signals library warns about).
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => {
+		for (const effect of [discovery, tilesEffect, ui, viz, metaEffect]) effect.close();
+		for (const tile of tiles.values()) tile.close();
+		tiles.clear();
+		connection.close();
+	});
 }
