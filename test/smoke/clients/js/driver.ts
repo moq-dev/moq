@@ -1,9 +1,13 @@
-// Drives a headless Chromium (channel "chromium" for WebTransport + WebCodecs)
-// against the vite-built page (dist/). publish streams a fake camera until
-// killed; subscribe exits 0 once the watch element decodes a frame.
-//
-//   bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang
-//   bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
+/**
+ * Drives a headless Chromium (channel "chromium" for WebTransport + WebCodecs)
+ * against the vite-built page (dist/). publish streams a fake camera until
+ * killed; subscribe exits 0 once the watch element decodes a frame.
+ *
+ *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang
+ *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
+ *
+ * @module
+ */
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";

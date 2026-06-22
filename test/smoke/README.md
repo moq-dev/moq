@@ -71,7 +71,7 @@ A client whose source build fails fails only its own matrix cells (see
 
 ## Layout
 
-```
+```text
 smoke.sh                  orchestrator: build clients, run the relay + matrix
 smoke.toml                relay config (anonymous, self-signed localhost)
 clients/

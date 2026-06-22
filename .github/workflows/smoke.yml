@@ -14,6 +14,10 @@ on:
   pull_request:
     paths:
       - "test/smoke/**"
+      # The smoke job also depends on the recipe that invokes it and the
+      # workspace membership that links the JS clients to source.
+      - "test/justfile"
+      - "package.json"
       - ".github/workflows/smoke.yml"
 
 concurrency:

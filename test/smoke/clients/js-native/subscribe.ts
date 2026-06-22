@@ -1,15 +1,16 @@
-// Native-JS (non-browser) subscriber: run the workspace @moq/net + @moq/hang
-// packages under a JS runtime that has no native WebTransport, using moq's own
-// @moq/web-transport polyfill (a prebuilt NAPI QUIC/HTTP3 addon, the one piece
-// that comes from npm rather than this checkout). Runs under both node and bun.
-//
-// Connect, read the .hang catalog to find the video track, subscribe it, and
-// exit 0 as soon as any non-empty frame arrives (1 on timeout).
-//
-//   node --import tsx subscribe.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
-//
-// Subscribe-only: publishing media needs a WebCodecs encoder, which a native JS
-// runtime doesn't have. Reading raw container frames needs no codec.
+/**
+ * Native-JS (non-browser) smoke subscriber: run the workspace `@moq/net` +
+ * `@moq/hang` under a runtime with no native WebTransport, via moq's own
+ * `@moq/web-transport` polyfill (a prebuilt NAPI QUIC/HTTP3 addon, the one piece
+ * that comes from npm rather than this checkout). Runs under both node and bun.
+ * Connect, find the video track in the .hang catalog, subscribe, and exit 0 as
+ * soon as a non-empty frame arrives (1 on timeout). Subscribe-only: publishing
+ * media needs a WebCodecs encoder a native JS runtime lacks.
+ *
+ *     node --import tsx subscribe.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
+ *
+ * @module
+ */
 import { parseArgs } from "node:util";
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";

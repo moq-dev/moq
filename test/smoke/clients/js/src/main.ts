@@ -1,5 +1,9 @@
-// Browser entry point. Registers the public custom elements from the workspace
-// @moq/publish + @moq/watch packages, then runs the shared role logic.
+/**
+ * Browser entry point: register the `@moq/publish` + `@moq/watch` custom elements
+ * from the workspace, then run the shared role logic.
+ *
+ * @module
+ */
 import "@moq/publish/element";
 import "@moq/watch/element";
 import "./setup.ts";
