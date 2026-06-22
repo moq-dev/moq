@@ -4316,6 +4316,7 @@ dependencies = [
  "rml_rtmp",
  "rustls",
  "sd-notify",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",

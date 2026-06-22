@@ -53,6 +53,10 @@ moq-net = { workspace = true }
 # server-session state machine. RTMP carries FLV, demuxed by moq-mux.
 rml_rtmp = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }
+# TCP keepalive on accepted sockets, so a half-open connection (a peer that
+# vanished without a FIN/RST) is reaped instead of pinning a broadcast and its
+# stream-key slot forever.
+socket2 = "0.6"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
 # RTMPS: TLS-terminate accepted connections. Mirrors moq-relay's pinning so the

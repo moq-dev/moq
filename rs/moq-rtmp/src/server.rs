@@ -39,6 +39,7 @@ use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
 use rml_rtmp::time::RtmpTimestamp;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -54,6 +55,17 @@ const READ_BUFFER: usize = 16 * 1024;
 /// connections can't accumulate without limit. With TLS this also covers the TLS
 /// handshake.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// TCP keepalive idle period before the kernel starts probing a silent peer, and
+/// the interval between probes. Once a connection is publishing or playing it can
+/// block in a `read` indefinitely, so without keepalive a half-open connection (a
+/// peer that vanished without sending a FIN/RST, e.g. a yanked network cable)
+/// would pin its broadcast (and its first-publisher stream-key slot) forever.
+/// Keepalive lets the kernel surface the dead peer as a read error, tearing the
+/// session down. The values are generous enough not to disturb a healthy but
+/// momentarily quiet connection.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A bidirectional byte stream carrying an RTMP session.
 ///
@@ -179,10 +191,7 @@ impl Server {
 				// A new TCP connection: start its (TLS +) handshake concurrently.
 				res = self.listener.accept() => match res {
 					Ok((stream, peer)) => {
-						// Nagle off: RTMP is latency-sensitive and we write whole packets.
-						if let Err(err) = stream.set_nodelay(true) {
-							tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");
-						}
+						configure_socket(&stream, peer);
 						#[cfg(feature = "server")]
 						let tls = self.tls.clone();
 						self.pending.push(Box::pin(async move {
@@ -226,6 +235,24 @@ impl Server {
 				},
 			}
 		}
+	}
+}
+
+/// Tune a freshly accepted RTMP socket: Nagle off for latency, keepalive on so a
+/// dead peer is reaped rather than pinning a broadcast forever.
+///
+/// Both are best-effort: a failure to set either is logged and ignored rather
+/// than dropping an otherwise healthy connection.
+fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
+	// Nagle off: RTMP is latency-sensitive and we write whole packets.
+	if let Err(err) = stream.set_nodelay(true) {
+		tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");
+	}
+	let keepalive = TcpKeepalive::new()
+		.with_time(KEEPALIVE_IDLE)
+		.with_interval(KEEPALIVE_INTERVAL);
+	if let Err(err) = SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+		tracing::debug!(%peer, %err, "failed to set TCP keepalive");
 	}
 }
 
