@@ -3,8 +3,8 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::{
-	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
+	BroadcastDynamic, BroadcastGuard, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE,
+	OriginProducer, OriginPublish, Path, PathOwned, StatsHandle, TrackGuard, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -34,9 +34,9 @@ struct TrackState {
 	/// created), so the model records groups/frames/bytes as data is produced into it.
 	producer: TrackProducer,
 	alias: Option<u64>,
-	/// The `SubscriberTrack` guard (subscriptions lifecycle), held for the entry's
-	/// life; records `subscriptions_closed` when the entry is dropped.
-	_stats: Arc<SubscriberTrack>,
+	/// The track guard (subscriptions lifecycle), held for the entry's life;
+	/// records `subscriptions_closed` when the entry is dropped.
+	_stats: Arc<TrackGuard>,
 }
 
 struct BroadcastState {
@@ -52,7 +52,7 @@ struct BroadcastState {
 
 	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
 	/// held for as long as the broadcast is announced into our origin.
-	_stats: SubscriberStats,
+	_stats: BroadcastGuard,
 }
 
 #[derive(Clone)]
