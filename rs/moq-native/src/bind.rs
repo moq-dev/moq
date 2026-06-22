@@ -54,11 +54,34 @@ fn make_dual_stack(socket: &Socket, addr: SocketAddr) {
 mod tests {
 	use super::*;
 
+	/// Skip a test when the host has no IPv6 stack (some CI sandboxes and
+	/// containers). Creating or binding an IPv6 socket then fails with an
+	/// address-family error, which is an environment limitation rather than a
+	/// bug in the dual-stack logic. The dual-stack assertion only has meaning
+	/// once a socket exists, so there's nothing to verify when IPv6 is absent.
+	fn skip_if_no_ipv6(err: &std::io::Error) -> bool {
+		// EAFNOSUPPORT / EADDRNOTAVAIL / EPROTONOSUPPORT on Unix, and the WSA*
+		// equivalents on Windows. The matching ErrorKinds round out the rest.
+		const NO_IPV6_ERRNOS: &[i32] = &[97, 99, 93, 10047, 10049, 10043];
+		let no_ipv6 = matches!(
+			err.kind(),
+			std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+		) || err.raw_os_error().is_some_and(|code| NO_IPV6_ERRNOS.contains(&code));
+		if no_ipv6 {
+			eprintln!("skipping: host has no IPv6 support ({err})");
+		}
+		no_ipv6
+	}
+
 	#[test]
 	fn udp_ipv6_is_dual_stack() {
 		// An IPv6 wildcard bind should come back dual-stack so IPv4 traffic
 		// reaches it. socket2 lets us read the option back to confirm.
-		let socket = udp("[::]:0".parse().unwrap()).unwrap();
+		let socket = match udp("[::]:0".parse().unwrap()) {
+			Ok(socket) => socket,
+			Err(err) if skip_if_no_ipv6(&err) => return,
+			Err(err) => panic!("failed to bind IPv6 UDP socket: {err}"),
+		};
 		let socket = Socket::from(socket);
 		assert!(!socket.only_v6().unwrap(), "IPv6 socket should be dual-stack");
 	}
@@ -71,7 +94,11 @@ mod tests {
 
 	#[test]
 	fn tcp_ipv6_is_dual_stack() {
-		let listener = tcp("[::]:0".parse().unwrap()).unwrap();
+		let listener = match tcp("[::]:0".parse().unwrap()) {
+			Ok(listener) => listener,
+			Err(err) if skip_if_no_ipv6(&err) => return,
+			Err(err) => panic!("failed to bind IPv6 TCP listener: {err}"),
+		};
 		let socket = Socket::from(listener);
 		assert!(!socket.only_v6().unwrap(), "IPv6 listener should be dual-stack");
 	}
