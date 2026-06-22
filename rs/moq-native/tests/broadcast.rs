@@ -140,7 +140,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-			compression: moq_native::moq_net::Compression::None,
+			compression: None,
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -258,7 +258,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-			compression: moq_native::moq_net::Compression::None,
+			compression: None,
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -386,7 +386,7 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 		.create_frame(moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(1_000, Timescale::MICRO).unwrap()),
-			compression: Compression::None,
+			compression: None,
 		})
 		.expect("failed to create frame");
 	writer.write(payload.clone()).expect("failed to write frame");
@@ -395,7 +395,7 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 		.create_frame(moq_net::Frame {
 			size: tiny.len() as u64,
 			timestamp: Some(Timestamp::new(2_000, Timescale::MICRO).unwrap()),
-			compression: Compression::None,
+			compression: None,
 		})
 		.expect("failed to create tiny frame");
 	writer.write(tiny.clone()).expect("failed to write tiny frame");
@@ -462,7 +462,7 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 
 	// The cache holds the Deflate-compressed bytes, not the plaintext: the codec
 	// is recorded and the stored size is the compressed length.
-	assert_eq!(frame_sub.compression, Compression::Deflate);
+	assert_eq!(frame_sub.compression, Some(Compression::Deflate));
 	assert!(
 		(frame_sub.size as usize) < payload.len(),
 		"cached size {} should be the compressed length, smaller than {}",
@@ -480,7 +480,7 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 		.expect("next_frame timed out")
 		.expect("next_frame failed")
 		.expect("expected a second frame");
-	assert_eq!(tiny_sub.compression, Compression::None);
+	assert_eq!(tiny_sub.compression, None);
 	assert_eq!(tiny_sub.read_all().await.expect("failed to read tiny frame"), tiny);
 
 	drop(session);
@@ -508,7 +508,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-			compression: moq_net::Compression::None,
+			compression: None,
 		}
 	}
 

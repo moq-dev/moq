@@ -12,10 +12,12 @@
 // inflates past this so a malicious peer can't zip-bomb the receiver.
 const MAX_FRAME_SIZE = 16 * 1024 * 1024;
 
-/** The codec used to (de)compress frame payloads, negotiated per subscription. */
+/**
+ * A frame-payload compression codec. "No compression" (verbatim) is the absence of
+ * a codec, modeled as `undefined` rather than a member here, so a negotiated
+ * algorithm list can't list it and "compress with nothing" can't be expressed.
+ */
 export const Compression = {
-	/** Frames are sent verbatim. */
-	None: 0,
 	/**
 	 * Raw DEFLATE (RFC 1951), no zlib/gzip header. Matches the browser's
 	 * "deflate-raw" format and the Rust side's `flate2` raw deflate. QUIC already
@@ -26,11 +28,11 @@ export const Compression = {
 
 export type Compression = (typeof Compression)[keyof typeof Compression];
 
-/** Parse a wire varint code, throwing on an unknown codec. */
-export function compressionFromCode(code: number): Compression {
+/** Parse a wire varint code into a codec, or `undefined` for verbatim (code `0`). Throws on an unknown codec. */
+export function compressionFromCode(code: number): Compression | undefined {
 	switch (code) {
-		case Compression.None:
-			return Compression.None;
+		case 0:
+			return undefined;
 		case Compression.Deflate:
 			return Compression.Deflate;
 		default:
@@ -96,9 +98,11 @@ async function pump(transform: CompressionStream | DecompressionStream, data: Ui
 	return concat(chunks, total);
 }
 
-/** Compress a whole frame payload. {@link Compression.None} returns the input unchanged. */
+/**
+ * Compress a whole frame payload with this codec. Verbatim transfer is the absence
+ * of a codec (`undefined`), handled by the caller, not here.
+ */
 export async function compress(codec: Compression, data: Uint8Array): Promise<Uint8Array> {
-	if (codec === Compression.None) return data;
 	return pump(new CompressionStream(format(codec)), data, Number.POSITIVE_INFINITY);
 }
 
@@ -107,6 +111,5 @@ export async function compress(codec: Compression, data: Uint8Array): Promise<Ui
  * `maxSize` (default {@link MAX_FRAME_SIZE}).
  */
 export async function decompress(codec: Compression, data: Uint8Array, maxSize = MAX_FRAME_SIZE): Promise<Uint8Array> {
-	if (codec === Compression.None) return data;
 	return pump(new DecompressionStream(format(codec)), data, maxSize);
 }

@@ -3,9 +3,8 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::{
-	BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE,
-	OriginProducer, OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
-	TrackRequest,
+	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
+	OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -818,7 +817,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let mut frame = producer.create_frame(Frame {
 						size: 0,
 						timestamp: None,
-						compression: Compression::None,
+						compression: None,
 					})?;
 					track_stats.frame();
 					frame.finish()?;
@@ -834,7 +833,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut frame = producer.create_frame(Frame {
 					size,
 					timestamp: None,
-					compression: Compression::None,
+					compression: None,
 				})?;
 				track_stats.frame();
 

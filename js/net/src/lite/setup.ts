@@ -5,7 +5,7 @@
  * @module
  */
 
-import { Compression, compressionFromCode } from "../compression.ts";
+import { type Compression, compressionFromCode } from "../compression.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
@@ -141,8 +141,9 @@ export class Setup {
 	/**
 	 * Compression algorithms this endpoint can *decompress*, in preference order
 	 * (most-preferred first). Governs only what a peer may compress when sending
-	 * *to* us; the sender names the algorithm actually used per frame. `None` (0) is
-	 * never listed. Empty (the default) means "send me everything verbatim".
+	 * *to* us; the sender names the algorithm actually used per frame. Verbatim
+	 * transfer needs no negotiation, so it's never listed; empty (the default) means
+	 * "send me everything verbatim".
 	 */
 	compression: Compression[];
 
@@ -167,10 +168,11 @@ export class Setup {
 		if (this.path !== undefined) {
 			params.setBytes(PARAM_PATH, new TextEncoder().encode(this.path));
 		}
-		// Pack the advertised algorithms back-to-back as varints, omitting `none`.
+		// Pack the advertised algorithms back-to-back as varints. The type can't hold
+		// a verbatim "no codec" entry, so there's nothing to omit.
 		const algos: Uint8Array[] = [];
 		for (const algo of this.compression) {
-			if (algo !== Compression.None) algos.push(Varint.encode(algo));
+			algos.push(Varint.encode(algo));
 		}
 		if (algos.length > 0) {
 			const total = algos.reduce((n, a) => n + a.byteLength, 0);
@@ -200,8 +202,9 @@ export class Setup {
 			}
 		}
 
-		// A back-to-back sequence of algorithm varints. Skip `none` (0) and any
-		// identifier we don't understand: we can neither produce nor consume it.
+		// A back-to-back sequence of algorithm varints. Skip `none` (0, which decodes
+		// to `undefined`) and any identifier we don't understand (it throws): we can
+		// neither produce nor consume it.
 		const compression: Compression[] = [];
 		let algoBytes = params.getBytes(PARAM_COMPRESSION);
 		while (algoBytes !== undefined && algoBytes.byteLength > 0) {
@@ -209,7 +212,7 @@ export class Setup {
 			algoBytes = remain;
 			try {
 				const algo = compressionFromCode(code);
-				if (algo !== Compression.None && !compression.includes(algo)) {
+				if (algo !== undefined && !compression.includes(algo)) {
 					compression.push(algo);
 				}
 			} catch {

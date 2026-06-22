@@ -11,26 +11,26 @@ use std::io::{Read, Write};
 
 use crate::{Error, MAX_FRAME_SIZE, Result};
 
-/// The codec used to (de)compress frame payloads, negotiated per subscription.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A frame-payload compression codec. "No compression" (verbatim) is the absence
+/// of a codec, modeled as `Option::None` rather than a variant here, so the type
+/// can't represent a meaningless "compress with nothing" and a negotiated algorithm
+/// list can't list it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Compression {
-	/// Frames are sent verbatim.
-	#[default]
-	None,
 	/// Raw DEFLATE (RFC 1951), no zlib/gzip header. QUIC already guarantees
 	/// integrity, so the extra checksum bytes of zlib/gzip would be wasted.
 	Deflate,
 }
 
 impl Compression {
-	/// Compress a whole frame payload.
+	/// Compress a whole frame payload with this codec.
 	///
-	/// [`Compression::None`] returns the input unchanged. The caller decides
-	/// whether the result is actually smaller; this just applies the codec.
-	pub fn compress(&self, data: &[u8]) -> Vec<u8> {
+	/// The caller decides whether the result is actually smaller; this just applies
+	/// the codec. Verbatim transfer is the absence of a codec, so it's handled by the
+	/// caller (an `Option<Compression>` of `None`), not here.
+	pub fn compress(self, data: &[u8]) -> Vec<u8> {
 		match self {
-			Self::None => data.to_vec(),
 			Self::Deflate => {
 				let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
 				// Writing into a Vec is infallible.
@@ -42,9 +42,8 @@ impl Compression {
 
 	/// Decompress a whole frame payload, rejecting anything that inflates past
 	/// `MAX_FRAME_SIZE` so a malicious peer can't zip-bomb the receiver.
-	pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
+	pub fn decompress(self, data: &[u8]) -> Result<Vec<u8>> {
 		match self {
-			Self::None => Ok(data.to_vec()),
 			Self::Deflate => {
 				// Read one byte past the limit so we can tell "exactly at the cap"
 				// apart from "overflowed".
@@ -59,24 +58,20 @@ impl Compression {
 		}
 	}
 
-	/// True for [`Compression::None`] (frames stored/sent verbatim).
-	pub fn is_none(&self) -> bool {
-		matches!(self, Self::None)
-	}
-
-	/// The varint code used on the wire.
+	/// This codec's wire varint code (always non-zero; verbatim is code `0`, which
+	/// has no codec — see [`Self::from_code`]).
 	pub fn to_code(self) -> u64 {
 		match self {
-			Self::None => 0,
 			Self::Deflate => 1,
 		}
 	}
 
-	/// Parse a wire varint code, erroring on unknown codecs.
-	pub fn from_code(code: u64) -> Result<Self> {
+	/// Parse a wire varint code into an optional codec: `0` is verbatim (`None`);
+	/// other known codes are `Some`. Errors on an unknown codec.
+	pub fn from_code(code: u64) -> Result<Option<Self>> {
 		match code {
-			0 => Ok(Self::None),
-			1 => Ok(Self::Deflate),
+			0 => Ok(None),
+			1 => Ok(Some(Self::Deflate)),
 			_ => Err(Error::Unsupported),
 		}
 	}
@@ -85,15 +80,6 @@ impl Compression {
 #[cfg(test)]
 mod test {
 	use super::*;
-
-	#[test]
-	fn none_roundtrip() {
-		let data = b"the quick brown fox";
-		let c = Compression::None;
-		let packed = c.compress(data);
-		assert_eq!(&packed, data);
-		assert_eq!(c.decompress(&packed).unwrap(), data);
-	}
 
 	#[test]
 	fn deflate_roundtrip() {
@@ -120,9 +106,12 @@ mod test {
 
 	#[test]
 	fn code_roundtrip() {
-		for c in [Compression::None, Compression::Deflate] {
-			assert_eq!(Compression::from_code(c.to_code()).unwrap(), c);
-		}
+		// A codec round-trips through its non-zero code; `0` is verbatim (`None`).
+		assert_eq!(
+			Compression::from_code(Compression::Deflate.to_code()).unwrap(),
+			Some(Compression::Deflate)
+		);
+		assert_eq!(Compression::from_code(0).unwrap(), None);
 		assert!(Compression::from_code(99).is_err());
 	}
 }

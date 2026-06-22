@@ -438,9 +438,10 @@ export class Publisher {
 					}
 
 					// Compress-hinted track: every frame carries a Compression field naming
-					// the codec used. Use DEFLATE only if the peer can inflate it and it
-					// actually shrinks the (non-empty) payload; otherwise send verbatim.
-					let codec: Compression = Compression.None;
+					// the codec used (`undefined` / wire code 0 = verbatim). Use DEFLATE only
+					// if the peer can inflate it and it actually shrinks the (non-empty)
+					// payload; otherwise send verbatim.
+					let codec: Compression | undefined;
 					let payload = frame;
 					if (peerDeflate && frame.byteLength > 0) {
 						const deflated = await compressPayload(Compression.Deflate, frame);
@@ -449,7 +450,7 @@ export class Publisher {
 							payload = deflated;
 						}
 					}
-					await stream.u53(codec);
+					await stream.u53(codec ?? 0);
 					await stream.u53(payload.byteLength);
 					await stream.write(payload);
 				}

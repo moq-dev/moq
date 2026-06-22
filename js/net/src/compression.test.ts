@@ -1,12 +1,6 @@
 import { expect, test } from "bun:test";
 import { Compression, compress, compressionFromCode, decompress } from "./compression.ts";
 
-test("compression: none is a no-op", async () => {
-	const data = new TextEncoder().encode("the quick brown fox");
-	expect(await compress(Compression.None, data)).toEqual(data);
-	expect(await decompress(Compression.None, data)).toEqual(data);
-});
-
 test("compression: deflate round-trips and shrinks repetitive data", async () => {
 	const data = new Uint8Array(4096).fill(0x61); // "aaaa..." — highly compressible
 	const packed = await compress(Compression.Deflate, data);
@@ -30,7 +24,7 @@ test("compression: decompress enforces the max size", async () => {
 });
 
 test("compression: wire-code round-trip", () => {
-	expect(compressionFromCode(0)).toBe(Compression.None);
+	expect(compressionFromCode(0)).toBeUndefined();
 	expect(compressionFromCode(1)).toBe(Compression.Deflate);
 	expect(() => compressionFromCode(99)).toThrow();
 });

@@ -652,7 +652,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				};
 				Compression::from_code(code)?
 			} else {
-				Compression::None
+				None
 			};
 
 			// Message length, the sentinel only when neither field above was present.

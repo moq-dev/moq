@@ -30,8 +30,8 @@ pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
 	/// Number of *stored* payload bytes, declared up front so consumers can
-	/// preallocate. When [`Self::compression`] is not [`Compression::None`] this
-	/// is the compressed length, which is smaller than the decoded payload that
+	/// preallocate. When [`Self::compression`] is `Some`, this is the compressed
+	/// length, which is smaller than the decoded payload that
 	/// [`FrameConsumer::read_all`] returns.
 	pub size: u64,
 	/// Presentation timestamp in the parent track's timescale.
@@ -42,19 +42,18 @@ pub struct Frame {
 	/// scale matches the track's [`crate::TrackInfo::timescale`]; the publisher
 	/// surfaces a `ProtocolViolation` otherwise.
 	pub timestamp: Option<Timestamp>,
-	/// Codec the stored payload bytes are in.
+	/// Codec the stored payload bytes are in, or `None` for verbatim bytes.
 	///
-	/// [`Compression::None`] (the default) means the bytes are verbatim. A relay
-	/// that ingests an already-compressed track keeps the bytes packed in the
+	/// A relay that ingests an already-compressed frame keeps the bytes packed in the
 	/// cache and records the codec here, so the cache holds (and bills for) the
-	/// compressed size. It is *not* the same as [`crate::TrackInfo::compress`]:
-	/// that flag asks the publisher to compress on egress, whereas this records
-	/// what the cached bytes already are (an origin marks a track `compress` yet
-	/// writes its frames verbatim, so they stay [`Compression::None`] here).
-	/// [`FrameConsumer::read_all`] decodes against this; the wire publishers read
-	/// it to decide whether to pass the bytes through or recode them for a peer.
-	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Compression::is_none"))]
-	pub compression: Compression,
+	/// compressed size. It is *not* the same as [`crate::TrackInfo::compress`]: that
+	/// flag asks the publisher to compress on egress, whereas this records what the
+	/// cached bytes already are (an origin marks a track `compress` yet writes its
+	/// frames verbatim, so they stay `None` here). [`FrameConsumer::read_all`] decodes
+	/// against this; the wire publishers read it to decide whether to pass the bytes
+	/// through or recode them for a peer.
+	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+	pub compression: Option<Compression>,
 }
 
 impl Frame {
@@ -73,7 +72,7 @@ impl From<usize> for Frame {
 		Self {
 			size: size as u64,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 	}
 }
@@ -83,7 +82,7 @@ impl From<u64> for Frame {
 		Self {
 			size,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 	}
 }
@@ -93,7 +92,7 @@ impl From<u32> for Frame {
 		Self {
 			size: size as u64,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 	}
 }
@@ -103,7 +102,7 @@ impl From<u16> for Frame {
 		Self {
 			size: size as u64,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 	}
 }
@@ -414,13 +413,13 @@ impl FrameConsumer {
 			Ok(()) => {
 				// Frame is finished: written == capacity.
 				self.read_idx = self.buf.capacity();
-				if self.info.compression.is_none() {
+				let Some(codec) = self.info.compression else {
 					// Verbatim: hand back a zero-copy view of the remaining bytes.
 					let bytes = self
 						.snapshot(read_idx)
 						.unwrap_or_else(|| Bytes::from_owner(self.buf.clone()).slice(read_idx..read_idx));
 					return Poll::Ready(Ok(bytes));
-				}
+				};
 				// Already drained by a prior read: nothing remains.
 				if read_idx >= self.buf.capacity() {
 					return Poll::Ready(Ok(Bytes::new()));
@@ -429,7 +428,7 @@ impl FrameConsumer {
 				// full stream from the start, so this decodes the entire buffer and
 				// ignores any partial `read_chunk` cursor (compressed frames are
 				// meant to be read whole).
-				match self.info.compression.decompress(self.buf.as_ref()) {
+				match codec.decompress(self.buf.as_ref()) {
 					Ok(decoded) => Poll::Ready(Ok(Bytes::from(decoded))),
 					Err(e) => Poll::Ready(Err(e)),
 				}
@@ -515,7 +514,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -531,7 +530,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -548,7 +547,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -572,7 +571,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -590,7 +589,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hi")).unwrap();
@@ -603,7 +602,7 @@ mod test {
 		let mut producer = Frame {
 			size: 3,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		let err = producer.write(Bytes::from_static(b"toolong")).unwrap_err();
@@ -615,7 +614,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		let mut consumer = producer.consume();
@@ -630,7 +629,7 @@ mod test {
 		let mut producer = Frame {
 			size: 0,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		producer.finish().unwrap();
@@ -645,7 +644,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		let mut consumer = producer.consume();
@@ -666,7 +665,7 @@ mod test {
 		let mut producer = Frame {
 			size: 12,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		assert_eq!(producer.remaining_mut(), 12);
@@ -687,7 +686,7 @@ mod test {
 		let mut producer = Frame {
 			size: 4,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		// Safety violation on purpose: cnt > remaining_mut().
@@ -699,7 +698,7 @@ mod test {
 		let mut producer = Frame {
 			size: 6,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		let mut consumer = producer.consume();
@@ -724,7 +723,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
-			compression: Compression::None,
+			compression: None,
 		}
 		.produce();
 		let mut c1 = producer.consume();
@@ -757,7 +756,7 @@ mod test {
 		let mut producer = Frame {
 			size: packed.len() as u64,
 			timestamp: None,
-			compression: Compression::Deflate,
+			compression: Some(Compression::Deflate),
 		}
 		.produce();
 		producer.write(Bytes::from(packed.clone())).unwrap();
@@ -777,7 +776,7 @@ mod test {
 
 		// The header reports the stored size and codec.
 		assert_eq!(decoded.size, packed.len() as u64);
-		assert_eq!(decoded.compression, Compression::Deflate);
+		assert_eq!(decoded.compression, Some(Compression::Deflate));
 	}
 
 	/// `read_all` on a compressed frame surfaces a decode error for corrupt
@@ -787,7 +786,7 @@ mod test {
 		let mut producer = Frame {
 			size: 4,
 			timestamp: None,
-			compression: Compression::Deflate,
+			compression: Some(Compression::Deflate),
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"\xff\xff\xff\xff")).unwrap();

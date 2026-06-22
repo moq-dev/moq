@@ -62,7 +62,7 @@ impl Frame {
 		let net_frame = moq_net::Frame {
 			size,
 			timestamp: net_timestamp,
-			compression: moq_net::Compression::None,
+			compression: None,
 		};
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;

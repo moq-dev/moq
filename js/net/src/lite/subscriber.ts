@@ -2,7 +2,7 @@ import { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
-import { Compression, compressionFromCode, decompress } from "../compression.ts";
+import { compressionFromCode, decompress } from "../compression.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -511,15 +511,15 @@ export class Subscriber {
 				}
 
 				// Per-frame Compression field, present iff the track is compress-hinted;
-				// it names the codec this frame's payload actually uses.
-				const codec = hint ? compressionFromCode(await stream.u53()) : Compression.None;
+				// it names the codec this frame's payload uses (`undefined` = verbatim).
+				const codec = hint ? compressionFromCode(await stream.u53()) : undefined;
 
 				const size = await stream.u53();
 				const payload = await stream.read(size);
 				if (!payload) break;
 
-				// Inflate per frame; an opted-out (none) frame is already the logical payload.
-				producer.writeFrame(codec === Compression.None ? payload : await decompress(codec, payload));
+				// Inflate per frame; an opted-out (verbatim) frame is already the logical payload.
+				producer.writeFrame(codec === undefined ? payload : await decompress(codec, payload));
 			}
 
 			producer.close();

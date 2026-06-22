@@ -786,14 +786,14 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 /// Pick the wire codec for one frame's logical payload: DEFLATE when the peer
 /// advertised it and it actually shrinks the bytes, else verbatim. An empty payload
 /// always stays verbatim (it must use `none`). Shared by the live and fetch paths.
-fn choose_compression(peer_deflate: bool, payload: bytes::Bytes) -> (Compression, bytes::Bytes) {
+fn choose_compression(peer_deflate: bool, payload: bytes::Bytes) -> (Option<Compression>, bytes::Bytes) {
 	if peer_deflate && !payload.is_empty() {
 		let deflated = Compression::Deflate.compress(&payload);
 		if deflated.len() < payload.len() {
-			return (Compression::Deflate, bytes::Bytes::from(deflated));
+			return (Some(Compression::Deflate), bytes::Bytes::from(deflated));
 		}
 	}
-	(Compression::None, payload)
+	(None, payload)
 }
 
 /// Write one frame to a fetch stream in the lite wire format: the optional timing
@@ -825,7 +825,7 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	}
 
 	// Passthrough: cached DEFLATE forwarded verbatim to a peer that can inflate it.
-	if peer_deflate && frame.compression == Compression::Deflate {
+	if peer_deflate && frame.compression == Some(Compression::Deflate) {
 		writer.encode(&Compression::Deflate.to_code()).await?;
 		writer.encode(&frame.size).await?;
 		track_stats.frame();
@@ -842,7 +842,7 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	let payload = frame.read_all().await?;
 	let (codec, mut chunk) = choose_compression(peer_deflate, payload);
 	let n = chunk.len() as u64;
-	writer.encode(&codec.to_code()).await?;
+	writer.encode(&codec.map_or(0, Compression::to_code)).await?;
 	writer.encode(&n).await?;
 	track_stats.frame();
 	writer.write_all(&mut chunk).await?;
@@ -1028,7 +1028,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		// Passthrough: the cache already holds DEFLATE bytes and the peer can inflate
 		// them, so forward verbatim (the relay hot path) — field, stored size, bytes.
-		if self.peer_deflate && frame.compression == Compression::Deflate {
+		if self.peer_deflate && frame.compression == Some(Compression::Deflate) {
 			stream.encode(&Compression::Deflate.to_code()).await?;
 			stream.encode(&frame.size).await?;
 			self.track_stats.frame();
@@ -1042,7 +1042,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		// peer that can't inflate) and pick per frame whether DEFLATE shrinks it.
 		let payload = self.read_all(stream, priority, &mut frame).await?;
 		let (codec, chunk) = choose_compression(self.peer_deflate, payload);
-		stream.encode(&codec.to_code()).await?;
+		stream.encode(&codec.map_or(0, Compression::to_code)).await?;
 		stream.encode(&(chunk.len() as u64)).await?;
 		self.track_stats.frame();
 		self.write_chunk(stream, priority, chunk).await?;

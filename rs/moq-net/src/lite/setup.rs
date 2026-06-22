@@ -64,8 +64,9 @@ pub struct Setup {
 	pub path: Option<String>,
 	/// Compression algorithms this endpoint can *decompress*, in preference order
 	/// (most-preferred first). Governs only what a peer may compress when sending
-	/// *to* us; the sender names the algorithm actually used per frame. `none` (0)
-	/// is never listed. Empty (the default) means "send me everything verbatim".
+	/// *to* us; the sender names the algorithm actually used per frame. Verbatim
+	/// transfer needs no negotiation, so it's never listed; empty (the default) means
+	/// "send me everything verbatim".
 	pub compression: Vec<Compression>,
 }
 
@@ -91,15 +92,15 @@ impl Message for Setup {
 			None => None,
 		};
 
-		// A back-to-back sequence of algorithm varints. Skip `none` (0) and any
-		// identifier we don't understand: we can neither produce nor consume it.
+		// A back-to-back sequence of algorithm varints. Skip `none` (0, which decodes
+		// to `None`) and any identifier we don't understand (an error): we can neither
+		// produce nor consume it.
 		let mut compression = Vec::new();
 		if let Some(bytes) = params.get_bytes(PARAM_COMPRESSION) {
 			let mut slice = bytes;
 			while !slice.is_empty() {
 				let code = u64::decode(&mut slice, version)?;
-				if let Ok(algo) = Compression::from_code(code)
-					&& algo != Compression::None
+				if let Ok(Some(algo)) = Compression::from_code(code)
 					&& !compression.contains(&algo)
 				{
 					compression.push(algo);
@@ -127,12 +128,11 @@ impl Message for Setup {
 		if let Some(path) = &self.path {
 			params.set_bytes(PARAM_PATH, path.as_bytes().to_vec());
 		}
-		// Pack the advertised algorithms back-to-back as varints, omitting `none`.
+		// Pack the advertised algorithms back-to-back as varints. The type can't hold
+		// a verbatim "no codec" entry, so there's nothing to omit.
 		let mut algos = Vec::new();
 		for algo in &self.compression {
-			if *algo != Compression::None {
-				algo.to_code().encode(&mut algos, version)?;
-			}
+			algo.to_code().encode(&mut algos, version)?;
 		}
 		if !algos.is_empty() {
 			params.set_bytes(PARAM_COMPRESSION, algos);

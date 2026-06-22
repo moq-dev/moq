@@ -333,7 +333,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// IETF carries no per-frame compression, so a cached compressed frame
 			// (e.g. relayed from a lite-05 origin) must be inflated for this peer.
-			if !frame.compression.is_none() {
+			if frame.compression.is_some() {
 				let mut payload = tokio::select! {
 					biased;
 					_ = stream.closed() => return Err(Error::Cancel),
