@@ -20,6 +20,7 @@ doctest = false
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
 gst = { package = "gstreamer", version = "0.23" }
+gst-base = { package = "gstreamer-base", version = "0.23" }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
