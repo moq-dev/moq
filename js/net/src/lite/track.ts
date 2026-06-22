@@ -1,4 +1,3 @@
-import { Compression, compressionFromCode } from "../compression.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -65,39 +64,45 @@ export class TrackInfo {
 	 * per-frame timestamps on the wire.
 	 */
 	timescale: number;
-	/** Codec applied to every frame payload on this track. */
-	compression: Compression;
+	/**
+	 * Boolean hint that this track's payloads are worth compressing. It names no
+	 * algorithm: that's negotiated per hop (SETUP) and named per frame. When set,
+	 * every FRAME on the track carries a per-frame `Compression` field. Wire values
+	 * `>1` are reserved and decode as `true`, so the hint stays additive.
+	 */
+	compress: boolean;
 
 	constructor({
 		priority = 0,
 		ordered = true,
 		timescale = 0,
-		compression = Compression.None,
+		compress = false,
 	}: {
 		priority?: number;
 		ordered?: boolean;
 		timescale?: number;
-		compression?: Compression;
+		compress?: boolean;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
 		this.timescale = timescale;
-		this.compression = compression;
+		this.compress = compress;
 	}
 
 	async #encode(w: Writer) {
 		await w.u8(this.priority);
 		await w.bool(this.ordered);
 		await w.u53(this.timescale);
-		await w.u53(this.compression);
+		await w.u53(this.compress ? 1 : 0);
 	}
 
 	static async #decode(r: Reader): Promise<TrackInfo> {
 		const priority = await r.u8();
 		const ordered = await r.bool();
 		const timescale = await r.u53();
-		const compression = compressionFromCode(await r.u53());
-		return new TrackInfo({ priority, ordered, timescale, compression });
+		// Any non-zero value (including reserved `>1`) is the "worth compressing" hint.
+		const compress = (await r.u53()) !== 0;
+		return new TrackInfo({ priority, ordered, timescale, compress });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

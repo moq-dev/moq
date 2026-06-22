@@ -1,10 +1,11 @@
 /**
  * Per-frame payload compression for moq-lite-05.
  *
- * A publisher marks a {@link Track} with `compress = true` when its frames are
- * worth compressing (e.g. a JSON catalog). The concrete codec is negotiated in
- * SUBSCRIBE_OK, and every frame is compressed independently so the codec never
- * carries state across the lossy, out-of-order group boundary.
+ * A publisher marks a {@link Track} with `compress = true` to hint its frames are
+ * worth compressing (e.g. a JSON catalog). The algorithm is negotiated per hop (the
+ * SETUP `Compression` parameter) and named per frame, so a frame can opt out when
+ * compression wouldn't shrink it; each frame is compressed independently so the codec
+ * never carries state across the lossy, out-of-order group boundary.
  */
 
 // Mirrors the Rust MAX_FRAME_SIZE cap on the receive path: reject anything that

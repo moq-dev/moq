@@ -5,6 +5,7 @@
  * @module
  */
 
+import { Compression, compressionFromCode } from "../compression.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
@@ -14,6 +15,8 @@ import { hasSetupStream, type Version } from "./version.ts";
 const PARAM_PROBE = 0x1n;
 /** Setup Parameter id for the request Path (client-only, URI-less transports). */
 const PARAM_PATH = 0x2n;
+/** Setup Parameter id for the compression algorithms this endpoint can decompress. */
+const PARAM_COMPRESSION = 0x3n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -135,9 +138,18 @@ export class Setup {
 	 */
 	path?: string;
 
-	constructor(probe: ProbeLevel = ProbeLevel.None, path?: string) {
+	/**
+	 * Compression algorithms this endpoint can *decompress*, in preference order
+	 * (most-preferred first). Governs only what a peer may compress when sending
+	 * *to* us; the sender names the algorithm actually used per frame. `None` (0) is
+	 * never listed. Empty (the default) means "send me everything verbatim".
+	 */
+	compression: Compression[];
+
+	constructor(probe: ProbeLevel = ProbeLevel.None, path?: string, compression: Compression[] = []) {
 		this.probe = probe;
 		this.path = path;
+		this.compression = compression;
 	}
 
 	static #guard(version: Version) {
@@ -154,6 +166,21 @@ export class Setup {
 		}
 		if (this.path !== undefined) {
 			params.setBytes(PARAM_PATH, new TextEncoder().encode(this.path));
+		}
+		// Pack the advertised algorithms back-to-back as varints, omitting `none`.
+		const algos: Uint8Array[] = [];
+		for (const algo of this.compression) {
+			if (algo !== Compression.None) algos.push(Varint.encode(algo));
+		}
+		if (algos.length > 0) {
+			const total = algos.reduce((n, a) => n + a.byteLength, 0);
+			const packed = new Uint8Array(total);
+			let offset = 0;
+			for (const a of algos) {
+				packed.set(a, offset);
+				offset += a.byteLength;
+			}
+			params.setBytes(PARAM_COMPRESSION, packed);
 		}
 		await params.encode(w);
 	}
@@ -173,7 +200,24 @@ export class Setup {
 			}
 		}
 
-		return new Setup(probe, path);
+		// A back-to-back sequence of algorithm varints. Skip `none` (0) and any
+		// identifier we don't understand: we can neither produce nor consume it.
+		const compression: Compression[] = [];
+		let algoBytes = params.getBytes(PARAM_COMPRESSION);
+		while (algoBytes !== undefined && algoBytes.byteLength > 0) {
+			const [code, remain] = Varint.decode(algoBytes);
+			algoBytes = remain;
+			try {
+				const algo = compressionFromCode(code);
+				if (algo !== Compression.None && !compression.includes(algo)) {
+					compression.push(algo);
+				}
+			} catch {
+				// Unknown algorithm; ignore it.
+			}
+		}
+
+		return new Setup(probe, path, compression);
 	}
 
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */

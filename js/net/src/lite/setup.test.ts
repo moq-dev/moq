@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Compression } from "../compression.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
@@ -51,6 +52,29 @@ test("SETUP with path round-trips on draft-05", async () => {
 	const got = await roundTrip(new Setup(ProbeLevel.Report, "/room/123"));
 	expect(got.probe).toBe(ProbeLevel.Report);
 	expect(got.path).toBe("/room/123");
+});
+
+test("SETUP compression parameter round-trips on draft-05", async () => {
+	const got = await roundTrip(new Setup(ProbeLevel.None, undefined, [Compression.Deflate]));
+	expect(got.compression).toEqual([Compression.Deflate]);
+});
+
+test("SETUP compression decode skips none and unknown", async () => {
+	// Hand-frame a Compression parameter (id 0x3) listing none(0), deflate(1), unknown(99);
+	// only deflate survives the decode.
+	const value = concat([Varint.encode(0), Varint.encode(1), Varint.encode(99)]);
+	const body = await bytes(async (w) => {
+		await w.u53(1); // parameter count
+		await w.u62(0x3n); // PARAM_COMPRESSION
+		await w.u53(value.byteLength);
+		await w.write(value);
+	});
+	const framed = await bytes(async (w) => {
+		await w.u53(body.byteLength);
+		await w.write(body);
+	});
+	const got = await Setup.decode(new Reader(undefined, framed), Version.DRAFT_05_WIP);
+	expect(got.compression).toEqual([Compression.Deflate]);
 });
 
 test("unknown probe level saturates to Increase", async () => {

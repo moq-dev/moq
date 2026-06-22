@@ -2,7 +2,7 @@ import { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
-import { Compression, decompress } from "../compression.ts";
+import { Compression, compressionFromCode, decompress } from "../compression.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -57,9 +57,10 @@ interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching TrackSubscriber it got from Broadcast.subscribe.
 	track: TrackProducer;
-	// undefined until the negotiated codec is known (from TRACK_INFO on lite-05+,
-	// or SUBSCRIBE_OK on older drafts).
-	compression: Signal<Compression | undefined>;
+	// The track's compress hint, undefined until known (from TRACK_INFO on lite-05+,
+	// or SUBSCRIBE_OK on older drafts). When true, each frame on the group stream
+	// carries a per-frame Compression field that runGroup reads and decodes against.
+	compress: Signal<boolean | undefined>;
 	// Per-frame timestamp scale (0 = none). undefined until it's known. A non-zero
 	// value means each frame on the group stream is prefixed with a zigzag-delta
 	// timestamp varint that runGroup must consume to stay in sync.
@@ -228,7 +229,7 @@ export class Subscriber {
 			}
 			const info = await this.#trackInfo(path, name);
 			return {
-				compress: info.compression !== Compression.None,
+				compress: info.compress,
 				// The wire no longer carries a cache hint (retention is best-effort),
 				// so the local retention window falls back to the model default.
 				cache: DEFAULT_CACHE_MS,
@@ -251,9 +252,9 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
 		const id = this.#subscribeNext++;
 
-		// `compression` stays undefined until TRACK_INFO (or, on older drafts,
+		// The `compress` hint stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
-		const compression = new Signal<Compression | undefined>(undefined);
+		const compress = new Signal<boolean | undefined>(undefined);
 		const timescale = new Signal<number | undefined>(undefined);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
@@ -263,7 +264,7 @@ export class Subscriber {
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
 		const state: { stream?: Stream } = {};
-		const setup = this.#openSubscribe(state, msg, request, id, compression, timescale);
+		const setup = this.#openSubscribe(state, msg, request, id, compress, timescale);
 
 		let opened: { stream: Stream; producer: TrackProducer };
 		try {
@@ -337,7 +338,7 @@ export class Subscriber {
 		msg: Subscribe,
 		request: TrackRequest,
 		id: bigint,
-		compression: Signal<Compression | undefined>,
+		compress: Signal<boolean | undefined>,
 		timescale: Signal<number | undefined>,
 	): Promise<{ stream: Stream; producer: TrackProducer }> {
 		let producer: TrackProducer;
@@ -347,25 +348,25 @@ export class Subscriber {
 			// Fetch the immutable properties once via the TRACK stream.
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
 			producer = request.accept({
-				compress: info.compression !== Compression.None,
+				compress: info.compress,
 				// The wire no longer carries a cache hint (retention is best-effort),
 				// so the local retention window falls back to the model default.
 				cache: DEFAULT_CACHE_MS,
 				priority: info.priority,
 				ordered: info.ordered,
 			});
-			compression.set(info.compression);
+			compress.set(info.compress);
 			timescale.set(info.timescale);
 		} else {
 			// Older drafts negotiate nothing per-track: verbatim frames, no timescale.
 			producer = request.accept();
-			compression.set(Compression.None);
+			compress.set(false);
 			timescale.set(0);
 			drainOk = true;
 		}
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
-		this.#subscribes.set(id, { track: producer, compression, timescale });
+		this.#subscribes.set(id, { track: producer, compress, timescale });
 
 		state.stream = await Stream.open(this.#quic);
 		await state.stream.writer.u53(StreamId.Subscribe);
@@ -475,30 +476,29 @@ export class Subscriber {
 			return;
 		}
 
-		const { track, compression, timescale } = entry;
+		const { track, compress, timescale } = entry;
 		const producer = new Group(group.sequence);
 		track.writeGroup(producer);
 
 		try {
-			// Block until the codec is known; the group's stream can arrive before
-			// TRACK_INFO (or SUBSCRIBE_OK) resolves it on the subscribe stream.
-			let codec = compression.peek();
-			while (codec === undefined) {
+			// Block until the compress hint is known; the group's stream can arrive
+			// before TRACK_INFO (or SUBSCRIBE_OK) resolves it on the subscribe stream.
+			let hint = compress.peek();
+			while (hint === undefined) {
 				if (track.state.closed.peek()) {
-					// Subscription ended before the codec resolved; nothing to decode.
+					// Subscription ended before the hint resolved; nothing to decode.
 					producer.close();
 					stream.stop(new Error("cancel"));
 					return;
 				}
-				await Signal.race(compression, track.state.closed);
-				codec = compression.peek();
+				await Signal.race(compress, track.state.closed);
+				hint = compress.peek();
 			}
 
-			// timescale resolves together with compression (from TRACK_INFO). A
-			// non-zero scale means every frame is prefixed with a zigzag-delta
-			// timestamp (see the lite-05 FRAME format). We don't surface it to the
-			// application yet, but we must still read the varint to keep the frame
-			// framing in sync with the publisher.
+			// timescale resolves together with the hint (from TRACK_INFO). A non-zero
+			// scale means every frame is prefixed with a zigzag-delta timestamp (see the
+			// lite-05 FRAME format). We don't surface it to the application yet, but we
+			// must still read the varint to keep the frame framing in sync.
 			const scale = timescale.peek() ?? 0;
 
 			for (;;) {
@@ -510,12 +510,15 @@ export class Subscriber {
 					await stream.u62();
 				}
 
+				// Per-frame Compression field, present iff the track is compress-hinted;
+				// it names the codec this frame's payload actually uses.
+				const codec = hint ? compressionFromCode(await stream.u53()) : Compression.None;
+
 				const size = await stream.u53();
 				const payload = await stream.read(size);
 				if (!payload) break;
 
-				// On a compressed track the wire size is the compressed length;
-				// inflate it back to the original frame the consumer sees.
+				// Inflate per frame; an opted-out (none) frame is already the logical payload.
 				producer.writeFrame(codec === Compression.None ? payload : await decompress(codec, payload));
 			}
 

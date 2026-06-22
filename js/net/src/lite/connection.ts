@@ -2,6 +2,7 @@ import { Signal } from "@moq/signals";
 import type { Announced } from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
+import { Compression } from "../compression.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -97,7 +98,7 @@ export class Connection implements Established {
 		this.rtt = new Signal<Time.Milli | undefined>(undefined);
 
 		this.origin = randomOrigin();
-		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
+		this.#publisher = new Publisher(this.#quic, this.#version, this.origin, this.#peerSetup);
 		this.#subscriber = new Subscriber(
 			this.#quic,
 			this.#version,
@@ -184,7 +185,8 @@ export class Connection implements Established {
 		const writer = await Writer.open(this.#quic);
 		try {
 			await writer.u8(DataType.Setup);
-			await new Setup(ProbeLevel.Report).encode(writer, this.#version);
+			// We can inflate DEFLATE, so a peer may compress what it sends us.
+			await new Setup(ProbeLevel.Report, undefined, [Compression.Deflate]).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);

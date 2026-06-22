@@ -1,6 +1,6 @@
 import { type Dispose, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast.ts";
-import { Compression, compress } from "../compression.ts";
+import { Compression, compress as compressPayload } from "../compression.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
@@ -10,6 +10,7 @@ import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest, epoc
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
+import type { Setup } from "./setup.ts";
 import {
 	encodeSubscribeResponse,
 	type Subscribe,
@@ -73,18 +74,37 @@ export class Publisher {
 	// `broadcast\0track`. A rejected lookup is evicted so a retry can re-probe.
 	#trackInfo = new Map<string, Promise<TrackInfoMessage>>();
 
+	// The peer's SETUP, recorded by the connection once its Setup stream is read.
+	// Consulted before compressing a track's egress: we may only use an algorithm
+	// the peer advertised it can decompress. `undefined` until it arrives.
+	#peerSetup?: Signal<Setup | undefined>;
+
 	/**
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
 	 * @param origin - Origin id shared with the Subscriber
+	 * @param peerSetup - Slot for the peer's SETUP, for compression negotiation (lite-05+)
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Origin) {
+	constructor(quic: WebTransport, version: Version, origin: Origin, peerSetup?: Signal<Setup | undefined>) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
+		this.#peerSetup = peerSetup;
+	}
+
+	// Await the algorithms the peer can decompress, blocking until its SETUP arrives.
+	// We MUST NOT compress with an algorithm the peer didn't advertise. An empty list
+	// (no slot, or no Compression parameter) means everything must be sent verbatim.
+	async #peerCompression(): Promise<Compression[]> {
+		if (!this.#peerSetup) return [];
+		let setup = this.#peerSetup.peek();
+		while (setup === undefined) {
+			setup = await this.#peerSetup.next();
+		}
+		return setup.compression;
 	}
 
 	/**
@@ -233,20 +253,24 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			let compression: Compression = Compression.None;
+			let compress = false;
+			let peerDeflate = false;
 
 			if (supportsTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
 				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
 				//
-				// The frame codec is one of those immutable properties, so serving
-				// MUST use exactly what TRACK_INFO advertised. Both come from the
-				// producer's accept(), so they always agree. Awaiting info() also
-				// surfaces a rejected track (accept never called, track closed) as an
-				// error here, which resets the stream.
+				// The compress hint is one of those immutable properties; it gates the
+				// per-frame Compression field. Awaiting info() also surfaces a rejected
+				// track (accept never called, track closed) as an error here, which
+				// resets the stream. Whether we may actually use DEFLATE is the per-hop
+				// SETUP negotiation; only wait on the peer's SETUP for a hinted track.
 				const info = await track.info();
-				compression = info.compress ? Compression.Deflate : Compression.None;
+				compress = info.compress;
+				if (compress) {
+					peerDeflate = (await this.#peerCompression()).includes(Compression.Deflate);
+				}
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({ priority: msg.priority });
@@ -255,7 +279,7 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, compression);
+			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, compress, peerDeflate);
 
 			for (;;) {
 				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
@@ -296,7 +320,8 @@ export class Publisher {
 		broadcast: Path.Valid,
 		track: TrackSubscriber,
 		stream: Writer,
-		compression: Compression,
+		compress: boolean,
+		peerDeflate: boolean,
 	) {
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
@@ -319,7 +344,7 @@ export class Publisher {
 				}
 				lastSequence = group.sequence;
 
-				void this.#runGroup(sub, group, compression);
+				void this.#runGroup(sub, group, compress, peerDeflate);
 			}
 
 			if (emitRange) {
@@ -376,7 +401,7 @@ export class Publisher {
 				ordered: info.ordered,
 				// This implementation doesn't produce per-frame timestamps yet.
 				timescale: 0,
-				compression: info.compress ? Compression.Deflate : Compression.None,
+				compress: info.compress,
 			});
 		})();
 
@@ -393,7 +418,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: Group, compression: Compression) {
+	async #runGroup(sub: bigint, group: Group, compress: boolean, peerDeflate: boolean) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			const stream = await Writer.open(this.#quic);
@@ -405,9 +430,26 @@ export class Publisher {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					// On a compressed track the wire size is the compressed length;
-					// the subscriber inflates it back from the SUBSCRIBE_OK codec.
-					const payload = await compress(compression, frame);
+					if (!compress) {
+						// No per-frame Compression field on a non-hinted track.
+						await stream.u53(frame.byteLength);
+						await stream.write(frame);
+						continue;
+					}
+
+					// Compress-hinted track: every frame carries a Compression field naming
+					// the codec used. Use DEFLATE only if the peer can inflate it and it
+					// actually shrinks the (non-empty) payload; otherwise send verbatim.
+					let codec: Compression = Compression.None;
+					let payload = frame;
+					if (peerDeflate && frame.byteLength > 0) {
+						const deflated = await compressPayload(Compression.Deflate, frame);
+						if (deflated.byteLength < frame.byteLength) {
+							codec = Compression.Deflate;
+							payload = deflated;
+						}
+					}
+					await stream.u53(codec);
 					await stream.u53(payload.byteLength);
 					await stream.write(payload);
 				}

@@ -1,8 +1,9 @@
 //! Per-frame payload compression.
 //!
-//! A publisher marks a [`crate::Track`] with `compress = true` when its frames are
-//! worth compressing (e.g. a JSON catalog). The wire protocol then negotiates a
-//! concrete [`Compression`] codec in SUBSCRIBE_OK, and every frame on that track is
+//! A publisher marks a [`crate::Track`] with `compress = true` to hint its frames
+//! are worth compressing (e.g. a JSON catalog). The wire then negotiates an
+//! algorithm per hop (the SETUP `Compression` parameter) and names it per frame, so
+//! a frame can opt out (`None`) when compression wouldn't shrink it. Each frame is
 //! compressed independently so the codec doesn't carry state across the lossy,
 //! out-of-order group boundary.
 

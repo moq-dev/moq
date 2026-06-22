@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { Compression } from "../compression.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Track, TrackInfo } from "./track.ts";
@@ -32,14 +31,31 @@ test("TrackInfo round-trips on draft-05", async () => {
 		priority: 7,
 		ordered: false,
 		timescale: 90000,
-		compression: Compression.Deflate,
+		compress: true,
 	});
 	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05_WIP)));
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05_WIP);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(false);
 	expect(got.timescale).toBe(90000);
-	expect(got.compression).toBe(Compression.Deflate);
+	expect(got.compress).toBe(true);
+});
+
+test("TrackInfo compress hint is additive", async () => {
+	// Reserved wire values (>1) decode as the boolean hint `true`. Hand-frame the
+	// body and prefix it with the Message size, the way the encoder does.
+	const body = await bytes(async (w) => {
+		await w.u8(7);
+		await w.bool(false);
+		await w.u53(90000);
+		await w.u53(9); // reserved compress value
+	});
+	const framed = await bytes(async (w) => {
+		await w.u53(body.byteLength);
+		await w.write(body);
+	});
+	const got = await TrackInfo.decode(new Reader(undefined, framed), Version.DRAFT_05_WIP);
+	expect(got.compress).toBe(true);
 });
 
 test("Track request round-trips on draft-05", async () => {
@@ -51,6 +67,6 @@ test("Track request round-trips on draft-05", async () => {
 });
 
 test("TRACK_INFO is rejected before draft-05", async () => {
-	const info = new TrackInfo({ compression: Compression.None });
+	const info = new TrackInfo({ compress: false });
 	await expect(bytes((w) => info.encode(w, Version.DRAFT_04))).rejects.toThrow();
 });
