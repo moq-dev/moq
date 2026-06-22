@@ -12,7 +12,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result};
+use crate::{Error, MAX_FRAME_SIZE, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -179,6 +179,11 @@ impl GroupProducer {
 
 	/// Create a frame with an upfront size
 	pub fn create_frame(&mut self, info: Frame) -> Result<FrameProducer> {
+		// Reject before `produce()`: `FrameProducer::new` preallocates `size` bytes, so an oversized
+		// frame must be caught here or it triggers the very allocation the limit exists to prevent.
+		if info.size > MAX_FRAME_SIZE {
+			return Err(Error::FrameTooLarge);
+		}
 		let frame = info.produce();
 		self.append_frame(frame.clone())?;
 		Ok(frame)
@@ -186,6 +191,11 @@ impl GroupProducer {
 
 	/// Append a frame producer to the group.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
+		// Backstop for direct callers (the buffer is already allocated by the time we hold a
+		// FrameProducer); `create_frame` is the path that rejects before allocating.
+		if frame.size > MAX_FRAME_SIZE {
+			return Err(Error::FrameTooLarge);
+		}
 		let mut state = modify(&self.state)?;
 		if state.fin {
 			return Err(Error::Closed);
@@ -439,6 +449,20 @@ mod test {
 		let chunks = consumer.read_frame_chunks().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(chunks.len(), 1);
 		assert_eq!(chunks[0], Bytes::from_static(b"helloworld"));
+	}
+
+	#[test]
+	fn append_rejects_oversized_frame() {
+		let mut producer = Group { sequence: 0 }.produce();
+		let err = producer.create_frame(Frame {
+			size: MAX_FRAME_SIZE + 1,
+		});
+		assert!(
+			matches!(err, Err(Error::FrameTooLarge)),
+			"a frame over the limit is rejected"
+		);
+		// A frame at the limit is still accepted.
+		assert!(producer.create_frame(Frame { size: MAX_FRAME_SIZE }).is_ok());
 	}
 
 	#[test]
