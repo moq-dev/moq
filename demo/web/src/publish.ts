@@ -259,7 +259,7 @@ async function buildCodecMenu() {
 		codec.set(select.value === "auto" ? undefined : select.value);
 	});
 }
-buildCodecMenu();
+void buildCodecMenu();
 
 // ---------------------------------------------------------------------------
 // Negotiated values, shown inline beside each control once live

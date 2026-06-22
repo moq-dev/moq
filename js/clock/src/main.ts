@@ -87,7 +87,7 @@ async function publish(config: Config) {
 		if (!request) break;
 
 		if (request.track.name === config.track) {
-			publishTrack(request.track);
+			void publishTrack(request.track);
 		} else {
 			request.track.close(new Error("not found"));
 		}

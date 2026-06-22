@@ -95,11 +95,10 @@ export class Muxer {
 		if (!media) return;
 
 		// Periodically clean up old buffered data.
-		effect.interval(async () => {
+		effect.interval(() => {
 			for (const sourceBuffer of media.sourceBuffers) {
-				while (sourceBuffer.updating) {
-					await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
-				}
+				// Skip a buffer mid-update; the next tick (1s later) catches it.
+				if (sourceBuffer.updating) continue;
 
 				// Keep at least 10 seconds of buffered data to avoid removing I-frames.
 				if (element.currentTime > 10) {

@@ -41,6 +41,13 @@
 						"ignoreTypes": true
 					}
 				}
+			},
+			"nursery": {
+				// Type-aware promise safety: floating promises must be explicitly handled
+				// (await/void/catch), and a promise can't be used where a non-promise is
+				// expected (e.g. an `async` callback passed to a sync `() => void`).
+				"noFloatingPromises": "error",
+				"noMisusedPromises": "error"
 			}
 		}
 	},

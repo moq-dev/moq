@@ -93,7 +93,7 @@ export class Connection implements Established {
 		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.origin, this.recvBandwidth, this.rtt);
 
-		this.#run();
+		void this.#run();
 	}
 
 	/**

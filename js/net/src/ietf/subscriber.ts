@@ -183,11 +183,11 @@ export class Subscriber {
 	consume(path: Path.Valid): Broadcast {
 		const broadcast = new Broadcast();
 
-		(async () => {
+		void (async () => {
 			for (;;) {
 				const request = await broadcast.requested();
 				if (!request) break;
-				this.#runSubscribe(path, request);
+				void this.#runSubscribe(path, request);
 			}
 		})();
 

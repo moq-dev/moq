@@ -96,9 +96,15 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		throw new Error("no transport available; WebTransport not supported and WebSocket is disabled");
 	}
 
-	// Race them, using `.any` to ignore if one participant has a error.
+	// Race the available transports, using `.any` to ignore if one participant has an error.
+	// `webtransport`/`websocket` are `Promise | undefined`, so test existence explicitly: a
+	// promise is always truthy, so bare truthiness here would be a misused-promise.
 	const session = await Promise.any(
-		webtransport ? (websocket ? [websocket, webtransport] : [webtransport]) : [websocket],
+		webtransport !== undefined
+			? websocket !== undefined
+				? [websocket, webtransport]
+				: [webtransport]
+			: [websocket],
 	);
 	done();
 

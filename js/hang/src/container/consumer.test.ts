@@ -271,7 +271,7 @@ test("Consumer throws on concurrent next() calls", async () => {
 	const consumer = new Consumer(track, { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	// First call blocks waiting for data
-	consumer.next();
+	void consumer.next();
 
 	// Second call should throw
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");

@@ -18,7 +18,7 @@ async function main() {
 
 		// Accept the request for the "chat" track
 		if (request.track.name === "chat") {
-			publishTrack(request.track);
+			void publishTrack(request.track);
 		} else {
 			// Reject other tracks
 			request.track.close(new Error("track not found"));
