@@ -96,6 +96,8 @@ A function with 4+ args, or a call site passing the same 3+ values into multiple
 
 ## Public API Scrutiny
 
+**API design is the single most important thing to get right, ahead of fixing functionality.** We expose a huge surface area across many languages and bindings, and every public shape is something consumers build on and we have to live with. A bug can be fixed in a point release; a bad API shape costs a breaking change, a migration, and ripples through every wrapper and doc. So when functionality and API cleanliness pull in different directions, bias toward the clean API: get the shape right first, then make it work. A slightly less capable but well-shaped surface beats a feature-complete one that's easy to misuse.
+
 Before exposing a new public type, function, or field, stop and ask: how will consumers actually call this, and what are we likely to add later? Default to the smallest surface that does the job. A simpler long-term API is worth a refactor now: reshaping today is cheaper than living with a confusing surface forever, so don't preserve an awkward shape just to avoid churn. Prefer one insulated high-level entry point (plain config in, plain result out) over exposing every building block.
 
 Favor composable building blocks over one-off functions. A handful of orthogonal primitives that snap together beats a pile of bespoke `do_the_specific_thing()` helpers that each cover one caller and invite misuse when a caller's needs drift slightly. Each building block should do one thing and be hard to hold wrong.
