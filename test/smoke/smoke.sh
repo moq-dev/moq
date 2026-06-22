@@ -73,6 +73,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Numeric guards so a fat-fingered --timeout / SMOKE_PORT fails clearly here
+# instead of surfacing later as a cryptic `timeout` or relay-bind error.
+[[ "$TIMEOUT" =~ ^[0-9]+(\.[0-9]+)?$ ]] || {
+    echo "error: timeout must be a positive number (got '$TIMEOUT')" >&2
+    exit 2
+}
+[[ "$PORT" =~ ^[0-9]+$ ]] || {
+    echo "error: port must be numeric (got '$PORT')" >&2
+    exit 2
+}
+
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
 

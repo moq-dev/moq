@@ -24,11 +24,17 @@ const { positionals, values } = parseArgs({
 const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
-if ((role !== "publish" && role !== "subscribe") || !url || !broadcast) {
-	console.error("usage: driver.ts publish|subscribe --url U --broadcast B [--timeout S]");
+const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
+if (
+	(role !== "publish" && role !== "subscribe") ||
+	!url ||
+	!broadcast ||
+	!Number.isFinite(timeoutMs) ||
+	timeoutMs <= 0
+) {
+	console.error("usage: driver.ts publish|subscribe --url U --broadcast B [--timeout S>0]");
 	process.exit(2);
 }
-const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
 
 // Serve the prebuilt page on localhost (a secure context, so WebTransport /
 // WebCodecs are enabled).

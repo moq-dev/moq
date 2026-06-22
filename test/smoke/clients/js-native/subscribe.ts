@@ -34,8 +34,8 @@ const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
-if (role !== "subscribe" || !url || !broadcast) {
-	console.error("usage: subscribe.ts subscribe --url U --broadcast B [--timeout S]");
+if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+	console.error("usage: subscribe.ts subscribe --url U --broadcast B [--timeout S>0]");
 	process.exit(2);
 }
 
