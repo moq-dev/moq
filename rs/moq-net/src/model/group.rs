@@ -12,7 +12,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result};
+use crate::{Error, MAX_FRAME_SIZE, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -186,6 +186,11 @@ impl GroupProducer {
 
 	/// Append a frame producer to the group.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
+		// Enforce the per-frame limit at the producer, not just on the receive path: a frame this large
+		// can never be sent, so reject it here rather than caching an unsendable frame.
+		if frame.size > MAX_FRAME_SIZE {
+			return Err(Error::FrameTooLarge);
+		}
 		let mut state = modify(&self.state)?;
 		if state.fin {
 			return Err(Error::Closed);
@@ -439,6 +444,20 @@ mod test {
 		let chunks = consumer.read_frame_chunks().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(chunks.len(), 1);
 		assert_eq!(chunks[0], Bytes::from_static(b"helloworld"));
+	}
+
+	#[test]
+	fn append_rejects_oversized_frame() {
+		let mut producer = Group { sequence: 0 }.produce();
+		let err = producer.create_frame(Frame {
+			size: MAX_FRAME_SIZE + 1,
+		});
+		assert!(
+			matches!(err, Err(Error::FrameTooLarge)),
+			"a frame over the limit is rejected"
+		);
+		// A frame at the limit is still accepted.
+		assert!(producer.create_frame(Frame { size: MAX_FRAME_SIZE }).is_ok());
 	}
 
 	#[test]

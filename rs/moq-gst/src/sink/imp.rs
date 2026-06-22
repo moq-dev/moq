@@ -6,7 +6,6 @@
 //! bookkeeping: serialized events and buffers for a pad arrive in order on one thread.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result};
@@ -20,10 +19,6 @@ use hang::moq_net;
 
 use super::pad::{Pad, caps_supported};
 use super::session::{CAT, RUNTIME, ResolvedSettings, Session};
-
-/// Reject a frame past the MoQ frame limit (moq-net's MAX_FRAME_SIZE, 16 MiB): it could not be
-/// consumed anyway, and copying it would let hostile input drive an unbounded allocation.
-const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -48,20 +43,87 @@ impl TryFrom<Settings> for ResolvedSettings {
 	}
 }
 
+/// Everything that lives only while the element is started, written from the aggregate thread. The
+/// producers are created up front (so frames buffered before connect are sent once it completes); the
+/// catalog is `Option` because it is taken on the first finalize. Bundled so the aggregate thread takes
+/// one lock per buffer.
+struct State {
+	session: Session,
+	broadcast: moq_net::BroadcastProducer,
+	catalog: Option<moq_mux::catalog::Producer>,
+	pads: HashMap<String, Pad>,
+	/// Set once the element has posted EOS, so completion is idempotent.
+	eos_posted: bool,
+}
+
+impl State {
+	/// Import one popped buffer into its pad's producer, building the producer lazily from the pad's
+	/// current caps. Per-pad failures (bad caps/bitstream, oversized frame) drop quietly; only a buffer we
+	/// cannot even map is surfaced as an error.
+	fn write_buffer(&mut self, agg_pad: &gst_base::AggregatorPad, buffer: gst::Buffer) -> Result<(), gst::FlowError> {
+		let caps = agg_pad.current_caps();
+		let segment = agg_pad.segment();
+		let pts = buffer.pts();
+		let map = buffer.map_readable().map_err(|_| {
+			gst::error!(CAT, "failed to map buffer on pad {}", agg_pad.name());
+			gst::FlowError::Error
+		})?;
+		let data = Bytes::copy_from_slice(map.as_slice());
+
+		// Disjoint field borrows: the pad entry borrows `pads` while observe_caps reads broadcast/catalog.
+		let Self {
+			broadcast,
+			catalog,
+			pads,
+			..
+		} = self;
+		let pad = pads.entry(agg_pad.name().to_string()).or_insert_with(Pad::new);
+		if pad.is_failed() {
+			return Ok(());
+		}
+		if let (Some(caps), Some(catalog)) = (caps.as_ref(), catalog.as_ref()) {
+			pad.observe_caps(broadcast, catalog, caps);
+		}
+		pad.observe_segment(segment);
+		pad.push_buffer(data, pts);
+		Ok(())
+	}
+
+	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent: a finalized
+	/// pad returns `Ok(false)` and the catalog is taken on the first call. A pad finalize error is logged
+	/// (the others still finalize) and surfaced as the returned `Err`; a catalog error takes precedence.
+	fn finalize_all(&mut self) -> Result<Vec<String>> {
+		let mut order = Vec::new();
+		let mut failure = None;
+		for (name, pad) in self.pads.iter_mut() {
+			match pad.finalize() {
+				Ok(true) => order.push(name.clone()),
+				Ok(false) => {}
+				Err(err) => {
+					gst::warning!(CAT, "finalize {name}: {err:?}");
+					failure.get_or_insert(err);
+				}
+			}
+		}
+		// finish() closes both the hang and MSF tracks; a bare drop would not.
+		if let Some(mut catalog) = self.catalog.take() {
+			catalog.finish().context("finalize catalog")?;
+			order.push("catalog".to_string());
+		}
+		match failure {
+			Some(err) => Err(err),
+			None => Ok(order),
+		}
+	}
+}
+
 #[derive(Default)]
 pub struct MoqSink {
 	settings: Mutex<Settings>,
-	/// The live session (connect task + status). Replaced on every start, so the property getters and
-	/// the aggregate thread always read the current one.
-	session: Mutex<Option<Session>>,
-	/// Producers written from the aggregate thread. Created in `start`, dropped in `stop`.
-	broadcast: Mutex<Option<moq_net::BroadcastProducer>>,
-	catalog: Mutex<Option<moq_mux::catalog::Producer>>,
-	/// Per-pad media state, keyed by pad name. Touched only by the aggregate thread, `flush`, and pad
-	/// release, all serialized by this mutex.
-	pads: Mutex<HashMap<String, Pad>>,
-	/// Guards against posting EOS more than once.
-	eos_posted: AtomicBool,
+	/// Live session state, present only between start() and stop(). One Mutex, not Arc<Mutex>: glib
+	/// already owns and shares the subclass instance across GStreamer's threads (the aggregate task,
+	/// property reads, state changes), so we need interior mutability but not a second ownership layer.
+	state: Mutex<Option<State>>,
 }
 
 #[glib::object_subclass]
@@ -122,8 +184,8 @@ impl ObjectImpl for MoqSink {
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
 		match pspec.name() {
 			"connected" | "moq-version" | "estimated-send-bitrate" => {
-				let session = self.session.lock().unwrap();
-				let status = session.as_ref().map(Session::status);
+				let state = self.state.lock().unwrap();
+				let status = state.as_ref().map(|s| s.session.status());
 				match pspec.name() {
 					"connected" => status.is_some_and(|s| s.connected()).to_value(),
 					"moq-version" => status.and_then(|s| s.version()).to_value(),
@@ -166,8 +228,9 @@ impl ElementImpl for MoqSink {
 
 	fn pad_templates() -> &'static [gst::PadTemplate] {
 		static PAD_TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-			// Every codec that converges on moq_mux::import::Framed; per-codec specifics are validated
-			// when the producer is built from caps, not here.
+			// Every codec that converges on moq_mux::import::Framed. The structural fields here
+			// (byte-stream/au, AAC mpegversion/stream-format) are what negotiation enforces, so the
+			// producer build does not re-check them.
 			let mut sink_caps = gst::Caps::new_empty();
 			sink_caps.merge(
 				gst::Caps::builder("video/x-h264")
@@ -221,10 +284,11 @@ impl ElementImpl for MoqSink {
 	fn release_pad(&self, pad: &gst::Pad) {
 		self.parent_release_pad(pad);
 		let _rt = RUNTIME.enter();
-		if let Some(mut media) = self.pads.lock().unwrap().remove(pad.name().as_str()) {
-			if let Err(err) = media.finalize() {
-				gst::warning!(CAT, "finalize on release {}: {err:?}", pad.name());
-			}
+		if let Some(state) = self.state.lock().unwrap().as_mut()
+			&& let Some(mut media) = state.pads.remove(pad.name().as_str())
+			&& let Err(err) = media.finalize()
+		{
+			gst::warning!(CAT, "finalize on release {}: {err:?}", pad.name());
 		}
 	}
 }
@@ -236,41 +300,44 @@ impl AggregatorImpl for MoqSink {
 			.map_err(|err| gst::error_msg!(gst::CoreError::Failed, ["invalid settings: {err:#}"]))?;
 		let (session, broadcast, catalog) = Session::start(settings, self.obj().downgrade())
 			.map_err(|err| gst::error_msg!(gst::CoreError::Failed, ["failed to start session: {err:?}"]))?;
-		*self.session.lock().unwrap() = Some(session);
-		*self.broadcast.lock().unwrap() = Some(broadcast);
-		*self.catalog.lock().unwrap() = Some(catalog);
-		self.eos_posted.store(false, Ordering::Relaxed);
+		*self.state.lock().unwrap() = Some(State {
+			session,
+			broadcast,
+			catalog: Some(catalog),
+			pads: HashMap::new(),
+			eos_posted: false,
+		});
 		Ok(())
 	}
 
 	/// Finalize the producers (catalog last) and tear down the session. The src task is already stopped
-	/// here, so there is no race with `aggregate`.
+	/// here, so there is no race with `aggregate`. Finalize is best-effort: we are tearing down regardless.
 	fn stop(&self) -> Result<(), gst::ErrorMessage> {
-		{
-			let _rt = RUNTIME.enter();
-			if let Err(err) = self.finalize_all() {
-				gst::warning!(CAT, "finalize on stop: {err:?}");
-			}
+		let Some(mut state) = self.state.lock().unwrap().take() else {
+			return Ok(());
+		};
+		let _rt = RUNTIME.enter();
+		if let Err(err) = state.finalize_all() {
+			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
-		self.broadcast.lock().unwrap().take();
-		self.pads.lock().unwrap().clear();
-		if let Some(session) = self.session.lock().unwrap().take() {
-			session.stop();
-		}
+		// Drop the broadcast (closing it) before reaping the session task.
+		drop(state.broadcast);
+		state.session.stop();
 		Ok(())
 	}
 
 	/// Drain every ready pad and write its buffers into the producers. Returns EOS once every pad has
-	/// ended, or an error if the session died.
+	/// ended, or an error if the session died or a buffer could not be handled.
 	fn aggregate(&self, _timeout: bool) -> Result<gst::FlowSuccess, gst::FlowError> {
-		if self.session.lock().unwrap().as_ref().is_some_and(Session::errored) {
-			return Err(gst::FlowError::Error);
-		}
-
 		// Producer writes can touch tokio time (group eviction), so hold the runtime context here.
 		let _rt = RUNTIME.enter();
-		let broadcast = self.broadcast.lock().unwrap().clone();
-		let catalog = self.catalog.lock().unwrap().clone();
+		let mut guard = self.state.lock().unwrap();
+		let Some(state) = guard.as_mut() else {
+			return Ok(gst::FlowSuccess::Ok);
+		};
+		if state.session.errored() {
+			return Err(gst::FlowError::Error);
+		}
 
 		let sink_pads = self.obj().sink_pads();
 		let mut all_ended = !sink_pads.is_empty();
@@ -279,28 +346,48 @@ impl AggregatorImpl for MoqSink {
 				.downcast_ref::<gst_base::AggregatorPad>()
 				.expect("sink pad is an AggregatorPad");
 			while let Some(buffer) = agg_pad.pop_buffer() {
-				self.write_buffer(agg_pad, broadcast.as_ref(), catalog.as_ref(), buffer);
+				state.write_buffer(agg_pad, buffer)?;
 			}
 			if !agg_pad.is_eos() {
 				all_ended = false;
 			}
 		}
 
-		if all_ended {
-			self.complete();
-			return Err(gst::FlowError::Eos);
+		if !all_ended {
+			return Ok(gst::FlowSuccess::Ok);
 		}
-		Ok(gst::FlowSuccess::Ok)
+
+		// Every pad has ended: finalize once, then post the element EOS off the lock.
+		let result = state.finalize_all();
+		let post = !state.eos_posted;
+		state.eos_posted = true;
+		drop(guard);
+
+		match result {
+			Ok(order) => {
+				gst::debug!(CAT, "finalized on EOS: {order:?}");
+				if post {
+					gst::info!(CAT, "all pads ended, posting EOS");
+					let obj = self.obj();
+					let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
+				}
+				Err(gst::FlowError::Eos)
+			}
+			Err(err) => {
+				gst::element_error!(self.obj(), gst::CoreError::Failed, ("finalize failed"), ["{err:?}"]);
+				Err(gst::FlowError::Error)
+			}
+		}
 	}
 
 	/// Reject unsupported caps synchronously so negotiation fails fast; everything else (SEGMENT, EOS,
 	/// caps storage) goes to the parent, which queues serialized events for the aggregate thread.
 	fn sink_event(&self, pad: &gst_base::AggregatorPad, event: gst::Event) -> bool {
-		if let gst::EventView::Caps(caps) = event.view() {
-			if !caps_supported(caps.caps()) {
-				gst::warning!(CAT, "rejecting unsupported caps on pad {}", pad.name());
-				return false;
-			}
+		if let gst::EventView::Caps(caps) = event.view()
+			&& !caps_supported(caps.caps())
+		{
+			gst::warning!(CAT, "rejecting unsupported caps on pad {}", pad.name());
+			return false;
 		}
 		self.parent_sink_event(pad, event)
 	}
@@ -308,93 +395,11 @@ impl AggregatorImpl for MoqSink {
 	/// FLUSH re-anchors every pad's timeline so post-flush frames are not dropped as regressions. The
 	/// producers are kept (FLUSH is not EOS).
 	fn flush(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
-		for pad in self.pads.lock().unwrap().values_mut() {
-			pad.flush();
+		if let Some(state) = self.state.lock().unwrap().as_mut() {
+			for pad in state.pads.values_mut() {
+				pad.flush();
+			}
 		}
 		self.parent_flush()
-	}
-}
-
-impl MoqSink {
-	/// Import one popped buffer into its pad's producer, building the producer lazily from the pad's
-	/// current caps. Every failure path is per-pad (drop the buffer); none tears down the session.
-	fn write_buffer(
-		&self,
-		agg_pad: &gst_base::AggregatorPad,
-		broadcast: Option<&moq_net::BroadcastProducer>,
-		catalog: Option<&moq_mux::catalog::Producer>,
-		buffer: gst::Buffer,
-	) {
-		// Bound the per-frame allocation before copying.
-		if buffer.size() > MAX_FRAME_BYTES {
-			gst::warning!(
-				CAT,
-				"rejecting {}-byte buffer on pad {} (exceeds frame limit)",
-				buffer.size(),
-				agg_pad.name()
-			);
-			return;
-		}
-		let (Some(broadcast), Some(catalog)) = (broadcast, catalog) else {
-			return; // No session producers (not started); drop.
-		};
-
-		let mut pads = self.pads.lock().unwrap();
-		let pad = pads.entry(agg_pad.name().to_string()).or_insert_with(Pad::new);
-		if pad.is_failed() {
-			return;
-		}
-		if let Some(caps) = agg_pad.current_caps() {
-			pad.observe_caps(broadcast, catalog, &caps);
-		}
-		pad.observe_segment(agg_pad.segment());
-
-		let Ok(map) = buffer.map_readable() else {
-			gst::warning!(CAT, "failed to map buffer on pad {}", agg_pad.name());
-			return;
-		};
-		let data = Bytes::copy_from_slice(map.as_slice());
-		pad.push_buffer(data, buffer.pts());
-	}
-
-	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent: a
-	/// finalized pad returns `Ok(false)` and the catalog is taken on the first call.
-	fn finalize_all(&self) -> Result<Vec<String>> {
-		let mut order = Vec::new();
-		{
-			let mut pads = self.pads.lock().unwrap();
-			for (name, pad) in pads.iter_mut() {
-				match pad.finalize() {
-					Ok(true) => order.push(name.clone()),
-					Ok(false) => {}
-					Err(err) => gst::warning!(CAT, "finalize {name}: {err:?}"),
-				}
-			}
-		}
-		// finish() closes both the hang and MSF tracks; a bare drop would not.
-		if let Some(mut catalog) = self.catalog.lock().unwrap().take() {
-			catalog.finish().context("finalize catalog")?;
-			order.push("catalog".to_string());
-		}
-		Ok(order)
-	}
-
-	/// Finalize on EOS and post the element EOS once the catalog closed cleanly; a finalize failure
-	/// surfaces as an element error instead.
-	fn complete(&self) {
-		if self.eos_posted.swap(true, Ordering::Relaxed) {
-			return;
-		}
-		match self.finalize_all() {
-			Ok(order) => {
-				gst::debug!(CAT, "finalized on EOS: {order:?}");
-				gst::info!(CAT, "all pads ended, posting EOS");
-				let obj = self.obj();
-				let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
-			}
-			Err(err) => {
-				gst::element_error!(self.obj(), gst::CoreError::Failed, ("finalize failed"), ["{err:?}"]);
-			}
-		}
 	}
 }

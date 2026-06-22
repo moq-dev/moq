@@ -4,14 +4,14 @@
 //! buffer for a pad onto its single aggregate thread, so this type is touched from one place and needs
 //! no generation tagging or cross-thread failure map.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use bytes::Bytes;
 
 use hang::moq_net;
 use moq_mux::import::{Framed, FramedFormat};
 
 use super::session::CAT;
-use super::timeline::{FrameDecision, SegmentDecision, SegmentInfo, classify_segment, frame_micros};
+use super::timeline::{SegmentInfo, classify_segment, frame_micros};
 
 /// Per-pad timeline state. Buffers only map and emit while `Active`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,29 +84,18 @@ impl Pad {
 		self.finalize()?;
 		let broadcast = broadcast.clone();
 		let catalog = catalog.clone();
-		// Every codec converges on one Framed; only the caps -> producer construction differs.
+		// Every codec converges on one Framed; only the caps -> producer construction differs. The pad
+		// template fixes the structural fields (h264/h265 byte-stream/au, AAC mpegversion=4/stream-format=raw),
+		// so negotiation rejects non-conforming caps before they reach here; only fields the template can't
+		// pin (the AAC codec_data) are checked below.
 		let framed: Framed = match structure.name().as_str() {
-			"video/x-h264" => {
-				require_byte_stream_au(structure)?;
-				Framed::new(broadcast, catalog, FramedFormat::Avc3, &mut Bytes::new())?
-			}
-			"video/x-h265" => {
-				require_byte_stream_au(structure)?;
-				Framed::new(broadcast, catalog, FramedFormat::Hev1, &mut Bytes::new())?
-			}
+			"video/x-h264" => Framed::new(broadcast, catalog, FramedFormat::Avc3, &mut Bytes::new())?,
+			"video/x-h265" => Framed::new(broadcast, catalog, FramedFormat::Hev1, &mut Bytes::new())?,
 			"video/x-av1" => Framed::new(broadcast, catalog, FramedFormat::Av01, &mut Bytes::new())?,
 			"video/x-vp8" => Framed::new(broadcast, catalog, FramedFormat::Vp8, &mut Bytes::new())?,
 			"video/x-vp9" => Framed::new(broadcast, catalog, FramedFormat::Vp9, &mut Bytes::new())?,
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
-				ensure!(
-					structure.get::<i32>("mpegversion").is_ok_and(|v| v == 4),
-					"AAC requires mpegversion=4"
-				);
-				ensure!(
-					structure.get::<String>("stream-format").is_ok_and(|f| f == "raw"),
-					"AAC requires stream-format=raw"
-				);
 				let codec_data = structure
 					.get::<gst::Buffer>("codec_data")
 					.context("AAC caps missing codec_data")?;
@@ -161,11 +150,11 @@ impl Pad {
 		};
 		self.segment_info = Some(info);
 		match classify_segment(prev.as_ref(), &info) {
-			SegmentDecision::Accept => {
+			Ok(()) => {
 				self.segment = segment.downcast::<gst::ClockTime>().ok();
 				self.state = PadState::Active;
 			}
-			SegmentDecision::Reject(reason) => {
+			Err(reason) => {
 				gst::warning!(CAT, "rejecting segment: {reason}");
 				// A break only invalidates a live timeline; a bad segment before any valid one leaves
 				// the pad in NoSegment.
@@ -188,7 +177,7 @@ impl Pad {
 	/// Maps a buffer PTS to a MoQ timestamp without enforcing frame-level monotonicity: frames arrive in
 	/// decode order and B-frames carry non-monotonic presentation timestamps, so a PTS regression is
 	/// normal reordering. Timeline breaks are caught at the SEGMENT level (the `Invalid` state).
-	fn frame_timestamp(&self, pts: Option<gst::ClockTime>) -> FrameDecision {
+	fn frame_timestamp(&self, pts: Option<gst::ClockTime>) -> Result<u64, &'static str> {
 		match self.state {
 			PadState::Active => {
 				// to_running_time_full is signed: a buffer before the segment returns Negative, which
@@ -201,31 +190,32 @@ impl Pad {
 					.and_then(signed_nanos);
 				frame_micros(running_time)
 			}
-			PadState::NoSegment => FrameDecision::Drop("buffer before a valid SEGMENT"),
-			PadState::Invalid => FrameDecision::Drop("buffer on an invalidated timeline"),
+			PadState::NoSegment => Err("buffer before a valid SEGMENT"),
+			PadState::Invalid => Err("buffer on an invalidated timeline"),
 		}
 	}
 
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline
-	/// drop is logged. A bad bitstream invalidates only this pad.
+	/// drop is logged. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this
+	/// pad.
 	pub(super) fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) {
 		if self.failed {
 			return;
 		}
-		let decision = self.frame_timestamp(pts);
+		let timestamp = self.frame_timestamp(pts);
 		let Some(framed) = self.framed.as_mut() else {
 			gst::warning!(CAT, "dropping buffer received before caps");
 			return;
 		};
-		match decision {
-			FrameDecision::Emit(micros) => {
+		match timestamp {
+			Ok(micros) => {
 				let ts = hang::container::Timestamp::from_micros(micros).ok();
 				if let Err(err) = framed.decode_frame(&mut data, ts) {
 					gst::warning!(CAT, "invalidating pad: {err}");
 					self.fail();
 				}
 			}
-			FrameDecision::Drop(reason) => gst::warning!(CAT, "dropping frame: {reason}"),
+			Err(reason) => gst::warning!(CAT, "dropping frame: {reason}"),
 		}
 	}
 
@@ -246,30 +236,15 @@ impl Pad {
 	}
 }
 
-/// Media types moqsink can build a producer for. Checked synchronously at the CAPS event (an
-/// unsupported caps is rejected with NotNegotiated) and again when the producer is built, where
-/// per-codec specifics (byte-stream/au, AAC codec_data) fail just that pad, not the session.
+/// Media types moqsink can build a producer for. Checked synchronously at the CAPS event so an
+/// unsupported type is rejected with NotNegotiated. The structural fields (byte-stream/au, AAC
+/// mpegversion/stream-format) are pinned by the pad template, so negotiation enforces them.
 pub(super) fn caps_supported(caps: &gst::CapsRef) -> bool {
 	let Some(s) = caps.structure(0) else { return false };
 	matches!(
 		s.name().as_str(),
 		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" | "audio/mpeg" | "audio/x-opus"
 	)
-}
-
-/// FramedFormat::Avc3/Hev1 consume Annex-B access units, so H.264/H.265 caps must be byte-stream/au.
-fn require_byte_stream_au(s: &gst::StructureRef) -> Result<()> {
-	ensure!(
-		s.get::<String>("stream-format").is_ok_and(|f| f == "byte-stream"),
-		"{} requires stream-format=byte-stream",
-		s.name()
-	);
-	ensure!(
-		s.get::<String>("alignment").is_ok_and(|a| a == "au"),
-		"{} requires alignment=au",
-		s.name()
-	);
-	Ok(())
 }
 
 fn segment_info(segment: &gst::Segment) -> SegmentInfo {
@@ -355,16 +330,6 @@ mod tests {
 		assert!(!pad.finalize().unwrap(), "second finalize is a no-op");
 	}
 
-	// H.264 without byte-stream/au cannot feed the Annex-B importer: the pad fails, the session lives.
-	#[test]
-	fn h264_without_byte_stream_au_fails_the_pad() {
-		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &gst::Caps::builder("video/x-h264").build());
-		assert!(pad.is_failed(), "missing stream-format/alignment fails the pad");
-	}
-
 	// AAC carries its config in caps; without codec_data the producer cannot be built.
 	#[test]
 	fn aac_without_codec_data_fails_the_pad() {
@@ -433,11 +398,11 @@ mod tests {
 		pad.observe_segment(time_segment_at(0, 0));
 		assert_eq!(
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(10_000))),
-			FrameDecision::Emit(10_000_000)
+			Ok(10_000_000)
 		);
 		assert_eq!(
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(6_000))),
-			FrameDecision::Emit(6_000_000)
+			Ok(6_000_000)
 		);
 	}
 
@@ -449,14 +414,8 @@ mod tests {
 		let mut audio = Pad::new();
 		video.observe_segment(time_segment());
 		audio.observe_segment(time_segment());
-		assert_eq!(
-			video.frame_timestamp(Some(gst::ClockTime::from_mseconds(7))),
-			FrameDecision::Emit(7_000)
-		);
-		assert_eq!(
-			audio.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))),
-			FrameDecision::Emit(5_000)
-		);
+		assert_eq!(video.frame_timestamp(Some(gst::ClockTime::from_mseconds(7))), Ok(7_000));
+		assert_eq!(audio.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))), Ok(5_000));
 	}
 
 	// A pad with no SEGMENT drops buffers (NoSegment), distinct from an invalidated timeline.
@@ -464,10 +423,7 @@ mod tests {
 	fn pad_without_segment_drops_buffers() {
 		let pad = Pad::new();
 		assert_eq!(pad.state, PadState::NoSegment);
-		assert!(matches!(
-			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))),
-			FrameDecision::Drop(_)
-		));
+		assert!(pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))).is_err());
 	}
 
 	// A moved media start stays continuous as long as the running-time base advances.
@@ -487,13 +443,10 @@ mod tests {
 		gst::init().unwrap();
 		let mut pad = Pad::new();
 		pad.observe_segment(time_segment_at(10_000, 0));
-		assert!(matches!(
-			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5_000))),
-			FrameDecision::Drop(_)
-		));
+		assert!(pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5_000))).is_err());
 		assert_eq!(
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(12_000))),
-			FrameDecision::Emit(2_000_000)
+			Ok(2_000_000)
 		);
 	}
 
@@ -528,10 +481,7 @@ mod tests {
 		// The same rewound segment, as the next buffer would carry it, must not recover the pad.
 		pad.observe_segment(time_segment_at(0, 0));
 		assert_eq!(pad.state, PadState::Invalid, "a re-sent rewound segment keeps dropping");
-		assert!(matches!(
-			pad.frame_timestamp(Some(gst::ClockTime::ZERO)),
-			FrameDecision::Drop(_)
-		));
+		assert!(pad.frame_timestamp(Some(gst::ClockTime::ZERO)).is_err());
 	}
 
 	// FLUSH re-anchors to NoSegment, so a rewinding post-flush segment is accepted fresh, not rejected.
@@ -547,7 +497,7 @@ mod tests {
 
 		pad.observe_segment(time_segment_at(0, 0));
 		assert_eq!(pad.state, PadState::Active, "post-flush rewinding segment is accepted");
-		assert_eq!(pad.frame_timestamp(Some(gst::ClockTime::ZERO)), FrameDecision::Emit(0));
+		assert_eq!(pad.frame_timestamp(Some(gst::ClockTime::ZERO)), Ok(0));
 	}
 
 	// FLUSH is not EOS: the producer survives a flush; only the timeline re-anchors.
@@ -582,12 +532,7 @@ mod tests {
 		let decode_order_pts_ms = [0u64, 160, 40, 80, 120];
 		let emitted = decode_order_pts_ms
 			.into_iter()
-			.filter(|&ms| {
-				matches!(
-					pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(ms))),
-					FrameDecision::Emit(_)
-				)
-			})
+			.filter(|&ms| pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(ms))).is_ok())
 			.count();
 		assert_eq!(emitted, 5, "all five decode-order frames must emit (got {emitted})");
 	}
