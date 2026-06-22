@@ -320,7 +320,7 @@ Either endpoint MAY reset/cancel the stream at any time.
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
-The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame index at which to start.
+The subscriber sends a FETCH message containing the broadcast path, track name, priority, and group sequence.
 The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
 The Subscribe ID and Group Sequence for the returned FRAME messages are implicit, taken from the original FETCH request.
 As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
@@ -948,7 +948,6 @@ FETCH Message {
   Track Name (s)
   Subscriber Priority (8)
   Group Sequence (i)
-  Frame Start (i)
 }
 ~~~
 
@@ -964,15 +963,6 @@ See the [Prioritization](#prioritization) section for more information.
 
 **Group Sequence**:
 The sequence number of the group to fetch.
-
-**Frame Start**:
-The index of the first frame to return, counting from `0` for the first frame in the group.
-The publisher skips all frames before this index and begins the response at this frame, allowing a subscriber to resume partway through a group.
-A value of `0` returns the entire group.
-If the group is still in progress and frame `Frame Start` has not yet been produced, the publisher waits and delivers it (and any later frames) as they arrive, just like a live subscription; it does not return early.
-Only once the group is complete is the out-of-range case resolved: if `Frame Start` is greater than or equal to the group's final frame count, the publisher returns no FRAME messages and FINs the stream.
-
-The returned FRAME messages are otherwise unchanged: when the Track's `Publisher Timescale` is non-zero, the first returned frame's `Timestamp Delta` is delta-encoded from `0` (i.e. its absolute timestamp), not from the timestamp of the skipped frame (see [FRAME](#frame)).
 
 The publisher responds with FRAME messages directly on the same stream — there is no response header.
 The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence is implicit from the FETCH request.
@@ -1076,7 +1066,6 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST (the subscriber's request to receive announcements) and ANNOUNCE to ANNOUNCE_BROADCAST (the publisher's per-broadcast advertisement). ANNOUNCE_OK is unchanged. Wire format otherwise unchanged.
 - Added a SETUP message, sent once on a unidirectional Setup Stream (0x1) at the start of the session and FIN'd immediately. It carries a list of Setup Parameters for negotiating optional capabilities and extensions per-hop, replacing the prior stream-probing approach (version is still negotiated via ALPN, not SETUP). Endpoints keep exchanging non-Setup streams without waiting for SETUP, buffering only a stream whose encoding a negotiated extension would change; unknown stream types are still reset as a fallback.
 - Added a SETUP `Probe` parameter advertising the publisher's capability level: `None`, `Report` (measure and report the estimated bitrate), or `Increase` (additionally pad to probe for bandwidth above the current sending rate). The levels are nested since probing without measuring is meaningless. A subscriber must not rely on a level the publisher did not advertise.
-- Added `Frame Start` to FETCH so a subscriber can begin partway through a group instead of always at frame `0`, allowing resumption of a partially-received group.
 - Added a Track Stream (0x6): a TRACK request that the publisher answers with a single TRACK_INFO message and then FINs. TRACK_INFO carries the Track's immutable publisher properties (`Publisher Priority`, `Publisher Ordered`, `Publisher Timescale`, `Publisher Compression`). It is fetched once and cached, so the properties are no longer echoed on every response — notably, group-by-group FETCHes reuse one lookup.
 - Removed FETCH_OK and trimmed SUBSCRIBE_OK down to a single resolved start group. Publisher properties moved to TRACK_INFO; a FETCH returns bare FRAME messages. All publisher properties are immutable for the lifetime of the Track — a publisher-side change would otherwise have to fan *out* to every downstream of a relay, whereas subscriber properties fan *in* and may still change via SUBSCRIBE_UPDATE.
 - Split the resolved group range across SUBSCRIBE_OK and a new SUBSCRIBE_END. SUBSCRIBE_OK resolves the absolute start (`>=` the requested start; a larger value implicitly drops the leading range), and SUBSCRIBE_END signals that no group will follow a given sequence (stragglers within the range may still be dropped before FIN). SUBSCRIBE_OK keeps the MoqTransport name and its role as the publisher's positive response.
