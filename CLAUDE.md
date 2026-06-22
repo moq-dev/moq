@@ -96,7 +96,18 @@ A function with 4+ args, or a call site passing the same 3+ values into multiple
 
 ## Public API Scrutiny
 
-Before exposing a new public type, function, or field, stop and ask: how will consumers actually call this, and what are we likely to add later? Default to the smallest surface that does the job. Prefer one insulated high-level entry point (plain config in, plain result out) over exposing every building block. Then future-proof what you do expose so additions don't force a breaking change:
+Before exposing a new public type, function, or field, stop and ask: how will consumers actually call this, and what are we likely to add later? Default to the smallest surface that does the job. A simpler long-term API is worth a refactor now: reshaping today is cheaper than living with a confusing surface forever, so don't preserve an awkward shape just to avoid churn. Prefer one insulated high-level entry point (plain config in, plain result out) over exposing every building block.
+
+Favor composable building blocks over one-off functions. A handful of orthogonal primitives that snap together beats a pile of bespoke `do_the_specific_thing()` helpers that each cover one caller and invite misuse when a caller's needs drift slightly. Each building block should do one thing and be hard to hold wrong.
+
+**Let the type system do the heavy lifting; make misuse unrepresentable rather than merely documented.** A compile error beats a runtime check beats a doc-comment warning. Encode the rules in types so the wrong call simply doesn't compile:
+
+- **Make terminal operations consume `self`** (e.g. `fn close(self)`) so use-after-close can't be expressed, rather than taking `&mut self` and tracking a `closed` flag.
+- Prefer enums/newtypes over stringly-typed or primitive args so invalid combinations don't typecheck.
+- Use the typestate / builder pattern when an object is only valid in certain states, so a half-built or out-of-order call is a compile error.
+- Return owned handles whose `Drop` does the cleanup instead of asking callers to remember a teardown call.
+
+Then future-proof what you do expose so additions don't force a breaking change:
 
 - **Config structs consumers construct**: add `#[non_exhaustive]` and a `Default` or constructor. New optional fields then stay additive (callers build via `default()`/`new()` + field set, not struct literals). Prefer adding a field to an existing `#[non_exhaustive]` config over adding a function parameter.
 - **Public enums that may gain variants**: add `#[non_exhaustive]` so external `match`es keep compiling.
