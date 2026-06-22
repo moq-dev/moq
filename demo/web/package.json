@@ -7,7 +7,7 @@
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"scripts": {
-		"dev": "vite --open",
+		"dev": "vite",
 		"build": "vite build",
 		"check": "tsc --noEmit"
 	},
@@ -18,15 +18,16 @@
 	},
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",
 	"devDependencies": {
-		"@tailwindcss/typography": "^0.5.16",
+		"@tailwindcss/typography": "^0.5.20",
 		"@tailwindcss/vite": "^4.3.0",
 		"esbuild": "^0.28.0",
 		"highlight.js": "^11.11.1",
+		"open": "^10.2.0",
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.13",
 		"tailwindcss": "^4.1.13",
 		"typescript": "^6.0.3",
-		"vite": "^8.0.14",
+		"vite": "^8.0.16",
 		"vite-plugin-solid": "^2.11.12"
 	}
 }

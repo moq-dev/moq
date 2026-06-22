@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en" class="dark">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MoQ Demo (Watch)</title>
+
+	<link rel="stylesheet" href="index.css">
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+</head>
+
+<body class="p-4 max-w-6xl mx-auto">
+	<!-- Only show the support banner when a required feature is missing. -->
+	<moq-watch-support show="warning"></moq-watch-support>
+
+	<h1 class="text-2xl font-bold mb-1">MoQ Watch</h1>
+	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
+		One tile per live broadcast announced under the prefix. Click a tile to make it active; only the
+		active tile plays sound, and the panel on the right shows its live stats. Everything is discovered
+		over a single connection.
+	</p>
+
+	<div class="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4 items-start">
+		<!-- Left: every live broadcast under the prefix. Tiles are built in index.ts. -->
+		<section>
+			<div id="players" class="grid grid-cols-1 gap-4"></div>
+			<div id="players-empty" class="text-neutral-500 text-sm border border-dashed border-neutral-800 rounded-lg p-8 text-center">
+				Searching for live broadcasts…
+			</div>
+		</section>
+
+		<!-- Right: stats + controls for the active tile only. -->
+		<aside>
+			<div class="flex gap-2 mb-3">
+				<span id="conn-status" class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">
+					<span class="dot w-2 h-2 rounded-full bg-neutral-500"></span>
+					<b id="conn-text">Connecting</b>
+				</span>
+				<span id="bcast-status" class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">
+					<span class="dot w-2 h-2 rounded-full bg-neutral-500"></span>
+					<b id="bcast-text">Offline</b>
+				</span>
+			</div>
+
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2">Source</h3>
+				<label class="block text-xs text-neutral-400 mb-2">
+					Relay URL
+					<input id="relay-url" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Prefix
+					<input id="prefix" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono"
+						placeholder="(everything)">
+				</label>
+			</section>
+
+			<section id="video-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Video <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+				</h3>
+				<div id="video-info" class="space-y-0.5"></div>
+				<div id="video-graphs" class="mt-3 space-y-2"></div>
+			</section>
+
+			<section id="audio-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Audio <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+				</h3>
+				<div id="audio-info" class="space-y-0.5"></div>
+			</section>
+
+			<section id="network-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Network <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">WebTransport</span>
+				</h3>
+				<div id="network-graphs" class="space-y-2"></div>
+			</section>
+
+			<section id="buffer-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Latency <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">MoQ</span>
+				</h3>
+				<div id="buffer-viz"></div>
+			</section>
+
+			<section id="metadata-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Metadata <code class="text-xs text-neutral-400">meta.json</code>
+					<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">MoQ</span>
+				</h3>
+				<pre id="metadata" class="text-xs font-mono text-neutral-200 max-h-64 overflow-auto whitespace-pre-wrap break-all"></pre>
+			</section>
+
+			<details id="catalog-raw-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3" hidden>
+				<summary class="text-sm font-semibold text-neutral-300 cursor-pointer">Raw catalog JSON</summary>
+				<pre id="catalog-raw" class="text-xs font-mono text-neutral-200 mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all"></pre>
+			</details>
+		</aside>
+	</div>
+
+	<!-- Dev-only: renders console output inline here. Set `level` to lower the
+	     threshold (debug | log | info | warn | error; defaults to warn). Defined
+	     by the console-overlay Vite plugin; absent from production builds. -->
+	<moq-console class="block mt-8"></moq-console>
+
+	<footer class="prose-doc mt-8">
+		<h3>How it works:</h3>
+		<p>
+			Each tile is a <code class="language-html">&lt;moq-watch-ui&gt;</code> wrapping a
+			<code class="language-html">&lt;moq-watch&gt;</code> <a
+				href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
+			A single connection discovers broadcasts via MoQ announcements
+			(<code class="language-typescript">connection.announced(prefix)</code>) and we reconcile one
+			tile per live <code>.hang</code> broadcast, adding and removing them as publishers come and go.
+			No F5 needed; restart a publisher and its tile reconnects on its own.
+		</p>
+		<p>
+			The right panel reads everything reactively off the active tile's element:
+		<pre><code class="language-typescript">const watch = document.querySelector("moq-watch");
+watch.broadcast.catalog.subscribe((catalog) =&gt; { /* video/audio config */ });
+watch.backend.video.stats.subscribe((stats) =&gt; { /* decoded frames, bytes */ });</code></pre>
+		</p>
+		<p>
+			The <code>meta.json</code> panel subscribes to a custom JSON track carried <em>within</em> the
+			broadcast (see the <a href="publish.html">publish demo</a>), reconstructed from a snapshot plus
+			merge-patch deltas via <code class="language-typescript">@moq/json</code>.
+		</p>
+		<p>
+			Don't want sound from a tile? It only downloads audio while active. Don't want video at all?
+			Remove the canvas and nothing is downloaded, decoded, or rendered.
+		</p>
+		<p>
+			This demo uses <code>http</code> so it's extra not secure: it insecurely fetches the certificate
+			hash and tells WebTransport to trust it. In production you'll need a real certificate (ex.
+			LetsEncrypt) and <code>https</code>.
+		</p>
+
+		<h3>Other demos:</h3>
+		<ul>
+			<li><a href="publish.html">Publish a broadcast.</a></li>
+			<li><a href="stats.html">Relay stats dashboard.</a></li>
+		</ul>
+	</footer>
+</body>
+
+<script type="module" src="index.ts"></script>
+
+</html>

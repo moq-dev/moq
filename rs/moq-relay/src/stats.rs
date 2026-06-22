@@ -32,7 +32,7 @@ pub struct StatsConfig {
 	/// re-parse. With a bare `bool`, an absent `--stats-enabled` CLI flag
 	/// writes the `Default::default()` value (`false`) over the TOML value.
 	/// See `tests::cli_does_not_clobber_toml_stats_enabled` and the
-	/// "Config flags + TOML merge" note in `CLAUDE.md`.
+	/// "Config flags + TOML merge" note in `rs/CLAUDE.md`.
 	#[arg(
 		long = "stats-enabled",
 		env = "MOQ_STATS_ENABLED",

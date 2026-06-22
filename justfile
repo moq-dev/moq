@@ -90,10 +90,20 @@ ci BASE="":
     	just go    ci "$files"
     fi
 
+    # Validate the flake (eval + dev shell build) via `nix flake check`. This no
+    # longer compiles the workspace -- the heavy Rust CI (clippy/doc/test) moved
+    # to `just rs ci` (plain cargo) and `checks` is unwired (see flake.nix) -- so
+    # it's cheap. Gate it to Nix/Rust input changes anyway: a pure doc/JS PR
+    # can't affect flake eval. Empty $files is a force-run, so run then.
+    if [[ -z "$files" ]] || echo "$files" | grep -qE '(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then
+    	nix flake check
+    else
+    	echo "ci: no Nix/Rust inputs changed; skipping nix flake check."
+    fi
+
     # Cheap; always run. `bun install` is needed for remark-cli, since
     # `just js ci` (where bun deps would otherwise install) is skipped
     # when the diff has no JS-scoped files.
-    nix flake check
     bun install --frozen-lockfile
     bun remark . --quiet --frail
     shfmt --diff $(shfmt -f .)

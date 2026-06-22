@@ -4,14 +4,14 @@
 //! buffer for a pad onto its single aggregate thread, so this type is touched from one place and needs
 //! no generation tagging or cross-thread failure map.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
 use hang::moq_net;
 use moq_mux::import::{Framed, FramedFormat};
 
 use super::session::CAT;
-use super::timeline::{classify_segment, frame_micros, FrameDecision, SegmentDecision, SegmentInfo};
+use super::timeline::{FrameDecision, SegmentDecision, SegmentInfo, classify_segment, frame_micros};
 
 /// Per-pad timeline state. Buffers only map and emit while `Active`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

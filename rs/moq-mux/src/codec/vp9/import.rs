@@ -1,7 +1,7 @@
 use anyhow::Context;
 use bytes::Buf;
 
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 use super::FrameHeader;
 
@@ -28,7 +28,7 @@ pub struct Import {
 	zero: Option<tokio::time::Instant>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl Import {
@@ -39,7 +39,7 @@ impl Import {
 			track: None,
 			config: None,
 			zero: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -50,7 +50,7 @@ impl Import {
 			track: None,
 			config: None,
 			zero: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 

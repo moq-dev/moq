@@ -132,9 +132,11 @@ impl Subscribe {
 
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
-		// is re-framed as ADTS. `fragment_duration` does not apply to TS.
-		let mut ts = moq_mux::container::ts::Export::with_catalog_format(self.broadcast, self.catalog)?
-			.with_latency(self.args.max_latency);
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
+		// selects the `mpegts` catalog extension so undecoded elementary streams
+		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
+		let mut ts =
+			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = ts.next().await? {
 			stdout.write_all(&chunk).await?;

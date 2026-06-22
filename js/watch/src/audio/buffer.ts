@@ -1,7 +1,59 @@
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Data, InitPost, InitShared, Latency, State } from "./render";
+import type { Data, InitPost, InitShared, Latency, Reset, State } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
+
+/**
+ * Timestamp-based backpressure for buffered playback. The decoded PCM ring only holds the latency
+ * floor; everything above it (the buffered lookahead, up to the ceiling) stays upstream as encoded
+ * Opus. `wait(timestamp)` stays pending until the playhead is within `headroom` (the floor) of
+ * `timestamp`, so the decode loop holds a frame as Opus instead of decoding it too far ahead of the
+ * floor-sized ring. Both transports share this; they differ only in how they observe the playhead
+ * (Atomics poll vs worklet state messages). A no-op when not buffered (the ring bounds itself).
+ */
+class Backpressure {
+	readonly #enabled: boolean;
+	#headroom: Time.Micro;
+	#waiters: Array<{ timestamp: Time.Micro; resolve: () => void }> = [];
+
+	constructor(enabled: boolean, headroom: Time.Micro) {
+		this.#enabled = enabled;
+		this.#headroom = headroom;
+	}
+
+	// Move the gate as the floor changes (e.g. "real-time" jitter tracking RTT).
+	setHeadroom(headroom: Time.Micro): void {
+		this.#headroom = headroom;
+	}
+
+	wait(timestamp: Time.Micro, playhead: Time.Micro): Promise<void> {
+		if (!this.#enabled) return Promise.resolve();
+		if (playhead >= ((timestamp - this.#headroom) | 0)) return Promise.resolve();
+		return new Promise((resolve) => this.#waiters.push({ timestamp, resolve }));
+	}
+
+	// Resolve every waiter the playhead has reached. Thresholds are recomputed live so a changed
+	// headroom takes effect on queued waiters too.
+	advance(playhead: Time.Micro): void {
+		if (this.#waiters.length === 0) return;
+		this.#waiters = this.#waiters.filter(({ timestamp, resolve }) => {
+			if (playhead < ((timestamp - this.#headroom) | 0)) return true;
+			resolve();
+			return false;
+		});
+	}
+
+	// Resolve everything unconditionally (reset/close): never strand a decode loop.
+	flush(): void {
+		for (const { resolve } of this.#waiters) resolve();
+		this.#waiters = [];
+	}
+}
+
+/** Convert a sample count to a Time.Micro duration at the given sample rate. */
+function samplesToMicro(samples: number, rate: number): Time.Micro {
+	return Time.Micro.fromSecond((samples / rate) as Time.Second);
+}
 
 /**
  * Unified interface for the audio buffer between the main thread and the AudioWorklet.
@@ -21,6 +73,17 @@ export interface AudioBuffer {
 
 	/** Update the target latency in samples. */
 	setLatency(samples: number): void;
+
+	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
+	reset(): void;
+
+	/**
+	 * Resolve once the playhead is near enough to decode a frame at `timestamp`. In buffered mode this
+	 * applies backpressure: it stays pending while decoding `timestamp` would run more than the latency
+	 * floor ahead of the playhead, so the caller holds the (encoded) frame instead of decoding it too
+	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
+	 */
+	wait(timestamp: Time.Micro): Promise<void>;
 
 	/** Current playback timestamp (derived from reader position). */
 	readonly timestamp: Getter<Time.Micro>;
@@ -50,13 +113,14 @@ export function createAudioBuffer(
 	channels: number,
 	rate: number,
 	latencySamples: number,
+	buffered = false,
 ): AudioBuffer {
 	if (supportsSharedArrayBuffer()) {
 		console.log("[audio] using SharedArrayBuffer audio buffer");
-		return new SharedAudioBuffer(worklet, channels, rate, latencySamples);
+		return new SharedAudioBuffer(worklet, channels, rate, latencySamples, buffered);
 	}
 	console.log("[audio] using postMessage audio buffer (SharedArrayBuffer unavailable)");
-	return new PostAudioBuffer(worklet, channels, rate, latencySamples);
+	return new PostAudioBuffer(worklet, channels, rate, latencySamples, buffered);
 }
 
 /** SharedArrayBuffer-backed implementation. Writes go directly into shared memory. */
@@ -72,16 +136,21 @@ class SharedAudioBuffer implements AudioBuffer {
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
 
+	#backpressure: Backpressure;
+
 	#signals = new Effect();
 
-	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number) {
+	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number, buffered: boolean) {
 		this.#worklet = worklet;
 		this.channels = channels;
 		this.rate = rate;
 
-		// Capacity needs headroom above LATENCY for overflow protection.
+		// The ring holds the latency floor as decoded PCM (headroom above it for overflow). In
+		// buffered mode the lookahead above the floor stays encoded upstream, held back by `wait()`.
 		const capacity = Math.max(rate, latencySamples * 2);
-		const init = allocSharedRingBuffer(channels, capacity, rate);
+		this.#backpressure = new Backpressure(buffered, samplesToMicro(latencySamples, rate));
+
+		const init = allocSharedRingBuffer(channels, capacity, rate, buffered);
 		this.#ring = new SharedRingBuffer(init);
 		this.#ring.setLatency(latencySamples);
 
@@ -90,8 +159,13 @@ class SharedAudioBuffer implements AudioBuffer {
 
 		// Poll the shared control array and reflect it into signals.
 		this.#signals.interval(() => {
+			const stalled = this.#ring.stalled;
 			this.#timestamp.set(this.#ring.timestamp);
-			this.#stalled.set(this.#ring.stalled);
+			this.#stalled.set(stalled);
+			// While stalled the playhead is parked, so release the decode loop to refill the floor;
+			// once playing, hold it to ~the floor ahead.
+			if (stalled) this.#backpressure.flush();
+			else this.#backpressure.advance(this.#ring.timestamp);
 		}, 50);
 	}
 
@@ -100,6 +174,8 @@ class SharedAudioBuffer implements AudioBuffer {
 	}
 
 	setLatency(samples: number): void {
+		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
+
 		// Grow the ring (preserving the unread window) if it's too small for the new latency.
 		if (this.#ring.capacity < samples * 1.5) {
 			const newCapacity = Math.max(this.rate, samples * 2);
@@ -113,7 +189,19 @@ class SharedAudioBuffer implements AudioBuffer {
 		}
 	}
 
+	reset(): void {
+		this.#ring.reset();
+		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
+	}
+
+	wait(timestamp: Time.Micro): Promise<void> {
+		// Stalled = still filling the floor (bootstrap or underflow): let frames through to refill.
+		if (this.#ring.stalled) return Promise.resolve();
+		return this.#backpressure.wait(timestamp, this.#ring.timestamp);
+	}
+
 	close(): void {
+		this.#backpressure.flush(); // never leave a decode loop awaiting a closed buffer
 		this.#signals.close();
 	}
 }
@@ -130,15 +218,20 @@ class PostAudioBuffer implements AudioBuffer {
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
 
+	// Backpressure runs off the playhead the worklet reports in its state messages.
+	#backpressure: Backpressure;
+
 	#signals = new Effect();
 
-	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number) {
+	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number, buffered: boolean) {
 		this.#worklet = worklet;
 		this.channels = channels;
 		this.rate = rate;
 
+		this.#backpressure = new Backpressure(buffered, samplesToMicro(latencySamples, rate));
+
 		const latency = Time.Milli.fromSecond((latencySamples / rate) as Time.Second);
-		const msg: InitPost = { type: "init-post", channels, rate, latency };
+		const msg: InitPost = { type: "init-post", channels, rate, latency, buffered };
 		worklet.port.postMessage(msg);
 
 		// Listen for state updates from the worklet.
@@ -147,6 +240,10 @@ class PostAudioBuffer implements AudioBuffer {
 			if (data?.type === "state") {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
+				// While stalled the playhead is parked, so release the decode loop to refill the floor;
+				// once playing, hold it to ~the floor ahead.
+				if (data.stalled) this.#backpressure.flush();
+				else this.#backpressure.advance(data.timestamp);
 			}
 		});
 		// addEventListener on a MessagePort requires start() to begin delivery.
@@ -164,12 +261,29 @@ class PostAudioBuffer implements AudioBuffer {
 	}
 
 	setLatency(samples: number): void {
+		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
+
 		const latency = Time.Milli.fromSecond((samples / this.rate) as Time.Second);
 		const msg: Latency = { type: "latency", latency };
 		this.#worklet.port.postMessage(msg);
 	}
 
+	reset(): void {
+		const msg: Reset = { type: "reset" };
+		this.#worklet.port.postMessage(msg);
+		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
+	}
+
+	wait(timestamp: Time.Micro): Promise<void> {
+		// Stalled = still filling the floor (bootstrap or underflow): let frames through to refill.
+		if (this.#stalled.peek()) return Promise.resolve();
+		// Uses the worklet-reported playhead, which lags by a state-message interval; the floor's
+		// headroom covers that. The worklet still drops the oldest if a frame slips through.
+		return this.#backpressure.wait(timestamp, this.#timestamp.peek());
+	}
+
 	close(): void {
+		this.#backpressure.flush(); // never leave a decode loop awaiting a closed buffer
 		this.#signals.close();
 	}
 }

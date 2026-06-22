@@ -102,12 +102,12 @@ where
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
 	// forward the negotiated subprotocol explicitly; axum performed the
 	// upgrade, so qmux can't sniff it from the handshake.
-	let bare = qmux::ws::Bare::new(socket);
-	let bare = match alpn.as_deref() {
-		Some(alpn) => bare.with_alpn(alpn),
-		None => bare,
+	let upgraded = qmux::ws::Upgraded::new(socket);
+	let upgraded = match alpn.as_deref() {
+		Some(alpn) => upgraded.with_alpn(alpn),
+		None => upgraded,
 	};
-	let ws = bare.accept();
+	let ws = upgraded.accept();
 	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
@@ -117,19 +117,33 @@ where
 	session.closed().await.map_err(Into::into)
 }
 
+/// QMux wire-format versions that can ride under a `{prefix}{alpn}` pair.
+/// Newest first so axum's exact-string match picks the freshest one.
+const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
+
+/// moq-transport-18 requires qmux-01, so we never pair it with qmux-00.
+/// Mirrors `js/net`'s `connect.ts` and moq-native's `qmux_versions_for`.
+const QMUX01_ONLY_ALPN: &str = "moqt-18";
+
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
-/// Generates the cross product of `qmux::PREFIXES` × `moq_net::ALPNS`, with
-/// the bare qmux fallbacks (`qmux-00`, `webtransport`) appended last so
-/// versioned subprotocols always win the exact-string match axum performs.
+/// Generates the cross product of [`QMUX_VERSIONS`] × `moq_net::ALPNS`, with
+/// the bare qmux fallbacks (`qmux-01`, `qmux-00`, `webtransport`) appended last
+/// so versioned subprotocols always win the exact-string match axum performs.
 /// Without the versioned entries, axum picks bare `webtransport`, qmux can't
-/// resolve a moq version from it, and the relay silently downgrades clients
-/// to Lite02 via SETUP-based negotiation.
+/// resolve a moq version from it, and the relay silently downgrades clients to
+/// Lite02 via SETUP-based negotiation.
+///
+/// `qmux-00.moqt-18` is excluded: moq-transport-18 requires qmux-01, so that
+/// pair is illegal.
 fn supported_subprotocols() -> Vec<String> {
-	let mut out = Vec::with_capacity(qmux::PREFIXES.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
-	for &prefix in qmux::PREFIXES {
+	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
+	for &version in QMUX_VERSIONS {
 		for &alpn in moq_net::ALPNS {
-			out.push(format!("{prefix}{alpn}"));
+			if version == qmux::Version::QMux00 && alpn == QMUX01_ONLY_ALPN {
+				continue;
+			}
+			out.push(format!("{}{alpn}", version.prefix()));
 		}
 	}
 	for &alpn in qmux::ALPNS {
@@ -200,11 +214,17 @@ mod tests {
 	}
 
 	fn preferred_qmux_prefix() -> &'static str {
-		qmux::PREFIXES.first().copied().expect("qmux::PREFIXES is empty")
+		qmux::Version::QMux01.prefix()
 	}
 
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
+		// Guard the literal: it must stay the IETF draft-18 ALPN (wire 0xff000012).
+		assert_eq!(
+			moq_net::Version::from_alpn(QMUX01_ONLY_ALPN).map(|v| v.code()),
+			Some(0xff000012)
+		);
+
 		let list = supported_subprotocols();
 
 		// Newest moq ALPN under the preferred prefix must come first so axum
@@ -212,10 +232,15 @@ mod tests {
 		let expected_first = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
 		assert_eq!(list.first().map(String::as_str), Some(expected_first.as_str()));
 
-		// Every moq ALPN must appear under every qmux prefix.
-		for &prefix in qmux::PREFIXES {
+		// Every moq ALPN must appear under every qmux wire version, except the
+		// illegal `qmux-00.moqt-18` pair (moq-transport-18 needs qmux-01).
+		for &version in QMUX_VERSIONS {
 			for &alpn in moq_net::ALPNS {
-				let entry = format!("{prefix}{alpn}");
+				let entry = format!("{}{alpn}", version.prefix());
+				if version == qmux::Version::QMux00 && alpn == QMUX01_ONLY_ALPN {
+					assert!(!list.contains(&entry), "illegal pair {entry} must not be advertised");
+					continue;
+				}
 				assert!(list.contains(&entry), "missing {entry}");
 			}
 		}
@@ -244,7 +269,7 @@ mod tests {
 	/// ALPN list to an axum router that mirrors `serve_ws`'s subprotocol
 	/// wiring. Both client and server must observe the newest moq ALPN
 	/// (`moq_net::ALPNS[0]`) on the resulting qmux session. A bug in
-	/// `supported_subprotocols` or in the `Bare::with_alpn` plumbing
+	/// `supported_subprotocols` or in the `Upgraded::with_alpn` plumbing
 	/// collapses this to `None` / bare `webtransport`, and moq-net then
 	/// downgrades to Lite02 via SETUP.
 	#[tokio::test]
@@ -265,12 +290,12 @@ mod tests {
 							.sink_map_err(|_| tungstenite::Error::ConnectionClosed)
 							.with(tungstenite_to_axum);
 
-						let bare = qmux::ws::Bare::new(socket);
-						let bare = match alpn.as_deref() {
-							Some(alpn) => bare.with_alpn(alpn),
-							None => bare,
+						let upgraded = qmux::ws::Upgraded::new(socket);
+						let upgraded = match alpn.as_deref() {
+							Some(alpn) => upgraded.with_alpn(alpn),
+							None => upgraded,
 						};
-						let session = bare.accept();
+						let session = upgraded.accept();
 						if let Some(tx) = server_alpn_tx.lock().unwrap().take() {
 							let _ = tx.send(session.protocol().map(str::to_owned));
 						}
@@ -292,8 +317,9 @@ mod tests {
 			axum::serve(listener, app).await.expect("axum serve");
 		});
 
+		let any: &[qmux::Version] = &[];
 		let session = qmux::Client::new()
-			.with_protocols(moq_net::ALPNS)
+			.with_protocols(moq_net::ALPNS.iter().map(|&alpn| (alpn, any)))
 			.connect(&format!("ws://{addr}/"))
 			.await
 			.expect("qmux client connect");
@@ -312,7 +338,7 @@ mod tests {
 		assert_eq!(
 			server_alpn.as_deref(),
 			Some(newest_moq_alpn()),
-			"server side should see the newest moq ALPN after Bare::with_alpn",
+			"server side should see the newest moq ALPN after Upgraded::with_alpn",
 		);
 
 		drop(session);

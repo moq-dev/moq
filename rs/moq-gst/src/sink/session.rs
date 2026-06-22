@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use gst::glib;
 use gst::prelude::*;
 

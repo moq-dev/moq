@@ -200,6 +200,14 @@ let
       fi
     '';
   };
+
+  # CI checks (clippy / doc / test) run as plain cargo via `just rs ci`, not
+  # through crane/`nix flake check`. The self-hosted runner caches compilation
+  # per-crate with sccache (wired into the runner environment, not here), so a
+  # Cargo.lock change recompiles only the changed crate + its reverse-deps.
+  # ./target stays ephemeral (wiped per job) -- the persistent CARGO_TARGET_DIR
+  # growth that the old crane checks were introduced to fix doesn't recur.
+  # Release artifacts still build via crane `buildPackage` below.
 in
 {
   moq-relay = craneLib.buildPackage moqRelayArgs;

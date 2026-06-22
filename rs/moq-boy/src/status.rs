@@ -1,8 +1,9 @@
 //! Status track: JSON state published to viewers each frame.
 //!
 //! Contains which buttons are held, per-viewer latency measurements,
-//! encoding stats, and an optional location label. Only published
-//! when the JSON changes from the previous frame to avoid waste.
+//! encoding stats, and an optional location label. Published through
+//! [`moq_json`], which skips unchanged values and emits merge-patch
+//! deltas between snapshots so frequent small changes stay cheap.
 
 use std::collections::BTreeMap;
 
@@ -32,10 +33,9 @@ pub struct Status {
 	pub location: Option<String>,
 }
 
-/// Manages the status track, only publishing when content changes.
+/// Manages the status track, publishing snapshots and deltas via [`moq_json`].
 pub struct StatusPublisher {
-	producer: moq_net::TrackProducer,
-	last_json: String,
+	producer: moq_json::Producer<Status>,
 }
 
 impl StatusPublisher {
@@ -47,20 +47,14 @@ impl StatusPublisher {
 		let producer = broadcast.create_track(track)?;
 
 		Ok(Self {
-			producer,
-			last_json: String::new(),
+			producer: moq_json::Producer::new(producer, moq_json::Config::default()),
 		})
 	}
 
-	/// Publish status if it changed since last call.
+	/// Publish status, a no-op if unchanged since the last call.
 	pub fn publish(&mut self, status: &Status) {
-		let json = serde_json::to_string(status).unwrap();
-		if json != self.last_json {
-			self.last_json = json.clone();
-			if let Ok(mut group) = self.producer.append_group() {
-				let _ = group.write_frame(json.into_bytes());
-				let _ = group.finish();
-			}
+		if let Err(err) = self.producer.update(status) {
+			tracing::warn!(%err, "failed to publish status");
 		}
 	}
 }

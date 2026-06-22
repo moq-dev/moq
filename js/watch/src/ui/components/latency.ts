@@ -2,6 +2,7 @@ import type { Moq } from "@moq/hang";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";
+import { latencyBounds } from "../../sync";
 import { formatMillis } from "../format";
 import { bufferControl } from "./buffer-control";
 
@@ -25,14 +26,14 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const buttons = PRESETS.map((preset) => {
 		const chip = DOM.create("button", { className: "chip", type: "button" }, preset.label);
 		parent.event(chip, "click", () => {
-			watch.backend.latency.set(preset.value === "real-time" ? "real-time" : (preset.value as Moq.Time.Milli));
+			watch.latencyMin = preset.value === "real-time" ? "real-time" : (preset.value as Moq.Time.Milli);
 		});
 		chips.appendChild(chip);
 		return { preset, chip };
 	});
 
 	parent.run((effect) => {
-		const mode = effect.get(watch.backend.latency);
+		const mode = latencyBounds(effect.get(watch.backend.latency)).min;
 		for (const { preset, chip } of buttons) {
 			const active = preset.value === "real-time" ? mode === "real-time" : mode === preset.value;
 			chip.classList.toggle("chip--active", active);
@@ -53,7 +54,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	readout.append(jitterStat, bufferStat);
 
 	parent.run((effect) => {
-		const mode = effect.get(watch.backend.latency);
+		const mode = latencyBounds(effect.get(watch.backend.latency)).min;
 		const jitter = effect.get(watch.backend.jitter);
 		const total = effect.get(watch.backend.sync.buffer);
 		jitterVal.textContent = `${formatMillis(jitter)}${mode === "real-time" ? " (auto)" : ""}`;

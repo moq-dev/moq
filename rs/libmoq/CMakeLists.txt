@@ -57,6 +57,17 @@ if(APPLE)
     target_link_options(moq INTERFACE "LINKER:-framework,CoreFoundation" "LINKER:-framework,Security")
 endif()
 
+# System libraries Rust std/deps pull in on Windows (from
+# `cargo rustc -- --print native-static-libs`). When the staticlib is linked
+# into a C/C++ target by an external linker, cargo can't inject these itself.
+# Keep in sync with the find_package config in cmake/moq-config.cmake.in.
+if(WIN32)
+    target_link_libraries(
+        moq
+        INTERFACE ntdll userenv ws2_32 bcrypt dbghelp advapi32 legacy_stdio_definitions
+    )
+endif()
+
 if(BUILD_RUST_LIB)
     add_dependencies(moq rust_build)
 endif()

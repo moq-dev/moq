@@ -6,8 +6,12 @@ permissions:
 
 on:
   pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
 
-# Cancel in-flight runs when a new commit lands on the same PR.
+# Cancel in-flight runs when a new commit lands on the same PR, or when the PR
+# is merged/closed (the close event shares this group and supersedes the build).
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -15,10 +19,22 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest
+    # Skip the actual work on close/merge: this run exists only to cancel the
+    # superseded in-flight build via the concurrency group above.
+    if: github.event.action != 'closed'
+    # Trusted events run on the moq-dev self-hosted A1 runner (warm /nix/store +
+    # persistent CARGO_TARGET_DIR). Fork PRs fall back to GitHub-hosted ARM so
+    # untrusted code never runs on the box.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["ubuntu-24.04-arm"]') || fromJSON('["self-hosted", "nix"]') }}
+    # Backstop a hang (e.g. a wedged test) instead of holding the runner for the
+    # 6-hour default. Generous enough for a cold first build.
+    timeout-minutes: 60
 
     steps:
+      # GitHub-hosted fallback only: the self-hosted box already has disk space,
+      # Determinate Nix, and a warm store.
       - name: Free disk space
+        if: runner.environment == 'github-hosted'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
         with:
           tool-cache: false
@@ -30,17 +46,27 @@ jobs:
           # Full history so `just changed` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+      - if: runner.environment == 'github-hosted'
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - uses: DeterminateSystems/flake-checker-action@9ee1c5473f1abdfb299f6c4f0fab813147c97fe3 # main
+      - if: runner.environment == 'github-hosted'
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+      - if: runner.environment == 'github-hosted'
+        uses: DeterminateSystems/flake-checker-action@9ee1c5473f1abdfb299f6c4f0fab813147c97fe3 # main
 
-      # Cache Rust dependencies and build artifacts
+      # GitHub-hosted fallback caches Rust via the Actions cache. The self-hosted
+      # box runs the heavy Rust CI (clippy/doc/test) as plain cargo, reusing a
+      # persistent CARGO_TARGET_DIR set in the runner environment (not here), so
+      # unchanged crates are reused across jobs; the checkout's ./target is unused.
       - name: Rust Cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
 
       # `just ci` calls `just changed` internally to skip unchanged scopes.
+      # Login shell so /etc/profile.d puts Nix on PATH; Actions shells don't by
+      # default. Harmless on the hosted fallback.
       - run: nix develop --command just ci
-
+        shell: bash -leo pipefail {0}

@@ -111,15 +111,29 @@ pub struct Client {
 }
 
 impl Client {
-	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket")))]
+	#[cfg(not(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	)))]
 	pub fn new(_config: ClientConfig) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, or websocket feature",
+			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, websocket, tcp, or uds feature",
 		))
 	}
 
 	/// Create a new client
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket"))]
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
 	pub fn new(config: ClientConfig) -> crate::Result<Self> {
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or({
@@ -227,11 +241,13 @@ impl Client {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "iroh",
-		feature = "websocket"
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
 	)))]
 	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature",
+			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -240,7 +256,9 @@ impl Client {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "iroh",
-		feature = "websocket"
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
 	))]
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
 		let session = self.connect_inner(url).await?;
@@ -253,9 +271,27 @@ impl Client {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "iroh",
-		feature = "websocket"
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
 	))]
 	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
+		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
+		// QUIC, which can't speak it. Use only on a trusted network.
+		#[cfg(feature = "tcp")]
+		if url.scheme() == "tcp" {
+			let session = crate::tcp::connect(url, &self.versions.alpns()).await?;
+			return Ok(self.moq.connect(session).await?);
+		}
+
+		// Unix domain socket (qmux, no TLS). Same-host only; the server can
+		// authenticate us by uid/gid via SO_PEERCRED.
+		#[cfg(all(feature = "uds", unix))]
+		if url.scheme() == "unix" {
+			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
+			return Ok(self.moq.connect(session).await?);
+		}
+
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;

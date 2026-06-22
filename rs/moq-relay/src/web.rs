@@ -263,7 +263,7 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 		.chain(root.iter().cloned())
 		.collect();
 
-	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+	let mut watcher = match moq_native::watch::FileWatcher::new(&paths) {
 		Ok(watcher) => watcher,
 		Err(err) => {
 			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
@@ -284,7 +284,7 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 
 /// Marker inserted as a request extension when rustls verified a client cert
 /// against the configured mTLS CA. We don't carry the cert bytes. "Verified
-/// by our CA" is the entire signal we need (mirrors `has_peer_certificate` on
+/// by our CA" is the entire signal we need (mirrors `peer_identity` on
 /// the QUIC side).
 #[derive(Clone, Debug)]
 pub(crate) struct MtlsPeer;

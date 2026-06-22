@@ -79,6 +79,10 @@
             git
             cmake
             pkg-config
+            # Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so ffmpeg-sys-next's
+            # bindgen finds libc headers (<errno.h>) on hosts without system
+            # headers in /usr/include, e.g. the self-hosted runner.
+            rustPlatform.bindgenHook
             glib
             libressl
             ffmpeg
@@ -88,6 +92,7 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-nextest
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
@@ -223,12 +228,22 @@
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
 
-          shellHook = ''
-            export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
-          '';
         };
 
         formatter = pkgs.nixfmt-tree;
+
+        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just rs
+        # ci` (see rs/justfile), no longer through crane. `nix flake check` is
+        # kept -- it still validates flake eval + builds the dev shell -- but no
+        # longer compiles the workspace, so it's cheap. Release artifacts still
+        # build via crane `buildPackage` (see `packages` above / release-*.yml).
+        #
+        # On the self-hosted runner those cargo checks transparently reuse a
+        # persistent CARGO_TARGET_DIR (set in the runner environment), so a
+        # Cargo.lock change recompiles only the changed crate + its reverse-deps
+        # and unchanged crates are reused across jobs. That's a runner-side
+        # concern -- nothing here or in the workflows configures it.
+        checks = { };
       }
     );
 }

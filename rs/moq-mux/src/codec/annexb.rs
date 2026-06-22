@@ -1,7 +1,43 @@
 use anyhow::{self};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
+
+/// Append `nal` to `set` unless a byte-identical entry is already present,
+/// preserving insertion order. Returns true if it was added.
+///
+/// Used to accumulate the distinct parameter-set NALs (SPS/PPS, plus VPS for
+/// H.265) a stream carries: avcC/hvcC hold an ordered list, and a source may
+/// define several (e.g. two PPS) that slices reference by id.
+pub(crate) fn push_distinct(set: &mut Vec<Bytes>, nal: &Bytes) -> bool {
+	if set.iter().any(|existing| existing == nal) {
+		return false;
+	}
+	set.push(nal.clone());
+	true
+}
+
+/// Reconcile the retained parameter sets with what a keyframe access unit carried
+/// inline, called when the keyframe slice is reached:
+///
+/// - If the AU presented its own set (`seen` non-empty), adopt it as the retained
+///   set, dropping any the new GOP no longer uses (a mid-stream reinit).
+/// - If the AU carried none, re-inject the retained set into `chunks` as Annex-B
+///   so a receiver tuning in at this keyframe still gets them.
+///
+/// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
+/// the cross-GOP set re-injected on bare keyframes.
+pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Vec<Bytes>, seen: &mut Vec<Bytes>) {
+	if seen.is_empty() {
+		for nal in retained.iter() {
+			chunks.extend_from_slice(&START_CODE);
+			chunks.extend_from_slice(nal);
+		}
+		seen.clone_from(retained);
+	} else if seen != retained {
+		retained.clone_from(seen);
+	}
+}
 
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,

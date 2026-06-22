@@ -180,7 +180,7 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend) {
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		// The peer cert must be visible before we accept the session.
-		let has_cert = request.has_peer_certificate();
+		let has_cert = request.peer_identity().is_some();
 		let session = request.with_publish(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(has_cert)
