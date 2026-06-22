@@ -642,12 +642,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let Some(size) = stream.decode_maybe::<u64>().await? else {
 				break;
 			};
-			if size > MAX_FRAME_SIZE {
-				return Err(Error::FrameTooLarge);
-			}
 
 			match compression {
 				Compression::None => {
+					// `create_frame` is the allocation chokepoint and rejects an
+					// oversized `size` before allocating, so no pre-check is needed.
 					let mut frame = group.create_frame(Frame { size, timestamp })?;
 					track_stats.frame();
 
@@ -659,8 +658,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					frame.finish()?;
 				}
 				compression => {
-					// `size` is the compressed length; pull it off the wire, then
-					// inflate. The frame the consumer sees carries the original size.
+					// Here `size` is the compressed wire length, not the frame size, so
+					// it never reaches the `create_frame` chokepoint. Bound it directly
+					// so a peer can't make us buffer an unbounded blob before decoding.
+					if size > MAX_FRAME_SIZE {
+						return Err(Error::FrameTooLarge);
+					}
+					// Pull the compressed bytes off the wire, then inflate. The frame
+					// the consumer sees carries the original (decompressed) size.
 					let packed = stream.read_exact(size as usize).await?;
 					track_stats.frame();
 					track_stats.bytes(size);

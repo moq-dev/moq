@@ -7,19 +7,18 @@ use bytes::{BufMut, Bytes};
 
 use crate::{Error, Result, Timestamp};
 
-/// Maximum payload size accepted for a single frame on the wire.
+/// Maximum payload size accepted for a single frame.
 ///
 /// The receive path preallocates a buffer from the declared frame size, so an
 /// untrusted peer could otherwise request a multi-gigabyte allocation with a
-/// single varint. Subscribers reject frames whose declared size exceeds this.
+/// single varint. [`FrameProducer::new`] enforces this for every frame: it's the
+/// sole allocation chokepoint (reached via [`Frame::produce`] and
+/// [`crate::GroupProducer::create_frame`]) and rejects an oversized declared size
+/// with [`Error::FrameTooLarge`] before allocating.
 ///
 /// Matches the per-group cache cap (`MAX_GROUP_CACHE`), so a single frame may fill
 /// a group. 16 MiB was too tight for a high-bitrate CMAF fragment carried as one
 /// frame; 32 MiB covers that while keeping the per-frame preallocation bounded.
-///
-// TODO enforce this in [Frame::produce] / [FrameProducer::new] so the limit is
-// guaranteed for every caller, not just the wire decode paths. Blocked on
-// making the constructor fallible (returning [Result]), which is an API break.
 pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 
 /// A chunk of data with an upfront size and optional presentation timestamp.
@@ -46,8 +45,9 @@ impl Frame {
 	///
 	/// Crate-private: frames are only constructed via
 	/// [`crate::GroupProducer::create_frame`], which validates the timestamp
-	/// against the parent track's timescale.
-	pub(crate) fn produce(self) -> FrameProducer {
+	/// against the parent track's timescale. Returns [`Error::FrameTooLarge`] if the
+	/// declared [`Frame::size`] exceeds [`MAX_FRAME_SIZE`].
+	pub(crate) fn produce(self) -> Result<FrameProducer> {
 		FrameProducer::new(self)
 	}
 }
@@ -196,13 +196,20 @@ impl std::ops::Deref for FrameProducer {
 
 impl FrameProducer {
 	/// Create a new frame producer for the given frame header.
-	pub(crate) fn new(info: Frame) -> Self {
+	///
+	/// The single allocation chokepoint: rejects a frame whose declared
+	/// [`Frame::size`] exceeds [`MAX_FRAME_SIZE`] with [`Error::FrameTooLarge`]
+	/// before allocating the (untrusted) buffer.
+	pub(crate) fn new(info: Frame) -> Result<Self> {
+		if info.size > MAX_FRAME_SIZE {
+			return Err(Error::FrameTooLarge);
+		}
 		let buf = FrameBuf::new(info.size as usize);
-		Self {
+		Ok(Self {
 			info,
 			state: kio::Producer::new(FrameState::default()),
 			buf,
-		}
+		})
 	}
 
 	/// Write a chunk of data to the frame.
@@ -471,7 +478,8 @@ mod test {
 			size: 5,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		producer.finish().unwrap();
 
@@ -486,7 +494,8 @@ mod test {
 			size: 10,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		producer.write(Bytes::from_static(b"world")).unwrap();
 		producer.finish().unwrap();
@@ -502,7 +511,8 @@ mod test {
 			size: 10,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		// Each read_chunk returns whatever is new since the last call,
 		// which may span multiple writes.
@@ -525,7 +535,8 @@ mod test {
 			size: 10,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		producer.write(Bytes::from_static(b"world")).unwrap();
 		producer.finish().unwrap();
@@ -542,7 +553,8 @@ mod test {
 			size: 5,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		producer.write(Bytes::from_static(b"hi")).unwrap();
 		let err = producer.finish().unwrap_err();
 		assert!(matches!(err, Error::WrongSize));
@@ -554,9 +566,22 @@ mod test {
 			size: 3,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		let err = producer.write(Bytes::from_static(b"toolong")).unwrap_err();
 		assert!(matches!(err, Error::WrongSize));
+	}
+
+	#[test]
+	fn rejects_oversized_frame() {
+		// The allocation chokepoint refuses an oversized declared size before any
+		// buffer is allocated, so a single varint can't request a huge allocation.
+		let result = Frame {
+			size: MAX_FRAME_SIZE + 1,
+			timestamp: None,
+		}
+		.produce();
+		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
 
 	#[test]
@@ -565,7 +590,8 @@ mod test {
 			size: 5,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		let mut consumer = producer.consume();
 		producer.abort(Error::Cancel).unwrap();
 
@@ -579,7 +605,8 @@ mod test {
 			size: 0,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -593,7 +620,8 @@ mod test {
 			size: 5,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		let mut consumer = producer.consume();
 
 		// Consumer blocks because no data yet.
@@ -613,7 +641,8 @@ mod test {
 			size: 12,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		assert_eq!(producer.remaining_mut(), 12);
 		producer.put_slice(b"hello");
 		assert_eq!(producer.remaining_mut(), 7);
@@ -633,7 +662,8 @@ mod test {
 			size: 4,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		// Safety violation on purpose: cnt > remaining_mut().
 		unsafe { producer.advance_mut(5) };
 	}
@@ -644,7 +674,8 @@ mod test {
 			size: 6,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		let mut consumer = producer.consume();
 
 		producer.write(Bytes::from_static(b"foo")).unwrap();
@@ -668,7 +699,8 @@ mod test {
 			size: 10,
 			timestamp: None,
 		}
-		.produce();
+		.produce()
+		.unwrap();
 		let mut c1 = producer.consume();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 

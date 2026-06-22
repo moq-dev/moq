@@ -3,8 +3,8 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::{
-	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
+	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, OriginPublish,
+	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -826,9 +826,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				if size > MAX_FRAME_SIZE {
-					return Err(Error::FrameTooLarge);
-				}
+				// `create_frame` is the allocation chokepoint and rejects an oversized
+				// `size` before allocating, so no pre-check is needed.
 				let mut frame = producer.create_frame(Frame { size, timestamp: None })?;
 				track_stats.frame();
 
