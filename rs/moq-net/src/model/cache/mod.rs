@@ -29,14 +29,14 @@ use bytes::Bytes;
 use super::{Timescale, Timestamp};
 
 // Internal orchestration for the disk/remote tiers; not part of the public surface, and only
-// needed (and only compiled) with those tiers.
-#[cfg(feature = "cache-tiered")]
+// needed (and only buildable) where object_store is available.
+#[cfg(not(target_arch = "wasm32"))]
 mod index;
 
 pub mod segment;
 
-/// Disk and remote tiers backed by object_store. Requires the `cache-tiered` feature.
-#[cfg(feature = "cache-tiered")]
+/// Disk and remote tiers backed by object_store. Native-only (object_store doesn't build on wasm).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod store;
 
 /// A cache bound, as a duration, a byte count, or both (the first to trip wins).

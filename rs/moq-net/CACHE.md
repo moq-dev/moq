@@ -14,7 +14,7 @@
 >   group model; `TrackProducer::with_cache(cache::Producer)` spawns a subscriber that drains
 >   finished groups into the cache; `TrackConsumer::with_cache(cache::Consumer)` makes `get_group`
 >   and `fetch_group` resolve from the cache on a live miss;
-> - the **disk/remote tier I/O** (`store.rs`, behind the `cache-tiered` feature): `cache::store::Store`
+> - the **disk/remote tier I/O** (`store.rs`, native-only via target-gating): `cache::store::Store`
 >   over an `object_store` disk tier and optional remote tier. `flush` encodes a band and `put`s it
 >   as a disk segment; `get` ranged-reads a located blob; `compact` rolls the oldest disk segments
 >   up into one remote object (or evicts them with no remote), driven by the index.
@@ -23,9 +23,8 @@
 > tracks a relay auto-creates (the Origin follow-up). Targets `dev`.
 
 A per-track group cache. It lets a relay or edge retain recent groups past the live window and
-serve them back on a FETCH, optionally spilling to local disk or remote object storage. This is
-the moq-net mechanism the `moq-archive` crate builds on (see `../moq-archive/DESIGN.md`); the
-on-tier byte format is shared with that crate.
+serve them back on a FETCH, optionally spilling to local disk or remote object storage. It lives
+in `moq-net` so any consumer of a track (relay, edge, archiver) gets durable caching for free.
 
 The implemented surface follows moq-net's produce/consume split: `cache::Config::produce()`
 yields a `cache::Producer` (the write half, not `Clone`), and `Producer::consume()` yields a
@@ -154,11 +153,10 @@ access.
 
 ## Tiers
 
-RAM is always present and dependency-free. disk and remote are `object_store`, behind a
-`cache-tiered` feature flag so RAM-only native builds (and any wasm consumers) do not pull the
-cloud stack. The on-tier bytes reuse the `moq-archive` segment plus manifest format, so the
-cache and the archive crate agree byte-for-byte and a relay's spilled data is directly readable
-by an archive node.
+RAM is always present and dependency-free. disk and remote are `object_store`, target-gated to
+non-wasm targets (`cfg(not(target_arch = "wasm32"))`) so native builds get the tiers with no flag
+and wasm builds drop the server-side cloud stack automatically. The on-tier byte format is the
+`segment` module's, so a relay's spilled data is directly readable by anything using this cache.
 
 ## Attaching to a producer or a consumer
 
@@ -295,7 +293,7 @@ pub struct CacheArgs {
 
 ```text
 moq serve --broadcast bbb --cache-ram 30s --cache-disk /var/cache/moq --cache-disk-age 5m \
-          --cache-remote s3://moq-archive/bbb --cache-remote-age 30d  fmp4 < bbb.mp4
+          --cache-remote s3://moq-cache/bbb --cache-remote-age 30d  fmp4 < bbb.mp4
 ```
 
 and converts to a `cache::Config` whose halves go to each endpoint:
@@ -322,8 +320,8 @@ the same flags under its `Option<T>` clobber rule.
 
 ## Open questions
 
-1. **object_store in moq-net.** Feature-gate `cache-tiered`; RAM-only stays dependency-free.
-   This is the one heavy dependency decision, since moq-net is the core wire crate.
+1. **object_store in moq-net.** Resolved: target-gated to `cfg(not(target_arch = "wasm32"))`, so
+   native always has the tiers and wasm drops them, with no opt-in feature.
 2. **Async get.** RAM hits must stay synchronous (serve under the lock); only disk and remote
    faults are async. The return type needs a "ready now or pending" shape, matching moq-net's
    existing `kio::Pending`.
