@@ -392,15 +392,20 @@ impl TrackState {
 	}
 
 	/// Evict groups that fall outside the retention window by either gate, never evicting the
-	/// max_sequence group. Evicted groups are handed to the cache (when one is attached) so a later
-	/// fetch can read them back from disk.
+	/// max_sequence group.
 	///
 	/// Two gates, both sized by `max_age`; a group is evicted when it trips either:
 	/// - **wall-clock**: it was received more than `max_age` ago. The hard memory backstop, so a
-	///   publisher can't pin RAM by lying about media timestamps.
+	///   publisher can't pin RAM by lying about media timestamps. A finished group aged out this
+	///   way is archived to the cache (when one is attached) so a later fetch reads it back.
 	/// - **media-time**: its last frame's media timestamp is more than `max_age` behind the live
-	///   media edge. Bounds a startup stampede where a burst of buffered media arrives at once
-	///   (all "received now", so the wall-clock gate alone would keep it all).
+	///   media edge. Drops a stale arrival (a group whose media is already past the window the
+	///   instant it lands, e.g. a startup burst or a lagging publisher) rather than spending RAM on
+	///   media too old to serve. A media-stale group is not archived.
+	///
+	/// An unfinished evicted group is [aborted](GroupProducer::abort): a producer still filling it
+	/// (a wire receive loop downloading a group already too stale to keep) stops and releases its
+	/// buffers instead of finishing a group we will immediately drop.
 	///
 	/// Groups arrive in wall-clock order, but a late out-of-order group can be media-expired
 	/// anywhere in the deque, so this scans the whole (small) window rather than breaking early.
@@ -434,12 +439,21 @@ impl TrackState {
 			}
 
 			removed.push(group.sequence);
-			// Only spill finished groups: draining an open one would park the flush task until it
-			// completes (or forever, if the writer stalled). An unfinished evicted group is dropped
-			// from the live tier as before, just not cached.
-			#[cfg(not(target_arch = "wasm32"))]
-			if self.cache.is_some() && group.is_finished() {
-				evicted.push(group.consume());
+			if group.is_finished() {
+				// A finished group that aged out by wall-clock is archived to the cache. A finished
+				// group that is only media-stale (a deliberately fetched old group, or a brief live
+				// group) is dropped without archiving and without aborting, so a consumer still
+				// reading it is unaffected.
+				#[cfg(not(target_arch = "wasm32"))]
+				if wall_expired && self.cache.is_some() {
+					evicted.push(group.consume());
+				}
+			} else {
+				// An unfinished group is dropped from RAM regardless. Abort it so a producer still
+				// filling it (e.g. a wire receive loop downloading a group already too stale to
+				// serve) stops wasting bandwidth and releases its buffers, rather than finishing a
+				// group we will never keep.
+				let _ = group.abort(Error::Old);
 			}
 			*slot = None;
 		}
@@ -1907,6 +1921,48 @@ mod test {
 			consumer.fetch_group(0, None).unwrap().await,
 			Err(Error::NotFound)
 		));
+	}
+
+	#[tokio::test]
+	async fn media_stale_unfinished_group_is_aborted() {
+		tokio::time::pause();
+		let scale = crate::Timescale::new(1_000_000).unwrap(); // microseconds
+
+		fn timed_frame(group: &mut GroupProducer, scale: crate::Timescale, micros: u64, payload: &'static [u8]) {
+			let info = crate::Frame {
+				size: payload.len() as u64,
+				timestamp: Some(crate::Timestamp::new(micros, scale).unwrap()),
+			};
+			let mut frame = group.create_frame(info).unwrap();
+			frame.write(bytes::Bytes::from_static(payload)).unwrap();
+			frame.finish().unwrap();
+		}
+
+		// Retain 10s of media (and wall-clock); no time advances, so only the media gate can fire.
+		let mut producer = TrackProducer::new(
+			"test",
+			TrackInfo::default()
+				.with_timescale(scale)
+				.with_cache(Duration::from_secs(10)),
+		);
+
+		// A stale group still being received: one frame at media t=0, left open (producer held).
+		let mut stale = producer.create_group(Group { sequence: 0 }).unwrap();
+		let mut reader = stale.consume();
+		timed_frame(&mut stale, scale, 0, b"old");
+
+		// The live edge jumps media time to 20s, well past the 10s window.
+		let mut edge = producer.create_group(Group { sequence: 1 }).unwrap();
+		timed_frame(&mut edge, scale, 20_000_000, b"new");
+		edge.finish().unwrap();
+
+		// A further insert runs eviction with media_now = 20s; the open group 0 (t=0) is >10s stale.
+		producer.append_group().unwrap(); // seq 2
+
+		// The stale, still-open group was aborted (Error::Old), signaling its receiver to stop, and
+		// it is gone from the live window.
+		assert!(matches!(reader.read_frame().await, Err(Error::Old)));
+		assert!(producer.consume().get_group(0).is_none());
 	}
 
 	#[tokio::test]

@@ -8,6 +8,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use object_store::{ObjectStore, PutPayload, path::Path};
 
 use super::index::{Index, SegmentId, Tier};
@@ -70,7 +71,8 @@ impl Store {
 		self.prefix.child(dir).child(id.to_string())
 	}
 
-	/// Persist a flushed band as one disk segment, then compact if the disk tier is over budget.
+	/// Persist a flushed band as one disk segment. Does not compact: the caller drives compaction
+	/// (see [`Self::plan_compaction`]) so the slow remote upload can run without the store lock.
 	pub async fn flush(&mut self, batch: Batch) -> Result<(), Error> {
 		if batch.is_empty() {
 			return Ok(());
@@ -84,7 +86,7 @@ impl Store {
 			.await?;
 		let added = self.index.add(Tier::Disk, &segment);
 		debug_assert_eq!(added, id, "index id drifted from the written key");
-		self.compact().await
+		Ok(())
 	}
 
 	/// Fetch a group by sequence: locate it, ranged-read its blob, decode it. `None` if not stored.
@@ -101,46 +103,98 @@ impl Store {
 		Ok(Some(segment::group_from_blob(sequence, bytes)?))
 	}
 
-	/// Bring the disk tier within bounds: roll the oldest segments up into one remote object, or
-	/// evict them when there is no remote tier. A no-op when the disk tier is within bounds.
-	pub async fn compact(&mut self) -> Result<(), Error> {
+	/// Phase 1 of compaction, run **under the store lock**: if the disk tier is over bounds, snapshot
+	/// a rollup of the oldest segments (read their bytes and build the rolled object), reserving the
+	/// remote segment id. With no remote tier, drop the oldest disk segments inline instead. Returns
+	/// the snapshot to [upload](Rollup::upload), or `None` when within bounds or evicted inline.
+	///
+	/// Disk reads happen here (local, fast); only the remote upload is slow, and it runs after this
+	/// returns so the lock can be released across it. The disk segments stay in place and indexed
+	/// until [`Self::apply_compaction`], so a concurrent fetch still reads them.
+	pub async fn plan_compaction(&mut self) -> Result<Option<Rollup>, Error> {
 		let promoted = self.index.promotion(self.bounds);
 		if promoted.is_empty() {
-			return Ok(());
+			return Ok(None);
 		}
 
-		match self.remote.clone() {
-			Some(remote) => {
-				// Read the promoted disk segments whole and roll them into one.
-				let mut segments = Vec::with_capacity(promoted.len());
-				for id in &promoted {
-					let bytes = self.disk.get(&self.key(Tier::Disk, *id)).await?.bytes().await?;
-					segments.push(bytes);
-				}
-				let rolled = segment::rollup(&segments)?;
-				let rolled_segment = Segment::open(rolled.clone())?;
-				// Upload the remote object before repointing the index, so a failed put leaves the
-				// index (still pointing at the disk segments) intact.
-				let new_id = self.index.next_id();
-				remote
-					.put(&self.key(Tier::Remote, new_id), PutPayload::from_bytes(rolled))
-					.await?;
-				let applied = self.index.apply_promotion(&promoted, &rolled_segment);
-				debug_assert_eq!(applied, new_id, "index id drifted from the uploaded key");
-				// Best-effort cleanup; an index now pointing at remote makes any leftover disk
-				// objects orphans, not inconsistency.
-				for id in &promoted {
-					self.disk.delete(&self.key(Tier::Disk, *id)).await?;
-				}
+		let Some(remote) = self.remote.clone() else {
+			// No remote tier: drop the oldest disk segments outright (local deletes, fast).
+			for id in &promoted {
+				self.disk.delete(&self.key(Tier::Disk, *id)).await?;
 			}
-			None => {
-				// No remote tier: drop the oldest disk segments outright.
-				for id in &promoted {
-					self.disk.delete(&self.key(Tier::Disk, *id)).await?;
-				}
-				self.index.evict(&promoted);
-			}
+			self.index.evict(&promoted);
+			return Ok(None);
+		};
+
+		// Read the promoted disk segments whole and roll them into one.
+		let mut segments = Vec::with_capacity(promoted.len());
+		for id in &promoted {
+			let bytes = self.disk.get(&self.key(Tier::Disk, *id)).await?.bytes().await?;
+			segments.push(bytes);
 		}
+		let rolled = segment::rollup(&segments)?;
+		let segment = Segment::open(rolled.clone())?;
+		// Reserve the id (and thus the key) the upload writes to. Only the flush task mutates the
+		// index, so `next_id` is stable until `apply_compaction` consumes it.
+		let new_id = self.index.next_id();
+		let key = self.key(Tier::Remote, new_id);
+		Ok(Some(Rollup {
+			promoted,
+			rolled,
+			segment,
+			new_id,
+			remote,
+			key,
+		}))
+	}
+
+	/// Phase 3 of compaction, run **under the store lock** after [`Rollup::upload`] succeeds: repoint
+	/// the index at the uploaded remote object and delete the now-orphaned disk segments.
+	pub async fn apply_compaction(&mut self, rollup: Rollup) -> Result<(), Error> {
+		let applied = self.index.apply_promotion(&rollup.promoted, &rollup.segment);
+		debug_assert_eq!(applied, rollup.new_id, "index id drifted from the uploaded key");
+		// Best-effort cleanup; an index now pointing at remote makes any leftover disk objects
+		// orphans, not inconsistency.
+		for id in &rollup.promoted {
+			self.disk.delete(&self.key(Tier::Disk, *id)).await?;
+		}
+		Ok(())
+	}
+
+	/// Bring the disk tier within bounds in one call, holding the lock across the remote upload.
+	/// Convenience for callers that don't need to release the lock (tests, single-tier setups); the
+	/// tiered cache path uses [`plan_compaction`](Self::plan_compaction) /
+	/// [`Rollup::upload`] / [`apply_compaction`](Self::apply_compaction) so a slow remote upload
+	/// doesn't block fetches.
+	pub async fn compact(&mut self) -> Result<(), Error> {
+		if let Some(rollup) = self.plan_compaction().await? {
+			rollup.upload().await?;
+			self.apply_compaction(rollup).await?;
+		}
+		Ok(())
+	}
+}
+
+/// A snapshot of a planned disk -> remote rollup, taken under the store lock by
+/// [`Store::plan_compaction`] so the slow remote upload can run without holding it. The rolled
+/// bytes are reference-counted, so the snapshot is cheap to carry across the unlocked upload.
+pub struct Rollup {
+	promoted: Vec<SegmentId>,
+	rolled: Bytes,
+	segment: Segment,
+	new_id: SegmentId,
+	remote: Arc<dyn ObjectStore>,
+	key: Path,
+}
+
+impl Rollup {
+	/// Upload the rolled object to the remote tier. Run this **without** holding the store lock; the
+	/// index still points at the (intact) disk segments until [`Store::apply_compaction`], so a
+	/// failed upload is a safe no-op to retry and a concurrent fetch is unaffected.
+	pub async fn upload(&self) -> Result<(), Error> {
+		self.remote
+			.put(&self.key, PutPayload::from_bytes(self.rolled.clone()))
+			.await?;
 		Ok(())
 	}
 }
@@ -185,6 +239,7 @@ mod tests {
 
 		for seq in 0..5 {
 			store.flush(vec![group(seq, 1000)]).await.unwrap();
+			store.compact().await.unwrap();
 		}
 
 		// Every group is still readable, whether it stayed on disk or rolled up to remote.
@@ -202,6 +257,7 @@ mod tests {
 
 		for seq in 0..5 {
 			store.flush(vec![group(seq, 1000)]).await.unwrap();
+			store.compact().await.unwrap();
 		}
 
 		// The newest group is retained; the oldest was evicted (no remote to promote into).

@@ -253,6 +253,26 @@ impl Tiers {
 				batch.sort_by_key(|group| group.sequence);
 				if let Err(err) = writer.write().await.flush(batch).await {
 					tracing::warn!(%err, "cache disk flush failed");
+					continue;
+				}
+
+				// Compact in phases so the slow remote upload runs without the store lock that
+				// fetches need: plan (locked) snapshots the rollup, upload (unlocked) does the remote
+				// put, apply (locked) repoints the index. Bind each phase to its own statement so the
+				// lock guard drops at the `;` rather than being held (a held guard would also
+				// deadlock the re-entrant `write()` in apply).
+				let planned = writer.write().await.plan_compaction().await;
+				match planned {
+					Ok(Some(rollup)) => {
+						if let Err(err) = rollup.upload().await {
+							// The index still points at the intact disk segments; safe to leave.
+							tracing::warn!(%err, "cache remote rollup upload failed");
+						} else if let Err(err) = writer.write().await.apply_compaction(rollup).await {
+							tracing::warn!(%err, "cache rollup apply failed");
+						}
+					}
+					Ok(None) => {}
+					Err(err) => tracing::warn!(%err, "cache compaction planning failed"),
 				}
 			}
 		});
@@ -399,5 +419,50 @@ mod tests {
 		assert_eq!(group.read_frame().await.unwrap().unwrap(), Bytes::from(vec![0u8; 100]));
 		assert!(tiers.fetch(2, None).await.is_some());
 		assert!(tiers.fetch(99, None).await.is_none());
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn tiers_roll_up_to_remote_and_fetch() {
+		use object_store::memory::InMemory;
+		use object_store::path::Path;
+
+		// Disk keeps ~1 segment (promote over budget); the rolled-up bytes go to the remote tier.
+		// This exercises the phased plan -> upload (off-lock) -> apply path in the flush task.
+		let bounds = Bounds::new(Limit::bytes(1100), Limit::bytes(2000));
+		let disk =
+			Disk::new(Arc::new(InMemory::new()), Path::from("cache"), bounds).with_remote(Arc::new(InMemory::new()));
+		let tiers = Tiers::spawn(disk);
+
+		// Evict five ~1 KB groups, one pass at a time, so the disk tier exceeds budget and rolls up.
+		for seq in 0..5u64 {
+			let mut live = crate::GroupProducer::new(crate::Group { sequence: seq }, None);
+			live.write_frame(Bytes::from(vec![seq as u8; 1000])).unwrap();
+			live.finish().unwrap();
+			tiers.evict(vec![live.consume()]);
+			// Let the flush task process this pass (flush + compaction) before the next eviction, so
+			// each becomes its own segment rather than coalescing into one.
+			for _ in 0..50 {
+				tokio::task::yield_now().await;
+			}
+		}
+
+		// Every group is still fetchable, whether it stayed on disk or rolled up to the remote tier.
+		for seq in 0..5u64 {
+			let mut found = None;
+			for _ in 0..200 {
+				if let Some(group) = tiers.fetch(seq, None).await {
+					found = Some(group);
+					break;
+				}
+				tokio::task::yield_now().await;
+			}
+			let mut group = found.unwrap_or_else(|| panic!("group {seq} fetchable after rollup"));
+			assert_eq!(group.sequence, seq);
+			assert_eq!(
+				group.read_frame().await.unwrap().unwrap(),
+				Bytes::from(vec![seq as u8; 1000])
+			);
+		}
 	}
 }
