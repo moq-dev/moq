@@ -26,7 +26,7 @@ enum PadState {
 }
 
 /// One sink pad's media producer plus its timeline policy.
-pub(super) struct Pad {
+pub struct Pad {
 	framed: Option<Framed>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
@@ -39,7 +39,7 @@ pub(super) struct Pad {
 }
 
 impl Pad {
-	pub(super) fn new() -> Self {
+	pub fn new() -> Self {
 		Self {
 			framed: None,
 			caps: None,
@@ -51,14 +51,14 @@ impl Pad {
 	}
 
 	/// True once this pad has been invalidated by a bad caps/bitstream; the caller drops its buffers.
-	pub(super) fn is_failed(&self) -> bool {
+	pub fn is_failed(&self) -> bool {
 		self.failed
 	}
 
 	/// (Re)build the producer when the pad's caps change. A build failure invalidates only this pad
 	/// (`failed` is set); the caller keeps the session and other pads alive. Identical caps re-sent as a
 	/// sticky event keep the live producer.
-	pub(super) fn observe_caps(
+	pub fn observe_caps(
 		&mut self,
 		broadcast: &moq_net::BroadcastProducer,
 		catalog: &moq_mux::catalog::Producer,
@@ -135,7 +135,7 @@ impl Pad {
 	/// Record a SEGMENT, re-anchoring the timeline. Only acts on a change, so a sticky re-send does not
 	/// spam rejections. An `Active` pad enforces continuity against its previous segment; `NoSegment` and
 	/// `Invalid` re-anchor from scratch on the next valid one.
-	pub(super) fn observe_segment(&mut self, segment: gst::Segment) {
+	pub fn observe_segment(&mut self, segment: gst::Segment) {
 		let info = segment_info(&segment);
 		// Re-observing the exact segment we last classified is a no-op. observe_segment runs on every
 		// buffer (the segment is sticky), so without this an Invalidated pad would re-anchor on the next
@@ -168,7 +168,7 @@ impl Pad {
 	/// Re-anchor on FLUSH. A flushing seek rewinds running time, so the timeline must restart: dropping
 	/// the segment moves the pad to NoSegment (the next SEGMENT is accepted fresh via `prev = None`). The
 	/// producer is kept (FLUSH is not EOS); the codec's partial-AU reset is a documented follow-up.
-	pub(super) fn flush(&mut self) {
+	pub fn flush(&mut self) {
 		self.state = PadState::NoSegment;
 		self.segment = None;
 		self.segment_info = None;
@@ -198,7 +198,7 @@ impl Pad {
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline
 	/// drop is logged. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this
 	/// pad.
-	pub(super) fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) {
+	pub fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) {
 		if self.failed {
 			return;
 		}
@@ -221,7 +221,7 @@ impl Pad {
 
 	/// Consumes the producer so a second call is a no-op (`Framed::finish()` is not idempotent). Returns
 	/// whether a producer was finalized.
-	pub(super) fn finalize(&mut self) -> Result<bool> {
+	pub fn finalize(&mut self) -> Result<bool> {
 		// take() up front makes this attempt-once: after a failed finish() the producer is already gone.
 		let Some(mut framed) = self.framed.take() else {
 			return Ok(false);
@@ -239,7 +239,7 @@ impl Pad {
 /// Media types moqsink can build a producer for. Checked synchronously at the CAPS event so an
 /// unsupported type is rejected with NotNegotiated. The structural fields (byte-stream/au, AAC
 /// mpegversion/stream-format) are pinned by the pad template, so negotiation enforces them.
-pub(super) fn caps_supported(caps: &gst::CapsRef) -> bool {
+pub fn caps_supported(caps: &gst::CapsRef) -> bool {
 	let Some(s) = caps.structure(0) else { return false };
 	matches!(
 		s.name().as_str(),
