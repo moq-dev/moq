@@ -4,8 +4,8 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
+import type { BufferedRanges } from "../buffered";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 

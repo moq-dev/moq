@@ -14,6 +14,13 @@
 		"indentWidth": 4,
 		"lineEnding": "lf"
 	},
+	"files": {
+		// The project scanner (enabled by noImportCycles) tries to parse every file it
+		// indexes. Exclude two kinds it can't handle:
+		//   - MPEG transport-stream fixtures whose `.ts` extension collides with TypeScript.
+		//   - SVG assets, which Biome routes to its HTML parser and rejects.
+		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg"]
+	},
 	"linter": {
 		"rules": {
 			"a11y": {
@@ -25,7 +32,15 @@
 			},
 			"suspicious": {
 				// Some runtimes need ts-ignore
-				"noTsIgnore": "off"
+				"noTsIgnore": "off",
+				// Catch runtime import cycles. Type-only cycles are erased at compile time
+				// and harmless, so ignoreTypes keeps them from failing the build.
+				"noImportCycles": {
+					"level": "error",
+					"options": {
+						"ignoreTypes": true
+					}
+				}
 			}
 		}
 	},

@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/net";
 import type { Getter } from "@moq/signals";
-import type { BufferedRanges } from "../backend";
+import type { BufferedRanges } from "../buffered";
 import type { Source } from "./source";
 
 // Video specific signals that work regardless of the backend source (mse vs webcodecs).

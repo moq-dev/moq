@@ -1,7 +1,7 @@
 import { Signals } from "@moq/net";
 import { createEffect, onCleanup, onMount, Show } from "solid-js";
-import type { Game } from "../../index.ts";
-import { KEY_MAP } from "../../index.ts";
+import type { Game } from "../../game.ts";
+import { KEY_MAP } from "../../game.ts";
 import { GameUIContextProvider } from "../context";
 import { useGameUI } from "../hooks/use-boy-ui";
 import Controls from "./Controls";

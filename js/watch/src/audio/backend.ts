@@ -1,5 +1,5 @@
 import type { Getter, Signal } from "@moq/signals";
-import type { BufferedRanges } from "../backend";
+import type { BufferedRanges } from "../buffered";
 import type { Source } from "./source";
 
 // Audio specific signals that work regardless of the backend source (mse vs webcodecs).

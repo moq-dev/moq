@@ -2,29 +2,10 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
+import type { BufferedRanges } from "./buffered";
 import { Muxer } from "./mse";
 import { type Latency, Sync } from "./sync";
 import * as Video from "./video";
-
-// Serializable representation of TimeRanges
-export interface BufferedRange {
-	start: Moq.Time.Milli;
-	end: Moq.Time.Milli;
-}
-export type BufferedRanges = BufferedRange[];
-
-// Helper to convert DOM TimeRanges
-export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
-	const result: BufferedRange[] = [];
-
-	for (let i = 0; i < ranges.length; i++) {
-		const start = Moq.Time.Milli.fromSecond(ranges.start(i) as Moq.Time.Second);
-		const end = Moq.Time.Milli.fromSecond(ranges.end(i) as Moq.Time.Second);
-
-		result.push({ start, end });
-	}
-	return result;
-}
 
 export interface Backend {
 	// Whether audio/video playback is paused.

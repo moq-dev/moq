@@ -1,7 +1,7 @@
 import * as Moq from "@moq/net";
 import { render } from "solid-js/web";
-import type { GameConfig } from "./index.ts";
-import { Game } from "./index.ts";
+import type { GameConfig } from "./game.ts";
+import { Game } from "./game.ts";
 import { BoyUI } from "./ui/element.tsx";
 
 const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;

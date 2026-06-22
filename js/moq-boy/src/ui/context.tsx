@@ -3,7 +3,7 @@ import { createAccessor } from "@moq/signals/solid";
 import type { JSX } from "solid-js";
 import { createContext, onCleanup } from "solid-js";
 import type MoqBoy from "../element";
-import type { Game } from "../index.ts";
+import type { Game } from "../game.ts";
 import type { GameStatus } from "../schemas.ts";
 
 export type BoyUIContextValues = {
