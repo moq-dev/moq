@@ -120,14 +120,21 @@ impl<F: Container> Consumer<F> {
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => break,
 					Poll::Ready(Err(e)) => {
-						tracing::warn!(error = ?e, "error reading current group, skipping");
+						// The group was dropped/aborted -- typically it aged out of the relay
+						// cache (`Error::Old`) while we weren't reading it. Any sequences
+						// between it and the next buffered group were evicted alongside it, so
+						// jump straight to that group instead of stepping one-by-one and then
+						// blocking on a sequence gap of groups that will never arrive.
+						tracing::warn!(error = ?e, "current group dropped; skipping to next buffered group");
+						self.pending.pop_front();
+						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 					}
-					// No more frames, advance to next group.
-					Poll::Ready(Ok(None)) => {}
+					// Cleanly finished group: advance to the next sequence.
+					Poll::Ready(Ok(None)) => {
+						self.pending.pop_front();
+						self.current += 1;
+					}
 				}
-
-				self.pending.pop_front();
-				self.current += 1
 			}
 
 			// Get the current group's min timestamp (the reference for latency
@@ -179,9 +186,13 @@ impl<F: Container> Consumer<F> {
 					let covered = current_end.is_some_and(|end| end >= next_start);
 					over_latency || covered
 				} else {
-					// Sequence gap: current group consumed but next sequence missing.
-					// Only skip if track is fully received (no more groups coming).
-					finished
+					// The current group can't produce a timestamp: either it's missing
+					// entirely -- a lower sequence the cache evicted, so `front` is already
+					// past `current` -- or it's finished/empty. With a newer group buffered,
+					// skip if the track is done OR the current sequence is simply gone. On a
+					// live track a buffered higher sequence means the missing one was evicted
+					// (the relay delivers in order), not merely late, so waiting is futile.
+					finished || self.pending.front().is_some_and(|g| g.sequence > self.current)
 				}
 			} else {
 				false
@@ -887,6 +898,86 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
+	}
+
+	// ---- Eviction recovery (pause/resume) ----
+
+	/// A group that aged out of the relay cache (aborted with `Error::Old`) while the
+	/// consumer was parked on it must not hang the consumer: reading it errors, and
+	/// the consumer skips the gap to the next live group even though the track is NOT
+	/// finished. This is the resume-from-pause path (the recorder stops reading, the
+	/// group + the sequences after it evict, then it resumes).
+	#[tokio::test]
+	async fn evicted_group_with_gap_skips_to_live() {
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
+
+		// Group 0: a frame the consumer reads, positioning it there.
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
+		Container::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		let first = consumer.read().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(0));
+
+		// A live group arrives far ahead -- sequences 1..4 never come (evicted). The
+		// track stays OPEN (not finished), the failure mode that used to hang.
+		write_group(&mut track, 5, &[ts(150_000)]);
+
+		// Group 0 ages out of the cache (the relay aborts it on eviction).
+		group0.abort(moq_net::Error::Old).unwrap();
+
+		// Must skip the evicted group + the gap and reach the live group, without
+		// hanging on a track that never finishes.
+		let next = tokio::time::timeout(Duration::from_secs(1), consumer.read())
+			.await
+			.expect("consumer hung on an evicted group / gap")
+			.unwrap()
+			.unwrap();
+		assert_eq!(next.timestamp, ts(150_000), "skipped the evicted gap to the live group");
+	}
+
+	/// A missing (evicted) sequence with a newer group buffered must be skipped even
+	/// while the track is still LIVE -- not only once it's finished. This is the
+	/// recorder resume stall: `current` points at a sequence the cache dropped, a
+	/// higher group is buffered, and the track never finishes.
+	#[tokio::test]
+	async fn missing_sequence_skips_on_live_track() {
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
+
+		// Group 0, then group 2 -- sequence 1 is missing (evicted) and never arrives.
+		// The track is NOT finished (live), the case that used to hang.
+		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
+		write_group(&mut track, 2, &[ts(200_000)]);
+
+		// Reading must reach group 2 across the gap instead of waiting forever for 1.
+		let reached = tokio::time::timeout(Duration::from_secs(1), async {
+			loop {
+				let frame = consumer.read().await.unwrap().unwrap();
+				if frame.timestamp == ts(200_000) {
+					return;
+				}
+			}
+		})
+		.await;
+		assert!(reached.is_ok(), "consumer hung on a missing sequence on a live track");
 	}
 
 	// ---- Frame Decoding ----

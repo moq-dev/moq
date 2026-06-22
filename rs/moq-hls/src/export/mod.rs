@@ -54,9 +54,9 @@ pub struct Broadcaster {
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
-	/// Pause flag shared with every rendition pump. While true, the pumps stop
-	/// draining the broadcast; renditions discovered later inherit the current
-	/// value (they `subscribe()` to this sender).
+	/// Pause flag shared with every rendition pump. While true the pumps stop
+	/// reading; renditions discovered later inherit the current value (they
+	/// `subscribe()` to this sender).
 	paused: watch::Sender<bool>,
 }
 
@@ -76,12 +76,14 @@ impl Broadcaster {
 
 	/// Pause or resume pulling media from the broadcast.
 	///
-	/// While paused, every rendition's pump stops draining the source, so live
-	/// media produced during the pause is dropped (not buffered); resuming
-	/// continues the SAME playlists, with the first post-resume segment of each
-	/// rendition marked `#EXT-X-DISCONTINUITY`. Segment numbering and the init
-	/// segment persist across the pause, so a paused-then-resumed export is one
-	/// continuous recording with a gap, not a restart. Idempotent.
+	/// While paused, every rendition's pump stops reading its track, so the relay
+	/// stops sending and the live media produced during the pause is dropped from the
+	/// recording (not buffered, and the publisher isn't kept ingesting). Resuming
+	/// continues the SAME playlists from the next group still in the relay cache (the
+	/// evicted span is skipped, then it reads forward -- it does NOT jump to live),
+	/// marking the first post-resume segment `#EXT-X-DISCONTINUITY`. CMAF sequence
+	/// numbers and the init segment persist, so it's one continuous recording with a
+	/// gap, not a restart. Idempotent.
 	pub fn set_paused(&self, paused: bool) {
 		let _ = self.paused.send(paused);
 	}

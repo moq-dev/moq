@@ -403,6 +403,12 @@ impl TrackState {
 			}
 
 			self.duplicates.remove(&group.sequence);
+			// Abort the group before dropping it so any consumer still reading it
+			// surfaces `Error::Old` instead of blocking forever on a frame that will
+			// never arrive (the cached producer is about to be gone). Without this a
+			// reader parked on an aged-out group hangs indefinitely, since the group
+			// was never finished or aborted -- it just silently disappeared.
+			let _ = group.abort(Error::Old);
 			*slot = None;
 		}
 

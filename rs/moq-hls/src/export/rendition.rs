@@ -134,15 +134,14 @@ async fn run_pump(
 		.with_fragment_duration(cfg.part_target)
 		.with_latency(cfg.latency);
 
-	// Whether we just resumed, so the first post-resume segment opens a new
+	// Whether we just resumed, so the first post-resume fragment opens a new
 	// continuity region (`#EXT-X-DISCONTINUITY`).
 	let mut resumed = false;
 
 	loop {
-		// Park while paused: stop draining the source entirely. The live media
-		// produced during the pause is dropped by the relay (the exporter's latency
-		// budget skips stale groups on resume), NOT buffered here, so a long pause
-		// costs no memory -- it just leaves a gap in the recording.
+		// While paused, stop reading the track entirely: the relay stops sending, so
+		// nothing is buffered here and the publisher isn't kept ingesting for a
+		// receiver that isn't recording.
 		while *paused.borrow_and_update() {
 			resumed = true;
 			tokio::select! {
@@ -158,15 +157,19 @@ async fn run_pump(
 		}
 
 		if resumed {
-			// The media timeline jumped across the dropped span; tag the next segment.
+			// The media dropped while paused is a real gap, so tag the seam. The export
+			// recovers on its own: the group it was mid-read on aged out of the relay
+			// cache while we weren't reading, and reading an evicted (or now-missing)
+			// group errors instead of blocking (moq-net aborts it with `Error::Old`), so
+			// the consumer skips the evicted span and resumes from the NEXT group still in
+			// the cache (`recv_group`), reading forward -- not jumping to live.
 			store.mark_discontinuity();
 			resumed = false;
 		}
 
-		// Pull exactly one fragment uninterrupted (next_fragment isn't cancel-safe),
-		// then re-check the pause flag at the top of the loop. So entering a pause
-		// costs at most one extra fragment (~part_target), which records right up to
-		// the pause point.
+		// Pull one fragment uninterrupted (next_fragment isn't cancel-safe), then
+		// re-check the pause flag at the top of the loop -- so entering a pause costs at
+		// most one extra fragment (~part_target), recording right up to the pause point.
 		match export.next_fragment().await? {
 			Some(fragment) => store.push(fragment),
 			None => break,
