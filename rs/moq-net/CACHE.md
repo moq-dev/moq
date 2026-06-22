@@ -1,344 +1,114 @@
-# moq-net track cache (spike)
+# moq-net track cache
 
-> Status: implemented in `src/model/cache/` (module `moq_net::cache`, with unit tests):
-> - the RAM tier and watermark eviction policy (`mod.rs`);
-> - the on-disk **segment byte format** and **rollup** compaction (`segment.rs`): lossless
->   per-frame encode/decode (raw timestamp value+scale, so any timescale round-trips), a
->   self-describing footer offset table read from a fixed trailer, `rollup` to concatenate small
->   segments into one larger object, and `group_from_blob` (the ranged-read decode path);
-> - the storage-agnostic **multi-tier index + promotion** (`index.rs`): `sequence -> Location`
->   (tier + segment + byte range), per-tier byte/duration accounting, `promotion` to pick the
->   oldest disk segments over the high watermark, and `apply_promotion` to repoint them at the
->   remote tier after a rollup;
-> - the **track wiring**: `cache::Group::read` / `produce` bridge a cached group to/from the live
->   group model; `TrackProducer::with_cache(cache::Producer)` spawns a subscriber that drains
->   finished groups into the cache; `TrackConsumer::with_cache(cache::Consumer)` makes `get_group`
->   and `fetch_group` resolve from the cache on a live miss;
-> - the **disk/remote tier I/O** (`store.rs`, native-only via target-gating): `cache::store::Store`
->   over an `object_store` disk tier and optional remote tier. `flush` encodes a band and `put`s it
->   as a disk segment; `get` ranged-reads a located blob; `compact` rolls the oldest disk segments
->   up into one remote object (or evicts them with no remote), driven by the index;
-> - the **tier wiring**: `cache::Config` carries an optional `disk: Disk` tier (an `object_store`,
->   a key prefix, bounds, and an optional remote rollup store; native-only). `Config::produce`
->   spawns a background task that flushes RAM-evicted bands to the disk tier, and
->   `Consumer::fetch` (async) reads across RAM -> disk -> remote (`Consumer::get` stays a sync
->   RAM-only lookup).
->
-> Still design: removing the wire field `TrackInfo.cache`; threading a `Config` onto the tracks a
-> relay auto-creates (the Origin follow-up); and serving disk/remote through a track's
-> `fetch_group` (today the sync track API serves RAM; the relay serve loop uses `Consumer::fetch`
-> for the lower tiers). Targets `dev`.
-
-A per-track group cache. It lets a relay or edge retain recent groups past the live window and
-serve them back on a FETCH, optionally spilling to local disk or remote object storage. It lives
+A per-track durable cache. It lets a relay or edge keep recent groups past the live window and
+serve them back on a FETCH, spilling to local disk and optionally remote object storage. It lives
 in `moq-net` so any consumer of a track (relay, edge, archiver) gets durable caching for free.
 
-The implemented surface follows moq-net's produce/consume split: `cache::Config::produce()`
-yields a `cache::Producer` (the write half, not `Clone`), and `Producer::consume()` yields a
-`cache::Consumer` (the read half, `Clone`). Names below are the real ones.
+## Shape
+
+The cache is **not** a separate handle you wire onto both endpoints. It lives on the shared track
+state (`TrackState`), so the RAM tier is the track's own live `groups` buffer and the disk/remote
+tiers hang off the same state. One store therefore backs the track's `TrackProducer` and every
+`TrackConsumer` automatically; a fetch is served from whichever tier holds the group.
+
+```rust
+// module moq_net::cache (native-only types are target-gated to non-wasm)
+
+let disk = cache::Disk::new(store, prefix, bounds)         // object_store + key prefix + bounds
+    .with_remote(remote);                                  // optional rollup target
+
+let producer = TrackProducer::new(name, info).with_cache(disk);
+let consumer = producer.consume();                         // shares the same store
+```
 
 ## Principles
 
-These come from design review and pin down the shape:
+- **Local, not on the wire.** The cache is local policy set by whoever holds a track endpoint (the
+  relay or edge), never by the original publisher and never carried on the wire.
+- **RAM is the live window.** There is no second in-memory copy of recent groups: the cache reuses
+  `TrackState.groups`, the buffer the track already keeps for live subscribers. A group is
+  serialized (to `cache::Group`) and handed to the disk tier only when it ages out of that window.
+- **No traits, no callbacks.** The cache is concrete values you configure and attach. moq-net owns
+  all behavior; the disk and remote backends are a configured `object_store`, not a
+  consumer-implemented extension point.
+- **Per-track, no shared LRU.** Each track keeps its own recent window; there is no cross-track
+  accounting, so no shared lock. Footprint is the sum of per-track windows across live tracks.
 
-- **Local, not on the wire.** The cache is local policy set by whoever holds a track endpoint
-  (the relay or edge), never by the original publisher and never carried on the wire. This is
-  why `TrackInfo.cache` goes away (see "Removing TrackInfo.cache"). The handle is **shareable**:
-  one cache can back both a track's `TrackProducer` and its `TrackConsumer` (see "Attaching to a
-  producer or a consumer").
-- **Per-track bounds, no shared LRU.** Each track keeps a `[min, max]` window of its own recent
-  groups. There is no cross-track accounting, so no shared lock and no contention. The cost is
-  that there is no global RAM ceiling; total footprint is the sum of per-track `max` across
-  live tracks. A global backstop, if ever needed, is additive and not part of v1.
-- **No traits, no callbacks.** The cache is concrete values you configure and attach (`cache::Producer` / `cache::Consumer`). moq-net
-  owns all behavior. The disk and remote backends are an internal, configured `object_store`,
-  not a consumer-implemented extension point.
-- **Watermark flush, not per-item eviction.** Groups accumulate to the high watermark, then a
-  whole band (the `max - min` worth) is flushed as one segment. This is the property an LRU
-  cannot provide: an LRU evicts one group the instant the budget trips, producing one tiny
-  object per group, which is fatal for audio (a group per frame). The watermark is what creates
-  batches.
+## Retention: two gates
 
-## Bounds
+A group is evicted from the live window (`TrackState::evict_expired`) when it trips **either** of
+two gates, both sized by `TrackInfo::cache` (the publisher's retention duration). The newest group
+(`max_sequence`) is never evicted.
 
-Per track, on both size and duration, whichever trips first:
+- **Wall-clock** — the group was *received* more than the window ago. The receive time is an
+  `Instant` stamped when the group lands in `groups`; it is never sent over the wire or set by the
+  publisher. This is the hard memory backstop: a publisher can't pin RAM by lying about media
+  timestamps.
+- **Media-time** — the group's last frame timestamp is more than the window behind the live media
+  edge (the newest frame timestamp buffered). This bounds a startup stampede, where a burst of
+  buffered media arrives at once (all "received now", so the wall-clock gate alone would keep it
+  all) and a fresh subscriber would otherwise be flooded.
 
-```rust
-// module moq_net::cache
+In steady state, where media time advances with wall-clock time, the two gates coincide. They
+diverge only under a stampede (media-time trims it) or timestamp abuse (wall-clock trims it).
 
-/// Local cache policy for a single track. Not on the wire, not in TrackInfo.
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-pub struct Config {
-    pub ram: Bounds,                            // keep >= min in RAM; flush the band once > max
-    #[cfg(not(target_arch = "wasm32"))]
-    pub disk: Option<Disk>,                     // optional spill tier (native-only)
-}
-
-/// The disk spill tier: an object store, key prefix, bounds, and an optional remote rollup store.
-#[cfg(not(target_arch = "wasm32"))]
-pub struct Disk {
-    pub store: Arc<dyn object_store::ObjectStore>,
-    pub prefix: object_store::path::Path,
-    pub bounds: Bounds,                         // disk retention; over it rolls up to `remote`
-    pub remote: Option<Arc<dyn object_store::ObjectStore>>,
-}
-
-/// A low/high watermark. The gap (max - min) is the flush batch size.
-pub struct Bounds { pub min: Limit, pub max: Limit }
-
-/// A bound expressed as a duration, a byte count, or both (first to trip wins).
-/// All-None means unbounded as a high watermark, floor-zero as a low watermark.
-pub struct Limit { pub duration: Option<Duration>, pub bytes: Option<u64> }
-```
-
-`Config::produce()` builds the RAM tier and, when `disk` is set, spawns a background task that
-flushes evicted bands to it. `Producer::insert` hands evicted bands to that task; `Consumer::fetch`
-(async) reads RAM then disk then remote. An `interval` flush backstop is still a possible addition
-(the `#[non_exhaustive]` Config keeps it additive).
-
-The flush batch is implicitly `max - min`, so the bounds map straight onto the tiering:
-
-| Want | Set |
-|---|---|
-| keep 30s in RAM, flush 10s segments to disk | `ram.min = 20s`, `ram.max = 30s` |
-| keep 5m on disk, flush 1m objects to remote | `disk.min = 4m`, `disk.max = 5m` |
-
-At 30s the buffer drains back to 20s, emitting a 10s segment, then refills over the next 10s.
-No explicit batch size: the band is the batch.
-
-`interval` is a backstop so a low data-rate track still flushes eventually instead of holding a
-half-full band for a long time. A duration-based `max` already covers most of this (the oldest
-group ages past `max` even with little data), so `interval` matters chiefly when the bounds are
-byte-only.
-
-## State and flush
-
-Each track owns a small buffer plus an index of what has been flushed where:
-
-```rust
-struct TrackCache {
-    ram: BTreeMap<u64, cache::Group>,  // recent groups, keyed by sequence
-    ram_bytes: u64,
-    flushed: BTreeMap<u64, Location>,  // sequence -> (tier, object key, offset) for serving
-    last_flush: Instant,
-}
-```
-
-Flush runs on group completion and on a timer:
+## Spill and serve
 
 ```text
-if over(ram.max)  ||  ram.interval elapsed with a flushable band:
-    batch = drain oldest completed, unpinned groups until back to ram.min
-    match disk:
-        Some(d) => segment = serialize(batch)              // archive segment format
-                   d.put(key, segment)
-                   for g in batch { flushed[g.seq] = Disk(key, offset) }
-        None    => drop(batch)                             // RAM-only cache: just evict
-// the disk tier runs the same watermark loop against disk.max, concatenating several
-// small segments into one larger remote object (the rollup) and updating `flushed`.
+evict_expired:                              (synchronous, under the state lock)
+    for each group outside the window (not max_sequence):
+        tombstone it in `groups`
+        if a cache is attached: hand its live GroupConsumer to the flush task
+
+flush task:                                 (one background task per cached track)
+    per eviction pass: drain the groups into cache::Group, write ONE disk segment,
+    then compact (roll the oldest disk segments up into one remote object, or evict
+    them when there is no remote tier)
+
+fetch_group(seq):
+    live hit in `groups`                 -> serve immediately
+    live miss, cache attached            -> spawn an async disk/remote lookup; a hit
+                                            resolves the fetch, a miss falls through
+    live miss, no cache                  -> queue for a TrackDynamic, or NotFound
 ```
 
-## Serving
+`get_group(seq)` stays synchronous and only consults the live window; a spilled group is reachable
+only through the async `fetch_group`.
 
-```text
-get(seq):
-    if let Some(g) = ram.find(seq)    -> serve(g)              // RAM hit, pin while read
-    if let Some(loc) = flushed.get(seq) -> stream_from_tier(loc)  // ranged GET, no fault-back
-    else -> None                                              // miss: upstream / Unroutable
-```
+Batching the disk write per eviction pass keeps a stampede-trim (many groups evicted at once) to a
+single object. A steady-state single eviction still writes one small disk segment per group; the
+remote tier is where rollup (`segment::rollup`) concatenates those into large objects, so a
+per-frame (audio) track does not litter object storage with tiny remote objects.
 
-A lower-tier hit streams straight from disk or remote via a ranged read. There is no fault-in
-and no re-population of RAM, so a group lives in exactly one tier and is served from there. This
-is what makes the watermark model simpler than an LRU, which needs to move items back up on
-access.
+## Tiers and the byte format
 
-## Always-latest and pinning
-
-- **The latest group is never evicted.** It sits inside `ram.min` by construction, so this is
-  free, and it is the group a new subscriber needs first.
-- **A pinned (actively read) group is never flushed.** A `GroupConsumer` handed out from the
-  cache holds a pin (hooked into the group's existing refcount); the flush skips pinned groups
-  and emits the rest of the band. Old groups are rarely pinned, so segments stay contiguous in
-  practice. If strictly contiguous segments are ever required, hold the batch until the pin
-  clears instead.
-
-## Tiers
-
-RAM is always present and dependency-free. disk and remote are `object_store`, target-gated to
+RAM is always present and dependency-free. Disk and remote are `object_store`, target-gated to
 non-wasm targets (`cfg(not(target_arch = "wasm32"))`) so native builds get the tiers with no flag
-and wasm builds drop the server-side cloud stack automatically. The on-tier byte format is the
-`segment` module's, so a relay's spilled data is directly readable by anything using this cache.
+and wasm builds drop the server-side cloud stack automatically.
 
-## Attaching to a producer or a consumer
+The on-disk format lives in `segment.rs`: a band of groups serialized as one self-describing
+object (a footer offset table read from a fixed trailer), lossless per-frame timestamps (raw
+value + scale, so any timescale round-trips), `rollup` to concatenate small segments into one
+larger object, and `group_from_blob` for the ranged-read decode path. `index.rs` is the
+storage-agnostic multi-tier index (`sequence -> (tier, segment, byte range)`), per-tier byte and
+duration accounting, and the promotion that picks the oldest disk segments over the disk high
+watermark. `store.rs` is the `object_store` glue tying them together. The disk `Bounds` (a
+low/high watermark) govern when disk segments roll up to remote, independent of the RAM retention
+window above.
 
-The cache splits into a write half and a read half, like the rest of moq-net. `cache::Producer`
-fills the cache and is **not `Clone`** (a single writer); `cache::Consumer` is `Clone` and shares
-the same store. `Producer::consume()` derives a reader, so **one cache backs both a track's
-producer and its consumer**.
+## Bridging live <-> cached
 
-```rust
-// implemented (RAM tier) in moq_net::cache
-let writer: cache::Producer = config.produce();   // not Clone
-let reader: cache::Consumer = writer.consume();    // Clone; shares the store
+`cache::Group::read` drains a finished live `GroupConsumer` into the serializable `cache::Group`
+(done on the flush task, off the state lock). `cache::Group::produce` rebuilds a live
+`GroupConsumer` from a stored group at the track's timescale, for serving a fetch.
 
-writer.insert(group);            // -> Option<Batch> (band to persist to the next tier)
-reader.get(sequence);            // -> Option<cache::Group>
-```
+## Still design
 
-The track wiring hands each endpoint the matching half:
-
-```rust
-impl TrackProducer {
-    /// Fill `cache` with groups this producer creates (spawns a populate subscriber).
-    pub fn with_cache(self, cache: cache::Producer) -> Self;
-}
-impl TrackConsumer {
-    /// Back fetch_group / get_group with `cache`: RAM hits resolve locally.
-    pub fn with_cache(self, cache: cache::Consumer) -> Self;
-}
-```
-
-Sharing one store across both endpoints of a track:
-
-```rust
-let writer = config.produce();
-let reader = writer.consume();
-let producer = producer.with_cache(writer);   // fills the cache
-let consumer = consumer.with_cache(reader);   // fetches from it, same groups
-```
-
-`cache::Producer` being non-`Clone` is also a deliberate step toward making `TrackProducer`
-non-`Clone`: a single writer per track.
-
-### Producer side
-`TrackState.groups` (today's inline buffer, bounded by the now-removed `TrackInfo.cache`) is
-backed by the cache: finished groups beyond `ram.min` move into the RAM tier, and a `get_group`
-or `dynamic()` miss consults the cache (RAM, then disk, then remote) before `NotFound`.
-
-### Consumer side (fetch vs populate)
-Reading and populating are different halves, which is what the produce/consume split buys:
-
-- A `TrackConsumer` given a `cache::Consumer` (read half) checks the cache first on
-  `fetch_group(seq)` / `get_group(seq)`: a **hit** resolves the `kio::Pending` locally with no
-  wire FETCH (RAM synchronously, disk/remote after the ranged read); a **miss** falls through to
-  the wire.
-- To *populate* the cache (insert groups read off the wire or off a live `subscribe`), a consumer
-  takes a `cache::Producer` (write half) instead. This is the archive's record-and-serve path: a
-  cache-backed consumer with no live upstream fills tiers as it reads and answers FETCH straight
-  from them.
-
-A shared cache makes the two directions symmetric: groups a producer creates are fetchable
-through a consumer of the same track, and groups a consumer pulled off the wire are servable by
-the producer. Inserts dedup by sequence, so attaching one cache to both sides is safe.
-
-## Removing TrackInfo.cache
-
-`TrackInfo.cache` is a producer-set, wire-serialized duration. It conflates "how long the
-publisher keeps groups for late subscribers" with "cache policy," and a relay should not
-inherit the publisher's number to size its own cache. Since the cache here is local and fully
-independent:
-
-- stop using `TrackInfo.cache` to size anything;
-- remove the field from `TrackInfo`. This is a public-API and wire change, hence the `dev`
-  target. If a producer-side retention knob is still wanted, it stays internal to the producer
-  rather than on the shared `TrackInfo`.
-
-## Per-binary use
-
-- **moq-cli:** no cache, or a small RAM-only `cache::Config` for a single track. See "moq-cli
-  flags" below for the concrete surface.
-- **moq-relay:** one `cache::Config` template applied to every track it creates. Threading that
-  config onto the tracks moq-net auto-creates during fan-out is the Origin follow-up; here it is
-  just `TrackProducer::with_cache(writer)`. A relay RAM cache that spills to disk or S3 becomes
-  configuration, not code.
-- **moq-edge:** the same, plus its own dynamic-handler business logic on top.
-
-## moq-cli flags
-
-The cache is most useful on the commands that run a local origin and serve a broadcast back
-(`moq serve`, `moq accept`), so a flattened `CacheArgs` group lands on those. The flags map onto
-the `[min, max]` bounds and the tier cascade; an absent `--cache-ram` means no cache (today's
-behavior). This is the proposed surface; wiring it waits on the track-endpoint `with_cache` API.
-
-```rust
-/// Retain recent groups so late subscribers and FETCHes get old content.
-/// Absent `--cache-ram` leaves caching off.
-#[derive(clap::Args, Clone, Default)]
-pub struct CacheArgs {
-    /// Keep up to this much of each track's recent groups in RAM (high watermark).
-    /// Setting it enables the cache. e.g. `30s`.
-    #[arg(long, value_parser = humantime::parse_duration)]
-    pub cache_ram: Option<Duration>,
-
-    /// RAM low watermark; a flush drains down to this, and the band between the two
-    /// becomes one segment. Defaults to two-thirds of `--cache-ram`.
-    #[arg(long, value_parser = humantime::parse_duration)]
-    pub cache_ram_min: Option<Duration>,
-
-    /// Also retain on local disk at this path (spill from RAM).
-    #[arg(long)]
-    pub cache_disk: Option<PathBuf>,
-
-    /// How long to keep groups on disk before rolling up to remote (or dropping if
-    /// no remote tier). e.g. `5m`.
-    #[arg(long, value_parser = humantime::parse_duration)]
-    pub cache_disk_age: Option<Duration>,
-
-    /// Also retain in remote object storage, e.g. `s3://bucket/prefix`.
-    #[arg(long)]
-    pub cache_remote: Option<Url>,
-
-    /// How long to keep groups in remote storage. Omit to keep forever.
-    #[arg(long, value_parser = humantime::parse_duration)]
-    pub cache_remote_age: Option<Duration>,
-
-    /// Flush a partial RAM band after this long even below the high watermark, so a
-    /// low data-rate track still spills. Mostly redundant with a duration `--cache-ram`.
-    #[arg(long, value_parser = humantime::parse_duration)]
-    pub cache_interval: Option<Duration>,
-}
-```
-
-`CacheArgs` flattens into `Serve` and `Accept` (the relay-running commands), e.g.
-
-```text
-moq serve --broadcast bbb --cache-ram 30s --cache-disk /var/cache/moq --cache-disk-age 5m \
-          --cache-remote s3://moq-cache/bbb --cache-remote-age 30d  fmp4 < bbb.mp4
-```
-
-and converts to a `cache::Config` whose halves go to each endpoint:
-
-```rust
-impl CacheArgs {
-    /// None when `--cache-ram` is unset (caching disabled).
-    pub fn config(&self) -> Option<moq_net::cache::Config> { /* flags -> bounds (+ tiers) */ }
-}
-
-// in run_serve / run_accept: produce the writer once, derive a reader, hand one to each endpoint.
-if let Some(config) = args.config() {
-    let writer = config.produce();
-    let reader = writer.consume();   // same store; serves fetch_group locally
-    producer = producer.with_cache(writer);
-    // a TrackConsumer of the same track takes `reader`.
-}
-```
-
-Notes: byte-budget variants (`--cache-ram-bytes`, etc.) are additive later; duration bounds
-cover the common case. moq-cli parses straight from clap (no TOML merge), so plain
-`Option<Duration>` is fine here. The relay (`rs/moq-relay`), which does merge TOML, would carry
-the same flags under its `Option<T>` clobber rule.
-
-## Open questions
-
-1. **object_store in moq-net.** Resolved: target-gated to `cfg(not(target_arch = "wasm32"))`, so
-   native always has the tiers and wasm drops them, with no opt-in feature.
-2. **Async get.** RAM hits must stay synchronous (serve under the lock); only disk and remote
-   faults are async. The return type needs a "ready now or pending" shape, matching moq-net's
-   existing `kio::Pending`.
-3. **Default bounds.** With `TrackInfo.cache` gone, pick a conservative RAM-only default so an
-   unconfigured `TrackProducer` behaves like today: a small recent window, no spill.
-4. **Footprint.** Per-track bounds mean total RAM is the sum of `ram.max` across live tracks.
-   Keep the default modest and document footprint = bound times track count.
-5. **Pinned groups mid-band.** Skip and flush around them, or hold the batch until unpinned.
-   Skipping is simpler and old groups are rarely pinned; revisit only if it bites.
+- **Disk-then-upstream fetch.** A track with a disk cache serves old content from the store; it
+  does not also chain to a `TrackDynamic` (wire FETCH) on a store miss. A relay that wants "disk,
+  then upstream" would queue the dynamic fetch after the store lookup misses; additive later.
+- **Removing `TrackInfo::cache`.** The retention window is still read from the wire-carried
+  `TrackInfo::cache`. Making retention purely local policy (and dropping the wire field) is a
+  separate wire change.
+- **moq-cli / moq-relay flags.** Surfacing `with_cache` as CLI/TOML configuration (a disk path, a
+  remote URL, bounds) is follow-up work; the model API is in place.

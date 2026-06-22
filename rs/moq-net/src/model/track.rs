@@ -187,6 +187,13 @@ struct TrackState {
 	// uncached groups, so a cache-miss `fetch` on an accepted track fails fast
 	// instead of blocking forever (mirrors `BroadcastState::dynamic`).
 	dynamic: usize,
+
+	// Optional durable spill below the live `groups` window: groups aged out of `groups` are
+	// serialized to the disk tier, and a fetch that misses `groups` reads them back. Shared by the
+	// producer and every consumer through this state. Native-only (object_store doesn't build on
+	// wasm). Set via `TrackProducer::with_cache`.
+	#[cfg(not(target_arch = "wasm32"))]
+	cache: Option<cache::Tiers>,
 }
 
 impl TrackState {
@@ -384,13 +391,32 @@ impl TrackState {
 		}
 	}
 
-	/// Evict groups older than `max_age`, never evicting the max_sequence group.
+	/// Evict groups that fall outside the retention window by either gate, never evicting the
+	/// max_sequence group. Evicted groups are handed to the cache (when one is attached) so a later
+	/// fetch can read them back from disk.
 	///
-	/// Groups are in arrival order, so we can stop early when we hit a non-expired,
-	/// non-max_sequence group (everything after it arrived even later).
-	/// When max_sequence is at the front, we skip past it and tombstone expired groups
-	/// behind it.
+	/// Two gates, both sized by `max_age`; a group is evicted when it trips either:
+	/// - **wall-clock**: it was received more than `max_age` ago. The hard memory backstop, so a
+	///   publisher can't pin RAM by lying about media timestamps.
+	/// - **media-time**: its last frame's media timestamp is more than `max_age` behind the live
+	///   media edge. Bounds a startup stampede where a burst of buffered media arrives at once
+	///   (all "received now", so the wall-clock gate alone would keep it all).
+	///
+	/// Groups arrive in wall-clock order, but a late out-of-order group can be media-expired
+	/// anywhere in the deque, so this scans the whole (small) window rather than breaking early.
 	fn evict_expired(&mut self, now: web_async::time::Instant, max_age: Duration) {
+		// The live media edge: the newest frame timestamp across buffered groups.
+		let media_now = self
+			.groups
+			.iter()
+			.flatten()
+			.filter_map(|(group, _)| group.last_timestamp())
+			.max();
+
+		let mut removed = Vec::new();
+		#[cfg(not(target_arch = "wasm32"))]
+		let mut evicted = Vec::new();
+
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
@@ -398,12 +424,29 @@ impl TrackState {
 				continue;
 			}
 
-			if now.duration_since(*created_at) <= max_age {
-				break;
+			let wall_expired = now.duration_since(*created_at) > max_age;
+			let media_expired = match (media_now, group.last_timestamp()) {
+				(Some(latest), Some(ts)) => Duration::from(latest).saturating_sub(Duration::from(ts)) > max_age,
+				_ => false,
+			};
+			if !wall_expired && !media_expired {
+				continue;
 			}
 
-			self.duplicates.remove(&group.sequence);
+			removed.push(group.sequence);
+			#[cfg(not(target_arch = "wasm32"))]
+			if self.cache.is_some() {
+				evicted.push(group.consume());
+			}
 			*slot = None;
+		}
+
+		for sequence in removed {
+			self.duplicates.remove(&sequence);
+		}
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(cache) = &self.cache {
+			cache.evict(evicted);
 		}
 
 		// Trim leading tombstones to advance the offset.
@@ -661,7 +704,6 @@ impl TrackProducer {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
-			cache: None,
 		}
 	}
 
@@ -692,28 +734,18 @@ impl TrackProducer {
 		}
 	}
 
-	/// Fill `cache` with this track's groups as they are produced, so a [`TrackConsumer`] sharing
-	/// the cache (via [`cache::Producer::consume`]) can serve them without a wire fetch.
+	/// Attach a durable disk (and optional remote) cache below this track's live window.
 	///
-	/// Spawns an internal subscriber that drains each finished group into the cache. Two caveats
-	/// follow from that, both being addressed in the cache design (see `rs/moq-net/CACHE.md`):
-	///
-	/// - The subscriber counts as a consumer, so [`unused`](Self::unused) never resolves while a
-	///   cache is attached. A relay that drops idle tracks via demand will not drop a cached one;
-	///   it stays alive until it ends or the producer is dropped. Intended for "keep recording
-	///   when idle", but it disables demand-driven teardown for this track.
-	/// - Groups are drained in arrival order and [`cache::Group::read`] resolves only once a group
-	///   finishes, so a stalled group head-of-line-blocks the caching of later finished ones.
-	pub fn with_cache(self, mut cache: cache::Producer) -> Self {
-		let mut subscriber = self.subscribe(None);
-		web_async::spawn(async move {
-			// A drained band (over the RAM watermark) is dropped here until a disk tier consumes it.
-			while let Ok(Some(group)) = subscriber.recv_group().await {
-				if let Ok(group) = cache::Group::read(group).await {
-					let _ = cache.insert(group);
-				}
-			}
-		});
+	/// Groups aged out of the live `groups` window are serialized to `disk` instead of just
+	/// dropped, and a [`fetch_group`](TrackConsumer::fetch_group) that misses the live window reads
+	/// them back from disk (or the rolled-up remote tier). The cache lives on the shared track
+	/// state, so every [`TrackConsumer`] of this track serves from it automatically. Native-only
+	/// (`object_store` does not build on wasm).
+	#[cfg(not(target_arch = "wasm32"))]
+	pub fn with_cache(self, disk: cache::Disk) -> Self {
+		if let Ok(mut state) = self.modify() {
+			state.cache = Some(cache::Tiers::spawn(disk));
+		}
 		self
 	}
 
@@ -927,7 +959,6 @@ impl TrackWeak {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
-			cache: None,
 		}
 	}
 
@@ -991,28 +1022,12 @@ impl TrackDemand {
 pub struct TrackConsumer {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
-	/// Optional read-through cache (RAM tier). A `get_group` / `fetch_group` miss on the live
-	/// state falls through to this before failing or waiting on a `TrackDynamic`.
-	cache: Option<cache::Consumer>,
 }
 
 impl TrackConsumer {
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
-	}
-
-	/// Attach a read-through cache: `get_group` / `fetch_group` resolve locally on a cache hit.
-	/// Share the [`cache::Producer::consume`] handle of the cache a [`TrackProducer`] fills to
-	/// serve a track's recent groups without a wire fetch.
-	pub fn with_cache(mut self, cache: cache::Consumer) -> Self {
-		self.cache = Some(cache);
-		self
-	}
-
-	/// The track's negotiated timescale, needed to rebuild a cached group.
-	fn timescale(&self) -> Option<Timescale> {
-		self.state.read().info.as_ref().and_then(|info| info.timescale)
 	}
 
 	pub(crate) fn weak(&self) -> TrackWeak {
@@ -1038,28 +1053,22 @@ impl TrackConsumer {
 		}))
 	}
 
-	/// Return a cached group by sequence without blocking, or `None` if it isn't in
-	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`TrackDynamic`]
-	/// will serve on demand.
+	/// Return a live-cached group by sequence without blocking, or `None` if it isn't in the live
+	/// window. A group spilled to the durable cache is only reachable via the async
+	/// [`Self::fetch_group`], as is one a [`TrackDynamic`] serves on demand.
 	pub fn get_group(&self, sequence: u64) -> Option<GroupConsumer> {
-		if let Some(group) = self.state.read().cached_group(sequence) {
-			return Some(group);
-		}
-		// Live miss: fall through to the read-through cache, rebuilding the group at the track's
-		// timescale. A cache decode/rebuild error is treated as a miss.
-		let cached = self.cache.as_ref()?.get(sequence)?;
-		cached.produce(self.timescale()).ok()
+		self.state.read().cached_group(sequence)
 	}
 
 	/// Fetch a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`GroupConsumer`]:
-	/// immediately if the group is cached, otherwise once a [`TrackDynamic`] serves
-	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`Fetch`],
-	/// or `Fetch::default()`.
+	/// immediately if the group is in the live window, otherwise once it is read back from the
+	/// durable cache (when one is attached) or a [`TrackDynamic`] serves the request (a wire FETCH
+	/// for a relay). `options` accepts `None`, a [`Fetch`], or `Fetch::default()`.
 	///
 	/// Fails synchronously with [`Error::NotFound`] when the group can never be served
-	/// (past the final sequence, or no [`TrackDynamic`] on the track), or the track's
+	/// (past the final sequence, or no cache and no [`TrackDynamic`] on the track), or the track's
 	/// abort error if it's already closed.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> Result<kio::Pending<TrackFetch>> {
 		let options = options.into().unwrap_or_default();
@@ -1069,25 +1078,21 @@ impl TrackConsumer {
 			.write()
 			.map_err(|s| s.abort.clone().unwrap_or(Error::Dropped))?;
 		match state.poll_fetch(sequence) {
-			// Cached live: the pending resolves immediately from state, no handler needed.
+			// Cached live: the pending resolves immediately from state, no lookup needed.
 			Poll::Ready(Ok(_)) => {}
-			// Live miss. Serve from the read-through cache if it holds the group and it rebuilds
-			// at the track's timescale (faster than waiting on a handler, and the only option when
-			// there is none). A rebuild error is treated as a miss, consistent with `get_group`,
-			// falling through to the live behavior.
+			// Live miss. If a durable cache is attached, spawn an async lookup across its
+			// disk/remote tiers; the returned `TrackFetch` resolves from it on a hit and falls
+			// through to the live decision on a miss.
 			other => {
-				let timescale = state.info.as_ref().and_then(|info| info.timescale);
-				if let Some(group) = self
-					.cache
-					.as_ref()
-					.and_then(|c| c.get(sequence))
-					.and_then(|g| g.produce(timescale).ok())
-				{
+				#[cfg(not(target_arch = "wasm32"))]
+				if let Some(tiers) = &state.cache {
+					let timescale = state.info.as_ref().and_then(|info| info.timescale);
+					let lookup = spawn_cache_lookup(tiers, sequence, timescale);
 					drop(state);
 					return Ok(kio::Pending::new(TrackFetch {
 						state: self.state.clone(),
 						sequence,
-						cached: Some(group),
+						lookup: Some(lookup),
 					}));
 				}
 				match other {
@@ -1107,7 +1112,8 @@ impl TrackConsumer {
 		Ok(kio::Pending::new(TrackFetch {
 			state: self.state.clone(),
 			sequence,
-			cached: None,
+			#[cfg(not(target_arch = "wasm32"))]
+			lookup: None,
 		}))
 	}
 
@@ -1232,27 +1238,66 @@ impl GroupRequest {
 	}
 }
 
+/// A pending durable-cache lookup spawned for a [`TrackFetch`] on a live miss. The background task
+/// writes [`Done`](CacheLookup::Done) once the disk/remote tiers resolve (the group, or `None` on a
+/// miss). Native-only (the durable cache doesn't build on wasm).
+#[cfg(not(target_arch = "wasm32"))]
+enum CacheLookup {
+	/// The lookup task is still reading the tiers.
+	Pending,
+	/// The lookup finished: the rebuilt group, or `None` on a miss.
+	Done(Option<GroupConsumer>),
+}
+
+/// Spawn a background task that reads `sequence` from the cache's disk/remote tiers, rebuilds it at
+/// `timescale`, and publishes the result through the returned slot.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_cache_lookup(tiers: &cache::Tiers, sequence: u64, timescale: Option<Timescale>) -> kio::Consumer<CacheLookup> {
+	let slot = kio::Producer::new(CacheLookup::Pending);
+	let consumer = slot.consume();
+	let store = tiers.store_handle();
+	web_async::spawn(async move {
+		let group = match store.read().await.get(sequence).await {
+			Ok(Some(group)) => group.produce(timescale).ok(),
+			// Miss, tier read error, or rebuild failure: report a miss so the fetch falls through.
+			Ok(None) | Err(_) => None,
+		};
+		if let Ok(mut slot) = slot.write() {
+			*slot = CacheLookup::Done(group);
+		}
+	});
+	consumer
+}
+
 /// The pollable state of a [`TrackConsumer::fetch_group`].
 ///
-/// Awaited via the [`kio::Pending`] wrapper; resolves to the
-/// [`GroupConsumer`] once the group lands in the track's cache (already present,
-/// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
+/// Awaited via the [`kio::Pending`] wrapper; resolves to the [`GroupConsumer`] once the group is
+/// read back from the durable cache, lands in the live window (e.g. after a wire FETCH), or
+/// [`Error::NotFound`] if it can never exist.
 pub struct TrackFetch {
 	state: kio::Consumer<TrackState>,
 	sequence: u64,
-	/// A group already rebuilt from the read-through cache. When set, the fetch resolves from it
-	/// instead of polling the live state.
-	cached: Option<GroupConsumer>,
+	/// A durable-cache lookup spawned on a live miss. On a hit it resolves the fetch; on a miss the
+	/// poll falls through to the live state. Native-only.
+	#[cfg(not(target_arch = "wasm32"))]
+	lookup: Option<kio::Consumer<CacheLookup>>,
 }
 
 impl kio::Future for TrackFetch {
 	type Output = Result<GroupConsumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		// A cache hit resolves immediately. `poll` returns `Ready` on first call, so the clone
-		// happens once.
-		if let Some(group) = &self.cached {
-			return Poll::Ready(Ok(group.clone()));
+		// A durable-cache lookup, if one was spawned, resolves the fetch on a hit. On a miss (or if
+		// the task died without publishing) fall through to the live state below.
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(lookup) = &self.lookup {
+			let resolved = ready!(lookup.poll(waiter, |slot| match &**slot {
+				CacheLookup::Pending => Poll::Pending,
+				CacheLookup::Done(group) => Poll::Ready(group.clone()),
+			}));
+			if let Ok(Some(group)) = resolved {
+				return Poll::Ready(Ok(group));
+			}
 		}
 		// `poll_fetch` already yields a `Result<GroupConsumer>` (group, or NotFound /
 		// abort); the outer error is the channel closing without one.
@@ -1506,7 +1551,6 @@ impl TrackRequest {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
-			cache: None,
 		}
 	}
 
@@ -1706,73 +1750,70 @@ mod test {
 		}
 	}
 
-	#[test]
-	fn get_group_falls_through_to_cache() {
-		let producer = TrackProducer::new("test", None);
-		// The live track has no groups; a read-through cache holds sequence 42.
-		let mut writer = cache::Config::default().produce();
-		writer.insert(cache::Group {
-			sequence: 42,
-			frames: vec![cache::Frame {
-				timestamp: None,
-				payload: bytes::Bytes::from_static(b"hi"),
-			}],
-		});
-
-		// Without the cache the group is a miss; with it, it resolves.
-		assert!(producer.consume().get_group(42).is_none());
-		let group = producer.consume().with_cache(writer.consume()).get_group(42);
-		assert_eq!(group.expect("served from cache").sequence, 42);
+	/// A disk-backed cache over an in-memory object store, retaining 1s of live groups.
+	#[cfg(not(target_arch = "wasm32"))]
+	fn disk_cached_producer() -> TrackProducer {
+		use object_store::memory::InMemory;
+		use object_store::path::Path;
+		let disk = cache::Disk::new(Arc::new(InMemory::new()), Path::from("test"), cache::Bounds::default());
+		TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(1))).with_cache(disk)
 	}
 
-	#[tokio::test]
-	async fn fetch_group_serves_from_cache() {
-		let producer = TrackProducer::new("test", None);
-		let mut writer = cache::Config::default().produce();
-		writer.insert(cache::Group {
-			sequence: 7,
-			frames: vec![cache::Frame {
-				timestamp: None,
-				payload: bytes::Bytes::from_static(b"data"),
-			}],
-		});
-		let consumer = producer.consume().with_cache(writer.consume());
-
-		// No live group 7 and no TrackDynamic: the fetch is served from the cache instead of
-		// failing with NotFound, and the frame reads back byte-for-byte.
-		let mut group = consumer.fetch_group(7, None).unwrap().await.unwrap();
-		assert_eq!(group.sequence, 7);
-		assert_eq!(
-			group.read_frame().await.unwrap().unwrap(),
-			bytes::Bytes::from_static(b"data")
-		);
-	}
-
-	#[tokio::test]
-	async fn producer_populates_cache() {
-		// A producer with a cache drains its finished groups into it; a reader sharing the cache
-		// then sees them. Producer fills, consumer reads, end to end.
-		let writer = cache::Config::default().produce();
-		let reader = writer.consume();
-		let mut producer = TrackProducer::new("test", None).with_cache(writer);
-
-		let mut group = producer.append_group().unwrap(); // seq 0
-		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+	/// Write+finish a single-frame group at the next sequence.
+	fn write_group(producer: &mut TrackProducer, payload: &'static [u8]) {
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(payload)).unwrap();
 		group.finish().unwrap();
+	}
 
-		// Let the spawned populate task drain the finished group into the cache.
-		let mut cached = None;
-		for _ in 0..100 {
-			if let Some(group) = reader.get(0) {
-				cached = Some(group);
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn get_group_does_not_read_disk() {
+		tokio::time::pause();
+		let mut producer = disk_cached_producer();
+		write_group(&mut producer, b"hello"); // seq 0
+
+		// seq 0 is live: get_group sees it synchronously.
+		assert!(producer.consume().get_group(0).is_some());
+
+		// Age seq 0 out of the live window; it spills to disk.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		write_group(&mut producer, b"world"); // seq 1, evicts seq 0
+
+		// get_group is sync and never reads disk, so an evicted group is a miss there.
+		assert!(producer.consume().get_group(0).is_none());
+		assert!(producer.consume().get_group(1).is_some());
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn fetch_group_serves_evicted_group_from_disk() {
+		tokio::time::pause();
+		let mut producer = disk_cached_producer();
+		write_group(&mut producer, b"hello"); // seq 0
+
+		// Age seq 0 out of the live window so it is flushed to the disk tier.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		write_group(&mut producer, b"world"); // seq 1, evicts seq 0
+
+		let consumer = producer.consume();
+
+		// The background flush is async; retry the fetch until the disk write lands. With no
+		// TrackDynamic, a disk miss resolves to NotFound, so a failed fetch just means "not yet".
+		let mut served = None;
+		for _ in 0..500 {
+			if let Ok(group) = consumer.fetch_group(0, None).unwrap().await {
+				served = Some(group);
 				break;
 			}
 			tokio::task::yield_now().await;
 		}
-
-		let cached = cached.expect("group populated into cache");
-		assert_eq!(cached.frames.len(), 1);
-		assert_eq!(cached.frames[0].payload, bytes::Bytes::from_static(b"hello"));
+		let mut group = served.expect("evicted group served from disk");
+		assert_eq!(group.sequence, 0);
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap(),
+			bytes::Bytes::from_static(b"hello")
+		);
 	}
 
 	#[tokio::test]

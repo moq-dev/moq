@@ -8,8 +8,8 @@ mod subscription;
 mod time;
 mod track;
 
-/// Per-track group cache (RAM tier and eviction policy). Namespaced: `cache::Producer`,
-/// `cache::Consumer`, `cache::Config`.
+/// Per-track durable cache: the disk/remote spill tiers below a track's live RAM window.
+/// Attached via [`TrackProducer::with_cache`]. Namespaced: `cache::Disk`, `cache::Group`.
 pub mod cache;
 
 pub use bandwidth::*;
