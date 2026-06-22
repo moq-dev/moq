@@ -77,15 +77,17 @@ impl Status {
 /// The connection settings, validated out of the GObject properties.
 #[derive(Clone)]
 pub struct ResolvedSettings {
+	/// Relay URL to connect to.
 	pub url: url::Url,
+	/// Name to publish the broadcast under.
 	pub broadcast: String,
+	/// Disable TLS certificate verification (local/dev use).
 	pub tls_disable_verify: bool,
 }
 
 /// A running session: the connect/lifecycle task plus the status it writes. Dropping the producers
 /// (held by the element) and calling [`Session::stop`] tears it down.
 pub(crate) struct Session {
-	shutdown: tokio::sync::watch::Sender<bool>,
 	join: tokio::task::JoinHandle<()>,
 	status: Arc<Status>,
 	/// Set by the task on a fatal transport error so the aggregate thread stops feeding a dead session.
@@ -114,27 +116,10 @@ impl Session {
 
 		let status = Arc::new(Status::default());
 		let errored = Arc::new(AtomicBool::new(false));
-		let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
 
-		let join = RUNTIME.spawn(run(
-			settings,
-			origin,
-			status.clone(),
-			errored.clone(),
-			shutdown_rx,
-			element,
-		));
+		let join = RUNTIME.spawn(run(settings, origin, status.clone(), errored.clone(), element));
 
-		Ok((
-			Self {
-				shutdown,
-				join,
-				status,
-				errored,
-			},
-			broadcast,
-			catalog,
-		))
+		Ok((Self { join, status, errored }, broadcast, catalog))
 	}
 
 	/// The live status, read by the element's property getters.
@@ -147,29 +132,24 @@ impl Session {
 		self.errored.load(Ordering::Relaxed)
 	}
 
-	/// Signal shutdown and reap the task off-thread (a clean local close, never an error).
+	/// Abort the task: a clean local close, never an error. The in-flight connect or idle loop is
+	/// cancelled at its next await point and the connection drops.
 	pub fn stop(self) {
-		let _ = self.shutdown.send(true);
-		RUNTIME.spawn(async move {
-			if let Err(err) = self.join.await {
-				gst::warning!(CAT, "session task ended with error: {err:?}");
-			}
-		});
+		self.join.abort();
 	}
 }
 
-/// Connect, then idle on the transport until it closes, shutdown fires, or it dies. A remote death is
-/// surfaced as an element error on the bus; a local shutdown is quiet.
+/// Connect, then idle on the transport until it closes or dies. A remote death is surfaced as an
+/// element error on the bus; [`Session::stop`] aborts this task instead, which is quiet.
 async fn run(
 	settings: ResolvedSettings,
 	origin: moq_net::OriginProducer,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,
-	mut shutdown: tokio::sync::watch::Receiver<bool>,
 	element: glib::WeakRef<Element>,
 ) {
 	// `origin` is held for the task's lifetime so the published broadcast stays alive across the session.
-	let result = connect_and_run(&settings, &origin, &status, &mut shutdown, &element).await;
+	let result = connect_and_run(&settings, &origin, &status, &element).await;
 
 	// Reset the observable surface on exit. The Status arc is private to this session, so this never
 	// touches a newer session's status even if a new one started before this task unwound.
@@ -188,18 +168,14 @@ async fn connect_and_run(
 	settings: &ResolvedSettings,
 	origin: &moq_net::OriginProducer,
 	status: &Status,
-	shutdown: &mut tokio::sync::watch::Receiver<bool>,
 	element: &glib::WeakRef<Element>,
 ) -> Result<()> {
 	let mut config = moq_native::ClientConfig::default();
 	config.tls.disable_verify = Some(settings.tls_disable_verify);
 	let client = config.init()?.with_publish(origin.consume());
 
-	// Cancellation covers connect: a shutdown while connecting is a clean local close, not an error.
-	let session = tokio::select! {
-		result = client.connect(settings.url.clone()) => result?,
-		_ = shutdown.changed() => return Ok(()),
-	};
+	// A stop() during connect aborts this task, cancelling the connect future cleanly.
+	let session = client.connect(settings.url.clone()).await?;
 	status.set_connected(true);
 	status.set_version(Some(session.version().to_string()));
 	notify_connected(element);
@@ -213,8 +189,6 @@ async fn connect_and_run(
 
 	loop {
 		tokio::select! {
-			// Local close: quiet stop, no error.
-			_ = shutdown.changed() => return Ok(()),
 			// Remote death: propagate the Err so the wrapper posts an element error to the bus.
 			result = &mut closed => return Ok(result?),
 			bitrate = async {
@@ -224,7 +198,11 @@ async fn connect_and_run(
 				}
 			} => match bitrate {
 				Some(rate) => status.set_send_bitrate(rate),
-				None => send_bandwidth = None,
+				None => {
+					// Estimate gone: report 0 (the documented "unavailable" value) and stop polling.
+					status.set_send_bitrate(0);
+					send_bandwidth = None;
+				}
 			},
 		}
 	}

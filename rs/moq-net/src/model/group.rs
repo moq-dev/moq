@@ -179,6 +179,11 @@ impl GroupProducer {
 
 	/// Create a frame with an upfront size
 	pub fn create_frame(&mut self, info: Frame) -> Result<FrameProducer> {
+		// Reject before `produce()`: `FrameProducer::new` preallocates `size` bytes, so an oversized
+		// frame must be caught here or it triggers the very allocation the limit exists to prevent.
+		if info.size > MAX_FRAME_SIZE {
+			return Err(Error::FrameTooLarge);
+		}
 		let frame = info.produce();
 		self.append_frame(frame.clone())?;
 		Ok(frame)
@@ -186,8 +191,8 @@ impl GroupProducer {
 
 	/// Append a frame producer to the group.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
-		// Enforce the per-frame limit at the producer, not just on the receive path: a frame this large
-		// can never be sent, so reject it here rather than caching an unsendable frame.
+		// Backstop for direct callers (the buffer is already allocated by the time we hold a
+		// FrameProducer); `create_frame` is the path that rejects before allocating.
 		if frame.size > MAX_FRAME_SIZE {
 			return Err(Error::FrameTooLarge);
 		}

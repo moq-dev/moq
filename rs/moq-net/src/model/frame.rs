@@ -18,8 +18,9 @@ use crate::{Error, Result};
 /// frame; 32 MiB covers that while keeping the per-frame preallocation bounded.
 ///
 /// Enforced on both paths: the wire decode (above) and the producer, where
-/// [`GroupProducer::append_frame`](super::group::GroupProducer::append_frame) rejects an oversized
-/// frame so a local writer cannot cache one that could never be sent.
+/// [`GroupProducer::create_frame`](super::group::GroupProducer::create_frame) rejects an oversized
+/// frame *before* `produce()` allocates its buffer, so a local writer can neither allocate nor cache
+/// one that could never be sent.
 pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 
 /// A chunk of data with an upfront size.
