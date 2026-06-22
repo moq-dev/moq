@@ -25,9 +25,6 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 pub static CAT: LazyLock<gst::DebugCategory> =
 	LazyLock::new(|| gst::DebugCategory::new("moq-sink", gst::DebugColorFlags::empty(), Some("MoQ Sink Element")));
 
-/// Handoff, not a buffer: a full channel must block the streaming thread, not grow.
-const DATA_CHANNEL_BOUND: usize = 8;
-
 /// Shared observable state, read by the element's getters and the chain without touching the worker
 /// task. One `Mutex` covers the session generation plus every gated field, so "check the live
 /// generation, then write" is one indivisible step: a stale session (one whose task lingers after a
@@ -132,9 +129,9 @@ impl Status {
 	}
 }
 
-/// Ordered; shutdown is deliberately elsewhere (cancellation channel) so it can cut a blocked send.
-/// Every message carries its pad's generation so a pad recreated with the same name discards the
-/// previous incarnation's in-flight messages.
+/// Ordered; shutdown rides a separate watch channel so it preempts queued data instead of waiting
+/// behind it. Every message carries its pad's generation so a pad recreated with the same name
+/// discards the previous incarnation's in-flight messages.
 pub enum DataMsg {
 	AddPad {
 		pad: String,
@@ -166,8 +163,9 @@ pub enum DataMsg {
 	},
 }
 
-/// Out-of-band FLUSH notification to the worker. Carried on its own unbounded channel (not the bounded
-/// `DataMsg` FIFO) so FLUSH_START re-anchors promptly and never blocks behind queued buffers.
+/// Out-of-band FLUSH notification to the worker. Carried on its own channel (separate from the `DataMsg`
+/// stream) so FLUSH_START re-anchors the pad's timeline promptly, and before queued data when both
+/// channels are ready (no cross-channel happens-before; see `run_loop`'s `biased` note).
 pub struct FlushSignal {
 	pub pad: String,
 	pub generation: u64,
@@ -181,16 +179,15 @@ pub struct ResolvedSettings {
 
 /// The worker's inbound channels, bundled so `run_session` stays under the argument limit.
 struct Inbound {
-	data: mpsc::Receiver<DataMsg>,
+	data: mpsc::UnboundedReceiver<DataMsg>,
 	flush: mpsc::UnboundedReceiver<FlushSignal>,
 	shutdown: watch::Receiver<bool>,
 }
 
 pub struct SessionHandle {
-	data: mpsc::Sender<DataMsg>,
-	/// Out-of-band control path for FLUSH: unbounded so FLUSH_START never blocks behind a full data
-	/// channel (the very condition a flush must break), and a discrete pad-targeted event a `watch`
-	/// would collapse.
+	data: mpsc::UnboundedSender<DataMsg>,
+	/// Out-of-band control path for FLUSH: a separate channel so FLUSH_START re-anchors promptly and wins
+	/// readiness ties against queued `data`, and a discrete pad-targeted event a `watch` would collapse.
 	flush: mpsc::UnboundedSender<FlushSignal>,
 	shutdown: watch::Sender<bool>,
 	join: tokio::task::JoinHandle<()>,
@@ -206,7 +203,12 @@ impl SessionHandle {
 		// Claim the generation synchronously so a previous session's late exit-reset (running on its own
 		// task) sees a newer generation and becomes a no-op instead of clobbering this session's status.
 		let generation = status.begin_session();
-		let (data_tx, data_rx) = mpsc::channel(DATA_CHANNEL_BOUND);
+		// Unbounded so the chain never blocks (cache-ingress, not a backpressure boundary): the worker
+		// drains this into the moq producers, whose cache owns retention/eviction. Caveat: until connect
+		// completes the worker is not yet draining (run_session connects before run_loop), and under worker
+		// lag buffers transiently accumulate here, so this handoff is a residual unbounded buffer ahead of
+		// the cache. A follow-up that builds the producers up front and writes to them directly removes it.
+		let (data_tx, data_rx) = mpsc::unbounded_channel();
 		let (flush_tx, flush_rx) = mpsc::unbounded_channel();
 		let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -245,19 +247,20 @@ impl SessionHandle {
 		}
 	}
 
-	/// Cloned out so the element blocking-sends without holding the session lock (else a full channel deadlocks stop).
-	pub fn sender(&self) -> mpsc::Sender<DataMsg> {
+	/// Cloned out so the element sends without holding the session lock. The channel is unbounded, so the
+	/// send never blocks: moqsink is a cache-ingress, not a backpressure boundary.
+	pub fn sender(&self) -> mpsc::UnboundedSender<DataMsg> {
 		self.data.clone()
 	}
 
-	/// Out-of-band FLUSH signal to the worker; unbounded, so it is safe to call from the event thread
-	/// even while the data channel is full.
+	/// Out-of-band FLUSH signal to the worker; on its own channel, so it is safe to call from the event
+	/// thread because it never waits on the data stream.
 	pub fn flush_sender(&self) -> mpsc::UnboundedSender<FlushSignal> {
 		self.flush.clone()
 	}
 
 	pub fn stop(self) {
-		// Cancel first so a send blocked on a full channel wakes via the dropped receiver; reap off-thread.
+		// Signal shutdown; the worker leaves its loop on the watch change. Reap off-thread.
 		let _ = self.shutdown.send(true);
 		RUNTIME.spawn(async move {
 			if let Err(err) = self.join.await {
@@ -265,60 +268,6 @@ impl SessionHandle {
 			}
 		});
 	}
-}
-
-/// Outcome of a flush-cancellable send. Both `Flushed` and `Closed` map to `FlowError::Flushing` for
-/// the caller; they are split only so the reason stays legible.
-pub(super) enum SendOutcome {
-	Sent,
-	/// FLUSH_START flipped this pad's flush watch (or the watch sender was dropped on release).
-	Flushed,
-	/// The worker's receiver is gone (the session ended).
-	Closed,
-}
-
-/// Send `msg` on the bounded data channel, aborting promptly if this pad starts flushing. This is the
-/// cancellable replacement for `blocking_send`: the chain runs off the runtime, so `block_on` is safe,
-/// and FLUSH_START (signalled on `flush`) can cut a send blocked on a full channel without tearing the
-/// session down. The loop re-arms on a FLUSH_STOP (`false`) that lands mid-block, so a quick flush+stop
-/// does not drop a still-valid buffer.
-pub(super) fn send_or_flush(
-	sender: &mpsc::Sender<DataMsg>,
-	msg: DataMsg,
-	flush: &mut watch::Receiver<bool>,
-) -> SendOutcome {
-	if *flush.borrow_and_update() {
-		return SendOutcome::Flushed;
-	}
-	RUNTIME.block_on(async move {
-		loop {
-			tokio::select! {
-				// Biased toward flush: FLUSH_START must win a tie with freed capacity, so a blocked chain is
-				// cut rather than enqueuing a pre-flush buffer.
-				biased;
-				changed = flush.changed() => {
-					// Sender dropped (release) or now flushing: abort. A `false` change (FLUSH_STOP) falls
-					// through and re-arms the wait.
-					if changed.is_err() || *flush.borrow() {
-						return SendOutcome::Flushed;
-					}
-				}
-				permit = sender.reserve() => match permit {
-					Ok(permit) => {
-						// Re-check after winning the permit: a flushing pad drops the buffer. This narrows (does
-						// not atomically close) the race: a FLUSH_START in the gap before the send below still
-						// enqueues one buffer, which the worker re-anchor and the next buffer's check absorb.
-						if *flush.borrow_and_update() {
-							return SendOutcome::Flushed;
-						}
-						permit.send(msg);
-						return SendOutcome::Sent;
-					}
-					Err(_) => return SendOutcome::Closed,
-				},
-			}
-		}
-	})
 }
 
 async fn run_session(
@@ -428,7 +377,7 @@ enum ExitReason {
 async fn run_loop(
 	session: moq_net::Session,
 	generation: u64,
-	data: &mut mpsc::Receiver<DataMsg>,
+	data: &mut mpsc::UnboundedReceiver<DataMsg>,
 	flush: &mut mpsc::UnboundedReceiver<FlushSignal>,
 	shutdown: &mut watch::Receiver<bool>,
 	pad_set: &mut PadSet,
@@ -445,8 +394,8 @@ async fn run_loop(
 		tokio::select! {
 			// Biased so a ready FLUSH wins a readiness tie and re-anchors the pad before its queued data is
 			// processed. FLUSH_START is out of band (a different thread), so this is not a happens-before
-			// against the bounded data channel; the pad goes NoSegment and drops until its next valid
-			// SEGMENT, which absorbs any residual reorder. Shutdown/death still preempt everything.
+			// against the data channel; the pad goes NoSegment and drops until its next valid SEGMENT,
+			// which absorbs any residual reorder. Shutdown/death still preempt everything.
 			biased;
 			// Local close: quiet stop, no ERROR.
 			_ = shutdown.changed() => return Ok(ExitReason::Stopped),
@@ -969,8 +918,6 @@ fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
-
 	use super::*;
 
 	fn pad_set() -> PadSet {
@@ -1562,190 +1509,6 @@ mod tests {
 		let pad = &set.pads["video"];
 		assert!(pad.segment_info.is_some(), "segment kept across a later caps");
 		assert!(pad.framed.is_some());
-	}
-
-	// The tokio property SessionHandle::stop relies on: dropping the receiver (which the worker does
-	// when run_session returns) wakes a sender parked on the full channel with Err, so a stop never
-	// deadlocks a chain thread applying backpressure. The element-level path needs a connected session.
-	#[test]
-	fn dropped_receiver_wakes_blocked_send() {
-		let runtime = tokio::runtime::Runtime::new().unwrap();
-		let (data_tx, data_rx) = mpsc::channel::<u8>(DATA_CHANNEL_BOUND);
-		let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-		for _ in 0..DATA_CHANNEL_BOUND {
-			data_tx.blocking_send(0).unwrap(); // fill to capacity
-		}
-
-		// Hold the receiver without draining (as if busy in a branch body), then return on the watch.
-		let loop_task = runtime.spawn(async move {
-			let _held = data_rx;
-			shutdown_rx.changed().await.ok();
-		});
-
-		let sender = data_tx.clone();
-		let blocked = std::thread::spawn(move || sender.blocking_send(1));
-		std::thread::sleep(Duration::from_millis(50)); // let the send park
-
-		shutdown_tx.send(true).unwrap();
-		runtime.block_on(loop_task).unwrap();
-
-		assert!(
-			blocked.join().unwrap().is_err(),
-			"a send blocked on the full channel must wake with Err when shutdown drops the receiver"
-		);
-	}
-
-	// FLUSH must wake a send blocked on a full channel AND leave the receiver alive. The second half is
-	// the discriminator: dropped_receiver_wakes_blocked_send proves the shutdown wake (receiver gone), so
-	// a flush wake that also tore the receiver down would be indistinguishable from it.
-	#[test]
-	fn flush_wakes_a_blocked_send_and_keeps_the_receiver() {
-		let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(DATA_CHANNEL_BOUND);
-		for _ in 0..DATA_CHANNEL_BOUND {
-			data_tx
-				.try_send(DataMsg::AddPad {
-					pad: "x".into(),
-					generation: 0,
-				})
-				.unwrap();
-		}
-		let (flush_tx, flush_rx) = watch::channel(false);
-
-		// Rendezvous so the flush is sent only after the worker is running and about to call
-		// send_or_flush (else the send could see flush=true at its initial check and never block). The
-		// sleep then covers parking inside reserve(), which has no test seam to observe directly.
-		let started = Arc::new(std::sync::Barrier::new(2));
-		let sender = data_tx.clone();
-		let mut rx = flush_rx;
-		let started_worker = started.clone();
-		let blocked = std::thread::spawn(move || {
-			started_worker.wait();
-			send_or_flush(
-				&sender,
-				DataMsg::AddPad {
-					pad: "x".into(),
-					generation: 1,
-				},
-				&mut rx,
-			)
-		});
-		started.wait();
-		std::thread::sleep(Duration::from_millis(50)); // let the send park inside block_on
-
-		flush_tx.send(true).unwrap();
-		assert!(
-			matches!(blocked.join().unwrap(), SendOutcome::Flushed),
-			"flush woke the blocked send"
-		);
-
-		// The receiver is still alive (not dropped): it delivers the queued data, and a fresh non-flushing
-		// send then goes through. A teardown would fail both.
-		assert!(data_rx.blocking_recv().is_some(), "receiver still delivers");
-		let (_gate_tx, mut rx) = watch::channel(false);
-		assert!(
-			matches!(
-				send_or_flush(
-					&data_tx,
-					DataMsg::AddPad {
-						pad: "x".into(),
-						generation: 2
-					},
-					&mut rx
-				),
-				SendOutcome::Sent
-			),
-			"the receiver survived the flush and accepts new sends"
-		);
-	}
-
-	// A per-pad watch means flushing pad A never cancels pad B's blocked send.
-	#[test]
-	fn flush_only_wakes_the_flushed_pad() {
-		let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(DATA_CHANNEL_BOUND);
-		for _ in 0..DATA_CHANNEL_BOUND {
-			data_tx
-				.try_send(DataMsg::AddPad {
-					pad: "fill".into(),
-					generation: 0,
-				})
-				.unwrap();
-		}
-		let (flush_a_tx, flush_a_rx) = watch::channel(false);
-		let (_flush_b_tx, flush_b_rx) = watch::channel(false);
-
-		// Both workers must be running before A is flushed, so B is genuinely inside send_or_flush (not
-		// merely unspawned). The sleep then covers parking inside reserve().
-		let started = Arc::new(std::sync::Barrier::new(3));
-		let sender_a = data_tx.clone();
-		let mut rx_a = flush_a_rx;
-		let started_a = started.clone();
-		let blocked_a = std::thread::spawn(move || {
-			started_a.wait();
-			send_or_flush(
-				&sender_a,
-				DataMsg::AddPad {
-					pad: "a".into(),
-					generation: 1,
-				},
-				&mut rx_a,
-			)
-		});
-		let sender_b = data_tx.clone();
-		let mut rx_b = flush_b_rx;
-		let started_b = started.clone();
-		let blocked_b = std::thread::spawn(move || {
-			started_b.wait();
-			send_or_flush(
-				&sender_b,
-				DataMsg::AddPad {
-					pad: "b".into(),
-					generation: 1,
-				},
-				&mut rx_b,
-			)
-		});
-		started.wait();
-		std::thread::sleep(Duration::from_millis(50));
-
-		flush_a_tx.send(true).unwrap();
-		assert!(
-			matches!(blocked_a.join().unwrap(), SendOutcome::Flushed),
-			"pad A's flush woke A"
-		);
-
-		// B was untouched: freeing a slot lets it send normally (Sent, not Flushed).
-		assert!(data_rx.blocking_recv().is_some());
-		assert!(
-			matches!(blocked_b.join().unwrap(), SendOutcome::Sent),
-			"pad B's send was not cancelled by A's flush"
-		);
-	}
-
-	// Already-flushing contract: a pad whose watch is set drops the buffer (returns Flushed, enqueues
-	// nothing) even with capacity. This exercises the initial check in send_or_flush, NOT the select's
-	// biased arm; the capacity+FLUSH sub-poll tie (pitfall 14) stays structural, not covered here.
-	#[test]
-	fn flush_drops_the_buffer_even_with_capacity() {
-		let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(DATA_CHANNEL_BOUND); // empty: capacity free
-		let (flush_tx, flush_rx) = watch::channel(false);
-		flush_tx.send(true).unwrap();
-		let mut rx = flush_rx;
-		assert!(
-			matches!(
-				send_or_flush(
-					&data_tx,
-					DataMsg::AddPad {
-						pad: "x".into(),
-						generation: 0
-					},
-					&mut rx
-				),
-				SendOutcome::Flushed
-			),
-			"a flushing send returns Flushed"
-		);
-		assert!(data_rx.try_recv().is_err(), "and enqueues nothing");
 	}
 
 	// Two pads, real PTS via to_running_time_full: the A/V offset survives because running time is shared.

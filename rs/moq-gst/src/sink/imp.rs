@@ -9,11 +9,8 @@ use bytes::Bytes;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use tokio::sync::watch;
 
-use super::session::{
-	caps_supported, send_or_flush, DataMsg, FlushSignal, ResolvedSettings, SendOutcome, SessionHandle, Status, CAT,
-};
+use super::session::{caps_supported, DataMsg, FlushSignal, ResolvedSettings, SessionHandle, Status, CAT};
 
 /// Reject a frame past the MoQ frame limit (moq-net's MAX_FRAME_SIZE, 16 MiB): it could not be
 /// consumed anyway, and copying it would let hostile input drive an unbounded allocation.
@@ -51,10 +48,6 @@ pub struct MoqSink {
 	// worker discards the previous incarnation's in-flight messages.
 	next_generation: AtomicU64,
 	pad_generations: Mutex<HashMap<String, u64>>,
-	// Per-pad FLUSH gate: FLUSH_START flips it true to cut a blocked send (the chain holds a cloned
-	// receiver); FLUSH_STOP flips it false. Per-pad so flushing one input never cancels another's send.
-	// Keyed with the generation so a stale FLUSH from a previous incarnation cannot flip the live pad.
-	pad_flush: Mutex<HashMap<String, (u64, watch::Sender<bool>)>>,
 }
 
 #[glib::object_subclass]
@@ -194,27 +187,16 @@ impl ElementImpl for MoqSink {
 		// Fixed per pad incarnation and captured here, so a buffer in flight from a released pad never
 		// reads a successor's generation.
 		let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-		// One flush watch per pad: the sender lives in `pad_flush` (toggled by FLUSH_START/STOP), each
-		// pad function carries its own cloned receiver to cancel a blocked send.
-		let (flush_tx, flush_rx) = watch::channel(false);
-		let chain_flush = flush_rx.clone();
-		let event_flush = flush_rx;
 		let pad_builder = gst::Pad::builder_from_template(templ)
 			.chain_function(move |pad, parent, buffer| {
-				let mut flush = chain_flush.clone();
 				MoqSink::catch_panic_pad_function(
 					parent,
 					|| Err(gst::FlowError::Error),
-					|sink| sink.forward_buffer(pad, generation, &mut flush, buffer),
+					|sink| sink.forward_buffer(pad, generation, buffer),
 				)
 			})
 			.event_function(move |pad, parent, event| {
-				let mut flush = event_flush.clone();
-				MoqSink::catch_panic_pad_function(
-					parent,
-					|| false,
-					|sink| sink.handle_event(pad, generation, &mut flush, event),
-				)
+				MoqSink::catch_panic_pad_function(parent, || false, |sink| sink.handle_event(pad, generation, event))
 			});
 
 		let pad = match name {
@@ -234,11 +216,6 @@ impl ElementImpl for MoqSink {
 		// is worse than the bug, whose trigger (same-name concurrent request_new_pad) apps do not produce.
 		let name = pad.name().to_string();
 		let prev_gen = self.pad_generations.lock().unwrap().insert(name.clone(), generation);
-		let prev_flush = self
-			.pad_flush
-			.lock()
-			.unwrap()
-			.insert(name.clone(), (generation, flush_tx));
 
 		if self.obj().add_pad(&pad).is_err() {
 			// Roll back, but only if this attempt still owns the entry. A concurrent same-name request
@@ -254,15 +231,6 @@ impl ElementImpl for MoqSink {
 					};
 				}
 			}
-			{
-				let mut flushes = self.pad_flush.lock().unwrap();
-				if flushes.get(name.as_str()).map(|(g, _)| *g) == Some(generation) {
-					match prev_flush {
-						Some(f) => flushes.insert(name.clone(), f),
-						None => flushes.remove(&name),
-					};
-				}
-			}
 			return None;
 		}
 
@@ -270,7 +238,7 @@ impl ElementImpl for MoqSink {
 		// the worker ahead of this AddPad.
 		let sender = self.session.lock().unwrap().as_ref().map(SessionHandle::sender);
 		if let Some(sender) = sender {
-			let _ = sender.blocking_send(DataMsg::AddPad { pad: name, generation });
+			let _ = sender.send(DataMsg::AddPad { pad: name, generation });
 		}
 		Some(pad)
 	}
@@ -278,18 +246,13 @@ impl ElementImpl for MoqSink {
 	fn release_pad(&self, pad: &gst::Pad) {
 		let name = pad.name().to_string();
 		let generation = self.pad_generations.lock().unwrap().remove(&name);
-		// Dropping the watch sender wakes any send still blocked on this pad (changed() errors -> Flushing).
-		self.pad_flush.lock().unwrap().remove(&name);
-		// Drop the session guard before blocking_send: holding it across a full-channel block deadlocks stop_session.
+		// Drop the session guard before the send so the unbounded send never runs under the session lock.
 		let sender = {
 			let session = self.session.lock().unwrap();
 			session.as_ref().map(SessionHandle::sender)
 		};
 		if let (Some(sender), Some(generation)) = (sender, generation) {
-			// Uncancellable: a full data channel or an in-progress connect stalls release here, and the
-			// per-pad flush watch (removed just above) cannot cut it. Known control-path-blocking limit,
-			// shared with the AddPad send; out of scope for FLUSH.
-			let _ = sender.blocking_send(DataMsg::DropPad { pad: name, generation });
+			let _ = sender.send(DataMsg::DropPad { pad: name, generation });
 		}
 		let _ = self.obj().remove_pad(pad);
 	}
@@ -328,8 +291,6 @@ impl MoqSink {
 				.collect()
 		};
 		let handle = SessionHandle::start(settings, self.status.clone(), self.obj().downgrade(), seed);
-		// Clear any watch left armed by a previous incarnation before the new session is visible.
-		reset_pad_flushes(&self.pad_flush.lock().unwrap());
 		*self.session.lock().unwrap() = Some(handle);
 		Ok(())
 	}
@@ -340,12 +301,12 @@ impl MoqSink {
 		}
 	}
 
-	/// Clone the sender, release the lock, then blocking-send: never apply backpressure under the session lock.
+	/// Clone the sender, release the lock, then send: never hold the session lock across the (non-blocking,
+	/// unbounded) send.
 	fn forward_buffer(
 		&self,
 		pad: &gst::Pad,
 		generation: u64,
-		flush: &mut watch::Receiver<bool>,
 		buffer: gst::Buffer,
 	) -> Result<gst::FlowSuccess, gst::FlowError> {
 		// The worker marks a pad failed after rejecting its data; surface that to GStreamer instead of
@@ -366,13 +327,6 @@ impl MoqSink {
 			return Err(gst::FlowError::Error);
 		}
 
-		// Skip the map + copy if the pad is already flushing; send_or_flush re-checks for a flush that
-		// starts mid-send, but during a flush repeated buffers would otherwise burn a copy each before
-		// being dropped.
-		if *flush.borrow() {
-			return Err(gst::FlowError::Flushing);
-		}
-
 		let sender = self
 			.session
 			.lock()
@@ -391,21 +345,14 @@ impl MoqSink {
 			data,
 			pts,
 		};
-		// FLUSH_START on this pad cuts a send blocked on a full channel (returns Flushing), instead of
-		// stalling the streaming thread until the relay drains.
-		match send_or_flush(&sender, msg, flush) {
-			SendOutcome::Sent => Ok(gst::FlowSuccess::Ok),
-			SendOutcome::Flushed | SendOutcome::Closed => Err(gst::FlowError::Flushing),
-		}
+		// The channel is unbounded, so the write never blocks: it hands the buffer to the worker, which
+		// drains it into the moq producers (the cache). An Err means the worker's receiver is gone
+		// (session ended) -> Flushing.
+		sender.send(msg).map_err(|_| gst::FlowError::Flushing)?;
+		Ok(gst::FlowSuccess::Ok)
 	}
 
-	fn handle_event(
-		&self,
-		pad: &gst::Pad,
-		generation: u64,
-		flush: &mut watch::Receiver<bool>,
-		event: gst::Event,
-	) -> bool {
+	fn handle_event(&self, pad: &gst::Pad, generation: u64, event: gst::Event) -> bool {
 		let sender = self.session.lock().unwrap().as_ref().map(|handle| handle.sender());
 
 		match event.view() {
@@ -422,9 +369,9 @@ impl MoqSink {
 					generation,
 					caps: caps.to_owned(),
 				};
-				match send_or_flush(&sender, msg, flush) {
-					SendOutcome::Sent => gst::Pad::event_default(pad, Some(&*self.obj()), event),
-					SendOutcome::Flushed | SendOutcome::Closed => false,
+				match sender.send(msg) {
+					Ok(()) => gst::Pad::event_default(pad, Some(&*self.obj()), event),
+					Err(_) => false,
 				}
 			}
 			gst::EventView::Segment(segment) => {
@@ -434,9 +381,9 @@ impl MoqSink {
 					generation,
 					segment: segment.segment().to_owned(),
 				};
-				match send_or_flush(&sender, msg, flush) {
-					SendOutcome::Sent => gst::Pad::event_default(pad, Some(&*self.obj()), event),
-					SendOutcome::Flushed | SendOutcome::Closed => false,
+				match sender.send(msg) {
+					Ok(()) => gst::Pad::event_default(pad, Some(&*self.obj()), event),
+					Err(_) => false,
 				}
 			}
 			gst::EventView::Eos(_) => {
@@ -445,12 +392,12 @@ impl MoqSink {
 					pad: pad.name().to_string(),
 					generation,
 				};
-				matches!(send_or_flush(&sender, msg, flush), SendOutcome::Sent)
+				sender.send(msg).is_ok()
 			}
-			// FLUSH_START arrives out of band on the flushing thread: flip this pad's watch to cut a send
-			// blocked in the chain, and tell the worker to re-anchor the timeline. Never blocks.
+			// FLUSH_START arrives out of band on the flushing thread: tell the worker to re-anchor the
+			// pad's timeline. The data channel is unbounded, so there is no blocked send to cut, and
+			// FLUSH_STOP needs no special handling (it propagates via the default arm below).
 			gst::EventView::FlushStart(_) => {
-				toggle_pad_flush(&self.pad_flush.lock().unwrap(), pad.name().as_str(), generation, true);
 				if let Some(handle) = self.session.lock().unwrap().as_ref() {
 					let _ = handle.flush_sender().send(FlushSignal {
 						pad: pad.name().to_string(),
@@ -459,88 +406,16 @@ impl MoqSink {
 				}
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
-			// FLUSH_STOP clears the gate so the chain resumes; the trailing SEGMENT re-anchors the worker.
-			gst::EventView::FlushStop(_) => {
-				toggle_pad_flush(&self.pad_flush.lock().unwrap(), pad.name().as_str(), generation, false);
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
-			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}
 	}
 }
 
-// Flip a pad's FLUSH watch only when the generation matches, so a stale FLUSH from a previous
-// incarnation cannot cancel the live pad's sends. Mirrors the worker's generation discipline.
-fn toggle_pad_flush(flush: &HashMap<String, (u64, watch::Sender<bool>)>, name: &str, generation: u64, value: bool) {
-	if let Some((gen, tx)) = flush.get(name) {
-		if *gen == generation {
-			let _ = tx.send(value);
-		}
-	}
-}
-
-// Clear every pad's FLUSH watch at session start. The watch is keyed to the pad's lifetime, not the
-// session's, so a FLUSH_START whose FLUSH_STOP never arrived before a restart would otherwise keep that
-// pad muted across the new session. `false` is always safe here; a later live FLUSH_START re-arms it.
-fn reset_pad_flushes(flush: &HashMap<String, (u64, watch::Sender<bool>)>) {
-	for (_, tx) in flush.values() {
-		let _ = tx.send(false);
-	}
-}
-
 #[cfg(test)]
 mod tests {
-	use std::collections::HashMap;
-
-	use tokio::sync::watch;
-
-	use super::{reset_pad_flushes, toggle_pad_flush};
-
-	// A FLUSH_START left unpaired by a previous incarnation (stopped before its FLUSH_STOP) leaves the
-	// pad's watch armed; the watch outlives the session, so a new session must clear it or the pad stays
-	// muted across the restart. Exercised over a real pad registered by request_new_pad.
-	#[test]
-	fn session_start_clears_a_pads_stuck_flush_watch() {
-		use gst::prelude::*;
-		use gst::subclass::prelude::*;
-		gst::init().unwrap();
-
-		let obj = gst::glib::Object::new::<super::super::MoqSink>();
-		let imp = obj.imp();
-		let templ = obj.pad_template("sink_%u").expect("sink template");
-		imp.request_new_pad(&templ, Some("sink_0"), None)
-			.expect("request sink_0");
-
-		// Arm the watch as an unpaired FLUSH_START would, then take an independent receiver to observe it.
-		let rx = {
-			let map = imp.pad_flush.lock().unwrap();
-			let (_, tx) = map.get("sink_0").expect("pad is registered");
-			tx.send(true).unwrap();
-			tx.subscribe()
-		};
-		assert!(*rx.borrow(), "watch is armed before session start");
-
-		// The reset start_session runs must clear it.
-		reset_pad_flushes(&imp.pad_flush.lock().unwrap());
-		assert!(!*rx.borrow(), "session start cleared the stuck watch");
-	}
-
-	#[test]
-	fn pad_flush_toggle_ignores_stale_generation() {
-		let mut map = HashMap::new();
-		let (tx, rx) = watch::channel(false);
-		map.insert("video".to_string(), (1u64, tx));
-		// A stale generation must not flip the live pad's watch.
-		toggle_pad_flush(&map, "video", 0, true);
-		assert!(!*rx.borrow(), "stale-generation flush is ignored");
-		// The current generation flips it.
-		toggle_pad_flush(&map, "video", 1, true);
-		assert!(*rx.borrow(), "current-generation flush flips the watch");
-	}
-
 	// A failed pad add must leave membership untouched. request_new_pad adds the pad before announcing
 	// AddPad or mutating the maps, so a duplicate name (or a concurrent request that lost the race) that
-	// fails add_pad does not corrupt the live pad: its generation and flush sender survive. Announcing
+	// fails add_pad does not corrupt the live pad: its generation survives. Announcing
 	// for a name already held would otherwise make the worker finalize the live pad's producer and
 	// overwrite its generation. Exercised via two direct request_new_pad calls (the concurrent path).
 	#[test]
@@ -559,17 +434,11 @@ mod tests {
 		assert!(p1.is_none(), "duplicate name fails to add");
 
 		let gen = imp.pad_generations.lock().unwrap().get("sink_0").copied();
-		let flush_gen = imp.pad_flush.lock().unwrap().get("sink_0").map(|(g, _)| *g);
-		// After the failed duplicate the maps must still describe the LIVE pad (generation 0).
+		// After the failed duplicate the map must still describe the LIVE pad (generation 0).
 		assert_eq!(
 			gen,
 			Some(0),
 			"live pad's generation must survive a failed duplicate (got {gen:?})"
-		);
-		assert_eq!(
-			flush_gen,
-			Some(0),
-			"live pad's flush sender must survive a failed duplicate (got {flush_gen:?})"
 		);
 	}
 }
