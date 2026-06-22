@@ -613,6 +613,7 @@ impl Import {
 			let mut frame = g.create_frame(moq_net::Frame {
 				size: fragment_bytes.len() as u64,
 				timestamp: Some(timestamp),
+				compression: moq_net::Compression::None,
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;

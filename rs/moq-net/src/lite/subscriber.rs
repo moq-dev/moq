@@ -646,34 +646,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Err(Error::FrameTooLarge);
 			}
 
-			match compression {
-				Compression::None => {
-					let mut frame = group.create_frame(Frame { size, timestamp })?;
-					track_stats.frame();
+			// Cache the bytes exactly as they arrive, tagged with the negotiated
+			// codec. For a compressed track the cache holds the packed bytes (no
+			// inflate on ingress): a relay forwards them verbatim to a modern peer
+			// and only the model decodes for one that can't speak the codec. `size`
+			// is the on-wire (stored) length in either case.
+			let mut frame = group.create_frame(Frame {
+				size,
+				timestamp,
+				compression,
+			})?;
+			track_stats.frame();
 
-					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
-						let _ = frame.abort(err.clone());
-						return Err(err);
-					}
-
-					frame.finish()?;
-				}
-				compression => {
-					// `size` is the compressed length; pull it off the wire, then
-					// inflate. The frame the consumer sees carries the original size.
-					let packed = stream.read_exact(size as usize).await?;
-					track_stats.frame();
-					track_stats.bytes(size);
-
-					let payload = compression.decompress(&packed)?;
-					let mut frame = group.create_frame(Frame {
-						size: payload.len() as u64,
-						timestamp,
-					})?;
-					frame.write(bytes::Bytes::from(payload))?;
-					frame.finish()?;
-				}
+			if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+				let _ = frame.abort(err.clone());
+				return Err(err);
 			}
+
+			frame.finish()?;
 		}
 
 		Ok(())

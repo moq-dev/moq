@@ -58,6 +58,11 @@ impl Compression {
 		}
 	}
 
+	/// True for [`Compression::None`] (frames stored/sent verbatim).
+	pub fn is_none(&self) -> bool {
+		matches!(self, Self::None)
+	}
+
 	/// The varint code used on the wire.
 	pub fn to_code(self) -> u64 {
 		match self {

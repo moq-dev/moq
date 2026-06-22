@@ -698,6 +698,7 @@ mod test {
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
+			compression: crate::Compression::None,
 		};
 		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
 	}
@@ -711,6 +712,7 @@ mod test {
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
+			compression: crate::Compression::None,
 		};
 		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
 	}
@@ -724,6 +726,7 @@ mod test {
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
+			compression: crate::Compression::None,
 		};
 		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
 	}
@@ -737,6 +740,7 @@ mod test {
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),
+			compression: crate::Compression::None,
 		};
 		let mut writer = producer.create_frame(frame).unwrap();
 		writer.write(Bytes::from_static(b"x")).unwrap();

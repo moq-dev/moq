@@ -788,25 +788,25 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
-	match compression {
-		Compression::None => {
-			writer.encode(&frame.size).await?;
-			track_stats.frame();
-			while let Some(mut chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
-				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
-			}
-		}
-		compression => {
-			let payload = frame.read_all().await?;
-			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
+	if frame.compression == compression {
+		// Cached codec matches the wire: forward the bytes verbatim.
+		writer.encode(&frame.size).await?;
+		track_stats.frame();
+		while let Some(mut chunk) = frame.read_chunk().await? {
 			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
 			writer.write_all(&mut chunk).await?;
 			track_stats.bytes(n);
 		}
+	} else {
+		// Recode for this peer: `read_all` decodes the cached bytes, then we
+		// re-encode for the wire (exactly one side is a real op; the other is None).
+		let payload = frame.read_all().await?;
+		let mut chunk = bytes::Bytes::from(compression.compress(&payload));
+		let n = chunk.len() as u64;
+		writer.encode(&n).await?;
+		track_stats.frame();
+		writer.write_all(&mut chunk).await?;
+		track_stats.bytes(n);
 	}
 
 	Ok(())
@@ -960,10 +960,12 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
-	/// Send one frame. Uncompressed frames stream chunk-by-chunk so we never
-	/// buffer the whole payload; a compressed frame must buffer to feed the
-	/// codec, and its wire size becomes the compressed length (the subscriber
-	/// inflates it from the track's codec, known from TRACK_INFO on lite-05+).
+	/// Send one frame. When the cached codec already matches the wire codec the
+	/// bytes stream through verbatim, never buffering the whole payload — this is
+	/// the hot path, and it's where a modern peer pulling an already-compressed
+	/// track avoids a needless inflate/deflate. Otherwise the payload is decoded
+	/// and re-encoded for this peer (an origin compressing its plaintext on egress,
+	/// or a compression-incapable peer that needs plain bytes), which buffers it.
 	async fn serve_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
@@ -973,22 +975,22 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
-		match self.compression {
-			Compression::None => {
-				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
+		if frame.compression == self.compression {
+			stream.encode(&frame.size).await?;
+			self.track_stats.frame();
 
-				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
-					self.write_chunk(stream, priority, chunk).await?;
-				}
-			}
-			compression => {
-				let payload = self.read_all(stream, priority, &mut frame).await?;
-				let chunk = bytes::Bytes::from(compression.compress(&payload));
-				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
+			while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 				self.write_chunk(stream, priority, chunk).await?;
 			}
+		} else {
+			// `read_all` decodes the cached bytes to the logical payload; we then
+			// re-encode in the wire codec. Codecs differ, so exactly one of decode
+			// and encode is a real operation (the other side is `None`).
+			let payload = self.read_all(stream, priority, &mut frame).await?;
+			let chunk = bytes::Bytes::from(self.compression.compress(&payload));
+			stream.encode(&(chunk.len() as u64)).await?;
+			self.track_stats.frame();
+			self.write_chunk(stream, priority, chunk).await?;
 		}
 
 		Ok(())

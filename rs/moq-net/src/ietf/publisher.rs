@@ -331,6 +331,27 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				stream.encode(&0u64).await?;
 			}
 
+			// IETF carries no per-frame compression, so a cached compressed frame
+			// (e.g. relayed from a lite-05 origin) must be inflated for this peer.
+			if !frame.compression.is_none() {
+				let mut payload = tokio::select! {
+					biased;
+					_ = stream.closed() => return Err(Error::Cancel),
+					payload = frame.read_all() => payload?,
+				};
+				let n = payload.len() as u64;
+				stream.encode(&n).await?;
+				track_stats.frame();
+				if n == 0 {
+					// Have to write the object status too.
+					stream.encode(&0u8).await?;
+				} else {
+					stream.write_all(&mut payload).await?;
+					track_stats.bytes(n);
+				}
+				continue;
+			}
+
 			// Write the size of the frame.
 			stream.encode(&frame.size).await?;
 			track_stats.frame();
