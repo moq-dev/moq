@@ -260,6 +260,30 @@
         "vite": "^8.0.16",
       },
     },
+    "test/smoke/clients/js": {
+      "name": "@moq/smoke-browser",
+      "dependencies": {
+        "@moq/publish": "workspace:*",
+        "@moq/watch": "workspace:*",
+      },
+      "devDependencies": {
+        "esbuild": "^0.28.0",
+        "playwright": "^1.61.0",
+        "vite": "^8.0.16",
+      },
+    },
+    "test/smoke/clients/js-native": {
+      "name": "@moq/smoke-native",
+      "dependencies": {
+        "@moq/hang": "workspace:*",
+        "@moq/net": "workspace:*",
+        "@moq/web-transport": "^0.1.2",
+        "zod": "^4.0.0",
+      },
+      "devDependencies": {
+        "tsx": "^4.0.0",
+      },
+    },
   },
   "trustedDependencies": [
     "@fails-components/webtransport-transport-http3-quiche",
@@ -541,9 +565,25 @@
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
+    "@moq/smoke-browser": ["@moq/smoke-browser@workspace:test/smoke/clients/js"],
+
+    "@moq/smoke-native": ["@moq/smoke-native@workspace:test/smoke/clients/js-native"],
+
     "@moq/token": ["@moq/token@workspace:js/token"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
+
+    "@moq/web-transport": ["@moq/web-transport@0.1.2", "", { "optionalDependencies": { "@moq/web-transport-darwin-arm64": "0.1.2", "@moq/web-transport-darwin-x64": "0.1.2", "@moq/web-transport-linux-arm64-gnu": "0.1.2", "@moq/web-transport-linux-x64-gnu": "0.1.2", "@moq/web-transport-win32-x64-msvc": "0.1.2" } }, "sha512-cJE0B+T5a8ey1ZgFUIBTWkIWfhCAYGAUgAw8XYeOPsKPjFhtW9M/C+XV8Yu0IeUS4nnrbBPw4sEc+TvMybV4IQ=="],
+
+    "@moq/web-transport-darwin-arm64": ["@moq/web-transport-darwin-arm64@0.1.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-waCy1fIyUg0WDwP+rI5Jg7Mw5efsJjImGZzyIDvCXM98O/nWoybPmh8Cka6VP+8xUBeclRpWmlC6phYXtYqPyw=="],
+
+    "@moq/web-transport-darwin-x64": ["@moq/web-transport-darwin-x64@0.1.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-MWllJfxoZ5ncFxuWpcrwIEMpNjvixt7ycCZQDoW9yjfqsMzfPVRaunvJ8kW0zp0IXrGpC/RFeecFSaE7PmzHpg=="],
+
+    "@moq/web-transport-linux-arm64-gnu": ["@moq/web-transport-linux-arm64-gnu@0.1.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-cjVoLj/SGjetlJx3tbVt0fhzYIN195L9JQ/UkZqpvkhIfWEopPX7MzCWUPRK72mzH7kCyWr0dUGSu7B3pD1j1w=="],
+
+    "@moq/web-transport-linux-x64-gnu": ["@moq/web-transport-linux-x64-gnu@0.1.2", "", { "os": "linux", "cpu": "x64" }, "sha512-ExZbJFdUeL2G0FkBY7mw/tZTq6+lZfYgIWkjDRa4YkifcGjMevEgpsby5QXlxhs+Og1y5q/x2Xgzd/bAG3TkRQ=="],
+
+    "@moq/web-transport-win32-x64-msvc": ["@moq/web-transport-win32-x64-msvc@0.1.2", "", { "os": "win32", "cpu": "x64" }, "sha512-iypZ2WVoqEDB4dt7qG/wRj3zWAEqpoPP1Lj44L3o23g60UGuqsrGgbpy85qmejBkjMmDrWHr0Phx6pYJNAj/TA=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.4", "", { "dependencies": { "@tybys/wasm-util": "^0.10.1" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow=="],
 
@@ -1321,6 +1361,10 @@
 
     "picomatch": ["picomatch@4.0.4", "", {}, "sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A=="],
 
+    "playwright": ["playwright@1.61.0", "", { "dependencies": { "playwright-core": "1.61.0" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-Z+7BeeqQPRRzklHsVFP4KTGIyMxKUmfeRA4WisM6G3/XW6nwGeX6fX9qYaDa+CiUqpOkb2f6X3nar05R3kSuJQ=="],
+
+    "playwright-core": ["playwright-core@1.61.0", "", { "bin": { "playwright-core": "cli.js" } }, "sha512-caX7TrY3Ml6egyDX0WUcTHDxodl/b51y5wJOdCEA36QviK/s2g081hvmGs8eaE3DWb6NYZQ6BjO/QkNRPenoPA=="],
+
     "pluralize": ["pluralize@8.0.0", "", {}, "sha512-Nc3IT5yHzflTfbjgqWcCPpo7DaKy4FnpB0l/zCAW0Tc7jxAiuqSxHasntB3D7887LSrA93kDJ9IXovxJYxyLCA=="],
 
     "postcss": ["postcss@8.5.15", "", { "dependencies": { "nanoid": "^3.3.12", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-FfR8sjd4em2T6fb3I2MwAJU7HWVMr9zba+enmQeeWFfCbm+UOC/0X4DS8XtpUTMwWMGbjKYP7xjfNekzyGmB3A=="],
@@ -1553,6 +1597,8 @@
 
     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
+    "tsx": ["tsx@4.22.4", "", { "dependencies": { "esbuild": "~0.28.0" }, "optionalDependencies": { "fsevents": "~2.3.3" }, "bin": { "tsx": "dist/cli.mjs" } }, "sha512-X8EX+XV4QR5xCsrgxaED954zTDfY8KqlDtskKEL0cHhyS/P8b4IFOvGDQpsC9Q1XnLq915wEfwwY/zzskCtmhg=="],
+
     "tunnel-agent": ["tunnel-agent@0.6.0", "", { "dependencies": { "safe-buffer": "^5.0.1" } }, "sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w=="],
 
     "type-fest": ["type-fest@3.13.1", "", {}, "sha512-tLq3bSNx+xSpwvAJnzrK0Ep5CLNWjvFTOp71URMaAEWBfRb9nnJiBoUe0tF8bI4ZFO3omgBR6NvnbzVUT3Ly4g=="],
@@ -1752,6 +1798,8 @@
     "npm-pick-manifest/semver": ["semver@7.7.4", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-vFKC2IEtQnVhpT78h1Yp8wzwrf8CM+MzKMHGJZfBtzhZNycRFnXsHk6E5TxIkkMsgNS7mdX3AGB7x2QM2di4lA=="],
 
     "parse-entities/@types/unist": ["@types/unist@2.0.11", "", {}, "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA=="],
+
+    "playwright/fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
 
     "readdirp/picomatch": ["picomatch@2.3.1", "", {}, "sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA=="],
 

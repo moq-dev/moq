@@ -3,8 +3,11 @@
 # Tests that span more than one language. Per-language unit tests live in each
 # language's own justfile; this module aggregates them.
 #
-# The cross-language interop smoke test against the published packages now lives
-# in its own repo: https://github.com/moq-dev/smoke
+# Two cross-language interop smoke tests exist:
+#   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
+#     package registry to catch packaging breakage in a release.
+#   - `just test smoke` (smoke/, below) builds every client from THIS checkout
+#     to catch interop regressions before anything is published.
 
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
 set fallback
@@ -15,3 +18,21 @@ default *args:
     just js test
     just rs test {{ args }}
     if command -v uv &> /dev/null; then just py test; fi
+
+# Cross-language media interop smoke test, built from this checkout. Stands up a
+# relay and runs the publisher x subscriber matrix. Default: rust only. Pass
+# flags through, e.g.
+# just test smoke --publishers rust,python,js --subscribers rust,c
+smoke *args:
+    ./smoke/smoke.sh {{ args }}
+
+# Full interop matrix: rust + python + browser publish; everyone subscribes
+# (incl. native node/bun JS, the C libmoq client, and the GStreamer moqsrc
+# plugin). --timeout 30 gives headless Chromium cold-start headroom.
+smoke-full:
+    ./smoke/smoke.sh --publishers rust,python,js --subscribers rust,python,js,js-native-node,js-native-bun,c,gst --timeout 30
+
+# Negative control: no publisher, every subscriber must time out (proves the
+# harness can actually report failure).
+smoke-negative *args:
+    ./smoke/smoke.sh --negative {{ args }}
