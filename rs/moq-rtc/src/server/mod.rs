@@ -11,11 +11,14 @@ pub mod whip;
 
 mod mux;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use tokio::sync::OnceCell;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use tokio::sync::{OnceCell, oneshot};
 
 use crate::Result;
 use mux::Mux;
@@ -76,6 +79,10 @@ struct Inner {
 	/// The shared media socket + demux, bound lazily on the first accept so
 	/// `Server::new` can stay synchronous (and an idle server binds no port).
 	mux: OnceCell<Mux>,
+	/// Live sessions keyed by resource id, each holding a cancel sender the
+	/// session task selects on. Lets [`Server::terminate`] (and the bundled
+	/// `DELETE` route) end a session by its `Location` id.
+	sessions: Mutex<HashMap<String, oneshot::Sender<()>>>,
 }
 
 impl Server {
@@ -88,6 +95,7 @@ impl Server {
 				publisher,
 				subscriber,
 				mux: OnceCell::new(),
+				sessions: Mutex::new(HashMap::new()),
 			}),
 		}
 	}
@@ -128,5 +136,78 @@ impl Server {
 
 	pub(crate) fn subscriber(&self) -> &moq_net::OriginConsumer {
 		&self.inner.subscriber
+	}
+
+	/// Register a session under its resource id, returning the cancel receiver
+	/// the session task selects on. Called by [`whip::accept`] / [`whep::accept`]
+	/// before spawning the session.
+	pub(crate) fn register_session(&self, resource_id: String) -> oneshot::Receiver<()> {
+		let (tx, rx) = oneshot::channel();
+		self.inner.sessions.lock().unwrap().insert(resource_id, tx);
+		rx
+	}
+
+	/// Drop a session's registry entry once it has ended on its own.
+	pub(crate) fn unregister_session(&self, resource_id: &str) {
+		self.inner.sessions.lock().unwrap().remove(resource_id);
+	}
+
+	/// Terminate a negotiated session by its resource id (the `Location` path
+	/// component from the WHIP/WHEP response). Returns `true` if a live session
+	/// was found and signalled to stop; the session task then releases its
+	/// broadcast announcement and mux registration. Embedders that own their own
+	/// HTTP routing call this to honor a WHIP/WHEP `DELETE`; the bundled routers
+	/// already wire it to the `DELETE` method.
+	pub fn terminate(&self, resource_id: &str) -> bool {
+		if let Some(cancel) = self.inner.sessions.lock().unwrap().remove(resource_id) {
+			let _ = cancel.send(());
+			true
+		} else {
+			false
+		}
+	}
+}
+
+/// Shared `DELETE` handler for both bundled routers: parse the resource id from
+/// the trailing path segment and terminate the matching session.
+pub(crate) async fn delete(State(server): State<Server>, Path(path): Path<String>) -> StatusCode {
+	match crate::sdp::parse_resource_id(&path) {
+		Ok(id) if server.terminate(&id.to_string()) => StatusCode::OK,
+		Ok(_) => StatusCode::NOT_FOUND,
+		Err(_) => StatusCode::BAD_REQUEST,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn server() -> Server {
+		let publisher = moq_net::Origin::random().produce();
+		let subscriber = moq_net::Origin::random().produce().consume();
+		Server::new(Config::default(), publisher, subscriber)
+	}
+
+	#[test]
+	fn terminate_unknown_session_is_false() {
+		assert!(!server().terminate("00000000-0000-0000-0000-000000000000"));
+	}
+
+	#[test]
+	fn terminate_registered_session_once() {
+		let server = server();
+		let id = "11111111-1111-1111-1111-111111111111";
+		let _cancel = server.register_session(id.to_string());
+		assert!(server.terminate(id), "first terminate finds the session");
+		assert!(!server.terminate(id), "second terminate is a no-op");
+	}
+
+	#[test]
+	fn unregister_drops_the_entry() {
+		let server = server();
+		let id = "22222222-2222-2222-2222-222222222222";
+		let _cancel = server.register_session(id.to_string());
+		server.unregister_session(id);
+		assert!(!server.terminate(id), "unregistered session can't be terminated");
 	}
 }

@@ -25,11 +25,14 @@ and are the same shape regardless of HTTP role.
 
 ### Keyframe latency on the egress side
 
-WebRTC subscribers expect a keyframe within ~2 s of joining. If the
-upstream MoQ broadcast uses long GOPs, freshly-connected WHEP / WHIP-out
-peers see a black screen until the next natural keyframe arrives.
-`KeyframeRequest` events from the peer are logged but not propagated
-upstream; PLI-to-MoQ back-pressure is a future enhancement.
+A freshly-connected WHEP / WHIP-out peer subscribes at the *current*
+(in-progress) MoQ group, which begins at a keyframe, so it gets a
+decodable start without waiting for the next GOP boundary. If the peer
+loses keyframe packets, str0m fulfils its NACK retransmissions from the
+video send buffer, which is sized to cover a large keyframe plus the rest
+of the current group. MoQ has no PLI path back to the publisher, so
+`KeyframeRequest` (PLI/FIR) events from the peer are logged but not
+propagated upstream.
 
 The egress paths (WHEP server, WHIP client) negotiate H.264, H.265, VP8,
 VP9, AV1, and Opus. The ingest paths (WHIP server, WHEP client) currently
@@ -82,6 +85,15 @@ moq-rtc --relay https://relay.example.com --broadcast my-stream \
 ### Client flags
 
 - `--url`: remote WHIP or WHEP resource URL.
+
+### Session teardown
+
+The bundled WHIP/WHEP servers honor an HTTP `DELETE` to the resource URL
+returned in the `Location` header (`/<broadcast>/<resource-id>`), per
+RFC 9725. It ends the session promptly, releasing its broadcast
+announcement and shared-media-port registration instead of waiting for the
+ICE disconnect timeout. Embedders that own their own routing can call
+`Server::terminate(resource_id)` to do the same.
 
 ## Codec mapping
 

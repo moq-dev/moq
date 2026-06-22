@@ -19,7 +19,9 @@ pub use crate::server::Response;
 
 /// Build the WHEP axum router.
 pub fn router(server: Server) -> Router {
-	Router::new().route("/{*path}", post(handle)).with_state(server)
+	Router::new()
+		.route("/{*path}", post(handle).delete(crate::server::delete))
+		.with_state(server)
 }
 
 async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, body: Bytes) -> HttpResponse {
@@ -109,14 +111,23 @@ pub async fn accept(
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let session = session::Session::egress(rtc, mux.socket(), mux.local(), inbound, source);
+	let session = session::Session::egress(rtc, mux.socket(), mux.candidates().to_vec(), inbound, source);
 
+	// Register before spawning so a DELETE that races startup still finds the
+	// session; the task unregisters itself when it ends.
+	let cancel = server.register_session(resource_id.clone());
+	let task_server = server.clone();
+	let task_resource = resource_id.clone();
 	tokio::spawn(async move {
 		// Hold the mux registration for the session's lifetime (unregisters on exit).
 		let _registration = registration;
-		if let Err(err) = session.run().await {
-			tracing::warn!(%err, "whep session ended");
+		tokio::select! {
+			res = session.run() => if let Err(err) = res {
+				tracing::warn!(%err, "whep session ended");
+			},
+			_ = cancel => tracing::debug!("whep session terminated by DELETE"),
 		}
+		task_server.unregister_session(&task_resource);
 	});
 
 	Ok(Response {

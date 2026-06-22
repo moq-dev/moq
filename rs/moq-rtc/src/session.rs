@@ -33,6 +33,12 @@ pub(crate) type Packet = (Vec<u8>, SocketAddr);
 /// and a stalled session must not grow memory without limit).
 pub(crate) const SESSION_INBOX: usize = 256;
 
+/// str0m's outbound video buffer depth (packets), which also backs NACK resends.
+/// Raised above the str0m default (1000) so a late-joining peer can recover a
+/// large keyframe and the rest of the current group via NACK; see
+/// [`rtc_config_with_codecs`].
+const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
+
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
 /// for any flow where RTP arrives from the peer (`server publish` / WHIP
@@ -72,12 +78,15 @@ pub struct Session {
 	/// Send side. Shared across sessions on the server (the mux socket); owned
 	/// 1:1 on the client. Receiving happens via `inbound`, not this socket.
 	socket: Arc<UdpSocket>,
-	/// The local address to report to str0m as each datagram's destination. MUST
-	/// equal one of the local ICE candidates we advertised, not the socket's bind
-	/// address: str0m drops a STUN binding request whose destination doesn't match
-	/// a host candidate ("unknown interface"), and the shared mux socket binds a
-	/// wildcard (`0.0.0.0`) while advertising a concrete IP.
-	local: SocketAddr,
+	/// The local ICE candidates we advertised. Each inbound datagram is tagged
+	/// (for str0m) with the candidate whose address family matches the packet's
+	/// source, so a dual-stack peer reaching us over IPv6 isn't told the packet
+	/// arrived on an IPv4 host candidate. MUST be the advertised candidates, not
+	/// the socket's bind address: str0m drops a STUN binding request whose
+	/// destination doesn't match a host candidate ("unknown interface"), and the
+	/// shared mux socket binds a wildcard (`0.0.0.0`) while advertising concrete
+	/// IPs. Never empty (falls back to the bound address).
+	locals: Vec<SocketAddr>,
 	/// Inbound datagrams routed to this session (demux on the server, a 1:1
 	/// reader on the client). `None` from `recv` means every sender dropped, so
 	/// the session is done.
@@ -93,19 +102,19 @@ pub struct Session {
 }
 
 impl Session {
-	/// Convenience for the ingest case (WHIP server, WHEP client). `local` is the
-	/// advertised ICE candidate address (see the field docs), not the socket bind.
+	/// Convenience for the ingest case (WHIP server, WHEP client). `locals` are the
+	/// advertised ICE candidates (see the field docs), not the socket bind.
 	pub fn ingest(
 		rtc: Rtc,
 		socket: Arc<UdpSocket>,
-		local: SocketAddr,
+		locals: Vec<SocketAddr>,
 		inbound: mpsc::Receiver<Packet>,
 		sink: Box<dyn MediaSink>,
 	) -> Self {
 		Self {
 			rtc,
 			socket,
-			local,
+			locals,
 			inbound,
 			role: MediaRole::Ingest(sink),
 			writes_rx: None,
@@ -113,12 +122,12 @@ impl Session {
 		}
 	}
 
-	/// Convenience for the egress case (WHEP server, WHIP client). `local` is the
-	/// advertised ICE candidate address (see the field docs), not the socket bind.
+	/// Convenience for the egress case (WHEP server, WHIP client). `locals` are the
+	/// advertised ICE candidates (see the field docs), not the socket bind.
 	pub fn egress(
 		rtc: Rtc,
 		socket: Arc<UdpSocket>,
-		local: SocketAddr,
+		locals: Vec<SocketAddr>,
 		inbound: mpsc::Receiver<Packet>,
 		mut source: EgressSource,
 	) -> Self {
@@ -126,7 +135,7 @@ impl Session {
 		Self {
 			rtc,
 			socket,
-			local,
+			locals,
 			inbound,
 			role: MediaRole::Egress(Box::new(source)),
 			writes_rx: Some(writes_rx),
@@ -135,10 +144,6 @@ impl Session {
 	}
 
 	pub async fn run(mut self) -> Result<()> {
-		// The local address str0m tags each inbound packet with -- the advertised
-		// ICE candidate, NOT the socket bind (see the `local` field docs).
-		let local = self.local;
-
 		loop {
 			// A dead Rtc (DTLS/SDP failure, explicit disconnect) makes poll_output
 			// return a never-firing timeout instead of erroring, which would hang
@@ -189,6 +194,9 @@ impl Session {
 					match packet {
 						Some((data, src)) => {
 							let now = Instant::now();
+							// Tag the packet with the advertised candidate matching its
+							// address family, not the socket bind (see the `locals` docs).
+							let local = pick_local(&self.locals, src);
 							let recv = Receive::new(str0m::net::Protocol::Udp, src, local, &data)
 								.map_err(Error::RtcInput)?;
 							self.rtc.handle_input(Input::Receive(now, recv)).map_err(Error::Rtc)?;
@@ -309,6 +317,18 @@ impl IngestClock {
 	}
 }
 
+/// Pick the advertised local candidate to tag an inbound packet with: the first
+/// one whose address family matches `src`, falling back to the first candidate
+/// (the list is never empty). Keeps a dual-stack peer's packets tagged with a
+/// same-family host candidate so str0m's ICE pairing stays consistent.
+fn pick_local(locals: &[SocketAddr], src: SocketAddr) -> SocketAddr {
+	locals
+		.iter()
+		.find(|l| l.is_ipv4() == src.is_ipv4())
+		.copied()
+		.unwrap_or(locals[0])
+}
+
 /// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.
 fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
 	// MediaTime stores `numer / denom` seconds; cast through i128 so the
@@ -354,7 +374,14 @@ impl Bridges {
 /// [`crate::egress::EgressSource`] can match to a rendition.
 pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConfig {
 	use str0m::format::Codec;
-	let mut config = str0m::RtcConfig::new().clear_codecs();
+	// str0m fulfils NACK resends from the video send buffer (default 1000
+	// packets). MoQ has no PLI path back to the publisher, so a late joiner's
+	// recovery is whatever the peer can NACK out of this buffer while the current
+	// group is still in flight. Widen it so a large keyframe plus the rest of the
+	// group stays recoverable instead of aging out after ~1000 packets.
+	let mut config = str0m::RtcConfig::new()
+		.clear_codecs()
+		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
 			Codec::Opus => config.enable_opus(true),
@@ -436,6 +463,19 @@ mod tests {
 	use str0m::media::Mid;
 
 	use super::*;
+
+	#[test]
+	fn pick_local_matches_address_family() {
+		let v4: SocketAddr = "1.2.3.4:5000".parse().unwrap();
+		let v6: SocketAddr = "[2001:db8::1]:5000".parse().unwrap();
+		let locals = vec![v4, v6];
+		let src_v4: SocketAddr = "9.9.9.9:1".parse().unwrap();
+		let src_v6: SocketAddr = "[2001:db8::2]:1".parse().unwrap();
+		assert_eq!(pick_local(&locals, src_v4), v4);
+		assert_eq!(pick_local(&locals, src_v6), v6);
+		// No same-family candidate falls back to the first.
+		assert_eq!(pick_local(&[v4], src_v6), v4);
+	}
 
 	#[test]
 	fn ingest_clock_rebases_first_frame_to_zero() {

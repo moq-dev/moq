@@ -121,18 +121,11 @@ impl Mux {
 		self.socket.clone()
 	}
 
-	/// ICE host candidates to advertise in the SDP answer.
+	/// ICE host candidates to advertise in the SDP answer. The session tags each
+	/// inbound datagram with the family-matching candidate; never empty (falls
+	/// back to the bound address).
 	pub(crate) fn candidates(&self) -> &[SocketAddr] {
 		&self.candidates
-	}
-
-	/// The local address to report to str0m as each datagram's destination. str0m
-	/// requires it to match an advertised host candidate (it drops STUN whose
-	/// destination is an "unknown interface"), and the shared socket binds a
-	/// wildcard, so report the first advertised candidate rather than the bind. The
-	/// candidate list is never empty (it falls back to the bound address).
-	pub(crate) fn local(&self) -> SocketAddr {
-		self.candidates[0]
 	}
 }
 
