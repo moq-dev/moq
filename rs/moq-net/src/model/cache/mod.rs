@@ -200,6 +200,13 @@ impl Group {
 /// A band of groups serialized to a tier in one flush, oldest first.
 pub type Batch = Vec<Group>;
 
+/// Backlog of eviction passes the flush task may fall behind before evicted groups are dropped
+/// rather than queued. A queued pass pins its groups' frame buffers, so an unbounded queue would
+/// let a slow disk migrate the RAM the live tier just freed into the channel. The cache is
+/// best-effort, so on overflow we drop (creating a hole) instead of growing memory.
+#[cfg(not(target_arch = "wasm32"))]
+const FLUSH_BACKLOG: usize = 256;
+
 /// The disk/remote spill handle held on a track's shared state.
 ///
 /// Holds a sender to a background task that drains evicted groups to the disk tier, and the store
@@ -207,8 +214,9 @@ pub type Batch = Vec<Group>;
 /// [`crate::TrackProducer::with_cache`].
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Tiers {
-	/// Hands each batch of evicted live groups to the background flush task.
-	flush: tokio::sync::mpsc::UnboundedSender<Vec<crate::GroupConsumer>>,
+	/// Hands each batch of evicted live groups to the background flush task. Bounded (see
+	/// [`FLUSH_BACKLOG`]); a full channel drops rather than blocks the eviction path.
+	flush: tokio::sync::mpsc::Sender<Vec<crate::GroupConsumer>>,
 	/// The disk/remote store, shared with the flush task; used to serve fetch misses.
 	store: Arc<tokio::sync::RwLock<store::Store>>,
 }
@@ -219,14 +227,19 @@ impl Tiers {
 	pub(crate) fn spawn(disk: Disk) -> Self {
 		let store = store::Store::new(disk.store, disk.remote, disk.prefix, disk.bounds);
 		let store = Arc::new(tokio::sync::RwLock::new(store));
-		let (flush, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<crate::GroupConsumer>>();
+		let (flush, mut rx) = tokio::sync::mpsc::channel::<Vec<crate::GroupConsumer>>(FLUSH_BACKLOG);
 		let writer = store.clone();
 		web_async::spawn(async move {
-			// Each message is one eviction pass. Drain its groups and write them as a single
-			// segment, so a stampede-trim (many groups at once) is one object rather than many.
-			while let Some(consumers) = rx.recv().await {
-				let mut batch = Batch::with_capacity(consumers.len());
-				for consumer in consumers {
+			while let Some(first) = rx.recv().await {
+				// Coalesce every eviction pass already queued into one segment, so a backlog (or a
+				// stampede-trim) becomes one disk object rather than one per pass.
+				let mut passes = vec![first];
+				while let Ok(more) = rx.try_recv() {
+					passes.push(more);
+				}
+
+				let mut batch = Batch::new();
+				for consumer in passes.into_iter().flatten() {
 					match Group::read(consumer).await {
 						Ok(group) => batch.push(group),
 						// A group torn down before we drained it (e.g. abort) is dropped, not cached.
@@ -236,6 +249,8 @@ impl Tiers {
 				if batch.is_empty() {
 					continue;
 				}
+				// Keep groups in ascending sequence so the segment's footer is ordered.
+				batch.sort_by_key(|group| group.sequence);
 				if let Err(err) = writer.write().await.flush(batch).await {
 					tracing::warn!(%err, "cache disk flush failed");
 				}
@@ -244,10 +259,19 @@ impl Tiers {
 		Self { flush, store }
 	}
 
-	/// Hand a batch of evicted live groups to the flush task. Dropped silently once the task is gone.
+	/// Hand a batch of evicted live groups to the flush task. Non-blocking (the caller holds the
+	/// track state lock): a full backlog or a gone task drops the batch rather than waiting, leaving
+	/// a hole in the best-effort cache instead of stalling eviction or growing RAM.
 	pub(crate) fn evict(&self, groups: Vec<crate::GroupConsumer>) {
-		if !groups.is_empty() {
-			let _ = self.flush.send(groups);
+		if groups.is_empty() {
+			return;
+		}
+		if let Err(err) = self.flush.try_send(groups) {
+			let dropped = match &err {
+				tokio::sync::mpsc::error::TrySendError::Full(g) => g.len(),
+				tokio::sync::mpsc::error::TrySendError::Closed(g) => g.len(),
+			};
+			tracing::warn!(dropped, "cache flush backlog full; dropping evicted groups");
 		}
 	}
 

@@ -192,6 +192,12 @@ impl GroupProducer {
 		self.state.read().frames.back().and_then(|f| f.timestamp)
 	}
 
+	/// Whether the group has been finished (no more frames will be written). The track cache only
+	/// spills finished groups: draining an open one would park the flush task until it completes.
+	pub(crate) fn is_finished(&self) -> bool {
+		self.state.read().fin
+	}
+
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.

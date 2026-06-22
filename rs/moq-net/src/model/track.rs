@@ -434,8 +434,11 @@ impl TrackState {
 			}
 
 			removed.push(group.sequence);
+			// Only spill finished groups: draining an open one would park the flush task until it
+			// completes (or forever, if the writer stalled). An unfinished evicted group is dropped
+			// from the live tier as before, just not cached.
 			#[cfg(not(target_arch = "wasm32"))]
-			if self.cache.is_some() {
+			if self.cache.is_some() && group.is_finished() {
 				evicted.push(group.consume());
 			}
 			*slot = None;
@@ -1875,6 +1878,33 @@ mod test {
 		let consumer = producer.consume();
 		assert!(matches!(
 			consumer.fetch_group(5, None).unwrap().await,
+			Err(Error::NotFound)
+		));
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn unfinished_evicted_group_is_not_spilled() {
+		tokio::time::pause();
+		let mut producer = disk_cached_producer();
+
+		// An open (never-finished) group, kept open by holding its producer handle.
+		let mut open = producer.append_group().unwrap(); // seq 0
+		open.write_frame(bytes::Bytes::from_static(b"partial")).unwrap();
+
+		// Age it out of the live window; it is dropped, not handed to the flush task (draining an
+		// open group would park the task forever).
+		tokio::time::advance(Duration::from_secs(2)).await;
+		write_group(&mut producer, b"next"); // seq 1, evicts the open seq 0
+
+		let consumer = producer.consume();
+		for _ in 0..50 {
+			tokio::task::yield_now().await;
+		}
+		// seq 0 is gone from RAM and was never spilled, and there is no dynamic: a clean NotFound,
+		// not a hang.
+		assert!(matches!(
+			consumer.fetch_group(0, None).unwrap().await,
 			Err(Error::NotFound)
 		));
 	}
