@@ -43,7 +43,7 @@ capture still pulls in `libav*`. This proposal replaces encode **and** capture.
 |---|---|---|---|
 | VideoToolbox (macOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
 | NVENC (NVIDIA) | [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) (0.4) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), loaded at runtime. No build-time SDK linking. |
-| VAAPI (Intel/AMD) | [`moq-vaapi`](../moq-vaapi) (in-tree; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | `dlopen`s `libva` at runtime; libva `dlopen`s the GPU driver. Build needs libva headers for bindgen. |
+| VAAPI (Intel/AMD) | [`moq-vaapi`](https://crates.io/crates/moq-vaapi) `0.0.2` (published; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | As of 0.0.2 *links* `libva` (`NEEDED libva.so.2`), build needs libva-dev; `dlopen` (no NEEDED, no build dep) is intended but not yet realized, see #1837. |
 | Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
 
 Decisions and rationale:
@@ -102,8 +102,8 @@ encode/
   backend/
     mod.rs          # Backend trait + open_backend(kind, config) fallback chain
     videotoolbox.rs # cfg(target_os = "macos")
-    nvenc.rs        # cfg(all(target_os = "linux", feature = "nvenc"))
-    vaapi.rs        # cfg(all(target_os = "linux", feature = "vaapi"))
+    nvenc.rs        # cfg(target_os = "linux")
+    vaapi.rs        # cfg(target_os = "linux")
     openh264.rs     # software fallback, all platforms
 ```
 
@@ -214,9 +214,7 @@ Wrinkles to handle:
 ```toml
 [features]
 default = []                       # capture pulled in by moq-cli's `capture` feature
-nvenc  = ["dep:nvidia-video-codec-sdk"]   # linux only, opt-in
-vaapi  = ["dep:moq-vaapi", "moq-vaapi/dlopen"] # linux only, opt-in
-# videotoolbox + openh264 need no feature: gated by cfg(target_os) / always-on
+software = ["dep:openh264"]        # opt-in software fallback, all targets
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-video-toolbox = "..."
@@ -224,26 +222,28 @@ objc2-core-media = "..."
 objc2-core-video = "..."
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nvidia-video-codec-sdk = { version = "0.4", optional = true }
-moq-vaapi = { workspace = true, optional = true }       # in-tree; vendored cros-libva + cros-codecs
+# Hardware encoders are always-on for Linux (cfg-gated, no feature). Both
+# dlopen their drivers at runtime, so they link on a GPU-less builder.
+nvidia-video-codec-sdk = { version = "0.4", features = ["dynamic-loading"] }
+moq-vaapi = "0.0.2"                 # standalone; vendored cros-libva + cros-codecs
 
 [dependencies]
-openh264 = "..."   # software fallback, all targets
-nokhwa = { version = "...", features = ["input-avfoundation", "input-v4l", "input-msmf", "decoding-mjpeg"] }
-dcv-color-primitives = "..."
+openh264 = "..."   # always-on software fallback
 ```
 
-Release builds for Linux enable both `nvenc` and `vaapi`; the runtime fallback
-chain skips whichever driver is absent. Neither is a build-time hard dep on the
-driver, so the binary still builds and runs on a box with neither GPU (it falls
-to openh264).
+Hardware encoders are always-on (VideoToolbox on macOS, Media Foundation on
+Windows, NVENC + VAAPI on Linux); the runtime fallback chain skips whichever
+driver is absent. None is a build-time hard dep on the driver, so the binary
+still builds and runs on a box with no GPU. openh264 is always compiled in as
+the software fallback, so a GPU-less box still encodes (it's also what moq-boy
+uses for its tiny 160x144 frames, which hardware encoders may reject).
 
 ### Selection / fallback (`Kind` mapping)
 
 `open_backend(kind, config)` builds an ordered candidate list and returns the
 first that opens, mirroring today's `open_encoder` loop:
 
-- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered) then openh264.
+- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered), then openh264.
 - `Hardware` -> hardware-only; `NoEncoder` if none opens.
 - `Software` -> openh264 only.
 - `Named(id)` -> that backend only.
@@ -254,14 +254,15 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 
 ## Packaging payoff
 
-- **macOS**: VideoToolbox + openh264 link only system frameworks + a vendored
-  static lib. One brew bottle per arch, no `Depends`.
+- **macOS**: VideoToolbox links only system frameworks. One brew bottle per
+  arch, no `Depends`.
 - **Linux**: one binary that
 
-  - `dlopen`s `libnvidia-encode.so` if an NVIDIA driver is present (no build dep),
-  - links `libva` (tiny, stable soname across releases) for Intel/AMD; package
-    `Depends: libva2`, `Recommends: intel-media-va-driver | mesa-va-drivers`,
-  - statically carries openh264 as the always-works fallback.
+  - `dlopen`s `libnvidia-encode` if an NVIDIA driver is present (no build dep),
+  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev) — *intended*;
+    moq-vaapi 0.0.2 currently links libva instead, so this isn't realized yet
+    (see #1837),
+  - falls back to the always-compiled-in openh264 when no GPU encoder is usable.
 
   That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
   which is the whole reason for the change.
@@ -393,6 +394,13 @@ links on a libva-less builder and loads on a libva-less machine, falling back to
 software (see `backend::open`). The build still needs libva *headers* for
 cros-libva's bindgen, so `libva` is in the nix devShell.
 
+> **Status (moq-vaapi 0.0.2): not yet realized.** The published `moq-vaapi` crate
+> we depend on today *links* libva via `pkg_config` (its `build.rs` probes `libva`
+> and `libva-drm`), so the binary carries `NEEDED libva.so.2` / `libva-drm.so.2`
+> and needs libva at both build and run time; a libva-less host fails to load
+> rather than falling back. Restoring the `dlopen` path in `moq-vaapi` (so this
+> section holds) is tracked in #1837.
+
 **Input is an NV12 surface upload, not zero-copy dmabuf.** The encoder wants an
 NV12 VA surface, but UVC webcams deliver YUYV/MJPEG (decoded to CPU I420); they
 rarely expose NV12 to import zero-copy. So `backend/vaapi.rs` drives
@@ -453,3 +461,35 @@ can carry NVENC and use it only where the driver is present. Upstream the
   first real exercise (see the unverified note above).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
+
+## Beyond H.264: HEVC (added later)
+
+The "H.264 only" scope above was the ffmpeg-removal project. H.265 encode landed
+afterward on top of the same `Backend` seam:
+
+- `Encoder`/`Config`/`Options` gained a `Codec` field (`H264` / `H265`);
+  `Producer::new` takes the codec and routes packets to the matching
+  `moq_mux::codec` importer (`.avc3` / `.hev1`). The mux + `hang` catalog already
+  supported both, so only `moq-video` needed work.
+- Backends advertise the codecs they emit and `backend::open` filters by the
+  requested codec before applying `Kind`. **H.265**: hardware-only (no software
+  encoder). On macOS, VideoToolbox (one extra codec type + profile, an
+  HVCC->Annex-B path reusing the H.264 conversion, and HEVC NAL/IRAP parsing). On
+  Windows, the Media Foundation MFT, which natively emits Annex-B with inline
+  VPS/SPS/PPS like its H.264 output, so it only needs the HEVC output subtype +
+  Main profile, no rewrite. The MFT is vendor-agnostic (NVIDIA/Intel/AMD).
+- Verified on macOS (`just check`): VideoToolbox HEVC emits a self-contained
+  VPS+SPS+PPS+IDR Annex-B keyframe, and the full encode -> split -> import ->
+  catalog round-trip registers the right rendition for each codec.
+- Verified on Windows (RTX 3070 Ti, live camera): Media Foundation HEVC publishes
+  a `.hev1` rendition; the round-trip into Matroska decodes as Main-profile HEVC.
+- Linux NVENC HEVC followed: the NVENC backend selects its codec GUID from
+  `Codec`, so H.265 reuses the H.264 preset / GOP / rate-control path and emits
+  Annex-B with inline VPS/SPS/PPS. Unvalidated on hardware like NVENC H.264.
+- Follow-ups: Linux VAAPI HEVC, and a live camera run per platform.
+
+AV1 is intentionally left out: there is no hardware AV1 encoder available to us
+(none on macOS; NVENC/VAAPI AV1 are Linux-only and not yet wired), and software
+AV1 (rav1e) is too slow for real-time capture. AV1 returns whenever a hardware
+backend lands. The `Codec` enum is `#[non_exhaustive]`, so adding it back is not
+a breaking change.

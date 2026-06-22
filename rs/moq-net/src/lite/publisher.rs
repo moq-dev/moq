@@ -147,7 +147,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn recv_announce(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
-		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
+		let interest = stream.reader.decode::<lite::AnnounceRequest>().await?;
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
 
@@ -211,6 +211,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
 
+		// Last advertised epoch per active path (wire value). An ANNOUNCE_BROADCAST
+		// `ended` carries the epoch of the instance that ended, but the origin's Ended
+		// event doesn't carry the broadcast, so we stash it here on every Active/Restart
+		// and read it back when the path goes away.
+		let mut epochs: std::collections::HashMap<crate::PathOwned, u64> = std::collections::HashMap::new();
+
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
@@ -246,10 +252,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			Version::Lite05Wip => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
-				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
-				// them afterward. The receiver stamps our origin onto each hop chain, so we
-				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
+				// stashing suffix+epoch+hops so we can both COUNT them for AnnounceOk and
+				// re-send them afterward. The receiver stamps our origin onto each hop chain,
+				// so we forward the stored chain as-is (no self push here).
+				let mut initial: Vec<(crate::PathOwned, u64, OriginList)> = Vec::new();
 				while let Some((path, event)) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
@@ -259,7 +265,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match event.broadcast() {
 						Some(broadcast) => {
-							let hops = &broadcast.info().hops;
+							let info = broadcast.info();
+							let hops = &info.hops;
 							// Apply the same exclude_hop and reflected-announce skips as the live
 							// loop so the count matches exactly what we send (minus the self push).
 							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
@@ -268,17 +275,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							if hops.contains(&self_origin) {
 								continue;
 							}
+							let epoch = info.epoch_wire();
 							tracing::debug!(broadcast = %absolute, "announce");
 							let guard = stats.broadcast(&absolute).publisher();
-							stats_guards.entry(absolute).or_insert(guard);
-							initial.retain(|(s, _)| s != &suffix);
-							initial.push((suffix, hops.clone()));
+							stats_guards.entry(absolute.clone()).or_insert(guard);
+							epochs.insert(absolute, epoch);
+							initial.retain(|(s, _, _)| s != &suffix);
+							initial.push((suffix, epoch, hops.clone()));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
 							tracing::debug!(broadcast = %absolute, "unannounce");
 							stats_guards.remove(&absolute);
-							initial.retain(|(s, _)| s != &suffix);
+							epochs.remove(&absolute);
+							initial.retain(|(s, _, _)| s != &suffix);
 						}
 					}
 				}
@@ -291,8 +301,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				};
 				stream.writer.encode(&ok).await?;
 
-				for (suffix, hops) in initial {
-					stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+				for (suffix, epoch, hops) in initial {
+					stream
+						.writer
+						.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops })
+						.await?;
 				}
 			}
 			_ => {
@@ -316,41 +329,49 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 						match event {
 							crate::Announced::Active(active) => {
-								let Some(hops) = Self::prepare_active_hops(&active.info().hops, self_origin, exclude_hop, version, &absolute) else {
+								let info = active.info();
+								let Some(hops) = Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
 								};
+								let epoch = info.epoch_wire();
 								tracing::debug!(broadcast = %absolute, "announce");
 								let guard = stats.broadcast(&absolute).publisher();
-								let prev = stats_guards.insert(absolute, guard);
+								let prev = stats_guards.insert(absolute.clone(), guard);
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+								epochs.insert(absolute, epoch);
+								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops }).await?;
 							}
 							crate::Announced::Restart(active) => {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
 								// `Active` for an already-announced path). Older versions never defined
 								// that, so split it into an unannounce followed by a fresh announce.
-								match Self::prepare_active_hops(&active.info().hops, self_origin, exclude_hop, version, &absolute) {
+								let info = active.info();
+								match Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) {
 									Some(hops) => {
+										let epoch = info.epoch_wire();
 										tracing::debug!(broadcast = %absolute, "restart");
+										epochs.insert(absolute.clone(), epoch);
 										// Continuity: keep the existing stats guard (no close + reopen).
 										if lite::restart_supported(version) {
-											stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops }).await?;
 										} else {
 											stream
 												.writer
-												.encode(&lite::Announce::Ended {
+												.encode(&lite::AnnounceBroadcast::Ended {
 													suffix: suffix.clone(),
+													epoch,
 													hops: OriginList::new(),
 												})
 												.await?;
-											stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops }).await?;
 										}
 									}
 									None => {
 										// The replacement loops back to us; from this peer's view the broadcast is gone.
 										tracing::debug!(broadcast = %absolute, "restart replacement looped; unannouncing");
 										stats_guards.remove(&absolute);
-										stream.writer.encode(&lite::Announce::Ended { suffix, hops: OriginList::new() }).await?;
+										let epoch = epochs.remove(&absolute).unwrap_or(0);
+										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, epoch, hops: OriginList::new() }).await?;
 									}
 								}
 							}
@@ -358,7 +379,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								tracing::debug!(broadcast = %absolute, "unannounce");
 								stats_guards.remove(&absolute);
 								// An ended announce doesn't need hops; the receiver matches on path only.
-								stream.writer.encode(&lite::Announce::Ended { suffix, hops: OriginList::new() }).await?;
+								// It carries the epoch of the instance that ended (0 if never seen).
+								let epoch = epochs.remove(&absolute).unwrap_or(0);
+								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, epoch, hops: OriginList::new() }).await?;
 							}
 						}
 					}
@@ -447,7 +470,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.encode(&lite::TrackInfo {
 				priority: info.priority,
 				ordered: info.ordered,
-				cache: info.cache,
 				timescale,
 				compression,
 			})

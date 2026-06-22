@@ -31,8 +31,9 @@ peers see a black screen until the next natural keyframe arrives.
 `KeyframeRequest` events from the peer are logged but not propagated
 upstream; PLI-to-MoQ back-pressure is a future enhancement.
 
-AV1 / H.265 aren't in str0m 0.19's codec enum, so they're not negotiated;
-this is tracked as a follow-up. Use H.264 or VP9 for now.
+The egress paths (WHEP server, WHIP client) negotiate H.264, H.265, VP8,
+VP9, AV1, and Opus. The ingest paths (WHIP server, WHEP client) currently
+accept H.264, VP8, VP9, and Opus; H.265 / AV1 ingest is a follow-up.
 
 ## CLI shape
 
@@ -78,16 +79,26 @@ moq-rtc --relay https://relay.example.com --broadcast my-stream \
 
 ## Codec mapping
 
-| WebRTC codec | MoQ catalog |
-|--------------|-------------|
-| Opus         | `AudioCodec::Opus`, 48 kHz / stereo |
-| H.264        | `H264 { inline: true }` (Annex-B in catalog, no `avcC`) |
-| VP8          | `VideoCodec::VP8` |
-| VP9          | `VideoCodec::VP9` |
+| WebRTC codec | MoQ catalog | Egress | Ingest |
+|--------------|-------------|--------|--------|
+| Opus         | `AudioCodec::Opus`, 48 kHz / stereo | yes | yes |
+| H.264        | `VideoCodec::H264` (avc3 inline or avc1 + `avcC`) | yes | yes (avc3) |
+| H.265        | `VideoCodec::H265` (hev1 inline or hvc1 + `hvcC`) | yes | no |
+| VP8          | `VideoCodec::VP8` | yes | yes |
+| VP9          | `VideoCodec::VP9` | yes | yes |
+| AV1          | `VideoCodec::AV1` | yes | no |
 
-H.264 input is reassembled by str0m as Annex-B; `moq-mux`'s H.264 importer
-in `Avc3` mode publishes the inline-parameter shape directly, which lines
-up with what the WebCodecs decoder in `@moq/watch` already expects. No
+On egress, `codec::Track` reshapes each rendition into what str0m's Frame
+API expects. Opus / VP8 / VP9 / AV1 and inline-parameter H.264 (avc3) /
+H.265 (hev1) pass through untouched. Out-of-band-parameter H.264 (avc1) and
+H.265 (hvc1) are rewritten from length-prefixed NALU to Annex-B with the
+parameter sets (SPS/PPS, plus VPS for H.265) prepended to each keyframe.
+This reuses `moq-mux`'s `parse_avcc_param_sets` / `parse_hvcc_param_sets`
+and `annexb` helpers, the same logic as its `h264::Export` / `h265::Export`.
+
+On ingest, H.264 is reassembled by str0m as Annex-B; `moq-mux`'s H.264
+importer in `Avc3` mode publishes the inline-parameter shape directly, which
+lines up with what the WebCodecs decoder in `@moq/watch` already expects. No
 extra conversion needed in the gateway.
 
 (Written by Claude)

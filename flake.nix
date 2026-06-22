@@ -107,10 +107,10 @@
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
-            # moq-video `vaapi` feature: the moq-vaapi crate (moq-dev/vaapi) vendors
-            # the libva headers so bindgen needs no system libva, but libva is
-            # dlopen'd at runtime, so this provides libva.so for actually running
-            # vaapi encode in the devShell. macOS has no VAAPI.
+            # moq-video's VAAPI backend (always-on for Linux): the moq-vaapi crate
+            # (moq-dev/vaapi) vendors the libva headers so bindgen needs no system
+            # libva, but libva is dlopen'd at runtime, so this provides libva.so for
+            # actually running vaapi encode in the devShell. macOS has no VAAPI.
             pkgs.libva
           ];
 
@@ -243,13 +243,18 @@
 
         formatter = pkgs.nixfmt-tree;
 
-        # Heavy Rust CI (clippy / doc / test, all features) as crane
-        # derivations: deps compile once and cache, only first-party code
-        # recompiles per run, and there's no persistent CARGO_TARGET_DIR to
-        # bound. Run with `nix flake check` or a single one via
-        # `nix build .#checks.<system>.clippy`. The cheap, non-compiling lints
-        # (rustfmt, cargo-deny/shear/sort) stay in `just rs ci`.
-        checks = overlayPkgs.moqChecks;
+        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just rs
+        # ci` (see rs/justfile), no longer through crane. `nix flake check` is
+        # kept -- it still validates flake eval + builds the dev shell -- but no
+        # longer compiles the workspace, so it's cheap. Release artifacts still
+        # build via crane `buildPackage` (see `packages` above / release-*.yml).
+        #
+        # On the self-hosted runner those cargo checks transparently reuse a
+        # per-crate compiler cache (rustc is wrapped by sccache via the runner
+        # environment), so a Cargo.lock change recompiles only the changed crate
+        # + its reverse-deps. That's a runner-side concern -- nothing here or in
+        # the workflows configures it.
+        checks = { };
       }
     );
 }

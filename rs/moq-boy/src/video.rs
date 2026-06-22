@@ -35,7 +35,8 @@ struct EncoderMsg {
 impl VideoEncoder {
 	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
-		let producer = moq_video::encode::Producer::new(broadcast, catalog).expect("failed to create avc3 producer");
+		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264)
+			.expect("failed to create avc3 producer");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
@@ -88,8 +89,8 @@ fn encoder_thread(
 		let enc = match encoder.as_mut() {
 			Some(enc) => enc,
 			None => {
-				// Game Boy is 160x144; force software (libx264) since hardware
-				// encoders can reject such tiny resolutions.
+				// Game Boy is 160x144; force the openh264 software encoder since
+				// hardware encoders can reject such tiny resolutions.
 				let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, 60);
 				config.kind = moq_video::encode::Kind::Software;
 				match moq_video::encode::Encoder::new(&config) {

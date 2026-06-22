@@ -257,12 +257,14 @@ struct OriginBroadcast {
 
 /// Ordering key used to pick the active route among broadcasts at the same path.
 ///
-/// Lower wins. Shorter hop chains sort first; equal-length chains are broken by a
-/// deterministic hash of the broadcast name and hop chain, so every node in the
-/// cluster, given the same candidate routes, converges on the same winner instead
-/// of relying on arrival order. Mixing the name in spreads equal-length routes
-/// across different upstreams rather than funneling every broadcast onto one.
-fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
+/// Lower wins. Shorter hop chains sort first (routing prefers the shortest path);
+/// among equal-length chains the newer broadcast instance (larger
+/// [`epoch`](BroadcastInfo::epoch)) wins, and any remaining ties break on a
+/// deterministic hash of the broadcast name and hop chain. Every node in the cluster,
+/// given the same candidate routes, converges on the same winner: the epoch and hops
+/// are forwarded unchanged, and the hash is build-stable. Mixing the name in spreads
+/// equal routes across different upstreams rather than funneling onto one.
+fn route_key(name: &Path, info: &BroadcastInfo) -> (usize, std::cmp::Reverse<u64>, u64) {
 	// FNV-1a, not the std hasher: its output is fixed across Rust versions and
 	// builds, which matters when nodes run mismatched binaries during a rolling
 	// deploy and still need to agree on the same route. SEED is a custom basis
@@ -275,13 +277,14 @@ fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 	for &byte in name.as_str().as_bytes() {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
-	for hop in hops {
+	for hop in &info.hops {
 		for &byte in &hop.id.to_le_bytes() {
 			hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 		}
 	}
 
-	(hops.len(), hash)
+	// Reverse the epoch so a larger (newer) instance sorts lower, i.e. wins.
+	(info.hops.len(), std::cmp::Reverse(info.epoch_wire()), hash)
 }
 
 /// One coalesced update queued for an `AnnounceConsumer`.
@@ -507,7 +510,7 @@ impl OriginNode {
 				return;
 			}
 
-			if route_key(&full, &broadcast.info().hops) < route_key(&full, &existing.active.info().hops) {
+			if route_key(&full, broadcast.info()) < route_key(&full, existing.active.info()) {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
 				existing.backup.push_back(old);
@@ -601,7 +604,7 @@ impl OriginNode {
 				.backup
 				.iter()
 				.enumerate()
-				.min_by_key(|(_, b)| route_key(&full, &b.info().hops))
+				.min_by_key(|(_, b)| route_key(&full, b.info()))
 				.map(|(i, _)| i);
 			if let Some(idx) = best {
 				let active = entry.backup.remove(idx).expect("index in range");
@@ -1863,6 +1866,7 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = BroadcastInfo {
 			hops: OriginList::try_from(vec![Origin::from(1u64)]).unwrap(),
+			..Default::default()
 		}
 		.produce();
 		let b = BroadcastInfo::new().produce();
@@ -1884,6 +1888,7 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = BroadcastInfo {
 			hops: OriginList::try_from(vec![Origin::from(1u64)]).unwrap(),
+			..Default::default()
 		}
 		.produce();
 		let b = BroadcastInfo::new().produce();
@@ -1926,10 +1931,15 @@ mod tests {
 	async fn test_deterministic_tiebreak() {
 		tokio::time::pause();
 
-		// Build a broadcast carrying a specific hop chain.
+		// Build a broadcast carrying a specific hop chain. All routes share one epoch so
+		// this test isolates the hash tie-break (a differing epoch would decide first).
 		fn route(ids: &[u64]) -> BroadcastProducer {
 			let hops = OriginList::try_from(ids.iter().copied().map(Origin::from).collect::<Vec<_>>()).unwrap();
-			BroadcastInfo { hops }.produce()
+			BroadcastInfo {
+				hops,
+				epoch: BroadcastInfo::epoch_from_wire(0),
+			}
+			.produce()
 		}
 
 		// Resolve the active route for "test" after publishing both routes in the given order.

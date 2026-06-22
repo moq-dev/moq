@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en" class="dark">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MoQ Demo (Relay Stats)</title>
+
+	<link rel="stylesheet" href="index.css">
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+</head>
+
+<body class="p-4 max-w-6xl mx-auto">
+	<h1 class="text-2xl font-bold mb-1">MoQ Relay Stats</h1>
+	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
+		Live view of every relay publishing a <code>.stats</code> broadcast: the whole cluster at once, not
+		just the relay you're connected to. Enable it with <code>[stats] enabled = true</code> in the relay
+		config.
+	</p>
+
+	<div class="flex flex-wrap items-end gap-3 mb-6">
+		<label class="text-xs text-neutral-400">
+			Relay URL
+			<input id="relay-url" type="text"
+				class="mt-1 block w-96 max-w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
+		</label>
+		<span id="status"
+			class="inline-flex items-center px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">connecting…</span>
+	</div>
+
+	<section class="mb-8">
+		<h2 class="text-lg font-semibold mb-1">Nodes</h2>
+		<p class="text-neutral-500 text-xs mb-3 max-w-3xl">
+			Every relay node publishing <code>.stats</code>, auto-discovered under <code>.stats/node</code>
+			(so this covers a whole cluster, not just one relay).
+			<b class="text-neutral-300">broadcasters</b>/<b class="text-neutral-300">viewers</b>/<b
+				class="text-neutral-300">ingress</b>/<b class="text-neutral-300">egress</b> are external clients;
+			<b class="text-neutral-300">cluster in</b>/<b class="text-neutral-300">cluster out</b> are internal
+			mTLS peer traffic (the relaying between nodes that's otherwise invisible). Click a node to drill in.
+		</p>
+		<div id="nodes" class="overflow-x-auto text-neutral-500 text-sm">searching for nodes…</div>
+	</section>
+
+	<section id="node-detail" hidden>
+		<h2 class="text-lg font-semibold mb-1">Node <span id="node-title" class="font-mono text-emerald-400"></span></h2>
+		<p class="text-neutral-500 text-xs mb-4 max-w-3xl">
+			Activity on this node, split by tier and direction. The relay reports external clients (JWT/public)
+			and internal cluster peers (mTLS) separately. The <code>.stats</code> feed itself is excluded
+			throughout. <span id="node-sessions" class="text-neutral-300"></span> · <span id="node-internal-sessions"
+				class="text-neutral-300"></span>
+		</p>
+
+		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Broadcasters (external ingress)</h3>
+		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
+			Broadcasts this node ingests from upstream publishers. <b class="text-neutral-300">ingress</b> is
+			capped at one subscription per track, so it's bytes pulled once, not per-viewer.
+		</p>
+		<div id="node-publishers" class="overflow-x-auto text-neutral-500 text-sm">no broadcasters</div>
+
+		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Viewers (external egress)</h3>
+		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
+			Broadcasts this node serves to downstream subscribers. <b class="text-neutral-300">egress</b> is
+			bytes served to viewers; the useful throughput number.
+		</p>
+		<div id="node-subscribers" class="overflow-x-auto text-neutral-500 text-sm">no viewers</div>
+
+		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Cluster ingress (internal / mTLS)</h3>
+		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
+			Broadcasts this node pulls from upstream <em>cluster peers</em> (other relays / the CDN) rather than
+			from real publishers.
+		</p>
+		<div id="node-internal-publishers" class="overflow-x-auto text-neutral-500 text-sm">no cluster ingress</div>
+
+		<h3 class="text-sm font-semibold text-neutral-300 mt-4 mb-1">Cluster egress (internal / mTLS)</h3>
+		<p class="text-neutral-500 text-xs mb-2 max-w-3xl">
+			Broadcasts this node fans out to downstream <em>cluster peers</em>. This is the relaying traffic
+			that never shows up in the external numbers, e.g. a hub bridging nodes.
+		</p>
+		<div id="node-internal-subscribers" class="overflow-x-auto text-neutral-500 text-sm">no cluster egress</div>
+	</section>
+
+	<!-- Dev-only: renders console output inline here. Defined by the
+	     console-overlay Vite plugin; absent from production builds. -->
+	<moq-console class="block mt-8"></moq-console>
+
+	<details class="mt-8">
+		<summary class="text-sm text-neutral-400 cursor-pointer">Raw frames</summary>
+		<pre id="raw" class="text-xs font-mono text-neutral-300 overflow-x-auto mt-2"></pre>
+	</details>
+
+	<div class="prose-doc mt-8">
+		<h3>Other demos:</h3>
+		<ul>
+			<li><a href="index.html">Watch broadcasts.</a></li>
+			<li><a href="publish.html">Publish a broadcast.</a></li>
+		</ul>
+	</div>
+</body>
+
+<script type="module" src="stats.ts"></script>
+
+</html>

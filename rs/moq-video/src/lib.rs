@@ -6,31 +6,35 @@
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
-//!   on Linux, native Media Foundation on Windows. Today that's a webcam or
-//!   the screen.
-//! - [`encode`] H.264-encodes frames with a native backend (openh264 /
-//!   VideoToolbox / NVENC) and publishes them through
-//!   [`moq_mux::codec::h264::Import`], which handles catalog registration
-//!   and framing. Two entry points:
+//!   on Linux, native Media Foundation (camera) and DXGI Desktop Duplication
+//!   (screen) on Windows. Today that's a webcam or the screen.
+//! - [`encode`] encodes frames with a native backend and publishes them through
+//!   the matching `moq_mux::codec` importer, which handles catalog registration
+//!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
+//!   VideoToolbox / Media Foundation / NVENC / VAAPI) or H.265 (VideoToolbox /
+//!   Media Foundation / NVENC). Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front, but the camera opens only while a subscriber is watching and is
 //!     released when the last one leaves.
-//!   - [`encode::Producer`] publishes H.264 you encoded yourself.
-//!
-//! The decode/consume side (the mirror of `moq-audio`'s `AudioConsumer`) is
-//! not implemented yet; native subscribers can keep using `moq_mux` directly.
+//!   - [`encode::Producer`] publishes packets you encoded yourself.
+//! - [`decode`] subscribes to an H.264 or H.265 track and decodes it to raw I420
+//!   frames with a native backend (VideoToolbox on macOS, Media Foundation / DXVA
+//!   on Windows, openh264 software fallback for H.264). [`decode::Consumer`] is
+//!   the mirror of `moq-audio`'s `AudioConsumer`.
 //!
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
 //! variant names a backend (openh264 / VideoToolbox / NVENC) or a capture
-//! implementation. [`encode::Encoder`] takes raw RGBA bytes, and the camera
-//! capture path stays internal. So swapping or bumping any backend crate is not
-//! a breaking change for consumers. Config structs are `#[non_exhaustive]`:
-//! build them via `default()`/`new()` and set fields, so new options stay additive.
+//! implementation. [`encode::Encoder`] takes raw RGBA bytes, [`decode::Consumer`]
+//! returns raw I420, and the camera capture path stays internal. So swapping or
+//! bumping any backend crate is not a breaking change for consumers. Config
+//! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
+//! fields, so new options stay additive.
 
 pub mod capture;
+pub mod decode;
 pub mod encode;
 
 mod error;

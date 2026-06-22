@@ -2,27 +2,79 @@ use std::{
 	collections::{HashMap, VecDeque, hash_map},
 	sync::Arc,
 	task::{Poll, ready},
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
 use super::{OriginList, TrackInfo};
 
+/// Wall-clock base for the broadcast epoch: 2020-01-01T00:00:00 UTC, expressed as
+/// seconds since the Unix epoch. The wire carries milliseconds since this base
+/// (smaller than a Unix-epoch value, and good past the year 2500 in a varint).
+const EPOCH_BASE_SECS: u64 = 1_577_836_800;
+
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`BroadcastInfo::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct BroadcastInfo {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
 	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
 	/// shortest-path preference.
 	pub hops: OriginList,
+
+	/// Wall-clock instant identifying this instance of the broadcast.
+	///
+	/// A newer instance of the same broadcast carries a later time than an older one,
+	/// so a consumer can prefer the newest when the same broadcast is advertised over
+	/// multiple routes. Defaults to [`SystemTime::now`] (the moment the broadcast was
+	/// created). Origin-assigned and forwarded unchanged by relays. On the wire
+	/// (ANNOUNCE_BROADCAST, lite-05+) it is encoded as milliseconds since 2020-01-01 UTC.
+	pub epoch: SystemTime,
+}
+
+impl Default for BroadcastInfo {
+	fn default() -> Self {
+		Self {
+			hops: OriginList::new(),
+			// A fresh broadcast instance is stamped with the current wall clock.
+			epoch: SystemTime::now(),
+		}
+	}
 }
 
 impl BroadcastInfo {
-	/// Create a new broadcast with an empty hop chain.
+	/// Create a new broadcast with an empty hop chain and an epoch of [`SystemTime::now`].
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the broadcast instance epoch, returning `self` for chaining.
+	///
+	/// A newer instance of the same broadcast must use a later time. See [`Self::epoch`].
+	pub fn with_epoch(mut self, epoch: SystemTime) -> Self {
+		self.epoch = epoch;
+		self
+	}
+
+	/// The epoch as the wire value: whole milliseconds since 2020-01-01 UTC.
+	///
+	/// Saturates to `0` for any instant at or before the base (e.g. a skewed clock).
+	pub(crate) fn epoch_wire(&self) -> u64 {
+		self.epoch
+			.duration_since(Self::epoch_base())
+			.map(|d| d.as_millis() as u64)
+			.unwrap_or(0)
+	}
+
+	/// Reconstruct an epoch [`SystemTime`] from the wire value (ms since 2020-01-01 UTC).
+	pub(crate) fn epoch_from_wire(wire: u64) -> SystemTime {
+		Self::epoch_base() + Duration::from_millis(wire)
+	}
+
+	fn epoch_base() -> SystemTime {
+		UNIX_EPOCH + Duration::from_secs(EPOCH_BASE_SECS)
 	}
 
 	/// Consume this [BroadcastInfo] to create a producer that carries its metadata

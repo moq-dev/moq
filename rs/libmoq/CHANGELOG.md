@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native video decode C API: `moq_consume_video_raw` (+ `_close`, `_frame`,
+  `_frame_free`) subscribes to an H.264 track and hands back decoded I420 frames,
+  the video counterpart to `moq_consume_audio_raw`. Decoding happens inside
+  libmoq (VideoToolbox / openh264), so consumers no longer need ffmpeg.
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/libmoq-v0.3.6...libmoq-v0.3.7) - 2026-06-19
 
 ### Fixed

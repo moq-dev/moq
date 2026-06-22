@@ -124,9 +124,9 @@ impl Emulator {
 		rgba
 	}
 
-	/// Drain accumulated audio samples from the APU.
-	pub fn audio_samples(&mut self) -> Vec<u8> {
-		let samples: Vec<u8> = self.gb.audio_buffer().iter().copied().collect();
+	/// Drain accumulated 16-bit PCM audio samples from the APU.
+	pub fn audio_samples(&mut self) -> Vec<i16> {
+		let samples: Vec<i16> = self.gb.audio_buffer().iter().copied().collect();
 		self.gb.clear_audio_buffer();
 		samples
 	}

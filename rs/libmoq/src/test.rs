@@ -926,6 +926,106 @@ fn video_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// End-to-end native decode: publish real H.264 (encoded by moq-video) and
+/// consume it through `moq_consume_video_raw`, asserting decoded I420 frames.
+#[test]
+fn video_raw_decode() {
+	// Encode a few gray frames to Annex-B (avc3, SPS/PPS inline on the keyframe).
+	let mut config = moq_video::encode::Config::new(320, 240, 30);
+	config.kind = moq_video::encode::Kind::Software;
+	let mut encoder = moq_video::encode::Encoder::new(&config).expect("openh264 encoder");
+	let gray = vec![0x80u8; 320 * 240 * 4];
+	let mut frames: Vec<bytes::Bytes> = Vec::new();
+	for i in 0..5 {
+		frames.extend(encoder.encode_rgba(&gray, 320, 240, i == 0).unwrap());
+	}
+	frames.extend(encoder.finish().unwrap());
+	assert!(!frames.is_empty(), "encoder produced no frames");
+
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	// The init's SPS/PPS only seed catalog metadata; avc3 frames carry their own
+	// inline parameter sets, so the decoder reads the true 320x240 from the wire.
+	let init = h264_init();
+	let format = b"avc3";
+	let media = id(unsafe {
+		moq_publish_media_ordered(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+		)
+	});
+
+	let path = b"video-raw-test";
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	// Subscribe + decode before publishing frames so the keyframe group is delivered.
+	let output = moq_video_decoder_output { latency_max_ms: 10_000 };
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
+
+	for (i, frame) in frames.iter().enumerate() {
+		assert_eq!(
+			unsafe { moq_publish_media_frame(media, frame.as_ptr(), frame.len(), (i as u64) * 33_000) },
+			0
+		);
+	}
+
+	// First decoded frame: packed I420 at the encoder resolution.
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_video_frame {
+		timestamp_us: 0,
+		width: 0,
+		height: 0,
+		data: std::ptr::null(),
+		data_size: 0,
+	};
+	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(frame.width, 320);
+	assert_eq!(frame.height, 240);
+	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
+	assert!(!frame.data.is_null());
+
+	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+
+	// Drain any other decoded frames already queued, then expect the terminal 0.
+	loop {
+		let code = frame_cb.recv();
+		if code > 0 {
+			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+		} else {
+			assert_eq!(code, 0, "raw video close delivers terminal 0");
+			break;
+		}
+	}
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	// The publisher may emit more than one catalog snapshot (e.g. as the track's
+	// stats settle), so drain any extra snapshots before the terminal.
+	loop {
+		let code = catalog_cb.recv();
+		if code > 0 {
+			assert_eq!(moq_consume_catalog_free(id(code)), 0);
+		} else {
+			assert_eq!(code, 0, "catalog close delivers terminal 0");
+			break;
+		}
+	}
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_close(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn multiple_frames_ordering() {
 	let origin = id(moq_origin_create());

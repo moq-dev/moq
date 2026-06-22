@@ -12,6 +12,7 @@ pub struct Client {
 	subscribe: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
+	setup_path: Option<String>,
 }
 
 impl Client {
@@ -64,6 +65,17 @@ impl Client {
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Set the request path to advertise in the lite-05 SETUP message.
+	///
+	/// Required on transports that carry no request URI (native QUIC, qmux over
+	/// TCP/TLS) so the server learns which path the client wants; omit it on bindings
+	/// that already carry a URI (WebTransport). Ignored by the IETF transport and by
+	/// pre-lite-05 versions, which have no SETUP message.
+	pub fn with_path(mut self, path: impl Into<String>) -> Self {
+		self.setup_path = Some(path.into());
 		self
 	}
 
@@ -144,6 +156,13 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
+				// Advertise our capabilities (we report send bitrate; we don't pad) plus
+				// the request path on URI-less transports.
+				let our_setup = lite::Setup {
+					probe: lite::ProbeLevel::Report,
+					path: self.setup_path.clone(),
+				};
+
 				let (recv_bw, connecting) = lite::start(
 					session.clone(),
 					None,
@@ -151,6 +170,7 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
+					our_setup,
 				)?;
 
 				// Block until the initial announce set has landed (Lite05 reports it
@@ -172,6 +192,7 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite04,
+					lite::Setup::default(),
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
@@ -192,6 +213,7 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite03,
+					lite::Setup::default(),
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
@@ -241,6 +263,9 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					v,
+					// This path only handles versions negotiated via the bidi SETUP exchange
+					// (pre-lite-05), which have no Setup Stream.
+					lite::Setup::default(),
 				)?;
 
 				// Block until the initial announce set has landed (for versions that

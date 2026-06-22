@@ -28,6 +28,12 @@ export class Broadcast {
 	// sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
+	// The underlying network broadcast, (re)created on each (re)connection and `undefined` while
+	// offline. Exposed so an application can serve its own tracks alongside the built-in
+	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
+	// Reacquire it via an effect, since reconnecting swaps in a fresh producer.
+	readonly net = new Signal<Moq.Broadcast | undefined>(undefined);
+
 	signals = new Effect();
 
 	constructor(props?: BroadcastProps) {
@@ -71,6 +77,12 @@ export class Broadcast {
 
 		const broadcast = new Moq.Broadcast();
 		effect.cleanup(() => broadcast.close());
+
+		// Publish it before serving so an application reacting to `net` can insert its own tracks.
+		this.net.set(broadcast);
+		effect.cleanup(() => {
+			if (this.net.peek() === broadcast) this.net.set(undefined);
+		});
 
 		connection.publish(name, broadcast);
 

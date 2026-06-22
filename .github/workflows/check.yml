@@ -6,8 +6,12 @@ permissions:
 
 on:
   pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
 
-# Cancel in-flight runs when a new commit lands on the same PR.
+# Cancel in-flight runs when a new commit lands on the same PR, or when the PR
+# is merged/closed (the close event shares this group and supersedes the build).
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -15,6 +19,9 @@ concurrency:
 jobs:
   check:
     name: Check
+    # Skip the actual work on close/merge: this run exists only to cancel the
+    # superseded in-flight build via the concurrency group above.
+    if: github.event.action != 'closed'
     # Trusted events run on the moq-dev self-hosted A1 runner (warm /nix/store +
     # persistent CARGO_TARGET_DIR). Fork PRs fall back to GitHub-hosted ARM so
     # untrusted code never runs on the box.

@@ -35,7 +35,11 @@ nix build github:moq-dev/moq#moq-cli
 
 ```bash
 docker pull moqdev/moq-cli
-docker run -v "$(pwd)/video.mp4:/app/video.mp4:ro" moqdev/moq-cli publish /app/video.mp4 https://relay.example.com/anon/stream
+
+# moq-cli reads media from stdin, so pipe an MPEG-TS stream into the container.
+# `-i` forwards stdin to the container process.
+ffmpeg -i video.mp4 -c copy -f mpegts - | \
+    docker run -i moqdev/moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-cli).
@@ -52,10 +56,17 @@ The binary will be in `target/release/moq-cli`.
 
 ## Basic Usage
 
+`moq-cli publish` reads media from stdin and selects the input container with a
+subcommand (`ts`, `fmp4`, `flv`, `avc3`, `hls`). The destination is set with
+`--url` (the server) and `--broadcast` (the broadcast name), not a path on the URL.
+
 ### Publish a Video File
 
+Remux a file to MPEG-TS and pipe it in (`-c copy` avoids re-encoding):
+
 ```bash
-moq-cli publish video.mp4 https://relay.example.com/anon/my-stream
+ffmpeg -i video.mp4 -c copy -f mpegts - | \
+    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ### Publish from FFmpeg
@@ -63,7 +74,7 @@ moq-cli publish video.mp4 https://relay.example.com/anon/my-stream
 Pipe FFmpeg output directly to moq-cli:
 
 ```bash
-ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/anon/my-stream
+ffmpeg -i input.mp4 -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ### Capture a Webcam
@@ -91,13 +102,28 @@ moq-cli publish --url https://relay.example.com --broadcast cam.hang \
 # One medium only:
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-audio
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
+
+# Pick a codec (default h264). h265 is hardware-only:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --codec h265
+```
+
+On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders are compiled in by
+default and link the CUDA / libva system libraries. To build `capture` without
+them (software openh264 + V4L2 capture only, no CUDA/libva dependency), drop the
+default features:
+
+```bash
+cargo build --release -p moq-cli --no-default-features \
+    --features "iroh quinn websocket capture"
 ```
 
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
-Linux, Media Foundation on Windows) and picks a hardware H.264 encoder
+Linux, Media Foundation on Windows). The codec is chosen with `--codec`
+(`h264` default, or `h265`). For H.264 it picks a hardware encoder
 (VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
 is present, falling back to the built-in software encoder (openh264); force either
-with `--hardware` / `--software`. `--camera` takes a bare integer as a device index, otherwise a
+with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
+Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
 device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
 ALSA) and encodes Opus.
@@ -106,20 +132,20 @@ Alternatively, pipe an external FFmpeg process as MPEG-TS:
 
 ```bash
 # macOS
-ffmpeg -f avfoundation -i "0:0" -f mpegts - | moq-cli publish - https://relay.example.com/anon/webcam
+ffmpeg -f avfoundation -i "0:0" -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast webcam ts
 
 # Linux
-ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | moq-cli publish - https://relay.example.com/anon/webcam
+ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast webcam ts
 ```
 
 ### Publish Screen
 
 ```bash
 # macOS
-ffmpeg -f avfoundation -i "1:" -f mpegts - | moq-cli publish - https://relay.example.com/anon/screen
+ffmpeg -f avfoundation -i "1:" -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast screen ts
 
 # Linux (X11)
-ffmpeg -f x11grab -i :0.0 -f mpegts - | moq-cli publish - https://relay.example.com/anon/screen
+ffmpeg -f x11grab -i :0.0 -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast screen ts
 ```
 
 ## Encoding Options
@@ -131,7 +157,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -b:v 2500k -maxrate 2500k -bufsize 5000k \
     -c:a aac -b:a 128k \
-    -f mpegts - | moq-cli publish - https://relay.example.com/anon/stream
+    -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ### Low Latency Settings
@@ -141,7 +167,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -g 30 -keyint_min 30 \
     -c:a aac \
-    -f mpegts - | moq-cli publish - https://relay.example.com/anon/stream
+    -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ### H.265/HEVC
@@ -150,7 +176,7 @@ ffmpeg -i input.mp4 \
 ffmpeg -i input.mp4 \
     -c:v libx265 -preset ultrafast \
     -c:a aac \
-    -f mpegts - | moq-cli publish - https://relay.example.com/anon/stream
+    -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ## Container Formats
@@ -198,6 +224,13 @@ rather than mis-described. The catalog describes the codec honestly so a
 subscriber that can decode it (typically TS gear) picks it up; browsers cannot
 play these codecs and should skip the rendition.
 
+Elementary streams the CLI does not decode (SCTE-35 cues, teletext, DVB
+subtitles, private data, ...) are carried verbatim too, one MoQ track per PID,
+described in the catalog `mpegts` section. They survive `publish ts | relay |
+subscribe --format ts` end-to-end with their original PIDs, PMT descriptors, and
+PES stream_ids, so a contribution feed keeps its ancillary streams. The relay
+forwards them transparently and never parses the payload.
+
 ### FLV
 
 Ingest an FLV stream from FFmpeg and play one back out:
@@ -219,10 +252,11 @@ are not supported.
 
 ## Authentication
 
-Pass a JWT token via the URL:
+Pass a JWT token via the URL's `?jwt=` query parameter:
 
 ```bash
-moq-cli publish video.mp4 "https://relay.example.com/room/123?jwt=<token>"
+ffmpeg -i video.mp4 -c copy -f mpegts - | \
+    moq-cli publish --url "https://relay.example.com/?jwt=<token>" --broadcast my-stream ts
 ```
 
 See [Authentication](/bin/relay/auth) for token generation.
@@ -245,10 +279,10 @@ Publish and subscribe to clock broadcasts for testing:
 
 ```bash
 # Publish a clock
-just clock publish https://relay.example.com/anon
+just pub clock publish https://relay.example.com/anon
 
 # Subscribe to a clock
-just clock subscribe https://relay.example.com/anon
+just pub clock subscribe https://relay.example.com/anon
 ```
 
 ## Debugging
@@ -256,7 +290,8 @@ just clock subscribe https://relay.example.com/anon
 ### Verbose Output
 
 ```bash
-RUST_LOG=debug moq-cli publish video.mp4 https://relay.example.com/anon/stream
+ffmpeg -i video.mp4 -c copy -f mpegts - | \
+    RUST_LOG=debug moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ### Check Connection
