@@ -15,7 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
-use super::{Fetch, Group, GroupConsumer, GroupProducer};
+use super::{Fetch, Group, GroupConsumer, GroupProducer, Meter};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -454,7 +454,11 @@ impl TrackState {
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = GroupProducer::new(Group { sequence }, info.timescale);
+		// Fetch/group-request path: no meter propagated here (TrackState is shared
+		// and side-agnostic). The fetch responder attaches one via `set_meter` once
+		// it knows the path/tier, so fetched groups are metered through that rather
+		// than the producer's normal Track -> Group propagation.
+		let group = GroupProducer::new(Group { sequence }, info.timescale, Meter::default());
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -470,6 +474,12 @@ pub struct TrackProducer {
 	name: Arc<str>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
+
+	// Ingress usage meter, propagated into every group this producer creates.
+	// Bumped once per group here and once per frame/byte in the group; a no-op
+	// until a stats sink is attached via [`Self::set_meter`]. Clones share it
+	// (parallel producers of one track feed the same sink).
+	meter: Meter,
 }
 
 impl TrackProducer {
@@ -483,6 +493,7 @@ impl TrackProducer {
 				..Default::default()
 			}),
 			prev_subscription: None,
+			meter: Meter::default(),
 		}
 	}
 
@@ -490,8 +501,17 @@ impl TrackProducer {
 		&self.name
 	}
 
+	/// Attach an ingress usage meter. Frames written through any group this
+	/// producer creates (and groups created after this call) bump the sink.
+	/// Transports that publish into the model (moq-lite, IETF, SRT, WHIP, ...)
+	/// call this once with a per-track sink so usage is recorded uniformly.
+	pub fn set_meter(&mut self, meter: Meter) {
+		self.meter = meter;
+	}
+
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&mut self, group: Group) -> Result<GroupProducer> {
+		let meter = self.meter.clone();
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.sequence >= fin
@@ -502,7 +522,7 @@ impl TrackProducer {
 		let timescale = info.timescale;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(group, timescale);
+		let group = GroupProducer::new(group, timescale, meter.clone());
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -511,12 +531,17 @@ impl TrackProducer {
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.evict_expired(now, cache);
+		drop(state);
 
+		// Ingress accounting: one group was produced (not counted on the early
+		// `Closed`/`Duplicate` returns above).
+		meter.group();
 		Ok(group)
 	}
 
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
+		let meter = self.meter.clone();
 		let mut state = self.modify()?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
@@ -532,14 +557,18 @@ impl TrackProducer {
 		let timescale = info.timescale;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(Group { sequence }, timescale);
+		let group = GroupProducer::new(Group { sequence }, timescale, meter.clone());
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
 		state.evict_expired(now, cache);
+		drop(state);
 
+		// Ingress accounting: one group was produced (not counted on the early
+		// `Closed`/overflow returns above).
+		meter.group();
 		Ok(group)
 	}
 
@@ -694,6 +723,7 @@ impl TrackProducer {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
+			meter: Meter::default(),
 		}
 	}
 
@@ -1074,6 +1104,7 @@ impl TrackSubscribe {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
+			meter: Meter::default(),
 		}))
 	}
 
@@ -1213,6 +1244,12 @@ pub struct TrackSubscriber {
 	/// any time. Groups beyond the cap stay in the producer's cache and
 	/// become eligible again when the cap rises (or is removed).
 	end_sequence: Option<u64>,
+
+	/// Egress usage meter for this subscriber. Bumped once per group delivered
+	/// and attached to each [`GroupConsumer`] handed out (which bumps per
+	/// frame/byte). Per-subscriber, so N subscribers of one track count N times.
+	/// A no-op until a stats sink is attached via [`Self::set_meter`].
+	meter: Meter,
 }
 
 impl TrackSubscriber {
@@ -1222,6 +1259,14 @@ impl TrackSubscriber {
 
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// Attach an egress usage meter. Each group this subscriber delivers (and the
+	/// frames pulled from it) bumps the sink. Transports that read from the model
+	/// (moq-lite, IETF, WHEP, ...) call this once per subscription so per-viewer
+	/// egress is recorded uniformly.
+	pub fn set_meter(&mut self, meter: Meter) {
+		self.meter = meter;
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -1247,13 +1292,17 @@ impl TrackSubscriber {
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		let Some((consumer, found_index)) =
+		let Some((mut consumer, found_index)) =
 			ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
 		else {
 			return Poll::Ready(Ok(None));
 		};
 
 		self.index = found_index + 1;
+		// Egress accounting: one group delivered to this subscriber. The consumer
+		// inherits the meter so its frames/bytes land on the same (per-viewer) sink.
+		consumer.set_meter(self.meter.clone());
+		self.meter.group();
 		Poll::Ready(Ok(Some(consumer)))
 	}
 
@@ -1276,10 +1325,14 @@ impl TrackSubscriber {
 	/// in the producer's cache and become eligible again if the cap is raised or removed.
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let floor = self.next_sequence.max(self.min_sequence);
-		let Some(group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, self.end_sequence))?) else {
+		let Some(mut group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, self.end_sequence))?)
+		else {
 			return Poll::Ready(Ok(None));
 		};
 		self.next_sequence = group.sequence.saturating_add(1);
+		// Egress accounting: one group delivered to this subscriber.
+		group.set_meter(self.meter.clone());
+		self.meter.group();
 		Poll::Ready(Ok(Some(group)))
 	}
 
@@ -1305,6 +1358,11 @@ impl TrackSubscriber {
 
 		self.index = found_index + 1;
 		self.next_sequence = sequence.saturating_add(1);
+		// Egress accounting: this helper consumes a (single-frame) group directly,
+		// bypassing the GroupConsumer path, so count the group/frame/bytes here.
+		self.meter.group();
+		self.meter.frame();
+		self.meter.bytes(frame.len() as u64);
 		Poll::Ready(Ok(Some(frame)))
 	}
 
@@ -1457,6 +1515,9 @@ impl TrackRequest {
 			name: self.name,
 			state: self.state,
 			prev_subscription: None,
+			// Attached later by the transport (e.g. the lite subscriber sets a
+			// per-track sink once the subscription is registered).
+			meter: Meter::default(),
 		}
 	}
 
@@ -1561,6 +1622,7 @@ impl TrackSubscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::Usage;
 
 	/// Helper: count non-tombstoned groups in state.
 	fn live_groups(state: &TrackState) -> usize {
@@ -1570,6 +1632,66 @@ mod test {
 	/// Helper: get the sequence number of the first live group.
 	fn first_live_sequence(state: &TrackState) -> u64 {
 		state.groups.iter().flatten().next().unwrap().0.sequence
+	}
+
+	/// Snapshot a shared [`Usage`] as `(groups, frames, bytes)`.
+	fn usage(u: &Usage) -> (u64, u64, u64) {
+		(u.groups(), u.frames(), u.bytes())
+	}
+
+	/// A meter on a producer counts each group/frame/byte exactly once as data is
+	/// produced (ingress is single-writer).
+	#[tokio::test]
+	async fn producer_meter_counts_ingress_once() {
+		let counts = std::sync::Arc::new(Usage::default());
+
+		let mut producer = TrackProducer::new("test", None);
+		producer.set_meter(Meter::from_arc(counts.clone()));
+
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap(); // 5 bytes
+		group.write_frame(bytes::Bytes::from_static(b"!")).unwrap(); // 1 byte
+		let mut group2 = producer.append_group().unwrap();
+		group2.write_frame(bytes::Bytes::from_static(b"abc")).unwrap(); // 3 bytes
+
+		// 2 groups, 3 frames, 9 bytes — each counted once at production.
+		assert_eq!(usage(&counts), (2, 3, 9));
+	}
+
+	/// A meter on a subscriber counts as data is pulled, per subscriber: two
+	/// subscribers draining the same cached group each count it, so egress scales
+	/// with the number of viewers.
+	#[tokio::test]
+	async fn subscriber_meter_counts_egress_per_viewer() {
+		let mut producer = TrackProducer::new("test", None);
+
+		// Produce one group (two frames, 9 bytes) before subscribing. The producer
+		// has no meter, so production itself isn't counted here.
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap(); // 5
+		group.write_frame(bytes::Bytes::from_static(b"abcd")).unwrap(); // 4
+		group.finish().unwrap();
+		producer.finish().unwrap();
+
+		// Two independent subscribers, each with its own shared Usage.
+		let counts_a = std::sync::Arc::new(Usage::default());
+		let mut sub_a = producer.subscribe(None);
+		sub_a.set_meter(Meter::from_arc(counts_a.clone()));
+
+		let counts_b = std::sync::Arc::new(Usage::default());
+		let mut sub_b = producer.subscribe(None);
+		sub_b.set_meter(Meter::from_arc(counts_b.clone()));
+
+		// Drain both subscribers fully (discarding frames still counts them, since
+		// egress bytes are counted at frame delivery, not on read).
+		for sub in [&mut sub_a, &mut sub_b] {
+			let mut g = sub.next_group().await.unwrap().expect("group");
+			while g.next_frame().await.unwrap().is_some() {}
+		}
+
+		// Each viewer counted the group, its two frames, and 9 bytes.
+		assert_eq!(usage(&counts_a), (1, 2, 9));
+		assert_eq!(usage(&counts_b), (1, 2, 9));
 	}
 
 	#[tokio::test]

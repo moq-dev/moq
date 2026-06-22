@@ -129,7 +129,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer};
+use crate::{AsPath, BroadcastInfo, Meter, OriginProducer, Path, PathOwned, TrackProducer, Usage};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -149,9 +149,10 @@ pub struct Counters {
 	pub subscriptions_closed: AtomicU64,
 	pub broadcasts: AtomicU64,
 	pub broadcasts_closed: AtomicU64,
-	pub bytes: AtomicU64,
-	pub frames: AtomicU64,
-	pub groups: AtomicU64,
+	/// Payload counters (groups/frames/bytes). Shared by `Arc` with the model
+	/// producer/consumer that bumps them as data flows (see [`Counters::meter`]
+	/// and [`crate::Meter`]); read here when snapshotting.
+	usage: Arc<Usage>,
 }
 
 impl Counters {
@@ -169,9 +170,9 @@ impl Counters {
 		let announced = self.announced.load(Ordering::Relaxed);
 		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
 		let broadcasts = self.broadcasts.load(Ordering::Relaxed);
-		let bytes = self.bytes.load(Ordering::Relaxed);
-		let frames = self.frames.load(Ordering::Relaxed);
-		let groups = self.groups.load(Ordering::Relaxed);
+		let bytes = self.usage.bytes();
+		let frames = self.usage.frames();
+		let groups = self.usage.groups();
 		RawCounts {
 			announced,
 			announced_closed,
@@ -183,6 +184,12 @@ impl Counters {
 			frames,
 			groups,
 		}
+	}
+
+	/// A [`Meter`] handle over this slot's shared payload counters, to hand to the
+	/// model producer/consumer so it bumps them directly as media flows.
+	fn meter(&self) -> Meter {
+		Meter::from_arc(self.usage.clone())
 	}
 }
 
@@ -877,24 +884,34 @@ pub struct PublisherTrack {
 }
 
 impl PublisherTrack {
+	/// A [`Meter`] over this track's shared egress payload counters, to attach to
+	/// the model `TrackSubscriber` (via `set_meter`) so groups/frames/bytes are
+	/// counted as media is served. No-op for a disabled aggregator.
+	pub fn meter(&self) -> Meter {
+		match &self.entry {
+			Some(entry) => entry.publisher[self.tier.idx()].meter(),
+			None => Meter::default(),
+		}
+	}
+
 	/// Bumps `frames` once.
 	pub fn frame(&self) {
 		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
+			entry.publisher[self.tier.idx()].usage.add_frame();
 		}
 	}
 
 	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
+			entry.publisher[self.tier.idx()].usage.add_bytes(n);
 		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
 		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
+			entry.publisher[self.tier.idx()].usage.add_group();
 		}
 	}
 }
@@ -918,24 +935,34 @@ pub struct SubscriberTrack {
 }
 
 impl SubscriberTrack {
+	/// A [`Meter`] over this track's shared ingress payload counters, to attach to
+	/// the model `TrackProducer` (via `set_meter`) so groups/frames/bytes are
+	/// counted as media is produced. No-op for a disabled aggregator.
+	pub fn meter(&self) -> Meter {
+		match &self.entry {
+			Some(entry) => entry.subscriber[self.tier.idx()].meter(),
+			None => Meter::default(),
+		}
+	}
+
 	/// Bumps `frames` once.
 	pub fn frame(&self) {
 		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
+			entry.subscriber[self.tier.idx()].usage.add_frame();
 		}
 	}
 
 	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
+			entry.subscriber[self.tier.idx()].usage.add_bytes(n);
 		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
 		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
+			entry.subscriber[self.tier.idx()].usage.add_group();
 		}
 	}
 }
@@ -1221,7 +1248,7 @@ fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, sync::atomic::Ordering::Relaxed};
+	use std::collections::BTreeMap;
 
 	use crate::{Origin, Path};
 
@@ -1284,8 +1311,8 @@ mod tests {
 		let entries = stats.shared().entries.lock();
 		let e1 = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
-		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
-		assert_eq!(e2.publisher[Tier::External.idx()].bytes.load(Relaxed), 7);
+		assert_eq!(e1.publisher[Tier::External.idx()].usage.bytes(), 100);
+		assert_eq!(e2.publisher[Tier::External.idx()].usage.bytes(), 7);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1301,10 +1328,10 @@ mod tests {
 
 		let entries = stats.shared().entries.lock();
 		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
-		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
-		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
-		assert_eq!(entry.publisher[Tier::Internal.idx()].bytes.load(Relaxed), 0);
-		assert_eq!(entry.subscriber[Tier::Internal.idx()].bytes.load(Relaxed), 7);
+		assert_eq!(entry.publisher[Tier::External.idx()].usage.bytes(), 100);
+		assert_eq!(entry.subscriber[Tier::External.idx()].usage.bytes(), 0);
+		assert_eq!(entry.publisher[Tier::Internal.idx()].usage.bytes(), 0);
+		assert_eq!(entry.subscriber[Tier::Internal.idx()].usage.bytes(), 7);
 	}
 
 	#[tokio::test(start_paused = true)]

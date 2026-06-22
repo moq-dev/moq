@@ -147,7 +147,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			..Default::default()
 		};
 
-		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription)?.await }.await {
+		let mut track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription)?.await }.await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
@@ -155,6 +155,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				return Ok(());
 			}
 		};
+
+		// Attach the publisher-side payload meter so the model counts
+		// groups/frames/bytes as they're served to this subscriber (egress is
+		// per-viewer). `track_stats` (the PublisherTrack guard, subscriptions
+		// lifecycle) stays owned by this function for the subscription's duration.
+		track.set_meter(track_stats.meter());
 
 		// Subscription is now active: count this session as a viewer of the
 		// broadcast. Dropping this guard (subscription end) releases it.
@@ -175,7 +181,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = tokio::select! {
-			res = self.run_track(track, request_id, track_stats) => res,
+			res = self.run_track(track, request_id) => res,
 			_ = stream.reader.closed() => Ok(()),
 			_ = self.session.closed() => Ok(()),
 		};
@@ -250,12 +256,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(
-		&self,
-		mut track: TrackSubscriber,
-		request_id: RequestId,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
-	) -> Result<(), Error> {
+	async fn run_track(&self, mut track: TrackSubscriber, request_id: RequestId) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
@@ -281,17 +282,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = track.subscription().priority;
-			tasks.push(
-				Self::run_group(
-					self.session.clone(),
-					msg,
-					priority,
-					group,
-					track_stats.clone(),
-					self.version,
-				)
-				.map(|_| ()),
-			);
+			tasks.push(Self::run_group(self.session.clone(), msg, priority, group, self.version).map(|_| ()));
 		}
 	}
 
@@ -300,7 +291,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: GroupConsumer,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -309,7 +299,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stream = Writer::new(stream, version);
 
 		stream.encode(&msg).await?;
-		track_stats.group();
+		// Groups/frames/bytes are counted by the model via the subscriber's meter
+		// (attached in run_subscribe_stream) as `recv_group`/`next_frame` are pulled.
 
 		loop {
 			let frame = tokio::select! {
@@ -333,7 +324,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Write the size of the frame.
 			stream.encode(&frame.size).await?;
-			track_stats.frame();
 
 			if frame.size == 0 {
 				// Have to write the object status too.
@@ -349,9 +339,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match chunk? {
 						Some(mut chunk) => {
-							let n = chunk.len() as u64;
 							stream.write_all(&mut chunk).await?;
-							track_stats.bytes(n);
 						}
 						None => break,
 					}
