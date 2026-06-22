@@ -28,6 +28,9 @@ use bytes::Bytes;
 
 use super::{Timescale, Timestamp};
 
+#[cfg(not(target_arch = "wasm32"))]
+use object_store::{ObjectStore, path::Path};
+
 // Internal orchestration for the disk/remote tiers; not part of the public surface, and only
 // needed (and only buildable) where object_store is available.
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,18 +99,71 @@ impl Bounds {
 pub struct Config {
 	/// Bounds on the RAM tier.
 	pub ram: Bounds,
-	// Disk and remote tiers are forthcoming (object_store-backed, feature-gated).
+	/// Optional disk (and remote) spill tier. When set, bands evicted from RAM are flushed here.
+	/// Native-only: the field is absent on wasm, where object_store does not build.
+	#[cfg(not(target_arch = "wasm32"))]
+	pub disk: Option<Disk>,
 }
 
 impl Config {
-	/// Build a [`Config`] with the given RAM bounds.
+	/// Build a [`Config`] with the given RAM bounds and no spill tier.
 	pub fn new(ram: Bounds) -> Self {
-		Self { ram }
+		Self {
+			ram,
+			#[cfg(not(target_arch = "wasm32"))]
+			disk: None,
+		}
 	}
 
-	/// Start an empty cache with this policy, returning its write half.
+	/// Start an empty cache with this policy, returning its write half. If a disk tier is
+	/// configured, spawns a background task that flushes evicted RAM bands to it.
 	pub fn produce(self) -> Producer {
-		Producer::new(self)
+		let state = Arc::new(Mutex::new(State {
+			bounds: self.ram,
+			ram: BTreeMap::new(),
+			ram_bytes: 0,
+		}));
+		Producer {
+			state,
+			#[cfg(not(target_arch = "wasm32"))]
+			tiers: self.disk.map(Tiers::spawn),
+		}
+	}
+}
+
+/// The disk spill tier: an object store, a key prefix, retention bounds, and an optional remote
+/// store the disk tier rolls up into. Native-only (`object_store` does not build on wasm). Build
+/// with [`Disk::new`], optionally [`with_remote`](Disk::with_remote).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Disk {
+	/// The object store for the disk tier (e.g. a `LocalFileSystem`).
+	pub store: Arc<dyn ObjectStore>,
+	/// Key prefix under which segments are written.
+	pub prefix: Path,
+	/// Retention bounds on the disk tier; exceeding them rolls up to `remote` (or evicts).
+	pub bounds: Bounds,
+	/// Optional remote store the disk tier rolls up into when over its bounds.
+	pub remote: Option<Arc<dyn ObjectStore>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Disk {
+	/// A disk tier over `store`, writing under `prefix`, capped by `bounds`. No remote rollup.
+	pub fn new(store: Arc<dyn ObjectStore>, prefix: Path, bounds: Bounds) -> Self {
+		Self {
+			store,
+			prefix,
+			bounds,
+			remote: None,
+		}
+	}
+
+	/// Set the remote store the disk tier rolls up into.
+	pub fn with_remote(mut self, remote: Arc<dyn ObjectStore>) -> Self {
+		self.remote = Some(remote);
+		self
 	}
 }
 
@@ -186,9 +242,9 @@ impl Group {
 /// next tier as a single segment.
 pub type Batch = Vec<Group>;
 
-/// The shared store behind a [`Producer`] and its [`Consumer`]s.
+/// The shared RAM tier behind a [`Producer`] and its [`Consumer`]s.
 struct State {
-	config: Config,
+	bounds: Bounds,
 	/// Groups keyed by sequence, so the first entry is the oldest and the last is the latest.
 	ram: BTreeMap<u64, Group>,
 	ram_bytes: u64,
@@ -219,7 +275,7 @@ impl State {
 
 	/// Whether the high watermark is tripped. An unset high watermark is unbounded (never trips).
 	fn over_max(&self) -> bool {
-		!self.config.ram.max.is_unset() && self.exceeds(self.config.ram.max)
+		!self.bounds.max.is_unset() && self.exceeds(self.bounds.max)
 	}
 
 	fn insert(&mut self, group: Group) -> Option<Batch> {
@@ -241,7 +297,7 @@ impl State {
 		let mut batch = Batch::new();
 		// Drain oldest-first while still above the low watermark, but never the latest group: a
 		// new subscriber and the live edge need it, and it is the likeliest next fetch.
-		while self.ram.len() > 1 && self.exceeds(self.config.ram.min) {
+		while self.ram.len() > 1 && self.exceeds(self.bounds.min) {
 			let oldest = *self.ram.keys().next().expect("non-empty");
 			let latest = *self.ram.keys().next_back().expect("non-empty");
 			if oldest == latest {
@@ -256,36 +312,64 @@ impl State {
 	}
 }
 
+/// The disk/remote tier handle held by a [`Producer`] and shared with its [`Consumer`]s: a sender
+/// to the background flush task, and the store itself for reads.
+#[cfg(not(target_arch = "wasm32"))]
+struct Tiers {
+	flush: tokio::sync::mpsc::UnboundedSender<Batch>,
+	store: Arc<tokio::sync::RwLock<store::Store>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Tiers {
+	/// Build the store and spawn the background flush task draining evicted bands into it.
+	fn spawn(disk: Disk) -> Self {
+		let store = store::Store::new(disk.store, disk.remote, disk.prefix, disk.bounds);
+		let store = Arc::new(tokio::sync::RwLock::new(store));
+		let (flush, mut rx) = tokio::sync::mpsc::unbounded_channel::<Batch>();
+		let writer = store.clone();
+		web_async::spawn(async move {
+			while let Some(band) = rx.recv().await {
+				if let Err(err) = writer.write().await.flush(band).await {
+					tracing::warn!(%err, "cache disk flush failed");
+				}
+			}
+		});
+		Self { flush, store }
+	}
+}
+
 /// The write half of a track cache. Insert finished groups; not `Clone` (a single writer fills
 /// the cache). Call [`consume`](Self::consume) for a read handle.
 pub struct Producer {
 	state: Arc<Mutex<State>>,
+	#[cfg(not(target_arch = "wasm32"))]
+	tiers: Option<Tiers>,
 }
 
 impl Producer {
-	fn new(config: Config) -> Self {
-		Self {
-			state: Arc::new(Mutex::new(State {
-				config,
-				ram: BTreeMap::new(),
-				ram_bytes: 0,
-			})),
-		}
-	}
-
 	/// Insert a finished group.
 	///
-	/// Returns a [`Batch`] when this insert pushed the RAM tier over its high watermark: the band
-	/// drained down to the low watermark, which the caller persists to the next tier. `None` when
-	/// nothing was evicted. A RAM-only cache ignores the return (the band is simply dropped).
+	/// If this insert pushed the RAM tier over its high watermark, the drained band is flushed to
+	/// the disk tier (when one is configured) and `None` is returned. Without a disk tier the band
+	/// is returned for a RAM-only caller to handle (or drop); `None` means nothing was evicted.
 	pub fn insert(&mut self, group: Group) -> Option<Batch> {
-		self.state.lock().expect("cache poisoned").insert(group)
+		let band = self.state.lock().expect("cache poisoned").insert(group)?;
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(tiers) = &self.tiers {
+			// Hand the evicted band to the background flush task; the disk tier owns it now.
+			let _ = tiers.flush.send(band);
+			return None;
+		}
+		Some(band)
 	}
 
-	/// A read handle sharing this cache's store.
+	/// A read handle sharing this cache's RAM tier (and disk/remote store, if any).
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			state: self.state.clone(),
+			#[cfg(not(target_arch = "wasm32"))]
+			store: self.tiers.as_ref().map(|t| t.store.clone()),
 		}
 	}
 
@@ -316,15 +400,31 @@ impl Producer {
 #[derive(Clone)]
 pub struct Consumer {
 	state: Arc<Mutex<State>>,
+	#[cfg(not(target_arch = "wasm32"))]
+	store: Option<Arc<tokio::sync::RwLock<store::Store>>>,
 }
 
 impl Consumer {
-	/// Fetch a cached group by sequence, or `None` if it is not in the RAM tier.
+	/// Fetch a cached group by sequence from the **RAM** tier, or `None` if it is not there.
+	/// Synchronous. Use [`fetch`](Self::fetch) to also consult the disk/remote tiers.
 	///
 	/// The returned [`Group`] is an owned copy (frame `Bytes` are reference-counted, so this is
 	/// cheap), so a later eviction never invalidates a fetch already in flight.
 	pub fn get(&self, sequence: u64) -> Option<Group> {
 		self.state.lock().expect("cache poisoned").ram.get(&sequence).cloned()
+	}
+
+	/// Fetch a group from any tier: RAM first, then (native only) the disk/remote store. Async
+	/// because the lower tiers do I/O. A tier read error is treated as a miss.
+	pub async fn fetch(&self, sequence: u64) -> Option<Group> {
+		if let Some(group) = self.get(sequence) {
+			return Some(group);
+		}
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(store) = &self.store {
+			return store.read().await.get(sequence).await.unwrap_or_default();
+		}
+		None
 	}
 
 	/// Whether a group with this sequence is currently in the RAM tier.
@@ -601,5 +701,40 @@ mod tests {
 		assert_eq!(cached.frames.len(), 1);
 		assert_eq!(cached.frames[0].timestamp, None);
 		assert_eq!(Group::read(cached.produce(None).unwrap()).await.unwrap(), cached);
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn spills_to_disk_and_fetches_back() {
+		use object_store::memory::InMemory;
+		use object_store::path::Path;
+
+		// RAM keeps ~1 group (flush over 250 bytes, down to 100); disk is unbounded so it keeps
+		// everything it is handed.
+		let disk = Disk::new(Arc::new(InMemory::new()), Path::from("cache"), Bounds::default());
+		let mut config = Config::new(Bounds::new(Limit::bytes(100), Limit::bytes(250)));
+		config.disk = Some(disk);
+
+		let mut producer = config.produce();
+		let consumer = producer.consume();
+
+		for seq in 0..5 {
+			producer.insert(plain(seq, 100));
+		}
+
+		// The oldest group was evicted from RAM and flushed to disk by the background task.
+		let mut from_disk = None;
+		for _ in 0..200 {
+			if let Some(group) = consumer.fetch(0).await {
+				from_disk = Some(group);
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+
+		assert!(consumer.get(0).is_none(), "group 0 is no longer in the RAM tier");
+		assert_eq!(from_disk.expect("group 0 fetched from disk").sequence, 0);
+		// A recent group is still served from RAM.
+		assert!(consumer.fetch(4).await.is_some());
 	}
 }

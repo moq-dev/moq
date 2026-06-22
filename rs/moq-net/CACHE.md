@@ -17,10 +17,17 @@
 > - the **disk/remote tier I/O** (`store.rs`, native-only via target-gating): `cache::store::Store`
 >   over an `object_store` disk tier and optional remote tier. `flush` encodes a band and `put`s it
 >   as a disk segment; `get` ranged-reads a located blob; `compact` rolls the oldest disk segments
->   up into one remote object (or evicts them with no remote), driven by the index.
+>   up into one remote object (or evicts them with no remote), driven by the index;
+> - the **tier wiring**: `cache::Config` carries an optional `disk: Disk` tier (an `object_store`,
+>   a key prefix, bounds, and an optional remote rollup store; native-only). `Config::produce`
+>   spawns a background task that flushes RAM-evicted bands to the disk tier, and
+>   `Consumer::fetch` (async) reads across RAM -> disk -> remote (`Consumer::get` stays a sync
+>   RAM-only lookup).
 >
-> Still design: removing the wire field `TrackInfo.cache`, and threading a `CacheConfig` onto the
-> tracks a relay auto-creates (the Origin follow-up). Targets `dev`.
+> Still design: removing the wire field `TrackInfo.cache`; threading a `Config` onto the tracks a
+> relay auto-creates (the Origin follow-up); and serving disk/remote through a track's
+> `fetch_group` (today the sync track API serves RAM; the relay serve loop uses `Consumer::fetch`
+> for the lower tiers). Targets `dev`.
 
 A per-track group cache. It lets a relay or edge retain recent groups past the live window and
 serve them back on a FETCH, optionally spilling to local disk or remote object storage. It lives
@@ -63,8 +70,18 @@ Per track, on both size and duration, whichever trips first:
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-    pub ram: Bounds,                // keep >= min in RAM; flush the band once > max
-    // forthcoming: disk + remote tiers (object_store, feature-gated) and an interval backstop.
+    pub ram: Bounds,                            // keep >= min in RAM; flush the band once > max
+    #[cfg(not(target_arch = "wasm32"))]
+    pub disk: Option<Disk>,                     // optional spill tier (native-only)
+}
+
+/// The disk spill tier: an object store, key prefix, bounds, and an optional remote rollup store.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Disk {
+    pub store: Arc<dyn object_store::ObjectStore>,
+    pub prefix: object_store::path::Path,
+    pub bounds: Bounds,                         // disk retention; over it rolls up to `remote`
+    pub remote: Option<Arc<dyn object_store::ObjectStore>>,
 }
 
 /// A low/high watermark. The gap (max - min) is the flush batch size.
@@ -75,17 +92,12 @@ pub struct Bounds { pub min: Limit, pub max: Limit }
 pub struct Limit { pub duration: Option<Duration>, pub bytes: Option<u64> }
 ```
 
-The implemented `cache::Config` has only `ram` so far (it is `#[non_exhaustive]`, so adding
-`disk` / `remote` / `interval` later is additive). The forthcoming tier shape:
+`Config::produce()` builds the RAM tier and, when `disk` is set, spawns a background task that
+flushes evicted bands to it. `Producer::insert` hands evicted bands to that task; `Consumer::fetch`
+(async) reads RAM then disk then remote. An `interval` flush backstop is still a possible addition
+(the `#[non_exhaustive]` Config keeps it additive).
 
-```rust
-// forthcoming
-pub struct Tier { pub store: /* path or url */ (), pub bounds: Bounds }
-// Config gains: disk: Option<Tier>, remote: Option<Tier>, interval: Option<Duration>
-```
-
-The flush batch is implicitly `max - min`, so the bounds map straight onto the tiering the
-archive doc describes:
+The flush batch is implicitly `max - min`, so the bounds map straight onto the tiering:
 
 | Want | Set |
 |---|---|
@@ -174,16 +186,15 @@ writer.insert(group);            // -> Option<Batch> (band to persist to the nex
 reader.get(sequence);            // -> Option<cache::Group>
 ```
 
-The forthcoming track wiring hands each endpoint the matching half:
+The track wiring hands each endpoint the matching half:
 
 ```rust
-// forthcoming
 impl TrackProducer {
-    /// Fill `cache` with groups this producer creates and serve them on a miss.
+    /// Fill `cache` with groups this producer creates (spawns a populate subscriber).
     pub fn with_cache(self, cache: cache::Producer) -> Self;
 }
 impl TrackConsumer {
-    /// Back fetch_group / get_group with `cache`: hits resolve locally.
+    /// Back fetch_group / get_group with `cache`: RAM hits resolve locally.
     pub fn with_cache(self, cache: cache::Consumer) -> Self;
 }
 ```
