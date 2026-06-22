@@ -502,6 +502,93 @@ async fn export_scte35_roundtrip() {
 	);
 }
 
+/// PES-framed verbatim round-trip: import `bbb.ts` (real H.264 + AAC, whose video
+/// supplies the media clock the exporter needs) alongside a private PES-framed
+/// stream (stream_type 0x06) carried verbatim, export to TS, then re-import and
+/// assert the PID, framing, stream_id, and payload all survive. Exercises the
+/// exporter's PES re-emit path; `private_pes_carried_verbatim` only covers import.
+#[tokio::test(start_paused = true)]
+async fn export_pes_verbatim_roundtrip() {
+	const DATA_PID: u16 = 0x104;
+	const STREAM_ID: u8 = 0xc0;
+	const PAYLOAD: &[u8] = &[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02];
+
+	let data = include_bytes!("test_data/bbb.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// Build the verbatim PES track BEFORE moving `broadcast` into `Import`; the
+	// producer stays alive so the exporter can subscribe to the retained track.
+	let data_track = broadcast.unique_track(".data").unwrap();
+	let data_name = data_track.name.clone();
+	{
+		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
+		verbatim.stream_id = Some(STREAM_ID);
+		let mut track = tscat::Track::new(DATA_PID);
+		track.verbatim = Some(verbatim);
+		catalog.lock().mpegts.tracks.insert(data_name.clone(), track);
+	}
+	let mut data_producer = Producer::new(data_track, HangContainer::Legacy);
+	data_producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(40).unwrap(),
+			payload: Bytes::from_static(PAYLOAD),
+			keyframe: true,
+		})
+		.unwrap();
+	data_producer.finish_group().unwrap();
+	data_producer.finish().unwrap();
+
+	// Real video/audio supplies the media clock (moves `broadcast`).
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	// `import`, `catalog`, and `data_producer` stay alive: retained tracks.
+	let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
+	assert_packet_aligned(&ts);
+
+	// Re-import the exported TS and recover the verbatim PES stream.
+	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let consumer2 = broadcast2.consume();
+	let catalog2 =
+		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let snapshot = catalog2.snapshot();
+	let (name, track) = snapshot
+		.mpegts
+		.tracks
+		.iter()
+		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x06))
+		.expect("verbatim PES survived the round-trip");
+	assert_eq!(track.pid, DATA_PID, "PES PID preserved");
+	let verbatim = track.verbatim.as_ref().unwrap();
+	assert_eq!(verbatim.framing, tscat::Framing::Pes, "PES framing preserved");
+	assert_eq!(verbatim.stream_id, Some(STREAM_ID), "PES stream_id preserved");
+	let name = name.clone();
+
+	let track = consumer2.subscribe_track(&moq_net::Track::new(name)).unwrap();
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let frame = reader
+		.read()
+		.await
+		.unwrap()
+		.expect("no verbatim PES frame after round-trip");
+	assert_eq!(
+		frame.payload.as_ref(),
+		PAYLOAD,
+		"verbatim PES payload round-trips byte-for-byte"
+	);
+}
+
 // SCTE-35 cues are clocked on video, so the exporter rejects a cue program with no video
 // track rather than emitting cues pinned to zero.
 #[tokio::test(start_paused = true)]
