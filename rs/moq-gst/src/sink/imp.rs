@@ -59,8 +59,9 @@ struct State {
 impl State {
 	/// Import one popped buffer into its pad's producer, building the producer lazily from the pad's
 	/// current caps. Per-pad failures (bad caps/bitstream, oversized frame) drop quietly; only a buffer we
-	/// cannot even map is surfaced as an error.
-	fn write_buffer(&mut self, agg_pad: &gst_base::AggregatorPad, buffer: gst::Buffer) -> Result<(), gst::FlowError> {
+	/// cannot even map is surfaced as an error. Returns `true` the first time the pad drops a buffer for
+	/// lack of a TIME segment, so the caller can surface that once on the bus.
+	fn write_buffer(&mut self, agg_pad: &gst_base::AggregatorPad, buffer: gst::Buffer) -> Result<bool, gst::FlowError> {
 		let caps = agg_pad.current_caps();
 		let segment = agg_pad.segment();
 		let pts = buffer.pts();
@@ -79,14 +80,13 @@ impl State {
 		} = self;
 		let pad = pads.entry(agg_pad.name().to_string()).or_insert_with(Pad::new);
 		if pad.is_failed() {
-			return Ok(());
+			return Ok(false);
 		}
 		if let (Some(caps), Some(catalog)) = (caps.as_ref(), catalog.as_ref()) {
 			pad.observe_caps(broadcast, catalog, caps);
 		}
 		pad.observe_segment(segment);
-		pad.push_buffer(data, pts);
-		Ok(())
+		Ok(pad.push_buffer(data, pts))
 	}
 
 	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent: a finalized
@@ -341,28 +341,47 @@ impl AggregatorImpl for MoqSink {
 
 		let sink_pads = self.obj().sink_pads();
 		let mut all_ended = !sink_pads.is_empty();
+		// Pads that produced buffers with no TIME segment; reported once each, off the lock.
+		let mut no_segment_pads: Vec<glib::GString> = Vec::new();
 		for pad in &sink_pads {
 			let agg_pad = pad
 				.downcast_ref::<gst_base::AggregatorPad>()
 				.expect("sink pad is an AggregatorPad");
 			while let Some(buffer) = agg_pad.pop_buffer() {
-				state.write_buffer(agg_pad, buffer)?;
+				if state.write_buffer(agg_pad, buffer)? {
+					no_segment_pads.push(agg_pad.name());
+				}
 			}
 			if !agg_pad.is_eos() {
 				all_ended = false;
 			}
 		}
 
-		if !all_ended {
-			return Ok(gst::FlowSuccess::Ok);
-		}
-
-		// Every pad has ended: finalize once, then post the element EOS off the lock.
-		let result = state.finalize_all();
-		let post = !state.eos_posted;
-		state.eos_posted = true;
+		// Finalize once if every pad has ended; capture the outcome to act on after releasing the lock.
+		let eos = all_ended.then(|| {
+			let result = state.finalize_all();
+			let post = !state.eos_posted;
+			state.eos_posted = true;
+			(result, post)
+		});
 		drop(guard);
 
+		// Strict timeline (no raw-PTS fallback): a pad with no TIME segment publishes nothing, so say so
+		// once on the bus rather than dropping every buffer in silence.
+		for pad in no_segment_pads {
+			gst::element_warning!(
+				self.obj(),
+				gst::StreamError::Format,
+				(
+					"pad {} received buffers with no TIME segment; nothing is published for it",
+					pad
+				)
+			);
+		}
+
+		let Some((result, post)) = eos else {
+			return Ok(gst::FlowSuccess::Ok);
+		};
 		match result {
 			Ok(order) => {
 				gst::debug!(CAT, "finalized on EOS: {order:?}");

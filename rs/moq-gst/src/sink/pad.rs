@@ -36,6 +36,9 @@ pub struct Pad {
 	segment_info: Option<SegmentInfo>,
 	/// Kept only to map a buffer PTS to a running time.
 	segment: Option<gst::FormattedSegment<gst::ClockTime>>,
+	/// Set once we have surfaced "buffers but no TIME segment" on the bus, so it is reported once per
+	/// pad rather than per dropped frame.
+	no_segment_reported: bool,
 }
 
 impl Pad {
@@ -47,6 +50,7 @@ impl Pad {
 			state: PadState::NoSegment,
 			segment_info: None,
 			segment: None,
+			no_segment_reported: false,
 		}
 	}
 
@@ -198,24 +202,34 @@ impl Pad {
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline
 	/// drop is logged. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this
 	/// pad.
-	pub fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) {
+	/// Returns `true` the first time a buffer is dropped because the pad has no TIME segment, so the
+	/// caller can surface it once on the bus: without a timeline the pad can never publish.
+	pub fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) -> bool {
 		if self.failed {
-			return;
+			return false;
 		}
 		let timestamp = self.frame_timestamp(pts);
-		let Some(framed) = self.framed.as_mut() else {
+		if self.framed.is_none() {
 			gst::warning!(CAT, "dropping buffer received before caps");
-			return;
-		};
+			return false;
+		}
 		match timestamp {
 			Ok(micros) => {
 				let ts = hang::container::Timestamp::from_micros(micros).ok();
+				let framed = self.framed.as_mut().expect("framed present");
 				if let Err(err) = framed.decode_frame(&mut data, ts) {
 					gst::warning!(CAT, "invalidating pad: {err}");
 					self.fail();
 				}
+				false
 			}
-			Err(reason) => gst::warning!(CAT, "dropping frame: {reason}"),
+			Err(reason) => {
+				gst::warning!(CAT, "dropping frame: {reason}");
+				// A pad stuck in NoSegment has no timeline and will never publish; report it once.
+				let first = self.state == PadState::NoSegment && !self.no_segment_reported;
+				self.no_segment_reported |= first;
+				first
+			}
 		}
 	}
 
@@ -342,6 +356,25 @@ mod tests {
 			.build();
 		pad.observe_caps(&broadcast, &catalog, &caps);
 		assert!(pad.is_failed(), "AAC without codec_data fails the pad");
+	}
+
+	// A pad with caps but no TIME segment drops buffers and reports the missing timeline exactly once,
+	// so the element surfaces it on the bus instead of dropping every frame in silence.
+	#[test]
+	fn no_time_segment_reports_once() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &h264_caps());
+		// No observe_segment: the pad stays in NoSegment.
+		assert!(
+			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			"first no-segment buffer is reported"
+		);
+		assert!(
+			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			"subsequent no-segment buffers are not re-reported"
+		);
 	}
 
 	// An unsupported media type fails the pad rather than the session.
