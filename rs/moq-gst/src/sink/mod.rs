@@ -7,6 +7,8 @@ mod session;
 mod timeline;
 
 glib::wrapper! {
+	/// The `moqsink` element: publishes its `sink_%u` pads as a single MoQ broadcast. Built on
+	/// `GstAggregator`, which owns the per-pad queues and FLUSH/EOS handling.
 	pub struct MoqSink(ObjectSubclass<imp::MoqSink>) @extends gst_base::Aggregator, gst::Element, gst::Object;
 }
 

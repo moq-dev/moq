@@ -148,16 +148,20 @@ impl Pad {
 	/// `Invalid` re-anchor from scratch on the next valid one.
 	pub(super) fn observe_segment(&mut self, segment: gst::Segment) {
 		let info = segment_info(&segment);
-		if self.state == PadState::Active && self.segment_info == Some(info) {
+		// Re-observing the exact segment we last classified is a no-op. observe_segment runs on every
+		// buffer (the segment is sticky), so without this an Invalidated pad would re-anchor on the next
+		// buffer (Invalid -> prev=None -> classify accepts) and silently recover on the same rewound
+		// segment. Recording `info` even on reject is what makes this hold.
+		if self.segment_info == Some(info) {
 			return;
 		}
 		let prev = match self.state {
-			PadState::Active => self.segment_info.as_ref(),
+			PadState::Active => self.segment_info,
 			PadState::NoSegment | PadState::Invalid => None,
 		};
-		match classify_segment(prev, &info) {
+		self.segment_info = Some(info);
+		match classify_segment(prev.as_ref(), &info) {
 			SegmentDecision::Accept => {
-				self.segment_info = Some(info);
 				self.segment = segment.downcast::<gst::ClockTime>().ok();
 				self.state = PadState::Active;
 			}
@@ -506,6 +510,28 @@ mod tests {
 
 		pad.observe_segment(time_segment_at(0, 10_000));
 		assert_eq!(pad.state, PadState::Active, "a valid SEGMENT re-anchors");
+	}
+
+	// observe_segment runs on every buffer, so a sticky rewound segment is re-observed repeatedly. Once
+	// it has invalidated the pad, re-seeing the SAME segment must keep it Invalid (not flap back to
+	// Active); only a genuinely new, valid SEGMENT recovers it.
+	#[test]
+	fn invalidated_pad_stays_invalid_on_a_resent_segment() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.observe_segment(time_segment_at(0, 5_000));
+		assert_eq!(pad.state, PadState::Active);
+
+		pad.observe_segment(time_segment_at(0, 0));
+		assert_eq!(pad.state, PadState::Invalid);
+
+		// The same rewound segment, as the next buffer would carry it, must not recover the pad.
+		pad.observe_segment(time_segment_at(0, 0));
+		assert_eq!(pad.state, PadState::Invalid, "a re-sent rewound segment keeps dropping");
+		assert!(matches!(
+			pad.frame_timestamp(Some(gst::ClockTime::ZERO)),
+			FrameDecision::Drop(_)
+		));
 	}
 
 	// FLUSH re-anchors to NoSegment, so a rewinding post-flush segment is accepted fresh, not rejected.
