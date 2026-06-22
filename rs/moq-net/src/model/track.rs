@@ -1080,20 +1080,27 @@ impl TrackConsumer {
 		match state.poll_fetch(sequence) {
 			// Cached live: the pending resolves immediately from state, no lookup needed.
 			Poll::Ready(Ok(_)) => {}
-			// Live miss. If a durable cache is attached, spawn an async lookup across its
-			// disk/remote tiers; the returned `TrackFetch` resolves from it on a hit and falls
-			// through to the live decision on a miss.
+			// Live miss. If a durable cache is attached and the group could still exist, spawn an
+			// async lookup across its disk/remote tiers. The returned `TrackFetch` resolves from it
+			// on a hit; on a miss the lookup task chains upstream (queues for a `TrackDynamic`) and
+			// the fetch falls through to that live decision.
 			other => {
 				#[cfg(not(target_arch = "wasm32"))]
-				if let Some(tiers) = &state.cache {
-					let timescale = state.info.as_ref().and_then(|info| info.timescale);
-					let lookup = spawn_cache_lookup(tiers, sequence, timescale);
-					drop(state);
-					return Ok(kio::Pending::new(TrackFetch {
-						state: self.state.clone(),
-						sequence,
-						lookup: Some(lookup),
-					}));
+				{
+					// A group past the final sequence can never exist in any tier, and an aborted
+					// track is terminal, so skip the cache and report those synchronously below.
+					let exhausted = state.abort.is_some() || state.final_sequence.is_some_and(|fin| sequence >= fin);
+					if !exhausted && let Some(tiers) = &state.cache {
+						let timescale = state.info.as_ref().and_then(|info| info.timescale);
+						let lookup =
+							spawn_cache_lookup(tiers, self.state.clone(), sequence, options.priority, timescale);
+						drop(state);
+						return Ok(kio::Pending::new(TrackFetch {
+							state: self.state.clone(),
+							sequence,
+							lookup: Some(lookup),
+						}));
+					}
 				}
 				match other {
 					// Unservable (NotFound) or already aborted: report it synchronously.
@@ -1251,8 +1258,19 @@ enum CacheLookup {
 
 /// Spawn a background task that reads `sequence` from the cache's disk/remote tiers, rebuilds it at
 /// `timescale`, and publishes the result through the returned slot.
+///
+/// On a tier miss the task chains upstream: it queues the request for a [`TrackDynamic`] (a wire
+/// FETCH for a relay) when one exists, so the [`TrackFetch`] then resolves once upstream serves it.
+/// Queuing only after the store misses keeps the store the fast path and avoids a redundant
+/// upstream fetch when the group is already cached.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_cache_lookup(tiers: &cache::Tiers, sequence: u64, timescale: Option<Timescale>) -> kio::Consumer<CacheLookup> {
+fn spawn_cache_lookup(
+	tiers: &cache::Tiers,
+	state: kio::Consumer<TrackState>,
+	sequence: u64,
+	priority: u8,
+	timescale: Option<Timescale>,
+) -> kio::Consumer<CacheLookup> {
 	let slot = kio::Producer::new(CacheLookup::Pending);
 	let consumer = slot.consume();
 	let store = tiers.store_handle();
@@ -1262,6 +1280,13 @@ fn spawn_cache_lookup(tiers: &cache::Tiers, sequence: u64, timescale: Option<Tim
 			// Miss, tier read error, or rebuild failure: report a miss so the fetch falls through.
 			Ok(None) | Err(_) => None,
 		};
+		if group.is_none()
+			&& let Ok(mut state) = state.write()
+			&& state.dynamic > 0
+		{
+			// Cache miss: chain upstream so a handler fetches the group into the live window.
+			state.fetches.push_back(GroupRequested { sequence, priority });
+		}
 		if let Ok(mut slot) = slot.write() {
 			*slot = CacheLookup::Done(group);
 		}
@@ -1814,6 +1839,44 @@ mod test {
 			group.read_frame().await.unwrap().unwrap(),
 			bytes::Bytes::from_static(b"hello")
 		);
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn fetch_chains_upstream_on_cache_miss() {
+		// A group that is neither live nor in the cache must still reach a TrackDynamic: the cache
+		// miss chains upstream rather than dead-ending in NotFound.
+		let producer = disk_cached_producer();
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let fetch = consumer.fetch_group(5, None).unwrap();
+
+		// The async cache miss queues the request, which the handler then receives and serves.
+		let request = dynamic.requested_group().await.unwrap();
+		assert_eq!(request.sequence(), 5);
+		let mut group = request.accept(None).unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"upstream")).unwrap();
+		group.finish().unwrap();
+
+		let mut served = fetch.await.unwrap();
+		assert_eq!(served.sequence, 5);
+		assert_eq!(
+			served.read_frame().await.unwrap().unwrap(),
+			bytes::Bytes::from_static(b"upstream")
+		);
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[tokio::test]
+	async fn fetch_cache_miss_without_dynamic_is_not_found() {
+		// A cache miss with no handler to chain to resolves NotFound, not a hang.
+		let producer = disk_cached_producer();
+		let consumer = producer.consume();
+		assert!(matches!(
+			consumer.fetch_group(5, None).unwrap().await,
+			Err(Error::NotFound)
+		));
 	}
 
 	#[tokio::test]

@@ -68,12 +68,18 @@ flush task:                                 (one background task per cached trac
 fetch_group(seq):
     live hit in `groups`                 -> serve immediately
     live miss, cache attached            -> spawn an async disk/remote lookup; a hit
-                                            resolves the fetch, a miss falls through
+                                            resolves the fetch, a miss chains upstream
+                                            (queues for a TrackDynamic), else NotFound
     live miss, no cache                  -> queue for a TrackDynamic, or NotFound
 ```
 
 `get_group(seq)` stays synchronous and only consults the live window; a spilled group is reachable
 only through the async `fetch_group`.
+
+On a tier miss the lookup task chains upstream: it queues the request for a `TrackDynamic` (a wire
+FETCH for a relay) when one exists, so the fetch then resolves once upstream serves the group into
+the live window. Queuing only *after* the store misses keeps the store the fast path and avoids a
+redundant upstream fetch when the group is already cached. With no handler, a miss is `NotFound`.
 
 Batching the disk write per eviction pass keeps a stampede-trim (many groups evicted at once) to a
 single object. A steady-state single eviction still writes one small disk segment per group; the
@@ -104,9 +110,6 @@ window above.
 
 ## Still design
 
-- **Disk-then-upstream fetch.** A track with a disk cache serves old content from the store; it
-  does not also chain to a `TrackDynamic` (wire FETCH) on a store miss. A relay that wants "disk,
-  then upstream" would queue the dynamic fetch after the store lookup misses; additive later.
 - **Removing `TrackInfo::cache`.** The retention window is still read from the wire-carried
   `TrackInfo::cache`. Making retention purely local policy (and dropping the wire field) is a
   separate wire change.
