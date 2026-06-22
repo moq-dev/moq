@@ -197,9 +197,12 @@ impl GroupProducer {
 		Ok(())
 	}
 
-	/// Create a frame with an upfront size
+	/// Create a frame with an upfront size.
+	///
+	/// Returns [`Error::FrameTooLarge`] if the declared size exceeds the per-frame
+	/// limit, refused before the buffer is allocated.
 	pub fn create_frame(&mut self, info: impl Into<Frame>) -> Result<FrameProducer> {
-		let frame = info.into().produce();
+		let frame = info.into().produce()?;
 		self.append_frame(frame.clone())?;
 		Ok(frame)
 	}
@@ -741,5 +744,14 @@ mod test {
 		let mut writer = producer.create_frame(frame).unwrap();
 		writer.write(Bytes::from_static(b"x")).unwrap();
 		writer.finish().unwrap();
+	}
+
+	/// The per-frame size cap is enforced at allocation, so create_frame surfaces
+	/// it as FrameTooLarge before allocating the buffer.
+	#[test]
+	fn create_frame_rejects_oversized() {
+		let mut producer = Group { sequence: 0 }.produce();
+		let result = producer.create_frame(crate::MAX_FRAME_SIZE + 1);
+		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
 }
