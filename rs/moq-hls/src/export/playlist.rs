@@ -14,7 +14,13 @@ use super::store::Snapshot;
 const VERSION: u32 = 9;
 
 /// Render a media playlist for one rendition from a [`Snapshot`].
-pub fn render_media(snapshot: &Snapshot) -> String {
+///
+/// `query` is appended to every URI (init, parts, segments, preload hint) so a
+/// token-gated player carries the token onto each sub-request; pass `None` for
+/// public broadcasts. See [`super::query_suffix`].
+pub fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
+	let q = super::query_suffix(query);
+
 	// TARGETDURATION must be >= the longest *complete* segment (rounded up), and
 	// at least the part target so a part-only edge still produces a sane value.
 	let max_segment = snapshot
@@ -39,20 +45,20 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 	);
 	let _ = writeln!(out, "#EXT-X-PART-INF:PART-TARGET={:.3}", snapshot.part_target);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
-	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
+	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4{q}\"");
 
 	for segment in &snapshot.segments {
 		for (index, part) in segment.parts.iter().enumerate() {
 			let independent = if part.independent { ",INDEPENDENT=YES" } else { "" };
 			let _ = writeln!(
 				out,
-				"#EXT-X-PART:DURATION={:.5},URI=\"part/{}/{}.m4s\"{}",
-				part.duration, segment.sequence, index, independent
+				"#EXT-X-PART:DURATION={:.5},URI=\"part/{}/{}.m4s{}\"{}",
+				part.duration, segment.sequence, index, q, independent
 			);
 		}
 		if segment.complete {
 			let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
-			let _ = writeln!(out, "seg/{}.m4s", segment.sequence);
+			let _ = writeln!(out, "seg/{}.m4s{}", segment.sequence, q);
 		}
 	}
 
@@ -64,7 +70,10 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 			Some(last) if !last.complete => (last.sequence, last.parts.len()),
 			_ => (snapshot.next_sequence, 0),
 		};
-		let _ = writeln!(out, "#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part/{sequence}/{index}.m4s\"");
+		let _ = writeln!(
+			out,
+			"#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part/{sequence}/{index}.m4s{q}\""
+		);
 	}
 
 	out
@@ -103,7 +112,7 @@ mod tests {
 			finished: false,
 		};
 
-		let out = render_media(&snapshot);
+		let out = render_media(&snapshot, None);
 
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
 		assert!(out.contains("#EXT-X-TARGETDURATION:1\n"));
@@ -140,8 +149,48 @@ mod tests {
 			finished: true,
 		};
 
-		let out = render_media(&snapshot);
+		let out = render_media(&snapshot, None);
 		assert!(out.contains("#EXT-X-ENDLIST\n"));
 		assert!(!out.contains("#EXT-X-PRELOAD-HINT"));
+	}
+
+	#[test]
+	fn appends_token_to_uris() {
+		let snapshot = Snapshot {
+			init_ready: true,
+			part_target: 0.5,
+			media_sequence: 0,
+			next_sequence: 1,
+			segments: vec![SegmentMeta {
+				sequence: 0,
+				parts: vec![part(0.5, true)],
+				duration: 0.5,
+				complete: false,
+			}],
+			finished: false,
+		};
+
+		let out = render_media(&snapshot, Some("jwt=abc"));
+		// init, parts and the live-edge preload hint all carry the token.
+		assert!(out.contains("#EXT-X-MAP:URI=\"init.mp4?jwt=abc\""));
+		assert!(out.contains("URI=\"part/0/0.m4s?jwt=abc\""));
+		assert!(out.contains("#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part/0/1.m4s?jwt=abc\""));
+
+		// A completed segment carries it on the bare segment line too.
+		let finished = Snapshot {
+			init_ready: true,
+			part_target: 0.5,
+			media_sequence: 0,
+			next_sequence: 1,
+			segments: vec![SegmentMeta {
+				sequence: 0,
+				parts: vec![part(0.5, true)],
+				duration: 0.5,
+				complete: true,
+			}],
+			finished: true,
+		};
+		let out = render_media(&finished, Some("jwt=abc"));
+		assert!(out.contains("\nseg/0.m4s?jwt=abc\n"));
 	}
 }

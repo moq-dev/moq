@@ -21,4 +21,4 @@ pub mod server;
 
 pub use error::*;
 #[cfg(feature = "server")]
-pub use server::Server;
+pub use server::{AuthFuture, AuthRejected, Authorizer, Server};

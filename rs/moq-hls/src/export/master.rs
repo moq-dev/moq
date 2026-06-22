@@ -26,7 +26,11 @@ pub struct AudioVariant {
 }
 
 /// Render the multivariant playlist. The first audio rendition is marked default.
-pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
+///
+/// `query` is appended to each rendition's media-playlist URI (see
+/// [`super::query_suffix`]) so a token-gated player carries the token forward.
+pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant], query: Option<&str>) -> String {
+	let q = super::query_suffix(query);
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
@@ -36,7 +40,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 		let default = if index == 0 { "YES" } else { "NO" };
 		let _ = writeln!(
 			out,
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{AUDIO_GROUP}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/media.m3u8\"",
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{AUDIO_GROUP}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/media.m3u8{q}\"",
 			variant.name, variant.name
 		);
 	}
@@ -59,7 +63,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 			let _ = write!(line, ",AUDIO=\"{AUDIO_GROUP}\"");
 		}
 		let _ = writeln!(out, "{line}");
-		let _ = writeln!(out, "{}/media.m3u8", variant.name);
+		let _ = writeln!(out, "{}/media.m3u8{q}", variant.name);
 	}
 
 	// Audio-only broadcast: still expose a playable variant per audio rendition.
@@ -70,7 +74,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 				"#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"",
 				variant.bandwidth, variant.codec
 			);
-			let _ = writeln!(out, "{}/media.m3u8", variant.name);
+			let _ = writeln!(out, "{}/media.m3u8{q}", variant.name);
 		}
 	}
 
@@ -96,7 +100,7 @@ mod tests {
 			codec: "mp4a.40.2".into(),
 		}];
 
-		let out = render_master(&video, &audio);
+		let out = render_master(&video, &audio, None);
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
 		assert!(out.contains(
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/media.m3u8\"\n"
@@ -114,8 +118,28 @@ mod tests {
 			bandwidth: 128_000,
 			codec: "opus".into(),
 		}];
-		let out = render_master(&[], &audio);
+		let out = render_master(&[], &audio, None);
 		assert!(out.contains("#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"opus\"\n"));
 		assert!(out.contains("\naudio/media.m3u8\n"));
+	}
+
+	#[test]
+	fn appends_token_to_rendition_uris() {
+		let video = vec![VideoVariant {
+			name: "video".into(),
+			bandwidth: 2_500_000,
+			width: Some(1280),
+			height: Some(720),
+			codec: "avc1.42c01f".into(),
+		}];
+		let audio = vec![AudioVariant {
+			name: "audio".into(),
+			bandwidth: 128_000,
+			codec: "mp4a.40.2".into(),
+		}];
+		let out = render_master(&video, &audio, Some("jwt=abc"));
+		// Both the audio EXT-X-MEDIA URI and the bare video variant line carry it.
+		assert!(out.contains("URI=\"audio/media.m3u8?jwt=abc\""));
+		assert!(out.contains("\nvideo/media.m3u8?jwt=abc\n"));
 	}
 }

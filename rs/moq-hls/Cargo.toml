@@ -19,24 +19,39 @@ doctest = false
 name = "moq-hls"
 path = "bin/moq-hls.rs"
 doc = false
-# The binary (and the HTTP export server) need the `server` feature; the library
-# can be depended on with `default-features = false` for import only (e.g. moq-cli).
-required-features = ["server"]
+# The standalone binary needs the `binary` feature (CLI + HTTP serve + TLS +
+# relay client). The library can be embedded with just `server` (Server +
+# router(), axum only), or `default-features = false` for import only (e.g. moq-cli).
+required-features = ["binary"]
 
 [features]
-default = ["server", "iroh", "quinn", "websocket"]
-# HTTP export server + the moq-hls binary. Pulls in axum / moq-native / clap.
-server = ["dep:axum", "dep:axum-server", "dep:clap", "dep:humantime", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tower-http"]
-iroh = ["server", "moq-native/iroh"]
-quinn = ["server", "moq-native/quinn"]
-quiche = ["server", "moq-native/quiche"]
-websocket = ["server", "moq-native/websocket"]
+default = ["binary", "iroh", "quinn", "websocket"]
+# Embeddable HLS export server library (`Server` + `router()`): axum only, so a
+# host (e.g. moq-edge) can mount it without the standalone binary's deps.
+server = ["dep:axum"]
+# The standalone `moq-hls` binary: CLI, HTTP serving, TLS, and a relay client.
+# Implies the server library.
+binary = [
+	"server",
+	"dep:axum-server",
+	"dep:clap",
+	"dep:humantime",
+	"dep:moq-native",
+	"dep:rustls",
+	"dep:sd-notify",
+	"dep:tower-http",
+]
+iroh = ["binary", "moq-native/iroh"]
+quinn = ["binary", "moq-native/quinn"]
+quiche = ["binary", "moq-native/quiche"]
+websocket = ["binary", "moq-native/websocket"]
 
 [dependencies]
 # Always required (import + export library).
 anyhow = { version = "1", features = ["backtrace"] }
 
-# Only needed by the HTTP export server / binary (gated by `server`).
+# `axum` powers the embeddable server library (`server`); the rest below are
+# binary-only (`binary`): HTTP serve, CLI, TLS, and the relay client.
 axum = { version = "0.8", features = ["tokio"], optional = true }
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 bytes = "1"

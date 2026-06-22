@@ -7,7 +7,7 @@ use moq_mux::catalog::{self, CatalogFormat, Filter, FilterAudio, FilterVideo};
 use moq_mux::container::fmp4::Export;
 
 use super::Config;
-use super::store::SegmentStore;
+use super::store::{Role, SegmentClock, SegmentStore};
 use crate::Result;
 
 /// Fallback advertised bitrates when the catalog doesn't carry one.
@@ -34,9 +34,18 @@ pub struct Rendition {
 }
 
 impl Rendition {
-	pub fn video(name: String, config: &VideoConfig, broadcast: moq_net::BroadcastConsumer, cfg: &Config) -> Self {
+	pub fn video(
+		name: String,
+		config: &VideoConfig,
+		broadcast: moq_net::BroadcastConsumer,
+		cfg: &Config,
+		role: Role,
+		clock: Arc<SegmentClock>,
+	) -> Self {
 		let store = Arc::new(SegmentStore::new(
+			role,
 			true,
+			clock,
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
@@ -53,9 +62,17 @@ impl Rendition {
 		}
 	}
 
-	pub fn audio(name: String, config: &AudioConfig, broadcast: moq_net::BroadcastConsumer, cfg: &Config) -> Self {
+	pub fn audio(
+		name: String,
+		config: &AudioConfig,
+		broadcast: moq_net::BroadcastConsumer,
+		cfg: &Config,
+		clock: Arc<SegmentClock>,
+	) -> Self {
 		let store = Arc::new(SegmentStore::new(
+			Role::Follower,
 			false,
+			clock,
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),

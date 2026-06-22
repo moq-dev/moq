@@ -22,6 +22,15 @@ use tokio::sync::watch;
 pub use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 
+/// The query string to append to every playlist URI, so token-gated sub-requests
+/// (media playlists, segments, parts, init) carry the auth token: `?{query}` when
+/// present, else empty. Export URIs never carry a query of their own, so it's
+/// always a fresh `?`. Pass `None` for public broadcasts (and the auth-less
+/// standalone binary).
+fn query_suffix(query: Option<&str>) -> String {
+	query.map(|q| format!("?{q}")).unwrap_or_default()
+}
+
 /// Export tuning shared across renditions.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -54,6 +63,12 @@ pub struct Broadcaster {
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
+	/// Shared segment-boundary timeline: the primary video publishes boundaries
+	/// and the others align to them (see [`store::SegmentClock`]).
+	clock: Arc<store::SegmentClock>,
+	/// Name of the rendition designated the alignment leader (the primary video),
+	/// assigned once so it stays stable as the catalog updates.
+	leader: Mutex<Option<String>>,
 }
 
 impl Broadcaster {
@@ -63,6 +78,8 @@ impl Broadcaster {
 		let broadcaster = Arc::new(Self {
 			renditions: Mutex::new(BTreeMap::new()),
 			ready,
+			clock: store::SegmentClock::new(),
+			leader: Mutex::new(None),
 		});
 		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
 		broadcaster
@@ -90,7 +107,11 @@ impl Broadcaster {
 	}
 
 	/// Render the multivariant (master) playlist from the current renditions.
-	pub fn master_playlist(&self) -> String {
+	///
+	/// `query` is appended to each rendition's media-playlist URI so a token-gated
+	/// player carries the token onto its sub-requests; pass `None` for public
+	/// broadcasts.
+	pub fn master_playlist(&self, query: Option<&str>) -> String {
 		let renditions = self.renditions.lock().unwrap();
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
@@ -110,22 +131,45 @@ impl Broadcaster {
 				}),
 			}
 		}
-		master::render_master(&video, &audio)
+		master::render_master(&video, &audio, query)
 	}
 
 	/// Add renditions newly present in `catalog`. Renditions are not removed when
 	/// they disappear; their stores simply go stale (rare for a live broadcast).
 	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
+		// Designate one primary video as the alignment leader (deterministically the
+		// first by name), assigned once so it stays stable across catalog updates.
+		let primary = catalog.video.renditions.keys().min().cloned();
+		let mut leader = self.leader.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
-			renditions
-				.entry(name.clone())
-				.or_insert_with(|| Arc::new(Rendition::video(name.clone(), video, broadcast.clone(), config)));
+			renditions.entry(name.clone()).or_insert_with(|| {
+				let role = if leader.is_none() && Some(name) == primary.as_ref() {
+					*leader = Some(name.clone());
+					store::Role::Leader
+				} else {
+					store::Role::Follower
+				};
+				Arc::new(Rendition::video(
+					name.clone(),
+					video,
+					broadcast.clone(),
+					config,
+					role,
+					self.clock.clone(),
+				))
+			});
 		}
 		for (name, audio) in &catalog.audio.renditions {
-			renditions
-				.entry(name.clone())
-				.or_insert_with(|| Arc::new(Rendition::audio(name.clone(), audio, broadcast.clone(), config)));
+			renditions.entry(name.clone()).or_insert_with(|| {
+				Arc::new(Rendition::audio(
+					name.clone(),
+					audio,
+					broadcast.clone(),
+					config,
+					self.clock.clone(),
+				))
+			});
 		}
 		let _ = self.ready.send(renditions.len());
 	}

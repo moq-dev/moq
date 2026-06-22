@@ -67,6 +67,11 @@ pub struct Fragment {
 
 	/// Presentation duration of the fragment in seconds (0 for the init segment).
 	pub duration: f64,
+
+	/// Presentation start time (seconds) of the fragment's earliest sample. 0 for
+	/// the init segment. A segmenting consumer uses this to align segment
+	/// boundaries across renditions (e.g. roll audio when video rolls).
+	pub timestamp: f64,
 }
 
 struct Fmp4Track {
@@ -221,6 +226,7 @@ impl<S: Stream> Export<S> {
 					init: true,
 					independent: false,
 					duration: 0.0,
+					timestamp: 0.0,
 				})));
 			}
 			// Still waiting for codec configs. If every track is finished and
@@ -556,12 +562,21 @@ fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Fragment> 
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
 	let duration = fragment_seconds(&frames, track.default_frame);
+	// Earliest presentation time in the buffered run (frames are in decode order,
+	// so B-frames make the start the min PTS, not the first frame's).
+	let timestamp = frames
+		.iter()
+		.map(|f| Duration::from(f.timestamp))
+		.min()
+		.unwrap_or_default()
+		.as_secs_f64();
 	let data = encode_fragment(track, frames)?;
 	Ok(Fragment {
 		data,
 		init: false,
 		independent,
 		duration,
+		timestamp,
 	})
 }
 
