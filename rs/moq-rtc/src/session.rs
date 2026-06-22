@@ -87,6 +87,9 @@ pub struct Session {
 	/// sessions; pumps send frames here, the main loop forwards them into
 	/// str0m's [`Writer`](str0m::media::Writer).
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
+	/// Rebases each ingested track's raw RTP timestamps onto one session
+	/// timeline so audio and video stay in sync. Unused by egress sessions.
+	clock: IngestClock,
 }
 
 impl Session {
@@ -106,6 +109,7 @@ impl Session {
 			inbound,
 			role: MediaRole::Ingest(sink),
 			writes_rx: None,
+			clock: IngestClock::default(),
 		}
 	}
 
@@ -126,6 +130,7 @@ impl Session {
 			inbound,
 			role: MediaRole::Egress(Box::new(source)),
 			writes_rx: Some(writes_rx),
+			clock: IngestClock::default(),
 		}
 	}
 
@@ -135,6 +140,14 @@ impl Session {
 		let local = self.local;
 
 		loop {
+			// A dead Rtc (DTLS/SDP failure, explicit disconnect) makes poll_output
+			// return a never-firing timeout instead of erroring, which would hang
+			// this task forever holding the broadcast announcement + mux
+			// registration. Bail so those release.
+			if !self.rtc.is_alive() {
+				return Err(Error::SessionClosed);
+			}
+
 			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
 				Output::Timeout(t) => t,
 				Output::Transmit(t) => {
@@ -205,8 +218,11 @@ impl Session {
 			}
 			Event::MediaAdded(added) => self.handle_media_added(added)?,
 			Event::MediaData(data) => {
+				// Rebase off the raw (random, per-track) RTP base before borrowing
+				// the sink, so the clock and the role are disjoint borrows.
+				let media_us = media_time_to_micros(&data.time);
+				let timestamp_us = self.clock.normalize(data.mid, data.network_time, media_us);
 				if let MediaRole::Ingest(sink) = &mut self.role {
-					let timestamp_us = media_time_to_micros(&data.time);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -255,6 +271,41 @@ impl Session {
 			}
 		}
 		Ok(())
+	}
+}
+
+/// Per-session clock that rebases each ingested track's raw RTP timestamps onto
+/// one timeline so audio and video stay in sync.
+///
+/// str0m hands us the RTP header timestamp verbatim
+/// ([`MediaData::time`](str0m::media::MediaData::time)). Per RFC 3550 that base
+/// is random and independent for each track, and str0m applies no RTCP
+/// sender-report correlation, so publishing the values as-is would desync audio
+/// from video (their bases differ by hours) and start the broadcast at an
+/// arbitrary offset. We anchor each track on its first frame to that packet's
+/// arrival time (relative to the first frame seen in the whole session), then
+/// advance within the track by the RTP delta (str0m extends the 32-bit RTP
+/// timestamp with a roll-over counter, so the delta is wrap-safe). The first
+/// frame of the session maps to 0.
+#[derive(Default)]
+pub(crate) struct IngestClock {
+	/// Arrival time of the first frame seen in the session; the timeline origin.
+	epoch: Option<Instant>,
+	/// Per-track additive offset (microseconds) applied to the raw RTP time.
+	offsets: HashMap<str0m::media::Mid, i64>,
+}
+
+impl IngestClock {
+	/// Map a raw RTP-derived microsecond timestamp onto the session timeline.
+	/// `arrival` is the packet's network time
+	/// ([`MediaData::network_time`](str0m::media::MediaData::network_time)).
+	fn normalize(&mut self, mid: str0m::media::Mid, arrival: Instant, media_us: u64) -> u64 {
+		let epoch = *self.epoch.get_or_insert(arrival);
+		let offset = *self.offsets.entry(mid).or_insert_with(|| {
+			let wall_us = arrival.saturating_duration_since(epoch).as_micros() as i64;
+			wall_us - media_us as i64
+		});
+		(media_us as i64 + offset).max(0) as u64
 	}
 }
 
@@ -376,4 +427,52 @@ pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> mpsc::Receiver<Packet> {
 		}
 	});
 	rx
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use str0m::media::Mid;
+
+	use super::*;
+
+	#[test]
+	fn ingest_clock_rebases_first_frame_to_zero() {
+		let mut clock = IngestClock::default();
+		let mid = Mid::from("0");
+		let t0 = Instant::now();
+		// Raw RTP base is a large random value; the first frame must map to 0.
+		assert_eq!(clock.normalize(mid, t0, 5_000_000_000), 0);
+	}
+
+	#[test]
+	fn ingest_clock_tracks_rtp_delta_within_track() {
+		let mut clock = IngestClock::default();
+		let mid = Mid::from("0");
+		let t0 = Instant::now();
+		assert_eq!(clock.normalize(mid, t0, 5_000_000_000), 0);
+		// A later frame advances by the RTP delta, not by arrival jitter.
+		let arrival = t0 + Duration::from_millis(17); // jittered arrival, ignored after anchor
+		assert_eq!(clock.normalize(mid, arrival, 5_000_020_000), 20_000);
+	}
+
+	#[test]
+	fn ingest_clock_keeps_tracks_in_sync_via_arrival() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		// Audio anchors the session at 0 with its own random RTP base.
+		assert_eq!(clock.normalize(audio, t0, 1_000_000_000), 0);
+		// Video's first frame arrives 5 ms later with an unrelated RTP base; it
+		// must land at +5 ms on the shared timeline, not at video's raw base.
+		let video_arrival = t0 + Duration::from_millis(5);
+		assert_eq!(clock.normalize(video, video_arrival, 8_000_000_000), 5_000);
+		// And then track its own RTP delta.
+		assert_eq!(
+			clock.normalize(video, video_arrival + Duration::from_millis(33), 8_000_033_000),
+			38_000
+		);
+	}
 }

@@ -70,6 +70,12 @@ moq-rtc --relay https://relay.example.com --broadcast my-stream \
 ### Server flags
 
 - `--listen`: HTTP bind address (default `[::]:8088`).
+- `--udp-bind`: UDP address the shared WebRTC media socket binds to
+  (default `0.0.0.0:0`, i.e. an OS-picked port for dev/loopback). Every
+  WHIP/WHEP session shares this one port (demuxed by ICE ufrag), so a
+  deployment behind a firewall pins it (e.g. `0.0.0.0:8089`) and opens just
+  that one media port. Pair it with `--public-addr` so the advertised ICE
+  candidate uses the pinned port.
 - `--tls-cert` / `--tls-key`: serve HTTPS instead. Most WHIP clients
   require it in practice.
 
