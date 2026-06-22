@@ -17,10 +17,11 @@ use crate::{Error, Result};
 /// a group. 16 MiB was too tight for a high-bitrate CMAF fragment carried as one
 /// frame; 32 MiB covers that while keeping the per-frame preallocation bounded.
 ///
-/// Enforced on both paths: the wire decode (above) and the producer, where
-/// [`GroupProducer::create_frame`](super::group::GroupProducer::create_frame) rejects an oversized
-/// frame *before* `produce()` allocates its buffer, so a local writer can neither allocate nor cache
-/// one that could never be sent.
+/// Enforced on the wire decode (above) and in
+/// [`GroupProducer::create_frame`](super::group::GroupProducer::create_frame), which rejects an
+/// oversized frame *before* `produce()` allocates its buffer. A direct `FrameProducer::new` still
+/// allocates ahead of the [`append_frame`](super::group::GroupProducer::append_frame) backstop;
+/// closing that gap means a fallible constructor, which is a breaking change left to a separate `dev` PR.
 pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 
 /// A chunk of data with an upfront size.
