@@ -36,18 +36,26 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The latency setting: "real-time" auto-computes jitter, a number sets a fixed jitter.
+	// The latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
 	latency: Signal<Latency>;
 
 	// The jitter buffer in milliseconds.
 	jitter: Signal<Moq.Time.Milli>;
+
+	// Derived: whether buffered playback is active (ceiling above floor).
+	buffered: Signal<boolean>;
+
+	// Re-anchor playback (and flush the audio buffer) at an utterance boundary in buffered mode.
+	reset(): void;
 }
 
 export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
+	// Latency target. A scalar (or "real-time") minimizes; an object `{ min, max }` opens a range and
+	// enables buffered playback: build up a buffer from future-dated frames (e.g. TTS) instead of
+	// minimizing latency. Call `reset()` at each utterance boundary to re-anchor. See {@link Latency}.
 	latency?: Latency | Signal<Latency>;
 
 	// Established connection, used by Sync to read RTT (PROBE) for dynamic jitter in "real-time" mode.
@@ -113,6 +121,7 @@ export class MultiBackend implements Backend {
 	broadcast: Signal<Broadcast | undefined>;
 	latency: Signal<Latency>;
 	jitter: Signal<Moq.Time.Milli>;
+	buffered: Signal<boolean>;
 	paused: Signal<boolean>;
 
 	// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
@@ -124,6 +133,9 @@ export class MultiBackend implements Backend {
 	audio: AudioBackend;
 	#audioSource: Audio.Source;
 
+	// The active WebCodecs audio decoder, used to flush the buffer on `reset()`.
+	#audioDecoder?: Audio.Decoder;
+
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
 
@@ -132,9 +144,13 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.sync = new Sync({ latency: props?.latency, connection: props?.connection });
+		this.sync = new Sync({
+			latency: props?.latency,
+			connection: props?.connection,
+		});
 		this.latency = this.sync.latency;
 		this.jitter = this.sync.jitter;
+		this.buffered = this.sync.buffered;
 
 		this.#videoSource = new Video.Source(this.sync, {
 			broadcast: this.broadcast,
@@ -166,6 +182,7 @@ export class MultiBackend implements Backend {
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
 		const videoSource = new Video.Decoder(this.#videoSource);
 		const audioSource = new Audio.Decoder(this.#audioSource);
+		this.#audioDecoder = audioSource;
 
 		const audioEmitter = new Audio.Emitter(audioSource, {
 			volume: this.audio.volume,
@@ -184,6 +201,7 @@ export class MultiBackend implements Backend {
 			audioSource.close();
 			audioEmitter.close();
 			videoRenderer.close();
+			this.#audioDecoder = undefined;
 		});
 
 		// Proxy the read only signals to the backend.
@@ -224,6 +242,13 @@ export class MultiBackend implements Backend {
 		effect.proxy(this.audio.stats, audio.stats);
 		effect.proxy(this.audio.buffered, audio.buffered);
 		effect.proxy(this.audio.context, audio.context);
+	}
+
+	// Re-anchor playback at an utterance boundary in buffered mode: reset the sync reference
+	// and flush the audio buffer so the next utterance plays from its own first frame.
+	reset(): void {
+		this.sync.reset();
+		this.#audioDecoder?.reset();
 	}
 
 	close(): void {

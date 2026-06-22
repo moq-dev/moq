@@ -10,7 +10,7 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
-use super::session::{caps_supported, DataMsg, FlushSignal, ResolvedSettings, SessionHandle, Status, CAT};
+use super::session::{CAT, DataMsg, FlushSignal, ResolvedSettings, SessionHandle, Status, caps_supported};
 
 /// Reject a frame past the MoQ frame limit (moq-net's MAX_FRAME_SIZE, 16 MiB): it could not be
 /// consumed anyway, and copying it would let hostile input drive an unbounded allocation.
@@ -433,12 +433,12 @@ mod tests {
 		assert!(p0.is_some(), "first request succeeds");
 		assert!(p1.is_none(), "duplicate name fails to add");
 
-		let gen = imp.pad_generations.lock().unwrap().get("sink_0").copied();
+		let generation = imp.pad_generations.lock().unwrap().get("sink_0").copied();
 		// After the failed duplicate the map must still describe the LIVE pad (generation 0).
 		assert_eq!(
-			gen,
+			generation,
 			Some(0),
-			"live pad's generation must survive a failed duplicate (got {gen:?})"
+			"live pad's generation must survive a failed duplicate (got {generation:?})"
 		);
 	}
 }

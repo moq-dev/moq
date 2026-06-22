@@ -237,6 +237,17 @@ impl DialMap {
 #[non_exhaustive]
 #[group(id = "cluster-config")]
 pub struct ClusterConfig {
+	/// Fixed origin (hop) id for this relay, identifying it in the hop chains
+	/// carried on each broadcast for loop detection and shortest-path routing.
+	///
+	/// Unset (the default) picks a fresh random id on every start. Set it to give
+	/// a node a stable identity across restarts. Must be non-zero and below 2^62
+	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
+	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
+	/// decode hop ids as a `u53` and reject anything larger.
+	#[arg(id = "cluster-id", long = "cluster-id", env = "MOQ_CLUSTER_ID")]
+	pub id: Option<u64>,
+
 	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`; a bare host or `host:port` is deprecated but
 	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
@@ -345,16 +356,27 @@ impl Cluster {
 	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing.
-	pub fn new(config: ClusterConfig) -> Self {
-		let origin = Origin::random().produce();
-		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		Cluster {
+	///
+	/// Errors if `config.id` is set but invalid: it must be non-zero and below
+	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
+	pub fn new(config: ClusterConfig) -> anyhow::Result<Self> {
+		let origin = match config.id {
+			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
+			Some(id) if id >= 1 << 62 => {
+				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
+			}
+			Some(id) => Origin::from(id),
+			None => Origin::random(),
+		}
+		.produce();
+		tracing::info!(origin_id = %origin.id, configured = config.id.is_some(), "cluster initialized");
+		Ok(Cluster {
 			config,
 			client: None,
 			client_tls: None,
 			origin,
 			stats: Stats::default(),
-		}
+		})
 	}
 
 	/// Attach a QUIC client used to dial cluster peers.
@@ -698,13 +720,13 @@ impl Cluster {
 	}
 
 	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
-	/// [`crate::watch::FileWatcher`] (OS notifications with a polling fallback).
+	/// [`moq_native::watch::FileWatcher`] (OS notifications with a polling fallback).
 	/// Fails static: a missing or malformed file keeps the current dials, and the
 	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = match crate::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+		let mut watcher = match moq_native::watch::FileWatcher::new(std::slice::from_ref(&path)) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
@@ -719,7 +741,7 @@ impl Cluster {
 	}
 
 	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
-	/// current dials; the [`FileWatcher`](crate::watch::FileWatcher) only
+	/// current dials; the [`FileWatcher`](moq_native::watch::FileWatcher) only
 	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
@@ -1107,7 +1129,7 @@ mod tests {
 			root: Some("legacy-root.example.com:4443".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
+		let err = Cluster::new(config).unwrap().run().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("cluster.root"), "missing cluster.root in: {msg}");
 		assert!(msg.contains("--cluster-connect"), "missing --cluster-connect in: {msg}");
@@ -1122,10 +1144,37 @@ mod tests {
 			mesh: Some("true".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
+		let err = Cluster::new(config).unwrap().run().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
 		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
+	}
+
+	/// A valid `cluster.id` is used verbatim as the relay's origin id, giving the
+	/// node a stable identity across restarts.
+	#[test]
+	fn cluster_id_sets_origin() {
+		let cluster = Cluster::new(ClusterConfig {
+			id: Some(42),
+			..Default::default()
+		})
+		.expect("valid id");
+		assert_eq!(cluster.origin.id, 42);
+	}
+
+	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather
+	/// than producing an unencodable hop id.
+	#[test]
+	fn cluster_id_out_of_range_errors() {
+		for bad in [0, 1u64 << 62] {
+			let err = Cluster::new(ClusterConfig {
+				id: Some(bad),
+				..Default::default()
+			})
+			.err()
+			.expect("should error");
+			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
+		}
 	}
 
 	/// `cluster.root` parsed from TOML triggers the same migration error.
@@ -1143,7 +1192,7 @@ mod tests {
 
 		let rt = tokio::runtime::Runtime::new().unwrap();
 		let err = rt
-			.block_on(Cluster::new(config.cluster).run())
+			.block_on(Cluster::new(config.cluster).unwrap().run())
 			.expect_err("should error");
 		assert!(format!("{err}").contains("cluster.root"));
 	}
@@ -1158,7 +1207,8 @@ mod tests {
 			node: Some("rendezvous.example.com:4443".to_string()),
 			mesh: Some("true".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
@@ -1213,7 +1263,8 @@ mod tests {
 		let cluster = Cluster::new(ClusterConfig {
 			mesh: Some("rendezvous.example.com:4443".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		let (gossip, node) = cluster.resolve_mesh().expect("legacy mesh url resolves");
 		assert!(gossip);
 		assert_eq!(node.as_deref(), Some("rendezvous.example.com:4443"));
@@ -1271,7 +1322,8 @@ mod tests {
 			mesh: Some("a.example.com:4443".to_string()),
 			node: Some("b.example.com:4443".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		let err = cluster.resolve_mesh().expect_err("conflict should error");
 		assert!(format!("{err}").contains("conflicts with"), "got: {err}");
 	}

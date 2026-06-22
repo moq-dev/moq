@@ -1,4 +1,4 @@
-//! Audio: stereo unsigned-8-bit PCM (Game Boy APU) -> Opus -> MoQ.
+//! Audio: stereo signed-16-bit PCM (Game Boy APU) -> Opus -> MoQ.
 //!
 //! A thin wrapper over [`moq_audio::AudioProducer`], which resamples to 48 kHz,
 //! encodes Opus, and anchors timestamps to a wall clock so audio stays in sync
@@ -26,7 +26,7 @@ impl AudioEncoder {
 		input_sample_rate: u32,
 	) -> Result<Self> {
 		let input = moq_audio::EncoderInput {
-			format: moq_audio::AudioFormat::U8,
+			format: moq_audio::AudioFormat::S16,
 			sample_rate: input_sample_rate,
 			channels: CHANNELS,
 		};
@@ -48,12 +48,16 @@ impl AudioEncoder {
 		self.producer.reset_epoch();
 	}
 
-	/// Push interleaved unsigned-8-bit stereo PCM captured at `elapsed` (since
+	/// Push interleaved signed-16-bit stereo PCM captured at `elapsed` (since
 	/// the emulator started, shared with the video clock).
-	pub fn push_samples(&mut self, samples: &[u8], elapsed: Duration) -> Result<()> {
+	pub fn push_samples(&mut self, samples: &[i16], elapsed: Duration) -> Result<()> {
+		let mut data = Vec::with_capacity(samples.len() * 2);
+		for sample in samples {
+			data.extend_from_slice(&sample.to_le_bytes());
+		}
 		let frame = moq_audio::Frame {
 			timestamp_us: elapsed.as_micros() as u64,
-			data: Bytes::copy_from_slice(samples),
+			data: Bytes::from(data),
 		};
 		self.producer.write(&frame)?;
 		Ok(())

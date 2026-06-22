@@ -45,6 +45,24 @@ fn import_bbb_catalog() {
 	assert!(audio.description.is_some(), "AAC track missing AudioSpecificConfig");
 }
 
+/// The Kyrion capture is H.264 1080i with B-frames (open-GOP, ~5-frame reorder despite only
+/// 3 consecutive B-frames). Its video rendition's `jitter` must capture that reorder delay
+/// (the source `PTS - DTS`), not just the ~33 ms frame interval, so a transmuxer/player sizes
+/// its decode buffer correctly. The stream is ~30 fps, so the reorder is ~5 * 33 ms.
+#[test]
+fn import_kyrion_video_jitter_captures_reorder() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+	let catalog = import_ts(data);
+
+	let video = catalog.video.renditions.values().next().expect("a video track");
+	let jitter = video.jitter.expect("B-frame stream must publish jitter").as_millis();
+	// ~5 frames of reorder at ~30 fps is ~167 ms, far above the ~33 ms frame interval.
+	assert!(
+		(150..=200).contains(&jitter),
+		"jitter {jitter} ms should reflect the ~5-frame reorder, not the frame interval"
+	);
+}
+
 /// The Kyrion capture carries two real MP2 programs (stream_type 0x03, 48 kHz
 /// stereo, 192 kbps). Both must surface as catalog renditions with the
 /// header-derived config and no description (verbatim carriage).
@@ -284,7 +302,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::with_catalog(
 		&mut broadcast,
-		crate::catalog::hang::Catalog::<crate::container::ts::scte35::Ext>::default(),
+		crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default(),
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -295,7 +313,15 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1, "video track lost across the dirty join");
-	let name = snap.scte35.renditions.keys().next().expect("scte35 track").clone();
+	// Select the SCTE-35 stream by its verbatim stream_type; media tracks also appear
+	// in mpegts.tracks now (with their PID + descriptors).
+	let name = snap
+		.mpegts
+		.tracks
+		.iter()
+		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
+		.map(|(name, _)| name.clone())
+		.expect("scte35 track");
 	let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut cues = Vec::new();

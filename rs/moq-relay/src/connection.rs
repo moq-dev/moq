@@ -89,7 +89,7 @@ impl Connection {
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = self
+		let mut session = self
 			.request
 			.with_publish(subscribe)
 			.with_consume(publish)
@@ -99,9 +99,22 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
-		// Wait until the session is closed.
-		session.closed().await?;
-		Ok(())
+		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
+		// connect time, so hold the session open no longer than the credential is
+		// valid. Without an expiry, just wait for the session to close.
+		let Some(expires) = token.expires else {
+			return Ok(session.closed().await?);
+		};
+
+		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+		match tokio::time::timeout(remaining, session.closed()).await {
+			Ok(res) => Ok(res?),
+			Err(_) => {
+				tracing::info!("credential expired, closing session");
+				session.close(moq_net::Error::Unauthorized);
+				Ok(())
+			}
+		}
 	}
 
 	/// Resolve an [`AuthToken`] from the request's URL and (optional) mTLS peer
@@ -117,7 +130,7 @@ impl Connection {
 			None => AuthParams::default(),
 		};
 
-		if self.request.has_peer_certificate() {
+		if let Some(identity) = self.request.peer_identity() {
 			tracing::debug!("mTLS peer authenticated");
 			// Scope the grant to the canonical root. An mTLS publisher dialing a
 			// vanity alias lands on the same tree a JWT would; cluster peers dial
@@ -126,6 +139,9 @@ impl Connection {
 			let (root, internal) = self.auth.resolve_mtls(&params.path).await?;
 			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
 			token.internal = internal;
+			// Close the session when the client certificate expires, mirroring
+			// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
+			token.expires = identity.expiry();
 			return Ok(token);
 		}
 

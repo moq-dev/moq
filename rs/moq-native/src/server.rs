@@ -612,22 +612,24 @@ impl Request {
 		}
 	}
 
-	/// Whether the peer presented a client certificate during the handshake
-	/// that chained to a configured [`crate::tls::Server::root`].
+	/// The client certificate chain the peer presented, if any, validated
+	/// against a configured [`crate::tls::Server::root`] during the handshake.
 	///
-	/// Only the Quinn and noq backends support mTLS; other backends always return `false`.
-	pub fn has_peer_certificate(&self) -> bool {
+	/// Only the Quinn and noq backends support mTLS; other backends always
+	/// return `None`. Use it to grant elevated access or to close the session
+	/// once the certificate expires (see [`crate::tls::PeerIdentity::expiry`]).
+	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
 		match self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(ref request) => request.has_peer_certificate(),
+			RequestKind::Quinn(ref request) => request.peer_identity(),
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(ref request) => request.has_peer_certificate(),
+			RequestKind::Noq(ref request) => request.peer_identity(),
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => false,
+			RequestKind::Quiche(_) => None,
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => false,
+			RequestKind::Iroh(_) => None,
 			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => false,
+			RequestKind::WebSocket(_) => None,
 			#[cfg(not(any(
 				feature = "noq",
 				feature = "quinn",
@@ -635,8 +637,14 @@ impl Request {
 				feature = "iroh",
 				feature = "websocket"
 			)))]
-			_ => false,
+			_ => None,
 		}
+	}
+
+	/// Whether the peer presented a valid client certificate during the handshake.
+	#[deprecated(note = "use `peer_identity` instead")]
+	pub fn has_peer_certificate(&self) -> bool {
+		self.peer_identity().is_some()
 	}
 }
 

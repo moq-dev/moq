@@ -37,7 +37,9 @@ pub struct Backoff {
 	pub max: Duration,
 
 	/// Maximum time to spend retrying before giving up.
-	/// Resets after each successful connection. Set to 0 for unlimited retries.
+	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
+	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
+	/// unlimited retries.
 	#[arg(
 		id = "backoff-timeout",
 		long,
@@ -133,28 +135,48 @@ impl Reconnect {
 			match client.connect(url.clone()).await {
 				Ok(session) => {
 					tracing::info!(%url, "connected");
-					delay = backoff.initial;
-					last_error = None;
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Connected);
 					}
-					let _ = session.closed().await;
-					tracing::warn!(%url, "session closed, reconnecting");
+
+					let connected = tokio::time::Instant::now();
+					let closed = session.closed().await;
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Disconnected);
 					}
-					retry_start = tokio::time::Instant::now();
+
+					if connected.elapsed() >= backoff.initial {
+						// Stayed up past the initial backoff: a healthy session. Reset the backoff
+						// window so a one-off drop reconnects promptly.
+						tracing::warn!(%url, "session closed, reconnecting");
+						delay = backoff.initial;
+						retry_start = tokio::time::Instant::now();
+						last_error = None;
+					} else {
+						// Connected then dropped almost immediately (e.g. the server accepts then
+						// resets). Treat it as a failed connection: keep the close reason so the
+						// give-up timeout reports a real cause, and fall through to the shared backoff
+						// sleep below so repeated flaps escalate instead of spinning the CPU.
+						if let Err(err) = closed {
+							let err = Error::from(err);
+							tracing::warn!(%url, %err, "session severed immediately, retrying");
+							last_error = Some(err);
+						} else {
+							tracing::warn!(%url, "session severed immediately, retrying");
+						}
+					}
 				}
 				Err(err) => {
 					if err.is_auth() {
 						return Err(err);
 					}
-					tracing::warn!(%url, %err, ?delay, "connection failed, retrying");
 					last_error = Some(err);
-					tokio::time::sleep(delay).await;
-					delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
 				}
 			}
+
+			tracing::warn!(%url, ?delay, "reconnecting after backoff");
+			tokio::time::sleep(delay).await;
+			delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
 		}
 	}
 

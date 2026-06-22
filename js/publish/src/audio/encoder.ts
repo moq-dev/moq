@@ -393,6 +393,22 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 	signal?: "auto" | "voice" | "music";
 }
 
+// Opus settings implied by the audio kind. These are only defaults: any field set explicitly via
+// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. DTX (silence
+// suppression) is enabled for voice, where speech has natural gaps that collapse to tiny
+// comfort-noise packets. Music has no useful silence to suppress, and "auto" leaves every knob to
+// the browser.
+function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
+	switch (kind) {
+		case "voice":
+			return { application: "voip", signal: "voice", usedtx: true };
+		case "music":
+			return { application: "audio", signal: "music" };
+		default:
+			return {};
+	}
+}
+
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
 // no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
@@ -415,12 +431,9 @@ function toEncoderConfig(
 	}
 
 	if (config.codec === "opus") {
-		const opus: OpusEncoderConfigExt = { ...opusOptions };
-
-		if (kind !== "auto") {
-			opus.application = kind === "voice" ? "voip" : "audio";
-			opus.signal = kind;
-		}
+		// Start from the kind's defaults, then let explicit opusOptions win (undefined knobs were
+		// already dropped upstream, so the spread only overrides what the caller actually set).
+		const opus: OpusEncoderConfigExt = { ...opusKindDefaults(kind), ...opusOptions };
 
 		// jitter carries the frame duration in ms; WebCodecs wants µs.
 		if (config.jitter !== undefined) {

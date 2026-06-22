@@ -183,12 +183,12 @@ pub(crate) async fn connect(
 		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
 		.and_then(|header| header.to_str().ok())
 		.map(str::to_owned);
-	let bare = qmux::ws::Bare::new(socket).with_keep_alive(qmux::KeepAlive::default());
-	let bare = match alpn.as_deref() {
-		Some(alpn) => bare.with_alpn(alpn),
-		None => bare,
+	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::KeepAlive::default());
+	let upgraded = match alpn.as_deref() {
+		Some(alpn) => upgraded.with_alpn(alpn),
+		None => upgraded,
 	};
-	let session = bare.connect();
+	let session = upgraded.connect();
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
@@ -197,11 +197,23 @@ pub(crate) async fn connect(
 }
 
 fn websocket_subprotocols(alpns: &[&str]) -> Vec<String> {
-	let mut protocols = Vec::with_capacity(qmux::ALPNS.len() + qmux::PREFIXES.len() * alpns.len());
-	for (&bare, &prefix) in qmux::ALPNS.iter().zip(qmux::PREFIXES) {
-		protocols.push(bare.to_string());
-		protocols.extend(alpns.iter().map(|alpn| format!("{prefix}{alpn}")));
+	// Each moq ALPN under every QMux wire version (`qmux-01.moq-lite-04`, ...),
+	// newest first, then the bare qmux fallbacks. Mirrors qmux's own ALPN
+	// builder, which isn't public.
+	//
+	// `qmux-00.moqt-18` is excluded: moq-transport-18 requires qmux-01, so that
+	// pair is illegal (matches the relay and js/net's connect.ts).
+	let versions = [qmux::Version::QMux01, qmux::Version::QMux00];
+	let mut protocols = Vec::with_capacity(versions.len() * alpns.len() + qmux::ALPNS.len());
+	for &alpn in alpns {
+		for version in versions {
+			if version == qmux::Version::QMux00 && alpn == "moqt-18" {
+				continue;
+			}
+			protocols.push(format!("{}{alpn}", version.prefix()));
+		}
 	}
+	protocols.extend(qmux::ALPNS.iter().map(|s| s.to_string()));
 	protocols
 }
 
@@ -240,7 +252,9 @@ impl Listener {
 
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let server = qmux::Server::new().with_protocols(alpns);
+		// Empty version slice = every QMux draft qmux knows about.
+		let any: &[qmux::Version] = &[];
+		let server = qmux::Server::new().with_protocols(alpns.iter().map(|&alpn| (alpn, any)));
 		Ok(Self { listener, server })
 	}
 

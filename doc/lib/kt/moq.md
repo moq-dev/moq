@@ -151,7 +151,7 @@ job.cancel()  // releases native resources
 To build and run the JVM tests locally:
 
 ```bash
-just check-ffi
+just kt check
 ```
 
 This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the JNA resource layout, and runs `gradle :moq:jvmTest`.

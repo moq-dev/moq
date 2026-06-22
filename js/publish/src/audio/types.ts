@@ -1,5 +1,6 @@
-// The kind of audio being encoded. Drives Opus application/signal settings on the encoder.
-// - "voice": speech (microphone). Opus application=voip + signal=voice.
+// The kind of audio being encoded. Drives the default Opus application/signal/DTX settings on the
+// encoder, each of which an explicit OpusConfig can still override.
+// - "voice": speech (microphone). Opus application=voip, signal=voice, and DTX on (speech has gaps).
 // - "music": music or mixed content (screen/tab capture). Opus application=audio + signal=music.
 // - "auto": let the encoder decide. Opus defaults (good for unknown sources like file playback).
 export type Kind = "voice" | "music" | "auto";

@@ -1,0 +1,76 @@
+name: Smoke
+
+# Cross-language interop smoke test built from THIS checkout (not the published
+# packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
+# publish x subscribe matrix across rust / python / browser / native-js / c.
+on:
+  # Manual on-demand runs.
+  workflow_dispatch:
+  # Nightly: catch an interop regression in the current tree before a user does.
+  schedule:
+    - cron: "0 8 * * *"
+  # On PRs that touch the harness itself, so a change to the smoke test is
+  # validated before it merges. Source regressions still surface nightly.
+  pull_request:
+    paths:
+      - "test/smoke/**"
+      # The smoke job also depends on the recipe that invokes it and the
+      # workspace membership that links the JS clients to source.
+      - "test/justfile"
+      - "package.json"
+      - ".github/workflows/smoke.yml"
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke
+    runs-on: ubuntu-latest
+    # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
+    # this is a safety net against a hung relay/client plus a cold first build.
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      # Reuse ~/.cargo + ./target across nightly runs so only changed crates
+      # recompile (the relay, cli, moq-ffi, and libmoq all build from source).
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
+      # runtime libs (`--with-deps` needs the host package manager) so the
+      # browser client can launch headless Chromium. smoke.sh's own
+      # `playwright install` then no-ops.
+      - name: Playwright Chromium
+        run: nix develop --command bash -c "bun install && bunx playwright install --with-deps chromium"
+        shell: bash -leo pipefail {0}
+
+      - name: Smoke (full matrix)
+        run: nix develop --command just test smoke-full
+        shell: bash -leo pipefail {0}
+
+      - name: Negative control
+        run: nix develop --command just test smoke-negative
+        shell: bash -leo pipefail {0}

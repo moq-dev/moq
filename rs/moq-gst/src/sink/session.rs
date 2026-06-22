@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use gst::glib;
 use gst::prelude::*;
@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, watch};
 use hang::moq_net;
 use moq_mux::import::{Framed, FramedFormat};
 
-use super::timeline::{classify_segment, frame_micros, FrameDecision, SegmentDecision, SegmentInfo};
 use super::MoqSink as Element;
+use super::timeline::{FrameDecision, SegmentDecision, SegmentInfo, classify_segment, frame_micros};
 
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
@@ -997,9 +997,10 @@ mod tests {
 	#[test]
 	fn buffer_for_unknown_pad_is_dropped_without_error() {
 		let mut set = pad_set();
-		assert!(set
-			.buffer("ghost", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
-			.is_ok());
+		assert!(
+			set.buffer("ghost", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+				.is_ok()
+		);
 	}
 
 	// AddPad declares membership independent of CAPS, and generation discriminates incarnations.
@@ -1100,9 +1101,10 @@ mod tests {
 		set.add_pad("video", 0);
 		set.caps("video", 0, &h264_caps()).unwrap();
 		set.eos("video", 0).unwrap();
-		assert!(set
-			.buffer("video", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
-			.is_ok());
+		assert!(
+			set.buffer("video", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+				.is_ok()
+		);
 	}
 
 	// A pad recreated with the same name (new generation) discards the previous incarnation's messages.
@@ -1114,9 +1116,10 @@ mod tests {
 		set.caps("video", 0, &h264_caps()).unwrap();
 		set.add_pad("video", 1);
 		// Old-generation messages no longer match the active generation.
-		assert!(set
-			.buffer("video", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
-			.is_ok());
+		assert!(
+			set.buffer("video", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+				.is_ok()
+		);
 		assert!(
 			!set.eos("video", 0).unwrap(),
 			"a stale EOS must not complete the element"
@@ -1746,7 +1749,7 @@ mod tests {
 		let status = Arc::new(Status::default());
 		let stale = status.begin_session(); // an old session's generation
 		let live = status.begin_session(); // the new session's generation, now the live one
-									 // The live session connects and writes the shared status.
+		// The live session connects and writes the shared status.
 		status.set_connected(live, true);
 		status.set_version(live, Some("moq-lite-04".to_string()));
 		// The old session's exit-reset runs late, but it is stale: a no-op that leaves the live status.

@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 		config.auth.init().await?
 	};
 
-	let cluster = Cluster::new(config.cluster)
+	let cluster = Cluster::new(config.cluster)?
 		.with_client(client)
 		.with_client_tls(config.client.tls.build()?);
 	let stats = config.stats.build(cluster.origin.clone());
@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
+		Err(err) = run_internal(config.internal, cluster.clone()) => return Err(err).context("internal server failed"),
 		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
 		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
 		else => Ok(()),

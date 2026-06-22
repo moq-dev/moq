@@ -13,9 +13,16 @@ export interface SharedRingBufferInit {
 	rate: number;
 	samples: SharedArrayBuffer; // channels * capacity * Float32Array.BYTES_PER_ELEMENT bytes
 	control: SharedArrayBuffer; // CONTROL_SLOTS * Int32Array.BYTES_PER_ELEMENT bytes
+	// Buffered mode: anchor to the first sample and never skip ahead on read.
+	buffered: boolean;
 }
 
-export function allocSharedRingBuffer(channels: number, capacity: number, rate: number): SharedRingBufferInit {
+export function allocSharedRingBuffer(
+	channels: number,
+	capacity: number,
+	rate: number,
+	buffered = false,
+): SharedRingBufferInit {
 	if (channels <= 0) throw new Error("invalid channels");
 	if (capacity <= 0) throw new Error("invalid capacity");
 	if (rate <= 0) throw new Error("invalid sample rate");
@@ -27,7 +34,7 @@ export function allocSharedRingBuffer(channels: number, capacity: number, rate: 
 	const ctrl = new Int32Array(control);
 	Atomics.store(ctrl, STALLED, 1);
 
-	return { channels, capacity, rate, samples, control };
+	return { channels, capacity, rate, samples, control, buffered };
 }
 
 /** Modular i32 max: returns a if a is ahead of b, else b. */
@@ -58,15 +65,20 @@ export class SharedRingBuffer {
 	readonly channels: number;
 	readonly capacity: number;
 	readonly rate: number;
+	readonly buffered: boolean;
 	readonly init: SharedRingBufferInit;
 
 	#control: Int32Array;
 	#samples: Float32Array[];
 
+	// Whether READ/WRITE have been anchored to the first inserted sample (buffered mode).
+	#anchored = false;
+
 	constructor(init: SharedRingBufferInit) {
 		this.channels = init.channels;
 		this.capacity = init.capacity;
 		this.rate = init.rate;
+		this.buffered = init.buffered;
 		this.init = init;
 
 		this.#control = new Int32Array(init.control);
@@ -88,6 +100,14 @@ export class SharedRingBuffer {
 		let start = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
 		const originalLength = data[0].length;
 		let offset = 0;
+
+		// Buffered mode: anchor READ/WRITE to the first sample so playback starts at its
+		// timestamp, instead of skipping ahead or gap-filling silence from index 0.
+		if (this.buffered && !this.#anchored) {
+			Atomics.store(this.#control, READ, start | 0);
+			Atomics.store(this.#control, WRITE, start | 0);
+			this.#anchored = true;
+		}
 
 		const end = (start + originalLength) | 0;
 
@@ -158,8 +178,9 @@ export class SharedRingBuffer {
 
 		// Latency skip: if buffered data exceeds LATENCY, skip ahead.
 		// CAS ensures we never step backward relative to a concurrent writer advance.
+		// Disabled in buffered mode, where we deliberately play through the whole buffer.
 		const buffered = (write - read) | 0;
-		if (latency > 0 && buffered > latency) {
+		if (!this.buffered && latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
 			read = casAdvance(this.#control, READ, skipTo);
 		}
@@ -189,6 +210,17 @@ export class SharedRingBuffer {
 	}
 
 	/**
+	 * Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode).
+	 * Main thread only. The worklet reader sees STALLED and stops until the next insert.
+	 */
+	reset(): void {
+		this.#anchored = false;
+		Atomics.store(this.#control, STALLED, 1);
+		const write = Atomics.load(this.#control, WRITE);
+		Atomics.store(this.#control, READ, write);
+	}
+
+	/**
 	 * Allocate a new ring with `newCapacity` samples and copy the unread window
 	 * [READ, WRITE) plus control state into it. Used when growing capacity so
 	 * we don't drop buffered audio. If `newCapacity` is smaller than the unread
@@ -201,8 +233,9 @@ export class SharedRingBuffer {
 	 * by READ/WRITE elsewhere.
 	 */
 	resize(newCapacity: number): SharedRingBuffer {
-		const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
+		const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate, this.buffered);
 		const dst = new SharedRingBuffer(init);
+		dst.#anchored = this.#anchored;
 
 		const read = Atomics.load(this.#control, READ);
 		const write = Atomics.load(this.#control, WRITE);

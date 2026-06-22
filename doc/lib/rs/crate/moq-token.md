@@ -51,7 +51,7 @@ nix build github:moq-dev/moq#moq-token-cli
 
 ```bash
 docker pull moqdev/moq-token-cli
-docker run -v "$(pwd):/app" -w /app moqdev/moq-token-cli --key root.jwk generate
+docker run -v "$(pwd):/app" -w /app moqdev/moq-token-cli generate --out root.jwk
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-token-cli).

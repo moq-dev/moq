@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -40,6 +40,11 @@ pub struct Config {
 	#[serde(default)]
 	pub web: WebConfig,
 
+	/// Optionally run an unauthenticated plain-TCP listener for trusted clients.
+	#[command(flatten)]
+	#[serde(default)]
+	pub internal: InternalConfig,
+
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[command(flatten)]
 	#[serde(default)]
@@ -74,7 +79,7 @@ impl Config {
 	/// (if `file` is set) → CLI args re-applied so explicit flags / env vars
 	/// override TOML.
 	///
-	/// # Pitfall (see `CLAUDE.md` and `tests` below)
+	/// # Pitfall (see `rs/CLAUDE.md` and `tests` below)
 	///
 	/// The final `update_from` re-runs the clap parser over `args`. For
 	/// fields typed as bare `bool`, an absent CLI flag writes
@@ -288,5 +293,108 @@ system_roots = true
 			Some(true),
 			"TOML's client.tls.system_roots must not be clobbered by the CLI re-parse"
 		);
+	}
+
+	/// Same clap+TOML clobber guard for `cluster.id`. It's typed as `Option<u64>`
+	/// so an absent `--cluster-id` CLI flag must not wipe a TOML-configured value
+	/// during the `update_from` re-parse. A bare `u64` would reset it to `0`,
+	/// which the cluster treats as reserved and silently swaps for a random id,
+	/// defeating the point of pinning a stable origin via TOML.
+	static CLUSTER_ID_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_cluster_id() {
+		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CLUSTER_ID_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_CLUSTER_ID") };
+
+		let toml = r#"
+[cluster]
+id = 12345
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-id-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cluster.id,
+			Some(12345),
+			"TOML's cluster.id must not be clobbered by the CLI re-parse"
+		);
+	}
+
+	/// Same clap+TOML clobber guard for the internal listeners. Both
+	/// `internal.tcp.listen` (`Option<SocketAddr>`) and `internal.uds.listen`
+	/// (`Option<PathBuf>`) must survive the `update_from` re-parse when their
+	/// CLI flags are absent, or a TOML-configured listener gets silently
+	/// disabled.
+	static INTERNAL_LISTEN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_internal_listen() {
+		let _guard = INTERNAL_LISTEN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: INTERNAL_LISTEN_ENV_LOCK serializes this with any sibling test
+		// touching the same env vars.
+		unsafe {
+			std::env::remove_var("MOQ_INTERNAL_LISTEN");
+			std::env::remove_var("MOQ_INTERNAL_UDS_LISTEN");
+		}
+
+		let toml = r#"
+[internal.tcp]
+listen = "127.0.0.1:4444"
+
+[internal.uds]
+listen = "/run/moq/internal.sock"
+
+[internal.uds.allow]
+uid = [1001]
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("internal-listen-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.internal.tcp.listen,
+			Some("127.0.0.1:4444".parse().unwrap()),
+			"TOML's internal.tcp.listen must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.internal.uds.listen.as_deref(),
+			Some(std::path::Path::new("/run/moq/internal.sock")),
+			"TOML's internal.uds.listen must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(config.internal.uds.allow.uid, vec![1001]);
+	}
+
+	#[test]
+	fn cli_flag_overrides_toml_cluster_id() {
+		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CLUSTER_ID_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_CLUSTER_ID") };
+
+		let toml = "[cluster]\nid = 12345\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-id-cli-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from(&path),
+			std::ffi::OsString::from("--cluster-id=67890"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert_eq!(config.cluster.id, Some(67890));
 	}
 }

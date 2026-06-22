@@ -559,6 +559,12 @@ pub struct AuthToken {
 	/// a JWT. Used to record stats on the internal tier so cluster peers can
 	/// be billed separately from end-user traffic.
 	pub internal: bool,
+	/// When the credential backing this session expires, if it has an expiry.
+	///
+	/// For JWT auth this is the token's `exp` claim; for mTLS it's the peer
+	/// certificate's `notAfter`. The relay closes the session once this passes
+	/// instead of trusting a credential that was only checked at connect time.
+	pub expires: Option<std::time::SystemTime>,
 }
 
 impl AuthToken {
@@ -579,6 +585,8 @@ impl AuthToken {
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			internal: true,
+			// Filled in by the caller from the peer certificate's notAfter.
+			expires: None,
 		}
 	}
 }
@@ -1031,6 +1039,7 @@ impl Auth {
 			subscribe,
 			publish,
 			internal: false,
+			expires: claims.expires,
 		})
 	}
 
@@ -1186,6 +1195,47 @@ mod tests {
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_jwt_expiry_carried_through() -> anyhow::Result<()> {
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// JWT `exp` has second granularity, so use a whole-second expiry to avoid
+		// rounding ambiguity on the round-trip.
+		let want = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)?
+			.as_secs()
+			+ 3600;
+		let expires = std::time::UNIX_EPOCH + std::time::Duration::from_secs(want);
+		let claims = moq_token::Claims {
+			root: "room/123".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["alice".into()],
+			expires: Some(expires),
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123".into(),
+				jwt: Some(token),
+			})
+			.await?;
+
+		// The `exp` claim survives finalize() so the relay can close on expiry.
+		let got = token.expires.expect("expiry should be carried through");
+		assert_eq!(got.duration_since(std::time::UNIX_EPOCH)?.as_secs(), want);
 
 		Ok(())
 	}

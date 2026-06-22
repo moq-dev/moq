@@ -5,16 +5,19 @@ default:
     cargo run --bin moq-relay -- localhost.toml
 
 # Run a cluster of relay servers.
-cluster: token
+#
+# The relays grant anonymous access (see *.toml), so no JWT is needed locally.
+# Cluster peers still authenticate to each other via mTLS (the cert/ca recipes).
+cluster:
     bun install
 
     bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
     	"just root" \
     	"just wait http://localhost:4443/certificate.sha256 && just leaf0" \
     	"just wait http://localhost:4443/certificate.sha256 && just leaf1" \
-    	"just wait http://localhost:4444/certificate.sha256 && just pub bbb http://localhost:4444/demo?jwt=$(cat demo-cli.jwt)" \
-    	"just wait http://localhost:4443/certificate.sha256 && just pub tos http://localhost:4443/demo?jwt=$(cat demo-cli.jwt)" \
-    	"just wait http://localhost:4445/certificate.sha256 && VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun --cwd ../web --bun vite --open"
+    	"just wait http://localhost:4444/certificate.sha256 && just pub bbb http://localhost:4444" \
+    	"just wait http://localhost:4443/certificate.sha256 && just pub tos http://localhost:4443" \
+    	"just wait http://localhost:4445/certificate.sha256 && VITE_RELAY_URL=http://localhost:4445 bun --cwd ../web --bun vite"
 
 # Run a localhost root server, accepting connections from leaf nodes.
 root: (cert "root")

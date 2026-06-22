@@ -4,6 +4,8 @@
 //! - WebTransport (HTTP/3)
 //! - Raw QUIC (with ALPN negotiation)
 //! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
+//! - Plain TCP via the `tcp://` scheme (qmux, no TLS; requires `tcp` feature)
+//! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - Iroh P2P (requires `iroh` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
@@ -25,11 +27,14 @@ pub mod noq;
 pub mod quinn;
 mod reconnect;
 mod server;
+#[cfg(feature = "tcp")]
+pub mod tcp;
 pub mod tls;
+#[cfg(all(feature = "uds", unix))]
+pub mod unix;
 mod util;
-// Only used by the cert-reload path, which is itself gated on a QUIC backend.
-#[cfg(any(feature = "noq", feature = "quinn"))]
-mod watch;
+#[cfg(feature = "watch")]
+pub mod watch;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
@@ -43,6 +48,11 @@ pub use server::*;
 // Re-export these crates.
 pub use moq_net;
 pub use rustls;
+
+/// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
+/// in its API; a major `notify` bump is therefore a breaking change for this crate.
+#[cfg(feature = "watch")]
+pub use notify;
 
 #[cfg(feature = "quiche")]
 pub mod quiche;

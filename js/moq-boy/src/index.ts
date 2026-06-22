@@ -1,3 +1,4 @@
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 
@@ -225,18 +226,23 @@ export class Game {
 		const statusTrack = active.subscribe("status", 10);
 		effect.cleanup(() => statusTrack.close());
 
+		// Reconstruct each status from snapshots and deltas, validated against the schema.
+		const consumer = new Json.Consumer(statusTrack, { schema: GameStatusSchema });
+
+		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
+		// ends without racing effect.cancel.
 		effect.spawn(async () => {
 			for (;;) {
-				const json = await Promise.race([effect.cancel, statusTrack.readJson()]);
-				if (!json) break;
-
-				const result = GameStatusSchema.safeParse(json);
-				if (!result.success) {
-					console.warn("Invalid status JSON:", result.error);
+				let status: GameStatus | undefined;
+				try {
+					status = await consumer.next();
+				} catch (err) {
+					console.warn("Invalid status JSON:", err);
 					continue;
 				}
+				if (!status) break;
 
-				this.status.set(result.data);
+				this.status.set(status);
 			}
 		});
 	}
@@ -272,18 +278,20 @@ export class Game {
 				if (!req) break;
 
 				if (req.track.name === "command") {
-					effect.run(this.#runCommandTrack.bind(this, req.track));
+					const producer = new Json.Producer<Record<string, unknown>>(req.track);
+					effect.cleanup(() => producer.finish());
+					effect.run(this.#runCommandTrack.bind(this, req.track, producer));
 				}
 			}
 		});
 	}
 
-	#runCommandTrack(track: Moq.Track, effect: Moq.Signals.Effect) {
+	#runCommandTrack(track: Moq.Track, producer: Json.Producer<Record<string, unknown>>, effect: Moq.Signals.Effect) {
 		if (effect.get(track.state.closed)) return;
 
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		track.writeJson({ ...command.cmd, timestamps: command.timestamps });
+		producer.update({ ...command.cmd, timestamps: command.timestamps });
 	}
 }

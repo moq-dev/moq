@@ -1,6 +1,6 @@
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -28,13 +28,16 @@ pub struct Import<E: CatalogExt = ()> {
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
 
-	// Cached parameter set NALs for re-insertion before keyframes.
-	vps: Option<Bytes>,
-	sps: Option<Bytes>,
-	pps: Option<Bytes>,
+	// Retained parameter set NALs from the latest keyframe that carried them,
+	// re-injected before bare keyframes. A keyframe may define several of each
+	// (slices reference them by id); all are kept, but a new GOP's set supersedes
+	// them (replace, not accumulate) so a mid-stream reinit drops stale entries.
+	vps: Vec<Bytes>,
+	sps: Vec<Bytes>,
+	pps: Vec<Bytes>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -46,10 +49,10 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			current: Default::default(),
 			zero: None,
-			vps: None,
-			sps: None,
-			pps: None,
-			jitter: MinFrameDuration::new(),
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -61,14 +64,17 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			current: Default::default(),
 			zero: None,
-			vps: None,
-			sps: None,
-			pps: None,
-			jitter: MinFrameDuration::new(),
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
-	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<()> {
+	/// Publish (or republish) the catalog rendition for this SPS. Returns true if
+	/// it changed an existing config (a reconfiguration), so the caller drops the
+	/// parameter sets tied to the old config. The first SPS is not a reconfiguration.
+	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<bool> {
 		let profile = &sps.rbsp.profile_tier_level.general_profile;
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
@@ -91,9 +97,15 @@ impl<E: CatalogExt> Import<E> {
 		if let Some(old) = &self.config
 			&& old == &config
 		{
-			return Ok(());
+			return Ok(false);
 		}
 
+		let reconfigured = self.config.is_some();
+		// Seed jitter from whatever has accumulated: a dirty start feeds frames before this
+		// first rendition exists, so those per-frame updates would otherwise be lost. The
+		// cached `config` stays jitter-free so a later jitter change is not mistaken for a
+		// codec reconfiguration.
+		let jitter = self.jitter.current();
 		let mut catalog = self.catalog.lock();
 
 		if self.track.is_some() && self.tracks.is_fixed() {
@@ -107,13 +119,15 @@ impl<E: CatalogExt> Import<E> {
 
 		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-		catalog.video.renditions.insert(track.name.clone(), config.clone());
+		let mut published = config.clone();
+		published.jitter = jitter;
+		catalog.video.renditions.insert(track.name.clone(), published);
 
 		self.config = Some(config);
 		self.track =
 			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 
-		Ok(())
+		Ok(reconfigured)
 	}
 
 	/// Initialize the decoder with SPS/PPS and other non-slice NALs.
@@ -166,6 +180,22 @@ impl<E: CatalogExt> Import<E> {
 	/// This can also be used when EOF is detected to flush the final frame.
 	///
 	/// NOTE: The next decode will fail if it doesn't begin with a start code.
+	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
+	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The container
+	/// supplies this since the elementary stream alone carries no decode time. No-op until the
+	/// track exists.
+	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
+		let Some(jitter) = self.jitter.observe_reorder(reorder) else {
+			return;
+		};
+		let Some(track) = self.track.as_ref() else {
+			return;
+		};
+		if let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name) {
+			c.jitter = Some(jitter);
+		}
+	}
+
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
@@ -209,36 +239,42 @@ impl<E: CatalogExt> Import<E> {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				self.vps = Some(nal.clone());
-				self.current.contains_vps = true;
+				// Track only what this AU carries; the retained set is reconciled at
+				// the keyframe so a new GOP's set replaces (not accumulates onto) it.
+				crate::codec::annexb::push_distinct(&mut self.current.vps_seen, &nal);
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
-				self.init(&sps)?;
+				let reconfigured = self.init(&sps)?;
 
-				// SPS changed mid-AU. Cached VPS/PPS are tied to the old SPS
-				// and may already have been appended to current.chunks earlier
-				// in this AU; reset the AU so the new VPS+SPS+PPS triple is
-				// the only parameter set we emit.
-				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
-					self.pps = None;
+				// A changed config means the retained VPS/SPS/PPS no longer apply; they
+				// may already have been appended to current.chunks earlier in this AU,
+				// so reset the sets and AU so only the new parameter sets emit.
+				if reconfigured {
+					self.vps.clear();
+					self.sps.clear();
+					self.pps.clear();
 					self.current.chunks.clear();
-					self.current.contains_vps = false;
-					self.current.contains_sps = false;
-					self.current.contains_pps = false;
+					// Keep vps_seen: in H.265 the VPS precedes the reconfiguring SPS, so
+					// any VPS already seen this AU belongs to the new config. Re-append
+					// it to the cleared chunks so the keyframe still carries it.
+					for nal in &self.current.vps_seen {
+						self.current.chunks.extend_from_slice(&START_CODE);
+						self.current.chunks.extend_from_slice(nal);
+					}
+					self.current.sps_seen.clear();
+					self.current.pps_seen.clear();
 				}
 
-				self.sps = Some(nal.clone());
-				self.current.contains_sps = true;
+				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				self.pps = Some(nal.clone());
-				self.current.contains_pps = true;
+				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
@@ -250,28 +286,23 @@ impl<E: CatalogExt> Import<E> {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
-				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
-				if !self.current.contains_vps
-					&& let Some(vps) = &self.vps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(vps);
-					self.current.contains_vps = true;
-				}
-				if !self.current.contains_sps
-					&& let Some(sps) = &self.sps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(sps);
-					self.current.contains_sps = true;
-				}
-				if !self.current.contains_pps
-					&& let Some(pps) = &self.pps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(pps);
-					self.current.contains_pps = true;
-				}
+				// Adopt this keyframe's inline set (dropping any the new GOP no longer
+				// uses), or re-inject the retained set if the keyframe carried none.
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.vps,
+					&mut self.current.vps_seen,
+				);
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.sps,
+					&mut self.current.sps_seen,
+				);
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.pps,
+					&mut self.current.pps_seen,
+				);
 
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
@@ -331,9 +362,9 @@ impl<E: CatalogExt> Import<E> {
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
-		self.current.contains_vps = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
+		self.current.vps_seen.clear();
+		self.current.sps_seen.clear();
+		self.current.pps_seen.clear();
 
 		Ok(())
 	}
@@ -382,9 +413,10 @@ struct Frame {
 	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
-	contains_vps: bool,
-	contains_sps: bool,
-	contains_pps: bool,
+	/// VPS/SPS/PPS NALs already inline in this access unit, so re-injection skips them.
+	vps_seen: Vec<Bytes>,
+	sps_seen: Vec<Bytes>,
+	pps_seen: Vec<Bytes>,
 }
 
 #[derive(Default)]
