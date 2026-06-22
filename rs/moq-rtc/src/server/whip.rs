@@ -124,9 +124,7 @@ pub async fn accept(
 		let _publish = publish;
 		let _registration = registration;
 		tokio::select! {
-			res = session.run() => if let Err(err) = res {
-				tracing::warn!(%err, "whip session ended");
-			},
+			res = session.run() => session::log_session_end("whip server", res),
 			_ = cancel => tracing::debug!("whip session terminated by DELETE"),
 		}
 		task_server.unregister_session(&task_resource);

@@ -122,9 +122,7 @@ pub async fn accept(
 		// Hold the mux registration for the session's lifetime (unregisters on exit).
 		let _registration = registration;
 		tokio::select! {
-			res = session.run() => if let Err(err) = res {
-				tracing::warn!(%err, "whep session ended");
-			},
+			res = session.run() => session::log_session_end("whep server", res),
 			_ = cancel => tracing::debug!("whep session terminated by DELETE"),
 		}
 		task_server.unregister_session(&task_resource);

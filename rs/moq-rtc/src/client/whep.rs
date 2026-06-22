@@ -66,9 +66,7 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::Broadcas
 	let inbound = session::spawn_socket_reader(socket.clone());
 	let session = session::Session::ingest(rtc, socket, candidates, inbound, sink);
 	tokio::spawn(async move {
-		if let Err(err) = session.run().await {
-			tracing::warn!(%err, "whep client session ended");
-		}
+		session::log_session_end("whep client", session.run().await);
 	});
 
 	Ok(())

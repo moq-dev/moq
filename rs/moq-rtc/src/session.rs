@@ -226,11 +226,12 @@ impl Session {
 			}
 			Event::MediaAdded(added) => self.handle_media_added(added)?,
 			Event::MediaData(data) => {
-				// Rebase off the raw (random, per-track) RTP base before borrowing
-				// the sink, so the clock and the role are disjoint borrows.
-				let media_us = media_time_to_micros(&data.time);
-				let timestamp_us = self.clock.normalize(data.mid, data.network_time, media_us);
+				// `clock` and `role` are disjoint fields, so the borrow checker lets
+				// us rebase the (random, per-track) RTP base and feed the sink in one
+				// block; egress sessions never get here so the clock stays untouched.
 				if let MediaRole::Ingest(sink) = &mut self.role {
+					let media_us = media_time_to_micros(&data.time);
+					let timestamp_us = self.clock.normalize(data.mid, data.network_time, media_us);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -310,10 +311,29 @@ impl IngestClock {
 	fn normalize(&mut self, mid: str0m::media::Mid, arrival: Instant, media_us: u64) -> u64 {
 		let epoch = *self.epoch.get_or_insert(arrival);
 		let offset = *self.offsets.entry(mid).or_insert_with(|| {
-			let wall_us = arrival.saturating_duration_since(epoch).as_micros() as i64;
+			// Signed wall delta from the epoch: a track whose first frame we dequeue
+			// after the epoch frame may have actually arrived *before* it, and that
+			// lead must pull its timeline earlier (not clamp to the epoch via an
+			// unsigned subtraction) so it stays in sync.
+			let wall_us = if arrival >= epoch {
+				arrival.duration_since(epoch).as_micros() as i64
+			} else {
+				-(epoch.duration_since(arrival).as_micros() as i64)
+			};
 			wall_us - media_us as i64
 		});
 		(media_us as i64 + offset).max(0) as u64
+	}
+}
+
+/// Log a finished session at the right level: an ordinary peer disconnect
+/// ([`Error::SessionClosed`]) is debug, a genuine failure is a warning. Keeps
+/// normal WebRTC churn out of the warning stream. `role` labels the path
+/// (e.g. `"whip server"`).
+pub(crate) fn log_session_end(role: &str, result: Result<()>) {
+	match result {
+		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
+		Err(err) => tracing::warn!(%err, role, "session ended"),
 	}
 }
 
@@ -513,6 +533,25 @@ mod tests {
 		assert_eq!(
 			clock.normalize(video, video_arrival + Duration::from_millis(33), 8_000_033_000),
 			38_000
+		);
+	}
+
+	#[test]
+	fn ingest_clock_handles_track_arriving_before_epoch() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		// Audio's MediaData is dequeued first and sets the epoch at t0.
+		assert_eq!(clock.normalize(audio, t0, 1_000_000), 0);
+		// Video's first frame actually arrived 5 ms *before* the epoch. Its lead
+		// pulls the start below zero (clamped to 0), and a frame 33 ms into video
+		// lands 28 ms onto the shared timeline (33 ms - the 5 ms head start).
+		let video_arrival = t0 - Duration::from_millis(5);
+		assert_eq!(clock.normalize(video, video_arrival, 8_000_000), 0);
+		assert_eq!(
+			clock.normalize(video, video_arrival + Duration::from_millis(33), 8_033_000),
+			28_000
 		);
 	}
 }
