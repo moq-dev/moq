@@ -54,7 +54,7 @@ target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
 # Link required system frameworks on macOS
 if(APPLE)
-    target_link_options(moq INTERFACE "LINKER:-framework,CoreFoundation" "LINKER:-framework,Security")
+    target_link_options(moq INTERFACE "LINKER:-framework,CoreFoundation" "LINKER:-framework,Security" "LINKER:-framework,CoreServices")
 endif()
 
 # System libraries Rust std/deps pull in on Windows (from
