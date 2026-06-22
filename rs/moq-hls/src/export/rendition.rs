@@ -5,6 +5,7 @@ use std::sync::Arc;
 use hang::catalog::{AudioConfig, VideoConfig};
 use moq_mux::catalog::{self, CatalogFormat, Filter, FilterAudio, FilterVideo};
 use moq_mux::container::fmp4::Export;
+use tokio::sync::watch;
 
 use super::Config;
 use super::store::SegmentStore;
@@ -34,14 +35,20 @@ pub struct Rendition {
 }
 
 impl Rendition {
-	pub fn video(name: String, config: &VideoConfig, broadcast: moq_net::BroadcastConsumer, cfg: &Config) -> Self {
+	pub fn video(
+		name: String,
+		config: &VideoConfig,
+		broadcast: moq_net::BroadcastConsumer,
+		cfg: &Config,
+		paused: watch::Receiver<bool>,
+	) -> Self {
 		let store = Arc::new(SegmentStore::new(
 			true,
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
 		));
-		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone());
+		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Video,
@@ -53,14 +60,20 @@ impl Rendition {
 		}
 	}
 
-	pub fn audio(name: String, config: &AudioConfig, broadcast: moq_net::BroadcastConsumer, cfg: &Config) -> Self {
+	pub fn audio(
+		name: String,
+		config: &AudioConfig,
+		broadcast: moq_net::BroadcastConsumer,
+		cfg: &Config,
+		paused: watch::Receiver<bool>,
+	) -> Self {
 		let store = Arc::new(SegmentStore::new(
 			false,
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
 		));
-		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone());
+		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -73,9 +86,16 @@ impl Rendition {
 	}
 }
 
-fn spawn_pump(broadcast: moq_net::BroadcastConsumer, name: String, kind: Kind, store: Arc<SegmentStore>, cfg: Config) {
+fn spawn_pump(
+	broadcast: moq_net::BroadcastConsumer,
+	name: String,
+	kind: Kind,
+	store: Arc<SegmentStore>,
+	cfg: Config,
+	paused: watch::Receiver<bool>,
+) {
 	tokio::spawn(async move {
-		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg).await {
+		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
@@ -89,6 +109,7 @@ async fn run_pump(
 	kind: Kind,
 	store: &SegmentStore,
 	cfg: &Config,
+	mut paused: watch::Receiver<bool>,
 ) -> Result<()> {
 	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
 	let mut filter = Filter::new(consumer);
@@ -105,12 +126,51 @@ async fn run_pump(
 	});
 	let _ = kind; // kind only drives the store policy; the exporter is codec-agnostic.
 
+	// A handle for noticing the broadcast close even while paused; the `Export`
+	// below takes its own clone for pulling fragments.
+	let closed = broadcast.clone();
+
 	let mut export = Export::new(broadcast, filter)
 		.with_fragment_duration(cfg.part_target)
 		.with_latency(cfg.latency);
 
-	while let Some(fragment) = export.next_fragment().await? {
-		store.push(fragment);
+	// Whether we just resumed, so the first post-resume segment opens a new
+	// continuity region (`#EXT-X-DISCONTINUITY`).
+	let mut resumed = false;
+
+	loop {
+		// Park while paused: stop draining the source entirely. The live media
+		// produced during the pause is dropped by the relay (the exporter's latency
+		// budget skips stale groups on resume), NOT buffered here, so a long pause
+		// costs no memory -- it just leaves a gap in the recording.
+		while *paused.borrow_and_update() {
+			resumed = true;
+			tokio::select! {
+				// Resume request, or the Broadcaster (and its sender) being dropped.
+				res = paused.changed() => {
+					if res.is_err() {
+						return Ok(()); // Broadcaster gone: stop pumping.
+					}
+				}
+				// The broadcast ending while paused still finalizes the track.
+				_ = kio::wait(|w| closed.poll_closed(w)) => return Ok(()),
+			}
+		}
+
+		if resumed {
+			// The media timeline jumped across the dropped span; tag the next segment.
+			store.mark_discontinuity();
+			resumed = false;
+		}
+
+		// Pull exactly one fragment uninterrupted (next_fragment isn't cancel-safe),
+		// then re-check the pause flag at the top of the loop. So entering a pause
+		// costs at most one extra fragment (~part_target), which records right up to
+		// the pause point.
+		match export.next_fragment().await? {
+			Some(fragment) => store.push(fragment),
+			None => break,
+		}
 	}
 
 	Ok(())

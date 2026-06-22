@@ -30,6 +30,9 @@ struct Segment {
 	duration: f64,
 	/// Set once the following segment opens, so EXTINF is final.
 	complete: bool,
+	/// First segment after a pause/resume: the media timeline jumps here, so the
+	/// playlist precedes it with `#EXT-X-DISCONTINUITY`.
+	discontinuity: bool,
 }
 
 /// Lightweight per-part metadata for rendering a playlist (no bytes).
@@ -44,6 +47,9 @@ pub struct SegmentMeta {
 	pub parts: Vec<PartMeta>,
 	pub duration: f64,
 	pub complete: bool,
+	/// True if this segment opens a new continuity region (post pause/resume); the
+	/// renderer emits `#EXT-X-DISCONTINUITY` before it.
+	pub discontinuity: bool,
 }
 
 /// A point-in-time view of the store, used to render a media playlist without
@@ -72,6 +78,9 @@ struct Inner {
 	segments: VecDeque<Segment>,
 	next_sequence: u64,
 	finished: bool,
+	/// Set by [`SegmentStore::mark_discontinuity`] after a resume; the next segment
+	/// to roll is forced open and tagged discontinuous, then this clears.
+	discontinuity_pending: bool,
 }
 
 /// Bounded per-rendition store of CMAF segments and LL-HLS parts.
@@ -97,6 +106,7 @@ impl SegmentStore {
 				segments: VecDeque::new(),
 				next_sequence: 0,
 				finished: false,
+				discontinuity_pending: false,
 			}),
 			notify,
 			is_video,
@@ -118,18 +128,23 @@ impl SegmentStore {
 		{
 			let mut inner = self.inner.lock().unwrap();
 
-			let need_new = match inner.segments.back() {
-				None => true,
-				Some(cur) => {
-					if self.is_video {
-						// A new GOP (independent fragment) starts a new segment.
-						fragment.independent
-					} else {
-						// Audio has no keyframes: roll once the segment is long enough.
-						cur.duration >= self.audio_segment_target
+			// A pending discontinuity forces a fresh segment so the resumed media never
+			// shares a segment with pre-pause media (matters for audio, which otherwise
+			// rolls on duration, not keyframes).
+			let discontinuity = inner.discontinuity_pending;
+			let need_new = discontinuity
+				|| match inner.segments.back() {
+					None => true,
+					Some(cur) => {
+						if self.is_video {
+							// A new GOP (independent fragment) starts a new segment.
+							fragment.independent
+						} else {
+							// Audio has no keyframes: roll once the segment is long enough.
+							cur.duration >= self.audio_segment_target
+						}
 					}
-				}
-			};
+				};
 
 			if need_new {
 				if let Some(cur) = inner.segments.back_mut() {
@@ -142,7 +157,9 @@ impl SegmentStore {
 					parts: Vec::new(),
 					duration: 0.0,
 					complete: false,
+					discontinuity,
 				});
+				inner.discontinuity_pending = false;
 			}
 
 			let cur = inner.segments.back_mut().expect("segment present after need_new");
@@ -167,6 +184,14 @@ impl SegmentStore {
 		}
 
 		self.bump();
+	}
+
+	/// Mark that the next segment to roll begins a new continuity region. Called
+	/// once on each pause->resume transition: the media timeline jumps across the
+	/// dropped span, so the renderer emits `#EXT-X-DISCONTINUITY` before it. The
+	/// next [`push`](Self::push) forces a fresh segment and tags it.
+	pub fn mark_discontinuity(&self) {
+		self.inner.lock().unwrap().discontinuity_pending = true;
 	}
 
 	/// Signal end-of-track. The playlist gains `#EXT-X-ENDLIST`.
@@ -277,6 +302,7 @@ impl SegmentStore {
 					.collect(),
 				duration: s.duration,
 				complete: s.complete,
+				discontinuity: s.discontinuity,
 			})
 			.collect();
 		Snapshot {
