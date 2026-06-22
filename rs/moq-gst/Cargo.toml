@@ -6,7 +6,7 @@ repository = "https://github.com/kixelated/moq"
 license = "MIT OR Apache-2.0"
 
 version = "0.2.7"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 publish = true
 

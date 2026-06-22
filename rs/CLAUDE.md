@@ -2,14 +2,14 @@
 
 Reference for the `/rs` Cargo workspace. Universal rules (writing style, no em dashes, Branch Targeting, Cross-Package Sync, Public API Scrutiny, Refactor As You Go, AI Attribution) live in the root `/CLAUDE.md` and are not repeated here.
 
-Workspace members live in the root `Cargo.toml` (`[workspace]`). `rust-version = "1.85"`, edition 2024 for most crates (moq-gst is 2021). Shared versions/paths are pinned under `[workspace.dependencies]`; new crates should add their dep there and reference it via `{ workspace = true }`.
+Workspace members live in the root `Cargo.toml` (`[workspace]`). `rust-version = "1.85"`, edition 2024. Shared versions/paths are pinned under `[workspace.dependencies]`; new crates should add their dep there and reference it via `{ workspace = true }`.
 
 ## Crate Map
 
 Layered roughly transport -> container/format -> media -> apps/bindings.
 
 **Transport / protocol**
-- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. Owns the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session` (no concrete QUIC dep). `lite/` and `ietf/` modules are private; `model/`, `error`, `version`, `coding`, `path`, `session`, `client`, `server` are public.
+- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. Owns the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session` (no concrete QUIC dep). Submodules are private; the public surface is re-exported flat from the crate root.
 - `moq-native` (lib): native connection helpers. `ClientConfig`/`ServerConfig` wrap QUIC backends (Quinn/Quiche/Noq/Iroh), WebTransport, WebSocket, TCP (qmux), Unix sockets, TLS, cert hot-reload, logging, jemalloc. Re-exports `moq_net`. Example: `examples/clock.rs`.
 - `kio` (lib): "easy async". `Producer<T>`/`Consumer<T>` shared-state channels with `Waiter`-based notification, built on `std::task::Waker`, no runtime dependency. Underpins all the `poll_*` plumbing in moq-net and moq-mux. `src/producer.rs`, `src/consumer.rs`, `src/waiter.rs`.
 
@@ -71,6 +71,7 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 
 ## Rust conventions
 
+- **Prefer `kio` over tokio sync primitives**: reach for `kio::Producer`/`Consumer` (and the `poll_*` plumbing) instead of `tokio::sync` channels or `watch`. A `tokio::sync::watch` (or a channel) carrying a single value is a code smell. `kio` ties into the runtime-free `poll_*` model and avoids a hard runtime dependency.
 - **Errors**: `thiserror` with `#[from]` for libraries, `anyhow` (with `.context("...")`, not `.map_err(|_| anyhow!())`) for binaries. Always `#[non_exhaustive]` on public error enums (e.g. `moq-net/src/error.rs:6`, `moq-ffi/src/error.rs:4`, `moq-loc/src/lib.rs:55`). Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors (see `moq-token/src/error.rs`).
 - **Config + TOML merge**: any `#[arg]` field on a TOML-loadable config must be `Option<T>`, never a bare `bool`/`String`/etc. The TOML->CLI merge re-applies clap defaults and silently clobbers TOML values for bare fields. See `moq-relay/src/config.rs` and its regression tests (`cli_does_not_clobber_toml_*`, around line 126); add such a test for any new flag.
 - **Config structs**: `#[derive(Parser, Serialize, Deserialize)]` with `#[serde(deny_unknown_fields, default)]`, clap `#[arg(long, env = "MOQ_...")]`, nested configs via `#[command(flatten)]`, and an `.init()`/`.load()` method that produces the live object. Add `#[non_exhaustive]` + `Default`/constructor to configs consumers build (per root Public API Scrutiny).

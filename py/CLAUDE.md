@@ -1,11 +1,18 @@
 # py/CLAUDE.md
 
-Scopes the `/py` uv workspace. Universal rules (writing style / no em-dashes, Branch Targeting, Cross-Package Sync, AI Attribution) live in the root `CLAUDE.md`. Detailed release/versioning mechanics for both distributions are in the root Project Structure notes; this file covers the code layout.
+Scopes the `/py` uv workspace. Universal rules (writing style / no em-dashes, Branch Targeting, Cross-Package Sync, AI Attribution) live in the root `CLAUDE.md`.
 
 ## Two packages, one wheel boundary
 
 - `moq-ffi/` (`moq_ffi`): the generated uniffi bindings layer over `rs/moq-ffi`. A Maturin project; one wheel covers every crate exposed via moq-ffi (uniffi-linked libs cannot be split across wheels). Keep this layer thin. `moq_ffi/__init__.py` mostly re-exports generated symbols (`Container`, `MoqError`, `MoqSession`, `MoqClient`, ...). Do not hand-write ergonomics here; that belongs in `moq-rs`.
 - `moq-rs/` (`moq`): the pure-python ergonomic wrapper consumers actually import (`import moq`). Depends on `moq-ffi` via a `~=0.2.x` compatible-release pin. This is where the friendly API lives.
+
+## Releases
+
+Two independently-versioned PyPI distributions:
+
+- `moq-ffi` (import `moq_ffi`): version tracks `rs/moq-ffi`; `release-py-ffi.yml` fires on `moq-ffi-v*` tags.
+- `moq-rs` (import `moq`, since `moq` was taken on PyPI): versioned by hand. Bump `py/moq-rs/pyproject.toml`; on merge to `main`, `release-py.yml` publishes only if that version isn't already on PyPI (the registry is the gate). The `~=0.2.x` pin lets it float to the latest `moq-ffi` patch.
 
 ## moq-rs layout
 

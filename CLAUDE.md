@@ -39,64 +39,17 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 ## Project Structure
 
-```
-/rs/                  # Rust crates
-  moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
-  moq-native/        # QUIC/WebTransport connection helpers for native apps; clock example lives in examples/clock.rs
-  moq-relay/         # Clusterable relay server (binary: moq-relay)
-  moq-token/         # JWT authentication library
-  moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
-  moq-cli/           # CLI tool for media operations (binary: moq)
-  moq-bench/         # Load generator for benchmarking relays (binary: moq-bench)
-  moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
-  moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
-  hang/              # Media encoding/streaming (catalog/container format)
-  libmoq/            # C bindings (staticlib)
-  moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
-  moq-boy/           # MoQ Boy emulator publisher (binary: moq-boy)
-  moq-gst/           # GStreamer plugin (moqsink/moqsrc elements)
+Top-level layout only. Per-crate and per-package detail lives in the nested guides (see [Per-Directory Guides](#per-directory-guides)), which sit next to the code and don't rot here.
 
-/js/                  # TypeScript/JavaScript packages
-  net/               # Core networking layer for browsers (published as @moq/net)
-  signals/           # Reactive signals library (published as @moq/signals)
-  token/             # JWT token generation (published as @moq/token)
-  clock/             # Clock example (published as @moq/clock)
-  hang/              # Core media layer: catalog, container, support (published as @moq/hang)
-  watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
-  publish/           # Publish media to streams + UI (published as @moq/publish)
-  moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
+- `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
+- `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
+- `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
+- `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
+- `/doc/` - documentation site (VitePress, deployed via Cloudflare).
 
-/py/                  # Python packages (uv workspace)
-  moq-ffi/           # Maturin project: rs/moq-ffi cdylib + uniffi bindings.
-                     # Distribution `moq-ffi` (PyPI); import `moq_ffi`. One
-                     # wheel covers every crate exposed via moq-ffi because
-                     # uniffi-linked libraries can't be split across separate
-                     # wheels. Version tracks rs/moq-ffi (release-py-ffi.yml
-                     # fires on moq-ffi-v* tags). Most callers want `moq-rs`.
-  moq-rs/            # Pure-python ergonomic wrapper. Distribution `moq-rs`
-                     # (PyPI, since `moq` is taken); import `moq`. Depends on
-                     # moq-ffi via a compatible-release pin (~=0.2.x) so it
-                     # floats to the latest moq-ffi patch. Versioned
-                     # independently: bump py/moq-rs/pyproject.toml by hand; on
-                     # merge to main release-py.yml publishes to PyPI if that
-                     # version isn't already there (registry is the gate).
+## Language Bindings
 
-/swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
-/kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
-/go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
-                      # swift/kt/go are in-tree source skeletons.
-                      # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
-                      # on each moq-ffi-v* tag.
-
-/demo/                # Demos and test media
-  boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
-  relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
-  pub/               # Media hosting (vid.moq.dev)
-  web/               # Web demo (watch/publish examples)
-  throttle/          # Network throttle script for testing
-
-/doc/                 # Documentation site (VitePress, deployed via Cloudflare)
-```
+`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the `swift`/`kt`/`go` source skeletons to `moq-dev/moq-{swift,kotlin,go}` on each `moq-ffi-v*` tag. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
 
 ## Per-Directory Guides
 
