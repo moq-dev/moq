@@ -118,13 +118,16 @@ export function decode(raw: Uint8Array): Catalog {
 	const str = new TextDecoder().decode(raw);
 	try {
 		const wire = WireCatalogSchema.parse(JSON.parse(str));
-		const list = wire.initDataList ?? [];
+
+		// id -> inline payload, built once so resolution is linear in the number
+		// of tracks rather than tracks x entries.
+		const inline = new Map((wire.initDataList ?? []).filter((e) => e.type === "inline").map((e) => [e.id, e.data]));
 
 		const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
 			// Resolve draft-01 initRef into inline initData so callers never see
 			// the indirection. Inline initData (draft-00) is left untouched.
 			if (track.initData === undefined && initRef !== undefined) {
-				track.initData = list.find((e) => e.id === initRef && e.type === "inline")?.data;
+				track.initData = inline.get(initRef);
 			}
 			return track;
 		});

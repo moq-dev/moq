@@ -91,6 +91,27 @@ test("resolves draft-01 initRef into inline initData", () => {
 	expect(catalog.tracks[0].initData).toBe("AQID");
 });
 
+test("leaves initData undefined for a dangling or non-inline initRef", () => {
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			initDataList: [{ id: "v0", type: "url", data: "https://example.com/init" }],
+			tracks: [
+				{ name: "a", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "missing" },
+				{ name: "b", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v0" },
+			],
+		}),
+	);
+
+	expect(catalog.tracks[0].initData).toBeUndefined();
+	expect(catalog.tracks[1].initData).toBeUndefined();
+});
+
+test("rejects an unsupported numeric version", () => {
+	// Mirrors the Rust side: any number other than 1 is rejected.
+	expect(() => decode(encodeJson({ version: 2, tracks: [] }))).toThrow();
+});
+
 test("encode hoists and dedups init data, then round-trips", () => {
 	const catalog = {
 		tracks: [

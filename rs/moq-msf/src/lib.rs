@@ -186,8 +186,18 @@ impl Serialize for Catalog {
 
 impl<'de> Deserialize<'de> for Catalog {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		use std::collections::HashMap;
+
 		let wire = Wire::deserialize(deserializer)?;
 		let init_data_list = wire.init_data_list.unwrap_or_default();
+
+		// id -> inline payload, built once so resolution is linear in the number
+		// of tracks rather than tracks x entries.
+		let inline: HashMap<&str, &str> = init_data_list
+			.iter()
+			.filter(|e| e.kind == "inline")
+			.map(|e| (e.id.as_str(), e.data.as_str()))
+			.collect();
 
 		let tracks = wire
 			.tracks
@@ -197,9 +207,7 @@ impl<'de> Deserialize<'de> for Catalog {
 				// see the indirection. Inline init_data (draft-00) is kept as-is.
 				if track.init_data.is_none() {
 					if let Some(id) = track.init_ref.take() {
-						if let Some(entry) = init_data_list.iter().find(|e| e.id == id && e.kind == "inline") {
-							track.init_data = Some(entry.data.clone());
-						}
+						track.init_data = inline.get(id.as_str()).map(|data| data.to_string());
 					}
 				}
 				track.init_ref = None;
@@ -244,6 +252,9 @@ impl<'de> Deserialize<'de> for WireVersion {
 				f.write_str("the JSON number 1 (draft-00) or a \"draft-XX\" version string")
 			}
 
+			// draft-00's only defined numeric version is 1. Accept it from any JSON
+			// number type (serde_json picks u64/i64/f64 by shape, and `1.0` is a
+			// valid spelling), and reject everything else.
 			fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<WireVersion, E> {
 				match v {
 					1 => Ok(WireVersion),
@@ -252,9 +263,18 @@ impl<'de> Deserialize<'de> for WireVersion {
 			}
 
 			fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<WireVersion, E> {
-				match u64::try_from(v) {
-					Ok(v) => self.visit_u64(v),
-					Err(_) => Err(E::custom(format!("unsupported MSF catalog version: {v}"))),
+				if v == 1 {
+					Ok(WireVersion)
+				} else {
+					Err(E::custom(format!("unsupported MSF catalog version: {v}")))
+				}
+			}
+
+			fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<WireVersion, E> {
+				if v == 1.0 {
+					Ok(WireVersion)
+				} else {
+					Err(E::custom(format!("unsupported MSF catalog version: {v}")))
 				}
 			}
 
@@ -705,6 +725,37 @@ mod test {
 	fn unsupported_numeric_version_errors() {
 		// Numbers other than 1 never had a defined meaning, so reject them.
 		assert!(Catalog::from_str(r#"{"version":2,"tracks":[]}"#).is_err());
+	}
+
+	#[test]
+	fn float_numeric_version_is_accepted() {
+		// `1.0` is a valid JSON spelling of the draft-00 version; accept it so we
+		// don't reject a catalog the JS decoder would happily parse.
+		assert!(Catalog::from_str(r#"{"version":1.0,"tracks":[]}"#).is_ok());
+		assert!(Catalog::from_str(r#"{"version":2.0,"tracks":[]}"#).is_err());
+	}
+
+	#[test]
+	fn unresolved_init_ref_leaves_init_data_none() {
+		// A dangling initRef (no matching entry, or a non-inline type) resolves to
+		// no init data rather than failing the whole catalog. Downstream decides
+		// whether a track without init data is usable.
+		let json = r#"{
+			"version": "draft-01",
+			"initDataList": [
+				{ "id": "v0", "type": "url", "data": "https://example.com/init" }
+			],
+			"tracks": [
+				{ "name": "a", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initRef": "missing" },
+				{ "name": "b", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initRef": "v0" }
+			]
+		}"#;
+
+		let catalog = Catalog::from_str(json).unwrap();
+		assert_eq!(catalog.tracks[0].init_data, None);
+		assert_eq!(catalog.tracks[1].init_data, None);
 	}
 
 	#[test]
