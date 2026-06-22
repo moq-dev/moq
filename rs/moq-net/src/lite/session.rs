@@ -87,6 +87,9 @@ pub fn start<S: web_transport_trait::Session>(
 		origin: publish,
 		stats: stats.clone(),
 		version,
+		// The subscriber loop records the peer's SETUP here; the publisher reads it
+		// to learn which algorithms the peer can decompress before compressing.
+		peer_setup: peer_setup.clone(),
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),

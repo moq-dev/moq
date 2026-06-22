@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Compression, Path, Timescale,
+	Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
@@ -54,8 +54,11 @@ pub struct TrackInfo {
 	/// Per-frame timestamp scale, or `None` if frames carry no timestamps. On the
 	/// wire `None` is `0` and `Some(n)` is `n`.
 	pub timescale: Option<Timescale>,
-	/// Codec applied to every frame payload on this track.
-	pub compression: Compression,
+	/// Boolean hint that this track's payloads are worth compressing. It names no
+	/// algorithm: that's negotiated per hop (SETUP) and named per frame. When set,
+	/// every FRAME on the track carries a per-frame `Compression` field. Wire values
+	/// `>1` are reserved and decode as `true`, so the hint stays additive.
+	pub compress: bool,
 }
 
 impl Message for TrackInfo {
@@ -67,13 +70,14 @@ impl Message for TrackInfo {
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
 		let timescale = Timescale::new(u64::decode(r, version)?).ok();
-		let compression = Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
+		// Any non-zero value (including reserved `>1`) is the "worth compressing" hint.
+		let compress = u64::decode(r, version)? != 0;
 
 		Ok(Self {
 			priority,
 			ordered,
 			timescale,
-			compression,
+			compress,
 		})
 	}
 
@@ -85,7 +89,7 @@ impl Message for TrackInfo {
 		self.priority.encode(w, version)?;
 		(self.ordered as u8).encode(w, version)?;
 		self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
-		self.compression.to_code().encode(w, version)?;
+		(self.compress as u64).encode(w, version)?;
 		Ok(())
 	}
 }
@@ -99,7 +103,7 @@ mod test {
 			priority: 7,
 			ordered: false,
 			timescale: Some(Timescale::MICRO),
-			compression: Compression::Deflate,
+			compress: true,
 		}
 	}
 
@@ -116,7 +120,21 @@ mod test {
 		assert_eq!(got.priority, 7);
 		assert!(!got.ordered);
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
-		assert_eq!(got.compression, Compression::Deflate);
+		assert!(got.compress);
+	}
+
+	#[test]
+	fn track_info_compress_hint_is_additive() {
+		// Reserved wire values (>1) decode as the boolean hint `true`.
+		let mut buf = Vec::new();
+		7u8.encode(&mut buf, Version::Lite05Wip).unwrap();
+		0u8.encode(&mut buf, Version::Lite05Wip).unwrap();
+		u64::from(Timescale::MICRO)
+			.encode(&mut buf, Version::Lite05Wip)
+			.unwrap();
+		9u64.encode(&mut buf, Version::Lite05Wip).unwrap(); // reserved compress value
+		let mut slice = buf.as_slice();
+		assert!(TrackInfo::decode_msg(&mut slice, Version::Lite05Wip).unwrap().compress);
 	}
 
 	#[test]

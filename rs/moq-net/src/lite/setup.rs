@@ -1,6 +1,7 @@
 //! The lite-05 SETUP message: each endpoint advertises its capabilities once, as
 //! the sole message on a unidirectional Setup Stream, then closes it.
 
+use crate::Compression;
 use crate::coding::*;
 
 use super::{Message, Parameters, Version};
@@ -9,6 +10,8 @@ use super::{Message, Parameters, Version};
 const PARAM_PROBE: u64 = 0x1;
 /// Setup Parameter id for the request Path (client-only, URI-less transports).
 const PARAM_PATH: u64 = 0x2;
+/// Setup Parameter id for the compression algorithms this endpoint can decompress.
+const PARAM_COMPRESSION: u64 = 0x3;
 
 /// The probe capability an endpoint advertises in SETUP.
 ///
@@ -59,6 +62,11 @@ pub struct Setup {
 	/// qmux over TCP/TLS). Sent only by the client; a server never sends one and a
 	/// relay never forwards it. `None` on URI-carrying bindings.
 	pub path: Option<String>,
+	/// Compression algorithms this endpoint can *decompress*, in preference order
+	/// (most-preferred first). Governs only what a peer may compress when sending
+	/// *to* us; the sender names the algorithm actually used per frame. `none` (0)
+	/// is never listed. Empty (the default) means "send me everything verbatim".
+	pub compression: Vec<Compression>,
 }
 
 impl Message for Setup {
@@ -83,7 +91,27 @@ impl Message for Setup {
 			None => None,
 		};
 
-		Ok(Self { probe, path })
+		// A back-to-back sequence of algorithm varints. Skip `none` (0) and any
+		// identifier we don't understand: we can neither produce nor consume it.
+		let mut compression = Vec::new();
+		if let Some(bytes) = params.get_bytes(PARAM_COMPRESSION) {
+			let mut slice = bytes;
+			while !slice.is_empty() {
+				let code = u64::decode(&mut slice, version)?;
+				if let Ok(algo) = Compression::from_code(code)
+					&& algo != Compression::None
+					&& !compression.contains(&algo)
+				{
+					compression.push(algo);
+				}
+			}
+		}
+
+		Ok(Self {
+			probe,
+			path,
+			compression,
+		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -98,6 +126,16 @@ impl Message for Setup {
 		}
 		if let Some(path) = &self.path {
 			params.set_bytes(PARAM_PATH, path.as_bytes().to_vec());
+		}
+		// Pack the advertised algorithms back-to-back as varints, omitting `none`.
+		let mut algos = Vec::new();
+		for algo in &self.compression {
+			if *algo != Compression::None {
+				algo.to_code().encode(&mut algos, version)?;
+			}
+		}
+		if !algos.is_empty() {
+			params.set_bytes(PARAM_COMPRESSION, algos);
 		}
 
 		params.encode(w, version)
@@ -141,6 +179,24 @@ impl PeerSetup {
 			}
 		}
 	}
+
+	/// Await the algorithms the peer can decompress, blocking until its SETUP arrives.
+	///
+	/// A publisher consults this before compressing: it MUST NOT use an algorithm the
+	/// peer did not advertise. An empty list (no parameter, or the sender dropped
+	/// without a SETUP) means everything must be sent verbatim.
+	pub async fn compression(&self) -> Vec<Compression> {
+		let mut rx = self.0.subscribe();
+		loop {
+			// Clone out of the borrow before awaiting so no guard crosses the await point.
+			if let Some(setup) = rx.borrow_and_update().clone() {
+				return setup.compression;
+			}
+			if rx.changed().await.is_err() {
+				return Vec::new();
+			}
+		}
+	}
 }
 
 #[cfg(test)]
@@ -165,7 +221,11 @@ mod tests {
 	#[test]
 	fn probe_levels_round_trip() {
 		for probe in [ProbeLevel::None, ProbeLevel::Report, ProbeLevel::Increase] {
-			let msg = Setup { probe, path: None };
+			let msg = Setup {
+				probe,
+				path: None,
+				compression: Vec::new(),
+			};
 			assert_eq!(round_trip(&msg), msg);
 		}
 	}
@@ -175,8 +235,41 @@ mod tests {
 		let msg = Setup {
 			probe: ProbeLevel::Report,
 			path: Some("/room/123".to_string()),
+			compression: Vec::new(),
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn compression_round_trip() {
+		let msg = Setup {
+			probe: ProbeLevel::None,
+			path: None,
+			compression: vec![Compression::Deflate],
+		};
+		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn compression_decode_skips_none_and_unknown() {
+		// Hand-frame a SETUP whose Compression parameter lists none (0), deflate (1),
+		// and an unknown algorithm (99); only deflate survives the decode.
+		let mut algos = Vec::new();
+		for code in [0u64, 1, 99] {
+			code.encode(&mut algos, Version::Lite05Wip).unwrap();
+		}
+		let mut params = Parameters::default();
+		params.set_bytes(PARAM_COMPRESSION, algos);
+		let mut body = Vec::new();
+		params.encode(&mut body, Version::Lite05Wip).unwrap();
+
+		let mut buf = bytes::BytesMut::new();
+		body.len().encode(&mut buf, Version::Lite05Wip).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut slice = &buf[..];
+		let got = Setup::decode(&mut slice, Version::Lite05Wip).unwrap();
+		assert_eq!(got.compression, vec![Compression::Deflate]);
 	}
 
 	#[test]

@@ -161,6 +161,8 @@ impl Client {
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
 					path: self.setup_path.clone(),
+					// We can inflate DEFLATE, so a peer may compress what it sends us.
+					compression: vec![crate::Compression::Deflate],
 				};
 
 				let (recv_bw, connecting) = lite::start(

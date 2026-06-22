@@ -15,7 +15,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
-use super::Version;
+use super::{PeerSetup, Version};
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
@@ -25,6 +25,9 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// to opt out.
 	pub stats: MoqStats,
 	pub version: Version,
+	/// The peer's SETUP, recorded by the subscriber loop. Read to learn which
+	/// compression algorithms the peer can decompress before compressing egress.
+	pub peer_setup: PeerSetup,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -38,6 +41,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
+	peer_setup: PeerSetup,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
@@ -55,6 +59,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			self_origin,
 			priority: Default::default(),
 			version: config.version,
+			peer_setup: config.peer_setup,
 		}
 	}
 
@@ -451,14 +456,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.request_broadcast(&request.broadcast)?.await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
-		// Same negotiation as a subscription, just answered once: codec only when
-		// both the producer asks for it and the draft can carry it; timescale only
-		// when the draft carries per-frame timestamps.
-		let compression = if info.compress {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
+		// The compress hint travels end to end; the algorithm is negotiated per hop
+		// (SETUP) and named per frame. Timescale only when the draft carries per-frame
+		// timestamps.
 		let timescale = if self.version.has_timestamps() {
 			info.timescale
 		} else {
@@ -471,7 +471,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				priority: info.priority,
 				ordered: info.ordered,
 				timescale,
-				compression,
+				compress: info.compress,
 			})
 			.await?;
 
@@ -508,6 +508,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			self.priority.clone(),
 			(track_stats, self.broadcasts.clone(), absolute.clone()),
 			self.version,
+			self.peer_setup.clone(),
 		)
 		.await
 		{
@@ -528,6 +529,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn run_subscribe(
 		session: S,
 		stream: &mut Stream<S, Version>,
@@ -539,6 +541,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// below, after the subscription is validated, and held for its lifetime.
 		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
 		version: Version,
+		peer_setup: PeerSetup,
 	) -> Result<(), Error> {
 		let (track_stats, broadcasts, absolute) = stats;
 		let subscription = crate::Subscription {
@@ -554,16 +557,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = broadcast?.await?;
 		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
 
-		// Compress only when the producer marked the track worth it and the
-		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get
-		// None and the frames stream verbatim. On Lite05+ this matches the codec the
-		// subscriber already learned from TRACK_INFO.
-		let supports_compression = version.has_timestamps();
-		let compression = if track.info().compress && supports_compression {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
+		// The publisher's `compress` hint (carried in TRACK_INFO) says whether this
+		// track is worth compressing; it gates the per-frame `Compression` field.
+		// Older drafts (lite-04 and below) have no per-frame field, so they never
+		// compress. Whether we may actually use DEFLATE is the per-hop SETUP
+		// negotiation: only if the peer advertised it can decompress. We only wait on
+		// the peer's SETUP for a compress-hinted track (media tracks skip it).
+		let compress = version.has_timestamps() && track.info().compress;
+		let peer_deflate = compress && peer_setup.compression().await.contains(&Compression::Deflate);
 
 		// Per-frame timestamps require both a publisher-advertised timescale and
 		// a wire format that carries it. Older drafts ignore `track.timescale`
@@ -608,7 +609,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority,
 			track_priority: track_priority_rx,
 			version,
-			compression,
+			compress,
+			peer_deflate,
 			timescale,
 		};
 
@@ -651,7 +653,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
-		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, self.version).await {
+		if let Err(err) = Self::run_fetch(
+			&mut stream,
+			&fetch,
+			broadcast,
+			track_stats,
+			self.version,
+			self.peer_setup.clone(),
+		)
+		.await
+		{
 			match &err {
 				Error::Cancel | Error::Transport(_) => {
 					tracing::info!(broadcast = %absolute, %track, %group, "fetch cancelled")
@@ -672,6 +683,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
+		peer_setup: PeerSetup,
 	) -> Result<(), Error> {
 		let broadcast = broadcast?.await?;
 		let track = broadcast.track(&fetch.track)?;
@@ -693,14 +705,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			None
 		};
 
-		// Compression is an immutable per-track property (reported in TRACK_INFO), so
-		// fetched frames use the same codec as live ones. The group resolved above, so
-		// the track's info is set and this resolves immediately.
-		let compression = if track.info().await?.compress && version.has_timestamps() {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
+		// The compress hint is an immutable per-track property (TRACK_INFO), so fetched
+		// frames carry the per-frame Compression field exactly as live ones do. The
+		// group resolved above, so the track info is set and this resolves immediately.
+		let compress = track.info().await?.compress && version.has_timestamps();
+		let peer_deflate = compress && peer_setup.compression().await.contains(&Compression::Deflate);
 
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
 		// the codec/timescale from TRACK_INFO and the group sequence from its request.
@@ -715,7 +724,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			write_fetch_frame(
 				&mut stream.writer,
 				&mut frame,
-				compression,
+				compress,
+				peer_deflate,
 				timescale,
 				&mut prev_ts,
 				&track_stats,
@@ -773,23 +783,37 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 	Ok(())
 }
 
+/// Pick the wire codec for one frame's logical payload: DEFLATE when the peer
+/// advertised it and it actually shrinks the bytes, else verbatim. An empty payload
+/// always stays verbatim (it must use `none`). Shared by the live and fetch paths.
+fn choose_compression(peer_deflate: bool, payload: bytes::Bytes) -> (Compression, bytes::Bytes) {
+	if peer_deflate && !payload.is_empty() {
+		let deflated = Compression::Deflate.compress(&payload);
+		if deflated.len() < payload.len() {
+			return (Compression::Deflate, bytes::Bytes::from(deflated));
+		}
+	}
+	(Compression::None, payload)
+}
+
 /// Write one frame to a fetch stream in the lite wire format: the optional timing
-/// prefix (see [`encode_frame_timing`]), the size, then the payload. Mirrors the
-/// per-frame encoding in [`Subscription::serve_frame`] without the priority
-/// machinery, since a one-shot fetch carries a single static priority set on the
-/// stream up front.
+/// prefix (see [`encode_frame_timing`]), the optional per-frame `Compression` field
+/// (present iff the track is `compress`-hinted), the size, then the payload. Mirrors
+/// the per-frame encoding in [`Subscription::serve_frame`] without the priority
+/// machinery, since a one-shot fetch carries a single static priority set up front.
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut FrameConsumer,
-	compression: Compression,
+	compress: bool,
+	peer_deflate: bool,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
-	if frame.compression == compression {
-		// Cached codec matches the wire: forward the bytes verbatim.
+	// No per-frame Compression field on a non-hinted track.
+	if !compress {
 		writer.encode(&frame.size).await?;
 		track_stats.frame();
 		while let Some(mut chunk) = frame.read_chunk().await? {
@@ -797,17 +821,32 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 			writer.write_all(&mut chunk).await?;
 			track_stats.bytes(n);
 		}
-	} else {
-		// Recode for this peer: `read_all` decodes the cached bytes, then we
-		// re-encode for the wire (exactly one side is a real op; the other is None).
-		let payload = frame.read_all().await?;
-		let mut chunk = bytes::Bytes::from(compression.compress(&payload));
-		let n = chunk.len() as u64;
-		writer.encode(&n).await?;
-		track_stats.frame();
-		writer.write_all(&mut chunk).await?;
-		track_stats.bytes(n);
+		return Ok(());
 	}
+
+	// Passthrough: cached DEFLATE forwarded verbatim to a peer that can inflate it.
+	if peer_deflate && frame.compression == Compression::Deflate {
+		writer.encode(&Compression::Deflate.to_code()).await?;
+		writer.encode(&frame.size).await?;
+		track_stats.frame();
+		while let Some(mut chunk) = frame.read_chunk().await? {
+			let n = chunk.len() as u64;
+			writer.write_all(&mut chunk).await?;
+			track_stats.bytes(n);
+		}
+		return Ok(());
+	}
+
+	// Otherwise decode (a cached DEFLATE frame for a peer that can't inflate) and
+	// pick per frame whether DEFLATE shrinks it.
+	let payload = frame.read_all().await?;
+	let (codec, mut chunk) = choose_compression(peer_deflate, payload);
+	let n = chunk.len() as u64;
+	writer.encode(&codec.to_code()).await?;
+	writer.encode(&n).await?;
+	track_stats.frame();
+	writer.write_all(&mut chunk).await?;
+	track_stats.bytes(n);
 
 	Ok(())
 }
@@ -825,9 +864,12 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Codec for this track (reported in TRACK_INFO on lite-05+); every frame on
-	/// this subscription is compressed with it before hitting the wire.
-	compression: Compression,
+	/// The track's `compress` hint (lite-05+, from TRACK_INFO). When set, every
+	/// frame carries a per-frame `Compression` field naming the codec it used.
+	compress: bool,
+	/// Whether the peer advertised DEFLATE in its SETUP, so we may compress frames
+	/// for it. Always `false` unless [`Self::compress`] is set.
+	peer_deflate: bool,
 	/// Negotiated timestamp scale for this track. `Some(_)` iff
 	/// [`Version::has_timestamps`] is true for `version` (gated in
 	/// `run_subscribe`); used to validate per-frame timestamps before encoding.
@@ -960,12 +1002,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
-	/// Send one frame. When the cached codec already matches the wire codec the
-	/// bytes stream through verbatim, never buffering the whole payload — this is
-	/// the hot path, and it's where a modern peer pulling an already-compressed
-	/// track avoids a needless inflate/deflate. Otherwise the payload is decoded
-	/// and re-encoded for this peer (an origin compressing its plaintext on egress,
-	/// or a compression-incapable peer that needs plain bytes), which buffers it.
+	/// Send one frame. A compress-hinted track carries a per-frame `Compression`
+	/// field naming the codec used; the relay forwards an already-DEFLATE frame
+	/// untouched when the peer can inflate it (no needless inflate/deflate), and
+	/// otherwise picks per frame whether DEFLATE actually helps. A non-compress
+	/// track streams verbatim with no field.
 	async fn serve_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
@@ -975,23 +1016,36 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
-		if frame.compression == self.compression {
+		// No per-frame Compression field on a track the publisher didn't hint.
+		if !self.compress {
 			stream.encode(&frame.size).await?;
 			self.track_stats.frame();
-
 			while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 				self.write_chunk(stream, priority, chunk).await?;
 			}
-		} else {
-			// `read_all` decodes the cached bytes to the logical payload; we then
-			// re-encode in the wire codec. Codecs differ, so exactly one of decode
-			// and encode is a real operation (the other side is `None`).
-			let payload = self.read_all(stream, priority, &mut frame).await?;
-			let chunk = bytes::Bytes::from(self.compression.compress(&payload));
-			stream.encode(&(chunk.len() as u64)).await?;
-			self.track_stats.frame();
-			self.write_chunk(stream, priority, chunk).await?;
+			return Ok(());
 		}
+
+		// Passthrough: the cache already holds DEFLATE bytes and the peer can inflate
+		// them, so forward verbatim (the relay hot path) — field, stored size, bytes.
+		if self.peer_deflate && frame.compression == Compression::Deflate {
+			stream.encode(&Compression::Deflate.to_code()).await?;
+			stream.encode(&frame.size).await?;
+			self.track_stats.frame();
+			while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
+				self.write_chunk(stream, priority, chunk).await?;
+			}
+			return Ok(());
+		}
+
+		// Otherwise read the logical payload (decoding a cached DEFLATE frame for a
+		// peer that can't inflate) and pick per frame whether DEFLATE shrinks it.
+		let payload = self.read_all(stream, priority, &mut frame).await?;
+		let (codec, chunk) = choose_compression(self.peer_deflate, payload);
+		stream.encode(&codec.to_code()).await?;
+		stream.encode(&(chunk.len() as u64)).await?;
+		self.track_stats.frame();
+		self.write_chunk(stream, priority, chunk).await?;
 
 		Ok(())
 	}

@@ -355,11 +355,11 @@ async fn broadcast_moq_lite_05_fetch_webtransport() {
 	lite05_fetch_roundtrip("https").await;
 }
 
-/// A modern (lite-05) subscriber caches a `compress` track's frames in their
-/// Deflate-compressed form: the model holds the packed bytes (so its byte count
-/// matches the wire/compressed size and exposes the codec), and only inflates
-/// them when the payload is actually read. This is the relay-billing invariant —
-/// the cache counts compressed bytes — and the decode-at-delivery contract.
+/// A modern (lite-05) subscriber caches a `compress` track's frames in the codec
+/// each frame names on the wire: a compressible frame is DEFLATE (so the cached
+/// byte count matches the wire/compressed size — the relay-billing invariant), a
+/// tiny frame DEFLATE would only enlarge opts out and is cached verbatim, and both
+/// inflate back to the original only when read (the decode-at-delivery contract).
 async fn lite05_compress_caches_compressed(scheme: &str) {
 	use moq_net::{Compression, Timescale, Timestamp};
 
@@ -378,6 +378,9 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 	// unmistakably smaller than the decoded payload. Written verbatim, the way an
 	// origin produces frames (the publisher compresses on egress).
 	let payload = bytes::Bytes::from(vec![b'a'; 4096]);
+	// A second, tiny payload DEFLATE would only enlarge: the publisher must send it
+	// verbatim (per-frame opt-out) even though the track is compress-hinted.
+	let tiny = bytes::Bytes::from_static(b"hi");
 	let mut group = track.append_group().expect("failed to append group");
 	let mut writer = group
 		.create_frame(moq_net::Frame {
@@ -388,6 +391,15 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 		.expect("failed to create frame");
 	writer.write(payload.clone()).expect("failed to write frame");
 	writer.finish().expect("failed to finish frame");
+	let mut writer = group
+		.create_frame(moq_net::Frame {
+			size: tiny.len() as u64,
+			timestamp: Some(Timestamp::new(2_000, Timescale::MICRO).unwrap()),
+			compression: Compression::None,
+		})
+		.expect("failed to create tiny frame");
+	writer.write(tiny.clone()).expect("failed to write tiny frame");
+	writer.finish().expect("failed to finish tiny frame");
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
@@ -461,6 +473,15 @@ async fn lite05_compress_caches_compressed(scheme: &str) {
 	// Reading inflates the cached bytes back to the original payload.
 	let decoded = frame_sub.read_all().await.expect("failed to read frame");
 	assert_eq!(decoded, payload);
+
+	// The tiny frame opted out: cached verbatim (no per-frame DEFLATE), reads back unchanged.
+	let mut tiny_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+		.await
+		.expect("next_frame timed out")
+		.expect("next_frame failed")
+		.expect("expected a second frame");
+	assert_eq!(tiny_sub.compression, Compression::None);
+	assert_eq!(tiny_sub.read_all().await.expect("failed to read tiny frame"), tiny);
 
 	drop(session);
 	server_handle

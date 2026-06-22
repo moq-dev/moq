@@ -140,6 +140,8 @@ impl Server {
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
 					path: None,
+					// We can inflate DEFLATE, so a peer may compress what it sends us.
+					compression: vec![crate::Compression::Deflate],
 				};
 
 				// Server side never blocks on the initial set; discard the synced receiver.
