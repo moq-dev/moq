@@ -47,32 +47,41 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, path, offer).await
+	accept(server, server.subscriber(), path, offer).await
 }
 
 /// Accept a WHEP SDP offer and egress the MoQ broadcast `broadcast` (a path
-/// relative to the subscribe origin's root) to the negotiated WebRTC peer.
+/// relative to `subscriber`'s root) to the negotiated WebRTC peer.
 ///
 /// This is the negotiation core behind [`router`], exposed so an embedder can own
 /// the HTTP route and authentication: verify the request, resolve the authorized
-/// broadcast name, then hand the raw SDP offer here. It parses the offer, resolves
-/// the broadcast on the subscribe origin, restricts the answer to the codecs the
-/// catalog actually has, binds the ICE socket, spawns the MoQ->RTP session, and
-/// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
-/// header. Mirrors [`whip::accept`](super::whip::accept).
+/// broadcast name, scope `subscriber` to the caller's grants, then hand the raw
+/// SDP offer here. Taking the consumer explicitly (rather than using the server's)
+/// lets the embedder egress through a *scoped* origin, so the subscribe scope is
+/// enforced by moq-net exactly as for a native session; the bundled [`router`]
+/// passes the server's own (unauthenticated) consumer. It parses the offer,
+/// resolves the broadcast on `subscriber`, restricts the answer to the codecs the
+/// catalog actually has, registers a media session on the shared mux, spawns the
+/// MoQ->RTP session, and returns the SDP answer plus an opaque `resource_id` for
+/// the WHEP `Location` header. Mirrors [`whip::accept`](super::whip::accept).
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
 /// on a malformed offer, and surfaces a not-announced broadcast (or one outside
-/// the subscribe origin's scope) as [`Error::Other`].
-pub async fn accept(server: &Server, broadcast: impl moq_net::AsPath, offer: &str) -> Result<Response> {
+/// `subscriber`'s scope) as [`Error::Other`].
+pub async fn accept(
+	server: &Server,
+	subscriber: &moq_net::OriginConsumer,
+	broadcast: impl moq_net::AsPath,
+	offer: &str,
+) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	// Look up the MoQ broadcast on the subscriber origin. `request_broadcast` resolves an
+	// Look up the MoQ broadcast on the subscribe origin. `request_broadcast` resolves an
 	// already-announced broadcast immediately and falls back to a dynamic handler if the
 	// origin has one; with neither, it fails fast and the WHEP client retries (typical).
 	let broadcast = broadcast.as_path().to_string();
-	let consumer = async { server.subscriber().request_broadcast(&broadcast)?.await }
+	let consumer = async { subscriber.request_broadcast(&broadcast)?.await }
 		.await
 		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {broadcast} not announced")))?;
 
@@ -84,21 +93,27 @@ pub async fn accept(server: &Server, broadcast: impl moq_net::AsPath, offer: &st
 		)));
 	}
 
-	let (socket, candidates) = session::bind_udp(&server.config().ice_candidates).await?;
-	// Restrict our CodecConfig before accept_offer so the answer intersects
-	// the peer's offer with what the catalog actually has, instead of
-	// agreeing to a codec we can't fulfil.
-	let mut rtc = session::rtc_with_codecs(&codecs);
-	for addr in &candidates {
+	// Register a session on the shared media mux (see whip::accept). Restrict our
+	// CodecConfig before accept_offer so the answer intersects the peer's offer
+	// with what the catalog actually has, instead of agreeing to a codec we can't
+	// fulfil; set the mux's known ICE credentials on the same config.
+	let mux = server.mux().await?;
+	let (creds, inbound, registration) = mux.register();
+	let mut rtc = session::rtc_config_with_codecs(&codecs)
+		.set_local_ice_credentials(creds)
+		.build(std::time::Instant::now());
+	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
 		rtc.add_local_candidate(cand);
 	}
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let session = session::Session::egress(rtc, socket, source);
+	let session = session::Session::egress(rtc, mux.socket(), mux.local(), inbound, source);
 
 	tokio::spawn(async move {
+		// Hold the mux registration for the session's lifetime (unregisters on exit).
+		let _registration = registration;
 		if let Err(err) = session.run().await {
 			tracing::warn!(%err, "whep session ended");
 		}

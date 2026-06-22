@@ -71,6 +71,12 @@ enum Role {
 		#[arg(long, env = "MOQ_RTC_LISTEN", default_value = "[::]:8088")]
 		listen: SocketAddr,
 
+		/// UDP socket the shared WebRTC media mux binds to. All WHIP/WHEP
+		/// sessions share this one port (demuxed by ICE ufrag), so open just
+		/// this in the firewall. `0.0.0.0:0` lets the OS pick (loopback/dev).
+		#[arg(long, env = "MOQ_RTC_UDP_BIND", default_value = "0.0.0.0:0")]
+		udp_bind: SocketAddr,
+
 		/// Optional TLS cert (PEM). Requires `--tls-key`.
 		#[arg(long, env = "MOQ_RTC_TLS_CERT", requires = "tls_key")]
 		tls_cert: Option<PathBuf>,
@@ -145,18 +151,33 @@ async fn run_role(
 	match role {
 		Role::Server {
 			listen,
+			udp_bind,
 			tls_cert,
 			tls_key,
 			direction,
-		} => run_server(public_addr, publisher, subscriber, listen, tls_cert, tls_key, direction).await,
+		} => {
+			run_server(
+				public_addr,
+				udp_bind,
+				publisher,
+				subscriber,
+				listen,
+				tls_cert,
+				tls_key,
+				direction,
+			)
+			.await
+		}
 		Role::Client { url, direction } => {
 			run_client(broadcast, public_addr, publisher, subscriber, url, direction).await
 		}
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_server(
 	public_addr: Vec<SocketAddr>,
+	udp_bind: SocketAddr,
 	publisher: moq_net::OriginProducer,
 	subscriber: moq_net::OriginConsumer,
 	listen: SocketAddr,
@@ -166,6 +187,7 @@ async fn run_server(
 ) -> anyhow::Result<()> {
 	let config = moq_rtc::server::Config {
 		ice_candidates: public_addr,
+		udp_bind,
 	};
 	let server = Server::new(config, publisher, subscriber);
 

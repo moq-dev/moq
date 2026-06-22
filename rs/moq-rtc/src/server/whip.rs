@@ -12,7 +12,7 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
-use str0m::{Candidate, Rtc};
+use str0m::{Candidate, RtcConfig};
 
 use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
 
@@ -52,27 +52,35 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, path, offer).await
+	accept(server, server.publisher(), path, offer).await
 }
 
-/// Accept a WHIP SDP offer and publish the negotiated WebRTC media into the
-/// server's configured publish origin under `broadcast` (a path relative to the
-/// origin's root).
+/// Accept a WHIP SDP offer and publish the negotiated WebRTC media into
+/// `publisher` under `broadcast` (a path relative to that producer's root).
 ///
 /// This is the negotiation core behind [`router`], exposed so an embedder can
 /// own the HTTP route and authentication: verify the request, resolve the
-/// authorized broadcast name, then hand the raw SDP offer here. It parses the
+/// authorized broadcast name, scope `publisher` to the caller's grants, then hand
+/// the raw SDP offer here. Taking the producer explicitly (rather than using the
+/// server's) lets the embedder publish through a *scoped* origin, so the publish
+/// scope is enforced by moq-net exactly as for a native session; the bundled
+/// [`router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers the broadcast (so a fast subscriber doesn't 404 in the gap
-/// before the first RTP packet), binds the ICE socket, spawns the RTP->MoQ
-/// session, and returns the SDP answer plus an opaque `resource_id` for the WHIP
-/// `Location` header.
+/// before the first RTP packet), registers a media session on the shared mux,
+/// spawns the RTP->MoQ session, and returns the SDP answer plus an opaque
+/// `resource_id` for the WHIP `Location` header.
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with
 /// [`Error::InvalidSdp`] on a malformed offer and surfaces
 /// [`moq_net::Error::Unauthorized`] (as [`Error::Other`]) if `broadcast` is
-/// outside the publish origin's scope.
-pub async fn accept(server: &Server, broadcast: impl moq_net::AsPath, offer: &str) -> Result<Response> {
+/// outside `publisher`'s scope.
+pub async fn accept(
+	server: &Server,
+	publisher: &moq_net::OriginProducer,
+	broadcast: impl moq_net::AsPath,
+	offer: &str,
+) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
 	// Register the broadcast on the publish origin before negotiating, so a
@@ -80,27 +88,34 @@ pub async fn accept(server: &Server, broadcast: impl moq_net::AsPath, offer: &st
 	// and the first RTP packet.
 	let producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
-	let publish = server
-		.publisher()
+	let publish = publisher
 		.publish_broadcast(broadcast, &consumer)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to publish broadcast: {err}")))?;
 
 	let sink = Box::new(IngestSink::new(producer)?);
 
-	let (socket, candidates) = session::bind_udp(&server.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(std::time::Instant::now());
-	for addr in &candidates {
+	// Register a session on the shared media mux: known ICE credentials (so the
+	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
+	// and a guard the session task holds for its lifetime (unregisters on exit).
+	let mux = server.mux().await?;
+	let (creds, inbound, registration) = mux.register();
+	let mut rtc = RtcConfig::new()
+		.set_local_ice_credentials(creds)
+		.build(std::time::Instant::now());
+	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
 		rtc.add_local_candidate(cand);
 	}
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let session = session::Session::ingest(rtc, socket, sink);
+	let session = session::Session::ingest(rtc, mux.socket(), mux.local(), inbound, sink);
 
 	tokio::spawn(async move {
-		// Hold the announcement guard for the session's lifetime; unannounces on exit.
+		// Hold the announcement guard + mux registration for the session's
+		// lifetime; both release (unannounce / unregister) on exit.
 		let _publish = publish;
+		let _registration = registration;
 		if let Err(err) = session.run().await {
 			tracing::warn!(%err, "whip session ended");
 		}

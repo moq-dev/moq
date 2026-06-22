@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, net::Receive};
@@ -20,6 +21,17 @@ use tokio::sync::mpsc;
 
 use crate::egress::{EgressSource, WriteRequest};
 use crate::{Error, Result, codec};
+
+/// One inbound UDP datagram plus its source address, the unit fed to a session.
+/// The [`server`](crate::server) paths get these from the shared-socket demux
+/// (`crate::server::mux`); the client paths get them from a 1:1 reader
+/// ([`spawn_socket_reader`]).
+pub(crate) type Packet = (Vec<u8>, SocketAddr);
+
+/// Bound on a session's inbound datagram queue, sized like a socket buffer:
+/// past this, datagrams are dropped rather than buffered (WebRTC tolerates loss
+/// and a stalled session must not grow memory without limit).
+pub(crate) const SESSION_INBOX: usize = 256;
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
@@ -49,13 +61,27 @@ pub enum MediaRole {
 	Egress(Box<EgressSource>),
 }
 
-/// Drives a [`Rtc`] instance on a UDP socket until it ends.
+/// Drives a [`Rtc`] instance until it ends.
 ///
-/// The caller pre-populates the `Rtc` with whatever SDP exchange they need;
-/// this just owns the socket and the media role.
+/// The caller pre-populates the `Rtc` with whatever SDP exchange they need.
+/// Sends go out the (possibly shared) `socket`; inbound datagrams arrive on
+/// `inbound` rather than being read off the socket directly, so several
+/// sessions can share one socket behind the `crate::server::mux`.
 pub struct Session {
 	rtc: Rtc,
-	socket: UdpSocket,
+	/// Send side. Shared across sessions on the server (the mux socket); owned
+	/// 1:1 on the client. Receiving happens via `inbound`, not this socket.
+	socket: Arc<UdpSocket>,
+	/// The local address to report to str0m as each datagram's destination. MUST
+	/// equal one of the local ICE candidates we advertised, not the socket's bind
+	/// address: str0m drops a STUN binding request whose destination doesn't match
+	/// a host candidate ("unknown interface"), and the shared mux socket binds a
+	/// wildcard (`0.0.0.0`) while advertising a concrete IP.
+	local: SocketAddr,
+	/// Inbound datagrams routed to this session (demux on the server, a 1:1
+	/// reader on the client). `None` from `recv` means every sender dropped, so
+	/// the session is done.
+	inbound: mpsc::Receiver<Packet>,
 	role: MediaRole,
 	/// Egress write requests. `Some` only for [`MediaRole::Egress`]
 	/// sessions; pumps send frames here, the main loop forwards them into
@@ -64,30 +90,49 @@ pub struct Session {
 }
 
 impl Session {
-	/// Convenience for the ingest case (WHIP server, WHEP client).
-	pub fn ingest(rtc: Rtc, socket: UdpSocket, sink: Box<dyn MediaSink>) -> Self {
+	/// Convenience for the ingest case (WHIP server, WHEP client). `local` is the
+	/// advertised ICE candidate address (see the field docs), not the socket bind.
+	pub fn ingest(
+		rtc: Rtc,
+		socket: Arc<UdpSocket>,
+		local: SocketAddr,
+		inbound: mpsc::Receiver<Packet>,
+		sink: Box<dyn MediaSink>,
+	) -> Self {
 		Self {
 			rtc,
 			socket,
+			local,
+			inbound,
 			role: MediaRole::Ingest(sink),
 			writes_rx: None,
 		}
 	}
 
-	/// Convenience for the egress case (WHEP server, WHIP client).
-	pub fn egress(rtc: Rtc, socket: UdpSocket, mut source: EgressSource) -> Self {
+	/// Convenience for the egress case (WHEP server, WHIP client). `local` is the
+	/// advertised ICE candidate address (see the field docs), not the socket bind.
+	pub fn egress(
+		rtc: Rtc,
+		socket: Arc<UdpSocket>,
+		local: SocketAddr,
+		inbound: mpsc::Receiver<Packet>,
+		mut source: EgressSource,
+	) -> Self {
 		let writes_rx = source.take_writes();
 		Self {
 			rtc,
 			socket,
+			local,
+			inbound,
 			role: MediaRole::Egress(Box::new(source)),
 			writes_rx: Some(writes_rx),
 		}
 	}
 
 	pub async fn run(mut self) -> Result<()> {
-		// Buffer for one UDP datagram (max v4/v6 payload size).
-		let mut buf = vec![0u8; 65_535];
+		// The local address str0m tags each inbound packet with -- the advertised
+		// ICE candidate, NOT the socket bind (see the `local` field docs).
+		let local = self.local;
 
 		loop {
 			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
@@ -127,16 +172,17 @@ impl Session {
 					crate::egress::dispatch(&mut self.rtc, req, Instant::now());
 				}
 
-				read = self.socket.recv_from(&mut buf) => {
-					match read {
-						Ok((len, src)) => {
-							let local = self.socket.local_addr()?;
+				packet = self.inbound.recv() => {
+					match packet {
+						Some((data, src)) => {
 							let now = Instant::now();
-							let recv = Receive::new(str0m::net::Protocol::Udp, src, local, &buf[..len])
+							let recv = Receive::new(str0m::net::Protocol::Udp, src, local, &data)
 								.map_err(Error::RtcInput)?;
 							self.rtc.handle_input(Input::Receive(now, recv)).map_err(Error::Rtc)?;
 						}
-						Err(err) => return Err(err.into()),
+						// Every sender dropped: the demux unregistered us (or the
+						// 1:1 reader stopped). Nothing more will arrive, so end.
+						None => return Err(Error::SessionClosed),
 					}
 				}
 
@@ -255,7 +301,7 @@ impl Bridges {
 /// can't fulfil (WHEP server). For both, the negotiated SDP intersects with
 /// what we can actually deliver, so `MediaAdded` only fires for codecs that
 /// [`crate::egress::EgressSource`] can match to a rendition.
-pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
+pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConfig {
 	use str0m::format::Codec;
 	let mut config = str0m::RtcConfig::new().clear_codecs();
 	for c in codecs {
@@ -270,16 +316,26 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 			_ => config,
 		};
 	}
-	config.build(std::time::Instant::now())
+	config
 }
 
-/// Bind a UDP socket on `0.0.0.0:0` and return both the socket and the
-/// listed ICE candidates the caller should advertise.
+/// Build a codec-restricted [`Rtc`] for the client egress path (which lets
+/// str0m mint its own ICE credentials). The server egress path uses
+/// [`rtc_config_with_codecs`] directly so it can inject the mux's known
+/// credentials before building.
+pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
+	rtc_config_with_codecs(codecs).build(std::time::Instant::now())
+}
+
+/// Bind an ephemeral UDP socket for a single client session and return it
+/// (shared with its [reader task](spawn_socket_reader)) plus the ICE candidates
+/// to advertise.
 ///
-/// If `advertise` is non-empty, those addresses are used verbatim as
-/// ICE host candidates (typically the gateway's public IPs). Otherwise we
-/// fall back to whatever the OS picked.
-pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(UdpSocket, Vec<SocketAddr>)> {
+/// The client paths are 1:1 (one socket per dialed session, no demux); the
+/// server paths share one socket via `crate::server::mux` instead. `advertise`
+/// IPs are used verbatim (reusing the bound port); empty falls back to whatever
+/// address the OS picked (loopback only).
+pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>)> {
 	let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
 	let local = socket.local_addr()?;
 	let candidates = if advertise.is_empty() {
@@ -293,5 +349,31 @@ pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(UdpSocket, Vec<Socket
 			.map(|addr| SocketAddr::new(addr.ip(), local.port()))
 			.collect()
 	};
-	Ok((socket, candidates))
+	Ok((Arc::new(socket), candidates))
+}
+
+/// Spawn a 1:1 reader pumping every datagram from `socket` into a channel, for
+/// the client paths (one socket per session, so no demux is needed). Mirrors the
+/// inbound side of `crate::server::mux` for a single session.
+pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> mpsc::Receiver<Packet> {
+	let (tx, rx) = mpsc::channel(SESSION_INBOX);
+	tokio::spawn(async move {
+		let mut buf = vec![0u8; 65_535];
+		loop {
+			match socket.recv_from(&mut buf).await {
+				// Bounded like a socket buffer: drop on full, stop once the
+				// session's receiver is gone.
+				Ok((len, src)) => {
+					if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send((buf[..len].to_vec(), src)) {
+						break;
+					}
+				}
+				Err(err) => {
+					tracing::warn!(%err, "webrtc client socket recv failed");
+					break;
+				}
+			}
+		}
+	});
+	rx
 }

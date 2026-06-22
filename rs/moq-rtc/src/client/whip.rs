@@ -66,7 +66,12 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::Broadcas
 	rtc.sdp_api().accept_answer(pending, answer).map_err(Error::Rtc)?;
 	tracing::info!(%url, "whip client connected");
 
-	let session = session::Session::egress(rtc, socket, source);
+	// 1:1 socket (no demux on the client): pump its datagrams into the session.
+	// Report the first advertised candidate as the local address (str0m matches
+	// each datagram's destination against a host candidate, not the socket bind).
+	let local = candidates[0];
+	let inbound = session::spawn_socket_reader(socket.clone());
+	let session = session::Session::egress(rtc, socket, local, inbound, source);
 	tokio::spawn(async move {
 		if let Err(err) = session.run().await {
 			tracing::warn!(%err, "whip client session ended");

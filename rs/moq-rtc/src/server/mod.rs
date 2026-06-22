@@ -9,10 +9,16 @@
 pub mod whep;
 pub mod whip;
 
+mod mux;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use tokio::sync::OnceCell;
+
+use crate::Result;
+use mux::Mux;
 
 /// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
 /// to return to the client, plus an opaque resource id for the `Location` header
@@ -26,16 +32,30 @@ pub struct Response {
 }
 
 /// Configuration shared by both `server publish` and `server subscribe`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Config {
 	/// Public UDP socket addresses that should be advertised as ICE host
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
 	/// answer so a remote peer can reach us.
 	///
-	/// If empty, the session loop binds an ephemeral port and uses whatever
-	/// address the OS picks. That works for loopback testing but not behind
-	/// NAT.
+	/// If empty, the mux advertises whatever address the OS picked for the
+	/// shared socket. That works for loopback testing but not behind NAT.
 	pub ice_candidates: Vec<SocketAddr>,
+
+	/// Address the shared WebRTC media socket binds to. Every WHIP/WHEP session
+	/// shares this one UDP port (demuxed by ICE ufrag), so a deployment opens
+	/// exactly one media port in its firewall. `0.0.0.0:0` (the default) lets
+	/// the OS pick a port, which is fine for dev/loopback; production pins it.
+	pub udp_bind: SocketAddr,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			ice_candidates: Vec::new(),
+			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
+		}
+	}
 }
 
 /// Glue that owns the moq-net origin pair and hands axum routers to the caller.
@@ -53,6 +73,9 @@ struct Inner {
 	publisher: moq_net::OriginProducer,
 	/// Source for `server subscribe` (WHEP) egress.
 	subscriber: moq_net::OriginConsumer,
+	/// The shared media socket + demux, bound lazily on the first accept so
+	/// `Server::new` can stay synchronous (and an idle server binds no port).
+	mux: OnceCell<Mux>,
 }
 
 impl Server {
@@ -64,8 +87,17 @@ impl Server {
 				config,
 				publisher,
 				subscriber,
+				mux: OnceCell::new(),
 			}),
 		}
+	}
+
+	/// The shared media mux, bound (and its demux task spawned) on first use.
+	pub(crate) async fn mux(&self) -> Result<&Mux> {
+		self.inner
+			.mux
+			.get_or_try_init(|| Mux::bind(self.inner.config.udp_bind, &self.inner.config.ice_candidates))
+			.await
 	}
 
 	/// Router for `server publish` (WHIP). Mount under whichever HTTP path
@@ -88,10 +120,6 @@ impl Server {
 	/// call [`whep::accept`] directly from your own handler.
 	pub fn subscribe_router(&self) -> Router {
 		whep::router(self.clone())
-	}
-
-	pub(crate) fn config(&self) -> &Config {
-		&self.inner.config
 	}
 
 	pub(crate) fn publisher(&self) -> &moq_net::OriginProducer {
