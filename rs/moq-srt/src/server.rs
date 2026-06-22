@@ -34,7 +34,7 @@ use crate::Result;
 
 /// Default SRT receive latency: the negotiated buffer that trades delay for loss
 /// recovery. Override per-server with [`Server::bind`]'s `latency` argument.
-const DEFAULT_LATENCY: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(200);
 
 /// SRT payload size for egress: 7 MPEG-TS packets (7 x 188), the de-facto
 /// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
@@ -321,8 +321,9 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	let mut send_at = anchor;
 	let mut buffer = bytes::BytesMut::new();
 	while let Some(frame) = subscriber.next().await? {
-		let origin = *base.get_or_insert(frame.timestamp);
-		send_at = anchor + Duration::from(frame.timestamp).saturating_sub(Duration::from(origin));
+		// The media timestamp of the first frame we send, the zero point the rest pace against.
+		let base = *base.get_or_insert(frame.timestamp);
+		send_at = anchor + Duration::from(frame.timestamp).saturating_sub(Duration::from(base));
 
 		buffer.extend_from_slice(&frame.payload);
 		while buffer.len() >= SRT_PAYLOAD {

@@ -61,7 +61,7 @@ impl Default for Config {
 		Self {
 			listen: None,
 			prefix: String::new(),
-			latency: Duration::from_millis(200),
+			latency: crate::server::DEFAULT_LATENCY,
 		}
 	}
 }
