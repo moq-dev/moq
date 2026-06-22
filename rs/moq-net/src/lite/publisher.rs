@@ -208,7 +208,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Per-path stats guards: dropping the guard records `broadcasts_closed`.
 		// The origin contract guarantees announce/unannounce toggles per path, so a
 		// new active announcement must always be for a path with no live guard.
-		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
+		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::BroadcastGuard> =
 			std::collections::HashMap::new();
 
 		// Last advertised epoch per active path (wire value). An ANNOUNCE_BROADCAST
@@ -537,7 +537,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
 		// below, after the subscription is validated, and held for its lifetime.
-		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
+		stats: (crate::TrackGuard, crate::SessionBroadcasts, crate::PathOwned),
 		version: Version,
 	) -> Result<(), Error> {
 		let (track_stats, broadcasts, absolute) = stats;
@@ -557,7 +557,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Attach the publisher-side payload meter so the model counts
 		// groups/frames/bytes as they're served to this subscriber (egress is
 		// per-subscriber, so N viewers of one track count N times). `track_stats`
-		// (the PublisherTrack guard, subscriptions lifecycle) stays owned by this
+		// (the track guard, subscriptions lifecycle) stays owned by this
 		// function for the subscription's duration.
 		track.set_meter(track_stats.meter());
 
@@ -655,9 +655,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
-		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
+		// The track guard records the fetch as a subscription for its lifetime; the
+		// Meter over the same shared counters carries the payload counts. Fetch reads
+		// random-access frames (`get_frame`), which the model doesn't auto-meter, so
+		// run_fetch bumps the Meter itself. `_fetch_guard` is held until run_fetch returns.
+		let _fetch_guard = self.stats.broadcast(&absolute).publisher_track(&track);
+		let meter = _fetch_guard.meter();
 
-		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, self.version).await {
+		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, meter, self.version).await {
 			match &err {
 				Error::Cancel | Error::Transport(_) => {
 					tracing::info!(broadcast = %absolute, %track, %group, "fetch cancelled")
@@ -676,7 +681,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
 		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
-		track_stats: crate::PublisherTrack,
+		meter: crate::Meter,
 		version: Version,
 	) -> Result<(), Error> {
 		let broadcast = broadcast?.await?;
@@ -710,7 +715,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
 		// the codec/timescale from TRACK_INFO and the group sequence from its request.
-		track_stats.group();
+		meter.group();
 
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
 		// delta-timestamp baseline resets to 0, so the first served frame's delta is
@@ -724,7 +729,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				compression,
 				timescale,
 				&mut prev_ts,
-				&track_stats,
+				&meter,
 			)
 			.await?;
 			index += 1;
@@ -790,18 +795,18 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	track_stats: &crate::PublisherTrack,
+	meter: &crate::Meter,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
 	match compression {
 		Compression::None => {
 			writer.encode(&frame.size).await?;
-			track_stats.frame();
+			meter.frame();
 			while let Some(mut chunk) = frame.read_chunk().await? {
 				let n = chunk.len() as u64;
 				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
+				meter.bytes(n);
 			}
 		}
 		compression => {
@@ -809,9 +814,9 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
 			let n = chunk.len() as u64;
 			writer.encode(&n).await?;
-			track_stats.frame();
+			meter.frame();
 			writer.write_all(&mut chunk).await?;
-			track_stats.bytes(n);
+			meter.bytes(n);
 		}
 	}
 

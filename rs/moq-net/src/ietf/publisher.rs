@@ -158,7 +158,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Attach the publisher-side payload meter so the model counts
 		// groups/frames/bytes as they're served to this subscriber (egress is
-		// per-viewer). `track_stats` (the PublisherTrack guard, subscriptions
+		// per-viewer). `track_stats` (the track guard, subscriptions
 		// lifecycle) stays owned by this function for the subscription's duration.
 		track.set_meter(track_stats.meter());
 
@@ -483,7 +483,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Each accepted namespace holds a `publisher()` announce guard (bumps
 		// `announced` / `announced_closed`) alongside its stream, so dropping the
 		// tuple on unannounce or cleanup records the close.
-		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)> =
+		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::BroadcastGuard)> =
 			HashMap::new();
 		let mut announced = self.origin.announced();
 
@@ -528,7 +528,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn announce_namespace(
 		&self,
 		suffix: crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)>,
+		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::BroadcastGuard)>,
 	) -> Result<(), Error> {
 		let absolute = self.origin.absolute(&suffix).to_owned();
 		tracing::debug!(broadcast = %absolute, "announce");
@@ -582,7 +582,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn unannounce_namespace(
 		&self,
 		suffix: &crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)>,
+		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::BroadcastGuard)>,
 	) {
 		tracing::debug!(broadcast = %self.origin.absolute(suffix), "unannounce");
 		// Dropping `_stats` on removal records the announce close.

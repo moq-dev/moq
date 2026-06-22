@@ -11,9 +11,9 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
-	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle,
-	SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
+	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastGuard, BroadcastInfo, Compression, Error, Frame,
+	FrameProducer, Group, GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned,
+	StatsHandle, Subscription, Timescale, Timestamp, TrackGuard, TrackInfo, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 };
@@ -216,7 +216,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
 		// actually accepted the announcement (it may drop reflected loops), so the
 		// guard set tracks `producers` exactly.
-		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
+		let mut stats_guards: HashMap<PathOwned, BroadcastGuard> = HashMap::new();
 
 		// Stats keys are absolute paths (matching the publisher side) so the
 		// fanned-out level keys line up with the absolute broadcast paths a
@@ -798,7 +798,7 @@ struct TrackServe<S: web_transport_trait::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	broadcast: BroadcastDynamic,
-	track_stats: Arc<SubscriberTrack>,
+	track_stats: Arc<TrackGuard>,
 	name: String,
 }
 
@@ -1151,7 +1151,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		// Attach the subscriber-side payload meter so the model counts
 		// groups/frames/bytes as they're produced into this track, regardless of
-		// transport. The SubscriberTrack guard (subscriptions lifecycle) stays held
+		// transport. The track guard (subscriptions lifecycle) stays held
 		// by this serve task in `self.track_stats`.
 		producer.set_meter(self.track_stats.meter());
 
