@@ -31,6 +31,12 @@ tracing = "0.1"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 
+# The disk/remote cache tiers use object_store, a server-side library that doesn't build for
+# wasm (browsers don't spill to disk/S3). Target-gated rather than feature-gated so native builds
+# get the tiers automatically with no flag, and wasm builds drop them automatically.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+object_store = { workspace = true }
+
 [dev-dependencies]
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on
 # wasm, so it must not leak into the normal dependency feature set.

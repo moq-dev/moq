@@ -8,6 +8,10 @@ mod subscription;
 mod time;
 mod track;
 
+/// Per-track durable cache: the disk/remote spill tiers below a track's live RAM window.
+/// Attached via [`TrackProducer::with_cache`]. Namespaced: `cache::Disk`, `cache::Group`.
+pub mod cache;
+
 pub use bandwidth::*;
 pub use broadcast::*;
 pub use compression::*;

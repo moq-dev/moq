@@ -185,6 +185,19 @@ impl GroupProducer {
 		self.timescale
 	}
 
+	/// The media timestamp of the last buffered frame, for the track cache's media-time
+	/// retention gate. `None` when the group has no frames yet or the track is untimed.
+	/// Reads the producer's own buffer, so it never blocks.
+	pub(crate) fn last_timestamp(&self) -> Option<crate::Timestamp> {
+		self.state.read().frames.back().and_then(|f| f.timestamp)
+	}
+
+	/// Whether the group has been finished (no more frames will be written). The track cache only
+	/// spills finished groups: draining an open one would park the flush task until it completes.
+	pub(crate) fn is_finished(&self) -> bool {
+		self.state.read().fin
+	}
+
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
