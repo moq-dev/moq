@@ -70,8 +70,9 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 #[derive(Clone)]
 struct TrackEntry {
+	/// Carries the subscriber-side usage meter (attached at insert), so the model
+	/// records groups/frames/bytes as data is produced into it.
 	producer: TrackProducer,
-	stats: Arc<SubscriberTrack>,
 	/// Codec + timestamp scale from this track's TRACK_INFO, known before the
 	/// SUBSCRIBE is even opened, so group streams decode frames without blocking.
 	compression: Compression,
@@ -519,23 +520,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, compression, timescale) = {
+		let (mut group, track, compression, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
+			// The producer carries the subscriber-side meter, so `create_group`
+			// bumps the groups counter and the group's frames/bytes are counted
+			// as they're appended below. No manual stats here.
 			let group = entry.producer.create_group(group_info)?;
-			(
-				group,
-				entry.producer.clone(),
-				entry.stats.clone(),
-				entry.compression,
-				entry.timescale,
-			)
+			(group, entry.producer.clone(), entry.compression, entry.timescale)
 		};
-
-		// Bump groups counter for this incoming group on the subscriber side.
-		track_stats.group();
 
 		// The codec/timescale came from TRACK_INFO (read before this subscription was
 		// even registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
@@ -543,7 +538,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), compression, timescale) => res,
+			res = self.run_group(stream, group.clone(), compression, timescale) => res,
 		};
 
 		match res {
@@ -566,7 +561,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
-		track_stats: Arc<SubscriberTrack>,
 		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
@@ -602,10 +596,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			match compression {
 				Compression::None => {
+					// `create_frame` (via the group's meter) counts the frame and its
+					// `size` bytes; the streaming read below just fills the buffer.
 					let mut frame = group.create_frame(Frame { size, timestamp })?;
-					track_stats.frame();
 
-					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+					if let Err(err) = self.run_frame(stream, &mut frame).await {
 						let _ = frame.abort(err.clone());
 						return Err(err);
 					}
@@ -615,9 +610,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				compression => {
 					// `size` is the compressed length; pull it off the wire, then
 					// inflate. The frame the consumer sees carries the original size.
+					// `create_frame` counts the frame and its (decompressed) byte
+					// length via the group's meter; once the model caches compressed
+					// bytes this becomes the compressed (wire) size again.
 					let packed = stream.read_exact(size as usize).await?;
-					track_stats.frame();
-					track_stats.bytes(size);
 
 					let payload = compression.decompress(&packed)?;
 					let mut frame = group.create_frame(Frame {
@@ -637,17 +633,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
-		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
 		// read_buf writes QUIC stream bytes directly into the frame — no
 		// intermediate Bytes allocations, and quinn's reassembly arena is freed
-		// as we drain it.
+		// as we drain it. Byte accounting happens once at `create_frame` (the
+		// group's meter), so the streaming read here just fills the buffer.
 		while bytes::BufMut::has_remaining_mut(frame) {
 			match stream.read_buf(frame).await? {
-				Some(n) if n > 0 => {
-					track_stats.bytes(n as u64);
-				}
+				Some(n) if n > 0 => {}
 				_ => return Err(Error::WrongSize),
 			}
 		}
@@ -1070,7 +1064,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(&msg).await?;
 
-		let producer = if self.subscriber.version.has_timestamps() {
+		let mut producer = if self.subscriber.version.has_timestamps() {
 			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
 			let Some(Track::Active(producer)) = track.as_ref() else {
 				unreachable!("lite05 track is active before establish");
@@ -1106,11 +1100,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
 		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
 
+		// Attach the subscriber-side payload meter so the model counts
+		// groups/frames/bytes as they're produced into this track, regardless of
+		// transport. The SubscriberTrack guard (subscriptions lifecycle) stays held
+		// by this serve task in `self.track_stats`.
+		producer.set_meter(self.track_stats.meter());
+
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
 				producer,
-				stats: self.track_stats.clone(),
 				compression,
 				timescale,
 			},
@@ -1200,14 +1199,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 		};
 
+		// Fetched groups aren't created through a metered TrackProducer, so attach
+		// the subscriber meter directly to count the frames/bytes this fetch fills.
+		producer.set_meter(track_stats.meter());
+
 		let res = subscriber
-			.run_group(
-				&mut stream.reader,
-				producer.clone(),
-				track_stats,
-				compression,
-				timescale,
-			)
+			.run_group(&mut stream.reader, producer.clone(), compression, timescale)
 			.await;
 		match res {
 			Ok(()) => {

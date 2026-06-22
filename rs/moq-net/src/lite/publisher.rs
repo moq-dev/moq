@@ -530,7 +530,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
 		// immediately otherwise.
 		let broadcast = broadcast?.await?;
-		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
+		let mut track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
+
+		// Attach the publisher-side payload meter so the model counts
+		// groups/frames/bytes as they're served to this subscriber (egress is
+		// per-subscriber, so N viewers of one track count N times). `track_stats`
+		// (the PublisherTrack guard, subscriptions lifecycle) stays owned by this
+		// function for the subscription's duration.
+		track.set_meter(track_stats.meter());
 
 		// Compress only when the producer marked the track worth it and the
 		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get
@@ -582,7 +589,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			session,
 			id: subscribe.id,
 			track_name: Arc::from(track.name()),
-			track_stats: Arc::new(track_stats),
 			priority,
 			track_priority: track_priority_rx,
 			version,
@@ -799,7 +805,6 @@ struct Subscription<S: web_transport_trait::Session> {
 	session: S,
 	id: u64,
 	track_name: Arc<str>,
-	track_stats: Arc<crate::PublisherTrack>,
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
@@ -919,7 +924,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		self.track_stats.group();
+		// Groups/frames/bytes are counted by the model via the subscriber's meter
+		// (attached in run_subscribe) as `next_group`/`next_frame` are pulled below.
 
 		// Lite05+ delta-encodes per-frame timestamps within the group. The first
 		// frame's delta is absolute (against an implicit prev value of 0), every
@@ -954,7 +960,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		match self.compression {
 			Compression::None => {
 				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
 
 				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 					self.write_chunk(stream, priority, chunk).await?;
@@ -964,7 +969,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				let payload = self.read_all(stream, priority, &mut frame).await?;
 				let chunk = bytes::Bytes::from(compression.compress(&payload));
 				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
 				self.write_chunk(stream, priority, chunk).await?;
 			}
 		}
@@ -1027,15 +1031,15 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	/// Write a whole chunk, applying priority changes between partial writes,
-	/// then count the bytes sent.
+	/// Write a whole chunk, applying priority changes between partial writes. Byte
+	/// accounting lives in the model (the subscriber's meter, bumped per frame),
+	/// so this no longer counts here.
 	async fn write_chunk(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
-		let n = chunk.len() as u64;
 		loop {
 			tokio::select! {
 				biased;
@@ -1047,7 +1051,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
 			}
 		}
-		self.track_stats.bytes(n);
 		Ok(())
 	}
 }
