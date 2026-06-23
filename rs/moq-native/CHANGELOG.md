@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.4](https://github.com/moq-dev/moq/compare/moq-native-v0.17.3...moq-native-v0.17.4) - 2026-06-23
+
+### Added
+
+- *(relay)* unauthenticated internal listener over qmux (tcp:// + unix://) ([#1810](https://github.com/moq-dev/moq/pull/1810))
+
+### Fixed
+
+- *(moq-native)* back off when a session flaps instead of busy-looping ([#1806](https://github.com/moq-dev/moq/pull/1806))
+
+### Other
+
+- Skip dual-stack bind tests when the host lacks IPv6 ([#1878](https://github.com/moq-dev/moq/pull/1878))
+- release ([#1774](https://github.com/moq-dev/moq/pull/1774))
+
 ## [0.17.3](https://github.com/moq-dev/moq/compare/moq-native-v0.17.2...moq-native-v0.17.3) - 2026-06-19
 
 ### Added

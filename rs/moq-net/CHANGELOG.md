@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/moq-dev/moq/compare/moq-net-v0.1.11...moq-net-v0.1.12) - 2026-06-23
+
+### Added
+
+- *(moq-net)* raise max frame size to 32 MiB to match the group cache cap ([#1816](https://github.com/moq-dev/moq/pull/1816))
+
+### Fixed
+
+- *(moq-net)* bound frame size in create_frame/append_frame ([#1882](https://github.com/moq-dev/moq/pull/1882))
+
 ## [0.1.11](https://github.com/moq-dev/moq/compare/moq-net-v0.1.10...moq-net-v0.1.11) - 2026-06-16
 
 ### Fixed

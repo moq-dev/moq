@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.6...moq-mux-v0.6.0) - 2026-06-23
+
+### Added
+
+- *(catalog)* expose untyped catalog extensions via moq-ffi and libmoq ([#1886](https://github.com/moq-dev/moq/pull/1886))
+- *(moq-mux)* generic verbatim MPEG-TS carriage (mpegts catalog section) ([#1815](https://github.com/moq-dev/moq/pull/1815))
+
+### Fixed
+
+- *(moq-mux)* author DTS for B-frame MPEG-TS export ([#1843](https://github.com/moq-dev/moq/pull/1843))
+- *(moq-mux)* carry all distinct SPS/PPS/VPS through transmux, not just the last seen ([#1812](https://github.com/moq-dev/moq/pull/1812))
+
+### Other
+
+- move moq-cli's TS verbatim coverage into moq-mux ([#1879](https://github.com/moq-dev/moq/pull/1879))
+
 ## [0.5.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.5...moq-mux-v0.5.6) - 2026-06-17
 
 ### Added

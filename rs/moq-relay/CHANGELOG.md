@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.12...moq-relay-v0.12.13) - 2026-06-23
+
+### Added
+
+- *(relay)* unauthenticated internal listener over qmux (tcp:// + unix://) ([#1810](https://github.com/moq-dev/moq/pull/1810))
+
+### Fixed
+
+- *(moq-relay)* serve the WebSocket fallback at the root path ([#1883](https://github.com/moq-dev/moq/pull/1883))
+
+### Other
+
+- split CLAUDE.md into per-directory guides ([#1846](https://github.com/moq-dev/moq/pull/1846))
+
 ## [0.12.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.11...moq-relay-v0.12.12) - 2026-06-19
 
 ### Added

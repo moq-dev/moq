@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/libmoq-v0.3.7...libmoq-v0.3.8) - 2026-06-23
+
+### Added
+
+- *(catalog)* expose untyped catalog extensions via moq-ffi and libmoq ([#1886](https://github.com/moq-dev/moq/pull/1886))
+
+### Fixed
+
+- link macOS CoreServices for the bundled notify/FSEvents backend ([#1875](https://github.com/moq-dev/moq/pull/1875))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/libmoq-v0.3.6...libmoq-v0.3.7) - 2026-06-19
 
 ### Fixed
