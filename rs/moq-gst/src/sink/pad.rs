@@ -4,7 +4,7 @@
 //! buffer for a pad onto its single aggregate thread, so this type is touched from one place and needs
 //! no generation tagging or cross-thread failure map.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
 use hang::moq_net;
@@ -108,16 +108,16 @@ impl Pad {
 				Framed::new(broadcast, catalog, FramedFormat::Aac, &mut data)?
 			}
 			"audio/x-opus" => {
-				// Opus: GStreamer gives channels/rate in caps (not an OpusHead), so build the config here.
-				let channels: i32 = structure.get("channels").unwrap_or(2);
-				let rate: i32 = structure.get("rate").unwrap_or(48_000);
-				let channel_count = u32::try_from(channels)
-					.with_context(|| format!("Opus caps has negative channel count {channels}"))?;
-				let sample_rate =
-					u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
+				// Opus: GStreamer carries channels/rate in caps (not an OpusHead), and valid Opus caps
+				// always include them. Require them rather than guessing a stereo/48k default that could
+				// misadvertise the stream.
+				let channels: i32 = structure.get("channels").context("Opus caps missing channels")?;
+				let rate: i32 = structure.get("rate").context("Opus caps missing rate")?;
+				ensure!(channels > 0, "Opus caps has non-positive channel count {channels}");
+				ensure!(rate > 0, "Opus caps has non-positive sample rate {rate}");
 				let config = moq_mux::codec::opus::Config {
-					sample_rate,
-					channel_count,
+					sample_rate: rate as u32,
+					channel_count: channels as u32,
 				};
 				moq_mux::codec::opus::Import::new(broadcast, catalog, config)?.into()
 			}
@@ -136,16 +136,16 @@ impl Pad {
 		self.failed = true;
 	}
 
-	/// Record a SEGMENT, re-anchoring the timeline. Only acts on a change, so a sticky re-send does not
-	/// spam rejections. An `Active` pad enforces continuity against its previous segment; `NoSegment` and
-	/// `Invalid` re-anchor from scratch on the next valid one.
+	/// Record a SEGMENT, re-anchoring the timeline. An `Active` pad enforces continuity against its
+	/// previous segment; `NoSegment` and `Invalid` re-anchor from scratch on the next valid one.
 	pub fn observe_segment(&mut self, segment: gst::Segment) {
 		let info = segment_info(&segment);
-		// Re-observing the exact segment we last classified is a no-op. observe_segment runs on every
-		// buffer (the segment is sticky), so without this an Invalidated pad would re-anchor on the next
-		// buffer (Invalid -> prev=None -> classify accepts) and silently recover on the same rewound
-		// segment. Recording `info` even on reject is what makes this hold.
-		if self.segment_info == Some(info) {
+		// Skip only a non-Active pad re-seeing the same classification. That stops an Invalidated pad from
+		// re-anchoring on the next sticky buffer (Invalid -> prev=None -> classify accepts) and recovering
+		// on the same rewound segment. An Active pad always re-runs so it refreshes `self.segment`:
+		// `SegmentInfo` omits `start`, so a SEGMENT with the same base/rate but a moved start must still
+		// update the segment used for PTS -> running-time mapping.
+		if self.segment_info == Some(info) && self.state != PadState::Active {
 			return;
 		}
 		let prev = match self.state {
@@ -358,6 +358,18 @@ mod tests {
 		assert!(pad.is_failed(), "AAC without codec_data fails the pad");
 	}
 
+	// Opus caps must carry channels/rate; a missing field fails the pad rather than silently defaulting
+	// to stereo/48k (which would misadvertise the stream).
+	#[test]
+	fn opus_caps_without_channels_fails_the_pad() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let caps = gst::Caps::builder("audio/x-opus").field("rate", 48_000i32).build();
+		pad.observe_caps(&broadcast, &catalog, &caps);
+		assert!(pad.is_failed(), "Opus without channels fails the pad");
+	}
+
 	// A pad with caps but no TIME segment drops buffers and reports the missing timeline exactly once,
 	// so the element surfaces it on the bus instead of dropping every frame in silence.
 	#[test]
@@ -468,6 +480,20 @@ mod tests {
 		assert_eq!(pad.state, PadState::Active);
 		pad.observe_segment(time_segment_at(30_000, 5_000));
 		assert_eq!(pad.state, PadState::Active);
+	}
+
+	// A new SEGMENT with the same base/rate but a moved `start` must refresh the cached segment, since
+	// `SegmentInfo` (the dedup key) omits `start` and the PTS -> running-time mapping depends on it.
+	#[test]
+	fn moved_start_with_equal_base_refreshes_timestamp_mapping() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.observe_segment(time_segment_at(0, 5_000));
+		pad.observe_segment(time_segment_at(3_000, 5_000));
+		assert_eq!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(6_000))),
+			Ok(8_000_000)
+		);
 	}
 
 	// A buffer before the segment start yields a negative running time: drop it, never clamp to zero.

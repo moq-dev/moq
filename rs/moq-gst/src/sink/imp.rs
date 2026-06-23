@@ -62,14 +62,10 @@ impl State {
 	/// cannot even map is surfaced as an error. Returns `true` the first time the pad drops a buffer for
 	/// lack of a TIME segment, so the caller can surface that once on the bus.
 	fn write_buffer(&mut self, agg_pad: &gst_base::AggregatorPad, buffer: gst::Buffer) -> Result<bool, gst::FlowError> {
+		let name = agg_pad.name();
 		let caps = agg_pad.current_caps();
 		let segment = agg_pad.segment();
 		let pts = buffer.pts();
-		let map = buffer.map_readable().map_err(|_| {
-			gst::error!(CAT, "failed to map buffer on pad {}", agg_pad.name());
-			gst::FlowError::Error
-		})?;
-		let data = Bytes::copy_from_slice(map.as_slice());
 
 		// Disjoint field borrows: the pad entry borrows `pads` while observe_caps reads broadcast/catalog.
 		let Self {
@@ -78,10 +74,19 @@ impl State {
 			pads,
 			..
 		} = self;
-		let pad = pads.entry(agg_pad.name().to_string()).or_insert_with(Pad::new);
+		let pad = pads.entry(name.to_string()).or_insert_with(Pad::new);
+		// Check failure before mapping/copying: a failed pad must not pay the copy, nor be able to fail
+		// the whole element on an unmappable buffer it would have dropped anyway.
 		if pad.is_failed() {
 			return Ok(false);
 		}
+
+		let map = buffer.map_readable().map_err(|_| {
+			gst::error!(CAT, "failed to map buffer on pad {name}");
+			gst::FlowError::Error
+		})?;
+		let data = Bytes::copy_from_slice(map.as_slice());
+
 		if let (Some(caps), Some(catalog)) = (caps.as_ref(), catalog.as_ref()) {
 			pad.observe_caps(broadcast, catalog, caps);
 		}
@@ -117,6 +122,7 @@ impl State {
 	}
 }
 
+/// The `moqsink` element implementation: its GObject properties plus the live session state.
 #[derive(Default)]
 pub struct MoqSink {
 	settings: Mutex<Settings>,
