@@ -1,6 +1,6 @@
 use std::task::{Poll, ready};
 
-use super::{Catalog, CatalogExt};
+use super::{Catalog, CatalogExt, Extra};
 use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
@@ -8,9 +8,9 @@ use crate::Result;
 /// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
 ///
-/// Generic over the application extension `E` (defaulting to `()`); yields a
-/// [`Catalog<E>`](super::Catalog).
-pub struct Consumer<E: CatalogExt = ()> {
+/// Generic over the application extension `E` (defaulting to [`Extra`](super::Extra), the
+/// untyped JSON passthrough); yields a [`Catalog<E>`](super::Catalog).
+pub struct Consumer<E: CatalogExt = Extra> {
 	inner: moq_json::Consumer<Catalog<E>>,
 }
 

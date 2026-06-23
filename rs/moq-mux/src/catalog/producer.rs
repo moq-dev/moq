@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
 
-use super::hang::{Catalog, CatalogExt, Consumer};
+use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 
 /// Produces both a hang and MSF catalog track for a broadcast.
 ///
@@ -20,7 +20,7 @@ use super::hang::{Catalog, CatalogExt, Consumer};
 /// The hang track is published through [`moq_json`], which currently emits one snapshot per
 /// group (deltas disabled). This routes catalog publishing through the JSON merge-patch helper
 /// so deltas can be enabled later without changing the wire format used today.
-pub struct Producer<E: CatalogExt = ()> {
+pub struct Producer<E: CatalogExt = Extra> {
 	hang: moq_json::Producer<Catalog<E>>,
 	msf_track: moq_net::TrackProducer,
 
@@ -38,12 +38,30 @@ impl<E: CatalogExt> Clone for Producer<E> {
 	}
 }
 
-impl Producer<()> {
+impl Producer<Extra> {
 	/// Create a new catalog producer with the default (empty) catalog.
 	///
-	/// To publish an extended catalog, use [`with_catalog`](Self::with_catalog) with a `Catalog<E>`.
+	/// The catalog carries the untyped [`Extra`] extension, so application sections can be set
+	/// later via [`set_section`](Self::set_section). To publish a *typed* extension instead, use
+	/// [`with_catalog`](Self::with_catalog) with a `Catalog<YourExt>`.
 	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, Catalog::default())
+	}
+
+	/// Set (or replace) a top-level application catalog section, publishing the updated catalog.
+	///
+	/// `value` is any JSON document (object, array, string, ...). Errors if `name` collides with a
+	/// reserved media section (`video`/`audio`). This is the untyped counterpart to mutating a
+	/// typed extension through [`lock`](Self::lock).
+	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
+		self.lock().set_section(name, value)
+	}
+
+	/// Remove a top-level application catalog section, publishing the updated catalog if it existed.
+	///
+	/// Returns the section's previous value, or `None` if it was absent.
+	pub fn remove_section(&mut self, name: &str) -> Option<serde_json::Value> {
+		self.lock().remove_section(name)
 	}
 }
 
@@ -100,11 +118,33 @@ impl<E: CatalogExt> Producer<E> {
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
-pub struct Guard<'a, E: CatalogExt = ()> {
+pub struct Guard<'a, E: CatalogExt = Extra> {
 	catalog: MutexGuard<'a, Catalog<E>>,
 	hang: &'a mut moq_json::Producer<Catalog<E>>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
+}
+
+impl Guard<'_, Extra> {
+	/// Set (or replace) a top-level application catalog section, republished on drop.
+	///
+	/// Errors if `name` collides with a reserved media section (`video`/`audio`).
+	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
+		self.catalog.ext.set(name, value)?;
+		self.updated = true;
+		Ok(())
+	}
+
+	/// Remove a top-level application catalog section, republished on drop if it existed.
+	///
+	/// Returns the section's previous value, or `None` if it was absent.
+	pub fn remove_section(&mut self, name: &str) -> Option<serde_json::Value> {
+		let removed = self.catalog.ext.remove(name);
+		if removed.is_some() {
+			self.updated = true;
+		}
+		removed
+	}
 }
 
 impl<E: CatalogExt> Deref for Guard<'_, E> {

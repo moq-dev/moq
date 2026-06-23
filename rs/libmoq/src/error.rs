@@ -142,6 +142,16 @@ pub enum Error {
 	/// Error from the moq-audio codec layer.
 	#[error("audio error: {0}")]
 	Audio(Arc<moq_audio::AudioError>),
+
+	/// Invalid JSON passed for an application catalog section.
+	#[error("json error: {0}")]
+	Json(Arc<serde_json::Error>),
+}
+
+impl From<serde_json::Error> for Error {
+	fn from(err: serde_json::Error) -> Self {
+		Error::Json(Arc::new(err))
+	}
 }
 
 impl From<moq_audio::AudioError> for Error {
@@ -205,6 +215,7 @@ impl ffi::ReturnCode for Error {
 			Error::Native(_) => -32,
 			Error::Unauthorized => -33,
 			Error::Forbidden => -34,
+			Error::Json(_) => -35,
 		}
 	}
 }

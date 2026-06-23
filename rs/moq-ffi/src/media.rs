@@ -44,6 +44,12 @@ pub struct MoqCatalog {
 	pub display: Option<MoqDimensions>,
 	pub rotation: Option<f64>,
 	pub flip: Option<bool>,
+
+	/// Untyped application catalog sections, keyed by section name, with each value
+	/// a JSON string. These are the top-level catalog keys beyond `video`/`audio`,
+	/// passed through verbatim (decode the JSON yourself). Set them on the publish
+	/// side with [`MoqBroadcastProducer::set_catalog_section`].
+	pub extra: HashMap<String, String>,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -126,11 +132,17 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog) -> MoqC
 		height: d.height,
 	});
 
+	let extra = catalog
+		.sections()
+		.map(|(name, value)| (name.clone(), value.to_string()))
+		.collect();
+
 	MoqCatalog {
 		video,
 		audio,
 		display,
 		rotation: catalog.video.rotation,
 		flip: catalog.video.flip,
+		extra,
 	}
 }

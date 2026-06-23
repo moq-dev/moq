@@ -75,11 +75,13 @@ The catalog is a JSON document published through the merge-patch helper (`@moq/j
 
 - **Reading**: the base schema is permissive, so unknown sections pass through validation untouched.
   A base consumer ignores them; an extension reads its own section and treats its absence as "not present".
-  In TypeScript, build an extended schema with `z.extend(Catalog.RootSchema, { scte35: ... })`; in Rust, flatten the catalog into your own struct with `#[serde(flatten)]`.
+  In TypeScript, build an extended schema with `z.extend(Catalog.RootSchema, { scte35: ... })`.
+  In Rust, either flatten the catalog into your own struct with `#[serde(flatten)]` for typed access, or read sections untyped from the default catalog, which keeps unknown keys as raw JSON (`catalog.section("scte35")`).
+  The FFI bindings expose the untyped form, one JSON string per section keyed by name (`catalog.extra["scte35"]` in Python, `moq_consume_catalog_section()` in C).
 - **Writing**: the catalog producer holds one shared document.
-  Each owner edits only its own keys and publishes (`producer.mutate(c => { c.scte35 = ... })` in TypeScript, or the `Deref`/`DerefMut` lock guard from `producer.lock()` in Rust).
+  Each owner edits only its own keys and publishes: `producer.mutate(c => { c.scte35 = ... })` in TypeScript; the `Deref`/`DerefMut` lock guard from `producer.lock()` for a typed Rust extension, or `producer.set_section("scte35", value)` for an untyped one; `broadcast.set_catalog_section("scte35", json)` in Python; `moq_publish_catalog_section()` in C.
   Every edit starts from the latest value, so the base media sections and any extension sections compose instead of clobbering one another.
-  Removing a key publishes a deletion, which a consumer reads as the section being removed.
+  Removing a key publishes a deletion (`producer.remove_section(...)`, `moq_publish_catalog_section_remove()`), which a consumer reads as the section being removed.
 
 This keeps application-specific sections in the application layer while the base catalog stays generic.
 

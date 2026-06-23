@@ -25,6 +25,11 @@ pub enum Error {
 	/// Error parsing or building LOC frames.
 	#[error("loc: {0}")]
 	Loc(#[from] moq_loc::Error),
+
+	/// Tried to set an application catalog section whose name collides with a
+	/// reserved media section (`video`/`audio`).
+	#[error("reserved catalog section: {0}")]
+	ReservedSection(String),
 }
 
 /// A Result type alias for moq-mux operations.

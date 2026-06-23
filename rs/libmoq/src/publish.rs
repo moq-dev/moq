@@ -126,6 +126,26 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Set or replace an untyped application section in the broadcast's catalog.
+	///
+	/// `value` is any JSON document. The section lands as a top-level key alongside
+	/// `video`/`audio`; `name` must not be a reserved media section (`video`/`audio`).
+	/// The catalog is republished automatically.
+	pub fn catalog_section(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog.set_section(name, value)?;
+		Ok(())
+	}
+
+	/// Remove an untyped application section from the broadcast's catalog by name.
+	///
+	/// A no-op if absent. The catalog is republished automatically.
+	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog.remove_section(name);
+		Ok(())
+	}
+
 	/// Create a raw track on a broadcast for arbitrary byte payloads.
 	///
 	/// No codec, container, or catalog framing. This is the moq-net primitive

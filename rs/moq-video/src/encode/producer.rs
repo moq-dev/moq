@@ -25,7 +25,7 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// trigger capture on demand. `moq_mux::codec::h264::Import` handles
 /// catalog registration and framing.
 pub struct Producer {
-	import: moq_mux::codec::h264::Import,
+	import: moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>,
 }
 
 impl Producer {

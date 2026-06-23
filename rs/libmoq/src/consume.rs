@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
+use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_video_config};
 
 struct ConsumeCatalog {
 	broadcast: moq_net::BroadcastConsumer,
@@ -12,6 +12,10 @@ struct ConsumeCatalog {
 	/// We need to store the codec information on the heap unfortunately.
 	audio_codec: Vec<String>,
 	video_codec: Vec<String>,
+
+	/// Untyped application sections, pre-serialized to `(name, json)` so the borrowed
+	/// pointers handed out by [`Self::catalog_section`] stay valid for the snapshot's life.
+	sections: Vec<(String, String)>,
 }
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
@@ -113,11 +117,17 @@ impl Consume {
 				.map(|config| config.codec.to_string())
 				.collect();
 
+			let sections = update
+				.sections()
+				.map(|(name, value)| (name.clone(), value.to_string()))
+				.collect();
+
 			let snapshot = ConsumeCatalog {
 				broadcast: broadcast.clone(),
 				catalog: update,
 				audio_codec,
 				video_codec,
+				sections,
 			};
 
 			// Hold the lock only to buffer the snapshot; release it before the callback.
@@ -189,6 +199,22 @@ impl Consume {
 			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
 			sample_rate: config.sample_rate,
 			channel_count: config.channel_count,
+		};
+
+		Ok(())
+	}
+
+	/// Fill `dst` with the application section at `index`, or [`Error::NoIndex`] when out of
+	/// range. The pointers are valid until the catalog snapshot is freed with `catalog_free`.
+	pub fn catalog_section(&self, catalog: Id, index: usize, dst: &mut moq_section) -> Result<(), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (name, json) = consume.sections.get(index).ok_or(Error::NoIndex)?;
+
+		*dst = moq_section {
+			name: name.as_str().as_ptr() as *const c_char,
+			name_len: name.len(),
+			json: json.as_str().as_ptr() as *const c_char,
+			json_len: json.len(),
 		};
 
 		Ok(())

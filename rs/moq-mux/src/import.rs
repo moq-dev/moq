@@ -14,6 +14,8 @@ use anyhow::Context;
 use bytes::Buf;
 use hang::Error;
 
+use crate::catalog::hang::Extra;
+
 /// The supported framed formats (known frame boundaries).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -104,19 +106,19 @@ impl From<StreamFormat> for FramedFormat {
 enum FramedKind {
 	/// H.264 (both avc1 and avc3 wire shapes go through this importer; mode
 	/// is pinned by the caller's FramedFormat choice).
-	H264(crate::codec::h264::Import),
+	H264(crate::codec::h264::Import<Extra>),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import>),
-	Hev1(crate::codec::h265::Import),
+	Hev1(crate::codec::h265::Import<Extra>),
 	Av01(crate::codec::av1::Import),
 	Vp8(crate::codec::vp8::Import),
 	Vp9(crate::codec::vp9::Import),
-	Aac(crate::codec::aac::Import),
+	Aac(crate::codec::aac::Import<Extra>),
 	Opus(crate::codec::opus::Import),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
-	Ts(Box<crate::container::ts::Import>),
+	Ts(Box<crate::container::ts::Import<Extra>>),
 	// Boxed for the same reason as Fmp4.
 	Flv(Box<crate::container::flv::Import>),
 }
@@ -364,8 +366,8 @@ impl From<crate::codec::opus::Import> for Framed {
 	}
 }
 
-impl From<crate::codec::aac::Import> for Framed {
-	fn from(aac: crate::codec::aac::Import) -> Self {
+impl From<crate::codec::aac::Import<Extra>> for Framed {
+	fn from(aac: crate::codec::aac::Import<Extra>) -> Self {
 		Self {
 			decoder: FramedKind::Aac(aac),
 		}
@@ -551,15 +553,15 @@ impl fmt::Display for StreamFormat {
 
 enum StreamKind {
 	/// H.264 in avc3 wire shape (Annex-B with inline SPS/PPS).
-	Avc3(crate::codec::h264::Import),
+	Avc3(crate::codec::h264::Import<Extra>),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import>),
-	Hev1(crate::codec::h265::Import),
+	Hev1(crate::codec::h265::Import<Extra>),
 	Av01(crate::codec::av1::Import),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
-	Ts(Box<crate::container::ts::Import>),
+	Ts(Box<crate::container::ts::Import<Extra>>),
 	// Boxed for the same reason as Fmp4.
 	Flv(Box<crate::container::flv::Import>),
 }

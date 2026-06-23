@@ -164,6 +164,14 @@ impl Catalog for () {
 	}
 }
 
+// The untyped catalog extension doesn't carry a typed `mpegts` section, so verbatim MPEG-TS
+// carriage is disabled for it (same as `()`). Use [`Ext`] to record MPEG-TS details.
+impl Catalog for crate::catalog::hang::Extra {
+	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
+		None
+	}
+}
+
 impl Catalog for Ext {
 	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
 		Some(&mut self.mpegts)

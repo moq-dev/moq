@@ -211,6 +211,25 @@ class BroadcastProducer:
         """Create a track. Send any bytes, no codec validation."""
         return TrackProducer(self._inner.publish_track(name))
 
+    def set_catalog_section(self, name: str, value: str) -> None:
+        """Set or replace an untyped application section in the catalog.
+
+        `value` is a JSON string that lands as a top-level catalog key alongside
+        `video`/`audio` and reaches subscribers via `Catalog.extra`. `name` must not
+        be a reserved media section ("video"/"audio"). The catalog is republished
+        automatically. Use this to advertise a side-channel track (e.g. a transcript
+        or captions track) that the catalog doesn't model natively.
+        """
+        self._inner.set_catalog_section(name, value)
+
+    def remove_catalog_section(self, name: str) -> None:
+        """Remove an untyped application section from the catalog by name.
+
+        A no-op if no section with that name exists. The catalog is republished
+        automatically.
+        """
+        self._inner.remove_catalog_section(name)
+
     def consume(self) -> BroadcastConsumer:
         """Create a consumer that reads from this broadcast's tracks."""
         from .subscribe import BroadcastConsumer

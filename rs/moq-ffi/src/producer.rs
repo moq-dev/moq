@@ -226,6 +226,35 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
+	/// Set (or replace) an untyped application section in this broadcast's catalog.
+	///
+	/// `value` is any JSON document (object, array, string, ...). The section lands as a
+	/// top-level key alongside `video`/`audio` and reaches subscribers via
+	/// [`MoqCatalog::extra`](crate::media::MoqCatalog). `name` must not be a reserved media
+	/// section (`video`/`audio`). The catalog is republished automatically.
+	///
+	/// Use this to advertise a side-channel track (e.g. a transcript or captions track) that
+	/// the catalog doesn't model natively, mirroring the JS catalog's pass-through sections.
+	pub fn set_catalog_section(&self, name: String, value: String) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let value: serde_json::Value = serde_json::from_str(&value).map_err(|err| MoqError::Json(err.to_string()))?;
+		self.with_state(|state| {
+			state.catalog.set_section(name, value)?;
+			Ok(())
+		})
+	}
+
+	/// Remove an untyped application section from this broadcast's catalog by name.
+	///
+	/// A no-op if no section with that name exists. The catalog is republished automatically.
+	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		self.with_state(|state| {
+			state.catalog.remove_section(&name);
+			Ok(())
+		})
+	}
+
 	/// Finish this publisher, finalizing the catalog stream.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();

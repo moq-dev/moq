@@ -53,6 +53,19 @@ pub struct moq_audio_config {
 	pub channel_count: u32,
 }
 
+/// An untyped application section in the catalog: a top-level key beyond `video`/`audio`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_section {
+	/// The section name, NOT NULL terminated.
+	pub name: *const c_char,
+	pub name_len: usize,
+
+	/// The section value as a UTF-8 JSON document, NOT NULL terminated.
+	pub json: *const c_char,
+	pub json_len: usize,
+}
+
 /// Information about a frame of media.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -561,6 +574,57 @@ pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c
 	})
 }
 
+/// Set or replace an untyped application section in a broadcast's catalog.
+///
+/// `value` is a UTF-8 JSON document (object, array, string, ...) that lands as a top-level
+/// catalog key alongside `video`/`audio`, delivered to subscribers via [moq_consume_catalog_section].
+/// Use it to advertise a side-channel track the catalog doesn't model natively (a transcript,
+/// captions, ...). Calling this again with the same `name` replaces it; `name` must not be a
+/// reserved media section (`video`/`audio`). The updated catalog is published automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` / `value` are valid pointers to their respective lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_catalog_section(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	value: *const c_char,
+	value_len: usize,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
+		let value = serde_json::from_slice(value)?;
+		State::lock().publish.catalog_section(broadcast, name, value)
+	})
+}
+
+/// Remove an untyped application section from a broadcast's catalog by name.
+///
+/// This is a no-op if no section with that name exists. The updated catalog is
+/// published to subscribers automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_catalog_section_remove(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.catalog_section_remove(broadcast, name)
+	})
+}
+
 /// Create a raw track on a broadcast for arbitrary byte payloads.
 ///
 /// Unlike [moq_publish_media_ordered], this is the bare moq-net primitive: no
@@ -742,6 +806,28 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 		let index = index as usize;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.audio_config(catalog, index, dst)
+	})
+}
+
+/// Query an untyped application section in a catalog by index.
+///
+/// Sections are the top-level catalog keys beyond `video`/`audio`, sorted by name. Iterate by
+/// incrementing `index` from zero until this returns the no-index error (-19); each call fills
+/// `dst` with the section's name and its value as a JSON document. Decode the JSON yourself.
+///
+/// Returns a zero on success, the no-index error when `index` is out of range, or another
+/// negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_section] struct.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_catalog_section(catalog: u32, index: u32, dst: *mut moq_section) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		let index = index as usize;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.catalog_section(catalog, index, dst)
 	})
 }
 

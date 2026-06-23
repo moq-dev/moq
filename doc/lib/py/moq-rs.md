@@ -72,6 +72,26 @@ async for announcement in client.announced("prefix/"):
         ...
 ```
 
+### Catalog extensions
+
+Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON string; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.extra`.
+
+```python
+import json
+
+# Publish: attach a custom section.
+broadcast = moq.BroadcastProducer()
+broadcast.set_catalog_section("transcript", json.dumps({"track": "transcript.json"}))
+client.publish("my-stream", broadcast)
+
+# Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
+catalog = await announcement.broadcast.catalog()
+if "transcript" in catalog.extra:
+    info = json.loads(catalog.extra["transcript"])
+```
+
+`"video"` and `"audio"` are reserved names. Remove a section with `broadcast.remove_catalog_section("transcript")`.
+
 ### Raw tracks (no codec)
 
 ```python

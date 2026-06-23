@@ -48,6 +48,9 @@ pub enum MoqError {
 	#[error("codec: {0}")]
 	Codec(String),
 
+	#[error("json: {0}")]
+	Json(String),
+
 	#[error("invalid error code: {0}")]
 	InvalidErrorCode(i32),
 

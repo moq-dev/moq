@@ -19,10 +19,10 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<moq_mux::codec::h264::Import>),
+	Avc3(Box<moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>>),
 	Fmp4(Box<fmp4::Import>),
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-	// verbatim, so it uses the `mpegts` catalog extension rather than the media-only `()`.
+	// verbatim, so it uses the typed `mpegts` catalog extension rather than the untyped default.
 	Ts(Box<ts::Import<ts::catalog::Ext>>),
 	Flv(Box<flv::Import>),
 	Hls(Box<hls::Import>),
