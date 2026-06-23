@@ -23,6 +23,14 @@ use super::{Container, Frame, Timestamp};
 ///
 /// Set the latency with [`with_latency`](Self::with_latency) (builder) or
 /// [`set_latency`](Self::set_latency) (mid-stream).
+///
+/// ## Timeline rewinds
+///
+/// If a newer group's timestamps jump backwards past the live edge, the publisher is
+/// reneging the buffered tail (e.g. a voice agent interrupted mid-utterance). The consumer
+/// drops the reneged groups, resumes at the rewound timeline, and bumps
+/// [`discontinuity`](Self::discontinuity) so downstream consumers can flush their own
+/// buffers. This is always on.
 pub struct Consumer<F: Container> {
 	track: moq_net::TrackConsumer,
 
@@ -41,19 +49,29 @@ pub struct Consumer<F: Container> {
 	// The maximum buffer size before skipping a group.
 	latency: std::time::Duration,
 
-	// The live edge of playback: the largest timestamp delivered so far, and the group
-	// that carried it. Used to detect a backwards "rewind" and to anchor the old epoch's
-	// upper bound. `None` until the first frame is delivered.
-	high_water: Option<(u64, Timestamp)>,
+	// Timeline-rewind tracking: the live edge, the active boundary, and the discontinuity count.
+	rewind: Rewind,
+}
 
-	// How far a newer group's timestamps must fall *below* the live edge to count as an
-	// explicit reneg of the buffered tail rather than normal reordering. `None` disables
-	// rewind detection (the default), preserving the plain sequence-ordered behavior.
-	reset_threshold: Option<std::time::Duration>,
+/// Live state for detecting timeline rewinds and classifying out-of-order groups.
+///
+/// A publisher reneges its buffered tail by rewinding timestamps while group sequence keeps
+/// climbing (e.g. a voice agent interrupted mid-utterance). We track the live edge to spot the
+/// jump, a [`Reset`] boundary to classify out-of-order groups across it, and a counter that
+/// downstream consumers watch to flush their own queues.
+#[derive(Default)]
+struct Rewind {
+	// The live edge of playback: the largest timestamp delivered so far and the group that
+	// carried it. `None` until the first frame is delivered.
+	live_edge: Option<(u64, Timestamp)>,
 
-	// The active rewind boundary, if any. Out-of-order groups are classified against it
-	// so a late new-epoch group is kept while a reneged old-epoch straggler is dropped.
-	reset: Option<Reset>,
+	// The active rewind boundary, if any. Out-of-order groups are classified against it so a
+	// late new-epoch group is kept while a reneged old-epoch straggler is dropped.
+	boundary: Option<Reset>,
+
+	// Increments on every rewind. Downstream consumers compare it across reads and, when it
+	// changes, drop media still queued in their decoder or render buffers.
+	discontinuity: u64,
 }
 
 /// A recorded rewind boundary.
@@ -109,9 +127,7 @@ impl<F: Container> Consumer<F> {
 			pending: VecDeque::new(),
 			startup: true,
 			latency: std::time::Duration::ZERO,
-			high_water: None,
-			reset_threshold: None,
-			reset: None,
+			rewind: Rewind::default(),
 		}
 	}
 
@@ -124,21 +140,16 @@ impl<F: Container> Consumer<F> {
 		self
 	}
 
-	/// Treat a backwards jump in group timestamps as a signal to drop the buffered tail
-	/// and resume at the rewound timeline.
+	/// A counter that increments each time the consumer detects a timeline rewind and drops
+	/// the reneged buffer.
 	///
-	/// When a newer group (higher sequence) carries frames whose timestamps land at
-	/// least `threshold` before the latest delivered frame, the publisher is reneging
-	/// everything buffered after that point (e.g. a voice agent interrupted
-	/// mid-utterance, or any producer that re-anchors its timeline). The consumer drops
-	/// the stale groups, advances its floor past them so out-of-order stragglers are
-	/// ignored, and resumes from the rewound group.
-	///
-	/// Disabled by default. Set `threshold` above the worst-case cross-group reordering
-	/// (B-frames, jitter) so an ordinary stream never trips it.
-	pub fn with_reset_threshold(mut self, threshold: std::time::Duration) -> Self {
-		self.reset_threshold = Some(threshold);
-		self
+	/// When a newer group's timestamps jump backwards past the live edge, the publisher is
+	/// reneging everything buffered after that point (e.g. a voice agent interrupted
+	/// mid-utterance). Downstream consumers should compare this across reads and, when it
+	/// changes, flush any media still queued in their decoder or render buffers. The frame
+	/// returned by the read that bumps it is the first of the new timeline.
+	pub fn discontinuity(&self) -> u64 {
+		self.rewind.discontinuity
 	}
 
 	/// Read the next frame from the track.
@@ -199,8 +210,8 @@ impl<F: Container> Consumer<F> {
 						// later backwards jump is detectable and the old epoch's tail is anchored.
 						let seq = group.group.sequence;
 						let ts = frame.timestamp;
-						if self.high_water.is_none_or(|(_, high)| ts > high) {
-							self.high_water = Some((seq, ts));
+						if self.rewind.live_edge.is_none_or(|(_, high)| ts > high) {
+							self.rewind.live_edge = Some((seq, ts));
 						}
 						return Poll::Ready(Ok(Some(frame)));
 					}
@@ -305,7 +316,7 @@ impl<F: Container> Consumer<F> {
 			// cursor isn't a valid floor: a late new-epoch group can sit below it. Defer to
 			// the boundary, admitting ambiguous groups so poll_classify can rule on them once
 			// their timestamps arrive.
-			let drop = match &self.reset {
+			let drop = match &self.rewind.boundary {
 				Some(reset) => match reset.by_sequence(sequence) {
 					Some(true) => true,                     // old epoch: reneged
 					Some(false) => sequence < self.current, // new epoch, but already played past
@@ -327,19 +338,19 @@ impl<F: Container> Consumer<F> {
 
 	// Detect a publisher "rewind" and record the reneged boundary.
 	//
-	// When `reset_threshold` is set, a newer group whose frames land far enough before the
-	// live edge can only be an explicit reneg of the buffered tail. We record a [`Reset`]
-	// from `(high-water group, rewound group, rewound timestamp)`, drop the buffered groups
-	// it can already prove stale, and resume playback from the earliest survivor. Groups
-	// that are still ambiguous (a late new-epoch group vs. an old straggler) are kept and
-	// resolved by [`poll_classify`](Self::poll_classify) once their timestamps arrive.
+	// A newer group (sequence climbs) whose first frame lands before the live edge (timestamp
+	// goes backwards) can only be an explicit reneg of the buffered tail. We record a [`Reset`]
+	// from `(live-edge group, rewound group, rewound timestamp)`, drop the buffered groups it
+	// can already prove stale, bump the discontinuity counter, and resume playback from the
+	// earliest survivor. Groups still ambiguous (a late new-epoch group vs. an old straggler)
+	// are kept and resolved by [`poll_classify`](Self::poll_classify) once their timestamps
+	// arrive.
 	//
 	// Returns true if a reset happened, signalling the caller to restart the read loop.
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Result<bool, F::Error> {
-		let (Some((prev_max, high_water)), Some(threshold)) = (self.high_water, self.reset_threshold) else {
+		let Some((prev_max, live_edge)) = self.rewind.live_edge else {
 			return Ok(false);
 		};
-		let high_water: std::time::Duration = high_water.into();
 
 		// The newest produced group is at the back (sequence ascending).
 		let reset = {
@@ -357,9 +368,9 @@ impl<F: Container> Consumer<F> {
 				return Ok(false);
 			};
 
-			let min_ts: std::time::Duration = min.into();
-			if high_water.saturating_sub(min_ts) < threshold {
-				// Forward, or within the reordering budget: not a rewind.
+			// Sequence climbs (guaranteed above); a rewind is the timestamp going strictly
+			// backwards past the live edge. Anything at or ahead of it is normal forward motion.
+			if min >= live_edge {
 				return Ok(false);
 			}
 
@@ -377,15 +388,17 @@ impl<F: Container> Consumer<F> {
 			None => g.min_timestamp.is_none_or(|ts| !reset.is_stale(g.group.sequence, ts)),
 		});
 
+		self.rewind.discontinuity += 1;
 		tracing::debug!(
 			prev_max = reset.prev_max,
 			group = reset.group,
+			discontinuity = self.rewind.discontinuity,
 			"buffer reset: group timestamps rewound"
 		);
-		self.reset = Some(reset);
+		self.rewind.boundary = Some(reset);
 		// Resume from the earliest survivor; if none buffered yet, from the rewound group.
 		self.current = self.pending.front().map_or(reset.group, |g| g.group.sequence);
-		self.high_water = Some((reset.group, reset.timestamp));
+		self.rewind.live_edge = Some((reset.group, reset.timestamp));
 
 		Ok(true)
 	}
@@ -397,7 +410,7 @@ impl<F: Container> Consumer<F> {
 	// detection time (drop). We can only tell once it has a frame, so we re-check each loop
 	// iteration and drop the ones that resolve to stale.
 	fn poll_classify(&mut self, waiter: &kio::Waiter) -> Result<(), F::Error> {
-		let Some(reset) = self.reset else {
+		let Some(reset) = self.rewind.boundary else {
 			return Ok(());
 		};
 
@@ -424,13 +437,6 @@ impl<F: Container> Consumer<F> {
 	/// Set the maximum latency tolerance.
 	pub fn set_latency(&mut self, latency: std::time::Duration) {
 		self.latency = latency;
-	}
-
-	/// Enable, update, or disable rewind detection mid-stream.
-	///
-	/// See [`with_reset_threshold`](Self::with_reset_threshold); `None` disables it.
-	pub fn set_reset_threshold(&mut self, threshold: Option<std::time::Duration>) {
-		self.reset_threshold = threshold;
 	}
 
 	/// Wait until the track is closed.
@@ -835,11 +841,9 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_net::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy)
-			.with_latency(Duration::from_secs(10))
-			.with_reset_threshold(Duration::from_millis(150));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
-		// Old epoch, played through to a live edge of 200 ms.
+		// Old epoch, played forward until the live edge passes the rewind point.
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(100_000)]);
 		write_group(&mut track, 2, &[ts(200_000)]);
@@ -857,13 +861,14 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 
-		// Old epoch's peak played before the reset, and all three new-epoch groups survived
-		// — including the two out-of-order gap-fillers that arrived below the resume point.
-		assert!(micros.contains(&200_000), "old epoch played up to the live edge");
+		// Old epoch played before the reset, and all three new-epoch groups survived —
+		// including the two out-of-order gap-fillers that arrived below the resume point.
+		assert!(micros.contains(&100_000), "old epoch played before the reset");
 		assert!(
 			micros.contains(&1_000) && micros.contains(&2_000) && micros.contains(&3_000),
 			"out-of-order new-epoch groups kept, got {micros:?}"
 		);
+		assert_eq!(consumer.discontinuity(), 1, "one rewind detected");
 		finisher.await.expect("finisher task panicked");
 	}
 
@@ -875,10 +880,8 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_net::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy)
-			// Large latency so the slow-group skip never fires; isolate the rewind path.
-			.with_latency(Duration::from_secs(10))
-			.with_reset_threshold(Duration::from_millis(150));
+		// Large latency so the slow-group skip never fires; isolate the rewind path.
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
 		// Publisher runs ahead: groups 0-4 at 0, 100, 200, 300, 400 ms.
 		for i in 0..5u64 {
@@ -891,30 +894,30 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let timestamps: Vec<_> = frames.iter().map(|f| f.timestamp).collect();
 
-		// We play forward until the live edge passes the 150 ms threshold (through
-		// 200 ms), then the rewind drops groups 3 and 4 and resumes at group 5.
-		assert_eq!(timestamps, vec![ts(0), ts(100_000), ts(200_000), ts(0), ts(20_000)]);
+		// We play forward until the live edge passes the rewind point (through 100 ms), then
+		// the rewind drops the buffered-ahead groups (200/300/400 ms) and resumes at group 5.
+		assert_eq!(timestamps, vec![ts(0), ts(100_000), ts(0), ts(20_000)]);
+		assert_eq!(consumer.discontinuity(), 1);
 	}
 
-	/// Rewind detection is opt-in: without a reset threshold, a backwards group is
-	/// played in sequence order like any other (default behavior is unchanged).
+	/// Rewind detection is always on: a backwards group timestamp resets the buffer with no
+	/// configuration. Here group 2 rewinds the timeline and bumps the discontinuity counter.
 	#[tokio::test]
-	async fn backwards_timestamp_ignored_without_threshold() {
+	async fn backwards_timestamp_always_resets() {
 		let mut track = moq_net::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(500_000)]);
-		write_group(&mut track, 2, &[ts(0)]); // backwards, but the feature is off
+		write_group(&mut track, 2, &[ts(0)]); // rewind
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(
-			frames.len(),
-			3,
-			"all groups delivered in sequence order, nothing dropped"
-		);
+		let timestamps: Vec<_> = frames.iter().map(|f| f.timestamp).collect();
+
+		assert_eq!(timestamps, vec![ts(0), ts(500_000), ts(0)]);
+		assert_eq!(consumer.discontinuity(), 1, "the backwards group triggered a reset");
 	}
 
 	// ---- Group Ordering ----
