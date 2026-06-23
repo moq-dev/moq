@@ -25,10 +25,11 @@ doc = false
 required-features = ["server"]
 
 [features]
-default = ["server", "quinn", "websocket"]
+default = ["server", "noq", "websocket"]
 # Relay client/server transports + the moq-srt binary. Pulls in moq-native /
 # axum / clap / rustls.
 server = ["dep:axum", "dep:axum-server", "dep:clap", "dep:humantime", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tower-http", "dep:url"]
+noq = ["server", "moq-native/noq"]
 quinn = ["server", "moq-native/quinn"]
 quiche = ["server", "moq-native/quiche"]
 websocket = ["server", "moq-native/websocket"]

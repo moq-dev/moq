@@ -137,19 +137,19 @@ impl Client {
 	pub fn new(config: ClientConfig) -> crate::Result<Self> {
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or({
-			#[cfg(feature = "quinn")]
-			{
-				QuicBackend::Quinn
-			}
-			#[cfg(all(feature = "noq", not(feature = "quinn")))]
+			#[cfg(feature = "noq")]
 			{
 				QuicBackend::Noq
 			}
-			#[cfg(all(feature = "quiche", not(feature = "quinn"), not(feature = "noq")))]
+			#[cfg(all(feature = "quinn", not(feature = "noq")))]
+			{
+				QuicBackend::Quinn
+			}
+			#[cfg(all(feature = "quiche", not(feature = "noq"), not(feature = "quinn")))]
 			{
 				QuicBackend::Quiche
 			}
-			#[cfg(all(not(feature = "quiche"), not(feature = "quinn"), not(feature = "noq")))]
+			#[cfg(all(not(feature = "quiche"), not(feature = "noq"), not(feature = "quinn")))]
 			panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 		});
 

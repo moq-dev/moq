@@ -21,7 +21,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "quinn", "websocket", "uds"]
+default = ["iroh", "noq", "websocket", "uds"]
 iroh = ["moq-native/iroh"]
 jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]

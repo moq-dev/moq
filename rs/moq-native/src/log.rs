@@ -40,6 +40,7 @@ impl Log {
 			.from_env_lossy() // Allow overriding with RUST_LOG
 			.add_directive("h2=warn".parse()?)
 			.add_directive("quinn=info".parse()?)
+			.add_directive("noq=info".parse()?)
 			.add_directive("tungstenite=info".parse()?)
 			.add_directive("rustls=info".parse()?)
 			.add_directive("tracing::span=off".parse()?)
