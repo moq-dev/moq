@@ -11,6 +11,15 @@ export interface ConsumerProps {
 	format: Format;
 	/** Target latency in milliseconds, controlling how aggressively slow groups are skipped (default: 0). */
 	latency?: Signal<Time.Milli> | Time.Milli;
+	/**
+	 * Treat a backwards jump in group timestamps as a signal to drop the buffered tail.
+	 *
+	 * When a newer group's frames land at least this many milliseconds before the live
+	 * edge, the publisher is reneging everything buffered after that point (e.g. a voice
+	 * agent interrupted mid-utterance). The consumer drops the stale groups and resumes
+	 * from the rewound group. Disabled (undefined) by default.
+	 */
+	resetThreshold?: Signal<Time.Milli> | Time.Milli;
 }
 
 interface Group {
@@ -20,13 +29,51 @@ interface Group {
 	done?: boolean; // Set when #runGroup finishes reading all frames
 }
 
+/**
+ * A recorded rewind boundary.
+ *
+ * After a backwards timestamp jump, groups can still arrive out of order, so a single
+ * sequence floor is not enough: a late new-epoch group can have a lower sequence than the
+ * group that triggered detection. This keeps just enough state to classify any group by
+ * its (sequence, timestamp).
+ */
+class Reset {
+	/** Highest-sequence old-epoch group seen at detection. At or below this is old: drop. */
+	readonly prevMax: number;
+	/** The group whose backwards timestamp triggered detection. At or above this is new: keep. */
+	readonly group: number;
+	/** That group's timestamp; in the ambiguous span, old stragglers sit at or above it. */
+	readonly timestamp: Time.Micro;
+
+	constructor(prevMax: number, group: number, timestamp: Time.Micro) {
+		this.prevMax = prevMax;
+		this.group = group;
+		this.timestamp = timestamp;
+	}
+
+	/** Classify by sequence alone: true=old, false=new, undefined=ambiguous (resolve by timestamp). */
+	bySequence(sequence: number): boolean | undefined {
+		if (sequence <= this.prevMax) return true;
+		if (sequence >= this.group) return false;
+		return undefined;
+	}
+
+	/** Whether a group belongs to the reneged old epoch and should be dropped. */
+	isStale(sequence: number, timestamp: Time.Micro): boolean {
+		return this.bySequence(sequence) ?? timestamp >= this.timestamp;
+	}
+}
+
 /** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
 export class Consumer {
 	#track: Moq.Track;
 	#format: Format;
 	#latency: Signal<Time.Milli>;
+	#resetThreshold?: Signal<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
+	#high?: { group: number; timestamp: Time.Micro }; // live edge: max delivered ts + its group
+	#reset?: Reset; // the active rewind boundary, if any
 
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
@@ -42,6 +89,7 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = Signal.from(props.latency ?? Moq.Time.Milli.zero);
+		this.#resetThreshold = props.resetThreshold !== undefined ? Signal.from(props.resetThreshold) : undefined;
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -65,9 +113,21 @@ export class Consumer {
 				this.#active = consumer.sequence;
 			}
 
-			if (consumer.sequence < this.#active) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
-				// Skip old groups.
+			// Normally we drop anything behind the cursor. With an active reset the cursor isn't
+			// a valid floor (a late new-epoch group can sit below it); defer to the boundary and
+			// admit ambiguous groups so #runGroup can rule on them once their timestamps arrive.
+			let drop: boolean;
+			if (this.#reset) {
+				const verdict = this.#reset.bySequence(consumer.sequence);
+				if (verdict === undefined) drop = false;
+				else if (verdict) drop = true;
+				else drop = consumer.sequence < this.#active;
+			} else {
+				drop = consumer.sequence < this.#active;
+			}
+
+			if (drop) {
+				console.warn(`skipping old group: ${consumer.sequence}`);
 				consumer.close();
 				continue;
 			}
@@ -121,7 +181,10 @@ export class Consumer {
 						this.#notify?.();
 						this.#notify = undefined;
 					} else {
-						// Check for latency violations if this is a newer group.
+						// Newer group: resolve it against an active reset (dropping a reneged
+						// straggler), else detect a new rewind, then check latency.
+						if (this.#classifyStale(group)) return;
+						this.#checkReset(group);
 						this.#checkLatency();
 					}
 				}
@@ -198,6 +261,70 @@ export class Consumer {
 		}
 	}
 
+	// Detect a publisher "rewind" and record the reneged boundary. A newer group whose
+	// earliest frame lands far enough before the live edge can only be an explicit reneg of
+	// the buffered tail; record the boundary, drop the groups it proves stale, and resume
+	// from the earliest survivor. Groups still ambiguous (a late new-epoch group vs. an old
+	// straggler) are kept and resolved by #classifyStale once their timestamps arrive.
+	#checkReset(group: Group) {
+		if (this.#active === undefined) return;
+
+		const threshold = this.#resetThreshold?.peek();
+		if (threshold === undefined || this.#high === undefined) return;
+
+		// Only a group newer than the active one can rewind the timeline.
+		if (group.consumer.sequence <= this.#active) return;
+
+		const start = group.frames.at(0)?.timestamp;
+		if (start === undefined) return;
+
+		// Forward, or within the reordering budget: not a rewind.
+		if (this.#high.timestamp - start < Moq.Time.Micro.fromMilli(threshold)) return;
+
+		const reset = new Reset(this.#high.group, group.consumer.sequence, start);
+		this.#reset = reset;
+
+		// Drop buffered groups the boundary can already prove stale; keep ambiguous ones.
+		this.#groups = this.#groups.filter((g) => {
+			const verdict = reset.bySequence(g.consumer.sequence);
+			const first = g.frames.at(0);
+			const stale = verdict ?? (first !== undefined && reset.isStale(g.consumer.sequence, first.timestamp));
+			if (stale) {
+				g.consumer.close();
+				g.frames.length = 0;
+			}
+			return !stale;
+		});
+
+		console.warn(`buffer reset: group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`);
+
+		// Resume from the earliest survivor; if none, from the rewound group.
+		this.#active = this.#groups[0]?.consumer.sequence ?? reset.group;
+		this.#high = { group: reset.group, timestamp: group.latest ?? start };
+		this.#updateBuffered();
+
+		// Wake up any consumer waiting for a new frame.
+		this.#notify?.();
+		this.#notify = undefined;
+	}
+
+	// Drop a group that an active reset resolves as a reneged old straggler (its timestamp
+	// landed at or above the reset point). Returns true if the group was dropped.
+	#classifyStale(group: Group): boolean {
+		const reset = this.#reset;
+		if (!reset) return false;
+
+		const first = group.frames.at(0);
+		if (first === undefined) return false;
+		if (!reset.isStale(group.consumer.sequence, first.timestamp)) return false;
+
+		this.#groups = this.#groups.filter((g) => g !== group);
+		group.consumer.close();
+		group.frames.length = 0;
+		this.#updateBuffered();
+		return true;
+	}
+
 	/**
 	 * Returns the next frame in order along with its group number, awaiting one if needed.
 	 * A `frame` of undefined signals the end of that group; the overall result is undefined once closed.
@@ -211,8 +338,14 @@ export class Consumer {
 			) {
 				const frame = this.#groups[0].frames.shift();
 				if (frame) {
+					const seq = this.#groups[0].consumer.sequence;
+					// Track the live edge (max timestamp + its group) so a later backwards jump
+					// is detectable and the old epoch's tail is anchored.
+					if (this.#high === undefined || frame.timestamp > this.#high.timestamp) {
+						this.#high = { group: seq, timestamp: frame.timestamp };
+					}
 					this.#updateBuffered();
-					return { frame, group: this.#groups[0].consumer.sequence };
+					return { frame, group: seq };
 				}
 
 				// Check if the group is done and then remove it.
