@@ -16,13 +16,15 @@ categories = ["multimedia", "network-programming", "web-programming"]
 doctest = false
 
 [features]
-default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 # Filesystem watcher for hot-reloading on-disk TLS certs/keys; the QUIC backends imply it.
 watch = ["dep:notify"]
-aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
+# The QUIC backends pull in their crypto provider from these features (default-features
+# are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
+aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["dep:qmux"]
@@ -31,7 +33,7 @@ tcp = ["dep:qmux"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
-ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
+ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring", "web-transport-noq?/ring"]
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]

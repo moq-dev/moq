@@ -12,7 +12,7 @@ This guide covers connecting to a relay, discovering broadcasts, subscribing to 
 
 The key crates:
 
-- [moq-native](https://crates.io/crates/moq-native) — Configures QUIC (via [quinn](https://crates.io/crates/quinn)) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
+- [moq-native](https://crates.io/crates/moq-native) — Configures QUIC (via [noq](https://crates.io/crates/noq) by default, or [quinn](https://crates.io/crates/quinn) with the `quinn` feature) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
 - [moq-net](https://crates.io/crates/moq-net) — The core networking layer. Can be used directly with any `web_transport_trait::Session` implementation if you need full control over the QUIC endpoint.
 - [hang](https://crates.io/crates/hang) — Media-specific catalog and container format on top of `moq-net`.
 
