@@ -287,7 +287,12 @@ pub(crate) fn encode(
 
 	let sequence_number = group.frame_count() as u32;
 	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
-	let mut writer = group.create_frame(bytes.len())?;
+	// The fragment may carry several samples; the net frame's timestamp is the
+	// fragment's earliest presentation time so a relay can order it.
+	let mut writer = group.create_frame(moq_net::Frame {
+		size: bytes.len() as u64,
+		timestamp: frames[0].timestamp,
+	})?;
 	writer.write(bytes)?;
 	writer.finish()?;
 

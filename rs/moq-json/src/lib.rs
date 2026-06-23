@@ -224,7 +224,7 @@ impl Inner {
 			Some(delta) => {
 				let group = self.group.as_mut().expect("delta requires an open group");
 				let len = delta.len() as u64;
-				group.write_frame(delta)?;
+				group.write_frame_now(delta)?;
 				self.delta_bytes += len;
 				self.group_frames += 1;
 			}
@@ -273,7 +273,7 @@ impl Inner {
 		}
 
 		let mut group = self.track.append_group()?;
-		group.write_frame(snapshot)?;
+		group.write_frame_now(snapshot)?;
 		self.delta_bytes = 0;
 		self.group_frames = 1;
 

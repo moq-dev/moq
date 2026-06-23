@@ -731,9 +731,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 /// (catalogs, control channels, IETF transport).
 ///
 /// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
-/// model layer (`GroupProducer::append_frame`) already validated the timestamp
-/// against the track timescale, so the `expect` below is infallible. Mirrors the
-/// decode in the subscriber's `run_group`.
+/// The model layer (`GroupProducer::create_frame`) already converted the timestamp
+/// into the track timescale, so its raw value goes straight onto the wire. Mirrors
+/// the decode in the subscriber's `run_group`.
 async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &FrameConsumer,
@@ -744,10 +744,7 @@ async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 		return Ok(());
 	}
 
-	let ts = frame
-		.timestamp
-		.expect("model layer validated timestamp presence")
-		.value();
+	let ts = frame.timestamp.value();
 	encode_zigzag_delta(writer, ts, prev_ts).await?;
 
 	Ok(())

@@ -80,7 +80,7 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let (catalog, payload) = catalog_payload("pending");
-		group.write_frame(payload).expect("catalog frame should write");
+		group.write_frame_now(payload).expect("catalog frame should write");
 		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
@@ -98,7 +98,7 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let (catalog, payload) = catalog_payload("finished");
-		group.write_frame(payload).expect("catalog frame should write");
+		group.write_frame_now(payload).expect("catalog frame should write");
 		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
@@ -115,13 +115,13 @@ mod test {
 
 		let mut old_group = track.append_group().expect("old catalog group should append");
 		old_group
-			.write_frame(old_payload)
+			.write_frame_now(old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
 		let mut latest_group = track.append_group().expect("latest catalog group should append");
 		latest_group
-			.write_frame(latest_payload)
+			.write_frame_now(latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 		track.finish().expect("catalog track should finish");
@@ -141,7 +141,7 @@ mod test {
 
 		let mut old_group = track.append_group().expect("old catalog group should append");
 		old_group
-			.write_frame(old_payload)
+			.write_frame_now(old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
@@ -150,7 +150,7 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		latest_group
-			.write_frame(latest_payload)
+			.write_frame_now(latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 
@@ -172,7 +172,7 @@ mod test {
 
 		let mut latest_group = track.append_group().expect("latest catalog group should append");
 		latest_group
-			.write_frame(latest_payload)
+			.write_frame_now(latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 		track.finish().expect("catalog track should finish");
@@ -180,7 +180,7 @@ mod test {
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 
 		old_group
-			.write_frame(old_payload)
+			.write_frame_now(old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 

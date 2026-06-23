@@ -647,7 +647,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				Compression::None => {
 					// `create_frame` is the allocation chokepoint and rejects an
 					// oversized `size` before allocating, so no pre-check is needed.
-					let mut frame = group.create_frame(Frame { size, timestamp })?;
+					// No wire timestamp (pre-lite-05) means wall-clock at receive.
+					let mut frame = match timestamp {
+						Some(ts) => group.create_frame(Frame { size, timestamp: ts })?,
+						None => group.create_frame_now(size)?,
+					};
 					track_stats.frame();
 
 					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
@@ -671,10 +675,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					track_stats.bytes(size);
 
 					let payload = compression.decompress(&packed)?;
-					let mut frame = group.create_frame(Frame {
-						size: payload.len() as u64,
-						timestamp,
-					})?;
+					let size = payload.len() as u64;
+					let mut frame = match timestamp {
+						Some(ts) => group.create_frame(Frame { size, timestamp: ts })?,
+						None => group.create_frame_now(size)?,
+					};
 					frame.write(bytes::Bytes::from(payload))?;
 					frame.finish()?;
 				}

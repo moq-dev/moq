@@ -58,8 +58,8 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 
 	// Write frames to the group.
 	// Each frame is dependent on the previous frame, so older frames are prioritized.
-	group.write_frame(bytes::Bytes::from_static(b"Hello"))?;
-	group.write_frame(bytes::Bytes::from_static(b"World"))?;
+	group.write_frame_now(bytes::Bytes::from_static(b"Hello"))?;
+	group.write_frame_now(bytes::Bytes::from_static(b"World"))?;
 	group.finish()?;
 
 	tracing::info!("wrote hello + world");
@@ -68,7 +68,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
 	// There's also a helper method to create a group with a single frame.
-	track.write_frame(bytes::Bytes::from_static(b"foobarbaz"))?;
+	track.write_frame_now(bytes::Bytes::from_static(b"foobarbaz"))?;
 	tracing::info!("wrote foobarbaz");
 
 	// Sleep before exiting and closing the broadcast.

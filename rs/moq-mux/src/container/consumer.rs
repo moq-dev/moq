@@ -443,7 +443,7 @@ mod tests {
 			// The duration tests write frames directly via `write_duration_frame`;
 			// this path just preserves the timestamp with an unknown duration.
 			for frame in frames {
-				group.write_frame(encode_duration_frame(frame.timestamp, ts(0)))?;
+				group.write_frame(frame.timestamp, encode_duration_frame(frame.timestamp, ts(0)))?;
 			}
 			Ok(())
 		}
@@ -474,7 +474,9 @@ mod tests {
 
 	/// Write one DurationWire frame (timestamp and duration in µs) into a group.
 	fn write_duration_frame(group: &mut moq_net::GroupProducer, timestamp: Timestamp, duration: Timestamp) {
-		group.write_frame(encode_duration_frame(timestamp, duration)).unwrap();
+		group
+			.write_frame(timestamp, encode_duration_frame(timestamp, duration))
+			.unwrap();
 	}
 
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy format).

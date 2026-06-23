@@ -55,7 +55,7 @@ impl Frame {
 		// into the track's timescale; older drafts simply don't put it on the wire.
 		let net_frame = moq_net::Frame {
 			size,
-			timestamp: Some(self.timestamp),
+			timestamp: self.timestamp,
 		};
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;

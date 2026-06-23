@@ -186,48 +186,66 @@ impl GroupProducer {
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
 	/// But an upfront size is required.
-	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) -> Result<()> {
-		let data = frame.into();
-		let mut frame = self.create_frame(data.len())?;
+	///
+	/// `timestamp` is converted into the parent track's timescale. Use
+	/// [Self::write_frame_now] to stamp wall-clock time instead of supplying one.
+	pub fn write_frame<B: Into<Bytes>>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
+		let data = data.into();
+		let mut frame = self.create_frame(Frame {
+			size: data.len() as u64,
+			timestamp,
+		})?;
 		frame.write(data)?;
 		frame.finish()?;
 		Ok(())
 	}
 
-	/// Create a frame with an upfront size, normalizing its timestamp into the parent
-	/// track's timescale.
-	///
-	/// A frame whose `timestamp` is at a different scale is converted; a frame with no
-	/// timestamp is stamped with wall-clock now ([`Timestamp::now`]), which is how
-	/// protocols whose wire can't carry a timestamp end up with millisecond wall-clock
-	/// timing. Returns [`Error::FrameTooLarge`] if the declared size exceeds the
-	/// per-frame limit (refused before the buffer is allocated) or
-	/// [`Error::TimestampMismatch`] if the timestamp can't be converted (overflow).
-	pub fn create_frame(&mut self, info: impl Into<Frame>) -> Result<FrameProducer> {
-		let mut info = info.into();
-		let normalized = match info.timestamp {
-			Some(ts) => ts.convert(self.timescale),
-			None => Timestamp::now().convert(self.timescale),
-		};
-		info.timestamp = Some(normalized.map_err(|_| Error::TimestampMismatch)?);
+	/// Like [Self::write_frame] but stamps the frame with wall-clock now
+	/// ([`Timestamp::now`]). For data with no real presentation time of its own
+	/// (catalogs, JSON state) or sources whose protocol can't carry one.
+	pub fn write_frame_now<B: Into<Bytes>>(&mut self, data: B) -> Result<()> {
+		self.write_frame(Timestamp::now(), data)
+	}
 
-		let frame = info.produce()?;
+	/// Create a frame with an upfront size and presentation timestamp.
+	///
+	/// The `timestamp` is converted into the parent track's timescale, so the scale you
+	/// build it with doesn't have to match the track. Returns [`Error::FrameTooLarge`]
+	/// if the declared size exceeds the per-frame limit (refused before the buffer is
+	/// allocated) or [`Error::TimestampMismatch`] if the timestamp can't be converted
+	/// (overflow).
+	pub fn create_frame(&mut self, frame: Frame) -> Result<FrameProducer> {
+		let mut frame = frame;
+		frame.timestamp = frame
+			.timestamp
+			.convert(self.timescale)
+			.map_err(|_| Error::TimestampMismatch)?;
+
+		let frame = frame.produce()?;
 		self.append_frame(frame.clone())?;
 		Ok(frame)
+	}
+
+	/// Like [Self::create_frame] but stamps the frame with wall-clock now
+	/// ([`Timestamp::now`]).
+	pub fn create_frame_now(&mut self, size: u64) -> Result<FrameProducer> {
+		self.create_frame(Frame {
+			size,
+			timestamp: Timestamp::now(),
+		})
 	}
 
 	/// Append a frame producer to the group.
 	///
 	/// Lower-level than [`Self::create_frame`]: the frame's `timestamp` must already be
-	/// `Some` at the parent track's timescale (use [`Self::create_frame`] to normalize).
+	/// at the parent track's timescale (use [`Self::create_frame`] to convert).
 	/// Returns [`Error::TimestampMismatch`] otherwise.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
 		// Catch the contract violation here, at the model layer, so peers that
 		// downstream-encode (e.g. the lite publisher's `serve_frame`) can rely
 		// on the invariant instead of re-validating per byte.
-		match frame.timestamp {
-			Some(ts) if ts.scale() == self.timescale => {}
-			_ => return Err(Error::TimestampMismatch),
+		if frame.timestamp.scale() != self.timescale {
+			return Err(Error::TimestampMismatch);
 		}
 
 		let mut state = modify(&self.state)?;
@@ -464,8 +482,8 @@ mod test {
 	#[test]
 	fn basic_frame_reading() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"frame0")).unwrap();
-		producer.write_frame(Bytes::from_static(b"frame1")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"frame0")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"frame1")).unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -480,7 +498,7 @@ mod test {
 	#[test]
 	fn read_frame_all_at_once() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"hello")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"hello")).unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -491,7 +509,7 @@ mod test {
 	#[test]
 	fn read_frame_chunks() {
 		let mut producer = Group { sequence: 0 }.produce();
-		let mut frame = producer.create_frame(10u64).unwrap();
+		let mut frame = producer.create_frame_now(10).unwrap();
 		frame.write(Bytes::from_static(b"hello")).unwrap();
 		frame.write(Bytes::from_static(b"world")).unwrap();
 		frame.finish().unwrap();
@@ -508,8 +526,8 @@ mod test {
 	#[test]
 	fn get_frame_by_index() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"a")).unwrap();
-		producer.write_frame(Bytes::from_static(b"bb")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"bb")).unwrap();
 		producer.finish().unwrap();
 
 		let consumer = producer.consume();
@@ -544,7 +562,7 @@ mod test {
 	#[test]
 	fn abort_clears_cached_frames() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 
 		// A stale consumer that never reads must not pin the cached frames.
 		let _consumer = producer.consume();
@@ -561,7 +579,7 @@ mod test {
 	fn drop_unfinished_clears_cached_frames() {
 		let producer = Group { sequence: 0 }.produce();
 		let mut writer = producer.clone();
-		writer.write_frame(Bytes::from_static(b"data")).unwrap();
+		writer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 
 		// A stale consumer keeps the channel (and thus the cache) alive.
 		let mut consumer = producer.consume();
@@ -578,7 +596,7 @@ mod test {
 	#[test]
 	fn drop_finished_keeps_cached_frames() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -597,7 +615,7 @@ mod test {
 		// Consumer blocks because no frames yet.
 		assert!(consumer.next_frame().now_or_never().is_none());
 
-		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 		producer.finish().unwrap();
 
 		let frame = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -610,8 +628,8 @@ mod test {
 
 		// Write frames that total more than MAX_GROUP_CACHE.
 		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
-		producer.write_frame(big.clone()).unwrap();
-		producer.write_frame(big).unwrap();
+		producer.write_frame_now(big.clone()).unwrap();
+		producer.write_frame_now(big).unwrap();
 
 		// The first frame should have been evicted.
 		let consumer = producer.consume();
@@ -626,8 +644,8 @@ mod test {
 	#[test]
 	fn no_eviction_under_limit() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"small")).unwrap();
-		producer.write_frame(Bytes::from_static(b"frames")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"small")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"frames")).unwrap();
 		producer.finish().unwrap();
 
 		let consumer = producer.consume();
@@ -643,7 +661,7 @@ mod test {
 
 		// Write more than MAX_GROUP_FRAMES frames.
 		for _ in 0..=MAX_GROUP_FRAMES {
-			producer.write_frame(Bytes::from_static(b"x")).unwrap();
+			producer.write_frame_now(Bytes::from_static(b"x")).unwrap();
 		}
 
 		// The first frame should have been evicted.
@@ -666,8 +684,8 @@ mod test {
 		let mut producer = Group { sequence: 0 }.produce();
 
 		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
-		producer.write_frame(big.clone()).unwrap();
-		producer.write_frame(big).unwrap();
+		producer.write_frame_now(big.clone()).unwrap();
+		producer.write_frame_now(big).unwrap();
 
 		let mut consumer = producer.consume();
 		// First frame was evicted, next_frame should return CacheFull.
@@ -678,7 +696,7 @@ mod test {
 	#[test]
 	fn clone_consumer_independent() {
 		let mut producer = Group { sequence: 0 }.produce();
-		producer.write_frame(Bytes::from_static(b"a")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
 
 		let mut c1 = producer.consume();
 		// Read one frame from c1
@@ -687,7 +705,7 @@ mod test {
 		// Clone c1 — inherits index (past first frame)
 		let mut c2 = c1.clone();
 
-		producer.write_frame(Bytes::from_static(b"b")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"b")).unwrap();
 		producer.finish().unwrap();
 
 		// c2 should get the second frame (inherited index)
@@ -699,7 +717,7 @@ mod test {
 	}
 
 	/// A frame whose timestamp is at a different scale is converted to the group's
-	/// scale by `create_frame`, not rejected.
+	/// scale by `create_frame`.
 	#[test]
 	fn create_frame_converts_mismatched_scale() {
 		use crate::{Timescale, Timestamp};
@@ -707,28 +725,22 @@ mod test {
 		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
 		let frame = Frame {
 			size: 3,
-			timestamp: Some(Timestamp::from_millis(1).unwrap()), // 1ms -> 1000µs
+			timestamp: Timestamp::from_millis(1).unwrap(), // 1ms -> 1000µs
 		};
 		let writer = producer.create_frame(frame).unwrap();
-		let ts = writer.timestamp.unwrap();
-		assert_eq!(ts.scale(), Timescale::MICRO);
-		assert_eq!(ts.value(), 1000);
+		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
+		assert_eq!(writer.timestamp.value(), 1000);
 	}
 
-	/// A frame with no timestamp is stamped with wall-clock now, at the group's scale.
+	/// `create_frame_now` stamps wall-clock now, at the group's scale.
 	#[tokio::test]
-	async fn create_frame_stamps_wall_clock_when_missing() {
+	async fn create_frame_now_stamps_wall_clock() {
 		use crate::Timescale;
 
 		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
-		let frame = Frame {
-			size: 3,
-			timestamp: None,
-		};
-		let writer = producer.create_frame(frame).unwrap();
-		let ts = writer.timestamp.expect("stamped");
-		assert_eq!(ts.scale(), Timescale::MICRO);
-		assert!(!ts.is_zero(), "wall clock should be non-zero");
+		let writer = producer.create_frame_now(3).unwrap();
+		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
+		assert!(!writer.timestamp.is_zero(), "wall clock should be non-zero");
 	}
 
 	/// A matching scale passes through unchanged; bytes can be written normally.
@@ -739,10 +751,10 @@ mod test {
 		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
 		let frame = Frame {
 			size: 1,
-			timestamp: Some(Timestamp::from_micros(7).unwrap()),
+			timestamp: Timestamp::from_micros(7).unwrap(),
 		};
 		let mut writer = producer.create_frame(frame).unwrap();
-		assert_eq!(writer.timestamp.unwrap().value(), 7);
+		assert_eq!(writer.timestamp.value(), 7);
 		writer.write(Bytes::from_static(b"x")).unwrap();
 		writer.finish().unwrap();
 	}
@@ -752,7 +764,7 @@ mod test {
 	#[test]
 	fn create_frame_rejects_oversized() {
 		let mut producer = Group { sequence: 0 }.produce();
-		let result = producer.create_frame(crate::MAX_FRAME_SIZE + 1);
+		let result = producer.create_frame_now(crate::MAX_FRAME_SIZE + 1);
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
 }

@@ -29,7 +29,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Write a group containing a single frame.
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
@@ -137,7 +137,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -253,7 +253,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -359,7 +359,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	fn timestamped_frame(us: u64, payload: &str) -> moq_net::Frame {
 		moq_net::Frame {
 			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
 		}
 	}
 
@@ -482,7 +482,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
-	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
@@ -874,7 +874,7 @@ async fn broadcast_websocket() {
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	// Server with both QUIC (required) and WebSocket listeners.
@@ -979,7 +979,7 @@ async fn broadcast_websocket_fallback() {
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	// QUIC binds on its own port; WebSocket on a different port.
@@ -1088,7 +1088,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
@@ -1154,7 +1154,7 @@ async fn broadcast_race_quic_wins() {
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	// Bind WebSocket TCP first to pick a random port, then bind QUIC UDP to
@@ -1241,7 +1241,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group0 = track.append_group().expect("append group 0");
-	group0.write_frame(b"a".as_ref()).expect("write frame 0");
+	group0.write_frame_now(b"a".as_ref()).expect("write frame 0");
 	group0.finish().expect("finish group 0");
 
 	let mut server_config = moq_native::ServerConfig::default();
@@ -1310,7 +1310,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	// A new group published after the resubscribe must reach the consumer
 	// regardless of which linger branch fired.
 	let mut group1 = track.append_group().expect("append group 1");
-	group1.write_frame(b"b".as_ref()).expect("write frame 1");
+	group1.write_frame_now(b"b".as_ref()).expect("write frame 1");
 	group1.finish().expect("finish group 1");
 
 	let mut saw_group1 = false;
@@ -1433,7 +1433,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	let publish = pub_origin
@@ -1565,7 +1565,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	let publish = pub_origin

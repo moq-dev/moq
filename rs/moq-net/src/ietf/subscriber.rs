@@ -3,8 +3,8 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::{
-	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, OriginPublish,
-	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
+	BroadcastDynamic, BroadcastInfo, Error, FrameProducer, Group, GroupProducer, OriginProducer, OriginPublish, Path,
+	PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -814,10 +814,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					let mut frame = producer.create_frame(Frame {
-						size: 0,
-						timestamp: None,
-					})?;
+					// moq-transport doesn't yet decode per-object timestamps, so frames
+					// fall back to wall-clock at receive (the track's default timescale).
+					let mut frame = producer.create_frame_now(0)?;
 					track_stats.frame();
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
@@ -826,9 +825,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				// `create_frame` is the allocation chokepoint and rejects an oversized
-				// `size` before allocating, so no pre-check is needed.
-				let mut frame = producer.create_frame(Frame { size, timestamp: None })?;
+				// `create_frame_now` is the allocation chokepoint and rejects an oversized
+				// `size` before allocating, so no pre-check is needed. moq-transport
+				// doesn't yet decode per-object timestamps, so this is wall-clock.
+				let mut frame = producer.create_frame_now(size)?;
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, frame.clone(), &track_stats).await {

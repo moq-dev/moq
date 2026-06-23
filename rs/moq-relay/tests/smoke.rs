@@ -113,7 +113,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
-	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
 	let pub_session = tokio::time::timeout(TIMEOUT, client().with_publisher(&pub_origin).connect(url.clone()))
@@ -187,7 +187,7 @@ async fn two_publish_only_clients_coexist() {
 	track_a
 		.append_group()
 		.expect("append group a")
-		.write_frame(b"a".as_ref())
+		.write_frame_now(b"a".as_ref())
 		.expect("write frame a");
 
 	let pub_b = Origin::random().produce();
@@ -196,7 +196,7 @@ async fn two_publish_only_clients_coexist() {
 	track_b
 		.append_group()
 		.expect("append group b")
-		.write_frame(b"b".as_ref())
+		.write_frame_now(b"b".as_ref())
 		.expect("write frame b");
 
 	let sess_a = tokio::time::timeout(TIMEOUT, client().with_publisher(pub_a.consume()).connect(url.clone()))
@@ -292,7 +292,7 @@ async fn internal_tcp_round_trip() {
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
-	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
 	let pub_session = tokio::time::timeout(
@@ -396,7 +396,7 @@ async fn internal_unix_round_trip() {
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
-	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
 	let pub_session = tokio::time::timeout(

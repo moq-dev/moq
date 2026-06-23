@@ -7,7 +7,7 @@ use crate::ffi::Task;
 /// Publisher-side track properties, mirroring [`moq_net::TrackInfo`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
-/// (priority 0, ordered, uncompressed, default cache, untimed).
+/// (priority 0, ordered, uncompressed, default cache, millisecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
@@ -431,7 +431,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		track.write_frame(payload)?;
+		track.write_frame_now(payload)?;
 		Ok(())
 	}
 
@@ -480,7 +480,7 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let group = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
-		group.write_frame(payload)?;
+		group.write_frame_now(payload)?;
 		Ok(())
 	}
 

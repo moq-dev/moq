@@ -168,7 +168,7 @@ impl<E: CatalogExt> Drop for Guard<'_, E> {
 		// Publish the MSF catalog, derived from the base media sections.
 		let msf = to_msf(&self.catalog.media());
 		if let Ok(mut group) = self.msf_track.append_group() {
-			let _ = group.write_frame(msf.to_string().expect("invalid MSF catalog"));
+			let _ = group.write_frame_now(msf.to_string().expect("invalid MSF catalog"));
 			let _ = group.finish();
 		}
 	}

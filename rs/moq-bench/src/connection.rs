@@ -210,13 +210,13 @@ async fn produce(
 				.as_millis(),
 		};
 		let header = Bytes::from(serde_json::to_vec(&header)?);
-		group.write_frame(header.clone())?;
+		group.write_frame_now(header.clone())?;
 		stats.frame_sent(header.len());
 
 		// The remaining frames in the group are zeroed payload.
 		for _ in 0..rolled.group_size {
 			ticker.tick().await;
-			group.write_frame(zeros.clone())?;
+			group.write_frame_now(zeros.clone())?;
 			stats.frame_sent(zeros.len());
 		}
 

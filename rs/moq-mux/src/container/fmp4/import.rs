@@ -612,7 +612,7 @@ impl Import {
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
 			let mut frame = g.create_frame(moq_net::Frame {
 				size: fragment_bytes.len() as u64,
-				timestamp: Some(timestamp),
+				timestamp,
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;

@@ -21,66 +21,34 @@ use crate::{Error, Result, Timestamp};
 /// frame; 32 MiB covers that while keeping the per-frame preallocation bounded.
 pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 
-/// A chunk of data with an upfront size and optional presentation timestamp.
+/// A chunk of data with an upfront size and a presentation timestamp.
 ///
 /// Note that this is just the header.
 /// You use [FrameProducer] and [FrameConsumer] to deal with the frame payload, potentially chunked.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
-	/// Presentation timestamp in the parent track's timescale.
+	/// Presentation timestamp.
 	///
-	/// `None` on input asks [`crate::GroupProducer::create_frame`] to stamp the frame
-	/// with wall-clock now; a `Some` at any scale is converted to the track's timescale.
-	/// After `create_frame` (and on every frame a consumer receives) this is always
-	/// `Some` at the track's [`crate::TrackInfo::timescale`].
-	pub timestamp: Option<Timestamp>,
+	/// [`crate::GroupProducer::create_frame`] converts it into the parent track's
+	/// timescale, so the scale you build it with doesn't have to match the track.
+	/// Use [`crate::GroupProducer::create_frame_now`] /
+	/// [`crate::GroupProducer::write_frame_now`] to stamp wall-clock time instead of
+	/// supplying one explicitly.
+	pub timestamp: Timestamp,
 }
 
 impl Frame {
 	/// Create a producer for the frame.
 	///
 	/// Crate-private: frames are only constructed via
-	/// [`crate::GroupProducer::create_frame`], which validates the timestamp
-	/// against the parent track's timescale. Returns [`Error::FrameTooLarge`] if the
-	/// declared [`Frame::size`] exceeds [`MAX_FRAME_SIZE`].
+	/// [`crate::GroupProducer::create_frame`], which converts the timestamp into the
+	/// parent track's timescale. Returns [`Error::FrameTooLarge`] if the declared
+	/// [`Frame::size`] exceeds [`MAX_FRAME_SIZE`].
 	pub(crate) fn produce(self) -> Result<FrameProducer> {
 		FrameProducer::new(self)
-	}
-}
-
-impl From<usize> for Frame {
-	fn from(size: usize) -> Self {
-		Self {
-			size: size as u64,
-			timestamp: None,
-		}
-	}
-}
-
-impl From<u64> for Frame {
-	fn from(size: u64) -> Self {
-		Self { size, timestamp: None }
-	}
-}
-
-impl From<u32> for Frame {
-	fn from(size: u32) -> Self {
-		Self {
-			size: size as u64,
-			timestamp: None,
-		}
-	}
-}
-
-impl From<u16> for Frame {
-	fn from(size: u16) -> Self {
-		Self {
-			size: size as u64,
-			timestamp: None,
-		}
 	}
 }
 
@@ -475,7 +443,7 @@ mod test {
 	fn single_chunk_roundtrip() {
 		let mut producer = Frame {
 			size: 5,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -491,7 +459,7 @@ mod test {
 	fn multi_chunk_read_all() {
 		let mut producer = Frame {
 			size: 10,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -508,7 +476,7 @@ mod test {
 	fn read_chunk_sequential() {
 		let mut producer = Frame {
 			size: 10,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -532,7 +500,7 @@ mod test {
 	fn read_all_chunks() {
 		let mut producer = Frame {
 			size: 10,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -550,7 +518,7 @@ mod test {
 	fn finish_checks_remaining() {
 		let mut producer = Frame {
 			size: 5,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -563,7 +531,7 @@ mod test {
 	fn write_too_many_bytes() {
 		let mut producer = Frame {
 			size: 3,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -577,7 +545,7 @@ mod test {
 		// buffer is allocated, so a single varint can't request a huge allocation.
 		let result = Frame {
 			size: MAX_FRAME_SIZE + 1,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce();
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
@@ -587,7 +555,7 @@ mod test {
 	fn abort_propagates() {
 		let mut producer = Frame {
 			size: 5,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -602,7 +570,7 @@ mod test {
 	fn empty_frame() {
 		let mut producer = Frame {
 			size: 0,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -617,7 +585,7 @@ mod test {
 	async fn pending_then_ready() {
 		let mut producer = Frame {
 			size: 5,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -638,7 +606,7 @@ mod test {
 		// Exercise the BufMut path that the receive loop uses via `read_buf`.
 		let mut producer = Frame {
 			size: 12,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -659,7 +627,7 @@ mod test {
 	fn buf_mut_advance_past_capacity_panics() {
 		let mut producer = Frame {
 			size: 4,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -671,7 +639,7 @@ mod test {
 	fn read_chunk_streams_partial_writes() {
 		let mut producer = Frame {
 			size: 6,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
@@ -696,7 +664,7 @@ mod test {
 	fn cloned_consumer_independent_cursor() {
 		let mut producer = Frame {
 			size: 10,
-			timestamp: None,
+			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
