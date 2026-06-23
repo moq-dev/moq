@@ -306,9 +306,10 @@ export class Consumer {
 
 		console.warn(`buffer reset: group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`);
 
-		// Resume from the earliest survivor; if none, from the rewound group.
+		// Resume from the earliest survivor; if none, from the rewound group. Anchor the live
+		// edge at the rewind point (delivered), not group.latest (buffered ahead of playback).
 		this.#active = this.#groups[0]?.consumer.sequence ?? reset.group;
-		this.#rewind.liveEdge = { group: reset.group, timestamp: group.latest ?? start };
+		this.#rewind.liveEdge = { group: reset.group, timestamp: start };
 		this.#updateBuffered();
 
 		// Wake up any consumer waiting for a new frame.
@@ -333,6 +334,19 @@ export class Consumer {
 		return true;
 	}
 
+	// Re-check buffered newer groups against the current live edge. #checkReset otherwise only
+	// runs when a group receives a frame, so a group that buffered while the live edge was lower
+	// (or undefined) is never reconsidered once delivery advances the edge past it, and the
+	// rewind would be missed. Highest sequence first, mirroring the Rust scan: the first rewound
+	// group becomes the boundary, and #checkReset's own guards make the rest no-ops.
+	#checkBufferedReset(): void {
+		if (this.#active === undefined || this.#rewind.liveEdge === undefined) return;
+		for (const group of [...this.#groups].reverse()) {
+			if (group.consumer.sequence <= this.#active) break;
+			this.#checkReset(group);
+		}
+	}
+
 	/**
 	 * Returns the next frame in order along with its group number and the current
 	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals the
@@ -342,6 +356,10 @@ export class Consumer {
 	 */
 	async next(): Promise<{ frame: Frame | undefined; group: number; discontinuity: number } | undefined> {
 		for (;;) {
+			// A group may have buffered a rewind while the live edge was still behind it; catch it
+			// now that delivery has advanced the edge.
+			this.#checkBufferedReset();
+
 			if (
 				this.#groups.length > 0 &&
 				this.#active !== undefined &&

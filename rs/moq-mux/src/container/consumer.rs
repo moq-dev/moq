@@ -352,33 +352,38 @@ impl<F: Container> Consumer<F> {
 			return Ok(false);
 		};
 
-		// The newest produced group is at the back (sequence ascending).
+		// Scan newer groups from the back (highest sequence first) for a rewind: a group whose
+		// timestamp went strictly backwards past the live edge. Checking only `back()` would
+		// miss a rewind that a higher-sequence group masks by having already caught back up
+		// (timestamp >= live edge) or by having no frame yet. Pending is sequence-sorted, so we
+		// take the highest-sequence group that actually rewound.
 		let reset = {
-			let Some(newest) = self.pending.back_mut() else {
+			let mut found = None;
+			for group in self.pending.iter_mut().rev() {
+				// Once we reach the playback cursor, older groups can't rewind the timeline.
+				if group.group.sequence <= self.current {
+					break;
+				}
+
+				// Skip groups with no frame yet; a lower-sequence one may still have rewound.
+				let Poll::Ready(Ok(min)) = group.poll_min_timestamp(waiter, &self.format) else {
+					continue;
+				};
+
+				if min < live_edge {
+					found = Some(Reset {
+						prev_max,
+						group: group.group.sequence,
+						timestamp: min,
+					});
+					break;
+				}
+			}
+
+			let Some(reset) = found else {
 				return Ok(false);
 			};
-
-			// Only a group newer than the one we're playing can rewind the timeline.
-			if newest.group.sequence <= self.current {
-				return Ok(false);
-			}
-
-			// We need at least one frame to know where the new group lands.
-			let Poll::Ready(Ok(min)) = newest.poll_min_timestamp(waiter, &self.format) else {
-				return Ok(false);
-			};
-
-			// Sequence climbs (guaranteed above); a rewind is the timestamp going strictly
-			// backwards past the live edge. Anything at or ahead of it is normal forward motion.
-			if min >= live_edge {
-				return Ok(false);
-			}
-
-			Reset {
-				prev_max,
-				group: newest.group.sequence,
-				timestamp: min,
-			}
+			reset
 		};
 
 		// Drop buffered groups the boundary can already prove are old-epoch. Ambiguous ones
@@ -739,12 +744,14 @@ mod tests {
 		let consumer_track = subscribe_default(&track);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::ZERO);
 
+		// Group 0 at ts 0 keeps timestamps monotonic with sequence (groups 1-9 follow at
+		// g*50 ms), so the test exercises latency skipping and not rewind detection.
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
-					timestamp: ts(400_000),
+					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 				}],
@@ -870,6 +877,41 @@ mod tests {
 		);
 		assert_eq!(consumer.discontinuity(), 1, "one rewind detected");
 		finisher.await.expect("finisher task panicked");
+	}
+
+	/// A rewind is detected even when a higher-sequence group has already caught back up past
+	/// the live edge (so the newest pending group looks forward). Scanning only `back()` would
+	/// miss the lower-sequence rewound group and play the reneged tail without a discontinuity.
+	#[tokio::test]
+	async fn reset_detected_behind_forward_newest_group() {
+		tokio::time::pause();
+		let mut track = moq_net::Track::new("test").produce();
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
+
+		// Old timeline, played to a live edge of 200 ms.
+		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut track, 1, &[ts(100_000)]);
+		write_group(&mut track, 2, &[ts(200_000)]);
+		// Group 6 (highest sequence) is forward of the live edge, masking...
+		write_group(&mut track, 6, &[ts(250_000)]);
+		// ...group 5, a lower-sequence group that rewound below it.
+		write_group(&mut track, 5, &[ts(50_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+
+		assert_eq!(
+			consumer.discontinuity(),
+			1,
+			"rewind detected behind a forward newest group"
+		);
+		assert!(micros.contains(&50_000), "resumed at the rewound group, got {micros:?}");
+		assert!(
+			!micros.contains(&200_000),
+			"the reneged tail was dropped, got {micros:?}"
+		);
 	}
 
 	/// A newer group whose timestamps jump backwards past the buffered tail drops the
