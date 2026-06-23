@@ -220,6 +220,10 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<BufferedRanges>([]);
 
+	// The last discontinuity count seen from the container consumer; doubles as a generation
+	// so in-flight decodes from before a rewind can be dropped on output.
+	#discontinuity = 0;
+
 	signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -242,6 +246,10 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
+					// The generation this frame was decoded in. If a rewind bumps it while we wait
+					// below, this frame belongs to the reneged timeline and must be dropped.
+					const generation = this.#discontinuity;
+
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -256,6 +264,7 @@ class DecoderTrack {
 					const wait = this.source.sync.wait(timestamp).then(() => true);
 					const ok = await Promise.race([wait, effect.cancel]);
 					if (!ok) return;
+					if (generation !== this.#discontinuity) return; // a rewind happened while waiting
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -325,6 +334,9 @@ class DecoderTrack {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
+
+				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
+				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame, group } = next;
 
@@ -407,6 +419,9 @@ class DecoderTrack {
 				const next = await consumer.next();
 				if (!next) break;
 
+				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
+				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
+
 				const { frame, group } = next;
 
 				if (!frame) {
@@ -450,6 +465,22 @@ class DecoderTrack {
 				);
 			}
 		});
+	}
+
+	// React to the container consumer's discontinuity counter. On a change the publisher has
+	// rewound the timeline, so drop what's queued downstream and re-anchor the shared clock
+	// before the new utterance. Clearing `timestamp` is load-bearing: otherwise its stale high
+	// value would late-reject the rewound (lower-timestamp) frames at the output guard. Bumping
+	// the generation drops in-flight decodes on output. The held frame is left in place so the
+	// last picture shows until the new keyframe renders, instead of flashing empty. Returns true
+	// if a rewind was handled.
+	#onDiscontinuity(count: number): boolean {
+		if (count === this.#discontinuity) return false;
+		this.#discontinuity = count;
+		this.timestamp.set(undefined);
+		this.#buffered.set([]);
+		this.source.sync.reset();
+		return true;
 	}
 
 	// Add a range to the decode buffer (decoded, waiting to render)
