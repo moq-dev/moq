@@ -199,7 +199,7 @@ impl ElementImpl for MoqSink {
 				"MoQ Sink",
 				"Sink/Network/MoQ",
 				"Transmits media over MoQ",
-				"Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>",
+				"Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>, Ariel Molina <ariel@edis.mx>",
 			)
 		});
 		Some(&*METADATA)
