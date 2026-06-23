@@ -8,8 +8,7 @@ use std::{
 
 use axum::{
 	extract::{
-		Extension, Path, Query, State, WebSocketUpgrade,
-		rejection::{PathRejection, QueryRejection},
+		Extension, Path, Query, State, WebSocketUpgrade, rejection::QueryRejection,
 		ws::rejection::WebSocketUpgradeRejection,
 	},
 	http::StatusCode,
@@ -21,16 +20,20 @@ use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web:
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-	path: Result<Path<String>, PathRejection>,
+	path: Option<Path<String>>,
 	query: Result<Query<AuthQuery>, QueryRejection>,
 	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
 	// the informational landing page instead of an error response.
-	let (Ok(ws), Ok(Path(path)), Ok(Query(query))) = (ws, path, query) else {
+	let (Ok(ws), Ok(Query(query))) = (ws, query) else {
 		return Ok(landing_response());
 	};
+
+	// The `/{*path}` route captures the path; the bare `/` route captures none,
+	// which is the empty (root) auth scope. Mirrors `serve_announced`.
+	let path = path.map_or_else(String::new, |Path(path)| path);
 
 	// Advertise the full qmux × moq-net subprotocol matrix, with bare qmux
 	// fallbacks last. axum picks the first entry that the client also offered,

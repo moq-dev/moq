@@ -185,6 +185,71 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
+/// A client that dials a bare `host:port` with no path must still get a
+/// WebSocket upgrade at the root, not the landing page. The empty path is the
+/// root auth scope (same as the internal listener). Regression for the
+/// `/{*path}`-only route, which left bare-URL clients (e.g.
+/// `moqsink url="https://host:4443"`) with a silently dead WS fallback.
+#[tokio::test]
+async fn relay_websocket_root_path_upgrades() {
+	let (port, web_handle) = spawn_relay().await;
+	// No path: the URL is just host:port, so the WS handshake targets "/".
+	let url: url::Url = format!("ws://127.0.0.1:{port}").parse().expect("parse url");
+
+	// ── publisher ───────────────────────────────────────────────────
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.finish().expect("finish group");
+
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client().with_publish(pub_origin.consume()).connect(url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed (root-path WS upgrade)");
+
+	// ── subscriber ──────────────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume();
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed (root-path WS upgrade)");
+
+	// ── data path ───────────────────────────────────────────────────
+	// The root auth scope is the empty path, so the broadcast announces at its
+	// own name with no prefix.
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announcement timeout")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	let mut track_sub = bc.subscribe_track(&Track::new("video")).expect("subscribe_track");
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timeout")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		.await
+		.expect("read_frame timeout")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&*frame, b"hello");
+
+	drop(track);
+	drop(broadcast);
+	drop(pub_session);
+	drop(sub_session);
+	web_handle.abort();
+}
+
 /// Two publish-only clients (each `with_publish`, no `with_consume`) coexist on one relay;
 /// a single subscriber sees broadcasts forwarded from both. Verifies that multiple
 /// publish-only connections don't interfere with each other or get torn down.

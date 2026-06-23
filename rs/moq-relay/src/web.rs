@@ -131,10 +131,18 @@ impl Web {
 			.route("/announced/{*prefix}", get(serve_announced))
 			.route("/fetch/{*path}", get(serve_fetch));
 
-		// If WebSocket is enabled, add the WebSocket route.
+		// If WebSocket is enabled, add the WebSocket route. Both `/` and
+		// `/{*path}` map to the same handler so a client that dials a bare
+		// `host:port` with no path (e.g. `moqsink url="https://host:4443"`)
+		// still gets a WebSocket upgrade at the empty (root) auth scope. Without
+		// the root route, axum's wildcard never matches `/`, the request falls
+		// through to the landing page, and the client's WS fallback is silently
+		// dead.
 		#[cfg(feature = "websocket")]
 		let app = match self.config.ws {
-			true => app.route("/{*path}", axum::routing::any(crate::websocket::serve_ws)),
+			true => app
+				.route("/", axum::routing::any(crate::websocket::serve_ws))
+				.route("/{*path}", axum::routing::any(crate::websocket::serve_ws)),
 			false => app,
 		};
 
