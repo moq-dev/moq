@@ -54,8 +54,10 @@ pub struct TrackInfo {
 	/// Per-frame timestamp scale, or `None` if frames carry no timestamps. On the
 	/// wire `None` is `0` and `Some(n)` is `n`.
 	pub timescale: Option<Timescale>,
-	/// Codec applied to every frame payload on this track.
-	pub compression: Compression,
+	/// The algorithm the sender compressed this track's frame payloads with, or
+	/// `None` for plaintext. On the wire `None` is `0` and an algorithm is its code.
+	/// It MUST be one the receiver advertised as a decoder in SETUP.
+	pub compression: Option<Compression>,
 }
 
 impl Message for TrackInfo {
@@ -67,7 +69,12 @@ impl Message for TrackInfo {
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
 		let timescale = Timescale::new(u64::decode(r, version)?).ok();
-		let compression = Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
+		// `0` is plaintext; any other code is an algorithm and MUST decode (an unknown
+		// code means the sender used something we never advertised: a protocol error).
+		let compression = match u64::decode(r, version)? {
+			0 => None,
+			code => Some(Compression::from_code(code).map_err(|_| DecodeError::InvalidValue)?),
+		};
 
 		Ok(Self {
 			priority,
@@ -85,7 +92,10 @@ impl Message for TrackInfo {
 		self.priority.encode(w, version)?;
 		(self.ordered as u8).encode(w, version)?;
 		self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
-		self.compression.to_code().encode(w, version)?;
+		self.compression
+			.map(Compression::to_code)
+			.unwrap_or(0)
+			.encode(w, version)?;
 		Ok(())
 	}
 }
@@ -99,7 +109,7 @@ mod test {
 			priority: 7,
 			ordered: false,
 			timescale: Some(Timescale::MICRO),
-			compression: Compression::Deflate,
+			compression: Some(Compression::Deflate),
 		}
 	}
 
@@ -116,7 +126,29 @@ mod test {
 		assert_eq!(got.priority, 7);
 		assert!(!got.ordered);
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
-		assert_eq!(got.compression, Compression::Deflate);
+		assert_eq!(got.compression, Some(Compression::Deflate));
+	}
+
+	#[test]
+	fn track_info_compression_variants_roundtrip() {
+		for compression in [None, Some(Compression::Deflate), Some(Compression::Zstd)] {
+			let mut info = info_sample();
+			info.compression = compression;
+			assert_eq!(info_roundtrip(Version::Lite05Wip, &info).compression, compression);
+		}
+	}
+
+	#[test]
+	fn track_info_rejects_unknown_compression_code() {
+		// Hand-frame a TRACK_INFO with an unknown algorithm code (9) in the
+		// compression slot: priority, ordered, timescale(0), compression(9).
+		let mut buf = Vec::new();
+		7u8.encode(&mut buf, Version::Lite05Wip).unwrap();
+		0u8.encode(&mut buf, Version::Lite05Wip).unwrap();
+		0u64.encode(&mut buf, Version::Lite05Wip).unwrap();
+		9u64.encode(&mut buf, Version::Lite05Wip).unwrap();
+		let mut slice = buf.as_slice();
+		assert!(TrackInfo::decode_msg(&mut slice, Version::Lite05Wip).is_err());
 	}
 
 	#[test]

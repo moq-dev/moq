@@ -136,10 +136,12 @@ impl Server {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
-				// We report send bitrate; a server never advertises a request Path.
+				// We report send bitrate (and the compression algorithms we can decode);
+				// a server never advertises a request Path.
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
 					path: None,
+					compression: lite::Setup::default_compression(),
 				};
 
 				// Server side never blocks on the initial set; discard the synced receiver.

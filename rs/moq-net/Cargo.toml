@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["macros", "io-util", "sync", "time"] }
 tracing = "0.1"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on

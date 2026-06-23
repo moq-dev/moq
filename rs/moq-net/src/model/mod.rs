@@ -11,6 +11,8 @@ mod track;
 pub use bandwidth::*;
 pub use broadcast::*;
 pub use compression::*;
+// Crate-internal negotiation helper (not part of the public surface).
+pub(crate) use compression::select;
 pub use frame::*;
 pub use group::*;
 pub use origin::*;

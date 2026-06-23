@@ -4235,6 +4235,7 @@ dependencies = [
  "tracing",
  "web-async",
  "web-transport-trait",
+ "zstd",
 ]
 
 [[package]]

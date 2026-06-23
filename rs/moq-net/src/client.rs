@@ -156,11 +156,13 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
-				// Advertise our capabilities (we report send bitrate; we don't pad) plus
-				// the request path on URI-less transports.
+				// Advertise our capabilities (we report send bitrate; we don't pad; the
+				// payload compression algorithms we can decode) plus the request path on
+				// URI-less transports.
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
 					path: self.setup_path.clone(),
+					compression: lite::Setup::default_compression(),
 				};
 
 				let (recv_bw, connecting) = lite::start(

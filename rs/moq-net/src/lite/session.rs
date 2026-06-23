@@ -68,8 +68,14 @@ pub fn start<S: web_transport_trait::Session>(
 	// must be stable across every session that shares the local origin.
 	// Required for cross-session cluster loop detection.
 	// Shared slot for the peer's SETUP (lite-05+). The subscriber writes it when it
-	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
+	// reads the peer's Setup stream; capability-gated streams (PROBE) and the
+	// publisher's compression choice wait on it.
 	let peer_setup = PeerSetup::default();
+
+	// The algorithms we advertise: the same list serves as our decoders (the
+	// subscriber validates against it) and our encoders (the publisher picks from
+	// it). Captured before `our_setup` is moved into the send task.
+	let our_compression = our_setup.compression.clone();
 
 	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
 	// a failure here just means the peer falls back to "no capabilities" for us.
@@ -87,6 +93,8 @@ pub fn start<S: web_transport_trait::Session>(
 		origin: publish,
 		stats: stats.clone(),
 		version,
+		compression: our_compression.clone(),
+		peer_setup: peer_setup.clone(),
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
@@ -95,6 +103,7 @@ pub fn start<S: web_transport_trait::Session>(
 		stats,
 		version,
 		peer_setup,
+		compression: our_compression,
 	});
 
 	web_async::spawn(async move {

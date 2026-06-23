@@ -85,6 +85,9 @@ web-transport-proto = "0.6"
 web-transport-quiche = "0.4"
 web-transport-quinn = "0.11"
 web-transport-trait = "0.3.4"
+# `experimental` exposes the magicless frame format + checksum/content-size params
+# we use to keep the per-group zstd stream free of redundant container bytes.
+zstd = { version = "0.13", features = ["experimental"] }
 
 [profile.dev]
 panic = "abort"

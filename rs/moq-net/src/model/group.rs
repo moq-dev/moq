@@ -12,9 +12,9 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale};
+use crate::{Error, Result, Timescale, Timestamp};
 
-use super::{Frame, FrameConsumer, FrameProducer};
+use super::{Compression, Decoder, Encoder, Frame, FrameConsumer, FrameProducer};
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
 ///
@@ -43,7 +43,7 @@ impl Group {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> GroupProducer {
-		GroupProducer::new(self, None)
+		GroupProducer::new(self, None, None)
 	}
 }
 
@@ -94,6 +94,11 @@ struct GroupState {
 
 	// The error that caused the group to be aborted, if any.
 	abort: Option<Error>,
+
+	// The per-group encoder for cooked writes (`Some` iff the track is compressed).
+	// Lives in the shared state so the single stream stays in frame order across
+	// producer handles; consumers never touch it (they hold their own decoder).
+	encoder: Option<Encoder>,
 }
 
 impl GroupState {
@@ -155,6 +160,11 @@ pub struct GroupProducer {
 	// requires `Frame::timestamp = Some(ts)` with `ts.scale() == scale`.
 	// Populated by [`crate::TrackProducer::create_group`] / `append_group`.
 	timescale: Option<Timescale>,
+
+	// The algorithm this group's stored frame payloads are encoded in, or `None`
+	// for plaintext. Set by the track based on where the frames come from (a relay's
+	// wire-ingested cache is compressed; a locally-produced group is plaintext).
+	compression: Option<Compression>,
 }
 
 impl std::ops::Deref for GroupProducer {
@@ -169,14 +179,21 @@ impl GroupProducer {
 	/// Create a group producer bound to its parent track's timescale.
 	///
 	/// Crate-private: groups are only constructed via [`crate::TrackProducer`],
-	/// which supplies the negotiated timescale. `None` means the parent track is
-	/// untimed and added frames must have `timestamp = None`; `Some(scale)`
-	/// requires every frame's `timestamp` to be `Some(ts)` with `ts.scale() == scale`.
-	pub(crate) fn new(info: Group, timescale: Option<Timescale>) -> Self {
+	/// which supplies the negotiated timescale and the algorithm the stored frames
+	/// are encoded in. `timescale` `None` means the parent track is untimed and added
+	/// frames must have `timestamp = None`; `Some(scale)` requires every frame's
+	/// `timestamp` to be `Some(ts)` with `ts.scale() == scale`. `compression` `Some`
+	/// means the stored payloads are compressed slices (decoded lazily on a cooked
+	/// read); `None` means plaintext.
+	pub(crate) fn new(info: Group, timescale: Option<Timescale>, compression: Option<Compression>) -> Self {
 		Self {
 			info,
-			state: kio::Producer::default(),
+			state: kio::Producer::new(GroupState {
+				encoder: compression.map(Compression::encoder),
+				..Default::default()
+			}),
 			timescale,
+			compression,
 		}
 	}
 
@@ -185,19 +202,58 @@ impl GroupProducer {
 		self.timescale
 	}
 
-	/// A helper method to write a frame from a single byte buffer.
-	///
-	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
-	/// But an upfront size is required.
-	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) -> Result<()> {
-		let data = frame.into();
-		let mut frame = self.create_frame(data.len())?;
-		frame.write(data)?;
+	/// The parent track's in-RAM compression algorithm, or `None` for plaintext.
+	pub fn compression(&self) -> Option<Compression> {
+		self.compression
+	}
+
+	/// Write a whole frame's payload, compressing it into the group's stream when the
+	/// track is compressed (otherwise stored as-is). This is the **cooked** path: pass
+	/// the original plaintext and the model handles the codec, so a local reader gets
+	/// it back unchanged. Untimed; use [`Self::write_frame_at`] on a timed track.
+	pub fn write_frame<B: Into<Bytes>>(&mut self, payload: B) -> Result<()> {
+		self.write_frame_inner(None, payload.into())
+	}
+
+	/// Like [`Self::write_frame`] but with a presentation timestamp, for a timed track.
+	pub fn write_frame_at<B: Into<Bytes>>(&mut self, timestamp: Timestamp, payload: B) -> Result<()> {
+		self.write_frame_inner(Some(timestamp), payload.into())
+	}
+
+	fn write_frame_inner(&mut self, timestamp: Option<Timestamp>, payload: Bytes) -> Result<()> {
+		// Compress whole-frame (the cooked path knows the full payload, so the
+		// compressed size is known before the raw frame is allocated). The encoder
+		// is reused across the group, so frames must be written in order.
+		let stored = match self.compression {
+			None => payload,
+			Some(_) => self.encode(&payload)?,
+		};
+		let mut frame = self.create_frame(Frame {
+			size: stored.len() as u64,
+			timestamp,
+		})?;
+		frame.write(stored)?;
 		frame.finish()?;
 		Ok(())
 	}
 
-	/// Create a frame with an upfront size.
+	/// Compress one whole frame through the per-group encoder, under the state lock
+	/// so the single stream stays in frame order.
+	fn encode(&mut self, payload: &[u8]) -> Result<Bytes> {
+		let mut state = modify(&self.state)?;
+		if state.fin {
+			return Err(Error::Closed);
+		}
+		let encoder = state.encoder.as_mut().expect("compressed group has an encoder");
+		Ok(encoder.frame(payload))
+	}
+
+	/// Create a frame with an upfront size, storing whatever bytes are written to it
+	/// **verbatim** (no compression). This is the **raw** path: the bytes must already
+	/// be in the group's [`Self::compression`] encoding. A relay uses it to stream a
+	/// compressed slice straight off the wire (size known) without inflating it;
+	/// uncompressed tracks use it for plain multi-chunk frames. App producers of a
+	/// compressed track should use [`Self::write_frame`] instead.
 	///
 	/// Returns [`Error::FrameTooLarge`] if the declared size exceeds the per-frame
 	/// limit, refused before the buffer is allocated.
@@ -267,7 +323,10 @@ impl GroupProducer {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			timescale: self.timescale,
+			compression: self.compression,
 			index: 0,
+			decoder: None,
+			decode_index: 0,
 		}
 	}
 
@@ -292,6 +351,7 @@ impl Clone for GroupProducer {
 			info: self.info.clone(),
 			state: self.state.clone(),
 			timescale: self.timescale,
+			compression: self.compression,
 		}
 	}
 }
@@ -314,7 +374,11 @@ impl Drop for GroupProducer {
 }
 
 /// Consume a group, frame-by-frame.
-#[derive(Clone)]
+///
+/// The cooked reads ([`Self::read_frame`], [`Self::next_frame`], …) return the
+/// original plaintext, decompressing on a compressed track. The `_raw` reads
+/// ([`Self::read_frame_raw`], [`Self::next_frame_raw`]) return the stored bytes
+/// untouched, for a relay forwarding a compressed group it doesn't need to inspect.
 pub struct GroupConsumer {
 	// Shared state with the producer.
 	state: kio::Consumer<GroupState>,
@@ -326,9 +390,38 @@ pub struct GroupConsumer {
 	// wire publisher decide whether to emit per-frame timestamps for a fetched group.
 	timescale: Option<Timescale>,
 
+	// Parent track's in-RAM compression algorithm, or `None` for plaintext.
+	compression: Option<Compression>,
+
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
+
+	// Per-consumer decoder for cooked reads, created lazily on the first compressed
+	// read. A group must be decoded in frame order from where the decoder starts, so
+	// a clone resets it (see `Clone`) and a non-contiguous cooked read errors.
+	decoder: Option<Decoder>,
+
+	// The frame index `decoder` expects next; tracks decode contiguity.
+	decode_index: usize,
+}
+
+impl Clone for GroupConsumer {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+			info: self.info.clone(),
+			timescale: self.timescale,
+			compression: self.compression,
+			index: self.index,
+			// A decoder can't be cloned (it carries per-group stream state), so the
+			// clone starts fresh. Cooked reads on a compressed group must therefore
+			// begin at a group boundary (frame 0); a mid-group clone that cooks will
+			// surface a decode error rather than silently corrupt.
+			decoder: None,
+			decode_index: self.index,
+		}
+	}
 }
 
 impl std::ops::Deref for GroupConsumer {
@@ -343,6 +436,35 @@ impl GroupConsumer {
 	/// The parent track's negotiated timescale, or `None` for untimed tracks.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.timescale
+	}
+
+	/// The parent track's in-RAM compression algorithm, or `None` for plaintext.
+	///
+	/// A relay compares this with what a downstream negotiated: equal means the
+	/// stored slices can be forwarded with the `_raw` reads (passthrough), otherwise
+	/// it cooked-reads the plaintext and re-encodes.
+	pub fn compression(&self) -> Option<Compression> {
+		self.compression
+	}
+
+	/// Decode one frame's stored `raw` bytes into plaintext, advancing the per-group
+	/// decoder. `None` compression is an identity passthrough. The per-group stream
+	/// must be decoded in frame order from where the decoder started, so a
+	/// non-contiguous cooked read surfaces [`Error::Decompress`].
+	fn decode(&mut self, raw: Bytes) -> Result<Bytes> {
+		let Some(algo) = self.compression else {
+			return Ok(raw);
+		};
+		if self.decoder.is_none() {
+			self.decoder = Some(algo.decoder());
+			self.decode_index = self.index;
+		}
+		if self.index != self.decode_index {
+			return Err(Error::Decompress);
+		}
+		let out = self.decoder.as_mut().unwrap().frame(&raw)?;
+		self.decode_index += 1;
+		Ok(out)
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -371,15 +493,41 @@ impl GroupConsumer {
 		self.poll(waiter, |state| state.poll_get_frame(index))
 	}
 
-	/// Return a consumer for the next frame for chunked reading.
+	/// Return a consumer for the next frame, decompressed on a compressed track.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
 		kio::wait(|waiter| self.poll_next_frame(waiter)).await
 	}
 
-	/// Poll for the next frame, without blocking.
+	/// Poll for the next frame, decompressed on a compressed track, without blocking.
 	///
-	/// Returns None if the group is finished and the index is out of range.
+	/// Returns None if the group is finished and the index is out of range. On a
+	/// compressed track the frame is buffered and decoded, then handed back as a
+	/// fresh in-memory frame carrying the original timestamp.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<FrameConsumer>>> {
+		if self.compression.is_none() {
+			return self.poll_next_frame_raw(waiter);
+		}
+
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+		let timestamp = frame.timestamp;
+		let raw = ready!(frame.poll_read_all(waiter))?;
+		let plain = self.decode(raw)?;
+		self.index += 1;
+
+		let mut producer = Frame {
+			size: plain.len() as u64,
+			timestamp,
+		}
+		.produce()?;
+		producer.write(plain)?;
+		producer.finish()?;
+		Poll::Ready(Ok(Some(producer.consume())))
+	}
+
+	/// Poll for the next frame's stored bytes without decoding (relay passthrough).
+	pub fn poll_next_frame_raw(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<FrameConsumer>>> {
 		let Some(frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
@@ -388,8 +536,31 @@ impl GroupConsumer {
 		Poll::Ready(Ok(Some(frame)))
 	}
 
-	/// Read the next frame's data all at once, without blocking.
+	/// Return the next frame's stored bytes without decoding (relay passthrough).
+	pub async fn next_frame_raw(&mut self) -> Result<Option<FrameConsumer>> {
+		kio::wait(|waiter| self.poll_next_frame_raw(waiter)).await
+	}
+
+	/// Read the next frame's data all at once, decompressed on a compressed track.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		let data = ready!(frame.poll_read_all(waiter))?;
+		let data = self.decode(data)?;
+		self.index += 1;
+
+		Poll::Ready(Ok(Some(data)))
+	}
+
+	/// Read the next frame's data all at once, decompressed on a compressed track.
+	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
+		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// Read the next frame's stored bytes without decoding (relay passthrough).
+	pub fn poll_read_frame_raw(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
@@ -400,24 +571,23 @@ impl GroupConsumer {
 		Poll::Ready(Ok(Some(data)))
 	}
 
-	/// Read the next frame's data all at once.
-	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+	/// Read the next frame's stored bytes without decoding (relay passthrough).
+	pub async fn read_frame_raw(&mut self) -> Result<Option<Bytes>> {
+		kio::wait(|waiter| self.poll_read_frame_raw(waiter)).await
 	}
 
-	/// Read all of the chunks of the next frame, without blocking.
+	/// Read all of the chunks of the next frame, decompressed on a compressed track.
+	///
+	/// A compressed frame is buffered to decode, so it comes back as a single chunk.
 	pub fn poll_read_frame_chunks(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
-		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
-			return Poll::Ready(Ok(None));
-		};
-
-		let data = ready!(frame.poll_read_all_chunks(waiter))?;
-		self.index += 1;
-
-		Poll::Ready(Ok(Some(data)))
+		match ready!(self.poll_read_frame(waiter)?) {
+			Some(data) if data.is_empty() => Poll::Ready(Ok(Some(Vec::new()))),
+			Some(data) => Poll::Ready(Ok(Some(vec![data]))),
+			None => Poll::Ready(Ok(None)),
+		}
 	}
 
-	/// Read all of the chunks of the next frame.
+	/// Read all of the chunks of the next frame, decompressed on a compressed track.
 	pub async fn read_frame_chunks(&mut self) -> Result<Option<Vec<Bytes>>> {
 		kio::wait(|waiter| self.poll_read_frame_chunks(waiter)).await
 	}
@@ -467,6 +637,35 @@ mod test {
 		assert_eq!(f1.size, 6);
 		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
+	}
+
+	/// A compressed group: the cooked write compresses each payload into the per-group
+	/// stream, the cooked read gives it back verbatim, and the raw read exposes the
+	/// stored (compressed, smaller) slice for relay passthrough.
+	#[test]
+	fn compressed_group_cooked_and_raw() {
+		let payload = Bytes::from(b"the quick brown fox jumps over the lazy dog. ".repeat(4));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, None, Some(Compression::Deflate));
+		producer.write_frame(payload.clone()).unwrap();
+		producer.write_frame(payload.clone()).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(producer.consume().compression(), Some(Compression::Deflate));
+
+		// Cooked reads decompress back to the original plaintext.
+		let mut cooked = producer.consume();
+		assert_eq!(cooked.read_frame().now_or_never().unwrap().unwrap().unwrap(), payload);
+		assert_eq!(cooked.read_frame().now_or_never().unwrap().unwrap().unwrap(), payload);
+
+		// Raw reads expose the stored compressed slice (smaller, never inflated).
+		let mut raw = producer.consume();
+		let slice = raw.read_frame_raw().now_or_never().unwrap().unwrap().unwrap();
+		assert!(
+			slice.len() < payload.len(),
+			"compressed slice {} vs plaintext {}",
+			slice.len(),
+			payload.len()
+		);
 	}
 
 	#[test]
@@ -697,7 +896,7 @@ mod test {
 	fn append_frame_rejects_timestamp_on_untimed_group() {
 		use crate::Timestamp;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, None);
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, None, None);
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
@@ -710,7 +909,7 @@ mod test {
 	fn append_frame_rejects_missing_timestamp_on_timed_group() {
 		use crate::Timescale;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), None);
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
@@ -723,7 +922,7 @@ mod test {
 	fn append_frame_rejects_scale_mismatch() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), None);
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
@@ -736,7 +935,7 @@ mod test {
 	fn append_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), None);
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),

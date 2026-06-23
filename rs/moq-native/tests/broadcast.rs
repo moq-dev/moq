@@ -249,20 +249,16 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("failed to create track");
 
 	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch
-	// stream carries a negative zigzag delta too).
+	// stream carries a negative zigzag delta too). The cooked `write_frame_at`
+	// compresses each payload into the group's stream (the track is compress-hinted).
 	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track.append_group().expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_native::moq_net::Frame {
-			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-		};
-		let mut writer = group.create_frame(frame).expect("failed to create frame");
-		writer
-			.write(bytes::Bytes::from(payload))
+		let timestamp = Timestamp::new(us, Timescale::MICRO).unwrap();
+		group
+			.write_frame_at(timestamp, bytes::Bytes::from(payload))
 			.expect("failed to write frame");
-		writer.finish().expect("failed to finish frame");
 	}
 	group.finish().expect("failed to finish group");
 
@@ -351,6 +347,112 @@ async fn broadcast_moq_lite_05_fetch_webtransport() {
 	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
 	// The raw-QUIC ALPN path is covered by broadcast_race_quic_wins.
 	lite05_fetch_roundtrip("https").await;
+}
+
+/// Lite05 publisher→subscriber round-trip with payload compression: the publisher
+/// marks the track with an algorithm, the egress compresses each group's frames
+/// into one stream (sliced per frame), and the subscriber transparently
+/// decompresses back to the original plaintext. Parameterized over the algorithm.
+async fn lite05_compressed_subscribe(algo: moq_net::Compression) {
+	// Mostly-redundant JSON so the per-group stream exercises cross-frame context.
+	let frames: [&[u8]; 3] = [
+		br#"{"id":1,"name":"alpha","kind":"catalog","tags":["a","b","c"]}"#,
+		br#"{"id":2,"name":"alpha","kind":"catalog","tags":["a","b","c"]}"#,
+		br#"{"id":3,"name":"beta","kind":"catalog","tags":["a","b","c"]}"#,
+	];
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track("catalog", moq_net::TrackInfo::default().with_compression(Some(algo)))
+		.expect("failed to create track");
+
+	let mut group = track.append_group().expect("failed to append group");
+	for f in &frames {
+		group.write_frame(*f).expect("failed to write frame");
+	}
+	group.finish().expect("failed to finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
+
+	let mut track_sub = bc
+		.track("catalog")
+		.unwrap()
+		.subscribe(None)
+		.unwrap()
+		.await
+		.expect("subscribe failed");
+
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+
+	// The subscriber decompresses transparently: each frame reads back as the
+	// original plaintext, in order.
+	for expected in &frames {
+		let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+			.await
+			.expect("read_frame timed out")
+			.expect("read_frame failed")
+			.expect("group closed prematurely");
+		assert_eq!(&*frame, *expected, "{algo:?}: decompressed frame mismatch");
+	}
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_05_compressed_deflate() {
+	lite05_compressed_subscribe(moq_net::Compression::Deflate).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_05_compressed_zstd() {
+	lite05_compressed_subscribe(moq_net::Compression::Zstd).await;
 }
 
 /// A fetch must be served while a live subscription is active on the same track.

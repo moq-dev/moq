@@ -11,11 +11,38 @@ use crate::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	model::{FrameConsumer, GroupConsumer},
+	model::{Encoder, FrameConsumer, GroupConsumer},
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use super::Version;
+
+/// Choose the algorithm to compress a track with for one downstream, from the
+/// honest cache algorithm, the downstream's advertised `decoders`, and our
+/// `encoders`. `None` cache stays `None` (we never compress a plaintext cache); a
+/// `Some` cache is passed through when the downstream can decode it, otherwise
+/// transcoded to the best shared algorithm, or decompressed (`None`) when none.
+fn pick_compression(
+	cache: Option<Compression>,
+	decoders: &[Compression],
+	encoders: &[Compression],
+) -> Option<Compression> {
+	match cache {
+		None => None,
+		Some(c) if decoders.contains(&c) => Some(c),
+		Some(_) => crate::model::select(decoders, encoders),
+	}
+}
+
+/// Per-hop egress parameters threaded into the subscribe and fetch serving paths:
+/// the negotiated version plus the compression algorithms each side supports (the
+/// peer's decoders and our encoders), used to pick a track's wire encoding.
+#[derive(Clone)]
+struct Egress {
+	version: Version,
+	peer_compression: Vec<Compression>,
+	our_compression: Vec<Compression>,
+}
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
@@ -25,6 +52,11 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// to opt out.
 	pub stats: MoqStats,
 	pub version: Version,
+	/// The algorithms we can encode with (== what we advertised as decoders). The
+	/// egress algorithm for a track is chosen from this and the peer's decoders.
+	pub compression: Vec<Compression>,
+	/// The peer's SETUP, read to learn which algorithms it can decode.
+	pub peer_setup: super::PeerSetup,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -38,6 +70,8 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
+	compression: Vec<Compression>,
+	peer_setup: super::PeerSetup,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
@@ -55,6 +89,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			self_origin,
 			priority: Default::default(),
 			version: config.version,
+			compression: config.compression,
+			peer_setup: config.peer_setup,
 		}
 	}
 
@@ -444,6 +480,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	/// The peer's advertised decoder list. Awaits the peer's SETUP (so we never
+	/// compress before we've seen its capabilities); a pre-lite-05 peer sends no
+	/// SETUP, so it advertises nothing and gets verbatim frames.
+	async fn peer_compression(&self) -> Vec<Compression> {
+		if self.version.has_setup_stream() {
+			self.peer_setup.compression().await
+		} else {
+			Vec::new()
+		}
+	}
+
+	/// The algorithm to compress a track with for this peer, given the honest cache
+	/// algorithm.
+	async fn egress_compression(&self, cache: Option<Compression>) -> Option<Compression> {
+		pick_compression(cache, &self.peer_compression().await, &self.compression)
+	}
+
 	async fn run_track_info(&self, stream: &mut Stream<S, Version>, request: &lite::Track<'_>) -> Result<(), Error> {
 		// The peer requested this exact path, so it has already seen an announcement for it.
 		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
@@ -451,14 +504,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.request_broadcast(&request.broadcast)?.await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
-		// Same negotiation as a subscription, just answered once: codec only when
-		// both the producer asks for it and the draft can carry it; timescale only
-		// when the draft carries per-frame timestamps.
-		let compression = if info.compress {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
+		// Pick the algorithm we'll compress this track with for this peer, the same
+		// way the group streams will (so TRACK_INFO names what the frames actually
+		// use). Timescale is reported only when the draft carries per-frame timestamps.
+		let compression = self.egress_compression(info.compression).await;
 		let timescale = if self.version.has_timestamps() {
 			info.timescale
 		} else {
@@ -500,6 +549,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// a stale/invalid SUBSCRIBE isn't counted as a viewer.
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
+		// Resolve the peer's decoders once (it sent its SETUP at session start); a
+		// pre-lite-05 peer sends none, so it gets verbatim frames.
+		let egress = Egress {
+			version: self.version,
+			peer_compression: self.peer_compression().await,
+			our_compression: self.compression.clone(),
+		};
+
 		if let Err(err) = Self::run_subscribe(
 			self.session.clone(),
 			&mut stream,
@@ -507,7 +564,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			broadcast,
 			self.priority.clone(),
 			(track_stats, self.broadcasts.clone(), absolute.clone()),
-			self.version,
+			egress,
 		)
 		.await
 		{
@@ -538,9 +595,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
 		// below, after the subscription is validated, and held for its lifetime.
 		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
-		version: Version,
+		egress: Egress,
 	) -> Result<(), Error> {
 		let (track_stats, broadcasts, absolute) = stats;
+		let version = egress.version;
 		let subscription = crate::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
@@ -554,16 +612,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = broadcast?.await?;
 		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
 
-		// Compress only when the producer marked the track worth it and the
-		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get
-		// None and the frames stream verbatim. On Lite05+ this matches the codec the
-		// subscriber already learned from TRACK_INFO.
-		let supports_compression = version.has_timestamps();
-		let compression = if track.info().compress && supports_compression {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
+		// The algorithm we serve this subscription's groups with: passthrough when the
+		// downstream speaks the cache's algorithm, else transcode/decompress. Matches
+		// the algorithm TRACK_INFO already named for this peer (same inputs). Older
+		// drafts advertise no decoders, so this resolves to `None` (verbatim).
+		let compression = pick_compression(
+			track.info().compression,
+			&egress.peer_compression,
+			&egress.our_compression,
+		);
 
 		// Per-frame timestamps require both a publisher-advertised timescale and
 		// a wire format that carries it. Older drafts ignore `track.timescale`
@@ -650,8 +707,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
+		let egress = Egress {
+			version: self.version,
+			peer_compression: self.peer_compression().await,
+			our_compression: self.compression.clone(),
+		};
 
-		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, self.version).await {
+		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, egress).await {
 			match &err {
 				Error::Cancel | Error::Transport(_) => {
 					tracing::info!(broadcast = %absolute, %track, %group, "fetch cancelled")
@@ -671,12 +733,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		fetch: &lite::Fetch<'_>,
 		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
 		track_stats: crate::PublisherTrack,
-		version: Version,
+		egress: Egress,
 	) -> Result<(), Error> {
+		let version = egress.version;
 		let broadcast = broadcast?.await?;
 		let track = broadcast.track(&fetch.track)?;
 
-		let group = track
+		let mut group = track
 			.fetch_group(
 				fetch.group,
 				crate::Fetch {
@@ -693,14 +756,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			None
 		};
 
-		// Compression is an immutable per-track property (reported in TRACK_INFO), so
-		// fetched frames use the same codec as live ones. The group resolved above, so
-		// the track's info is set and this resolves immediately.
-		let compression = if track.info().await?.compress && version.has_timestamps() {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
+		// Same per-peer choice as a live subscription: the algorithm we serve with is
+		// chosen from the track's (intent) algorithm; passthrough only when it equals
+		// the fetched group's *actual* stored encoding (a relay's compressed cache),
+		// not the origin's plaintext.
+		let algo = pick_compression(
+			track.info().await?.compression,
+			&egress.peer_compression,
+			&egress.our_compression,
+		);
+		let passthrough = algo == group.compression();
 
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
 		// the codec/timescale from TRACK_INFO and the group sequence from its request.
@@ -709,19 +774,44 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
 		// delta-timestamp baseline resets to 0, so the first served frame's delta is
 		// its absolute timestamp (the subscriber decodes against the same baseline).
-		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
-		while let Some(mut frame) = group.get_frame(index).await? {
-			write_fetch_frame(
-				&mut stream.writer,
-				&mut frame,
-				compression,
-				timescale,
-				&mut prev_ts,
-				&track_stats,
-			)
-			.await?;
-			index += 1;
+		if passthrough {
+			// Forward stored slices untouched; random access honors frame_start directly.
+			let mut index = fetch.frame_start as usize;
+			while let Some(mut frame) = group.get_frame(index).await? {
+				write_fetch_frame(
+					&mut stream.writer,
+					&mut frame,
+					timescale,
+					&mut prev_ts,
+					&track_stats,
+					true,
+					&mut None,
+				)
+				.await?;
+				index += 1;
+			}
+		} else {
+			// Decode sequentially from frame 0 (a compressed group is one stream), then
+			// re-encode (or send plaintext) from frame_start. Earlier frames are still
+			// decoded to advance the decoder, just not sent.
+			let mut encoder = algo.map(Compression::encoder);
+			let mut index = 0u64;
+			while let Some(mut frame) = group.next_frame().await? {
+				if index >= fetch.frame_start {
+					write_fetch_frame(
+						&mut stream.writer,
+						&mut frame,
+						timescale,
+						&mut prev_ts,
+						&track_stats,
+						false,
+						&mut encoder,
+					)
+					.await?;
+				}
+				index += 1;
+			}
 		}
 
 		stream.writer.finish()?;
@@ -774,39 +864,41 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 }
 
 /// Write one frame to a fetch stream in the lite wire format: the optional timing
-/// prefix (see [`encode_frame_timing`]), the size, then the payload. Mirrors the
-/// per-frame encoding in [`Subscription::serve_frame`] without the priority
-/// machinery, since a one-shot fetch carries a single static priority set on the
-/// stream up front.
+/// prefix (see [`encode_frame_timing`]), the size, then the payload. Mirrors
+/// [`Subscription::serve_frame`] without the priority machinery, since a one-shot
+/// fetch carries a single static priority set on the stream up front. On
+/// passthrough `frame` holds the stored bytes (streamed verbatim); otherwise it
+/// holds the decoded plaintext, which we re-encode with `encoder` (or send as-is).
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut FrameConsumer,
-	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 	track_stats: &crate::PublisherTrack,
+	passthrough: bool,
+	encoder: &mut Option<Encoder>,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
-	match compression {
-		Compression::None => {
-			writer.encode(&frame.size).await?;
-			track_stats.frame();
-			while let Some(mut chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
-				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
-			}
-		}
-		compression => {
-			let payload = frame.read_all().await?;
-			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
+	if passthrough {
+		writer.encode(&frame.size).await?;
+		track_stats.frame();
+		while let Some(mut chunk) = frame.read_chunk().await? {
 			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
 			writer.write_all(&mut chunk).await?;
 			track_stats.bytes(n);
 		}
+	} else {
+		let payload = frame.read_all().await?;
+		let mut chunk = match encoder {
+			Some(encoder) => encoder.frame(&payload),
+			None => payload,
+		};
+		let n = chunk.len() as u64;
+		writer.encode(&n).await?;
+		track_stats.frame();
+		writer.write_all(&mut chunk).await?;
+		track_stats.bytes(n);
 	}
 
 	Ok(())
@@ -825,9 +917,10 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Codec for this track (reported in TRACK_INFO on lite-05+); every frame on
-	/// this subscription is compressed with it before hitting the wire.
-	compression: Compression,
+	/// The algorithm this subscription's groups are served with (named in this
+	/// peer's TRACK_INFO). Equal to the cache's algorithm means passthrough; any
+	/// other value means transcode/decompress.
+	compression: Option<Compression>,
 	/// Negotiated timestamp scale for this track. `Some(_)` iff
 	/// [`Version::has_timestamps`] is true for `version` (gated in
 	/// `run_subscribe`); used to validate per-frame timestamps before encoding.
@@ -943,13 +1036,33 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.encode(&msg).await?;
 		self.track_stats.group();
 
+		// When the downstream's algorithm matches the cache, forward the stored
+		// slices untouched (passthrough). Otherwise decode each frame and re-encode
+		// with this subscription's algorithm (a fresh per-group encoder), or send
+		// plaintext when it's `None`.
+		let passthrough = self.compression == group.compression();
+		let mut encoder = match passthrough {
+			true => None,
+			false => self.compression.map(Compression::encoder),
+		};
+
 		// Lite05+ delta-encodes per-frame timestamps within the group. The first
 		// frame's delta is absolute (against an implicit prev value of 0), every
 		// subsequent delta is signed against the previous frame.
 		let mut prev_ts: u64 = 0;
-		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
-				.await?;
+		while let Some(frame) = self
+			.next_frame(&mut stream, &mut priority, &mut group, passthrough)
+			.await?
+		{
+			self.serve_frame(
+				&mut stream,
+				&mut priority,
+				frame,
+				&mut prev_ts,
+				passthrough,
+				&mut encoder,
+			)
+			.await?;
 		}
 
 		stream.finish()?;
@@ -960,35 +1073,37 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
-	/// Send one frame. Uncompressed frames stream chunk-by-chunk so we never
-	/// buffer the whole payload; a compressed frame must buffer to feed the
-	/// codec, and its wire size becomes the compressed length (the subscriber
-	/// inflates it from the track's codec, known from TRACK_INFO on lite-05+).
+	/// Send one frame. On passthrough the stored bytes stream out chunk-by-chunk
+	/// (no buffering, so a large media frame never lands in memory whole). Otherwise
+	/// `frame` is already the decoded plaintext (a cooked read); we re-encode it with
+	/// `encoder` (or send it verbatim when `encoder` is `None`), which buffers.
 	async fn serve_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
 		mut frame: FrameConsumer,
 		prev_ts: &mut u64,
+		passthrough: bool,
+		encoder: &mut Option<Encoder>,
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
-		match self.compression {
-			Compression::None => {
-				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
+		if passthrough {
+			stream.encode(&frame.size).await?;
+			self.track_stats.frame();
 
-				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
-					self.write_chunk(stream, priority, chunk).await?;
-				}
-			}
-			compression => {
-				let payload = self.read_all(stream, priority, &mut frame).await?;
-				let chunk = bytes::Bytes::from(compression.compress(&payload));
-				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
+			while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 				self.write_chunk(stream, priority, chunk).await?;
 			}
+		} else {
+			let payload = self.read_all(stream, priority, &mut frame).await?;
+			let chunk = match encoder {
+				Some(encoder) => encoder.frame(&payload),
+				None => payload,
+			};
+			stream.encode(&(chunk.len() as u64)).await?;
+			self.track_stats.frame();
+			self.write_chunk(stream, priority, chunk).await?;
 		}
 
 		Ok(())
@@ -996,17 +1111,19 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 	/// Await the next frame in the group, applying any priority changes that
 	/// arrive meanwhile. Errors with [`Error::Cancel`] if the peer closes first.
+	/// `passthrough` selects the raw stored frame vs. the decoded (cooked) one.
 	async fn next_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
 		group: &mut GroupConsumer,
+		passthrough: bool,
 	) -> Result<Option<FrameConsumer>, Error> {
 		loop {
 			tokio::select! {
 				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
-				frame = group.next_frame() => return frame,
+				frame = async { if passthrough { group.next_frame_raw().await } else { group.next_frame().await } } => return frame,
 				new_pri = priority.next() => stream.set_priority(new_pri),
 				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
 			}

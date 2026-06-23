@@ -12,8 +12,8 @@ use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
 	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle,
-	SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
+	GroupProducer, GroupRequest, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats,
+	SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 };
@@ -42,6 +42,9 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
+	/// The algorithms we advertised as decoders. A received TRACK_INFO that names an
+	/// algorithm not in this list is a protocol violation.
+	pub compression: Vec<Compression>,
 }
 
 #[derive(Clone)]
@@ -71,15 +74,18 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	/// The algorithms we advertised as decoders, used to validate a received
+	/// TRACK_INFO compression algorithm.
+	compression: Vec<Compression>,
 }
 
 #[derive(Clone)]
 struct TrackEntry {
 	producer: TrackProducer,
 	stats: Arc<SubscriberTrack>,
-	/// Codec + timestamp scale from this track's TRACK_INFO, known before the
-	/// SUBSCRIBE is even opened, so group streams decode frames without blocking.
-	compression: Compression,
+	/// Timestamp scale from this track's TRACK_INFO, known before the SUBSCRIBE is
+	/// even opened, so group streams parse frames without blocking. (The compression
+	/// algorithm rides on the producer's [`crate::TrackInfo`].)
 	timescale: Option<Timescale>,
 }
 
@@ -103,6 +109,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			compression: config.compression,
 		}
 	}
 
@@ -565,31 +572,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, compression, timescale) = {
+		let (mut group, track, track_stats, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
+			// The producer carries the track's compression algorithm (from TRACK_INFO),
+			// so the group it creates is tagged with it; we store the wire slices as-is.
 			let group = entry.producer.create_group(group_info)?;
-			(
-				group,
-				entry.producer.clone(),
-				entry.stats.clone(),
-				entry.compression,
-				entry.timescale,
-			)
+			(group, entry.producer.clone(), entry.stats.clone(), entry.timescale)
 		};
 
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
-		// The codec/timescale came from TRACK_INFO (read before this subscription was
-		// even registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
+		// The timescale came from TRACK_INFO (read before this subscription was even
+		// registered), so frames parse immediately. No SUBSCRIBE_OK to wait on.
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), compression, timescale) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone(), timescale) => res,
 		};
 
 		match res {
@@ -613,7 +616,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
-		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// Previous frame's raw timestamp value (in `timescale` units), for the
@@ -643,42 +645,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				break;
 			};
 
-			match compression {
-				Compression::None => {
-					// `create_frame` is the allocation chokepoint and rejects an
-					// oversized `size` before allocating, so no pre-check is needed.
-					let mut frame = group.create_frame(Frame { size, timestamp })?;
-					track_stats.frame();
+			// Store the on-wire slice verbatim, compressed or not: `create_frame` is
+			// the allocation chokepoint (rejecting an oversized `size`), and the group's
+			// compression tag (set because we marked the cache compressed) drives lazy
+			// decode for app readers; a relay just forwards it. `size` is the on-wire
+			// (compressed) length.
+			let mut frame = group.create_frame(Frame { size, timestamp })?;
+			track_stats.frame();
 
-					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
-						let _ = frame.abort(err.clone());
-						return Err(err);
-					}
-
-					frame.finish()?;
-				}
-				compression => {
-					// Here `size` is the compressed wire length, not the frame size, so
-					// it never reaches the `create_frame` chokepoint. Bound it directly
-					// so a peer can't make us buffer an unbounded blob before decoding.
-					if size > MAX_FRAME_SIZE {
-						return Err(Error::FrameTooLarge);
-					}
-					// Pull the compressed bytes off the wire, then inflate. The frame
-					// the consumer sees carries the original (decompressed) size.
-					let packed = stream.read_exact(size as usize).await?;
-					track_stats.frame();
-					track_stats.bytes(size);
-
-					let payload = compression.decompress(&packed)?;
-					let mut frame = group.create_frame(Frame {
-						size: payload.len() as u64,
-						timestamp,
-					})?;
-					frame.write(bytes::Bytes::from(payload))?;
-					frame.finish()?;
-				}
+			if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+				let _ = frame.abort(err.clone());
+				return Err(err);
 			}
+
+			frame.finish()?;
 		}
 
 		Ok(())
@@ -829,11 +809,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// The codec/timescale then flow into every SUBSCRIBE and FETCH without a per-
 		// response header. Older drafts have no TRACK stream: the request stays pending
 		// until the first SUBSCRIBE_OK supplies the properties (see `establish`).
-		let (mut track, compression, timescale) = if self.subscriber.version.has_timestamps() {
+		let (mut track, timescale) = if self.subscriber.version.has_timestamps() {
 			match self.track_info().await {
-				Ok((info, compression)) => {
+				Ok(info) => {
 					let timescale = info.timescale;
-					(Some(Track::Active(request.accept(info))), compression, timescale)
+					// The track's compression algorithm rides on the accepted TrackInfo,
+					// so the groups we create for the upstream's (already-compressed) wire
+					// frames are tagged with it; local readers decode lazily, a relay
+					// forwards the slices untouched via the raw reads.
+					(Some(Track::Active(request.accept(info))), timescale)
 				}
 				Err(err) => {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "track info failed");
@@ -842,7 +826,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 			}
 		} else {
-			(Some(Track::Pending(request)), Compression::None, None)
+			(Some(Track::Pending(request)), None)
 		};
 
 		let mut sub = Sub::None;
@@ -919,20 +903,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req, compression, timescale).maybe_boxed());
+					fetches.push(self.clone().serve_fetch(req, timescale).maybe_boxed());
 				}
 				Event::Subscription(pref) => {
 					linger = None;
 					if let Err(err) = self
-						.handle_subscription(
-							&mut track,
-							&mut sub,
-							pref,
-							supports_linger,
-							completed,
-							compression,
-							timescale,
-						)
+						.handle_subscription(&mut track, &mut sub, pref, supports_linger, completed, timescale)
 						.await
 					{
 						return self.finish_track(track.take().unwrap(), sub, err);
@@ -981,9 +957,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	}
 
 	/// Open a TRACK stream, read the single TRACK_INFO, and map it to the model's
-	/// [`crate::TrackInfo`] plus the wire [`Compression`] (needed verbatim to decode
-	/// frames). Lite05+ only. Bails if the broadcast dies meanwhile.
-	async fn track_info(&self) -> Result<(crate::TrackInfo, Compression), Error> {
+	/// the track's immutable [`crate::TrackInfo`], including the algorithm the
+	/// publisher compressed its frames with (cached as-is; decoded lazily on read).
+	/// Lite05+ only. Bails if the broadcast dies meanwhile.
+	async fn track_info(&self) -> Result<crate::TrackInfo, Error> {
 		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
 		stream.writer.encode(&lite::ControlType::Track).await?;
 		stream
@@ -1001,17 +978,24 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 
+		// A compressed track MUST name an algorithm we advertised as a decoder;
+		// otherwise the publisher used something we can't decode.
+		if let Some(algo) = info.compression
+			&& !self.subscriber.compression.contains(&algo)
+		{
+			return Err(Error::ProtocolViolation);
+		}
+
 		// The wire no longer carries a cache hint (the publisher's retention is now
 		// best-effort, not a guarantee), so the local retention window falls back to
 		// the model default.
-		let model = crate::TrackInfo {
-			compress: info.compression != Compression::None,
+		Ok(crate::TrackInfo {
+			compression: info.compression,
 			timescale: info.timescale,
 			cache: crate::DEFAULT_CACHE,
 			priority: info.priority,
 			ordered: info.ordered,
-		};
-		Ok((model, info.compression))
+		})
 	}
 
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
@@ -1024,7 +1008,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		pref: Option<Subscription>,
 		supports_linger: bool,
 		completed: bool,
-		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		match pref {
@@ -1040,7 +1023,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						None => false,
 					};
 					if establish {
-						self.establish(track, sub, subscription, compression, timescale).await?;
+						self.establish(track, sub, subscription, timescale).await?;
 					}
 				}
 				Sub::Active(active) if active.paused => {
@@ -1102,7 +1085,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		track: &mut Option<Track>,
 		sub: &mut Sub<S>,
 		subscription: Subscription,
-		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
@@ -1165,7 +1147,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			TrackEntry {
 				producer,
 				stats: self.track_stats.clone(),
-				compression,
 				timescale,
 			},
 		);
@@ -1201,7 +1182,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	/// come from this track's TRACK_INFO (already known), and the group sequence is
 	/// implicit from the request. Runs to completion as an independent future in the
 	/// serve loop's `FuturesUnordered`.
-	async fn serve_fetch(self, request: GroupRequest, compression: Compression, timescale: Option<Timescale>) {
+	async fn serve_fetch(self, request: GroupRequest, timescale: Option<Timescale>) {
 		let TrackServe {
 			mut subscriber,
 			path,
@@ -1255,13 +1236,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 
 		let res = subscriber
-			.run_group(
-				&mut stream.reader,
-				producer.clone(),
-				track_stats,
-				compression,
-				timescale,
-			)
+			.run_group(&mut stream.reader, producer.clone(), track_stats, timescale)
 			.await;
 		match res {
 			Ok(()) => {

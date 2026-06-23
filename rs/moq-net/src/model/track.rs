@@ -15,7 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
-use super::{Fetch, Group, GroupConsumer, GroupProducer};
+use super::{Compression, Fetch, Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -36,11 +36,13 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackInfo {
-	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
-	/// The publisher honors it by negotiating a codec in TRACK_INFO; codec-less
-	/// peers (older drafts) ignore it and send frames verbatim.
-	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
-	pub compress: bool,
+	/// The algorithm this track's cached frame payloads are stored in, or `None`
+	/// for plaintext. This is the *in-RAM* encoding at this hop, not an end-to-end
+	/// property: a publisher sets it to request compression (the model compresses on
+	/// write to honor it), and a subscriber sets it from the algorithm named in
+	/// TRACK_INFO. It is local and per-hop, so it is kept out of the catalog.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	pub compression: Option<Compression>,
 	/// Units per second for per-frame timestamps on this track.
 	///
 	/// `None` means the publisher hasn't advertised a timescale; subscribers
@@ -103,7 +105,7 @@ mod cache_millis {
 impl Default for TrackInfo {
 	fn default() -> Self {
 		Self {
-			compress: false,
+			compression: None,
 			timescale: None,
 			cache: DEFAULT_CACHE,
 			priority: 0,
@@ -113,9 +115,17 @@ impl Default for TrackInfo {
 }
 
 impl TrackInfo {
-	/// Mark this track's frames as worth compressing, returning `self` for chaining.
-	pub fn with_compress(mut self, compress: bool) -> Self {
-		self.compress = compress;
+	/// Request compression for this track's frame payloads, returning `self` for
+	/// chaining. `true` picks the default algorithm ([`Compression::default`], the
+	/// universal baseline); use [`Self::with_compression`] to name one explicitly.
+	pub fn with_compress(self, compress: bool) -> Self {
+		self.with_compression(compress.then(Compression::default))
+	}
+
+	/// Set the exact compression algorithm (or `None` for plaintext), returning
+	/// `self` for chaining.
+	pub fn with_compression(mut self, compression: Option<Compression>) -> Self {
+		self.compression = compression;
 		self
 	}
 
@@ -454,7 +464,7 @@ impl TrackState {
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = GroupProducer::new(Group { sequence }, info.timescale);
+		let group = GroupProducer::new(Group { sequence }, info.timescale, info.compression);
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -500,9 +510,10 @@ impl TrackProducer {
 		}
 		let info = state.info.as_ref().unwrap();
 		let timescale = info.timescale;
+		let compression = info.compression;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(group, timescale);
+		let group = GroupProducer::new(group, timescale, compression);
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -530,9 +541,10 @@ impl TrackProducer {
 
 		let info = state.info.as_ref().unwrap();
 		let timescale = info.timescale;
+		let compression = info.compression;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(Group { sequence }, timescale);
+		let group = GroupProducer::new(Group { sequence }, timescale, compression);
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
