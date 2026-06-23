@@ -12,7 +12,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale};
+use crate::{Error, Result, Timescale, Timestamp};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -43,7 +43,7 @@ impl Group {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> GroupProducer {
-		GroupProducer::new(self, None)
+		GroupProducer::new(self, Timescale::default())
 	}
 }
 
@@ -149,12 +149,10 @@ pub struct GroupProducer {
 	// The group header containing the sequence number.
 	info: Group,
 
-	// Parent track's negotiated timescale, used by [`Self::create_frame`] to
-	// validate per-frame timestamps before they enter the stream. `None` means
-	// frames on this group must have `Frame::timestamp = None`; `Some(scale)`
-	// requires `Frame::timestamp = Some(ts)` with `ts.scale() == scale`.
-	// Populated by [`crate::TrackProducer::create_group`] / `append_group`.
-	timescale: Option<Timescale>,
+	// Parent track's timescale, used by [`Self::create_frame`] to normalize every
+	// frame's timestamp into this scale before it enters the stream. Populated by
+	// [`crate::TrackProducer::create_group`] / `append_group`.
+	timescale: Timescale,
 }
 
 impl std::ops::Deref for GroupProducer {
@@ -168,11 +166,10 @@ impl std::ops::Deref for GroupProducer {
 impl GroupProducer {
 	/// Create a group producer bound to its parent track's timescale.
 	///
-	/// Crate-private: groups are only constructed via [`crate::TrackProducer`],
-	/// which supplies the negotiated timescale. `None` means the parent track is
-	/// untimed and added frames must have `timestamp = None`; `Some(scale)`
-	/// requires every frame's `timestamp` to be `Some(ts)` with `ts.scale() == scale`.
-	pub(crate) fn new(info: Group, timescale: Option<Timescale>) -> Self {
+	/// Crate-private: groups are only constructed via [`crate::TrackProducer`], which
+	/// supplies the track's timescale. Every frame added to this group is normalized to
+	/// that scale by [`Self::create_frame`].
+	pub(crate) fn new(info: Group, timescale: Timescale) -> Self {
 		Self {
 			info,
 			state: kio::Producer::default(),
@@ -180,8 +177,8 @@ impl GroupProducer {
 		}
 	}
 
-	/// The parent track's negotiated timescale, or `None` for untimed tracks.
-	pub fn timescale(&self) -> Option<Timescale> {
+	/// The parent track's timescale.
+	pub fn timescale(&self) -> Timescale {
 		self.timescale
 	}
 
@@ -197,28 +194,39 @@ impl GroupProducer {
 		Ok(())
 	}
 
-	/// Create a frame with an upfront size.
+	/// Create a frame with an upfront size, normalizing its timestamp into the parent
+	/// track's timescale.
 	///
-	/// Returns [`Error::FrameTooLarge`] if the declared size exceeds the per-frame
-	/// limit, refused before the buffer is allocated.
+	/// A frame whose `timestamp` is at a different scale is converted; a frame with no
+	/// timestamp is stamped with wall-clock now ([`Timestamp::now`]), which is how
+	/// protocols whose wire can't carry a timestamp end up with millisecond wall-clock
+	/// timing. Returns [`Error::FrameTooLarge`] if the declared size exceeds the
+	/// per-frame limit (refused before the buffer is allocated) or
+	/// [`Error::TimestampMismatch`] if the timestamp can't be converted (overflow).
 	pub fn create_frame(&mut self, info: impl Into<Frame>) -> Result<FrameProducer> {
-		let frame = info.into().produce()?;
+		let mut info = info.into();
+		let normalized = match info.timestamp {
+			Some(ts) => ts.convert(self.timescale),
+			None => Timestamp::now().convert(self.timescale),
+		};
+		info.timestamp = Some(normalized.map_err(|_| Error::TimestampMismatch)?);
+
+		let frame = info.produce()?;
 		self.append_frame(frame.clone())?;
 		Ok(frame)
 	}
 
 	/// Append a frame producer to the group.
 	///
-	/// Returns [`Error::TimestampMismatch`] if the frame's timing doesn't match the
-	/// parent track's timescale: a `timestamp` missing on a timed track, present on
-	/// an untimed track, or at a different scale.
+	/// Lower-level than [`Self::create_frame`]: the frame's `timestamp` must already be
+	/// `Some` at the parent track's timescale (use [`Self::create_frame`] to normalize).
+	/// Returns [`Error::TimestampMismatch`] otherwise.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
 		// Catch the contract violation here, at the model layer, so peers that
 		// downstream-encode (e.g. the lite publisher's `serve_frame`) can rely
 		// on the invariant instead of re-validating per byte.
-		match (self.timescale, frame.timestamp) {
-			(Some(track_scale), Some(ts)) if ts.scale() == track_scale => {}
-			(None, None) => {}
+		match frame.timestamp {
+			Some(ts) if ts.scale() == self.timescale => {}
 			_ => return Err(Error::TimestampMismatch),
 		}
 
@@ -322,9 +330,9 @@ pub struct GroupConsumer {
 	// Immutable stream state.
 	info: Group,
 
-	// Parent track's negotiated timescale, copied from the producer. Lets the
-	// wire publisher decide whether to emit per-frame timestamps for a fetched group.
-	timescale: Option<Timescale>,
+	// Parent track's timescale, copied from the producer. Lets the wire publisher
+	// emit per-frame timestamps at the right scale for a fetched group.
+	timescale: Timescale,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -340,8 +348,8 @@ impl std::ops::Deref for GroupConsumer {
 }
 
 impl GroupConsumer {
-	/// The parent track's negotiated timescale, or `None` for untimed tracks.
-	pub fn timescale(&self) -> Option<Timescale> {
+	/// The parent track's timescale.
+	pub fn timescale(&self) -> Timescale {
 		self.timescale
 	}
 
@@ -690,58 +698,51 @@ mod test {
 		assert!(end.is_none());
 	}
 
-	/// An untimed group (timescale = None) accepts only frames with no
-	/// timestamp. A timestamped frame triggers [`Error::TimestampMismatch`]
-	/// at the model layer, before any wire encoding happens.
+	/// A frame whose timestamp is at a different scale is converted to the group's
+	/// scale by `create_frame`, not rejected.
 	#[test]
-	fn append_frame_rejects_timestamp_on_untimed_group() {
-		use crate::Timestamp;
+	fn create_frame_converts_mismatched_scale() {
+		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, None);
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
 		let frame = Frame {
 			size: 3,
-			timestamp: Some(Timestamp::from_micros(42).unwrap()),
+			timestamp: Some(Timestamp::from_millis(1).unwrap()), // 1ms -> 1000µs
 		};
-		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
+		let writer = producer.create_frame(frame).unwrap();
+		let ts = writer.timestamp.unwrap();
+		assert_eq!(ts.scale(), Timescale::MICRO);
+		assert_eq!(ts.value(), 1000);
 	}
 
-	/// A timed group rejects frames that are missing a timestamp.
-	#[test]
-	fn append_frame_rejects_missing_timestamp_on_timed_group() {
+	/// A frame with no timestamp is stamped with wall-clock now, at the group's scale.
+	#[tokio::test]
+	async fn create_frame_stamps_wall_clock_when_missing() {
 		use crate::Timescale;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
 		};
-		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
+		let writer = producer.create_frame(frame).unwrap();
+		let ts = writer.timestamp.expect("stamped");
+		assert_eq!(ts.scale(), Timescale::MICRO);
+		assert!(!ts.is_zero(), "wall clock should be non-zero");
 	}
 
-	/// A timed group rejects a frame whose timestamp scale doesn't match.
+	/// A matching scale passes through unchanged; bytes can be written normally.
 	#[test]
-	fn append_frame_rejects_scale_mismatch() {
+	fn create_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
-		let frame = Frame {
-			size: 3,
-			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
-		};
-		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
-	}
-
-	/// A matching scale passes through; bytes can be written normally.
-	#[test]
-	fn append_frame_accepts_matching_scale() {
-		use crate::{Timescale, Timestamp};
-
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),
 		};
 		let mut writer = producer.create_frame(frame).unwrap();
+		assert_eq!(writer.timestamp.unwrap().value(), 7);
 		writer.write(Bytes::from_static(b"x")).unwrap();
 		writer.finish().unwrap();
 	}

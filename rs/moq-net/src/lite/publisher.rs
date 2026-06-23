@@ -459,18 +459,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		} else {
 			Compression::None
 		};
-		let timescale = if self.version.has_timestamps() {
-			info.timescale
-		} else {
-			None
-		};
-
+		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
+		// track is timed, so the model's timescale goes on the wire verbatim.
 		stream
 			.writer
 			.encode(&lite::TrackInfo {
 				priority: info.priority,
 				ordered: info.ordered,
-				timescale,
+				timescale: info.timescale,
 				compression,
 			})
 			.await?;
@@ -565,12 +561,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Compression::None
 		};
 
-		// Per-frame timestamps require both a publisher-advertised timescale and
-		// a wire format that carries it. Older drafts ignore `track.timescale`
-		// (the field never lands on the wire) and stream untimed frames; Lite05+
-		// honors `Some(_)` and skips the timestamp byte for `None`.
+		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
+		// every frame with a zigzag-delta timestamp at the track's timescale; older
+		// drafts have no wire field, so `None` here means "don't emit the prefix" (the
+		// frames still carry timestamps in the model, just not on this wire).
 		let timescale = if version.has_timestamps() {
-			track.info().timescale
+			Some(track.info().timescale)
 		} else {
 			None
 		};
@@ -685,10 +681,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			)
 			.await?;
 
-		// FETCH is gated to lite-05+, which always carries timestamps when the track
-		// advertised a timescale; `None` means an untimed track (frames omit them).
+		// FETCH is gated to lite-05+, which always prefixes frames with a timestamp at
+		// the track's timescale.
 		let timescale = if version.has_timestamps() {
-			group.timescale()
+			Some(group.timescale())
 		} else {
 			None
 		};

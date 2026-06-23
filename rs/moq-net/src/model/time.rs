@@ -92,6 +92,15 @@ impl From<Timescale> for NonZero<u64> {
 	}
 }
 
+impl Default for Timescale {
+	/// Milliseconds ([`Self::MILLI`]). Every track has a timescale; this is the one
+	/// used when a producer doesn't pick one and the fallback for protocols whose wire
+	/// can't carry a timescale (pre-Lite05 moq-lite, IETF moq-transport).
+	fn default() -> Self {
+		Self::MILLI
+	}
+}
+
 impl std::fmt::Debug for Timescale {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match *self {
@@ -293,8 +302,13 @@ impl Timestamp {
 		}
 	}
 
-	/// Current time, expressed in microseconds ([`Timescale::MICRO`]). Uses
-	/// [`tokio::time::Instant::now`] so it honors `tokio::time::pause` in tests.
+	/// Wall-clock now, expressed in the default timescale ([`Timescale::MILLI`]).
+	///
+	/// This is the one-way bridge from wall-clock time to a track timestamp: there is
+	/// deliberately no inverse (a [`Timestamp`] is relative and jittered, never a clock).
+	/// Used to stamp frames that arrive without one, e.g. on protocols whose wire can't
+	/// carry a timestamp. Uses [`tokio::time::Instant::now`] so it honors
+	/// `tokio::time::pause` in tests.
 	pub fn now() -> Self {
 		tokio::time::Instant::now().into()
 	}
@@ -405,8 +419,11 @@ static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|
 });
 
 impl From<std::time::Instant> for Timestamp {
-	/// Convert an [`std::time::Instant`] into a microsecond-scale timestamp anchored to a
-	/// jittered wall-clock reference (see `TIME_ANCHOR`).
+	/// Convert an [`std::time::Instant`] into a millisecond-scale timestamp (the default
+	/// timescale) anchored to a jittered wall-clock reference (see `TIME_ANCHOR`).
+	///
+	/// One-way only: there is no inverse, since the anchor is jittered to keep a
+	/// [`Timestamp`] from being read back as a clock.
 	fn from(instant: std::time::Instant) -> Self {
 		let (anchor_instant, anchor_system) = *TIME_ANCHOR;
 
@@ -419,7 +436,7 @@ impl From<std::time::Instant> for Timestamp {
 			.duration_since(UNIX_EPOCH)
 			.expect("dude your clock is earlier than 1970");
 
-		Self::from_micros(duration.as_micros() as u64).expect("dude your clock is later than 2116")
+		Self::from_millis(duration.as_millis() as u64).expect("dude your clock is later than 2116")
 	}
 }
 

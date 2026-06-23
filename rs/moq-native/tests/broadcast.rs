@@ -124,8 +124,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 
-	// Track with an advertised microsecond timescale. Without it, Lite05 publish
-	// fails with ProtocolViolation.
+	// Track with an explicit microsecond timescale (the default is milliseconds).
 	let mut track = broadcast
 		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
 		.expect("failed to create track");
@@ -470,12 +469,14 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 	lite05_fetch_during_subscribe("https").await;
 }
 
-/// On Lite05 a publisher that doesn't advertise a timescale still works:
-/// SUBSCRIBE_OK carries `timescale = 0` and neither side encodes a
-/// per-frame timestamp byte. Subscribers receive `frame.timestamp = None`.
+/// On Lite05 timestamps are mandatory: a publisher that doesn't set a timescale gets
+/// the default (milliseconds), and frames written without an explicit timestamp are
+/// stamped with wall-clock time. The subscriber receives `Some(ts)` at that scale.
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_moq_lite_05_without_timescale() {
+async fn broadcast_moq_lite_05_default_timescale() {
+	use moq_native::moq_net::Timescale;
+
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
@@ -540,10 +541,8 @@ async fn broadcast_moq_lite_05_without_timescale() {
 		.expect("next_frame failed")
 		.expect("group closed");
 
-	assert_eq!(
-		frame_sub.timestamp, None,
-		"no timescale negotiated, no per-frame timestamp"
-	);
+	let ts = frame_sub.timestamp.expect("Lite05 frames always carry a timestamp");
+	assert_eq!(ts.scale(), Timescale::MILLI, "default timescale is milliseconds");
 
 	drop(session);
 	server_handle

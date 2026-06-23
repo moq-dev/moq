@@ -43,13 +43,12 @@ pub struct TrackInfo {
 	pub compress: bool,
 	/// Units per second for per-frame timestamps on this track.
 	///
-	/// `None` means the publisher hasn't advertised a timescale; subscribers
-	/// receive frames with `timestamp: None`. On Lite05+ a `Some(_)` value is
-	/// reported in TRACK_INFO and the publisher zigzag-delta encodes
-	/// per-frame timestamps at that scale on the wire; rejecting a frame at
-	/// the wrong scale prevents silent corruption.
-	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
-	pub timescale: Option<Timescale>,
+	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
+	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
+	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
+	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to wall-clock milliseconds.
+	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "is_default_timescale"))]
+	pub timescale: Timescale,
 	/// How long the publisher keeps old groups available before evicting them
 	/// (the newest group is always retained). A subscriber's
 	/// [`Subscription::stale`] window is clamped to this, since a group can't be
@@ -85,6 +84,11 @@ fn is_default_cache(cache: &Duration) -> bool {
 	*cache == DEFAULT_CACHE
 }
 
+#[cfg(feature = "serde")]
+fn is_default_timescale(timescale: &Timescale) -> bool {
+	*timescale == Timescale::default()
+}
+
 /// Serialize [`TrackInfo::cache`] as a bare integer of milliseconds, matching the
 /// catalog's other durations (and the wire), rather than serde's `{secs, nanos}`.
 #[cfg(feature = "serde")]
@@ -104,7 +108,7 @@ impl Default for TrackInfo {
 	fn default() -> Self {
 		Self {
 			compress: false,
-			timescale: None,
+			timescale: Timescale::default(),
 			cache: DEFAULT_CACHE,
 			priority: 0,
 			ordered: true,
@@ -121,9 +125,10 @@ impl TrackInfo {
 
 	/// Set the per-frame timestamp scale, returning `self` for chaining.
 	///
-	/// Required for Lite05+ peers to encode per-frame timestamps on the wire.
+	/// Defaults to [`Timescale::MILLI`]. On Lite05+ this scale is reported in TRACK_INFO
+	/// and used to encode per-frame timestamps on the wire.
 	pub fn with_timescale(mut self, timescale: Timescale) -> Self {
-		self.timescale = Some(timescale);
+		self.timescale = timescale;
 		self
 	}
 

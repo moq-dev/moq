@@ -51,17 +51,11 @@ impl Frame {
 		let size = (header.len() + self.payload.len()) as u64;
 
 		// Stamp the moq-net frame timestamp too so Lite05+ can delta-encode it on the
-		// wire independently of the container-level prefix, but only when the track
-		// advertises a timescale. Untimed tracks (e.g. an on-demand TrackRequest
-		// accepted with default info) carry the timestamp in the container prefix
-		// alone, matching the timeless net frames LOC/CMAF already produce.
-		let net_timestamp = group
-			.timescale()
-			.map(|scale| self.timestamp.convert(scale))
-			.transpose()?;
+		// wire independently of the container-level prefix. `create_frame` converts it
+		// into the track's timescale; older drafts simply don't put it on the wire.
 		let net_frame = moq_net::Frame {
 			size,
-			timestamp: net_timestamp,
+			timestamp: Some(self.timestamp),
 		};
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;

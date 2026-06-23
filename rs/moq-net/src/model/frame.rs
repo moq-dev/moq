@@ -32,11 +32,10 @@ pub struct Frame {
 	pub size: u64,
 	/// Presentation timestamp in the parent track's timescale.
 	///
-	/// `None` means no timestamp is attached to this frame, which is the case for
-	/// pre-Lite05 moq-lite streams and IETF moq-transport streams that haven't
-	/// negotiated a timescale. On Lite05+, producers must set `Some(ts)` whose
-	/// scale matches the track's [`crate::TrackInfo::timescale`]; the publisher
-	/// surfaces a `ProtocolViolation` otherwise.
+	/// `None` on input asks [`crate::GroupProducer::create_frame`] to stamp the frame
+	/// with wall-clock now; a `Some` at any scale is converted to the track's timescale.
+	/// After `create_frame` (and on every frame a consumer receives) this is always
+	/// `Some` at the track's [`crate::TrackInfo::timescale`].
 	pub timestamp: Option<Timestamp>,
 }
 

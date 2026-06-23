@@ -832,7 +832,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let (mut track, compression, timescale) = if self.subscriber.version.has_timestamps() {
 			match self.track_info().await {
 				Ok((info, compression)) => {
-					let timescale = info.timescale;
+					// Lite05 carries per-frame timestamps on the wire at this scale; `Some`
+					// tells `run_group` to decode them (vs. wall-clock-stamping locally).
+					let timescale = Some(info.timescale);
 					(Some(Track::Active(request.accept(info))), compression, timescale)
 				}
 				Err(err) => {
@@ -1241,7 +1243,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
 		// live subscription); otherwise the group inherits the accepted timescale.
 		let group_info = TrackInfo {
-			timescale,
+			// FETCH is lite-05+, so `timescale` is `Some`; fall back to the default scale
+			// defensively rather than panicking.
+			timescale: timescale.unwrap_or_default(),
 			..Default::default()
 		};
 		let mut producer = match request.accept(group_info) {
