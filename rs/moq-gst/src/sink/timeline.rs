@@ -5,6 +5,7 @@
 pub struct SegmentInfo {
 	/// Only TIME segments map to a media timeline (not BYTES/DEFAULT).
 	pub time_format: bool,
+	/// Playback rate; only a unit rate (1.0) maps to a continuous media timeline.
 	pub rate: f64,
 	/// Running-time anchor of the segment; continuity is judged on this, not on `start`.
 	pub base_nanos: u64,

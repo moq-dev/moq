@@ -1,8 +1,9 @@
 //! The MoQ session: connect, transport lifecycle, and the observable status the element exposes.
 //!
 //! The producers are created here (so the broadcast/catalog exist before connect, buffering early
-//! frames) but handed back to the element, which writes into them synchronously from the aggregate
-//! thread. This task only owns connect, the transport's lifetime, and stats; it touches no media.
+//! frames) but handed back to the element, which writes into them synchronously from each pad's
+//! streaming thread. This task only owns connect, the transport's lifetime, and stats; it touches no
+//! media.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -90,7 +91,7 @@ pub struct ResolvedSettings {
 pub(crate) struct Session {
 	join: tokio::task::JoinHandle<()>,
 	status: Arc<Status>,
-	/// Set by the task on a fatal transport error so the aggregate thread stops feeding a dead session.
+	/// Set by the task on a fatal transport error so the pad streaming threads stop feeding a dead session.
 	errored: Arc<AtomicBool>,
 }
 
@@ -127,7 +128,7 @@ impl Session {
 		&self.status
 	}
 
-	/// Whether the transport has hit a fatal error (the aggregate thread stops feeding it on this).
+	/// Whether the transport has hit a fatal error (the pad streaming threads stop feeding it on this).
 	pub fn errored(&self) -> bool {
 		self.errored.load(Ordering::Relaxed)
 	}

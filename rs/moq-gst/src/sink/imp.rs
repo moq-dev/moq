@@ -19,11 +19,6 @@ use hang::moq_net;
 use super::pad::{Pad, caps_supported};
 use super::session::{CAT, RUNTIME, ResolvedSettings, Session};
 
-/// Reject a frame past the MoQ frame limit (moq-net's wire MAX_FRAME_SIZE, 32 MiB): it could not be
-/// sent anyway, and copying it would let hostile input drive an unbounded allocation. moq-net keeps the
-/// constant `pub(crate)`; a follow-up to make its frame constructor fallible would let this check go.
-const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
-
 #[derive(Debug, Clone, Default)]
 struct Settings {
 	url: Option<String>,
@@ -60,29 +55,42 @@ struct State {
 }
 
 impl State {
-	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent. A pad
-	/// finalize error is logged and surfaced as the returned `Err`; a catalog error takes precedence.
+	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent. The names of
+	/// the producers finalized are accumulated into the `Ok` order until the first error, which is logged
+	/// and then surfaced as the returned `Err`.
 	fn finalize_all(&mut self) -> Result<Vec<String>> {
-		let mut order = Vec::new();
-		let mut failure = None;
+		let mut result: Result<Vec<String>> = Ok(Vec::new());
 		for (name, pad) in self.pads.iter_mut() {
 			match pad.finalize() {
-				Ok(true) => order.push(name.clone()),
+				Ok(true) => {
+					if let Ok(order) = result.as_mut() {
+						order.push(name.clone());
+					}
+				}
 				Ok(false) => {}
 				Err(err) => {
 					gst::warning!(CAT, "finalize {name}: {err:?}");
-					failure.get_or_insert(err);
+					if result.is_ok() {
+						result = Err(err);
+					}
 				}
 			}
 		}
 		if let Some(mut catalog) = self.catalog.take() {
-			catalog.finish().context("finalize catalog")?;
-			order.push("catalog".to_string());
+			match catalog.finish().context("finalize catalog") {
+				Ok(()) => {
+					if let Ok(order) = result.as_mut() {
+						order.push("catalog".to_string());
+					}
+				}
+				Err(err) => {
+					if result.is_ok() {
+						result = Err(err);
+					}
+				}
+			}
 		}
-		match failure {
-			Some(err) => Err(err),
-			None => Ok(order),
-		}
+		result
 	}
 }
 
@@ -262,17 +270,21 @@ impl ElementImpl for MoqSink {
 	}
 
 	fn release_pad(&self, pad: &gst::Pad) {
-		let _rt = RUNTIME.enter();
-		if let Some(state) = self.state.lock().unwrap().as_mut() {
-			let name = pad.name();
-			if let Some(mut media) = state.pads.remove(name.as_str())
-				&& let Err(err) = media.finalize()
-			{
-				gst::warning!(CAT, "finalize on release {name}: {err:?}");
+		{
+			let _rt = RUNTIME.enter();
+			if let Some(state) = self.state.lock().unwrap().as_mut() {
+				let name = pad.name();
+				if let Some(mut media) = state.pads.remove(name.as_str())
+					&& let Err(err) = media.finalize()
+				{
+					gst::warning!(CAT, "finalize on release {name}: {err:?}");
+				}
+				state.ended.remove(name.as_str());
 			}
-			state.ended.remove(name.as_str());
 		}
 		let _ = self.obj().remove_pad(pad);
+		// Removing a still-active pad can leave only already-ended pads, which now satisfies EOS.
+		self.maybe_post_eos();
 	}
 
 	fn change_state(&self, transition: gst::StateChange) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
@@ -326,16 +338,16 @@ impl MoqSink {
 	/// quietly so the session and other pads keep going; an unmappable buffer or a dead session is a hard
 	/// error on this pad's streaming thread.
 	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-		// Bound the per-frame allocation before copying.
-		if buffer.size() > MAX_FRAME_BYTES {
-			gst::warning!(
-				CAT,
-				"rejecting {}-byte buffer on pad {} (exceeds frame limit)",
-				buffer.size(),
-				pad.name()
-			);
-			return Err(gst::FlowError::Error);
-		}
+		// Map and copy outside the lock: neither needs shared state, so the per-pad lock is held only for
+		// the producer write. An oversized frame is left to moq-net, which rejects it (FrameTooLarge) before
+		// allocating the group slot and so invalidates just this pad.
+		let pts = buffer.pts();
+		let map = buffer.map_readable().map_err(|_| {
+			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
+			gst::FlowError::Error
+		})?;
+		let data = Bytes::copy_from_slice(map.as_slice());
+		drop(map);
 
 		// Producer writes can touch tokio time (group eviction), so hold the runtime context here.
 		let _rt = RUNTIME.enter();
@@ -347,17 +359,18 @@ impl MoqSink {
 			return Err(gst::FlowError::Error);
 		}
 
-		let media = state.pads.entry(pad.name().to_string()).or_insert_with(Pad::new);
+		// The pad almost always exists already (caps arrive before buffers), so look it up without
+		// allocating an owned name; only the rare first-buffer insert pays for the key.
+		let name = pad.name();
+		if !state.pads.contains_key(name.as_str()) {
+			state.pads.insert(name.to_string(), Pad::new());
+		}
+		let media = state.pads.get_mut(name.as_str()).expect("pad inserted above");
 		if media.is_failed() {
 			return Ok(gst::FlowSuccess::Ok); // drop quietly; the pad already reported its failure
 		}
 
-		let map = buffer.map_readable().map_err(|_| {
-			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
-			gst::FlowError::Error
-		})?;
-		let data = Bytes::copy_from_slice(map.as_slice());
-		let no_segment = media.push_buffer(data, buffer.pts());
+		let no_segment = media.push_buffer(data, pts);
 		drop(guard);
 
 		if no_segment {
@@ -426,15 +439,23 @@ impl MoqSink {
 		}
 	}
 
-	/// Mark a pad ended; once every active pad has ended, finalize and post the element EOS once.
+	/// Mark a pad ended, then post the element EOS if that was the last active pad.
 	fn handle_eos(&self, pad: &gst::Pad) {
+		if let Some(state) = self.state.lock().unwrap().as_mut() {
+			state.ended.insert(pad.name().to_string());
+		}
+		self.maybe_post_eos();
+	}
+
+	/// Finalize and post the element EOS once every active sink pad has ended. Locks internally and is
+	/// idempotent via `eos_posted`, so both the EOS handler and `release_pad` (releasing the last active
+	/// pad can satisfy aggregation for pads that already ended) can call it.
+	fn maybe_post_eos(&self) {
 		let _rt = RUNTIME.enter();
 		let mut guard = self.state.lock().unwrap();
 		let Some(state) = guard.as_mut() else {
 			return;
 		};
-		state.ended.insert(pad.name().to_string());
-
 		let sink_pads = self.obj().sink_pads();
 		let all_ended = !sink_pads.is_empty() && sink_pads.iter().all(|p| state.ended.contains(p.name().as_str()));
 		if !all_ended || state.eos_posted {

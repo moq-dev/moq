@@ -1,8 +1,8 @@
 //! Per-pad media state: caps -> producer, SEGMENT/running-time policy, frame import.
 //!
-//! Pure media logic with no GStreamer threading. The aggregator funnels every serialized event and
-//! buffer for a pad onto its single aggregate thread, so this type is touched from one place and needs
-//! no generation tagging or cross-thread failure map.
+//! Pure media logic with no GStreamer threading. GStreamer serializes a pad's events and buffers on
+//! that pad's own streaming thread, so this type is touched from one thread and needs no generation
+//! tagging or cross-thread failure map.
 
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -42,6 +42,7 @@ pub struct Pad {
 }
 
 impl Pad {
+	/// A fresh pad with no caps, no segment, and no producer yet.
 	pub fn new() -> Self {
 		Self {
 			framed: None,
@@ -289,7 +290,7 @@ fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> Option<i64> {
 mod tests {
 	use super::*;
 
-	/// Local producers, no network: a broadcast plus its catalog, exactly what the aggregate thread holds.
+	/// Local producers, no network: a broadcast plus its catalog, exactly what the element holds.
 	fn producers() -> (moq_net::BroadcastProducer, moq_mux::catalog::Producer) {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
