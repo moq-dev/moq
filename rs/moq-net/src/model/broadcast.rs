@@ -215,7 +215,10 @@ impl BroadcastProducer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`BroadcastDynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
-		let request = TrackRequest::new(name);
+		let mut request = TrackRequest::new(name);
+		// Inherit the broadcast's ingress meter so the served track is accounted
+		// like one from `create_track`.
+		request.set_meter(self.meter.clone());
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(request.weak())?;
 		drop(state);
@@ -245,8 +248,12 @@ impl BroadcastProducer {
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
+	///
+	/// The handler inherits this producer's ingress meter (set via
+	/// [`Self::set_meter`]) and stamps it onto every track it serves, so
+	/// dynamically-created tracks are metered like [`Self::create_track`] ones.
 	pub fn dynamic(&self) -> BroadcastDynamic {
-		BroadcastDynamic::new(self.info.clone(), self.state.clone())
+		BroadcastDynamic::new(self.info.clone(), self.state.clone(), self.meter.clone())
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -290,6 +297,10 @@ impl BroadcastProducer {
 pub struct BroadcastDynamic {
 	info: BroadcastInfo,
 	state: kio::Producer<BroadcastState>,
+	// Ingress meter inherited from the [`BroadcastProducer`], stamped onto every
+	// track this handler serves (see [`Self::poll_requested_track`]) so dynamic
+	// tracks are metered like `create_track` ones. A no-op until attached.
+	meter: Meter,
 }
 
 impl Clone for BroadcastDynamic {
@@ -305,18 +316,19 @@ impl Clone for BroadcastDynamic {
 		Self {
 			info: self.info.clone(),
 			state: self.state.clone(),
+			meter: self.meter.clone(),
 		}
 	}
 }
 
 impl BroadcastDynamic {
-	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>) -> Self {
+	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>, meter: Meter) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
 		}
 
-		Self { info, state }
+		Self { info, state, meter }
 	}
 
 	pub fn info(&self) -> &BroadcastInfo {
@@ -346,8 +358,12 @@ impl BroadcastDynamic {
 		}))?;
 
 		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
-		let pending = state.requests.remove(&name).expect("request_order out of sync");
+		let mut pending = state.requests.remove(&name).expect("request_order out of sync");
 		state.tracks.insert(name, pending.weak());
+		// Stamp the broadcast's ingress meter so the accepted track (and any fetch
+		// it serves) is metered. The request was created consumer-side, so the meter
+		// is attached here, where the producer picks it up.
+		pending.set_meter(self.meter.clone());
 		Poll::Ready(Ok(pending))
 	}
 
@@ -595,6 +611,56 @@ mod test {
 
 		// Each viewer counted the group, its two frames, and 9 bytes, so 2x overall.
 		assert_eq!((counts.groups(), counts.frames(), counts.bytes()), (2, 4, 18));
+	}
+
+	/// The ingress meter reaches the dynamic-track path: a consumer requests a track,
+	/// the dynamic handler accepts it, and the served track's groups/frames/bytes land
+	/// on the broadcast's ingress sink. This is the relay's lite/IETF ingress shape,
+	/// where tracks are created on demand rather than via `create_track`.
+	#[tokio::test]
+	async fn dynamic_track_inherits_broadcast_meter() {
+		use crate::Usage;
+
+		let counts = Arc::new(Usage::default());
+		let mut producer = BroadcastInfo::new().produce();
+		producer.set_meter(Meter::from_arc(counts.clone()));
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		// Consumer asks for a track that doesn't exist yet; the dynamic handler serves it.
+		let sub = consumer.track("video").unwrap().subscribe(None).unwrap();
+		let request = dynamic.requested_track().await.unwrap();
+		let mut track = request.accept(None);
+		let _sub = sub.await.unwrap();
+
+		track
+			.append_group()
+			.unwrap()
+			.write_frame(Bytes::from_static(b"hello"))
+			.unwrap(); // 5
+
+		// The dynamically-served track fed the broadcast's sink: 1 group, 1 frame, 5 bytes.
+		assert_eq!((counts.groups(), counts.frames(), counts.bytes()), (1, 1, 5));
+	}
+
+	/// A reserved track inherits the broadcast's ingress meter too, so the
+	/// reserve-then-accept shape is metered like `create_track`.
+	#[tokio::test]
+	async fn reserved_track_inherits_broadcast_meter() {
+		use crate::Usage;
+
+		let counts = Arc::new(Usage::default());
+		let mut producer = BroadcastInfo::new().produce();
+		producer.set_meter(Meter::from_arc(counts.clone()));
+
+		let mut track = producer.reserve_track("video").unwrap().accept(None);
+		track
+			.append_group()
+			.unwrap()
+			.write_frame(Bytes::from_static(b"hey"))
+			.unwrap(); // 3
+
+		assert_eq!((counts.groups(), counts.frames(), counts.bytes()), (1, 1, 3));
 	}
 
 	/// A consumer with no meter attached bills nothing: the default for any consumer

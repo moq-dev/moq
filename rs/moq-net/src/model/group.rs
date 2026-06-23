@@ -190,14 +190,6 @@ impl GroupProducer {
 		self.timescale
 	}
 
-	/// Attach (or replace) the ingress usage meter for this group. Normally a
-	/// group inherits its track's meter via [`crate::TrackProducer::create_group`];
-	/// this is for groups created out-of-band (e.g. a fetch responder filling a
-	/// group from [`crate::GroupRequest::accept`]) that still need accounting.
-	pub(crate) fn set_meter(&mut self, meter: Meter) {
-		self.meter = meter;
-	}
-
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.

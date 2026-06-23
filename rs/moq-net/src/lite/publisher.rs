@@ -551,15 +551,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
 		// immediately otherwise.
-		let broadcast = broadcast?.await?;
-		let mut track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
+		let mut broadcast = broadcast?.await?;
 
-		// Attach the publisher-side payload meter so the model counts
-		// groups/frames/bytes as they're served to this subscriber (egress is
-		// per-subscriber, so N viewers of one track count N times). `track_stats`
-		// (the PublisherTrack guard, subscriptions lifecycle) stays owned by this
-		// function for the subscription's duration.
-		track.set_meter(track_stats.meter());
+		// Attach the publisher-side payload meter to the broadcast consumer so the
+		// model counts groups/frames/bytes as they're served to this subscriber. This
+		// handle is local to this subscription, so it's per-viewer (N viewers of one
+		// track count N times) and the meter rides into the track subscription below.
+		// `track_stats` (the PublisherTrack guard, subscriptions lifecycle) stays
+		// owned by this function for the subscription's duration.
+		broadcast.set_meter(track_stats.meter());
+		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
 
 		// Compress only when the producer marked the track worth it and the
 		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get

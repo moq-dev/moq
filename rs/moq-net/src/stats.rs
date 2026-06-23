@@ -664,6 +664,19 @@ impl BroadcastStats {
 			tier: self.tier,
 		}
 	}
+
+	/// A [`Meter`] over this broadcast's shared ingress payload counters, *without*
+	/// opening a lifecycle guard. Use this to attach a meter to a model
+	/// [`crate::BroadcastProducer`] when a broadcast-lifetime guard (from
+	/// [`Self::subscriber`]) is already held elsewhere, so `announced` isn't
+	/// double-counted. The held guard keeps the counters alive for the snapshot
+	/// task. No-op for a disabled aggregator.
+	pub fn subscriber_meter(&self) -> Meter {
+		match &self.entry {
+			Some(entry) => entry.subscriber[self.tier.idx()].meter(),
+			None => Meter::default(),
+		}
+	}
 }
 
 /// Which side of a [`BroadcastEntry`] a [`SessionBroadcasts`] bumps.

@@ -133,7 +133,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
 		// an `OriginDynamic` handler if one is registered.
-		let broadcast = match async { self.origin.request_broadcast(&msg.track_namespace)?.await }.await {
+		let mut broadcast = match async { self.origin.request_broadcast(&msg.track_namespace)?.await }.await {
 			Ok(broadcast) => broadcast,
 			Err(_) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
@@ -142,12 +142,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
+		// Attach the publisher-side payload meter to the broadcast consumer so the
+		// model counts groups/frames/bytes served to this subscriber. This handle is
+		// local to this subscription (per-viewer: N viewers count N times) and the
+		// meter rides into the track subscription below. `track_stats` (the
+		// PublisherTrack guard, subscriptions lifecycle) stays owned by this function.
+		broadcast.set_meter(track_stats.meter());
+
 		let subscription = Subscription {
 			priority: msg.subscriber_priority,
 			..Default::default()
 		};
 
-		let mut track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription)?.await }.await {
+		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription)?.await }.await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
@@ -155,12 +162,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				return Ok(());
 			}
 		};
-
-		// Attach the publisher-side payload meter so the model counts
-		// groups/frames/bytes as they're served to this subscriber (egress is
-		// per-viewer). `track_stats` (the PublisherTrack guard, subscriptions
-		// lifecycle) stays owned by this function for the subscription's duration.
-		track.set_meter(track_stats.meter());
 
 		// Subscription is now active: count this session as a viewer of the
 		// broadcast. Dropping this guard (subscription end) releases it.

@@ -464,11 +464,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.expect("an empty hop chain has room for one entry");
 				// moq-transport carries no broadcast epoch on the wire; stamp the current
 				// time so the instance is still ordered against any future re-announce.
-				let broadcast = BroadcastInfo {
+				let mut broadcast = BroadcastInfo {
 					hops,
 					..Default::default()
 				}
 				.produce();
+
+				// Open the broadcast-lifetime subscriber guard and attach its meter to
+				// the broadcast, so every track served on demand (and its frames/bytes)
+				// is counted without a per-track attach. The guard (held in
+				// BroadcastState) keeps the counters alive and records `announced`.
+				let stats = self.stats.broadcast(&abs).subscriber();
+				broadcast.set_meter(stats.meter());
 
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a
@@ -483,7 +490,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					producer: broadcast.clone(),
 					count: 1,
 					publish,
-					_stats: self.stats.broadcast(&abs).subscriber(),
+					_stats: stats,
 				});
 
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
@@ -524,12 +531,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let mut track = TrackProducer::new(msg.track_name.to_string(), None);
+		// Announce the broadcast, then create the track through it so it inherits the
+		// broadcast's ingress meter (no per-track set_meter). On a duplicate below the
+		// unstored `track` drops, closing the orphan; `create_track` itself rejects a
+		// duplicate track name before any state is mutated.
+		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+		let track = broadcast.create_track(msg.track_name.to_string(), None)?;
 
 		let abs = self.origin.absolute(&msg.track_namespace).to_owned();
+		// Held in TrackState for the `subscriptions` lifecycle counter; payload is
+		// metered via the broadcast the track was created on.
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&msg.track_name));
-		// Attach the subscriber-side payload meter; the guard is held in TrackState.
-		track.set_meter(track_stats.meter());
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -553,10 +565,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
-		drop(state);
-
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}
@@ -610,9 +618,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		let abs = self.origin.absolute(&broadcast_path).to_owned();
+		// The track inherits the broadcast's ingress meter (stamped on the request by
+		// the dynamic handler), so payload is counted without a per-track attach.
+		// `track_stats` is still held in TrackState for the `subscriptions` counter.
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(track.name()));
-		// Attach the subscriber-side payload meter; the guard is held in TrackState.
-		track.set_meter(track_stats.meter());
 
 		// Pre-register the track so group data arriving before SubscribeOk can be routed.
 		// The publisher uses request_id.0 as track_alias, and recv_group falls back to

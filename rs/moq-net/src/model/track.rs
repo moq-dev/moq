@@ -438,7 +438,7 @@ impl TrackState {
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
 	/// [`TrackFetch`] resolves via [`Self::poll_fetch`].
-	fn insert_group_request(&mut self, sequence: u64, info: Option<TrackInfo>) -> Result<GroupProducer> {
+	fn insert_group_request(&mut self, sequence: u64, info: Option<TrackInfo>, meter: Meter) -> Result<GroupProducer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
 		}
@@ -454,11 +454,10 @@ impl TrackState {
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		// Fetch/group-request path: no meter propagated here (TrackState is shared
-		// and side-agnostic). The fetch responder attaches one via `set_meter` once
-		// it knows the path/tier, so fetched groups are metered through that rather
-		// than the producer's normal Track -> Group propagation.
-		let group = GroupProducer::new(Group { sequence }, info.timescale, Meter::default());
+		// Fetch/group-request path: the meter rides the GroupRequest (threaded from
+		// the serving TrackDynamic), so fetched groups are accounted the same way as
+		// the producer's normal Track -> Group propagation.
+		let group = GroupProducer::new(Group { sequence }, info.timescale, meter);
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -503,9 +502,12 @@ impl TrackProducer {
 
 	/// Attach an ingress usage meter. Frames written through any group this
 	/// producer creates (and groups created after this call) bump the sink.
-	/// Transports that publish into the model (moq-lite, IETF, SRT, WHIP, ...)
-	/// call this once with a per-track sink so usage is recorded uniformly.
-	pub fn set_meter(&mut self, meter: Meter) {
+	///
+	/// Internal: a producer normally inherits its meter from the broadcast that
+	/// creates it ([`crate::BroadcastProducer::set_meter`] -> `create_track` /
+	/// dynamic `accept`), which is the entry point transports use. This stays for
+	/// that propagation and for tests.
+	pub(crate) fn set_meter(&mut self, meter: Meter) {
 		self.meter = meter;
 	}
 
@@ -785,7 +787,7 @@ impl TrackProducer {
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
 	pub fn dynamic(&self) -> TrackDynamic {
-		TrackDynamic::new(self.name.clone(), self.state.clone())
+		TrackDynamic::new(self.name.clone(), self.state.clone(), self.meter.clone())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
@@ -796,7 +798,11 @@ impl TrackProducer {
 /// Pop the next queued group fetch off the shared state and wrap it in a
 /// [`GroupRequest`] bound to a fresh producer handle. Shared by every
 /// [`TrackDynamic`] handle on the track.
-fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+fn poll_requested_group(
+	state: &kio::Producer<TrackState>,
+	meter: &Meter,
+	waiter: &kio::Waiter,
+) -> Poll<Result<GroupRequest>> {
 	// Read-only predicate: ready once there's a request to pop, or the track aborted.
 	let mut guard = ready!(state.poll(waiter, |state| {
 		if state.fetches.is_empty() && state.abort.is_none() {
@@ -817,6 +823,7 @@ fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter)
 		state: state.clone(),
 		sequence: req.sequence,
 		priority: req.priority,
+		meter: meter.clone(),
 	}))
 }
 
@@ -832,14 +839,18 @@ fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter)
 pub struct TrackDynamic {
 	name: Arc<str>,
 	state: kio::Producer<TrackState>,
+	// Usage meter inherited from the track (via [`TrackProducer::dynamic`] /
+	// [`TrackRequest::dynamic`]), stamped onto every [`GroupRequest`] this handle
+	// serves so fetched groups are metered like live ones.
+	meter: Meter,
 }
 
 impl TrackDynamic {
-	fn new(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
+	fn new(name: Arc<str>, state: kio::Producer<TrackState>, meter: Meter) -> Self {
 		if let Ok(mut state) = state.write() {
 			state.dynamic += 1;
 		}
-		Self { name, state }
+		Self { name, state, meter }
 	}
 
 	pub fn name(&self) -> &str {
@@ -856,7 +867,7 @@ impl TrackDynamic {
 	}
 
 	pub fn poll_requested_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
-		poll_requested_group(&self.state, waiter)
+		poll_requested_group(&self.state, &self.meter, waiter)
 	}
 
 	/// Poll for the track becoming unused (every consumer dropped).
@@ -874,6 +885,7 @@ impl Clone for TrackDynamic {
 		Self {
 			name: self.name.clone(),
 			state: self.state.clone(),
+			meter: self.meter.clone(),
 		}
 	}
 }
@@ -1197,6 +1209,10 @@ pub struct GroupRequest {
 	state: kio::Producer<TrackState>,
 	sequence: u64,
 	priority: u8,
+	// Usage meter inherited from the serving [`TrackDynamic`], applied to the
+	// [`GroupProducer`] produced by [`Self::accept`] so fetched groups are metered
+	// like live ones. A no-op unless the track was metered.
+	meter: Meter,
 }
 
 impl GroupRequest {
@@ -1218,7 +1234,7 @@ impl GroupRequest {
 	/// and is ignored once accepted. Returns [`Error::Duplicate`] if the group is
 	/// already present, or the track's abort error if it closed while pending.
 	pub fn accept(self, info: impl Into<Option<TrackInfo>>) -> Result<GroupProducer> {
-		TrackState::modify(&self.state)?.insert_group_request(self.sequence, info.into())
+		TrackState::modify(&self.state)?.insert_group_request(self.sequence, info.into(), self.meter)
 	}
 }
 
@@ -1274,7 +1290,8 @@ pub struct TrackSubscriber {
 	/// Egress usage meter for this subscriber. Bumped once per group delivered
 	/// and attached to each [`GroupConsumer`] handed out (which bumps per
 	/// frame/byte). Per-subscriber, so N subscribers of one track count N times.
-	/// A no-op until a stats sink is attached via [`Self::set_meter`].
+	/// Inherited from the [`TrackConsumer`] this was opened from (which gets it
+	/// from [`crate::BroadcastConsumer::set_meter`]); a no-op otherwise.
 	meter: Meter,
 }
 
@@ -1285,14 +1302,6 @@ impl TrackSubscriber {
 
 	pub fn name(&self) -> &str {
 		&self.name
-	}
-
-	/// Attach an egress usage meter. Each group this subscriber delivers (and the
-	/// frames pulled from it) bumps the sink. Transports that read from the model
-	/// (moq-lite, IETF, WHEP, ...) call this once per subscription so per-viewer
-	/// egress is recorded uniformly.
-	pub fn set_meter(&mut self, meter: Meter) {
-		self.meter = meter;
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -1491,24 +1500,41 @@ pub struct TrackRequest {
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
 	_dynamic: TrackDynamic,
+
+	// Usage meter for the track once served. Stamped by the producer side
+	// ([`crate::BroadcastDynamic`] when it picks the request up, or
+	// [`crate::BroadcastProducer::reserve_track`]) and flowed into the accepted
+	// [`TrackProducer`] and any fetch [`TrackDynamic`]. A no-op until stamped.
+	meter: Meter,
 }
 
 impl TrackRequest {
 	pub fn new(name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::<TrackState>::default();
-		let dynamic = TrackDynamic::new(name.clone(), state.clone());
+		// The held `_dynamic` is only a fetch-capable sentinel (never polled), so it
+		// keeps the default meter; the meter is stamped later and reaches the serving
+		// dynamic via `dynamic()`.
+		let dynamic = TrackDynamic::new(name.clone(), state.clone(), Meter::default());
 		Self {
 			name,
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
+			meter: Meter::default(),
 		}
 	}
 
 	/// The requested track name.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// Stamp the ingress meter the producer side wants this track accounted to.
+	/// Applied to the [`TrackProducer`] from [`Self::accept`] and to any fetch
+	/// [`TrackDynamic`] from [`Self::dynamic`].
+	pub(crate) fn set_meter(&mut self, meter: Meter) {
+		self.meter = meter;
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
@@ -1525,7 +1551,7 @@ impl TrackRequest {
 	/// groups, before [`Self::accept`] is even called. A relay creates one to fetch
 	/// past groups from upstream while (or instead of) serving a live subscription.
 	pub fn dynamic(&self) -> TrackDynamic {
-		TrackDynamic::new(self.name.clone(), self.state.clone())
+		TrackDynamic::new(self.name.clone(), self.state.clone(), self.meter.clone())
 	}
 
 	/// Poll for the request becoming unused (every consumer dropped), so a relay can
@@ -1544,9 +1570,10 @@ impl TrackRequest {
 			name: self.name,
 			state: self.state,
 			prev_subscription: None,
-			// Attached later by the transport (e.g. the lite subscriber sets a
-			// per-track sink once the subscription is registered).
-			meter: Meter::default(),
+			// Inherited from whoever stamped the request (the broadcast's dynamic
+			// handler or `reserve_track`), so the served track is metered without the
+			// transport touching it.
+			meter: self.meter,
 		}
 	}
 
@@ -1702,14 +1729,26 @@ mod test {
 		group.finish().unwrap();
 		producer.finish().unwrap();
 
-		// Two independent subscribers, each with its own shared Usage.
+		// Two independent subscribers, each opened from a consumer carrying its own
+		// shared Usage (the real egress path: a meter rides the consumer onto the
+		// subscriber, mirroring BroadcastConsumer::set_meter).
 		let counts_a = std::sync::Arc::new(Usage::default());
-		let mut sub_a = producer.subscribe(None);
-		sub_a.set_meter(Meter::from_arc(counts_a.clone()));
+		let mut sub_a = producer
+			.consume()
+			.with_meter(Meter::from_arc(counts_a.clone()))
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 
 		let counts_b = std::sync::Arc::new(Usage::default());
-		let mut sub_b = producer.subscribe(None);
-		sub_b.set_meter(Meter::from_arc(counts_b.clone()));
+		let mut sub_b = producer
+			.consume()
+			.with_meter(Meter::from_arc(counts_b.clone()))
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 
 		// Drain both subscribers fully (discarding frames still counts them, since
 		// egress bytes are counted at frame delivery, not on read).
@@ -1721,6 +1760,30 @@ mod test {
 		// Each viewer counted the group, its two frames, and 9 bytes.
 		assert_eq!(usage(&counts_a), (1, 2, 9));
 		assert_eq!(usage(&counts_b), (1, 2, 9));
+	}
+
+	/// A track's meter reaches the fetch path: the serving `TrackDynamic` stamps it
+	/// onto the `GroupRequest`, so a fetched group's frames/bytes land on the same
+	/// sink (the relay's fetch responder shape). A fetch re-serves an existing group,
+	/// so it counts frames/bytes but not a new group.
+	#[tokio::test]
+	async fn fetch_inherits_track_meter() {
+		let counts = std::sync::Arc::new(Usage::default());
+
+		let mut producer = TrackProducer::new("video", None);
+		producer.set_meter(Meter::from_arc(counts.clone()));
+		let consumer = producer.consume();
+		let dynamic = producer.dynamic(); // inherits the producer's meter
+
+		// Consumer misses the cache and fetches group 0; the dynamic handler serves it.
+		let fetch = consumer.fetch_group(0, None).unwrap();
+		let request = dynamic.requested_group().await.unwrap();
+		let mut group = request.accept(None).unwrap();
+		let _ = fetch.await.unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"abc")).unwrap(); // 3 bytes
+
+		// 1 frame, 3 bytes counted; no group bump (the fetch re-serves an existing one).
+		assert_eq!(usage(&counts), (0, 1, 3));
 	}
 
 	#[tokio::test]

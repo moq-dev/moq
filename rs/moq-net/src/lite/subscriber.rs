@@ -446,11 +446,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = BroadcastInfo {
+		let mut broadcast = BroadcastInfo {
 			hops,
 			epoch: BroadcastInfo::epoch_from_wire(epoch),
 		}
 		.produce();
+
+		// Attach the broadcast's ingress meter before creating the dynamic handler, so
+		// every track served on demand (and its frames/bytes) is counted. The
+		// lifecycle guard that keeps these counters alive lives in the announce loop's
+		// `stats_guards`, so this is the non-bumping accessor (no double `announced`).
+		let abs = self.origin.absolute(&path).to_owned();
+		broadcast.set_meter(self.stats.broadcast(&abs).subscriber_meter());
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -504,11 +511,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
-		let broadcast = BroadcastInfo {
+		let mut broadcast = BroadcastInfo {
 			hops,
 			epoch: BroadcastInfo::epoch_from_wire(epoch),
 		}
 		.produce();
+
+		// Inherit the broadcast's ingress meter (see `start_announce`); the announce
+		// loop's `stats_guards` holds the lifecycle guard, so use the non-bumping accessor.
+		let abs = self.origin.absolute(&path).to_owned();
+		broadcast.set_meter(self.stats.broadcast(&abs).subscriber_meter());
+
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
@@ -1113,7 +1126,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(&msg).await?;
 
-		let mut producer = if self.subscriber.version.has_timestamps() {
+		let producer = if self.subscriber.version.has_timestamps() {
 			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
 			let Some(Track::Active(producer)) = track.as_ref() else {
 				unreachable!("lite05 track is active before establish");
@@ -1149,11 +1162,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
 		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
 
-		// Attach the subscriber-side payload meter so the model counts
-		// groups/frames/bytes as they're produced into this track, regardless of
-		// transport. The SubscriberTrack guard (subscriptions lifecycle) stays held
-		// by this serve task in `self.track_stats`.
-		producer.set_meter(self.track_stats.meter());
+		// The producer already carries the broadcast's ingress meter (inherited via
+		// the dynamic `accept` in `run`), so groups/frames/bytes are counted without
+		// a per-track attach here. `self.track_stats` is still held for the
+		// `subscriptions` lifecycle counter.
 
 		self.subscriber.subscribes.lock().insert(
 			id,
@@ -1200,7 +1212,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			mut subscriber,
 			path,
 			broadcast: _,
-			track_stats,
+			// Held for the `subscriptions` lifecycle counter; the fetched group inherits
+			// the broadcast's meter via the request, so no per-fetch attach is needed.
+			track_stats: _track_stats,
 			name,
 		} = self;
 		let group = request.sequence();
@@ -1238,6 +1252,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			timescale,
 			..Default::default()
 		};
+		// The group inherits the broadcast's meter via the request (threaded
+		// TrackDynamic -> GroupRequest), so the frames/bytes this fetch fills are
+		// counted without a per-fetch attach.
 		let mut producer = match request.accept(group_info) {
 			Ok(producer) => producer,
 			Err(err) => {
@@ -1247,10 +1264,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				return;
 			}
 		};
-
-		// Fetched groups aren't created through a metered TrackProducer, so attach
-		// the subscriber meter directly to count the frames/bytes this fetch fills.
-		producer.set_meter(track_stats.meter());
 
 		let res = subscriber
 			.run_group(&mut stream.reader, producer.clone(), compression, timescale)
