@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.20...moq-boy-v0.2.21) - 2026-06-23
+
+### Other
+
+- *(deps)* bump boytacean to 0.12.1 (hold reqwest-middleware at 0.4) ([#1820](https://github.com/moq-dev/moq/pull/1820))
+
 ## [0.2.20](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.19...moq-boy-v0.2.20) - 2026-06-19
 
 ### Other

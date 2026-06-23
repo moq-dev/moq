@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.23](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.22...moq-ffi-v0.2.23) - 2026-06-23
+
+### Added
+
+- *(catalog)* expose untyped catalog extensions via moq-ffi and libmoq ([#1886](https://github.com/moq-dev/moq/pull/1886))
+
 ## [0.2.22](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.21...moq-ffi-v0.2.22) - 2026-06-19
 
 ### Other

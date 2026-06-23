@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.34](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.33...moq-cli-v0.7.34) - 2026-06-23
+
+### Added
+
+- *(catalog)* expose untyped catalog extensions via moq-ffi and libmoq ([#1886](https://github.com/moq-dev/moq/pull/1886))
+- *(moq-cli)* wire verbatim MPEG-TS carriage through publish/subscribe ([#1842](https://github.com/moq-dev/moq/pull/1842))
+
+### Other
+
+- move moq-cli's TS verbatim coverage into moq-mux ([#1879](https://github.com/moq-dev/moq/pull/1879))
+
 ## [0.7.33](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.32...moq-cli-v0.7.33) - 2026-06-19
 
 ### Other

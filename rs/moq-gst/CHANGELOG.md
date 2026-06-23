@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.7...moq-gst-v0.2.8) - 2026-06-23
+
+### Fixed
+
+- *(moq-gst)* deterministic moqsrc pad names so CMAF playback works ([#1809](https://github.com/moq-dev/moq/pull/1809))
+
+### Other
+
+- split CLAUDE.md into per-directory guides ([#1846](https://github.com/moq-dev/moq/pull/1846))
+- fix plugin license + broadcast-aligned timestamps ([#1808](https://github.com/moq-dev/moq/pull/1808))
+
 ## [0.2.7](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.6...moq-gst-v0.2.7) - 2026-06-17
 
 ### Added
