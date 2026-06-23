@@ -29,8 +29,10 @@ impl Announced {
 		loop {
 			match self.inner.announced().await {
 				Some((path, Some(broadcast))) => {
+					let hops = broadcast.hops.iter().map(|origin| origin.id).collect();
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
+						hops,
 						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
@@ -59,6 +61,7 @@ impl Announced {
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncement {
 	path: String,
+	hops: Vec<u64>,
 	broadcast: Arc<MoqBroadcastConsumer>,
 }
 
@@ -147,6 +150,11 @@ impl MoqAnnouncement {
 	/// The path of the announced broadcast.
 	pub fn path(&self) -> String {
 		self.path.clone()
+	}
+
+	/// The origin ids of the relay hops this broadcast traversed, oldest first.
+	pub fn hops(&self) -> Vec<u64> {
+		self.hops.clone()
 	}
 
 	/// The broadcast consumer.

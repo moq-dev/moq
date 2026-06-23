@@ -131,11 +131,14 @@ Missing track subscriptions are accepted while the `BroadcastDynamic` object is 
 ```python
 async for announcement in client.announced("live/"):
     print(announcement.path)
+    print(announcement.hops)  # relay origin ids the broadcast traversed, oldest first
     ...
 
 # Or wait for a specific path:
 broadcast = await client.announced_broadcast("live/cam1")
 ```
+
+`announcement.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first. It is useful for routing decisions such as preferring a nearby edge or detecting how many relays a broadcast crossed.
 
 ## Examples
 

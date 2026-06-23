@@ -19,6 +19,11 @@ class Announcement:
         return self._inner.path()
 
     @property
+    def hops(self) -> list[int]:
+        """Origin ids of the relay hops this broadcast traversed, oldest first."""
+        return self._inner.hops()
+
+    @property
     def broadcast(self) -> BroadcastConsumer:
         return BroadcastConsumer(self._inner.broadcast())
 

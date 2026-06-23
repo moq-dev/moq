@@ -165,6 +165,36 @@ async def test_serve_helper_accepts_clients():
             broadcast.finish()
 
 
+async def test_announcement_hops_over_wire():
+    """An announcement received over the wire exposes its relay hop chain as a list of ints."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        broadcast = moq.BroadcastProducer()
+        server.publish("with-hops", broadcast)
+
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                tls_verify=False,
+                bind="127.0.0.1:0",
+            ) as client:
+                async for announcement in client.announced():
+                    assert announcement.path == "with-hops"
+                    hops = announcement.hops
+                    assert isinstance(hops, list)
+                    assert all(isinstance(h, int) for h in hops)
+                    # A broadcast crossing at least one session carries a non-empty hop chain.
+                    assert len(hops) >= 1
+                    break
+        finally:
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
+            broadcast.finish()
+
+
 async def test_serve_helper_with_on_request_rejection():
     """on_request returning False causes Server.serve() to reject the request."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
