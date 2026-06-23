@@ -1184,6 +1184,9 @@ pub struct BroadcastRequested {
 enum Requested {
 	// Already announced: resolves immediately with a clone of this broadcast.
 	Ready(BroadcastConsumer),
+	// Unroutable at request time, or the origin was already dropped: resolves immediately
+	// with this error. Baked in so `request_broadcast` itself stays infallible.
+	Failed(Error),
 	// Awaiting a handler: resolves when the request's result channel is written.
 	Pending(kio::Consumer<PendingBroadcast>),
 }
@@ -1192,6 +1195,12 @@ impl BroadcastRequested {
 	fn ready(broadcast: BroadcastConsumer) -> Self {
 		Self {
 			inner: Requested::Ready(broadcast),
+		}
+	}
+
+	fn failed(error: Error) -> Self {
+		Self {
+			inner: Requested::Failed(error),
 		}
 	}
 
@@ -1205,6 +1214,7 @@ impl BroadcastRequested {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<BroadcastConsumer, Error>> {
 		match &self.inner {
 			Requested::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
+			Requested::Failed(error) => Poll::Ready(Err(error.clone())),
 			Requested::Pending(consumer) => Poll::Ready(
 				match ready!(consumer.poll(waiter, |state| match &state.resolved {
 					Some(result) => Poll::Ready(result.clone()),
@@ -1423,31 +1433,33 @@ impl OriginConsumer {
 	/// [`reject`](BroadcastRequest::reject)s or every handler drops). Concurrent requests for
 	/// the same unannounced path coalesce onto one handler request.
 	///
-	/// Fails synchronously with [`Error::Unroutable`] when the path is not announced and no
+	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
 	/// dynamic handler exists, or [`Error::Dropped`] once the origin is gone. A request that is
 	/// registered while a handler is live but then loses every handler before being served also
 	/// resolves to [`Error::Unroutable`]. Unlike an announced broadcast, a dynamically served one
 	/// is never visible to [`Self::announced`].
-	pub fn request_broadcast(&self, path: impl AsPath) -> Result<kio::Pending<BroadcastRequested>, Error> {
+	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<BroadcastRequested> {
 		let path = path.as_path();
 
 		// Prefer a live announcement when one is present; the dynamic queue is only a fallback.
 		if let Some(broadcast) = self.get_broadcast(&path) {
-			return Ok(kio::Pending::new(BroadcastRequested::ready(broadcast)));
+			return kio::Pending::new(BroadcastRequested::ready(broadcast));
 		}
 
 		// Key requests by absolute path so a scoped/rooted consumer and the handler
 		// (which may have a different root) agree on the same entry.
 		let absolute = self.root.join(&path).to_owned();
 
-		let mut state = self.dynamic.write().map_err(|_| Error::Dropped)?;
+		let Ok(mut state) = self.dynamic.write() else {
+			return kio::Pending::new(BroadcastRequested::failed(Error::Dropped));
+		};
 
 		// Coalesce onto a queued request for the same path; otherwise register a new one.
 		let consumer = if let Some(producer) = state.requests.get(&absolute) {
 			producer.consume()
 		} else {
 			if state.dynamic == 0 {
-				return Err(Error::Unroutable);
+				return kio::Pending::new(BroadcastRequested::failed(Error::Unroutable));
 			}
 
 			let producer = kio::Producer::<PendingBroadcast>::default();
@@ -1457,7 +1469,7 @@ impl OriginConsumer {
 			consumer
 		};
 
-		Ok(kio::Pending::new(BroadcastRequested::pending(consumer)))
+		kio::Pending::new(BroadcastRequested::pending(consumer))
 	}
 
 	/// Returns a new OriginConsumer that automatically strips out the provided prefix.
@@ -2963,12 +2975,15 @@ mod tests {
 		assert_eq!(paths, ["test1", "test2"]);
 	}
 
-	// With no OriginDynamic handler, an unannounced path fails fast (synchronously).
+	// With no OriginDynamic handler, an unannounced path resolves to Unroutable.
 	#[tokio::test]
 	async fn dynamic_request_unroutable_without_handler() {
 		let origin = Origin::random().produce();
 		let consumer = origin.consume();
-		assert!(matches!(consumer.request_broadcast("missing"), Err(Error::Unroutable)));
+		assert!(matches!(
+			consumer.request_broadcast("missing").await,
+			Err(Error::Unroutable)
+		));
 	}
 
 	// A dynamically served broadcast resolves the requester and serves tracks, but is
@@ -2984,8 +2999,8 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Request a path that nobody announced; the future stays pending until served.
-		// Registration is synchronous, so the handler sees the request immediately.
-		let request_fut = consumer.request_broadcast("fallback").unwrap();
+		// Registration happens up front, so the handler sees the request immediately.
+		let request_fut = consumer.request_broadcast("fallback");
 
 		// The handler serves it with a live broadcast it keeps producing into.
 		let served = BroadcastInfo::new().produce();
@@ -2999,7 +3014,7 @@ mod tests {
 		assert!(broadcast.is_clone(&served.consume()));
 
 		// The served broadcast is live: a track subscription resolves via its handler.
-		let track_fut = broadcast.track("video").unwrap().subscribe(None).unwrap();
+		let track_fut = broadcast.track("video").unwrap().subscribe(None);
 		let mut producer = served_dynamic.requested_track().await.unwrap().accept(None);
 		let mut track = track_fut.await.unwrap();
 		producer.append_group().unwrap();
@@ -3016,9 +3031,9 @@ mod tests {
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
-		// Both register synchronously before the handler drains either.
-		let f1 = consumer.request_broadcast("dup").unwrap();
-		let f2 = consumer.request_broadcast("dup").unwrap();
+		// Both register before the handler drains either.
+		let f1 = consumer.request_broadcast("dup");
+		let f2 = consumer.request_broadcast("dup");
 
 		// Exactly one request reaches the handler.
 		let request = dynamic.requested_broadcast().await.unwrap();
@@ -3042,7 +3057,7 @@ mod tests {
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
-		let request_fut = consumer.request_broadcast("fallback").unwrap();
+		let request_fut = consumer.request_broadcast("fallback");
 
 		let request = dynamic.requested_broadcast().await.unwrap();
 		request.reject(Error::Cancel);
@@ -3051,19 +3066,22 @@ mod tests {
 	}
 
 	// Dropping the last handler resolves queued requests with an error and reverts to
-	// failing fast.
+	// resolving Unroutable.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_handler_dropped() {
 		let origin = Origin::random().produce();
 		let dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
-		let request_fut = consumer.request_broadcast("fallback").unwrap();
+		let request_fut = consumer.request_broadcast("fallback");
 		drop(dynamic);
 		assert!(matches!(request_fut.await, Err(Error::Unroutable)));
 
-		// With no handler left, a fresh request fails fast.
-		assert!(matches!(consumer.request_broadcast("again"), Err(Error::Unroutable)));
+		// With no handler left, a fresh request resolves Unroutable.
+		assert!(matches!(
+			consumer.request_broadcast("again").await,
+			Err(Error::Unroutable)
+		));
 	}
 
 	// `accept` is decoupled from the dynamic count: once a handler has picked a request up,
@@ -3075,7 +3093,7 @@ mod tests {
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
-		let request_fut = consumer.request_broadcast("fallback").unwrap();
+		let request_fut = consumer.request_broadcast("fallback");
 
 		// The handler picks the request up, then every handler drops (count -> 0).
 		let request = dynamic.requested_broadcast().await.unwrap();
@@ -3097,7 +3115,7 @@ mod tests {
 		let broadcast = BroadcastInfo::new().produce();
 		let _publish = origin.publish_broadcast("live", &broadcast).unwrap();
 
-		let got = consumer.request_broadcast("live").unwrap().await.unwrap();
+		let got = consumer.request_broadcast("live").await.unwrap();
 		assert!(
 			got.is_clone(&broadcast.consume()),
 			"should return the announced broadcast"
@@ -3118,11 +3136,10 @@ mod tests {
 		drop(dynamic.clone());
 
 		// The original handle is still live, so the request registers (stays pending)
-		// instead of failing fast.
+		// instead of resolving Unroutable.
 		let request_fut = consumer.request_broadcast("fallback");
-		assert!(request_fut.is_ok(), "request should register, not fail");
 		assert!(
-			request_fut.unwrap().now_or_never().is_none(),
+			request_fut.now_or_never().is_none(),
 			"request should stay pending until served"
 		);
 	}

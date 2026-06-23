@@ -85,7 +85,7 @@ impl Track {
 		// `None` subscription => start at the latest (in-progress) group. Groups
 		// begin at a keyframe, so a late joiner gets a decodable start immediately
 		// rather than waiting for the next group boundary.
-		let track = broadcast.track(name)?.subscribe(None)?.await?;
+		let track = broadcast.track(name)?.subscribe(None).await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
 			consumer,
@@ -101,7 +101,7 @@ impl Track {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
 		// `None` subscription => start at the latest (in-progress) group, which
 		// begins at a keyframe, so a late-joining peer gets a decodable start.
-		let track = broadcast.track(name)?.subscribe(None)?.await?;
+		let track = broadcast.track(name)?.subscribe(None).await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
 		let (codec, convert) = match &config.codec {

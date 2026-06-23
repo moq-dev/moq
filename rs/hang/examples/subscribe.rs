@@ -53,7 +53,7 @@ async fn run_subscribe(consumer: moq_net::OriginConsumer) -> anyhow::Result<()> 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast
 		.track(hang::Catalog::DEFAULT_NAME)?
-		.subscribe(hang::Catalog::default_subscription())?
+		.subscribe(hang::Catalog::default_subscription())
 		.await?;
 	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
 
@@ -81,7 +81,7 @@ async fn run_subscribe(consumer: moq_net::OriginConsumer) -> anyhow::Result<()> 
 		.subscribe(moq_net::Subscription {
 			priority: 1,
 			..Default::default()
-		})?
+		})
 		.await?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 		.with_latency(Duration::from_millis(500));

@@ -27,12 +27,12 @@ impl<E: CatalogExt> Consumer<E> {
 			CatalogFormat::Hang => {
 				let track = broadcast
 					.track(hang::Catalog::DEFAULT_NAME)?
-					.subscribe(hang::Catalog::default_subscription())?
+					.subscribe(hang::Catalog::default_subscription())
 					.await?;
 				Self::Hang(super::hang::Consumer::new(track))
 			}
 			CatalogFormat::Msf => {
-				let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None)?.await?;
+				let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;
 				Self::Msf(super::msf::Consumer::new(track))
 			}
 		})

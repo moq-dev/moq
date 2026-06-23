@@ -113,13 +113,7 @@ async fn import_emits_frames() {
 	let video_name = snap.video.renditions.keys().next().unwrap().clone();
 
 	// Decode the video track back through the Legacy container.
-	let track = consumer
-		.track(&video_name)
-		.unwrap()
-		.subscribe(None)
-		.unwrap()
-		.await
-		.unwrap();
+	let track = consumer.track(&video_name).unwrap().subscribe(None).await.unwrap();
 	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
 		.with_latency(std::time::Duration::from_secs(1));
 	let frame = decoder.read().await.unwrap().expect("a video frame");

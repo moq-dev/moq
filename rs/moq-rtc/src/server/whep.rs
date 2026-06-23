@@ -81,9 +81,10 @@ pub async fn accept(
 
 	// Look up the MoQ broadcast on the subscribe origin. `request_broadcast` resolves an
 	// already-announced broadcast immediately and falls back to a dynamic handler if the
-	// origin has one; with neither, it fails fast and the WHEP client retries (typical).
+	// origin has one; with neither, it resolves to an error and the WHEP client retries (typical).
 	let broadcast = broadcast.as_path().to_string();
-	let consumer = async { subscriber.request_broadcast(&broadcast)?.await }
+	let consumer = subscriber
+		.request_broadcast(&broadcast)
 		.await
 		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {broadcast} not announced")))?;
 

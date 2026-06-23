@@ -220,9 +220,9 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Registration is synchronous; this errors immediately if the path can never be served
-		// (not announced and no dynamic handler).
-		let pending = consumer.request_broadcast(path.as_str())?;
+		// Resolves to an error if the path can never be served (not announced and no dynamic
+		// handler), otherwise once a handler serves it.
+		let pending = consumer.request_broadcast(path.as_str());
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {

@@ -82,7 +82,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)?),
+			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
 			media: Some(media),
 			latency,
 			transform,
@@ -104,7 +104,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)?),
+			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -124,7 +124,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)?),
+			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -141,7 +141,7 @@ impl ExportSource {
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)?),
+			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
 			media: Some(HangContainer::Legacy),
 			latency,
 			transform: None,

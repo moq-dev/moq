@@ -133,7 +133,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
 		// an `OriginDynamic` handler if one is registered.
-		let broadcast = match async { self.origin.request_broadcast(&msg.track_namespace)?.await }.await {
+		let broadcast = match self.origin.request_broadcast(&msg.track_namespace).await {
 			Ok(broadcast) => broadcast,
 			Err(_) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
@@ -147,7 +147,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			..Default::default()
 		};
 
-		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription)?.await }.await {
+		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription).await }.await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

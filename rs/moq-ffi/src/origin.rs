@@ -160,7 +160,7 @@ impl MoqOriginConsumer {
 	/// indefinitely for a future announcement: it resolves or fails based on what is
 	/// announced now plus any dynamic fallback. Drop the returned future to cancel.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self.inner.request_broadcast(path.as_str())?.await?;
+		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))
 	}
 }

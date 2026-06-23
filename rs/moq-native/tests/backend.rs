@@ -71,7 +71,6 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -342,7 +341,6 @@ async fn iroh_connect() {
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 

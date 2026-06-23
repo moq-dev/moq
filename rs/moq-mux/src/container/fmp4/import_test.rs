@@ -185,7 +185,6 @@ async fn test_seek_sets_initial_sequence() {
 		.track(&video_name)
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("video track should exist");
 
@@ -227,7 +226,6 @@ async fn test_msf_catalog_roundtrip() {
 		.track(moq_msf::DEFAULT_NAME)
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("MSF catalog track should exist");
 	let mut msf = crate::catalog::msf::Consumer::new(track);
