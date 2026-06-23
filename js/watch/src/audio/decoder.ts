@@ -58,6 +58,10 @@ export class Decoder {
 	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
 	#ring: AudioBuffer | undefined;
 
+	// The last discontinuity count seen from the container consumer. A change means the
+	// publisher rewound the timeline (e.g. a voice agent interrupted) and we must flush.
+	#discontinuity = 0;
+
 	#signals = new Effect();
 
 	// How much buffered audio the container consumer retains before skipping
@@ -260,6 +264,9 @@ export class Decoder {
 				const next = await consumer.next();
 				if (!next) break;
 
+				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
+				this.#onDiscontinuity(next.discontinuity);
+
 				const { frame } = next;
 				if (!frame) continue;
 
@@ -336,6 +343,9 @@ export class Decoder {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
+
+				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
+				this.#onDiscontinuity(next.discontinuity);
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -433,6 +443,17 @@ export class Decoder {
 	// Use in buffered mode at an utterance boundary (see Sync.reset).
 	reset(): void {
 		this.#ring?.reset();
+	}
+
+	// React to the container consumer's discontinuity counter. When it changes the publisher
+	// has rewound the timeline, so flush the queued PCM and re-anchor the shared clock before
+	// the first frame of the new utterance is decoded. This makes the wire signal trigger the
+	// same flush as a manual `reset()`, with no app involvement.
+	#onDiscontinuity(count: number): void {
+		if (count === this.#discontinuity) return;
+		this.#discontinuity = count;
+		this.#ring?.reset();
+		this.source.sync.reset();
 	}
 
 	close() {
