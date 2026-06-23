@@ -1,9 +1,82 @@
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::{Timescale, Timestamp};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::Version;
 use crate::ietf::Param;
+
+/// MOQ Object Property IDs (the MOQ Object Properties registry, shared with
+/// draft-ietf-moq-loc). Even type ids carry a single varint value.
+const PROP_TIMESTAMP: u64 = 0x06;
+const PROP_TIMESCALE: u64 = 0x08;
+
+/// Encode a frame's presentation timestamp as moq-transport Object Properties:
+/// Timestamp (0x06, absolute) in Timescale (0x08) units. Matches the LOC encoding
+/// of the same registry ids so a relay or LOC-aware peer reads the same bytes.
+///
+/// Writes the raw KVP bytes (no outer length prefix); the caller frames the
+/// extension block with its byte length.
+pub fn encode_object_time<W: bytes::BufMut>(
+	w: &mut W,
+	timestamp: Timestamp,
+	version: Version,
+) -> Result<(), EncodeError> {
+	// KVP type ids are delta-encoded ascending: 0x06 then 0x08 (delta 0x02).
+	PROP_TIMESTAMP.encode(w, version)?;
+	timestamp.value().encode(w, version)?;
+	(PROP_TIMESCALE - PROP_TIMESTAMP).encode(w, version)?;
+	u64::from(timestamp.scale()).encode(w, version)?;
+	Ok(())
+}
+
+/// Decode the Timestamp (0x06) + Timescale (0x08) Object Properties from an object's
+/// extension block, skipping any other properties. Returns `None` when no Timestamp
+/// property is present; a missing Timescale defaults to microseconds (the registry default).
+pub fn decode_object_time<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Option<Timestamp>, DecodeError> {
+	let mut timestamp: Option<u64> = None;
+	let mut timescale: Option<u64> = None;
+	let mut prev_type: u64 = 0;
+	let mut first = true;
+
+	while r.has_remaining() {
+		let delta = u64::decode(r, version)?;
+		let abs = if first {
+			delta
+		} else {
+			prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+		};
+		first = false;
+		prev_type = abs;
+
+		if abs % 2 == 0 {
+			let value = u64::decode(r, version)?;
+			match abs {
+				PROP_TIMESTAMP => timestamp = Some(value),
+				PROP_TIMESCALE => timescale = Some(value),
+				_ => {}
+			}
+		} else {
+			// Odd type: length-prefixed bytes we don't care about.
+			let len = u64::decode(r, version)? as usize;
+			if r.remaining() < len {
+				return Err(DecodeError::Short);
+			}
+			r.advance(len);
+		}
+	}
+
+	let Some(value) = timestamp else {
+		return Ok(None);
+	};
+	let scale = match timescale {
+		Some(s) => Timescale::new(s).map_err(|_| DecodeError::InvalidValue)?,
+		None => Timescale::MICRO,
+	};
+	Ok(Some(
+		Timestamp::new(value, scale).map_err(|_| DecodeError::InvalidValue)?,
+	))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
@@ -234,6 +307,43 @@ impl Decode<Version> for GroupHeader {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	use bytes::Buf;
+
+	/// Object Property timestamp round-trips through encode/decode at its own scale.
+	#[test]
+	fn test_object_time_roundtrip() {
+		let ts = Timestamp::new(96_000, Timescale::MICRO).unwrap();
+		let mut buf = bytes::BytesMut::new();
+		encode_object_time(&mut buf, ts, Version::Draft18).unwrap();
+
+		let mut bytes = buf.freeze();
+		let decoded = decode_object_time(&mut bytes, Version::Draft18).unwrap().unwrap();
+		assert_eq!(decoded.value(), 96_000);
+		assert_eq!(decoded.scale(), Timescale::MICRO);
+		assert!(!bytes.has_remaining());
+	}
+
+	/// A timescale-less extension block falls back to microseconds (registry default).
+	#[test]
+	fn test_object_time_defaults_to_micros() {
+		let mut buf = bytes::BytesMut::new();
+		// Just a 0x06 Timestamp property, no 0x08.
+		PROP_TIMESTAMP.encode(&mut buf, Version::Draft18).unwrap();
+		1234u64.encode(&mut buf, Version::Draft18).unwrap();
+
+		let mut bytes = buf.freeze();
+		let decoded = decode_object_time(&mut bytes, Version::Draft18).unwrap().unwrap();
+		assert_eq!(decoded.value(), 1234);
+		assert_eq!(decoded.scale(), Timescale::MICRO);
+	}
+
+	/// No Timestamp property at all yields None (the caller wall-clock-stamps).
+	#[test]
+	fn test_object_time_absent() {
+		let mut empty = bytes::Bytes::new();
+		assert!(decode_object_time(&mut empty, Version::Draft18).unwrap().is_none());
+	}
 
 	// Test table from draft-ietf-moq-transport-14 Section 10.4.2 Table 7
 	#[test]

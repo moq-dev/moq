@@ -277,7 +277,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				group_id: sequence,
 				sub_group_id: 0,
 				publisher_priority: 0,
-				flags: Default::default(),
+				// Carry per-object timestamps as extension headers (Timestamp/Timescale
+				// Object Properties) so moq-transport peers get the real PTS.
+				flags: ietf::GroupFlags {
+					has_extensions: true,
+					..Default::default()
+				},
 			};
 
 			let priority = track.subscription().priority;
@@ -326,9 +331,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// object id delta is always 0.
 			stream.encode(&0u64).await?;
 
-			// not using extensions.
+			// Per-object extension headers carry the frame's presentation timestamp.
 			if msg.flags.has_extensions {
-				stream.encode(&0u64).await?;
+				let mut ext = bytes::BytesMut::new();
+				ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
+				stream.encode(&(ext.len() as u64)).await?;
+				let mut ext = ext.freeze();
+				stream.write_all(&mut ext).await?;
 			}
 
 			// Write the size of the frame.

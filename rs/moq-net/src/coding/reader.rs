@@ -128,25 +128,6 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		Ok(buf.into_inner().freeze())
 	}
 
-	/// Skip the given number of bytes from the stream.
-	pub async fn skip(&mut self, mut size: usize) -> Result<(), Error> {
-		let buffered = self.buffer.len().min(size);
-		self.buffer.advance(buffered);
-		size -= buffered;
-
-		while size > 0 {
-			let chunk = self
-				.stream
-				.read_chunk(size)
-				.await
-				.map_err(Error::from_transport)?
-				.ok_or(DecodeError::Short)?;
-			size -= chunk.len();
-		}
-
-		Ok(())
-	}
-
 	/// Wait until the stream is closed, erroring if there are any additional bytes.
 	pub async fn closed(&mut self) -> Result<(), Error> {
 		if self.has_more().await? {
