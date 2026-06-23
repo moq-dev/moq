@@ -275,7 +275,7 @@ async fn subscribe(
 async fn drain(broadcast: BroadcastConsumer, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let mut track = broadcast.track(TRACK)?.subscribe(None)?.await?;
+	let mut track = broadcast.track(TRACK)?.subscribe(None).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
 
@@ -428,7 +428,7 @@ mod tests {
 		// Advance past one full group (keyframe + 2 payload) into the next.
 		tokio::time::advance(Duration::from_millis(350)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).unwrap().await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
@@ -463,7 +463,7 @@ mod tests {
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).unwrap().await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.

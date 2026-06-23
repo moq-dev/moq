@@ -224,7 +224,7 @@ mod tests {
 		let mut producer =
 			AudioProducer::new(&mut broadcast, catalog, "audio", input, EncoderOutput::default()).unwrap();
 
-		let track = consumer.track("audio").unwrap().subscribe(None).unwrap().await.unwrap();
+		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 
 		let mut pts = Vec::new();

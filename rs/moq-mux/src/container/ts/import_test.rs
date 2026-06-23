@@ -278,7 +278,7 @@ async fn survives_midstream_join() {
 
 	// The track resumes at the keyframe: the leading delta was dropped, the IDR
 	// anchors the one and only group.
-	let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -322,7 +322,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
 		.map(|(name, _)| name.clone())
 		.expect("scte35 track");
-	let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {

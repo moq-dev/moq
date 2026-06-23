@@ -300,7 +300,7 @@ async fn run_session(
 
 	let catalog_track = broadcast
 		.track(hang::catalog::Catalog::DEFAULT_NAME)?
-		.subscribe(hang::catalog::Catalog::default_subscription())?
+		.subscribe(hang::catalog::Catalog::default_subscription())
 		.await?;
 	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
@@ -427,7 +427,7 @@ async fn reconcile(
 		}
 		.fetch_add(1, Ordering::Relaxed);
 
-		let track_subscriber = broadcast.track(&name)?.subscribe(None)?.await?;
+		let track_subscriber = broadcast.track(&name)?.subscribe(None).await?;
 		let track = moq_mux::container::Consumer::new(track_subscriber, container).with_latency(Duration::from_secs(1));
 
 		let descriptor = TrackDescriptor {

@@ -1733,7 +1733,7 @@ mod test {
 		);
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
-		let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
@@ -1908,7 +1908,7 @@ mod test {
 			.next()
 			.expect("an audio track")
 			.clone();
-		let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
@@ -2039,7 +2039,7 @@ mod test {
 		import.finish().unwrap();
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
-		let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
@@ -2170,13 +2170,7 @@ mod test {
 		assert_eq!(verbatim.stream_id, Some(0xC0), "recorded the PES stream_id");
 		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
-		let track = consumer
-			.track(name.as_str())
-			.unwrap()
-			.subscribe(None)
-			.unwrap()
-			.await
-			.unwrap();
+		let track = consumer.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await

@@ -89,7 +89,6 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -191,7 +190,6 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -306,12 +304,10 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 
 	// Fetch group 0 directly, without subscribing. No live producer holds the group
 	// on the client, so this issues a wire FETCH upstream.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, async {
-		bc.track("video").unwrap().fetch_group(0, None).unwrap().await
-	})
-	.await
-	.expect("fetch timed out")
-	.expect("fetch failed");
+	let mut group_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(0, None).await })
+		.await
+		.expect("fetch timed out")
+		.expect("fetch failed");
 	assert_eq!(group_sub.sequence, 0);
 
 	for &expected_us in &frames {
@@ -428,12 +424,10 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 
 	// Subscribe (starts at the latest group) and read the live group, which
 	// establishes the upstream subscription and leaves it active.
-	let mut track_sub = tokio::time::timeout(TIMEOUT, async {
-		bc.track("video").unwrap().subscribe(None).unwrap().await
-	})
-	.await
-	.expect("subscribe timed out")
-	.expect("subscribe failed");
+	let mut track_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
 	let mut live = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
@@ -450,12 +444,10 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	// While the subscription is still held and active, fetch the older group. The
 	// relay doesn't have it cached (subscription started at the latest), so this
 	// must issue a wire FETCH concurrently with the live subscription.
-	let mut fetched = tokio::time::timeout(TIMEOUT, async {
-		bc.track("video").unwrap().fetch_group(0, None).unwrap().await
-	})
-	.await
-	.expect("fetch timed out")
-	.expect("fetch failed");
+	let mut fetched = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(0, None).await })
+		.await
+		.expect("fetch timed out")
+		.expect("fetch failed");
 	assert_eq!(fetched.sequence, 0);
 	let frame = tokio::time::timeout(TIMEOUT, fetched.read_frame())
 		.await
@@ -533,7 +525,6 @@ async fn broadcast_moq_lite_05_without_timescale() {
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -947,7 +938,6 @@ async fn broadcast_websocket() {
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -1056,7 +1046,6 @@ async fn broadcast_websocket_fallback() {
 		.track("video")
 		.unwrap()
 		.subscribe(None)
-		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -1293,13 +1282,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let bc = bc.broadcast().expect("expected announce");
 
 	// First subscription: receive group 0.
-	let mut sub1 = bc
-		.track("video")
-		.unwrap()
-		.subscribe(None)
-		.unwrap()
-		.await
-		.expect("subscribe1");
+	let mut sub1 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe1");
 	let mut g = tokio::time::timeout(TIMEOUT, sub1.recv_group())
 		.await
 		.expect("recv group 0 timeout")
@@ -1323,13 +1306,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	tokio::time::sleep(Duration::from_millis(20)).await;
 
 	// Resubscribe well inside the 5s linger window.
-	let mut sub2 = bc
-		.track("video")
-		.unwrap()
-		.subscribe(None)
-		.unwrap()
-		.await
-		.expect("subscribe2");
+	let mut sub2 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe2");
 
 	// A new group published after the resubscribe must reach the consumer
 	// regardless of which linger branch fired.
@@ -1557,7 +1534,6 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.track("video")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("consume_track failed");
 		let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())

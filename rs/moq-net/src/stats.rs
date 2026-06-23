@@ -1456,7 +1456,6 @@ mod tests {
 			.track("publisher.json")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1485,7 +1484,6 @@ mod tests {
 			.track("publisher.json")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1522,7 +1520,6 @@ mod tests {
 			.track("publisher.json")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1651,7 +1648,6 @@ mod tests {
 			.track("sessions.json")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_session_frame(track).await;
@@ -1667,7 +1663,6 @@ mod tests {
 			.track("internal/sessions.json")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("subscribe");
 		let snap = *read_session_frame(int_track).await.get("peer").expect("internal entry");
@@ -1719,7 +1714,6 @@ mod tests {
 			.track("publisher.json")
 			.unwrap()
 			.subscribe(None)
-			.unwrap()
 			.await
 			.expect("subscribe");
 		assert!(
@@ -1730,13 +1724,7 @@ mod tests {
 		// The other three slots had zero activity. The first frame on
 		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
-			let t = broadcast
-				.track(name)
-				.unwrap()
-				.subscribe(None)
-				.unwrap()
-				.await
-				.expect("subscribe");
+			let t = broadcast.track(name).unwrap().subscribe(None).await.expect("subscribe");
 			let frame = read_frame(t).await;
 			assert!(
 				frame.is_empty(),

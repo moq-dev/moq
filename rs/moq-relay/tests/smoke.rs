@@ -149,13 +149,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
-	let mut track_sub = bc
-		.track("video")
-		.unwrap()
-		.subscribe(None)
-		.unwrap()
-		.await
-		.expect("consume_track");
+	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
@@ -332,13 +326,7 @@ async fn internal_tcp_round_trip() {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
-	let mut track_sub = bc
-		.track("video")
-		.unwrap()
-		.subscribe(None)
-		.unwrap()
-		.await
-		.expect("consume_track");
+	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
@@ -440,13 +428,7 @@ async fn internal_unix_round_trip() {
 	assert_eq!(announced_path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
-	let mut track_sub = bc
-		.track("video")
-		.unwrap()
-		.subscribe(None)
-		.unwrap()
-		.await
-		.expect("consume_track");
+	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")

@@ -548,7 +548,7 @@ mod tests {
 
 	/// Read the first frame of a verbatim track back as raw bytes.
 	async fn read_frame(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<u8> {
-		let track = consumer.track(name).unwrap().subscribe(None).unwrap().await.unwrap();
+		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Duration::ZERO);
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await

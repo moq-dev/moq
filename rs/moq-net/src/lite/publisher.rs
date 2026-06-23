@@ -448,7 +448,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// The peer requested this exact path, so it has already seen an announcement for it.
 		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
 		// handler (as in recv_subscribe).
-		let broadcast = self.origin.request_broadcast(&request.broadcast)?.await?;
+		let broadcast = self.origin.request_broadcast(&request.broadcast).await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
 		// Same negotiation as a subscription, just answered once: codec only when
@@ -491,7 +491,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact path, so by definition the peer has
 		// already seen an announcement for it. `request_broadcast` resolves an announced
 		// broadcast immediately; if it isn't announced it falls back to an `OriginDynamic`
-		// handler (or fails fast when there is none). Registration is synchronous.
+		// handler (or resolves to an error when there is none).
 		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
 		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
@@ -532,7 +532,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
+		broadcast: kio::Pending<crate::BroadcastRequested>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -550,9 +550,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
-		// immediately otherwise.
-		let broadcast = broadcast?.await?;
-		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
+		// immediately otherwise (including an unroutable/dropped error).
+		let broadcast = broadcast.await?;
+		let track = broadcast.track(&subscribe.track)?.subscribe(subscription).await?;
 
 		// Compress only when the producer marked the track worth it and the
 		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get
@@ -669,11 +669,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch(
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
-		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
+		broadcast: kio::Pending<crate::BroadcastRequested>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let broadcast = broadcast?.await?;
+		let broadcast = broadcast.await?;
 		let track = broadcast.track(&fetch.track)?;
 
 		let group = track
@@ -682,7 +682,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				crate::Fetch {
 					priority: fetch.priority,
 				},
-			)?
+			)
 			.await?;
 
 		// FETCH is gated to lite-05+, which always carries timestamps when the track

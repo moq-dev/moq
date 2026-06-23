@@ -120,7 +120,7 @@ impl MoqBroadcastConsumer {
 		let track = self
 			.inner
 			.track(hang::catalog::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::catalog::Catalog::default_subscription())?
+			.subscribe(hang::catalog::Catalog::default_subscription())
 			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
@@ -138,7 +138,7 @@ impl MoqBroadcastConsumer {
 		subscription: Option<MoqSubscription>,
 	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let subscription = subscription.map(moq_net::Subscription::from);
-		let track = self.inner.track(&name)?.subscribe(subscription)?.await?;
+		let track = self.inner.track(&name)?.subscribe(subscription).await?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -161,7 +161,7 @@ impl MoqBroadcastConsumer {
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let subscription = subscription.map(moq_net::Subscription::from);
-		let track = self.inner.track(&name)?.subscribe(subscription)?.await?;
+		let track = self.inner.track(&name)?.subscribe(subscription).await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {

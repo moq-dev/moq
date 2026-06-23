@@ -103,7 +103,7 @@ impl Broadcast {
 	/// Subscribe to a track by name, resolving once the publisher accepts.
 	pub async fn subscribe(&self, name: String) -> Result<Track, JsValue> {
 		let track = self.inner.track(&name).map_err(js_err)?;
-		let subscriber = track.subscribe(None).map_err(js_err)?.await.map_err(js_err)?;
+		let subscriber = track.subscribe(None).await.map_err(js_err)?;
 		Ok(Track {
 			inner: Rc::new(RefCell::new(Some(subscriber))),
 		})
