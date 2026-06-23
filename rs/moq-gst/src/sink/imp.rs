@@ -362,10 +362,10 @@ impl MoqSink {
 		// The pad almost always exists already (caps arrive before buffers), so look it up without
 		// allocating an owned name; only the rare first-buffer insert pays for the key.
 		let name = pad.name();
-		if !state.pads.contains_key(name.as_str()) {
-			state.pads.insert(name.to_string(), Pad::new());
-		}
-		let media = state.pads.get_mut(name.as_str()).expect("pad inserted above");
+		let media = match state.pads.get_mut(name.as_str()) {
+			Some(media) => media,
+			None => state.pads.entry(name.to_string()).or_insert_with(Pad::new),
+		};
 		if media.is_failed() {
 			return Ok(gst::FlowSuccess::Ok); // drop quietly; the pad already reported its failure
 		}
