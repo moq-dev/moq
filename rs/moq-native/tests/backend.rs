@@ -19,7 +19,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
@@ -259,7 +259,7 @@ async fn iroh_connect() {
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
-	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.write_frame_now(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
 	// Create server iroh endpoint

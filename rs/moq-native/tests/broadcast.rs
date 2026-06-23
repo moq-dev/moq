@@ -205,7 +205,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp.expect("Lite05 must carry per-frame timestamps");
+		let ts = frame_sub.timestamp;
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
 
@@ -316,9 +316,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub
-			.timestamp
-			.expect("Lite05 fetch must carry per-frame timestamps");
+		let ts = frame_sub.timestamp;
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
 
@@ -541,7 +539,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("next_frame failed")
 		.expect("group closed");
 
-	let ts = frame_sub.timestamp.expect("Lite05 frames always carry a timestamp");
+	let ts = frame_sub.timestamp;
 	assert_eq!(ts.scale(), Timescale::MILLI, "default timescale is milliseconds");
 
 	drop(session);
