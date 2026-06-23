@@ -15,7 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
-use super::{Fetch, Group, GroupConsumer, GroupProducer};
+use super::{BroadcastInfo, Fetch, Group, GroupConsumer, GroupProducer, broadcast::noop_broadcast};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -156,7 +156,13 @@ impl TrackInfo {
 #[derive(Default)]
 struct TrackState {
 	// The info for the track; always Some for TrackSubscriber/TrackProducer.
-	info: Option<TrackInfo>,
+	// Held as an `Arc` so each group can cheaply share it (for timescale etc.).
+	info: Option<Arc<TrackInfo>>,
+
+	// The broadcast this track belongs to, carrying the ingress usage sink that
+	// groups created here bump. Defaults to a shared no-op broadcast for a
+	// standalone track. The egress sink is supplied per-subscriber instead.
+	broadcast: Arc<BroadcastInfo>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
 	groups: VecDeque<Option<(GroupProducer, web_async::time::Instant)>>,
@@ -191,6 +197,16 @@ struct TrackState {
 
 impl TrackState {
 	fn poll_info(&self) -> Poll<Result<TrackInfo>> {
+		if let Some(info) = &self.info {
+			Poll::Ready(Ok((**info).clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	/// Like [`Self::poll_info`] but yields the shared `Arc<TrackInfo>` so a
+	/// subscriber can hand the same info to every group it delivers.
+	fn poll_info_arc(&self) -> Poll<Result<Arc<TrackInfo>>> {
 		if let Some(info) = &self.info {
 			Poll::Ready(Ok(info.clone()))
 		} else {
@@ -452,10 +468,12 @@ impl TrackState {
 		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet.
-		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
+		let info = self.info.get_or_insert_with(|| Arc::new(info.unwrap_or_default()));
 
-		let group = GroupProducer::new(Group { sequence }, info.timescale);
 		let cache = info.cache;
+		// A fetch re-serves an existing group, so it bumps frames/bytes (via the
+		// returned producer) but not `groups`.
+		let group = GroupProducer::new(Group { sequence }, info.clone(), self.broadcast.clone());
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
 		self.groups.push_back(Some((group.clone(), now)));
@@ -470,19 +488,39 @@ pub struct TrackProducer {
 	name: Arc<str>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
+
+	// The broadcast this track belongs to. Groups created here bump its ingress
+	// usage sink. A standalone track gets a shared no-op broadcast.
+	broadcast: Arc<BroadcastInfo>,
 }
 
 impl TrackProducer {
 	/// Build a producer for the given track metadata.
+	///
+	/// Standalone: the track belongs to no broadcast, so its usage goes to a
+	/// shared no-op sink. Use [`crate::BroadcastProducer::create_track`] to make a
+	/// track whose usage is metered against its broadcast.
 	pub fn new(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> Self {
+		Self::for_broadcast(name, info, noop_broadcast())
+	}
+
+	/// Build a producer for a track that belongs to `broadcast`, inheriting its
+	/// ingress usage sink.
+	pub(crate) fn for_broadcast(
+		name: impl Into<Arc<str>>,
+		info: impl Into<Option<TrackInfo>>,
+		broadcast: Arc<BroadcastInfo>,
+	) -> Self {
 		let info = info.into().unwrap_or_default();
 		Self {
 			name: name.into(),
 			state: kio::Producer::new(TrackState {
-				info: Some(info),
+				info: Some(Arc::new(info)),
+				broadcast: broadcast.clone(),
 				..Default::default()
 			}),
 			prev_subscription: None,
+			broadcast,
 		}
 	}
 
@@ -498,11 +536,10 @@ impl TrackProducer {
 		{
 			return Err(Error::Closed);
 		}
-		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
+		let info = state.info.clone().unwrap();
 		let cache = info.cache;
 
-		let group = GroupProducer::new(group, timescale);
+		let group = GroupProducer::new(group, info, self.broadcast.clone());
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -512,6 +549,7 @@ impl TrackProducer {
 		state.groups.push_back(Some((group.clone(), now)));
 		state.evict_expired(now, cache);
 
+		self.broadcast.stats.producer.add_group();
 		Ok(group)
 	}
 
@@ -528,11 +566,10 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 
-		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
+		let info = state.info.clone().unwrap();
 		let cache = info.cache;
 
-		let group = GroupProducer::new(Group { sequence }, timescale);
+		let group = GroupProducer::new(Group { sequence }, info, self.broadcast.clone());
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
@@ -540,6 +577,7 @@ impl TrackProducer {
 		state.groups.push_back(Some((group.clone(), now)));
 		state.evict_expired(now, cache);
 
+		self.broadcast.stats.producer.add_group();
 		Ok(group)
 	}
 
@@ -667,6 +705,7 @@ impl TrackProducer {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
+			broadcast: self.broadcast.clone(),
 		}
 	}
 
@@ -694,6 +733,7 @@ impl TrackProducer {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
+			broadcast: self.broadcast.clone(),
 		}
 	}
 
@@ -904,9 +944,12 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
+		// The egress sink is supplied by the consuming `BroadcastConsumer`, which
+		// overrides this no-op default via `set_broadcast`.
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
+			broadcast: noop_broadcast(),
 		}
 	}
 
@@ -970,6 +1013,10 @@ impl TrackDemand {
 pub struct TrackConsumer {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
+
+	// The broadcast this consumer reads through, carrying the egress usage sink
+	// that delivered groups/frames bump. Stamped by the owning `BroadcastConsumer`.
+	broadcast: Arc<BroadcastInfo>,
 }
 
 impl TrackConsumer {
@@ -983,6 +1030,13 @@ impl TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.weak(),
 		}
+	}
+
+	/// Stamp the egress usage sink onto this consumer, used by
+	/// [`crate::BroadcastConsumer::track`] so a delivered group/frame is metered
+	/// against the consuming session rather than the publisher.
+	pub(crate) fn set_broadcast(&mut self, broadcast: Arc<BroadcastInfo>) {
+		self.broadcast = broadcast;
 	}
 
 	/// Open a live subscription.
@@ -1003,6 +1057,7 @@ impl TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
+			broadcast: self.broadcast.clone(),
 		})
 	}
 
@@ -1057,12 +1112,13 @@ pub struct TrackSubscribe {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
+	broadcast: Arc<BroadcastInfo>,
 }
 
 impl TrackSubscribe {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber>> {
 		// Wait until the track info is available
-		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
+		let info = ready!(self.state.poll(waiter, |state| state.poll_info_arc()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 
 		Poll::Ready(Ok(TrackSubscriber {
@@ -1074,6 +1130,7 @@ impl TrackSubscribe {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
+			broadcast: self.broadcast.clone(),
 		}))
 	}
 
@@ -1197,8 +1254,12 @@ impl kio::Future for TrackFetch {
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
 pub struct TrackSubscriber {
 	name: Arc<str>,
-	info: TrackInfo,
+	info: Arc<TrackInfo>,
 	state: kio::Consumer<TrackState>,
+
+	// The broadcast this subscriber reads through, carrying the egress usage
+	// sink. Stamped onto each delivered group so its frames bump the same sink.
+	broadcast: Arc<BroadcastInfo>,
 
 	subscription: kio::Producer<Subscription>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
@@ -1254,7 +1315,17 @@ impl TrackSubscriber {
 		};
 
 		self.index = found_index + 1;
-		Poll::Ready(Ok(Some(consumer)))
+		Poll::Ready(Ok(Some(self.deliver(consumer))))
+	}
+
+	/// Stamp the egress usage sink and shared track info onto a delivered group,
+	/// and record the group against egress. Each group a subscriber receives
+	/// counts once; its frames are counted as the consumer reads them.
+	fn deliver(&self, mut group: GroupConsumer) -> GroupConsumer {
+		group.set_broadcast(self.broadcast.clone());
+		group.set_track(self.info.clone());
+		self.broadcast.stats.consumer.add_group();
+		group
 	}
 
 	/// Receive the next group in arrival order.
@@ -1280,7 +1351,7 @@ impl TrackSubscriber {
 			return Poll::Ready(Ok(None));
 		};
 		self.next_sequence = group.sequence.saturating_add(1);
-		Poll::Ready(Ok(Some(group)))
+		Poll::Ready(Ok(Some(self.deliver(group))))
 	}
 
 	/// Return the next group with a higher sequence number than any previously returned.
@@ -1305,6 +1376,9 @@ impl TrackSubscriber {
 
 		self.index = found_index + 1;
 		self.next_sequence = sequence.saturating_add(1);
+		// Egress dual of the producer's per-frame bump; the group path counts the
+		// group, this helper counts the single frame it reads.
+		self.broadcast.stats.consumer.add_frame(frame.len() as u64);
 		Poll::Ready(Ok(Some(frame)))
 	}
 
@@ -1407,18 +1481,32 @@ pub struct TrackRequest {
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
 	_dynamic: TrackDynamic,
+
+	// The broadcast this request belongs to. Threaded to the accepted
+	// `TrackProducer` (ingress sink) and to consumers it hands out.
+	broadcast: Arc<BroadcastInfo>,
 }
 
 impl TrackRequest {
 	pub fn new(name: impl Into<Arc<str>>) -> Self {
+		Self::for_broadcast(name, noop_broadcast())
+	}
+
+	/// Build a request for a track that belongs to `broadcast`, inheriting its
+	/// usage sinks.
+	pub(crate) fn for_broadcast(name: impl Into<Arc<str>>, broadcast: Arc<BroadcastInfo>) -> Self {
 		let name = name.into();
-		let state = kio::Producer::<TrackState>::default();
+		let state = kio::Producer::new(TrackState {
+			broadcast: broadcast.clone(),
+			..Default::default()
+		});
 		let dynamic = TrackDynamic::new(name.clone(), state.clone());
 		Self {
 			name,
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
+			broadcast,
 		}
 	}
 
@@ -1431,6 +1519,7 @@ impl TrackRequest {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
+			broadcast: self.broadcast.clone(),
 		}
 	}
 
@@ -1452,11 +1541,12 @@ impl TrackRequest {
 	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
 	/// mismatch, or the broadcast's abort error if it closed while pending.
 	pub fn accept(self, info: impl Into<Option<TrackInfo>>) -> TrackProducer {
-		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
+		self.state.write().ok().unwrap().info = Some(Arc::new(info.into().unwrap_or_default()));
 		TrackProducer {
 			name: self.name,
 			state: self.state,
 			prev_subscription: None,
+			broadcast: self.broadcast,
 		}
 	}
 

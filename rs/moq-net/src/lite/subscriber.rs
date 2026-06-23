@@ -448,6 +448,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let broadcast = BroadcastInfo {
 			hops,
 			epoch: BroadcastInfo::epoch_from_wire(epoch),
+			..Default::default()
 		}
 		.produce();
 
@@ -506,6 +507,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let broadcast = BroadcastInfo {
 			hops,
 			epoch: BroadcastInfo::epoch_from_wire(epoch),
+			..Default::default()
 		}
 		.produce();
 		let dynamic = broadcast.dynamic();

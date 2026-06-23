@@ -1950,6 +1950,7 @@ mod tests {
 			BroadcastInfo {
 				hops,
 				epoch: BroadcastInfo::epoch_from_wire(0),
+				..Default::default()
 			}
 			.produce()
 		}

@@ -8,13 +8,16 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
 use crate::{Error, Result, Timescale};
 
-use super::{Frame, FrameConsumer, FrameProducer};
+use super::{BroadcastInfo, Frame, FrameConsumer, FrameProducer, TrackInfo};
+#[cfg(test)]
+use super::broadcast::noop_broadcast;
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
 ///
@@ -43,7 +46,7 @@ impl Group {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> GroupProducer {
-		GroupProducer::new(self, None)
+		GroupProducer::new(self, Arc::new(TrackInfo::default()), noop_broadcast())
 	}
 }
 
@@ -149,12 +152,12 @@ pub struct GroupProducer {
 	// The group header containing the sequence number.
 	info: Group,
 
-	// Parent track's negotiated timescale, used by [`Self::create_frame`] to
-	// validate per-frame timestamps before they enter the stream. `None` means
-	// frames on this group must have `Frame::timestamp = None`; `Some(scale)`
-	// requires `Frame::timestamp = Some(ts)` with `ts.scale() == scale`.
-	// Populated by [`crate::TrackProducer::create_group`] / `append_group`.
-	timescale: Option<Timescale>,
+	// Parent track's info, used by [`Self::create_frame`] to validate per-frame
+	// timestamps against the negotiated timescale before they enter the stream.
+	track: Arc<TrackInfo>,
+
+	// The broadcast this group belongs to. Each frame bumps its ingress usage sink.
+	broadcast: Arc<BroadcastInfo>,
 }
 
 impl std::ops::Deref for GroupProducer {
@@ -169,20 +172,22 @@ impl GroupProducer {
 	/// Create a group producer bound to its parent track's timescale.
 	///
 	/// Crate-private: groups are only constructed via [`crate::TrackProducer`],
-	/// which supplies the negotiated timescale. `None` means the parent track is
-	/// untimed and added frames must have `timestamp = None`; `Some(scale)`
-	/// requires every frame's `timestamp` to be `Some(ts)` with `ts.scale() == scale`.
-	pub(crate) fn new(info: Group, timescale: Option<Timescale>) -> Self {
+	/// which supplies the parent track info (for the negotiated timescale) and the
+	/// owning broadcast (for the usage sink). An untimed track requires every
+	/// frame's `timestamp` to be `None`; a timed one requires `Some(ts)` with
+	/// `ts.scale()` equal to the track's timescale.
+	pub(crate) fn new(info: Group, track: Arc<TrackInfo>, broadcast: Arc<BroadcastInfo>) -> Self {
 		Self {
 			info,
 			state: kio::Producer::default(),
-			timescale,
+			track,
+			broadcast,
 		}
 	}
 
 	/// The parent track's negotiated timescale, or `None` for untimed tracks.
 	pub fn timescale(&self) -> Option<Timescale> {
-		self.timescale
+		self.track.timescale
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -216,19 +221,24 @@ impl GroupProducer {
 		// Catch the contract violation here, at the model layer, so peers that
 		// downstream-encode (e.g. the lite publisher's `serve_frame`) can rely
 		// on the invariant instead of re-validating per byte.
-		match (self.timescale, frame.timestamp) {
+		match (self.track.timescale, frame.timestamp) {
 			(Some(track_scale), Some(ts)) if ts.scale() == track_scale => {}
 			(None, None) => {}
 			_ => return Err(Error::TimestampMismatch),
 		}
 
+		let size = frame.size;
 		let mut state = modify(&self.state)?;
 		if state.fin {
 			return Err(Error::Closed);
 		}
-		state.cache += frame.size;
+		state.cache += size;
 		state.frames.push_back(frame);
 		state.evict();
+		drop(state);
+
+		// Ingress: every frame written to the group bumps the producer sink.
+		self.broadcast.stats.producer.add_frame(size);
 		Ok(())
 	}
 
@@ -266,7 +276,8 @@ impl GroupProducer {
 		GroupConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			timescale: self.timescale,
+			track: self.track.clone(),
+			broadcast: self.broadcast.clone(),
 			index: 0,
 		}
 	}
@@ -291,7 +302,8 @@ impl Clone for GroupProducer {
 		Self {
 			info: self.info.clone(),
 			state: self.state.clone(),
-			timescale: self.timescale,
+			track: self.track.clone(),
+			broadcast: self.broadcast.clone(),
 		}
 	}
 }
@@ -322,9 +334,14 @@ pub struct GroupConsumer {
 	// Immutable stream state.
 	info: Group,
 
-	// Parent track's negotiated timescale, copied from the producer. Lets the
-	// wire publisher decide whether to emit per-frame timestamps for a fetched group.
-	timescale: Option<Timescale>,
+	// Parent track's info, copied from the producer. Lets the wire publisher
+	// decide whether to emit per-frame timestamps for a fetched group.
+	track: Arc<TrackInfo>,
+
+	// The broadcast this group is delivered through. Each frame read bumps its
+	// egress usage sink. The owning `TrackSubscriber` stamps the consuming
+	// session's sink here before delivery.
+	broadcast: Arc<BroadcastInfo>,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -342,7 +359,18 @@ impl std::ops::Deref for GroupConsumer {
 impl GroupConsumer {
 	/// The parent track's negotiated timescale, or `None` for untimed tracks.
 	pub fn timescale(&self) -> Option<Timescale> {
-		self.timescale
+		self.track.timescale
+	}
+
+	/// Stamp the egress usage sink (and shared track info) onto this consumer, so
+	/// frames read from it are metered against the consuming session. Used by
+	/// [`crate::TrackSubscriber`] when delivering a group.
+	pub(crate) fn set_broadcast(&mut self, broadcast: Arc<BroadcastInfo>) {
+		self.broadcast = broadcast;
+	}
+
+	pub(crate) fn set_track(&mut self, track: Arc<TrackInfo>) {
+		self.track = track;
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -385,6 +413,7 @@ impl GroupConsumer {
 		};
 
 		self.index += 1;
+		self.broadcast.stats.consumer.add_frame(frame.size);
 		Poll::Ready(Ok(Some(frame)))
 	}
 
@@ -394,9 +423,11 @@ impl GroupConsumer {
 			return Poll::Ready(Ok(None));
 		};
 
+		let size = frame.size;
 		let data = ready!(frame.poll_read_all(waiter))?;
 		self.index += 1;
 
+		self.broadcast.stats.consumer.add_frame(size);
 		Poll::Ready(Ok(Some(data)))
 	}
 
@@ -411,9 +442,11 @@ impl GroupConsumer {
 			return Poll::Ready(Ok(None));
 		};
 
+		let size = frame.size;
 		let data = ready!(frame.poll_read_all_chunks(waiter))?;
 		self.index += 1;
 
+		self.broadcast.stats.consumer.add_frame(size);
 		Poll::Ready(Ok(Some(data)))
 	}
 
@@ -697,7 +730,7 @@ mod test {
 	fn append_frame_rejects_timestamp_on_untimed_group() {
 		use crate::Timestamp;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, None);
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Arc::new(TrackInfo::default()), noop_broadcast());
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
@@ -710,7 +743,11 @@ mod test {
 	fn append_frame_rejects_missing_timestamp_on_timed_group() {
 		use crate::Timescale;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(
+			Group { sequence: 0 },
+			Arc::new(TrackInfo::default().with_timescale(Timescale::MICRO)),
+			noop_broadcast(),
+		);
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
@@ -723,7 +760,11 @@ mod test {
 	fn append_frame_rejects_scale_mismatch() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(
+			Group { sequence: 0 },
+			Arc::new(TrackInfo::default().with_timescale(Timescale::MICRO)),
+			noop_broadcast(),
+		);
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
@@ -736,7 +777,11 @@ mod test {
 	fn append_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(
+			Group { sequence: 0 },
+			Arc::new(TrackInfo::default().with_timescale(Timescale::MICRO)),
+			noop_broadcast(),
+		);
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),

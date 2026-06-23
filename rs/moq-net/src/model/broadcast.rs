@@ -1,13 +1,23 @@
 use std::{
 	collections::{HashMap, VecDeque, hash_map},
-	sync::Arc,
+	sync::{Arc, LazyLock},
 	task::{Poll, ready},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
-use super::{OriginList, TrackInfo};
+use super::{BroadcastStats, OriginList, TrackInfo};
+
+/// Shared no-op broadcast metadata for tracks created outside a broadcast.
+///
+/// A standalone [`TrackProducer::new`] track has no broadcast to inherit from, so
+/// it points at this default instance; its usage sinks have no reader, so bumping
+/// them is harmless. Shared so a fresh standalone track is a cheap `Arc` clone.
+pub(crate) fn noop_broadcast() -> Arc<BroadcastInfo> {
+	static NOOP: LazyLock<Arc<BroadcastInfo>> = LazyLock::new(|| Arc::new(BroadcastInfo::default()));
+	NOOP.clone()
+}
 
 /// Wall-clock base for the broadcast epoch: 2020-01-01T00:00:00 UTC, expressed as
 /// seconds since the Unix epoch. The wire carries milliseconds since this base
@@ -32,6 +42,13 @@ pub struct BroadcastInfo {
 	/// created). Origin-assigned and forwarded unchanged by relays. On the wire
 	/// (ANNOUNCE_BROADCAST, lite-05+) it is encoded as milliseconds since 2020-01-01 UTC.
 	pub epoch: SystemTime,
+
+	/// Usage sinks for this broadcast, carried immutably to every track, group,
+	/// and frame. The ingress sink is baked in by the publisher at construction;
+	/// the egress sink is stamped per consuming session by the origin. Defaults to
+	/// unreferenced no-op sinks, so a broadcast is unmetered unless a stats layer
+	/// supplies them.
+	pub stats: BroadcastStats,
 }
 
 impl Default for BroadcastInfo {
@@ -40,6 +57,7 @@ impl Default for BroadcastInfo {
 			hops: OriginList::new(),
 			// A fresh broadcast instance is stamped with the current wall clock.
 			epoch: SystemTime::now(),
+			stats: BroadcastStats::default(),
 		}
 	}
 }
@@ -133,7 +151,7 @@ impl BroadcastState {
 /// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Producer<BroadcastState>,
 }
 
@@ -141,7 +159,7 @@ impl BroadcastProducer {
 	/// Create a producer for the given broadcast metadata. Prefer [`BroadcastInfo::produce`].
 	pub fn new(info: BroadcastInfo) -> Self {
 		Self {
-			info,
+			info: Arc::new(info),
 			state: Default::default(),
 		}
 	}
@@ -179,7 +197,7 @@ impl BroadcastProducer {
 		info: impl Into<Option<TrackInfo>>,
 	) -> Result<TrackProducer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = TrackProducer::new(name, info);
+		let track = TrackProducer::for_broadcast(name, info, self.info.clone());
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())?;
 		drop(state);
@@ -194,7 +212,7 @@ impl BroadcastProducer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`BroadcastDynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
-		let request = TrackRequest::new(name);
+		let request = TrackRequest::for_broadcast(name, self.info.clone());
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(request.weak())?;
 		drop(state);
@@ -265,7 +283,7 @@ impl BroadcastProducer {
 /// [`TrackRequest::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 pub struct BroadcastDynamic {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Producer<BroadcastState>,
 }
 
@@ -287,7 +305,7 @@ impl Clone for BroadcastDynamic {
 }
 
 impl BroadcastDynamic {
-	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>) -> Self {
+	fn new(info: Arc<BroadcastInfo>, state: kio::Producer<BroadcastState>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
@@ -388,7 +406,7 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Consumer<BroadcastState>,
 }
 
@@ -408,7 +426,11 @@ impl BroadcastConsumer {
 		// Reuse a live producer if one is already publishing the track.
 		if let Some(weak) = state.tracks.get(name) {
 			if !weak.is_closed() {
-				return Ok(weak.consume());
+				let mut consumer = weak.consume();
+				// Attribute egress to this consuming session, not whoever produced
+				// or first requested the track.
+				consumer.set_broadcast(self.info.clone());
+				return Ok(consumer);
 			}
 			// Drop the stale entry and fall through to a fresh request.
 			state.tracks.remove(name);
@@ -416,7 +438,9 @@ impl BroadcastConsumer {
 
 		if let Some(pending) = state.requests.get_mut(name) {
 			// Coalesce onto an in-flight request for the same name.
-			return Ok(pending.consume());
+			let mut consumer = pending.consume();
+			consumer.set_broadcast(self.info.clone());
+			return Ok(consumer);
 		}
 
 		if state.dynamic == 0 {
@@ -424,9 +448,10 @@ impl BroadcastConsumer {
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
-		// requests map, and the FIFO order.
+		// requests map, and the FIFO order. The request carries this broadcast's
+		// info so the accepted producer meters ingress and this consumer meters egress.
 		let name: Arc<str> = name.into();
-		let request = TrackRequest::new(name.clone());
+		let request = TrackRequest::for_broadcast(name.clone(), self.info.clone());
 		let consumer = request.consume();
 
 		state.requests.insert(name.clone(), request);

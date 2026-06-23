@@ -538,8 +538,8 @@ impl StatsHandle {
 	/// Paths under the aggregator's configured `prefix` return an empty handle
 	/// whose bumps are no-ops. This keeps stats traffic from feeding back into
 	/// the aggregator.
-	pub fn broadcast(&self, path: impl AsPath) -> BroadcastStats {
-		BroadcastStats {
+	pub fn broadcast(&self, path: impl AsPath) -> BroadcastHandle {
+		BroadcastHandle {
 			entry: self.stats.entry(path),
 			tier: self.tier,
 		}
@@ -583,12 +583,12 @@ impl Default for StatsHandle {
 /// [`Self::subscriber_track`] when the broadcast's lifetime is tracked
 /// elsewhere.
 #[derive(Clone)]
-pub struct BroadcastStats {
+pub struct BroadcastHandle {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
 }
 
-impl BroadcastStats {
+impl BroadcastHandle {
 	/// True if this handle has no underlying entry (path was under the
 	/// aggregator's own prefix, or stats are disabled). All bumps through an
 	/// empty handle are no-ops.
@@ -808,7 +808,7 @@ impl Drop for SessionStats {
 	}
 }
 
-/// RAII broadcast guard for the publisher role. See [`BroadcastStats::publisher`].
+/// RAII broadcast guard for the publisher role. See [`BroadcastHandle::publisher`].
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct PublisherStats {
 	entry: Option<Arc<BroadcastEntry>>,
@@ -819,7 +819,7 @@ impl PublisherStats {
 	/// Open a track-subscription guard. Bumps `subscriptions` on construction
 	/// and `subscriptions_closed` on drop.
 	pub fn track(&self, name: &str) -> PublisherTrack {
-		BroadcastStats {
+		BroadcastHandle {
 			entry: self.entry.clone(),
 			tier: self.tier,
 		}
@@ -840,7 +840,7 @@ impl Drop for PublisherStats {
 	}
 }
 
-/// RAII broadcast guard for the subscriber role. See [`BroadcastStats::subscriber`].
+/// RAII broadcast guard for the subscriber role. See [`BroadcastHandle::subscriber`].
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct SubscriberStats {
 	entry: Option<Arc<BroadcastEntry>>,
@@ -850,7 +850,7 @@ pub struct SubscriberStats {
 impl SubscriberStats {
 	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
 	pub fn track(&self, name: &str) -> SubscriberTrack {
-		BroadcastStats {
+		BroadcastHandle {
 			entry: self.entry.clone(),
 			tier: self.tier,
 		}
@@ -1136,7 +1136,7 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		// publisher/subscriber/track guard remains, so every open counter
 		// has caught up to its `*_closed` counterpart and no traffic can
 		// flow. We can't key this on the counters directly: a held but idle
-		// `BroadcastStats` (all counters equal) must stay so a later bump
+		// `BroadcastHandle` (all counters equal) must stay so a later bump
 		// isn't lost on an orphaned `Arc`. Then drop local state for any
 		// path that left the map. We already emitted each removed entry's
 		// final snapshot above, so nothing is lost.
