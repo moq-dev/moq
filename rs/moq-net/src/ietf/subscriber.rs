@@ -60,10 +60,6 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	origin: OriginProducer,
 	control: Control,
 	stats: StatsHandle,
-	/// Per-session ingress broadcast-subscription tracker. Each upstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
-	/// distinct upstream sessions feeding each broadcast.
-	broadcasts: crate::SessionBroadcasts,
 	// A random per-connection origin stamped into the hop chain of every
 	// broadcast. moq-transport never carries hop ids on the wire, so each
 	// upstream session needs a stable, unique identity in the hop list for two
@@ -76,13 +72,11 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn new(session: S, origin: OriginProducer, control: Control, stats: StatsHandle, version: Version) -> Self {
-		let broadcasts = stats.subscriber_broadcasts();
 		Self {
 			session,
 			origin,
 			control,
 			stats,
-			broadcasts,
 			session_origin: crate::Origin::random(),
 			state: Default::default(),
 			version,
@@ -268,11 +262,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let res = self.write_publish_ok(&mut stream, &msg).await;
 
 		if res.is_ok() {
-			// PUBLISH is the peer feeding us a broadcast, so count this session as
-			// an active upstream feed for the lifetime of the publish. The guard
-			// drops (releasing `broadcasts_closed`) when the stream closes below.
-			let abs = self.origin.absolute(&msg.track_namespace).to_owned();
-			let _broadcast_sub = self.broadcasts.subscribe(&abs);
+			// PUBLISH is the peer feeding us a broadcast; the model counts this
+			// session as a live publisher via the producer tokens on the tracks it
+			// serves into the broadcast.
 
 			// Wait for PublishDone or stream close
 			let _ = stream.reader.closed().await;
@@ -662,10 +654,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		// Upstream confirmed (SubscribeOk), so this session is now actively feeding
-		// the broadcast: take the `broadcasts` sentinel for the subscription's
-		// lifetime. It drops (releasing `broadcasts_closed`) when this fn returns.
-		let _broadcast_sub = self.broadcasts.subscribe(&abs);
+		// Upstream confirmed (SubscribeOk): the model counts this session as a live
+		// publisher via the producer token on the track it feeds the broadcast.
 
 		tokio::select! {
 			_ = track.unused() => {

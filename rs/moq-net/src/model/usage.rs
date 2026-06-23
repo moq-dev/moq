@@ -9,7 +9,7 @@
 //! egress ([`BroadcastStats::consumer`]) one.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Cumulative usage counters for one direction of a broadcast.
 ///
@@ -40,8 +40,6 @@ impl Usage {
 	}
 
 	/// Record a handle opening (the live count goes up by one).
-	// Wired by the model's live viewer/publisher counting (a later phase).
-	#[allow(dead_code)]
 	pub(crate) fn open(&self) {
 		self.opened.fetch_add(1, Ordering::Relaxed);
 	}
@@ -50,7 +48,6 @@ impl Usage {
 	///
 	/// `Release` so the matching `Acquire` load of `closed` in [`Self::closed`]
 	/// transitively publishes the earlier `open` bump to the reader.
-	#[allow(dead_code)]
 	pub(crate) fn close(&self) {
 		self.closed.fetch_add(1, Ordering::Release);
 	}
@@ -82,6 +79,67 @@ impl Usage {
 	/// with the `Release` store on close.
 	pub fn closed(&self) -> u64 {
 		self.closed.load(Ordering::Acquire)
+	}
+}
+
+/// Liveness refcount for a broadcast handle (viewers on the consumer side,
+/// publishers on the producer side).
+///
+/// While at least one [`LiveToken`] is outstanding the handle counts as one live
+/// viewer/publisher: the `0 -> 1` transition bumps [`Usage::open`] and the last
+/// `1 -> 0` drop bumps [`Usage::close`], so `opened - closed` is the live count.
+/// Clones of a handle share one `Live`, so they are a single logical
+/// viewer/publisher.
+#[derive(Debug)]
+pub(crate) struct Live {
+	usage: Arc<Usage>,
+	count: AtomicUsize,
+}
+
+impl Default for Live {
+	/// A no-op refcount over an unreferenced sink, for default-constructed state
+	/// that is overwritten with a real sink before use.
+	fn default() -> Self {
+		Self {
+			usage: Arc::default(),
+			count: AtomicUsize::new(0),
+		}
+	}
+}
+
+impl Live {
+	/// Create a refcount that bumps `usage`'s lifecycle counters.
+	pub(crate) fn new(usage: Arc<Usage>) -> Arc<Self> {
+		Arc::new(Self {
+			usage,
+			count: AtomicUsize::new(0),
+		})
+	}
+
+	/// Take a token, bumping `opened` on the `0 -> 1` transition.
+	pub(crate) fn enter(self: &Arc<Self>) -> LiveToken {
+		if self.count.fetch_add(1, Ordering::AcqRel) == 0 {
+			self.usage.open();
+		}
+		LiveToken(self.clone())
+	}
+}
+
+/// RAII guard from [`Live::enter`]. The last token to drop bumps `close`.
+#[derive(Debug)]
+pub(crate) struct LiveToken(Arc<Live>);
+
+impl Clone for LiveToken {
+	fn clone(&self) -> Self {
+		self.0.enter()
+	}
+}
+
+impl Drop for LiveToken {
+	fn drop(&mut self) {
+		if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+			self.0.usage.close();
+		}
 	}
 }
 

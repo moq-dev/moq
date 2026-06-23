@@ -50,10 +50,6 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: OriginProducer,
 	stats: StatsHandle,
-	/// Per-session ingress broadcast-subscription tracker. Each upstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
-	/// distinct upstream sessions feeding each broadcast.
-	broadcasts: crate::SessionBroadcasts,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
@@ -93,12 +89,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = *config.origin;
-		let broadcasts = config.stats.subscriber_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
-			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: crate::Origin::random(),
@@ -769,8 +763,6 @@ struct SubStream<S: web_transport_trait::Session> {
 	max_latency: Duration,
 	start_group: Option<u64>,
 	priority: u8,
-	/// Per-(session, broadcast) viewer sentinel, held for the subscription's life.
-	_broadcast_sub: crate::BroadcastSubscription,
 }
 
 enum Sub<S: web_transport_trait::Session> {
@@ -1158,11 +1150,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			producer
 		};
 
-		// This session is now actively feeding the broadcast, so take the per-(session,
-		// broadcast) viewer sentinel for the subscription's life.
-		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
-		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
-
+		// The accepted producer holds a live-publisher token (taken when the
+		// broadcast served this track request), so the model counts this session as
+		// feeding the broadcast for the producer's lifetime.
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -1181,7 +1171,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: subscription.stale,
 			start_group: subscription.group_start,
 			priority: subscription.priority,
-			_broadcast_sub: broadcast_sub,
 		});
 
 		Ok(())
@@ -1286,6 +1275,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 			Track::Pending(request) => request.reject(err),
 		}
-		// Dropping `sub` releases the BroadcastSubscription viewer sentinel.
+		// Dropping the producer releases its live-publisher token.
 	}
 }

@@ -31,10 +31,6 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
 	stats: MoqStats,
-	/// Per-session egress broadcast-subscription tracker. Each downstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
-	/// the distinct sessions (viewers) watching each broadcast.
-	broadcasts: crate::SessionBroadcasts,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
@@ -46,12 +42,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
 		let self_origin = *config.origin;
-		let broadcasts = config.stats.publisher_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
-			broadcasts,
 			self_origin,
 			priority: Default::default(),
 			version: config.version,
@@ -494,10 +488,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// handler (or resolves to an error when there is none).
 		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
-		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
-		// broadcast) `broadcasts` sentinel that counts viewers is taken inside
-		// `run_subscribe`, only once the subscription is validated and active, so
-		// a stale/invalid SUBSCRIBE isn't counted as a viewer.
+		// Per-track subscription guard (bumps `subscriptions`). The viewer count
+		// (`broadcasts`) is owned by the model: `broadcast.track()` hands the
+		// subscription a live-viewer token for its lifetime.
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
 		if let Err(err) = Self::run_subscribe(
@@ -506,7 +499,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			&subscribe,
 			broadcast,
 			self.priority.clone(),
-			(track_stats, self.broadcasts.clone(), absolute.clone()),
+			track_stats,
 			self.version,
 		)
 		.await
@@ -534,13 +527,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		broadcast: kio::Pending<crate::BroadcastRequested>,
 		priority: PriorityQueue,
-		// The track guard (bumps `subscriptions`), the per-session broadcast
-		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
-		// below, after the subscription is validated, and held for its lifetime.
-		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
+		// The track guard, bumping `subscriptions` for its lifetime. The viewer
+		// count is owned by the model (see the caller).
+		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let (track_stats, broadcasts, absolute) = stats;
 		let subscription = crate::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
@@ -574,10 +565,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		} else {
 			None
 		};
-
-		// Subscription is now active: count this session as a viewer of the
-		// broadcast. Dropping this guard (subscription end) releases it.
-		let _broadcast_sub = broadcasts.subscribe(&absolute);
 
 		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties live
 		// in TRACK_INFO, and the resolved range arrives as SUBSCRIBE_START/END emitted

@@ -15,7 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
-use super::{BroadcastInfo, Fetch, Group, GroupConsumer, GroupProducer, broadcast::noop_broadcast};
+use super::{BroadcastInfo, Fetch, Group, GroupConsumer, GroupProducer, broadcast::noop_broadcast, usage::LiveToken};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -492,6 +492,10 @@ pub struct TrackProducer {
 	// The broadcast this track belongs to. Groups created here bump its ingress
 	// usage sink. A standalone track gets a shared no-op broadcast.
 	broadcast: Arc<BroadcastInfo>,
+
+	// Live-publisher token: holding it (or any clone) keeps the broadcast's
+	// publisher count at >= 1. `None` for a standalone track.
+	_publisher: Option<LiveToken>,
 }
 
 impl TrackProducer {
@@ -501,15 +505,17 @@ impl TrackProducer {
 	/// shared no-op sink. Use [`crate::BroadcastProducer::create_track`] to make a
 	/// track whose usage is metered against its broadcast.
 	pub fn new(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> Self {
-		Self::for_broadcast(name, info, noop_broadcast())
+		Self::for_broadcast(name, info, noop_broadcast(), None)
 	}
 
 	/// Build a producer for a track that belongs to `broadcast`, inheriting its
-	/// ingress usage sink.
+	/// ingress usage sink. `publisher` counts the track toward the broadcast's
+	/// live-publisher count.
 	pub(crate) fn for_broadcast(
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<TrackInfo>>,
 		broadcast: Arc<BroadcastInfo>,
+		publisher: Option<LiveToken>,
 	) -> Self {
 		let info = info.into().unwrap_or_default();
 		Self {
@@ -521,6 +527,7 @@ impl TrackProducer {
 			}),
 			prev_subscription: None,
 			broadcast,
+			_publisher: publisher,
 		}
 	}
 
@@ -706,6 +713,7 @@ impl TrackProducer {
 			name: self.name.clone(),
 			state: self.state.consume(),
 			broadcast: self.broadcast.clone(),
+			_viewer: None,
 		}
 	}
 
@@ -734,6 +742,8 @@ impl TrackProducer {
 			next_sequence: 0,
 			end_sequence: None,
 			broadcast: self.broadcast.clone(),
+			// In-process producer subscription: not an external viewer.
+			_viewer: None,
 		}
 	}
 
@@ -944,12 +954,13 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
-		// The egress sink is supplied by the consuming `BroadcastConsumer`, which
-		// overrides this no-op default via `set_broadcast`.
+		// The egress sink and viewer token are supplied by the consuming
+		// `BroadcastConsumer` via `set_broadcast` / `set_viewer`.
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
 			broadcast: noop_broadcast(),
+			_viewer: None,
 		}
 	}
 
@@ -1017,6 +1028,11 @@ pub struct TrackConsumer {
 	// The broadcast this consumer reads through, carrying the egress usage sink
 	// that delivered groups/frames bump. Stamped by the owning `BroadcastConsumer`.
 	broadcast: Arc<BroadcastInfo>,
+
+	// Live-viewer token, set by `BroadcastConsumer::track`. Holding it (or any
+	// clone) keeps the broadcast's viewer count at >= 1; dropping the last one
+	// records the viewer as gone. `None` for standalone/internal track handles.
+	_viewer: Option<LiveToken>,
 }
 
 impl TrackConsumer {
@@ -1039,6 +1055,11 @@ impl TrackConsumer {
 		self.broadcast = broadcast;
 	}
 
+	/// Attach the live-viewer token (see [`crate::BroadcastConsumer::track`]).
+	pub(crate) fn set_viewer(&mut self, token: LiveToken) {
+		self._viewer = Some(token);
+	}
+
 	/// Open a live subscription.
 	///
 	/// Registers the subscription on the track and returns a [`kio::Pending`] that resolves to the
@@ -1058,6 +1079,9 @@ impl TrackConsumer {
 			state: self.state.clone(),
 			subscription,
 			broadcast: self.broadcast.clone(),
+			// Keep this consumer counted as a viewer for the subscription's
+			// lifetime, even after the `TrackConsumer` handle is dropped.
+			viewer: self._viewer.clone(),
 		})
 	}
 
@@ -1117,6 +1141,7 @@ pub struct TrackSubscribe {
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
 	broadcast: Arc<BroadcastInfo>,
+	viewer: Option<LiveToken>,
 }
 
 impl TrackSubscribe {
@@ -1135,6 +1160,7 @@ impl TrackSubscribe {
 			next_sequence: 0,
 			end_sequence: None,
 			broadcast: self.broadcast.clone(),
+			_viewer: self.viewer.clone(),
 		}))
 	}
 
@@ -1271,6 +1297,10 @@ pub struct TrackSubscriber {
 	// The broadcast this subscriber reads through, carrying the egress usage
 	// sink. Stamped onto each delivered group so its frames bump the same sink.
 	broadcast: Arc<BroadcastInfo>,
+
+	// Live-viewer token held for the subscription's lifetime (see
+	// `BroadcastConsumer::track`). `None` for an in-process `TrackProducer::subscribe`.
+	_viewer: Option<LiveToken>,
 
 	subscription: kio::Producer<Subscription>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
@@ -1496,6 +1526,10 @@ pub struct TrackRequest {
 	// The broadcast this request belongs to. Threaded to the accepted
 	// `TrackProducer` (ingress sink) and to consumers it hands out.
 	broadcast: Arc<BroadcastInfo>,
+
+	// Live-publisher token, set when the request is reserved or served. Moved to
+	// the `TrackProducer` on accept so the broadcast counts as a live publisher.
+	publisher: Option<LiveToken>,
 }
 
 impl TrackRequest {
@@ -1518,7 +1552,13 @@ impl TrackRequest {
 			prev_subscription: None,
 			_dynamic: dynamic,
 			broadcast,
+			publisher: None,
 		}
+	}
+
+	/// Count the served track toward the broadcast's live-publisher count.
+	pub(crate) fn set_publisher(&mut self, token: LiveToken) {
+		self.publisher = Some(token);
 	}
 
 	/// The requested track name.
@@ -1531,6 +1571,7 @@ impl TrackRequest {
 			name: self.name.clone(),
 			state: self.state.consume(),
 			broadcast: self.broadcast.clone(),
+			_viewer: None,
 		}
 	}
 
@@ -1558,6 +1599,7 @@ impl TrackRequest {
 			state: self.state,
 			prev_subscription: None,
 			broadcast: self.broadcast,
+			_publisher: self.publisher,
 		}
 	}
 
