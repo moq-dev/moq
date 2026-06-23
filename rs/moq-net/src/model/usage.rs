@@ -78,7 +78,8 @@ impl Usage {
 		self.opened.load(Ordering::Relaxed)
 	}
 
-	/// Cumulative number of handles closed. Loaded with `Acquire`; see [`Self::close`].
+	/// Cumulative number of handles closed. Loaded with `Acquire` so it pairs
+	/// with the `Release` store on close.
 	pub fn closed(&self) -> u64 {
 		self.closed.load(Ordering::Acquire)
 	}
