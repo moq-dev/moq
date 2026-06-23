@@ -30,8 +30,9 @@ classifiers = [
 ]
 # Compatible-release pin: floats to the latest 0.2.x moq-ffi patch without a
 # wrapper re-release. A moq-ffi minor bump (0.3) is the only thing that forces
-# bumping this constraint.
-dependencies = ["moq-ffi ~= 0.2.16"]
+# bumping this constraint. Floor is 0.2.24, the first release exposing
+# MoqAnnouncement.hops() that Announcement.hops depends on.
+dependencies = ["moq-ffi ~= 0.2.24"]
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"
