@@ -832,6 +832,19 @@ impl PublisherStats {
 		}
 		.publisher_track(name)
 	}
+
+	/// A [`Meter`] over this broadcast's shared egress payload counters, to attach
+	/// to a model [`crate::BroadcastConsumer`] (via `set_meter`) so every track it
+	/// subscribes to is counted. Hold this guard while metering: it keeps the
+	/// broadcast's counters alive for the snapshot task. No-op for a disabled
+	/// aggregator. A gateway serving the origin out over an external protocol uses
+	/// this to bill egress without touching each track.
+	pub fn meter(&self) -> Meter {
+		match &self.entry {
+			Some(entry) => entry.publisher[self.tier.idx()].meter(),
+			None => Meter::default(),
+		}
+	}
 }
 
 impl Drop for PublisherStats {
@@ -862,6 +875,19 @@ impl SubscriberStats {
 			tier: self.tier,
 		}
 		.subscriber_track(name)
+	}
+
+	/// A [`Meter`] over this broadcast's shared ingress payload counters, to attach
+	/// to a model [`crate::BroadcastProducer`] (via `set_meter`) so every track it
+	/// creates is counted. Hold this guard while metering: it keeps the broadcast's
+	/// counters alive for the snapshot task. No-op for a disabled aggregator. A
+	/// gateway publishing an external protocol's media into the origin uses this to
+	/// bill ingress without touching each track.
+	pub fn meter(&self) -> Meter {
+		match &self.entry {
+			Some(entry) => entry.subscriber[self.tier.idx()].meter(),
+			None => Meter::default(),
+		}
 	}
 }
 
@@ -1313,6 +1339,34 @@ mod tests {
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
 		assert_eq!(e1.publisher[Tier::External.idx()].usage.bytes(), 100);
 		assert_eq!(e2.publisher[Tier::External.idx()].usage.bytes(), 7);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn broadcast_meter_counts_ingress_via_producer() {
+		// The gateway pattern: attach a broadcast-scoped meter to a model
+		// BroadcastProducer once; tracks created on it (here directly, in practice
+		// inside a muxer) bump the same (broadcast, subscriber, tier) usage the
+		// snapshot reads. The held guard keeps the entry alive.
+		use crate::BroadcastInfo;
+
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let guard = stats.tier(Tier::External).broadcast("demo/bbb").subscriber();
+
+		let mut broadcast = BroadcastInfo::new().produce();
+		broadcast.set_meter(guard.meter());
+		let mut video = broadcast.create_track("video", None).unwrap();
+		video
+			.append_group()
+			.unwrap()
+			.write_frame(bytes::Bytes::from_static(b"hello"))
+			.unwrap(); // 1 group, 1 frame, 5 bytes
+
+		let entries = stats.shared().entries.lock();
+		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
+		let usage = &entry.subscriber[Tier::External.idx()].usage;
+		assert_eq!((usage.groups(), usage.frames(), usage.bytes()), (1, 1, 5));
+		// Ingress never touches the egress (publisher) side.
+		assert_eq!(entry.publisher[Tier::External.idx()].usage.bytes(), 0);
 	}
 
 	#[tokio::test(start_paused = true)]

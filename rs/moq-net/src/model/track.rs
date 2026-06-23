@@ -696,6 +696,9 @@ impl TrackProducer {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
+			// No-op unless overridden via `with_meter`; only the broadcast egress
+			// path attaches a real meter.
+			meter: Meter::default(),
 		}
 	}
 
@@ -937,6 +940,9 @@ impl TrackWeak {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
+			// No-op unless overridden via `with_meter`; only the broadcast egress
+			// path attaches a real meter.
+			meter: Meter::default(),
 		}
 	}
 
@@ -1000,6 +1006,12 @@ impl TrackDemand {
 pub struct TrackConsumer {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
+
+	// Egress usage meter, threaded onto every [`TrackSubscriber`] this handle
+	// opens. Default is a no-op; [`crate::BroadcastConsumer::track`] injects the
+	// broadcast's egress meter so subscriptions opened deep inside a muxer
+	// (which only ever sees this consumer) still count per-viewer.
+	meter: Meter,
 }
 
 impl TrackConsumer {
@@ -1015,6 +1027,14 @@ impl TrackConsumer {
 		}
 	}
 
+	/// Return this consumer with an egress usage meter attached, propagated onto
+	/// every subscription it opens. Used by [`crate::BroadcastConsumer::track`] to
+	/// hand the broadcast's egress meter down to muxer-internal subscribes.
+	pub(crate) fn with_meter(mut self, meter: Meter) -> Self {
+		self.meter = meter;
+		self
+	}
+
 	/// Open a live subscription.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Result<kio::Pending<TrackSubscribe>> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
@@ -1028,6 +1048,7 @@ impl TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
+			meter: self.meter.clone(),
 		}))
 	}
 
@@ -1087,6 +1108,9 @@ pub struct TrackSubscribe {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
+	/// Egress meter inherited from the [`TrackConsumer`], moved onto the
+	/// [`TrackSubscriber`] once it resolves.
+	meter: Meter,
 }
 
 impl TrackSubscribe {
@@ -1104,7 +1128,9 @@ impl TrackSubscribe {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
-			meter: Meter::default(),
+			// Inherited from the TrackConsumer (the broadcast egress meter, or a
+			// no-op). The lite/IETF publisher overrides it via `set_meter`.
+			meter: self.meter.clone(),
 		}))
 	}
 
@@ -1489,6 +1515,9 @@ impl TrackRequest {
 		TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
+			// No-op unless overridden via `with_meter`; only the broadcast egress
+			// path attaches a real meter.
+			meter: Meter::default(),
 		}
 	}
 

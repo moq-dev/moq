@@ -5,7 +5,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
+use crate::{Error, Meter, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
 use super::{OriginList, TrackInfo};
 
@@ -135,6 +135,12 @@ impl BroadcastState {
 pub struct BroadcastProducer {
 	info: BroadcastInfo,
 	state: kio::Producer<BroadcastState>,
+
+	// Ingress usage meter, propagated into every track this producer creates.
+	// A no-op until a stats sink is attached via [`Self::set_meter`]. Lets a
+	// gateway (moq-srt, moq-rtc, ...) meter a whole broadcast with one call even
+	// though the tracks themselves are created deep inside a [`moq_mux`] importer.
+	meter: Meter,
 }
 
 impl BroadcastProducer {
@@ -143,11 +149,22 @@ impl BroadcastProducer {
 		Self {
 			info,
 			state: Default::default(),
+			meter: Meter::default(),
 		}
 	}
 
 	pub fn info(&self) -> &BroadcastInfo {
 		&self.info
+	}
+
+	/// Attach an ingress usage meter, recording groups/frames/bytes for every
+	/// track created on this broadcast from now on (including tracks created
+	/// inside a [`moq_mux`](https://docs.rs/moq-mux) importer that only holds this
+	/// producer). Call once with a per-broadcast sink; tracks created before this
+	/// call are not retro-attached. A gateway publishing an external protocol's
+	/// media into the origin uses this to bill ingress uniformly.
+	pub fn set_meter(&mut self, meter: Meter) {
+		self.meter = meter;
 	}
 
 	/// Insert a track into the lookup, returning an error on duplicate.
@@ -179,7 +196,11 @@ impl BroadcastProducer {
 		info: impl Into<Option<TrackInfo>>,
 	) -> Result<TrackProducer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = TrackProducer::new(name, info);
+		let mut track = TrackProducer::new(name, info);
+		// Inherit the broadcast's ingress meter so per-track usage is counted
+		// without the caller touching each track (covers `unique_track`, which
+		// routes through here, and muxer-internal track creation).
+		track.set_meter(self.meter.clone());
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())?;
 		drop(state);
@@ -233,6 +254,8 @@ impl BroadcastProducer {
 		BroadcastConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			// Egress metering is opt-in per consumer; attach via `set_meter`.
+			meter: Meter::default(),
 		}
 	}
 
@@ -338,6 +361,8 @@ impl BroadcastDynamic {
 		BroadcastConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			// Egress metering is opt-in per consumer; attach via `set_meter`.
+			meter: Meter::default(),
 		}
 	}
 
@@ -390,11 +415,27 @@ impl BroadcastDynamic {
 pub struct BroadcastConsumer {
 	info: BroadcastInfo,
 	state: kio::Consumer<BroadcastState>,
+
+	// Egress usage meter, propagated onto every track subscription opened through
+	// this consumer (and its clones). A no-op until attached via [`Self::set_meter`].
+	// Per-consumer, so two viewers of one broadcast each carry their own handle to
+	// the same shared sink and egress counts per-viewer.
+	meter: Meter,
 }
 
 impl BroadcastConsumer {
 	pub fn info(&self) -> &BroadcastInfo {
 		&self.info
+	}
+
+	/// Attach an egress usage meter, recording groups/frames/bytes for every track
+	/// subscription opened through this consumer from now on (including
+	/// subscriptions opened inside a [`moq_mux`](https://docs.rs/moq-mux) exporter
+	/// that only holds this consumer). A gateway serving the origin's media out over
+	/// an external protocol uses this to bill egress uniformly. Clones made after
+	/// this call inherit the meter; pre-existing clones do not.
+	pub fn set_meter(&mut self, meter: Meter) {
+		self.meter = meter;
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -408,7 +449,7 @@ impl BroadcastConsumer {
 		// Reuse a live producer if one is already publishing the track.
 		if let Some(weak) = state.tracks.get(name) {
 			if !weak.is_closed() {
-				return Ok(weak.consume());
+				return Ok(weak.consume().with_meter(self.meter.clone()));
 			}
 			// Drop the stale entry and fall through to a fresh request.
 			state.tracks.remove(name);
@@ -416,7 +457,7 @@ impl BroadcastConsumer {
 
 		if let Some(pending) = state.requests.get_mut(name) {
 			// Coalesce onto an in-flight request for the same name.
-			return Ok(pending.consume());
+			return Ok(pending.consume().with_meter(self.meter.clone()));
 		}
 
 		if state.dynamic == 0 {
@@ -427,7 +468,7 @@ impl BroadcastConsumer {
 		// requests map, and the FIFO order.
 		let name: Arc<str> = name.into();
 		let request = TrackRequest::new(name.clone());
-		let consumer = request.consume();
+		let consumer = request.consume().with_meter(self.meter.clone());
 
 		state.requests.insert(name.clone(), request);
 		state.request_order.push_back(name);
@@ -478,6 +519,7 @@ impl BroadcastConsumer {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use bytes::Bytes;
 
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
 	/// a publisher accepts). Returns the pending subscription to resolve after accepting.
@@ -490,6 +532,86 @@ mod test {
 			);
 			pending
 		}};
+	}
+
+	/// An ingress meter attached to the producer propagates into every track
+	/// created afterward, so one `set_meter` bills a whole broadcast even though
+	/// the tracks (here `video`/`audio`) might be created deep inside a muxer.
+	#[tokio::test]
+	async fn producer_meter_propagates_to_created_tracks() {
+		use crate::Usage;
+
+		let counts = Arc::new(Usage::default());
+		let mut producer = BroadcastInfo::new().produce();
+		producer.set_meter(Meter::from_arc(counts.clone()));
+
+		let mut video = producer.create_track("video", None).unwrap();
+		let mut audio = producer.create_track("audio", None).unwrap();
+
+		video
+			.append_group()
+			.unwrap()
+			.write_frame(Bytes::from_static(b"hello"))
+			.unwrap(); // 5
+		audio
+			.append_group()
+			.unwrap()
+			.write_frame(Bytes::from_static(b"hi"))
+			.unwrap(); // 2
+
+		// Both tracks feed the one shared broadcast sink: 2 groups, 2 frames, 7 bytes.
+		assert_eq!((counts.groups(), counts.frames(), counts.bytes()), (2, 2, 7));
+	}
+
+	/// An egress meter attached to the consumer propagates into every track
+	/// subscription opened through it (the path a muxer's internal
+	/// `track(..).subscribe(..)` takes), and counts per-viewer: two consumer clones
+	/// over one shared sink both bill it.
+	#[tokio::test]
+	async fn consumer_meter_propagates_per_viewer() {
+		use crate::Usage;
+
+		let mut producer = BroadcastInfo::new().produce();
+		let mut video = producer.create_track("video", None).unwrap();
+
+		// One cached group, two frames, 9 bytes, ready before anyone subscribes.
+		let mut group = video.append_group().unwrap();
+		group.write_frame(Bytes::from_static(b"hello")).unwrap(); // 5
+		group.write_frame(Bytes::from_static(b"abcd")).unwrap(); // 4
+		group.finish().unwrap();
+
+		// Two viewers: each a consumer clone with its own handle to the same sink.
+		let counts = Arc::new(Usage::default());
+		let mut view_a = producer.consume();
+		view_a.set_meter(Meter::from_arc(counts.clone()));
+		let mut view_b = producer.consume();
+		view_b.set_meter(Meter::from_arc(counts.clone()));
+
+		for view in [&mut view_a, &mut view_b] {
+			let mut sub = view.track("video").unwrap().subscribe(None).unwrap().await.unwrap();
+			let mut group = sub.next_group().await.unwrap().expect("group");
+			while group.next_frame().await.unwrap().is_some() {}
+		}
+
+		// Each viewer counted the group, its two frames, and 9 bytes, so 2x overall.
+		assert_eq!((counts.groups(), counts.frames(), counts.bytes()), (2, 4, 18));
+	}
+
+	/// A consumer with no meter attached bills nothing: the default for any consumer
+	/// not wired to stats. Exercises the no-op path end to end.
+	#[tokio::test]
+	async fn consumer_without_meter_is_noop() {
+		let mut producer = BroadcastInfo::new().produce();
+		let mut video = producer.create_track("video", None).unwrap();
+		let mut group = video.append_group().unwrap();
+		group.write_frame(Bytes::from_static(b"hello")).unwrap();
+		group.finish().unwrap();
+
+		let view = producer.consume();
+		assert!(view.track("video").unwrap().subscribe(None).is_ok());
+		let mut sub = view.track("video").unwrap().subscribe(None).unwrap().await.unwrap();
+		let mut group = sub.next_group().await.unwrap().expect("group");
+		while group.next_frame().await.unwrap().is_some() {}
 	}
 
 	#[tokio::test]

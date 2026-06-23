@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
-use moq_net::{OriginConsumer, OriginProducer};
+use moq_net::{Meter, OriginConsumer, OriginProducer, StatsHandle};
 use srt_tokio::access::{
 	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
 };
@@ -50,6 +50,9 @@ pub struct Server {
 	/// Held to keep the listener (and its UDP socket) alive for the server's lifetime.
 	_listener: SrtListener,
 	incoming: SrtIncoming,
+	/// Tier-scoped usage sink, cloned onto every [`Request`] so an accepted
+	/// publish/subscribe records ingress/egress. No-op by default.
+	stats: StatsHandle,
 }
 
 impl Server {
@@ -63,7 +66,17 @@ impl Server {
 		Ok(Self {
 			_listener: listener,
 			incoming,
+			stats: StatsHandle::default(),
 		})
+	}
+
+	/// Attach a tier-scoped stats handle so accepted publishes record ingress and
+	/// accepted subscribes record egress (groups/frames/bytes), keyed by broadcast
+	/// path. Defaults to a no-op handle. Mirrors `moq_native`'s `Server::with_stats`;
+	/// an embedder passes `stats.tier(Tier::External)` for customer traffic.
+	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
+		self.stats = stats;
+		self
 	}
 
 	/// Wait for the next connection that wants to publish or subscribe.
@@ -87,6 +100,7 @@ impl Server {
 				resource,
 				stream_id,
 				peer,
+				stats: self.stats.clone(),
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -111,6 +125,8 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
+	/// Tier-scoped usage sink inherited from the [`Server`], applied at accept time.
+	stats: StatsHandle,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -193,7 +209,11 @@ impl Publish {
 	pub async fn accept(self, origin: &OriginProducer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path, socket).await
+		// Open the ingress guard (announces the broadcast on the subscriber side and
+		// keeps its counters alive); its meter rides the broadcast so every demuxed
+		// track is billed. Held until this future resolves (the connection ends).
+		let stats = self.0.stats.broadcast(path).subscriber();
+		serve_publish(origin, path, socket, stats.meter()).await
 	}
 
 	/// Reject the publish, sending the client a `Forbidden` rejection.
@@ -243,7 +263,11 @@ impl Subscribe {
 	pub async fn accept(self, origin: &OriginConsumer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
-		serve_subscribe(origin, path, socket).await
+		// Open the egress guard (publisher side, per-viewer) and keep it alive for
+		// the connection; its meter rides the broadcast consumer so every track the
+		// exporter subscribes to is billed to this viewer.
+		let stats = self.0.stats.broadcast(path).publisher();
+		serve_subscribe(origin, path, socket, stats.meter()).await
 	}
 
 	/// Reject the subscribe, sending the client a `Forbidden` rejection.
@@ -265,10 +289,10 @@ async fn reject_log(request: ConnectionRequest, reason: ServerRejectReason, peer
 }
 
 /// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
-async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket) -> Result<()> {
+async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket, meter: Meter) -> Result<()> {
 	use futures::TryStreamExt;
 
-	let mut publisher = crate::ts::Publisher::new(origin, path)?;
+	let mut publisher = crate::ts::Publisher::new(origin, path, meter)?;
 	while let Some((_instant, bytes)) = socket.try_next().await? {
 		publisher.feed(bytes)?;
 	}
@@ -282,7 +306,7 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// Waits for the broadcast to be announced (so a caller may connect before the
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket) -> Result<()> {
+async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket, meter: Meter) -> Result<()> {
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
@@ -293,7 +317,7 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 			tracing::debug!(%path, "SRT subscribe closed before its broadcast was available");
 			return Ok(());
 		}
-		subscriber = crate::ts::Subscriber::new(origin, path) => subscriber?,
+		subscriber = crate::ts::Subscriber::new(origin, path, meter) => subscriber?,
 	};
 
 	let Some(mut subscriber) = subscriber else {
