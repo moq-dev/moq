@@ -405,9 +405,12 @@ mod tests {
 			.tracks
 			.insert(section.name().to_string(), section_track);
 		let mut section_producer = Producer::new(section, Container::Legacy);
+		// bbb's first video keyframe is at 1.4 s; stamp the ancillary streams just after
+		// it so they clear the export's keyframe alignment (anything before the first
+		// keyframe is dropped on tune-in).
 		section_producer
 			.write(Frame {
-				timestamp: Timestamp::from_millis(40).unwrap(),
+				timestamp: Timestamp::from_millis(1410).unwrap(),
 				duration: None,
 				payload: bytes::Bytes::from_static(CUE),
 				keyframe: true,
@@ -432,7 +435,7 @@ mod tests {
 		let mut pes_producer = Producer::new(pes, Container::Legacy);
 		pes_producer
 			.write(Frame {
-				timestamp: Timestamp::from_millis(40).unwrap(),
+				timestamp: Timestamp::from_millis(1410).unwrap(),
 				duration: None,
 				payload: bytes::Bytes::from_static(PES_PAYLOAD),
 				keyframe: true,

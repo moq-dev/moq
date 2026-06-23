@@ -68,6 +68,18 @@ pub struct Export<E: catalog::Catalog = ()> {
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission.
 	last_psi: Option<Timestamp>,
+	/// Tune-in point: the first video keyframe's timestamp, captured when the program
+	/// tables are built. Non-video frames before it are dropped so the keyframe leads
+	/// the stream.
+	///
+	/// MPEG-TS carries the H.264/H.265 parameter sets in-band on the keyframe (unlike
+	/// RTMP/CMAF, which carry the codec config out-of-band in the header). On a
+	/// mid-stream join the audio source can start over a second before the oldest
+	/// cached video keyframe; emitting that lead audio first would bury the parameter
+	/// sets behind an audio-only preamble, and a live decoder probing the stream gives
+	/// up before it ever configures video. `None` until the tables are built, and for
+	/// programs with no video track (nothing to align to).
+	video_start: Option<Timestamp>,
 }
 
 struct Track {
@@ -180,6 +192,7 @@ impl<E: catalog::Catalog> Export<E> {
 			program_descriptors: Vec::new(),
 			psi: None,
 			last_psi: None,
+			video_start: None,
 		})
 	}
 
@@ -221,14 +234,23 @@ impl<E: catalog::Catalog> Export<E> {
 		// can't use them, and parking them would stop us polling for the keyframe
 		// that carries the parameter sets.
 		let waiting_for_header = self.psi.is_none();
+		let video_start = self.video_start;
 		for track in self.tracks.values_mut() {
 			if track.pending.is_some() || track.finished {
 				continue;
 			}
+			let is_video = matches!(track.kind, Kind::Video(_));
 			loop {
 				match track.source.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
 						if waiting_for_header && !track.source.header_ready() {
+							continue;
+						}
+						// Tune-in alignment: drop non-video frames before the first video
+						// keyframe (see `video_start`) so the in-band SPS/PPS leads the stream.
+						if let Some(start) = video_start
+							&& !is_video && frame.timestamp < start
+						{
 							continue;
 						}
 						track.pending = Some(frame);
@@ -256,15 +278,30 @@ impl<E: catalog::Catalog> Export<E> {
 				}
 				return Poll::Pending;
 			}
-			if !self.header_ready() {
-				// Still waiting on codec configs. If every track finished without
-				// producing one, the broadcast can't be muxed.
+			if !self.header_ready() || !self.video_ready() {
+				// Hold all output (tables and audio alike) until codec configs resolve
+				// and, when the program has a video rendition, its first keyframe is
+				// buffered: the stream must begin on that keyframe so the in-band
+				// parameter sets lead it. An audio-only program has nothing to wait for.
+				// If every track finished without producing a config, it can't be muxed.
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					return Poll::Ready(Ok(None));
 				}
 				return Poll::Pending;
 			}
 			self.build_psi()?;
+			// Anchor tune-in to the first video keyframe and drop any non-video frame
+			// already buffered ahead of it (see `video_start`).
+			self.video_start = self.first_video_pts();
+			if let Some(start) = self.video_start {
+				for track in self.tracks.values_mut() {
+					if !matches!(track.kind, Kind::Video(_))
+						&& track.pending.as_ref().is_some_and(|f| f.timestamp < start)
+					{
+						track.pending = None;
+					}
+				}
+			}
 		}
 
 		// 4. Emit the smallest-timestamp pending frame as a PES packet (the first
@@ -447,6 +484,28 @@ impl<E: catalog::Catalog> Export<E> {
 	/// codec config (from the catalog `description`, or built by the transform).
 	fn header_ready(&self) -> bool {
 		self.tracks.values().all(|t| t.source.header_ready())
+	}
+
+	/// Every video track has buffered its first frame (the keyframe) or finished.
+	/// The tables wait for this so the tune-in point ([`Self::video_start`]) can be
+	/// read from the keyframe before any audio is emitted ahead of it. A program
+	/// with no video track is trivially ready.
+	fn video_ready(&self) -> bool {
+		self.tracks
+			.values()
+			.filter(|t| matches!(t.kind, Kind::Video(_)))
+			.all(|t| t.pending.is_some() || t.finished)
+	}
+
+	/// The smallest timestamp among the video tracks' buffered frames: the first
+	/// video keyframe, since pre-keyframe video frames are dropped before the tables
+	/// are built. `None` when no video track has a buffered frame (audio-only program).
+	fn first_video_pts(&self) -> Option<Timestamp> {
+		self.tracks
+			.values()
+			.filter(|t| matches!(t.kind, Kind::Video(_)))
+			.filter_map(|t| t.pending.as_ref().map(|f| f.timestamp))
+			.min()
 	}
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
