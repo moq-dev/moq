@@ -670,7 +670,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
 		broadcast: kio::Pending<crate::BroadcastRequested>,
-		track_stats: crate::PublisherTrack,
+		// Held for the fetch's lifetime so it counts as one subscription; payload is
+		// metered by the model.
+		_track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
 		let broadcast = broadcast.await?;
@@ -704,7 +706,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
 		// the codec/timescale from TRACK_INFO and the group sequence from its request.
-		track_stats.group();
+		// A fetch re-serves an existing group, so the model meters its frames/bytes
+		// (via `get_frame`) but not `groups`.
 
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
 		// delta-timestamp baseline resets to 0, so the first served frame's delta is
@@ -712,15 +715,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
-			write_fetch_frame(
-				&mut stream.writer,
-				&mut frame,
-				compression,
-				timescale,
-				&mut prev_ts,
-				&track_stats,
-			)
-			.await?;
+			write_fetch_frame(&mut stream.writer, &mut frame, compression, timescale, &mut prev_ts).await?;
 			index += 1;
 		}
 
@@ -784,28 +779,21 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
 	match compression {
 		Compression::None => {
 			writer.encode(&frame.size).await?;
-			track_stats.frame();
 			while let Some(mut chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
 				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
 			}
 		}
 		compression => {
 			let payload = frame.read_all().await?;
 			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
-			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
+			writer.encode(&(chunk.len() as u64)).await?;
 			writer.write_all(&mut chunk).await?;
-			track_stats.bytes(n);
 		}
 	}
 
@@ -821,6 +809,9 @@ struct Subscription<S: web_transport_trait::Session> {
 	session: S,
 	id: u64,
 	track_name: Arc<str>,
+	// Held for its `Drop`, which records the `subscriptions` lifecycle; egress
+	// payload is metered by the model, so the guard is never read.
+	#[allow(dead_code)]
 	track_stats: Arc<crate::PublisherTrack>,
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
@@ -941,7 +932,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		self.track_stats.group();
 
 		// Lite05+ delta-encodes per-frame timestamps within the group. The first
 		// frame's delta is absolute (against an implicit prev value of 0), every
@@ -976,7 +966,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		match self.compression {
 			Compression::None => {
 				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
 
 				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 					self.write_chunk(stream, priority, chunk).await?;
@@ -986,7 +975,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				let payload = self.read_all(stream, priority, &mut frame).await?;
 				let chunk = bytes::Bytes::from(compression.compress(&payload));
 				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
 				self.write_chunk(stream, priority, chunk).await?;
 			}
 		}
@@ -1057,7 +1045,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
-		let n = chunk.len() as u64;
 		loop {
 			tokio::select! {
 				biased;
@@ -1069,7 +1056,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
 			}
 		}
-		self.track_stats.bytes(n);
+		// Egress bytes are metered by the model when the frame is read
+		// (`GroupConsumer::next_frame`), not per wire chunk.
 		Ok(())
 	}
 }

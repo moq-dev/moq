@@ -62,6 +62,15 @@ pub fn start<S: web_transport_trait::Session>(
 	let publish = publish.unwrap_or_else(|| OriginProducer::empty(Origin::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
 
+	// Attach this session's egress sink provider so every broadcast the publisher
+	// serves downstream is metered by the model, keyed by absolute path and tier.
+	let publish = {
+		let stats = stats.clone();
+		publish.with_egress(std::sync::Arc::new(move |abs: &str| {
+			stats.broadcast(abs).egress_usage()
+		}))
+	};
+
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
 	// stamped onto outbound hops and checked against incoming hops, so it

@@ -129,17 +129,17 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer};
+use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer, Usage};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
-/// Every field is bumped from a RAII guard: the open counters on construction
-/// and their `_closed` counterparts on drop. `broadcasts` / `broadcasts_closed`
-/// are the per-(broadcast, session) subscription sentinel driven by
-/// [`SessionBroadcasts`] (the first active subscription a session opens for the
-/// broadcast bumps `broadcasts`, the last to close bumps `broadcasts_closed`),
-/// so summed across sessions `broadcasts - broadcasts_closed` is the count of
-/// distinct sessions currently subscribed.
+/// `announced` / `subscriptions` / `broadcasts` (and their `_closed`
+/// counterparts) are bumped from RAII guards: the open counters on construction
+/// and their `_closed` counterparts on drop. The payload counters
+/// (groups/frames/bytes) live in [`Usage`], bumped by the model through the sink
+/// baked into the broadcast (ingress) or stamped onto the consumer (egress); the
+/// snapshot reads them back. `broadcasts` / `broadcasts_closed` are the
+/// per-(broadcast, session) subscription sentinel driven by [`SessionBroadcasts`].
 #[derive(Default, Debug)]
 #[non_exhaustive]
 pub struct Counters {
@@ -149,9 +149,10 @@ pub struct Counters {
 	pub subscriptions_closed: AtomicU64,
 	pub broadcasts: AtomicU64,
 	pub broadcasts_closed: AtomicU64,
-	pub bytes: AtomicU64,
-	pub frames: AtomicU64,
-	pub groups: AtomicU64,
+	/// Payload usage (groups/frames/bytes) for this `(tier, role)`, shared with
+	/// the model: the same `Arc` is baked into the broadcast so the model's bumps
+	/// land here. The snapshot reads it back.
+	pub usage: Arc<Usage>,
 }
 
 impl Counters {
@@ -169,9 +170,9 @@ impl Counters {
 		let announced = self.announced.load(Ordering::Relaxed);
 		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
 		let broadcasts = self.broadcasts.load(Ordering::Relaxed);
-		let bytes = self.bytes.load(Ordering::Relaxed);
-		let frames = self.frames.load(Ordering::Relaxed);
-		let groups = self.groups.load(Ordering::Relaxed);
+		let bytes = self.usage.bytes();
+		let frames = self.usage.frames();
+		let groups = self.usage.groups();
 		RawCounts {
 			announced,
 			announced_closed,
@@ -657,6 +658,30 @@ impl BroadcastHandle {
 			tier: self.tier,
 		}
 	}
+
+	/// The ingress (subscriber-role) payload sink for this tier.
+	///
+	/// Bake it into a [`BroadcastInfo::stats`]`.producer` at construction so the
+	/// model meters everything the publisher writes. An empty handle yields a fresh
+	/// unreferenced sink, so the bumps are dropped.
+	pub fn ingress_usage(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|e| e.subscriber[self.tier.idx()].usage.clone())
+			.unwrap_or_default()
+	}
+
+	/// The egress (publisher-role) payload sink for this tier.
+	///
+	/// Stamp it onto a [`crate::BroadcastConsumer`]'s `stats.consumer` (the origin
+	/// does this per session) so the model meters everything delivered downstream.
+	/// An empty handle yields a fresh unreferenced sink.
+	pub fn egress_usage(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|e| e.publisher[self.tier.idx()].usage.clone())
+			.unwrap_or_default()
+	}
 }
 
 /// Which side of a [`BroadcastEntry`] a [`SessionBroadcasts`] bumps.
@@ -870,33 +895,13 @@ impl Drop for SubscriberStats {
 }
 
 /// RAII subscription guard for the publisher role.
+///
+/// Tracks only the `subscriptions` lifecycle; payload is metered by the model
+/// through the broadcast's egress sink, not this guard.
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct PublisherTrack {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
-}
-
-impl PublisherTrack {
-	/// Bumps `frames` once.
-	pub fn frame(&self) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `bytes` by `n`.
-	pub fn bytes(&self, n: u64) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `groups` once.
-	pub fn group(&self) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
-		}
-	}
 }
 
 impl Drop for PublisherTrack {
@@ -911,33 +916,13 @@ impl Drop for PublisherTrack {
 }
 
 /// RAII subscription guard for the subscriber role.
+///
+/// Tracks only the `subscriptions` lifecycle; payload is metered by the model
+/// through the broadcast's ingress sink, not this guard.
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct SubscriberTrack {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
-}
-
-impl SubscriberTrack {
-	/// Bumps `frames` once.
-	pub fn frame(&self) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `bytes` by `n`.
-	pub fn bytes(&self, n: u64) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `groups` once.
-	pub fn group(&self) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
-		}
-	}
 }
 
 impl Drop for SubscriberTrack {
@@ -1221,7 +1206,7 @@ fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, sync::atomic::Ordering::Relaxed};
+	use std::collections::BTreeMap;
 
 	use crate::{Origin, Path};
 
@@ -1276,16 +1261,15 @@ mod tests {
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let bs1 = stats.tier(Tier::External).broadcast("demo/bbb");
 		let bs2 = stats.tier(Tier::External).broadcast("demo/ccc");
-		let g1 = bs1.publisher().track("video");
-		g1.bytes(100);
-		let g2 = bs2.publisher().track("video");
-		g2.bytes(7);
+		// Bump the egress payload sink the way the model would.
+		bs1.egress_usage().add_frame(100);
+		bs2.egress_usage().add_frame(7);
 
 		let entries = stats.shared().entries.lock();
 		let e1 = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
-		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
-		assert_eq!(e2.publisher[Tier::External.idx()].bytes.load(Relaxed), 7);
+		assert_eq!(e1.publisher[Tier::External.idx()].usage.bytes(), 100);
+		assert_eq!(e2.publisher[Tier::External.idx()].usage.bytes(), 7);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1294,17 +1278,16 @@ mod tests {
 		let ext = stats.tier(Tier::External);
 		let int = stats.tier(Tier::Internal);
 
-		let ext_track = ext.broadcast("demo/bbb").publisher().track("video");
-		ext_track.bytes(100);
-		let int_track = int.broadcast("demo/bbb").subscriber().track("audio");
-		int_track.bytes(7);
+		// External egress and internal ingress: distinct (tier, role) sinks.
+		ext.broadcast("demo/bbb").egress_usage().add_frame(100);
+		int.broadcast("demo/bbb").ingress_usage().add_frame(7);
 
 		let entries = stats.shared().entries.lock();
 		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
-		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
-		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
-		assert_eq!(entry.publisher[Tier::Internal.idx()].bytes.load(Relaxed), 0);
-		assert_eq!(entry.subscriber[Tier::Internal.idx()].bytes.load(Relaxed), 7);
+		assert_eq!(entry.publisher[Tier::External.idx()].usage.bytes(), 100);
+		assert_eq!(entry.subscriber[Tier::External.idx()].usage.bytes(), 0);
+		assert_eq!(entry.publisher[Tier::Internal.idx()].usage.bytes(), 0);
+		assert_eq!(entry.subscriber[Tier::Internal.idx()].usage.bytes(), 7);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1315,9 +1298,7 @@ mod tests {
 		let bs = stats.tier(Tier::External).broadcast(".stats/node/sjc");
 		assert!(bs.is_empty());
 		let p = bs.publisher();
-		let track = p.track("video");
-		track.bytes(100);
-		drop(track);
+		bs.egress_usage().add_frame(100);
 		drop(p);
 		assert!(stats.shared().entries.lock().is_empty());
 	}
@@ -1331,9 +1312,7 @@ mod tests {
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		assert!(bs.is_empty());
 		let p = bs.publisher();
-		let track = p.track("video");
-		track.bytes(100);
-		drop(track);
+		bs.egress_usage().add_frame(100);
 		drop(p);
 	}
 
@@ -1442,9 +1421,8 @@ mod tests {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let track = bs.publisher().track("video");
-		track.bytes(42);
-		track.frame();
+		let _track = bs.publisher().track("video");
+		bs.egress_usage().add_frame(42);
 		let sessions = stats.tier(Tier::External).publisher_broadcasts();
 		let _sub = sessions.subscribe("foo/bar");
 
@@ -1505,9 +1483,8 @@ mod tests {
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let sessions = stats.tier(Tier::External).publisher_broadcasts();
 		{
-			let track = bs.publisher().track("video");
-			track.bytes(123);
-			track.frame();
+			let _track = bs.publisher().track("video");
+			bs.egress_usage().add_frame(123);
 			let _sub = sessions.subscribe("foo/bar");
 			// track + sub dropped here, all within tick 1
 		}
@@ -1701,8 +1678,8 @@ mod tests {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let track = bs.publisher().track("video");
-		track.frame();
+		let _track = bs.publisher().track("video");
+		bs.egress_usage().add_frame(1);
 
 		drive_ticks(2).await;
 

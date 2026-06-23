@@ -32,8 +32,9 @@ struct State {
 struct TrackState {
 	producer: TrackProducer,
 	alias: Option<u64>,
-	/// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
-	/// Dropping on subscription end records `subscriptions_closed`.
+	/// Held for its `Drop`, which records the `subscriptions` lifecycle. Payload is
+	/// metered by the model through the broadcast's ingress sink, so it's never read.
+	#[allow(dead_code)]
 	stats: Arc<SubscriberTrack>,
 }
 
@@ -462,8 +463,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.expect("an empty hop chain has room for one entry");
 				// moq-transport carries no broadcast epoch on the wire; stamp the current
 				// time so the instance is still ordered against any future re-announce.
+				// Bake the ingress usage sink so the model meters everything written.
 				let broadcast = BroadcastInfo {
 					hops,
+					stats: crate::BroadcastStats {
+						producer: self.stats.broadcast(&abs).ingress_usage(),
+						..Default::default()
+					},
 					..Default::default()
 				}
 				.produce();
@@ -749,7 +755,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
-		let (mut producer, track, track_stats) = {
+		let (mut producer, track) = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -763,17 +769,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group_info = Group {
 				sequence: group.group_id,
 			};
+			// `create_group` bumps the broadcast's ingress usage (groups); frames and
+			// bytes are metered by the model as they're written below.
 			let producer = track.producer.create_group(group_info)?;
-			(producer, track.producer.clone(), track.stats.clone())
+			(producer, track.producer.clone())
 		};
-
-		// Bump groups counter for this incoming group on the subscriber side.
-		track_stats.group();
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = producer.closed() => Err(err),
-			res = self.run_group(group, stream, producer.clone(), track_stats.clone()) => res,
+			res = self.run_group(group, stream, producer.clone()) => res,
 		};
 
 		match res {
@@ -797,7 +802,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut producer: GroupProducer,
-		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
@@ -818,7 +822,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						size: 0,
 						timestamp: None,
 					})?;
-					track_stats.frame();
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					break;
@@ -829,9 +832,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `create_frame` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
 				let mut frame = producer.create_frame(Frame { size, timestamp: None })?;
-				track_stats.frame();
 
-				if let Err(err) = self.run_frame(stream, frame.clone(), &track_stats).await {
+				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
@@ -847,15 +849,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
-		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut; read_buf writes stream bytes directly into
 		// the per-frame buffer (see lite/subscriber.rs run_frame for rationale).
+		// The model metered this frame's bytes at `create_frame` (ingress).
 		while bytes::BufMut::has_remaining_mut(&frame) {
 			match stream.read_buf(&mut frame).await? {
-				Some(n) if n > 0 => {
-					track_stats.bytes(n as u64);
-				}
+				Some(n) if n > 0 => {}
 				_ => return Err(Error::WrongSize),
 			}
 		}

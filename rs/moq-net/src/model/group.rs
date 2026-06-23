@@ -389,7 +389,13 @@ impl GroupConsumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		kio::wait(|waiter| self.poll_get_frame(waiter, index)).await
+		let frame = kio::wait(|waiter| self.poll_get_frame(waiter, index)).await?;
+		// Egress dual for random-access reads (the fetch serve path). The live
+		// path goes through `poll_next_frame`/`poll_read_frame` instead.
+		if let Some(frame) = &frame {
+			self.broadcast.stats.consumer.add_frame(frame.size);
+		}
+		Ok(frame)
 	}
 
 	/// Poll for the frame at the given index, without blocking.

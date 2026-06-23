@@ -1065,7 +1065,10 @@ impl TrackConsumer {
 	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`TrackDynamic`]
 	/// will serve on demand.
 	pub fn get_group(&self, sequence: u64) -> Option<GroupConsumer> {
-		self.state.read().cached_group(sequence)
+		let mut group = self.state.read().cached_group(sequence)?;
+		// Meter reads against this consumer's egress sink, not the producer's.
+		group.set_broadcast(self.broadcast.clone());
+		Some(group)
 	}
 
 	/// Fetch a single past group, without holding a live subscription.
@@ -1096,6 +1099,7 @@ impl TrackConsumer {
 		kio::Pending::new(TrackFetch {
 			state: self.state.clone(),
 			sequence,
+			broadcast: self.broadcast.clone(),
 		})
 	}
 
@@ -1230,6 +1234,9 @@ impl GroupRequest {
 pub struct TrackFetch {
 	state: kio::Consumer<TrackState>,
 	sequence: u64,
+	// Egress sink stamped onto the fetched group so its frames meter against the
+	// consuming session.
+	broadcast: Arc<BroadcastInfo>,
 }
 
 impl kio::Future for TrackFetch {
@@ -1240,7 +1247,11 @@ impl kio::Future for TrackFetch {
 		// abort); the outer error is the channel closing without one.
 		Poll::Ready(
 			match ready!(self.state.poll(waiter, |state| state.poll_fetch(self.sequence))) {
-				Ok(res) => res,
+				Ok(Ok(mut group)) => {
+					group.set_broadcast(self.broadcast.clone());
+					Ok(group)
+				}
+				Ok(Err(e)) => Err(e),
 				Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
 			},
 		)

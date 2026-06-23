@@ -300,7 +300,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: GroupConsumer,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
+		// Held for the group's lifetime so it counts as one subscription; payload
+		// is metered by the model when the frames are read.
+		_track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -309,7 +311,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stream = Writer::new(stream, version);
 
 		stream.encode(&msg).await?;
-		track_stats.group();
 
 		loop {
 			let frame = tokio::select! {
@@ -333,7 +334,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Write the size of the frame.
 			stream.encode(&frame.size).await?;
-			track_stats.frame();
 
 			if frame.size == 0 {
 				// Have to write the object status too.
@@ -349,9 +349,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match chunk? {
 						Some(mut chunk) => {
-							let n = chunk.len() as u64;
 							stream.write_all(&mut chunk).await?;
-							track_stats.bytes(n);
 						}
 						None => break,
 					}

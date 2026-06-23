@@ -7,7 +7,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
-use super::{BroadcastStats, OriginList, TrackInfo};
+use super::{BroadcastStats, OriginList, TrackInfo, Usage};
 
 /// Shared no-op broadcast metadata for tracks created outside a broadcast.
 ///
@@ -415,6 +415,19 @@ impl BroadcastConsumer {
 		&self.info
 	}
 
+	/// Replace this consumer's egress usage sink, attributing everything it
+	/// delivers to a particular session/tier.
+	///
+	/// The shared channel is untouched (so [`Self::is_clone`] and origin routing
+	/// are unaffected); only this handle's `Arc<BroadcastInfo>` is swapped for one
+	/// with a different `stats.consumer`. The origin calls this once per session
+	/// when it hands the consumer out.
+	pub(crate) fn set_consumer_sink(&mut self, usage: Arc<Usage>) {
+		let mut info = (*self.info).clone();
+		info.stats.consumer = usage;
+		self.info = Arc::new(info);
+	}
+
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
@@ -711,5 +724,62 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// Ingress is metered once (single writer) and egress per consumer: two viewers
+	/// of the same track count the payload twice on the egress sink while the
+	/// ingress sink counts it once.
+	#[tokio::test]
+	async fn usage_ingress_once_egress_per_viewer() {
+		use std::sync::Arc;
+
+		use crate::{BroadcastStats, Usage};
+
+		let ingress = Arc::new(Usage::default());
+		let egress = Arc::new(Usage::default());
+		let info = BroadcastInfo {
+			stats: BroadcastStats {
+				producer: ingress.clone(),
+				consumer: egress.clone(),
+			},
+			..Default::default()
+		};
+
+		let mut broadcast = info.produce();
+		let mut track = broadcast.assert_create_track("video", None);
+		let consumer = broadcast.consume();
+
+		// Ingress: one group of two frames (5 + 6 bytes).
+		let mut group = track.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"world!")).unwrap();
+		group.finish().unwrap();
+
+		assert_eq!(ingress.groups(), 1);
+		assert_eq!(ingress.frames(), 2);
+		assert_eq!(ingress.bytes(), 11);
+		// Nothing delivered yet.
+		assert_eq!(egress.groups(), 0);
+		assert_eq!(egress.bytes(), 0);
+
+		// Two viewers each read the group and its frames.
+		for _ in 0..2 {
+			let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut g = sub.next_group().await.unwrap().expect("group");
+			assert_eq!(
+				g.read_frame().await.unwrap().unwrap(),
+				bytes::Bytes::from_static(b"hello")
+			);
+			assert_eq!(
+				g.read_frame().await.unwrap().unwrap(),
+				bytes::Bytes::from_static(b"world!")
+			);
+		}
+
+		// Ingress unchanged; egress counted once per viewer.
+		assert_eq!(ingress.groups(), 1);
+		assert_eq!(egress.groups(), 2);
+		assert_eq!(egress.frames(), 4);
+		assert_eq!(egress.bytes(), 22);
 	}
 }
