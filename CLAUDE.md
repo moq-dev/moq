@@ -170,7 +170,7 @@ Two long-lived branches:
 
 When making changes to the codebase:
 
-1. Pick the base branch per [Branch Targeting](#branch-targeting) above
+1. Pick the base branch per [Branch Targeting](#branch-targeting) above. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
 2. Make your code changes
 3. Run `just fix` to auto-format and fix linting issues
 4. Run `just check` to verify everything passes
