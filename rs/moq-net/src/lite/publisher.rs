@@ -682,7 +682,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				crate::Fetch {
 					priority: fetch.priority,
 				},
-			)?
+			)
 			.await?;
 
 		// FETCH is gated to lite-05+, which always carries timestamps when the track

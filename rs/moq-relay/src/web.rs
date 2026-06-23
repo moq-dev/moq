@@ -600,7 +600,7 @@ async fn serve_fetch(
 				Err(err) => Err(err),
 			},
 			// A one-shot fetch, no subscription required.
-			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch_group(sequence, None)?.await }
+			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch_group(sequence, None).await }
 				.await
 				.map(Some),
 		};
