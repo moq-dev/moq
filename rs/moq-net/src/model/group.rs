@@ -8,13 +8,14 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
 use crate::{Error, Result, Timescale};
 
-use super::{Frame, FrameConsumer, FrameProducer, Meter};
+use super::{Frame, FrameConsumer, FrameProducer, Usage};
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
 ///
@@ -43,7 +44,7 @@ impl Group {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> GroupProducer {
-		GroupProducer::new(self, None, Meter::default())
+		GroupProducer::new(self, None, Arc::default())
 	}
 }
 
@@ -158,7 +159,7 @@ pub struct GroupProducer {
 
 	// Ingress usage meter, inherited from the parent track. Bumped per frame /
 	// byte in [`Self::append_frame`]; a no-op when no stats sink is attached.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl std::ops::Deref for GroupProducer {
@@ -176,7 +177,7 @@ impl GroupProducer {
 	/// which supplies the negotiated timescale. `None` means the parent track is
 	/// untimed and added frames must have `timestamp = None`; `Some(scale)`
 	/// requires every frame's `timestamp` to be `Some(ts)` with `ts.scale() == scale`.
-	pub(crate) fn new(info: Group, timescale: Option<Timescale>, meter: Meter) -> Self {
+	pub(crate) fn new(info: Group, timescale: Option<Timescale>, meter: Arc<Usage>) -> Self {
 		Self {
 			info,
 			state: kio::Producer::default(),
@@ -238,8 +239,8 @@ impl GroupProducer {
 		// frame is committed (and the kio lock released) so a rejected append
 		// above isn't counted. `size` is the frame's declared length; once the
 		// model caches compressed bytes this is the compressed (wire) size.
-		self.meter.frame();
-		self.meter.bytes(size);
+		self.meter.add_frame();
+		self.meter.add_bytes(size);
 		Ok(())
 	}
 
@@ -282,7 +283,7 @@ impl GroupProducer {
 			// Egress metering is a per-consumer concern attached by the
 			// subscriber that hands this consumer out, not inherited from the
 			// producer's (ingress) meter.
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -350,7 +351,7 @@ pub struct GroupConsumer {
 	// out this consumer. Bumped per frame / byte as frames are pulled in order;
 	// a no-op for consumers obtained directly (e.g. random-access `get_group`,
 	// or a producer's own `consume`).
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl std::ops::Deref for GroupConsumer {
@@ -370,7 +371,7 @@ impl GroupConsumer {
 	/// Attach an egress usage meter. Called by [`crate::TrackSubscriber`] as it
 	/// hands out each group so the per-viewer frame/byte counts land on the
 	/// subscriber's sink.
-	pub(crate) fn set_meter(&mut self, meter: Meter) {
+	pub(crate) fn set_meter(&mut self, meter: Arc<Usage>) {
 		self.meter = meter;
 	}
 
@@ -417,8 +418,8 @@ impl GroupConsumer {
 		// Egress accounting: this consumer pulled one frame. `size` is the frame's
 		// declared length (the compressed/wire size once the model caches
 		// compressed bytes). Counted here, per consumer, so N viewers count N times.
-		self.meter.frame();
-		self.meter.bytes(frame.size);
+		self.meter.add_frame();
+		self.meter.add_bytes(frame.size);
 		Poll::Ready(Ok(Some(frame)))
 	}
 
@@ -430,8 +431,8 @@ impl GroupConsumer {
 
 		let data = ready!(frame.poll_read_all(waiter))?;
 		self.index += 1;
-		self.meter.frame();
-		self.meter.bytes(frame.size);
+		self.meter.add_frame();
+		self.meter.add_bytes(frame.size);
 
 		Poll::Ready(Ok(Some(data)))
 	}
@@ -449,8 +450,8 @@ impl GroupConsumer {
 
 		let data = ready!(frame.poll_read_all_chunks(waiter))?;
 		self.index += 1;
-		self.meter.frame();
-		self.meter.bytes(frame.size);
+		self.meter.add_frame();
+		self.meter.add_bytes(frame.size);
 
 		Poll::Ready(Ok(Some(data)))
 	}
@@ -735,7 +736,7 @@ mod test {
 	fn append_frame_rejects_timestamp_on_untimed_group() {
 		use crate::Timestamp;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, None, Meter::default());
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, None, Arc::default());
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
@@ -748,7 +749,7 @@ mod test {
 	fn append_frame_rejects_missing_timestamp_on_timed_group() {
 		use crate::Timescale;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), Meter::default());
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), Arc::default());
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
@@ -761,7 +762,7 @@ mod test {
 	fn append_frame_rejects_scale_mismatch() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), Meter::default());
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), Arc::default());
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
@@ -774,7 +775,7 @@ mod test {
 	fn append_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), Meter::default());
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO), Arc::default());
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),

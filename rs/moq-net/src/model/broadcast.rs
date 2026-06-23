@@ -5,7 +5,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{Error, Meter, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
+use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak, Usage};
 
 use super::{OriginList, TrackInfo};
 
@@ -129,18 +129,18 @@ impl BroadcastState {
 
 /// Manages tracks within a broadcast.
 ///
-/// Insert tracks statically with [Self::insert_track] / [Self::create_track],
-/// or handle on-demand requests via [Self::dynamic].
+/// Create tracks statically with [Self::create_track], or handle on-demand
+/// requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
 	info: BroadcastInfo,
 	state: kio::Producer<BroadcastState>,
 
 	// Ingress usage meter, propagated into every track this producer creates.
-	// A no-op until a stats sink is attached via [`Self::set_meter`]. Lets a
+	// A no-op until a stats sink is attached via [`Self::with_meter`]. Lets a
 	// gateway (moq-srt, moq-rtc, ...) meter a whole broadcast with one call even
 	// though the tracks themselves are created deep inside a [`moq_mux`] importer.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl BroadcastProducer {
@@ -149,7 +149,7 @@ impl BroadcastProducer {
 		Self {
 			info,
 			state: Default::default(),
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -157,26 +157,15 @@ impl BroadcastProducer {
 		&self.info
 	}
 
-	/// Attach an ingress usage meter, recording groups/frames/bytes for every
-	/// track created on this broadcast from now on (including tracks created
-	/// inside a [`moq_mux`](https://docs.rs/moq-mux) importer that only holds this
-	/// producer). Call once with a per-broadcast sink; tracks created before this
-	/// call are not retro-attached. A gateway publishing an external protocol's
-	/// media into the origin uses this to bill ingress uniformly.
-	pub fn set_meter(&mut self, meter: Meter) {
+	/// Attach an ingress usage sink ([`Usage`]), recording groups/frames/bytes for
+	/// every track created on this broadcast (including tracks created inside a
+	/// [`moq_mux`](https://docs.rs/moq-mux) importer that only holds this producer).
+	/// Builder-style: call once on the freshly produced broadcast; tracks created
+	/// before this call are not retro-attached. A gateway publishing an external
+	/// protocol's media into the origin uses this to bill ingress uniformly.
+	pub fn with_meter(mut self, meter: Arc<Usage>) -> Self {
 		self.meter = meter;
-	}
-
-	/// Insert a track into the lookup, returning an error on duplicate.
-	///
-	/// Stores a weak handle to the track. The caller (or the owner of the
-	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
-	/// when all producers are dropped, the entry becomes closed and is
-	/// eventually evicted.
-	pub fn insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) -> Result<(), Error> {
-		let track = track.consume();
-		let mut state = BroadcastState::modify(&self.state)?;
-		state.insert_track(track.weak())
+		self
 	}
 
 	/// Remove a track from the lookup.
@@ -250,7 +239,7 @@ impl BroadcastProducer {
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	///
 	/// The handler inherits this producer's ingress meter (set via
-	/// [`Self::set_meter`]) and stamps it onto every track it serves, so
+	/// [`Self::with_meter`]) and stamps it onto every track it serves, so
 	/// dynamically-created tracks are metered like [`Self::create_track`] ones.
 	pub fn dynamic(&self) -> BroadcastDynamic {
 		BroadcastDynamic::new(self.info.clone(), self.state.clone(), self.meter.clone())
@@ -261,8 +250,8 @@ impl BroadcastProducer {
 		BroadcastConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			// Egress metering is opt-in per consumer; attach via `set_meter`.
-			meter: Meter::default(),
+			// Egress metering is opt-in per consumer; attach via `with_meter`.
+			meter: Arc::default(),
 		}
 	}
 
@@ -281,10 +270,6 @@ impl BroadcastProducer {
 	) -> TrackProducer {
 		self.create_track(name, info).expect("should not have errored")
 	}
-
-	pub fn assert_insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) {
-		self.insert_track(track).expect("should not have errored")
-	}
 }
 
 /// Handles on-demand track creation for a broadcast.
@@ -300,7 +285,7 @@ pub struct BroadcastDynamic {
 	// Ingress meter inherited from the [`BroadcastProducer`], stamped onto every
 	// track this handler serves (see [`Self::poll_requested_track`]) so dynamic
 	// tracks are metered like `create_track` ones. A no-op until attached.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl Clone for BroadcastDynamic {
@@ -322,7 +307,7 @@ impl Clone for BroadcastDynamic {
 }
 
 impl BroadcastDynamic {
-	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>, meter: Meter) -> Self {
+	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>, meter: Arc<Usage>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
@@ -377,8 +362,8 @@ impl BroadcastDynamic {
 		BroadcastConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			// Egress metering is opt-in per consumer; attach via `set_meter`.
-			meter: Meter::default(),
+			// Egress metering is opt-in per consumer; attach via `with_meter`.
+			meter: Arc::default(),
 		}
 	}
 
@@ -433,10 +418,10 @@ pub struct BroadcastConsumer {
 	state: kio::Consumer<BroadcastState>,
 
 	// Egress usage meter, propagated onto every track subscription opened through
-	// this consumer (and its clones). A no-op until attached via [`Self::set_meter`].
+	// this consumer (and its clones). A no-op until attached via [`Self::with_meter`].
 	// Per-consumer, so two viewers of one broadcast each carry their own handle to
 	// the same shared sink and egress counts per-viewer.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl BroadcastConsumer {
@@ -444,14 +429,15 @@ impl BroadcastConsumer {
 		&self.info
 	}
 
-	/// Attach an egress usage meter, recording groups/frames/bytes for every track
-	/// subscription opened through this consumer from now on (including
-	/// subscriptions opened inside a [`moq_mux`](https://docs.rs/moq-mux) exporter
-	/// that only holds this consumer). A gateway serving the origin's media out over
-	/// an external protocol uses this to bill egress uniformly. Clones made after
-	/// this call inherit the meter; pre-existing clones do not.
-	pub fn set_meter(&mut self, meter: Meter) {
+	/// Attach an egress usage sink ([`Usage`]), recording groups/frames/bytes for
+	/// every track subscription opened through this consumer (including subscriptions
+	/// opened inside a [`moq_mux`](https://docs.rs/moq-mux) exporter that only holds
+	/// this consumer). Builder-style. A gateway serving the origin's media out over an
+	/// external protocol uses this to bill egress uniformly. Clones made after this
+	/// call inherit the meter; pre-existing clones do not.
+	pub fn with_meter(mut self, meter: Arc<Usage>) -> Self {
 		self.meter = meter;
+		self
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -551,15 +537,14 @@ mod test {
 	}
 
 	/// An ingress meter attached to the producer propagates into every track
-	/// created afterward, so one `set_meter` bills a whole broadcast even though
+	/// created afterward, so one `with_meter` bills a whole broadcast even though
 	/// the tracks (here `video`/`audio`) might be created deep inside a muxer.
 	#[tokio::test]
 	async fn producer_meter_propagates_to_created_tracks() {
 		use crate::Usage;
 
 		let counts = Arc::new(Usage::default());
-		let mut producer = BroadcastInfo::new().produce();
-		producer.set_meter(Meter::from_arc(counts.clone()));
+		let mut producer = BroadcastInfo::new().produce().with_meter(counts.clone());
 
 		let mut video = producer.create_track("video", None).unwrap();
 		let mut audio = producer.create_track("audio", None).unwrap();
@@ -598,10 +583,8 @@ mod test {
 
 		// Two viewers: each a consumer clone with its own handle to the same sink.
 		let counts = Arc::new(Usage::default());
-		let mut view_a = producer.consume();
-		view_a.set_meter(Meter::from_arc(counts.clone()));
-		let mut view_b = producer.consume();
-		view_b.set_meter(Meter::from_arc(counts.clone()));
+		let mut view_a = producer.consume().with_meter(counts.clone());
+		let mut view_b = producer.consume().with_meter(counts.clone());
 
 		for view in [&mut view_a, &mut view_b] {
 			let mut sub = view.track("video").unwrap().subscribe(None).unwrap().await.unwrap();
@@ -622,8 +605,7 @@ mod test {
 		use crate::Usage;
 
 		let counts = Arc::new(Usage::default());
-		let mut producer = BroadcastInfo::new().produce();
-		producer.set_meter(Meter::from_arc(counts.clone()));
+		let producer = BroadcastInfo::new().produce().with_meter(counts.clone());
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -650,8 +632,7 @@ mod test {
 		use crate::Usage;
 
 		let counts = Arc::new(Usage::default());
-		let mut producer = BroadcastInfo::new().produce();
-		producer.set_meter(Meter::from_arc(counts.clone()));
+		let mut producer = BroadcastInfo::new().produce().with_meter(counts.clone());
 
 		let mut track = producer.reserve_track("video").unwrap().accept(None);
 		track
@@ -681,12 +662,11 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn insert() {
+	async fn create_before_consume() {
 		let mut producer = BroadcastInfo::new().produce();
-		let mut track1 = TrackProducer::new("track1", None);
 
-		// Make sure we can insert before a consumer is created.
-		producer.assert_insert_track(&track1);
+		// Make sure we can create a track before a consumer exists.
+		let mut track1 = producer.assert_create_track("track1", None);
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
@@ -701,8 +681,7 @@ mod test {
 			.unwrap();
 		track1_sub.assert_group();
 
-		let mut track2 = TrackProducer::new("track2", None);
-		producer.assert_insert_track(&track2);
+		let mut track2 = producer.assert_create_track("track2", None);
 
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2

@@ -550,16 +550,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
-		// immediately otherwise.
-		let mut broadcast = broadcast?.await?;
-
-		// Attach the publisher-side payload meter to the broadcast consumer so the
-		// model counts groups/frames/bytes as they're served to this subscriber. This
-		// handle is local to this subscription, so it's per-viewer (N viewers of one
-		// track count N times) and the meter rides into the track subscription below.
-		// `track_stats` (the PublisherTrack guard, subscriptions lifecycle) stays
-		// owned by this function for the subscription's duration.
-		broadcast.set_meter(track_stats.meter());
+		// immediately otherwise. Attach the publisher-side payload meter to this
+		// (per-subscription) broadcast consumer so the model counts groups/frames/bytes
+		// served to this subscriber; it's per-viewer (N viewers of one track count N
+		// times) and the meter rides into the track subscription below. `track_stats`
+		// (the PublisherTrack guard, subscriptions lifecycle) stays owned by this
+		// function for the subscription's duration.
+		let broadcast = broadcast?.await?.with_meter(track_stats.meter());
 		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
 
 		// Compress only when the producer marked the track worth it and the
@@ -947,8 +944,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		// Groups/frames/bytes are counted by the model via the subscriber's meter
-		// (attached in run_subscribe) as `next_group`/`next_frame` are pulled below.
 
 		// Lite05+ delta-encodes per-frame timestamps within the group. The first
 		// frame's delta is absolute (against an implicit prev value of 0), every

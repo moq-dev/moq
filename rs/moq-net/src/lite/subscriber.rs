@@ -446,18 +446,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let mut broadcast = BroadcastInfo {
-			hops,
-			epoch: BroadcastInfo::epoch_from_wire(epoch),
-		}
-		.produce();
-
 		// Attach the broadcast's ingress meter before creating the dynamic handler, so
 		// every track served on demand (and its frames/bytes) is counted. The
 		// lifecycle guard that keeps these counters alive lives in the announce loop's
 		// `stats_guards`, so this is the non-bumping accessor (no double `announced`).
 		let abs = self.origin.absolute(&path).to_owned();
-		broadcast.set_meter(self.stats.broadcast(&abs).subscriber_meter());
+		let broadcast = BroadcastInfo {
+			hops,
+			epoch: BroadcastInfo::epoch_from_wire(epoch),
+		}
+		.produce()
+		.with_meter(self.stats.broadcast(&abs).subscriber_meter());
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -511,16 +510,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
-		let mut broadcast = BroadcastInfo {
-			hops,
-			epoch: BroadcastInfo::epoch_from_wire(epoch),
-		}
-		.produce();
-
 		// Inherit the broadcast's ingress meter (see `start_announce`); the announce
 		// loop's `stats_guards` holds the lifecycle guard, so use the non-bumping accessor.
 		let abs = self.origin.absolute(&path).to_owned();
-		broadcast.set_meter(self.stats.broadcast(&abs).subscriber_meter());
+		let broadcast = BroadcastInfo {
+			hops,
+			epoch: BroadcastInfo::epoch_from_wire(epoch),
+		}
+		.produce()
+		.with_meter(self.stats.broadcast(&abs).subscriber_meter());
 
 		let dynamic = broadcast.dynamic();
 

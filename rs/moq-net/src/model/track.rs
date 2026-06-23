@@ -15,7 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
-use super::{Fetch, Group, GroupConsumer, GroupProducer, Meter};
+use super::{Fetch, Group, GroupConsumer, GroupProducer, Usage};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -438,7 +438,12 @@ impl TrackState {
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
 	/// [`TrackFetch`] resolves via [`Self::poll_fetch`].
-	fn insert_group_request(&mut self, sequence: u64, info: Option<TrackInfo>, meter: Meter) -> Result<GroupProducer> {
+	fn insert_group_request(
+		&mut self,
+		sequence: u64,
+		info: Option<TrackInfo>,
+		meter: Arc<Usage>,
+	) -> Result<GroupProducer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
 		}
@@ -474,11 +479,11 @@ pub struct TrackProducer {
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
 
-	// Ingress usage meter, propagated into every group this producer creates.
-	// Bumped once per group here and once per frame/byte in the group; a no-op
-	// until a stats sink is attached via [`Self::set_meter`]. Clones share it
-	// (parallel producers of one track feed the same sink).
-	meter: Meter,
+	// Ingress usage sink, inherited from the broadcast that created this track
+	// (`BroadcastProducer::with_meter`). Bumped once per group here and once per
+	// frame/byte in the group; a default `Arc<Usage>` nobody reads when unattached.
+	// Clones share it (parallel producers of one track feed the same sink).
+	meter: Arc<Usage>,
 }
 
 impl TrackProducer {
@@ -492,7 +497,7 @@ impl TrackProducer {
 				..Default::default()
 			}),
 			prev_subscription: None,
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -507,7 +512,7 @@ impl TrackProducer {
 	/// creates it ([`crate::BroadcastProducer::set_meter`] -> `create_track` /
 	/// dynamic `accept`), which is the entry point transports use. This stays for
 	/// that propagation and for tests.
-	pub(crate) fn set_meter(&mut self, meter: Meter) {
+	pub(crate) fn set_meter(&mut self, meter: Arc<Usage>) {
 		self.meter = meter;
 	}
 
@@ -537,7 +542,7 @@ impl TrackProducer {
 
 		// Ingress accounting: one group was produced (not counted on the early
 		// `Closed`/`Duplicate` returns above).
-		meter.group();
+		meter.add_group();
 		Ok(group)
 	}
 
@@ -570,7 +575,7 @@ impl TrackProducer {
 
 		// Ingress accounting: one group was produced (not counted on the early
 		// `Closed`/overflow returns above).
-		meter.group();
+		meter.add_group();
 		Ok(group)
 	}
 
@@ -700,7 +705,7 @@ impl TrackProducer {
 			state: self.state.consume(),
 			// No-op unless overridden via `with_meter`; only the broadcast egress
 			// path attaches a real meter.
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -728,7 +733,7 @@ impl TrackProducer {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -800,7 +805,7 @@ impl TrackProducer {
 /// [`TrackDynamic`] handle on the track.
 fn poll_requested_group(
 	state: &kio::Producer<TrackState>,
-	meter: &Meter,
+	meter: &Arc<Usage>,
 	waiter: &kio::Waiter,
 ) -> Poll<Result<GroupRequest>> {
 	// Read-only predicate: ready once there's a request to pop, or the track aborted.
@@ -842,11 +847,11 @@ pub struct TrackDynamic {
 	// Usage meter inherited from the track (via [`TrackProducer::dynamic`] /
 	// [`TrackRequest::dynamic`]), stamped onto every [`GroupRequest`] this handle
 	// serves so fetched groups are metered like live ones.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl TrackDynamic {
-	fn new(name: Arc<str>, state: kio::Producer<TrackState>, meter: Meter) -> Self {
+	fn new(name: Arc<str>, state: kio::Producer<TrackState>, meter: Arc<Usage>) -> Self {
 		if let Ok(mut state) = state.write() {
 			state.dynamic += 1;
 		}
@@ -954,7 +959,7 @@ impl TrackWeak {
 			state: self.state.consume(),
 			// No-op unless overridden via `with_meter`; only the broadcast egress
 			// path attaches a real meter.
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -1023,7 +1028,7 @@ pub struct TrackConsumer {
 	// opens. Default is a no-op; [`crate::BroadcastConsumer::track`] injects the
 	// broadcast's egress meter so subscriptions opened deep inside a muxer
 	// (which only ever sees this consumer) still count per-viewer.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl TrackConsumer {
@@ -1032,17 +1037,10 @@ impl TrackConsumer {
 		&self.name
 	}
 
-	pub(crate) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
-	}
-
 	/// Return this consumer with an egress usage meter attached, propagated onto
 	/// every subscription it opens. Used by [`crate::BroadcastConsumer::track`] to
 	/// hand the broadcast's egress meter down to muxer-internal subscribes.
-	pub(crate) fn with_meter(mut self, meter: Meter) -> Self {
+	pub(crate) fn with_meter(mut self, meter: Arc<Usage>) -> Self {
 		self.meter = meter;
 		self
 	}
@@ -1122,7 +1120,7 @@ pub struct TrackSubscribe {
 	subscription: kio::Producer<Subscription>,
 	/// Egress meter inherited from the [`TrackConsumer`], moved onto the
 	/// [`TrackSubscriber`] once it resolves.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl TrackSubscribe {
@@ -1140,8 +1138,8 @@ impl TrackSubscribe {
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
-			// Inherited from the TrackConsumer (the broadcast egress meter, or a
-			// no-op). The lite/IETF publisher overrides it via `set_meter`.
+			// Inherited from the TrackConsumer, which got it from the broadcast's
+			// egress meter (`BroadcastConsumer::with_meter`), or a default no-op.
 			meter: self.meter.clone(),
 		}))
 	}
@@ -1212,7 +1210,7 @@ pub struct GroupRequest {
 	// Usage meter inherited from the serving [`TrackDynamic`], applied to the
 	// [`GroupProducer`] produced by [`Self::accept`] so fetched groups are metered
 	// like live ones. A no-op unless the track was metered.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl GroupRequest {
@@ -1292,7 +1290,7 @@ pub struct TrackSubscriber {
 	/// frame/byte). Per-subscriber, so N subscribers of one track count N times.
 	/// Inherited from the [`TrackConsumer`] this was opened from (which gets it
 	/// from [`crate::BroadcastConsumer::set_meter`]); a no-op otherwise.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl TrackSubscriber {
@@ -1337,7 +1335,7 @@ impl TrackSubscriber {
 		// Egress accounting: one group delivered to this subscriber. The consumer
 		// inherits the meter so its frames/bytes land on the same (per-viewer) sink.
 		consumer.set_meter(self.meter.clone());
-		self.meter.group();
+		self.meter.add_group();
 		Poll::Ready(Ok(Some(consumer)))
 	}
 
@@ -1367,7 +1365,7 @@ impl TrackSubscriber {
 		self.next_sequence = group.sequence.saturating_add(1);
 		// Egress accounting: one group delivered to this subscriber.
 		group.set_meter(self.meter.clone());
-		self.meter.group();
+		self.meter.add_group();
 		Poll::Ready(Ok(Some(group)))
 	}
 
@@ -1395,9 +1393,9 @@ impl TrackSubscriber {
 		self.next_sequence = sequence.saturating_add(1);
 		// Egress accounting: this helper consumes a (single-frame) group directly,
 		// bypassing the GroupConsumer path, so count the group/frame/bytes here.
-		self.meter.group();
-		self.meter.frame();
-		self.meter.bytes(frame.len() as u64);
+		self.meter.add_group();
+		self.meter.add_frame();
+		self.meter.add_bytes(frame.len() as u64);
 		Poll::Ready(Ok(Some(frame)))
 	}
 
@@ -1505,7 +1503,7 @@ pub struct TrackRequest {
 	// ([`crate::BroadcastDynamic`] when it picks the request up, or
 	// [`crate::BroadcastProducer::reserve_track`]) and flowed into the accepted
 	// [`TrackProducer`] and any fetch [`TrackDynamic`]. A no-op until stamped.
-	meter: Meter,
+	meter: Arc<Usage>,
 }
 
 impl TrackRequest {
@@ -1515,13 +1513,13 @@ impl TrackRequest {
 		// The held `_dynamic` is only a fetch-capable sentinel (never polled), so it
 		// keeps the default meter; the meter is stamped later and reaches the serving
 		// dynamic via `dynamic()`.
-		let dynamic = TrackDynamic::new(name.clone(), state.clone(), Meter::default());
+		let dynamic = TrackDynamic::new(name.clone(), state.clone(), Arc::default());
 		Self {
 			name,
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -1533,7 +1531,7 @@ impl TrackRequest {
 	/// Stamp the ingress meter the producer side wants this track accounted to.
 	/// Applied to the [`TrackProducer`] from [`Self::accept`] and to any fetch
 	/// [`TrackDynamic`] from [`Self::dynamic`].
-	pub(crate) fn set_meter(&mut self, meter: Meter) {
+	pub(crate) fn set_meter(&mut self, meter: Arc<Usage>) {
 		self.meter = meter;
 	}
 
@@ -1543,7 +1541,7 @@ impl TrackRequest {
 			state: self.state.consume(),
 			// No-op unless overridden via `with_meter`; only the broadcast egress
 			// path attaches a real meter.
-			meter: Meter::default(),
+			meter: Arc::default(),
 		}
 	}
 
@@ -1702,7 +1700,7 @@ mod test {
 		let counts = std::sync::Arc::new(Usage::default());
 
 		let mut producer = TrackProducer::new("test", None);
-		producer.set_meter(Meter::from_arc(counts.clone()));
+		producer.set_meter(counts.clone());
 
 		let mut group = producer.append_group().unwrap();
 		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap(); // 5 bytes
@@ -1735,7 +1733,7 @@ mod test {
 		let counts_a = std::sync::Arc::new(Usage::default());
 		let mut sub_a = producer
 			.consume()
-			.with_meter(Meter::from_arc(counts_a.clone()))
+			.with_meter(counts_a.clone())
 			.subscribe(None)
 			.unwrap()
 			.await
@@ -1744,7 +1742,7 @@ mod test {
 		let counts_b = std::sync::Arc::new(Usage::default());
 		let mut sub_b = producer
 			.consume()
-			.with_meter(Meter::from_arc(counts_b.clone()))
+			.with_meter(counts_b.clone())
 			.subscribe(None)
 			.unwrap()
 			.await
@@ -1771,7 +1769,7 @@ mod test {
 		let counts = std::sync::Arc::new(Usage::default());
 
 		let mut producer = TrackProducer::new("video", None);
-		producer.set_meter(Meter::from_arc(counts.clone()));
+		producer.set_meter(counts.clone());
 		let consumer = producer.consume();
 		let dynamic = producer.dynamic(); // inherits the producer's meter
 

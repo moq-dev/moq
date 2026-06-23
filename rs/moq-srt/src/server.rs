@@ -20,10 +20,11 @@
 //! everything and routes by prefix, use [`crate::run`].
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
-use moq_net::{Meter, OriginConsumer, OriginProducer, StatsHandle};
+use moq_net::{OriginConsumer, OriginProducer, StatsHandle, Usage};
 use srt_tokio::access::{
 	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
 };
@@ -289,7 +290,7 @@ async fn reject_log(request: ConnectionRequest, reason: ServerRejectReason, peer
 }
 
 /// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
-async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket, meter: Meter) -> Result<()> {
+async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket, meter: Arc<Usage>) -> Result<()> {
 	use futures::TryStreamExt;
 
 	let mut publisher = crate::ts::Publisher::new(origin, path, meter)?;
@@ -306,7 +307,7 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// Waits for the broadcast to be announced (so a caller may connect before the
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket, meter: Meter) -> Result<()> {
+async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket, meter: Arc<Usage>) -> Result<()> {
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent

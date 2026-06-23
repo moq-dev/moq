@@ -133,7 +133,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
 		// an `OriginDynamic` handler if one is registered.
-		let mut broadcast = match async { self.origin.request_broadcast(&msg.track_namespace)?.await }.await {
+		let broadcast = match async { self.origin.request_broadcast(&msg.track_namespace)?.await }.await {
 			Ok(broadcast) => broadcast,
 			Err(_) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
@@ -147,7 +147,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// local to this subscription (per-viewer: N viewers count N times) and the
 		// meter rides into the track subscription below. `track_stats` (the
 		// PublisherTrack guard, subscriptions lifecycle) stays owned by this function.
-		broadcast.set_meter(track_stats.meter());
+		let broadcast = broadcast.with_meter(track_stats.meter());
 
 		let subscription = Subscription {
 			priority: msg.subscriber_priority,
@@ -300,8 +300,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stream = Writer::new(stream, version);
 
 		stream.encode(&msg).await?;
-		// Groups/frames/bytes are counted by the model via the subscriber's meter
-		// (attached in run_subscribe_stream) as `recv_group`/`next_frame` are pulled.
 
 		loop {
 			let frame = tokio::select! {

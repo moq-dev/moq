@@ -129,7 +129,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, BroadcastInfo, Meter, OriginProducer, Path, PathOwned, TrackProducer, Usage};
+use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer, Usage};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -151,7 +151,7 @@ pub struct Counters {
 	pub broadcasts_closed: AtomicU64,
 	/// Payload counters (groups/frames/bytes). Shared by `Arc` with the model
 	/// producer/consumer that bumps them as data flows (see [`Counters::meter`]
-	/// and [`crate::Meter`]); read here when snapshotting.
+	/// and [`crate::Usage`]); read here when snapshotting.
 	usage: Arc<Usage>,
 }
 
@@ -186,10 +186,10 @@ impl Counters {
 		}
 	}
 
-	/// A [`Meter`] handle over this slot's shared payload counters, to hand to the
+	/// A shared [`Usage`] handle over this slot's payload counters, to hand to the
 	/// model producer/consumer so it bumps them directly as media flows.
-	fn meter(&self) -> Meter {
-		Meter::from_arc(self.usage.clone())
+	fn meter(&self) -> Arc<Usage> {
+		self.usage.clone()
 	}
 }
 
@@ -665,17 +665,17 @@ impl BroadcastStats {
 		}
 	}
 
-	/// A [`Meter`] over this broadcast's shared ingress payload counters, *without*
+	/// A shared [`Usage`] over this broadcast's ingress payload counters, *without*
 	/// opening a lifecycle guard. Use this to attach a meter to a model
 	/// [`crate::BroadcastProducer`] when a broadcast-lifetime guard (from
 	/// [`Self::subscriber`]) is already held elsewhere, so `announced` isn't
 	/// double-counted. The held guard keeps the counters alive for the snapshot
 	/// task. No-op for a disabled aggregator.
-	pub fn subscriber_meter(&self) -> Meter {
-		match &self.entry {
-			Some(entry) => entry.subscriber[self.tier.idx()].meter(),
-			None => Meter::default(),
-		}
+	pub fn subscriber_meter(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|entry| entry.subscriber[self.tier.idx()].meter())
+			.unwrap_or_default()
 	}
 }
 
@@ -846,17 +846,17 @@ impl PublisherStats {
 		.publisher_track(name)
 	}
 
-	/// A [`Meter`] over this broadcast's shared egress payload counters, to attach
-	/// to a model [`crate::BroadcastConsumer`] (via `set_meter`) so every track it
+	/// A shared [`Usage`] over this broadcast's egress payload counters, to attach
+	/// to a model [`crate::BroadcastConsumer`] (via `with_meter`) so every track it
 	/// subscribes to is counted. Hold this guard while metering: it keeps the
 	/// broadcast's counters alive for the snapshot task. No-op for a disabled
 	/// aggregator. A gateway serving the origin out over an external protocol uses
 	/// this to bill egress without touching each track.
-	pub fn meter(&self) -> Meter {
-		match &self.entry {
-			Some(entry) => entry.publisher[self.tier.idx()].meter(),
-			None => Meter::default(),
-		}
+	pub fn meter(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|entry| entry.publisher[self.tier.idx()].meter())
+			.unwrap_or_default()
 	}
 }
 
@@ -890,17 +890,17 @@ impl SubscriberStats {
 		.subscriber_track(name)
 	}
 
-	/// A [`Meter`] over this broadcast's shared ingress payload counters, to attach
-	/// to a model [`crate::BroadcastProducer`] (via `set_meter`) so every track it
+	/// A shared [`Usage`] over this broadcast's ingress payload counters, to attach
+	/// to a model [`crate::BroadcastProducer`] (via `with_meter`) so every track it
 	/// creates is counted. Hold this guard while metering: it keeps the broadcast's
 	/// counters alive for the snapshot task. No-op for a disabled aggregator. A
 	/// gateway publishing an external protocol's media into the origin uses this to
 	/// bill ingress without touching each track.
-	pub fn meter(&self) -> Meter {
-		match &self.entry {
-			Some(entry) => entry.subscriber[self.tier.idx()].meter(),
-			None => Meter::default(),
-		}
+	pub fn meter(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|entry| entry.subscriber[self.tier.idx()].meter())
+			.unwrap_or_default()
 	}
 }
 
@@ -923,14 +923,14 @@ pub struct PublisherTrack {
 }
 
 impl PublisherTrack {
-	/// A [`Meter`] over this track's shared egress payload counters, to attach to
-	/// the model `TrackSubscriber` (via `set_meter`) so groups/frames/bytes are
-	/// counted as media is served. No-op for a disabled aggregator.
-	pub fn meter(&self) -> Meter {
-		match &self.entry {
-			Some(entry) => entry.publisher[self.tier.idx()].meter(),
-			None => Meter::default(),
-		}
+	/// A shared [`Usage`] over this track's egress payload counters, to attach to a
+	/// model [`crate::BroadcastConsumer`] (via `with_meter`) so groups/frames/bytes
+	/// are counted as media is served. No-op for a disabled aggregator.
+	pub fn meter(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|entry| entry.publisher[self.tier.idx()].meter())
+			.unwrap_or_default()
 	}
 
 	/// Bumps `frames` once.
@@ -974,14 +974,14 @@ pub struct SubscriberTrack {
 }
 
 impl SubscriberTrack {
-	/// A [`Meter`] over this track's shared ingress payload counters, to attach to
-	/// the model `TrackProducer` (via `set_meter`) so groups/frames/bytes are
-	/// counted as media is produced. No-op for a disabled aggregator.
-	pub fn meter(&self) -> Meter {
-		match &self.entry {
-			Some(entry) => entry.subscriber[self.tier.idx()].meter(),
-			None => Meter::default(),
-		}
+	/// A shared [`Usage`] over this track's ingress payload counters, to attach to a
+	/// model [`crate::BroadcastProducer`] (via `with_meter`) so groups/frames/bytes
+	/// are counted as media is produced. No-op for a disabled aggregator.
+	pub fn meter(&self) -> Arc<Usage> {
+		self.entry
+			.as_ref()
+			.map(|entry| entry.subscriber[self.tier.idx()].meter())
+			.unwrap_or_default()
 	}
 
 	/// Bumps `frames` once.
@@ -1365,8 +1365,7 @@ mod tests {
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let guard = stats.tier(Tier::External).broadcast("demo/bbb").subscriber();
 
-		let mut broadcast = BroadcastInfo::new().produce();
-		broadcast.set_meter(guard.meter());
+		let mut broadcast = BroadcastInfo::new().produce().with_meter(guard.meter());
 		let mut video = broadcast.create_track("video", None).unwrap();
 		video
 			.append_group()

@@ -7,9 +7,11 @@
 //! mirror image for egress: it consumes a broadcast from the origin and re-muxes
 //! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use moq_mux::container::{Frame, ts};
-use moq_net::{BroadcastInfo, Meter, OriginConsumer, OriginProducer, OriginPublish};
+use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish, Usage};
 
 use crate::Result;
 
@@ -31,14 +33,13 @@ impl Publisher {
 	/// Create the broadcast, wire up the TS importer + catalog, and announce it
 	/// into `origin` at `path`.
 	///
-	/// `meter` is the ingress usage sink (from a stats `SubscriberStats::meter`, or
-	/// [`Meter::default`] for no accounting). It's attached to the broadcast before
+	/// `meter` is the ingress usage sink (from a stats `SubscriberStats::meter`, or a
+	/// default `Arc<Usage>` for no accounting). It's attached to the broadcast before
 	/// any track is created, so the catalog and every demuxed media track inherit it
 	/// even though the importer only ever sees the broadcast, not the per-track
 	/// producers.
-	pub fn new(origin: &OriginProducer, path: &str, meter: Meter) -> Result<Self> {
-		let mut broadcast = BroadcastInfo::new().produce();
-		broadcast.set_meter(meter);
+	pub fn new(origin: &OriginProducer, path: &str, meter: Arc<Usage>) -> Result<Self> {
+		let mut broadcast = BroadcastInfo::new().produce().with_meter(meter);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let importer = ts::Import::new(broadcast.clone(), catalog);
 
@@ -82,15 +83,15 @@ impl Subscriber {
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
 	/// to be announced, so a caller may connect before the publisher does.
 	///
-	/// `meter` is the egress usage sink (from a stats `PublisherStats::meter`, or
-	/// [`Meter::default`] for no accounting). It's attached to the broadcast before
+	/// `meter` is the egress usage sink (from a stats `PublisherStats::meter`, or a
+	/// default `Arc<Usage>` for no accounting). It's attached to the broadcast before
 	/// the exporter subscribes to any track, so every subscription opened inside the
 	/// muxer counts toward this viewer.
-	pub async fn new(origin: &OriginConsumer, path: &str, meter: Meter) -> Result<Option<Self>> {
-		let Some(mut broadcast) = origin.announced_broadcast(path).await else {
+	pub async fn new(origin: &OriginConsumer, path: &str, meter: Arc<Usage>) -> Result<Option<Self>> {
+		let Some(broadcast) = origin.announced_broadcast(path).await else {
 			return Ok(None);
 		};
-		broadcast.set_meter(meter);
+		let broadcast = broadcast.with_meter(meter);
 
 		let export = ts::Export::new(broadcast).await?;
 		Ok(Some(Self { export }))

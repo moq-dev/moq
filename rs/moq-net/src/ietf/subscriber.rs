@@ -464,18 +464,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.expect("an empty hop chain has room for one entry");
 				// moq-transport carries no broadcast epoch on the wire; stamp the current
 				// time so the instance is still ordered against any future re-announce.
-				let mut broadcast = BroadcastInfo {
-					hops,
-					..Default::default()
-				}
-				.produce();
-
 				// Open the broadcast-lifetime subscriber guard and attach its meter to
 				// the broadcast, so every track served on demand (and its frames/bytes)
 				// is counted without a per-track attach. The guard (held in
 				// BroadcastState) keeps the counters alive and records `announced`.
 				let stats = self.stats.broadcast(&abs).subscriber();
-				broadcast.set_meter(stats.meter());
+				let broadcast = BroadcastInfo {
+					hops,
+					..Default::default()
+				}
+				.produce()
+				.with_meter(stats.meter());
 
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a
