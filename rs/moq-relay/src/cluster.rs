@@ -412,7 +412,7 @@ impl Cluster {
 	/// Billing tier cluster-peer traffic records under (`--cluster-tier`,
 	/// default `internal`). An empty label is the default (unprefixed) tier.
 	fn cluster_tier(&self) -> Tier {
-		Tier::new(self.config.tier.clone().unwrap_or_else(|| "internal".to_string()))
+		crate::trusted_tier(self.config.tier.clone())
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.

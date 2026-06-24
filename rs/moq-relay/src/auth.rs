@@ -851,7 +851,7 @@ impl Auth {
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
 			auth_api,
-			mtls_tier: Tier::new(config.mtls_tier.unwrap_or_else(|| "internal".to_string())),
+			mtls_tier: crate::trusted_tier(config.mtls_tier),
 		})
 	}
 
@@ -860,7 +860,7 @@ impl Auth {
 	/// [`AuthConfig`] to carry `--auth-mtls-tier`. An empty label selects the
 	/// default (unprefixed) tier.
 	pub fn with_mtls_tier(mut self, tier: Option<String>) -> Self {
-		self.mtls_tier = Tier::new(tier.unwrap_or_else(|| "internal".to_string()));
+		self.mtls_tier = crate::trusted_tier(tier);
 		self
 	}
 

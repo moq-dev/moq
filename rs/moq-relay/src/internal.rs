@@ -114,7 +114,7 @@ impl InternalAllow {
 /// run concurrently when both are configured.
 pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::Result<()> {
 	// Billing tier these sessions record under (--internal-tier, default `internal`).
-	let tier = moq_net::Tier::new(config.tier.clone().unwrap_or_else(|| "internal".to_string()));
+	let tier = crate::trusted_tier(config.tier.clone());
 
 	let tcp = {
 		let cluster = cluster.clone();
