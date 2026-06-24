@@ -338,11 +338,11 @@ pub struct Cluster {
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: OriginProducer,
 
-	/// Stats aggregator. One instance per relay; sessions pick a tier via
-	/// [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
-	/// (mTLS / cluster peer) traffic land in separate counter sets. Defaults
-	/// to a no-op aggregator ([`Stats::default`]) until [`with_stats`](Self::with_stats)
-	/// is called.
+	/// Stats aggregator. One instance per relay; sessions pick a billing tier via
+	/// [`Stats::tier`] at acceptance time (default tier for JWT/public, `internal`
+	/// for mTLS / cluster peers, or any label the auth API returns) so traffic
+	/// classes land in separate counter sets. Defaults to a no-op aggregator
+	/// ([`Stats::default`]) until [`with_stats`](Self::with_stats) is called.
 	pub stats: Stats,
 }
 
@@ -847,7 +847,7 @@ impl Cluster {
 		let cs = client
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
-			.with_stats(self.stats.tier(Tier::Internal))
+			.with_stats(self.stats.tier(Tier::new("internal")))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;

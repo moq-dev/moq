@@ -7,15 +7,17 @@
  * works for a single relay and for a cluster alike, then aggregate each node and
  * let you drill into one.
  *
- * The relay splits its stats by billing tier: external clients (JWT/public) and
- * internal peers (mTLS / cluster-connect). It publishes a parallel set of tracks
- * for each, so cluster fan-out (e.g. the hub relaying between nodes) shows up
- * only in the `internal/*` tracks, never in the external numbers.
+ * The relay splits its stats by billing tier, an arbitrary label chosen by
+ * business logic. The default tier is unprefixed; a named tier prefixes its
+ * tracks with its label. This dashboard reads the two well-known tiers: the
+ * default tier (external clients: JWT/public) and `internal` (mTLS /
+ * cluster-connect peers), so cluster fan-out (e.g. the hub relaying between
+ * nodes) shows up only in the `internal/*` tracks, never in the default numbers.
  *
  * Per-node tracks we read:
- *   publisher.json            external egress  (relay -> downstream viewers)
- *   subscriber.json           external ingress (upstream publishers -> relay)
- *   sessions.json             external sessions by auth root
+ *   publisher.json            default-tier egress  (relay -> downstream viewers)
+ *   subscriber.json           default-tier ingress (upstream publishers -> relay)
+ *   sessions.json             default-tier sessions by auth root
  *   internal/publisher.json   internal egress  (relay -> downstream cluster peers)
  *   internal/subscriber.json  internal ingress (upstream cluster peers -> relay)
  *   internal/sessions.json    internal sessions by auth root

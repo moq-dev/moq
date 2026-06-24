@@ -2,19 +2,25 @@
 //!
 //! [`Stats`] aggregates per-broadcast counter bumps for traffic this relay
 //! node is handling and publishes them on a single `<prefix>/node/<node>`
-//! broadcast (or `<prefix>/node` when no node is configured). The broadcast
-//! carries four per-broadcast tracks, one per `(tier, role)` pair:
+//! broadcast (or `<prefix>/node` when no node is configured). Traffic is
+//! bucketed by an arbitrary [`Tier`] label chosen by business logic (billing
+//! class, region, ...). The default tier is unprefixed; a named tier prefixes
+//! its track names with its label. So the broadcast carries, per tier, a
+//! publisher and a subscriber track:
 //!
-//! * `publisher.json`           : external (e.g. customer) egress
-//! * `subscriber.json`          : external ingress
-//! * `internal/publisher.json`  : internal (e.g. mTLS cluster peer) egress
-//! * `internal/subscriber.json` : internal ingress
+//! * `publisher.json`           : default-tier egress
+//! * `subscriber.json`          : default-tier ingress
+//! * `<label>/publisher.json`   : named-tier egress (e.g. `internal/publisher.json`)
+//! * `<label>/subscriber.json`  : named-tier ingress
 //!
-//! plus two session tracks, one per tier, that count connected sessions
-//! keyed by auth root rather than broadcast:
+//! plus one session track per tier that counts connected sessions keyed by
+//! auth root rather than broadcast:
 //!
-//! * `sessions.json`            : external sessions by root
-//! * `internal/sessions.json`   : internal sessions by root
+//! * `sessions.json`            : default-tier sessions by root
+//! * `<label>/sessions.json`    : named-tier sessions by root
+//!
+//! The default-tier tracks always exist (emitting `{}` while idle); a named
+//! tier's tracks are created the first time traffic routes to that label.
 //!
 //! Each per-broadcast frame is a JSON object mapping broadcast path to a
 //! cumulative counter snapshot. Tier, role, and node are implied by the track
@@ -119,8 +125,9 @@
 
 use std::{
 	collections::{BTreeMap, HashMap},
+	fmt,
 	sync::{
-		Arc, Weak,
+		Arc, Mutex, Weak,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::Duration,
@@ -129,7 +136,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer};
+use crate::{AsPath, BroadcastInfo, BroadcastProducer, OriginProducer, Path, PathOwned, TrackProducer};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -220,21 +227,54 @@ struct RawCounts {
 	groups: u64,
 }
 
-/// Distinguishes traffic classes so a single [`Stats`] can record
-/// customer-facing and cluster-peer traffic separately. Each tracked
-/// broadcast keeps per-tier [`Counters`] on both its publisher and
-/// subscriber sides.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Tier {
-	External,
-	Internal,
-}
+/// Traffic-class label that selects which counter set a session's bumps record
+/// in, so a single [`Stats`] can split customer-facing, cluster-peer, regional,
+/// etc. traffic. Each tracked broadcast keeps per-tier [`Counters`] on both its
+/// publisher and subscriber sides.
+///
+/// The default tier ([`Tier::default`]) is unprefixed: its tracks are
+/// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
+/// prefixes every track with its label, so `Tier::new("internal")` records on
+/// `internal/publisher.json`. The label is an arbitrary path, so business logic
+/// can bucket by anything (`"internal"`, `"region/sjc"`, ...); an empty label is
+/// the default tier.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Tier(PathOwned);
 
 impl Tier {
-	fn idx(self) -> usize {
-		match self {
-			Tier::External => 0,
-			Tier::Internal => 1,
+	/// A tier with the given label. An empty label is the default tier.
+	pub fn new(label: impl Into<PathOwned>) -> Self {
+		Self(label.into())
+	}
+
+	/// The tier label, empty for the default tier.
+	pub fn label(&self) -> &PathOwned {
+		&self.0
+	}
+
+	/// True for the default (unprefixed) tier.
+	pub fn is_default(&self) -> bool {
+		self.0.is_empty()
+	}
+
+	/// Track name for this tier: `name` on the default tier, else `<label>/<name>`.
+	fn track_name(&self, name: &str) -> String {
+		if self.0.is_empty() {
+			name.to_string()
+		} else {
+			format!("{}/{}", self.0.as_str(), name)
+		}
+	}
+}
+
+impl fmt::Display for Tier {
+	/// The label, or `external` for the default (unprefixed) tier. For logs only;
+	/// the wire uses the empty-prefix track names.
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		if self.0.is_empty() {
+			f.write_str("external")
+		} else {
+			fmt::Display::fmt(&self.0, f)
 		}
 	}
 }
@@ -333,34 +373,50 @@ pub struct Stats {
 struct StatsShared {
 	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
-	/// Connected-session gauges keyed by auth root, one map per tier (indexed
-	/// by `Tier::idx`). Independent of any broadcast; surfaced on the session
-	/// tracks.
-	sessions: [Lock<HashMap<PathOwned, Arc<SessionCounters>>>; 2],
+	/// Connected-session gauges keyed by `(tier, auth root)`. Independent of any
+	/// broadcast; surfaced on the per-tier session tracks. A tier's inner map is
+	/// created the first time a session records under it.
+	sessions: Lock<HashMap<Tier, HashMap<PathOwned, Arc<SessionCounters>>>>,
 }
 
-/// Per-broadcast counters split by side then tier. The two side fields are
-/// named explicitly (rather than indexed by some `Role` enum) because the
-/// bump-path call sites always know which side they're on at compile time;
-/// only the tier varies dynamically with the session.
+/// Per-broadcast counters, lazily split by tier. A tier's [`TierCounters`] is
+/// created the first time a guard records under that label, so the set of tiers
+/// is fully dynamic. Bump-path call sites resolve the `Arc<TierCounters>` once
+/// (at guard creation) and hold it, so the per-byte path never touches this map.
 struct BroadcastEntry {
-	publisher: [Counters; 2],
-	subscriber: [Counters; 2],
+	tiers: Mutex<HashMap<Tier, Arc<TierCounters>>>,
 }
 
 impl BroadcastEntry {
 	fn new() -> Self {
 		Self {
-			publisher: Default::default(),
-			subscriber: Default::default(),
+			tiers: Mutex::new(HashMap::new()),
 		}
+	}
+
+	/// Get-or-create the counters for `tier` on this broadcast.
+	fn tier(&self, tier: &Tier) -> Arc<TierCounters> {
+		self.tiers
+			.lock()
+			.expect("stats tiers poisoned")
+			.entry(tier.clone())
+			.or_default()
+			.clone()
 	}
 }
 
-/// Per-(entry, slot) state owned by the snapshot task. The snapshot task
-/// is single-threaded so this needs no atomics; we keep one of these per
-/// `(path, side, tier)` in a task-local map, mirroring the structure of
-/// [`BroadcastEntry`].
+/// Publisher and subscriber [`Counters`] for one `(broadcast, tier)`. The two
+/// sides are named explicitly (rather than indexed by a `Role` enum) because
+/// the bump-path call sites always know which side they're on at compile time.
+#[derive(Default)]
+struct TierCounters {
+	publisher: Counters,
+	subscriber: Counters,
+}
+
+/// Per-slot state owned by the snapshot task. The snapshot task is
+/// single-threaded so this needs no atomics; one is kept per `(path, tier,
+/// side)` in a task-local map.
 #[derive(Default)]
 struct SlotState {
 	/// Last `Snapshot` we wrote to the frame for this slot, used to detect
@@ -368,58 +424,19 @@ struct SlotState {
 	prev_emitted: Option<Snapshot>,
 }
 
-/// Snapshot-task-local mirror of [`BroadcastEntry`]: per-side, per-tier
-/// `SlotState`. Same field layout so iteration in the snapshot loop is
-/// trivially parallel between the two.
+/// Snapshot-task-local change-detection state for one `(path, tier)`: a
+/// `SlotState` per side.
 #[derive(Default)]
-struct EntrySnapState {
-	publisher: [SlotState; 2],
-	subscriber: [SlotState; 2],
+struct SideSlots {
+	publisher: SlotState,
+	subscriber: SlotState,
 }
 
-impl EntrySnapState {
-	/// Iterate the four `(track_name, counters, slot_state)` slots in the
-	/// fixed order matching `TRACK_ORDER`.
-	fn zip_slots<'a>(&'a mut self, entry: &'a BroadcastEntry) -> [(&'static str, &'a Counters, &'a mut SlotState); 4] {
-		let [pub_ext_state, pub_int_state] = &mut self.publisher;
-		let [sub_ext_state, sub_int_state] = &mut self.subscriber;
-		[
-			("publisher.json", &entry.publisher[Tier::External.idx()], pub_ext_state),
-			(
-				"subscriber.json",
-				&entry.subscriber[Tier::External.idx()],
-				sub_ext_state,
-			),
-			(
-				"internal/publisher.json",
-				&entry.publisher[Tier::Internal.idx()],
-				pub_int_state,
-			),
-			(
-				"internal/subscriber.json",
-				&entry.subscriber[Tier::Internal.idx()],
-				sub_int_state,
-			),
-		]
-	}
-}
-
-/// Number of `(side, tier)` slots, matching the four tracks per stats
-/// broadcast.
-const NUM_SLOTS: usize = 4;
-
-/// Track names in the same order [`EntrySnapState::zip_slots`] returns
-/// them. Used to construct the per-broadcast track set up front.
-const TRACK_ORDER: [&str; NUM_SLOTS] = [
-	"publisher.json",
-	"subscriber.json",
-	"internal/publisher.json",
-	"internal/subscriber.json",
-];
-
-/// Session track names, indexed by [`Tier::idx`]: external first, internal
-/// second.
-const SESSION_TRACK_ORDER: [&str; 2] = ["sessions.json", "internal/sessions.json"];
+/// Base track names. A named tier prefixes these with its label; see
+/// [`Tier::track_name`].
+const PUBLISHER_TRACK: &str = "publisher.json";
+const SUBSCRIBER_TRACK: &str = "subscriber.json";
+const SESSIONS_TRACK: &str = "sessions.json";
 
 impl Stats {
 	/// Build a stats aggregator from `config`.
@@ -500,11 +517,18 @@ impl Stats {
 	/// Get-or-create the session gauge for `root` on `tier`. `None` for a no-op
 	/// aggregator. Unlike [`Self::entry`], roots are auth scopes (never under
 	/// the stats prefix), so no cycle-breaking filter is needed.
-	fn session_counters(&self, tier: Tier, root: impl AsPath) -> Option<Arc<SessionCounters>> {
+	fn session_counters(&self, tier: &Tier, root: impl AsPath) -> Option<Arc<SessionCounters>> {
 		let shared = self.shared.as_ref()?;
 		let owned = root.as_path().to_owned();
-		let mut sessions = shared.sessions[tier.idx()].lock();
-		Some(sessions.entry(owned).or_default().clone())
+		let mut sessions = shared.sessions.lock();
+		Some(
+			sessions
+				.entry(tier.clone())
+				.or_default()
+				.entry(owned)
+				.or_default()
+				.clone(),
+		)
 	}
 }
 
@@ -529,8 +553,8 @@ impl StatsHandle {
 	}
 
 	/// The tier this handle bumps into.
-	pub fn tier(&self) -> Tier {
-		self.tier
+	pub fn tier(&self) -> &Tier {
+		&self.tier
 	}
 
 	/// Returns a per-broadcast handle scoped to this tier.
@@ -540,8 +564,7 @@ impl StatsHandle {
 	/// the aggregator.
 	pub fn broadcast(&self, path: impl AsPath) -> BroadcastStats {
 		BroadcastStats {
-			entry: self.stats.entry(path),
-			tier: self.tier,
+			counters: self.stats.entry(path).map(|entry| entry.tier(&self.tier)),
 		}
 	}
 
@@ -550,13 +573,13 @@ impl StatsHandle {
 	/// downstream subscription so `broadcasts - broadcasts_closed` counts the
 	/// distinct sessions watching each broadcast.
 	pub fn publisher_broadcasts(&self) -> SessionBroadcasts {
-		SessionBroadcasts::new(self.stats.clone(), self.tier, Side::Publisher)
+		SessionBroadcasts::new(self.stats.clone(), self.tier.clone(), Side::Publisher)
 	}
 
 	/// Per-session ingress (subscriber) counterpart to
 	/// [`Self::publisher_broadcasts`].
 	pub fn subscriber_broadcasts(&self) -> SessionBroadcasts {
-		SessionBroadcasts::new(self.stats.clone(), self.tier, Side::Subscriber)
+		SessionBroadcasts::new(self.stats.clone(), self.tier.clone(), Side::Subscriber)
 	}
 
 	/// Record a connected session authenticated under `root` on this tier. Hold
@@ -565,14 +588,14 @@ impl StatsHandle {
 	/// session that merely connects is still billable. Surfaced on the session
 	/// track for this tier, keyed by `root`.
 	pub fn session(&self, root: impl AsPath) -> SessionStats {
-		SessionStats::new(self.stats.session_counters(self.tier, root))
+		SessionStats::new(self.stats.session_counters(&self.tier, root))
 	}
 }
 
 impl Default for StatsHandle {
 	/// A no-op handle backed by a [`Stats::default`] aggregator.
 	fn default() -> Self {
-		Stats::default().tier(Tier::External)
+		Stats::default().tier(Tier::default())
 	}
 }
 
@@ -584,8 +607,9 @@ impl Default for StatsHandle {
 /// elsewhere.
 #[derive(Clone)]
 pub struct BroadcastStats {
-	entry: Option<Arc<BroadcastEntry>>,
-	tier: Tier,
+	/// Resolved counters for this `(broadcast, tier)`, or `None` when the path
+	/// was under the aggregator's own prefix or stats are disabled.
+	counters: Option<Arc<TierCounters>>,
 }
 
 impl BroadcastStats {
@@ -593,7 +617,7 @@ impl BroadcastStats {
 	/// aggregator's own prefix, or stats are disabled). All bumps through an
 	/// empty handle are no-ops.
 	pub fn is_empty(&self) -> bool {
-		self.entry.is_none()
+		self.counters.is_none()
 	}
 
 	/// Open a broadcast-lifetime guard for the publisher (egress) role.
@@ -601,14 +625,11 @@ impl BroadcastStats {
 	/// (The `broadcasts` sentinel is driven separately by
 	/// [`SessionBroadcasts`]; see the module docs.)
 	pub fn publisher(&self) -> PublisherStats {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()]
-				.announced
-				.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.publisher.announced.fetch_add(1, Ordering::Relaxed);
 		}
 		PublisherStats {
-			entry: self.entry.clone(),
-			tier: self.tier,
+			counters: self.counters.clone(),
 		}
 	}
 
@@ -617,14 +638,11 @@ impl BroadcastStats {
 	/// (The `broadcasts` sentinel is driven separately by
 	/// [`SessionBroadcasts`]; see the module docs.)
 	pub fn subscriber(&self) -> SubscriberStats {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()]
-				.announced
-				.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.subscriber.announced.fetch_add(1, Ordering::Relaxed);
 		}
 		SubscriberStats {
-			entry: self.entry.clone(),
-			tier: self.tier,
+			counters: self.counters.clone(),
 		}
 	}
 
@@ -634,27 +652,21 @@ impl BroadcastStats {
 	/// parameter is kept for symmetry with the rest of moq-net so callers
 	/// don't have to thread an `Option<&str>` through subscribe sites.
 	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()]
-				.subscriptions
-				.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.publisher.subscriptions.fetch_add(1, Ordering::Relaxed);
 		}
 		PublisherTrack {
-			entry: self.entry.clone(),
-			tier: self.tier,
+			counters: self.counters.clone(),
 		}
 	}
 
 	/// Subscriber-side counterpart to [`Self::publisher_track`].
 	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()]
-				.subscriptions
-				.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.subscriber.subscriptions.fetch_add(1, Ordering::Relaxed);
 		}
 		SubscriberTrack {
-			entry: self.entry.clone(),
-			tier: self.tier,
+			counters: self.counters.clone(),
 		}
 	}
 }
@@ -667,10 +679,10 @@ enum Side {
 }
 
 impl Side {
-	fn counters(self, entry: &BroadcastEntry, tier: Tier) -> &Counters {
+	fn counters(self, tier: &TierCounters) -> &Counters {
 		match self {
-			Side::Publisher => &entry.publisher[tier.idx()],
-			Side::Subscriber => &entry.subscriber[tier.idx()],
+			Side::Publisher => &tier.publisher,
+			Side::Subscriber => &tier.subscriber,
 		}
 	}
 }
@@ -694,7 +706,7 @@ pub struct SessionBroadcasts {
 	stats: Stats,
 	tier: Tier,
 	side: Side,
-	counts: Arc<std::sync::Mutex<HashMap<PathOwned, u32>>>,
+	counts: Arc<Mutex<HashMap<PathOwned, u32>>>,
 }
 
 impl SessionBroadcasts {
@@ -703,7 +715,7 @@ impl SessionBroadcasts {
 			stats,
 			tier,
 			side,
-			counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+			counts: Arc::new(Mutex::new(HashMap::new())),
 		}
 	}
 
@@ -713,7 +725,7 @@ impl SessionBroadcasts {
 	/// for that broadcast).
 	pub fn subscribe(&self, path: impl AsPath) -> BroadcastSubscription {
 		let path = path.as_path().to_owned();
-		let entry = self.stats.entry(&path);
+		let counters = self.stats.entry(&path).map(|entry| entry.tier(&self.tier));
 		let first = {
 			let mut counts = self.counts.lock().expect("stats refcount poisoned");
 			let n = counts.entry(path.clone()).or_insert(0);
@@ -722,16 +734,12 @@ impl SessionBroadcasts {
 			first
 		};
 		if first {
-			if let Some(entry) = &entry {
-				self.side
-					.counters(entry, self.tier)
-					.broadcasts
-					.fetch_add(1, Ordering::Relaxed);
+			if let Some(counters) = &counters {
+				self.side.counters(counters).broadcasts.fetch_add(1, Ordering::Relaxed);
 			}
 		}
 		BroadcastSubscription {
-			entry,
-			tier: self.tier,
+			counters,
 			side: self.side,
 			counts: self.counts.clone(),
 			path,
@@ -743,10 +751,9 @@ impl SessionBroadcasts {
 /// See [`SessionBroadcasts::subscribe`].
 #[must_use = "drop the guard to release the subscription"]
 pub struct BroadcastSubscription {
-	entry: Option<Arc<BroadcastEntry>>,
-	tier: Tier,
+	counters: Option<Arc<TierCounters>>,
 	side: Side,
-	counts: Arc<std::sync::Mutex<HashMap<PathOwned, u32>>>,
+	counts: Arc<Mutex<HashMap<PathOwned, u32>>>,
 	path: PathOwned,
 }
 
@@ -768,11 +775,11 @@ impl Drop for BroadcastSubscription {
 			}
 		};
 		if last {
-			if let Some(entry) = &self.entry {
+			if let Some(counters) = &self.counters {
 				// Release pairs with the snapshot reader's Acquire load of
 				// `broadcasts_closed`; see `PublisherStats::drop`.
 				self.side
-					.counters(entry, self.tier)
+					.counters(counters)
 					.broadcasts_closed
 					.fetch_add(1, Ordering::Release);
 			}
@@ -811,8 +818,7 @@ impl Drop for SessionStats {
 /// RAII broadcast guard for the publisher role. See [`BroadcastStats::publisher`].
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct PublisherStats {
-	entry: Option<Arc<BroadcastEntry>>,
-	tier: Tier,
+	counters: Option<Arc<TierCounters>>,
 }
 
 impl PublisherStats {
@@ -820,8 +826,7 @@ impl PublisherStats {
 	/// and `subscriptions_closed` on drop.
 	pub fn track(&self, name: &str) -> PublisherTrack {
 		BroadcastStats {
-			entry: self.entry.clone(),
-			tier: self.tier,
+			counters: self.counters.clone(),
 		}
 		.publisher_track(name)
 	}
@@ -829,13 +834,11 @@ impl PublisherStats {
 
 impl Drop for PublisherStats {
 	fn drop(&mut self) {
-		if let Some(entry) = &self.entry {
+		if let Some(counters) = &self.counters {
 			// Release pairs with the snapshot reader's Acquire load of
 			// `announced_closed`, propagating the open-bump from this
 			// guard's construction to whichever thread observes the close.
-			entry.publisher[self.tier.idx()]
-				.announced_closed
-				.fetch_add(1, Ordering::Release);
+			counters.publisher.announced_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -843,16 +846,14 @@ impl Drop for PublisherStats {
 /// RAII broadcast guard for the subscriber role. See [`BroadcastStats::subscriber`].
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct SubscriberStats {
-	entry: Option<Arc<BroadcastEntry>>,
-	tier: Tier,
+	counters: Option<Arc<TierCounters>>,
 }
 
 impl SubscriberStats {
 	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
 	pub fn track(&self, name: &str) -> SubscriberTrack {
 		BroadcastStats {
-			entry: self.entry.clone(),
-			tier: self.tier,
+			counters: self.counters.clone(),
 		}
 		.subscriber_track(name)
 	}
@@ -860,11 +861,9 @@ impl SubscriberStats {
 
 impl Drop for SubscriberStats {
 	fn drop(&mut self) {
-		if let Some(entry) = &self.entry {
+		if let Some(counters) = &self.counters {
 			// See `PublisherStats::drop` for why this is Release.
-			entry.subscriber[self.tier.idx()]
-				.announced_closed
-				.fetch_add(1, Ordering::Release);
+			counters.subscriber.announced_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -872,40 +871,37 @@ impl Drop for SubscriberStats {
 /// RAII subscription guard for the publisher role.
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct PublisherTrack {
-	entry: Option<Arc<BroadcastEntry>>,
-	tier: Tier,
+	counters: Option<Arc<TierCounters>>,
 }
 
 impl PublisherTrack {
 	/// Bumps `frames` once.
 	pub fn frame(&self) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.publisher.frames.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.publisher.bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.publisher.groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
 
 impl Drop for PublisherTrack {
 	fn drop(&mut self) {
-		if let Some(entry) = &self.entry {
+		if let Some(counters) = &self.counters {
 			// See `PublisherStats::drop` for why this is Release.
-			entry.publisher[self.tier.idx()]
-				.subscriptions_closed
-				.fetch_add(1, Ordering::Release);
+			counters.publisher.subscriptions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -913,40 +909,37 @@ impl Drop for PublisherTrack {
 /// RAII subscription guard for the subscriber role.
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct SubscriberTrack {
-	entry: Option<Arc<BroadcastEntry>>,
-	tier: Tier,
+	counters: Option<Arc<TierCounters>>,
 }
 
 impl SubscriberTrack {
 	/// Bumps `frames` once.
 	pub fn frame(&self) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.subscriber.frames.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.subscriber.bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
+		if let Some(counters) = &self.counters {
+			counters.subscriber.groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
 
 impl Drop for SubscriberTrack {
 	fn drop(&mut self) {
-		if let Some(entry) = &self.entry {
+		if let Some(counters) = &self.counters {
 			// See `PublisherStats::drop` for why this is Release.
-			entry.subscriber[self.tier.idx()]
-				.subscriptions_closed
-				.fetch_add(1, Ordering::Release);
+			counters.subscriber.subscriptions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1053,6 +1046,44 @@ fn flush_track<T: Serialize>(track: &mut TrackProducer, frame: &T, last: &mut Ve
 	*last = json;
 }
 
+/// One broadcast path with a snapshot of its per-tier counters, cloned out of
+/// the shared map so the lock can be dropped before the change-detection pass.
+type EntrySnapshot = (PathOwned, Vec<(Tier, Arc<TierCounters>)>);
+
+/// One tier with a snapshot of its per-root session gauges, cloned out of the
+/// shared map for the same reason.
+type TierSessions = (Tier, Vec<(PathOwned, Arc<SessionCounters>)>);
+
+/// Create any track named by `frames` that doesn't exist yet, then write every
+/// existing track. Writing all tracks (not just the ones with data this tick)
+/// lets one that went idle emit `{}`; track-latest retains the most recent
+/// frame for late subscribers. New tier tracks appear lazily the first tick
+/// traffic routes to their label.
+fn flush_dynamic<T: Serialize>(
+	broadcast: &mut BroadcastProducer,
+	tracks: &mut HashMap<String, TrackProducer>,
+	last: &mut HashMap<String, Vec<u8>>,
+	frames: &HashMap<String, BTreeMap<String, T>>,
+) {
+	for name in frames.keys() {
+		if !tracks.contains_key(name) {
+			match broadcast.create_track(name.as_str(), None) {
+				Ok(track) => {
+					tracks.insert(name.clone(), track);
+				}
+				Err(err) => tracing::warn!(?err, name, "stats: failed to create track"),
+			}
+		}
+	}
+
+	let empty = BTreeMap::new();
+	for (name, track) in tracks.iter_mut() {
+		let frame = frames.get(name).unwrap_or(&empty);
+		let last = last.entry(name.clone()).or_default();
+		flush_track(track, frame, last, name);
+	}
+}
+
 /// Publishes the stats broadcast and writes a frame per tick. Spawned once by
 /// [`Stats::new`] when an origin is set; runs until every [`Stats`] clone is
 /// dropped (`weak.upgrade()` returns `None`).
@@ -1063,31 +1094,33 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 
 	let mut broadcast = BroadcastInfo::new().produce();
 
-	// Create the four per-broadcast tracks and the two session tracks up front.
-	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(name, None) {
-		Ok(t) => Some(t),
-		Err(err) => {
-			tracing::warn!(?err, name, "stats: failed to create track");
-			None
+	// Pre-create the default tier's tracks so they always exist and emit `{}`
+	// while idle. Named-tier tracks are created lazily (see `flush_dynamic`) the
+	// first tick traffic routes to that label.
+	let mut broadcast_tracks: HashMap<String, TrackProducer> = HashMap::new();
+	let mut session_tracks: HashMap<String, TrackProducer> = HashMap::new();
+	for name in [PUBLISHER_TRACK, SUBSCRIBER_TRACK] {
+		match broadcast.create_track(name, None) {
+			Ok(track) => {
+				broadcast_tracks.insert(name.to_string(), track);
+			}
+			Err(err) => {
+				tracing::warn!(?err, name, "stats: failed to create track");
+				return;
+			}
 		}
-	};
-
-	let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
-	for name in TRACK_ORDER {
-		let Some(t) = create(&mut broadcast, name) else {
-			return;
-		};
-		tracks.push(t);
 	}
-	let mut session_tracks: Vec<TrackProducer> = Vec::with_capacity(SESSION_TRACK_ORDER.len());
-	for name in SESSION_TRACK_ORDER {
-		let Some(t) = create(&mut broadcast, name) else {
+	match broadcast.create_track(SESSIONS_TRACK, None) {
+		Ok(track) => {
+			session_tracks.insert(SESSIONS_TRACK.to_string(), track);
+		}
+		Err(err) => {
+			tracing::warn!(?err, name = SESSIONS_TRACK, "stats: failed to create track");
 			return;
-		};
-		session_tracks.push(t);
+		}
 	}
 
-	// Hold the announcement guard for the lifetime of this task; dropping it (on return)
+	// Hold the announce guard for the task's lifetime; dropping it (on return)
 	// unannounces the stats broadcast.
 	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, &broadcast) else {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
@@ -1095,13 +1128,14 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	};
 	drop(shared);
 
-	// Per-path snapshot state owned by this task. Mirrors the global entries
-	// and serves as the diff source for change detection across ticks.
-	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
-	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
-	// Same, for the session tracks: per-tier root -> change-detection state.
-	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
-	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
+	// Per-path snapshot state owned by this task, the diff source for change
+	// detection across ticks. Keyed by `(path, tier)` for broadcasts and
+	// `(tier, root)` for sessions, mirroring the shared maps. The `*_last` maps
+	// hold the last serialized payload per track name for idle-frame skipping.
+	let mut local: HashMap<PathOwned, HashMap<Tier, SideSlots>> = HashMap::new();
+	let mut broadcast_last: HashMap<String, Vec<u8>> = HashMap::new();
+	let mut session_local: HashMap<Tier, HashMap<PathOwned, SessionSlotState>> = HashMap::new();
+	let mut session_last: HashMap<String, Vec<u8>> = HashMap::new();
 
 	let mut ticker = web_async::time::interval(interval);
 	ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
@@ -1113,69 +1147,121 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			return;
 		};
 
-		// Clone the current entries map into a Vec so we can drop the
-		// global lock before the change-detection pass.
-		let entries: Vec<(PathOwned, Arc<BroadcastEntry>)> = {
+		// ---- per-broadcast tracks ----
+
+		// Clone the current entries and each entry's tier set so we can drop the
+		// locks before the change-detection pass.
+		let entries: Vec<EntrySnapshot> = {
 			let map = shared.entries.lock();
-			map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+			map.iter()
+				.map(|(path, entry)| {
+					let tiers = entry
+						.tiers
+						.lock()
+						.expect("stats tiers poisoned")
+						.iter()
+						.map(|(tier, counters)| (tier.clone(), counters.clone()))
+						.collect();
+					(path.clone(), tiers)
+				})
+				.collect()
 		};
 
-		let mut frames: [BTreeMap<String, Snapshot>; NUM_SLOTS] = Default::default();
-		for (path, entry) in &entries {
-			let snap_state = local.entry(path.clone()).or_default();
-			for (i, (_track_name, counters, slot_state)) in snap_state.zip_slots(entry).into_iter().enumerate() {
-				process_slot(counters, slot_state, |snap| {
-					frames[i].insert(path.as_str().to_string(), snap);
+		// Track name -> { broadcast path -> Snapshot } for this tick.
+		let mut frames: HashMap<String, BTreeMap<String, Snapshot>> = HashMap::new();
+		for (path, tiers) in &entries {
+			let path_local = local.entry(path.clone()).or_default();
+			for (tier, counters) in tiers {
+				let slots = path_local.entry(tier.clone()).or_default();
+				process_slot(&counters.publisher, &mut slots.publisher, |snap| {
+					frames
+						.entry(tier.track_name(PUBLISHER_TRACK))
+						.or_default()
+						.insert(path.as_str().to_string(), snap);
+				});
+				process_slot(&counters.subscriber, &mut slots.subscriber, |snap| {
+					frames
+						.entry(tier.track_name(SUBSCRIBER_TRACK))
+						.or_default()
+						.insert(path.as_str().to_string(), snap);
 				});
 			}
 		}
 		drop(entries);
 
-		// GC global entries: keep only those an external guard still holds.
-		// `strong_count == 1` (just the map's own `Arc`) means no live
-		// publisher/subscriber/track guard remains, so every open counter
-		// has caught up to its `*_closed` counterpart and no traffic can
-		// flow. We can't key this on the counters directly: a held but idle
-		// `BroadcastStats` (all counters equal) must stay so a later bump
-		// isn't lost on an orphaned `Arc`. Then drop local state for any
-		// path that left the map. We already emitted each removed entry's
-		// final snapshot above, so nothing is lost.
+		// GC global entries and their tiers, then prune local state to match.
+		// `strong_count(entry) > 1` keeps an entry a builder is mid-creating (it
+		// holds a clone) even before its first tier lands, so a later bump can't
+		// be lost on an orphaned `Arc`. Within a kept entry, an idle tier
+		// (counters all equal, no guard holding the `Arc`) is dropped; its final
+		// close snapshot was already emitted above.
 		{
 			let mut map = shared.entries.lock();
-			map.retain(|_, entry| Arc::strong_count(entry) > 1);
-			local.retain(|path, _| map.contains_key(path));
+			map.retain(|_, entry| {
+				if Arc::strong_count(entry) > 1 {
+					return true;
+				}
+				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
+				tiers.retain(|_, counters| Arc::strong_count(counters) > 1);
+				!tiers.is_empty()
+			});
+			local.retain(|path, tier_states| match map.get(path) {
+				Some(entry) => {
+					let tiers = entry.tiers.lock().expect("stats tiers poisoned");
+					tier_states.retain(|tier, _| tiers.contains_key(tier));
+					true
+				}
+				None => false,
+			});
 		}
 
-		// Session tracks: one frame per tier, keyed by auth root.
-		let mut session_frames: [BTreeMap<String, SessionSnapshot>; 2] = Default::default();
-		for tier_idx in 0..2 {
-			let roots: Vec<(PathOwned, Arc<SessionCounters>)> = {
-				let map = shared.sessions[tier_idx].lock();
-				map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-			};
-			let states = &mut session_local[tier_idx];
-			for (root, counters) in &roots {
-				let state = states.entry(root.clone()).or_default();
+		// ---- per-tier session tracks ----
+
+		let sessions: Vec<TierSessions> = {
+			let map = shared.sessions.lock();
+			map.iter()
+				.map(|(tier, roots)| {
+					let roots = roots.iter().map(|(root, c)| (root.clone(), c.clone())).collect();
+					(tier.clone(), roots)
+				})
+				.collect()
+		};
+
+		let mut session_frames: HashMap<String, BTreeMap<String, SessionSnapshot>> = HashMap::new();
+		for (tier, roots) in &sessions {
+			let tier_local = session_local.entry(tier.clone()).or_default();
+			for (root, counters) in roots {
+				let state = tier_local.entry(root.clone()).or_default();
 				process_session_slot(counters, state, |snap| {
-					session_frames[tier_idx].insert(root.as_str().to_string(), snap);
+					session_frames
+						.entry(tier.track_name(SESSIONS_TRACK))
+						.or_default()
+						.insert(root.as_str().to_string(), snap);
 				});
 			}
-			drop(roots);
+		}
+		drop(sessions);
 
-			// GC roots whose last session guard has dropped (`strong_count == 1`
-			// is just the map's own `Arc`), then forget their local state. The
-			// final snapshot was already emitted above.
-			let mut map = shared.sessions[tier_idx].lock();
-			map.retain(|_, counters| Arc::strong_count(counters) > 1);
-			states.retain(|root, _| map.contains_key(root));
+		// GC session roots whose last guard dropped, then tiers with no roots
+		// left, then prune local state to match.
+		{
+			let mut map = shared.sessions.lock();
+			for roots in map.values_mut() {
+				roots.retain(|_, counters| Arc::strong_count(counters) > 1);
+			}
+			map.retain(|_, roots| !roots.is_empty());
+			session_local.retain(|tier, states| match map.get(tier) {
+				Some(roots) => {
+					states.retain(|root, _| roots.contains_key(root));
+					true
+				}
+				None => false,
+			});
 		}
 
-		for (i, (frame, last)) in frames.iter().zip(last_payload.iter_mut()).enumerate() {
-			flush_track(&mut tracks[i], frame, last, TRACK_ORDER[i]);
-		}
-		for (i, (frame, last)) in session_frames.iter().zip(session_last_payload.iter_mut()).enumerate() {
-			flush_track(&mut session_tracks[i], frame, last, SESSION_TRACK_ORDER[i]);
-		}
+		// ---- flush ----
+		flush_dynamic(&mut broadcast, &mut broadcast_tracks, &mut broadcast_last, &frames);
+		flush_dynamic(&mut broadcast, &mut session_tracks, &mut session_last, &session_frames);
 
 		drop(shared);
 	}
@@ -1221,11 +1307,45 @@ fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, sync::atomic::Ordering::Relaxed};
+	use std::{
+		collections::BTreeMap,
+		sync::{Arc, atomic::Ordering::Relaxed},
+	};
 
 	use crate::{Origin, Path};
 
 	use super::*;
+
+	/// Counters for `(path, tier)`, creating the tier slot if absent.
+	fn tier_counters(stats: &Stats, path: &str, tier: &Tier) -> Arc<TierCounters> {
+		stats
+			.shared()
+			.entries
+			.lock()
+			.get(&PathOwned::from(path.to_string()))
+			.expect("entry")
+			.tier(tier)
+	}
+
+	/// `(sessions, sessions_closed)` for `(tier, root)`, or `None` if absent.
+	fn session_snapshot(stats: &Stats, tier: &Tier, root: &str) -> Option<(u64, u64)> {
+		stats
+			.shared()
+			.sessions
+			.lock()
+			.get(tier)
+			.and_then(|roots| roots.get(&PathOwned::from(root.to_string())).map(|c| c.snapshot()))
+	}
+
+	/// True if a session gauge exists for `(tier, root)`.
+	fn session_contains(stats: &Stats, tier: &Tier, root: &str) -> bool {
+		stats
+			.shared()
+			.sessions
+			.lock()
+			.get(tier)
+			.is_some_and(|roots| roots.contains_key(&PathOwned::from(root.to_string())))
+	}
 
 	fn test_stats(node: Option<&str>) -> (Stats, OriginProducer) {
 		let origin = Origin::random().produce();
@@ -1274,37 +1394,46 @@ mod tests {
 	async fn per_broadcast_counters_isolated() {
 		// Bumps on one broadcast must not leak into another.
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let bs1 = stats.tier(Tier::External).broadcast("demo/bbb");
-		let bs2 = stats.tier(Tier::External).broadcast("demo/ccc");
+		let bs1 = stats.tier(Tier::default()).broadcast("demo/bbb");
+		let bs2 = stats.tier(Tier::default()).broadcast("demo/ccc");
 		let g1 = bs1.publisher().track("video");
 		g1.bytes(100);
 		let g2 = bs2.publisher().track("video");
 		g2.bytes(7);
 
-		let entries = stats.shared().entries.lock();
-		let e1 = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
-		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
-		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
-		assert_eq!(e2.publisher[Tier::External.idx()].bytes.load(Relaxed), 7);
+		assert_eq!(
+			tier_counters(&stats, "demo/bbb", &Tier::default())
+				.publisher
+				.bytes
+				.load(Relaxed),
+			100
+		);
+		assert_eq!(
+			tier_counters(&stats, "demo/ccc", &Tier::default())
+				.publisher
+				.bytes
+				.load(Relaxed),
+			7
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn external_and_internal_tiers_are_independent() {
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let ext = stats.tier(Tier::External);
-		let int = stats.tier(Tier::Internal);
+		let ext = stats.tier(Tier::default());
+		let int = stats.tier(Tier::new("internal"));
 
 		let ext_track = ext.broadcast("demo/bbb").publisher().track("video");
 		ext_track.bytes(100);
 		let int_track = int.broadcast("demo/bbb").subscriber().track("audio");
 		int_track.bytes(7);
 
-		let entries = stats.shared().entries.lock();
-		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
-		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
-		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
-		assert_eq!(entry.publisher[Tier::Internal.idx()].bytes.load(Relaxed), 0);
-		assert_eq!(entry.subscriber[Tier::Internal.idx()].bytes.load(Relaxed), 7);
+		let ext_c = tier_counters(&stats, "demo/bbb", &Tier::default());
+		let int_c = tier_counters(&stats, "demo/bbb", &Tier::new("internal"));
+		assert_eq!(ext_c.publisher.bytes.load(Relaxed), 100);
+		assert_eq!(ext_c.subscriber.bytes.load(Relaxed), 0);
+		assert_eq!(int_c.publisher.bytes.load(Relaxed), 0);
+		assert_eq!(int_c.subscriber.bytes.load(Relaxed), 7);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1312,7 +1441,7 @@ mod tests {
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the aggregator.
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let bs = stats.tier(Tier::External).broadcast(".stats/node/sjc");
+		let bs = stats.tier(Tier::default()).broadcast(".stats/node/sjc");
 		assert!(bs.is_empty());
 		let p = bs.publisher();
 		let track = p.track("video");
@@ -1328,7 +1457,7 @@ mod tests {
 		// announces; every handle is empty and bumps are dropped.
 		let stats = Stats::default();
 		assert!(stats.shared.is_none());
-		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
+		let bs = stats.tier(Tier::default()).broadcast("demo/bbb");
 		assert!(bs.is_empty());
 		let p = bs.publisher();
 		let track = p.track("video");
@@ -1344,9 +1473,9 @@ mod tests {
 		let (stats, origin) = test_stats(Some("sjc/1"));
 		let mut consumer = origin.consume().announced();
 
-		let bs1 = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs1 = stats.tier(Tier::default()).broadcast("foo/bar");
 		let _t1 = bs1.publisher().track("video");
-		let bs2 = stats.tier(Tier::External).broadcast("baz/qux");
+		let bs2 = stats.tier(Tier::default()).broadcast("baz/qux");
 		let _t2 = bs2.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
@@ -1361,7 +1490,7 @@ mod tests {
 		let stats = Stats::new(StatsConfig::new().with_origin(origin.clone()));
 		let mut consumer = origin.consume().announced();
 
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let _t = bs.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
@@ -1373,7 +1502,7 @@ mod tests {
 	/// Drives the snapshot task forward by `count` ticks. In paused-time
 	/// tests, `tokio::time::advance` doesn't poll spawned tasks itself; we
 	/// have to combine it with explicit awaits. This helper interleaves
-	/// `advance` with `consumer.announced()` (and later `yield_now` calls)
+	/// `advance` with `consumer.next()` (and later `yield_now` calls)
 	/// so the task wakes, processes the tick, and re-parks each iteration.
 	async fn drive_ticks(count: u32) {
 		for _ in 0..count {
@@ -1393,7 +1522,7 @@ mod tests {
 		// subscription could still begin at any moment.
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let key = PathOwned::from("foo/bar".to_string());
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let guard = bs.publisher();
 
 		drive_ticks(5).await;
@@ -1419,7 +1548,7 @@ mod tests {
 		// guard holds the Arc, the entry is removed the very next tick.
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let key = PathOwned::from("foo/bar".to_string());
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 
 		drive_ticks(1).await;
@@ -1441,11 +1570,11 @@ mod tests {
 	async fn frame_emits_expected_counters() {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 		track.bytes(42);
 		track.frame();
-		let sessions = stats.tier(Tier::External).publisher_broadcasts();
+		let sessions = stats.tier(Tier::default()).publisher_broadcasts();
 		let _sub = sessions.subscribe("foo/bar");
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
@@ -1473,7 +1602,7 @@ mod tests {
 		// NOT broadcasts (which only counts sessions with an active sub).
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let _guard = bs.publisher();
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
@@ -1502,8 +1631,8 @@ mod tests {
 		// by snapshot time.
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let sessions = stats.tier(Tier::External).publisher_broadcasts();
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
+		let sessions = stats.tier(Tier::default()).publisher_broadcasts();
 		{
 			let track = bs.publisher().track("video");
 			track.bytes(123);
@@ -1540,19 +1669,15 @@ mod tests {
 		// "subscription count". broadcasts_closed only bumps once the session's
 		// last sub for the broadcast closes.
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let sessions = stats.tier(Tier::External).publisher_broadcasts();
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
+		let sessions = stats.tier(Tier::default()).publisher_broadcasts();
 		let pub_guard = bs.publisher();
 		let t1 = pub_guard.track("video");
 		let t2 = pub_guard.track("audio");
 		let s1 = sessions.subscribe("foo/bar");
 		let s2 = sessions.subscribe("foo/bar");
 
-		let raw = || {
-			let entries = stats.shared().entries.lock();
-			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
-			entry.publisher[Tier::External.idx()].snapshot()
-		};
+		let raw = || tier_counters(&stats, "foo/bar", &Tier::default()).publisher.snapshot();
 
 		let r = raw();
 		assert_eq!(r.subscriptions, 2, "two track subs");
@@ -1580,14 +1705,10 @@ mod tests {
 		// The viewer-count invariant: two different sessions subscribing to the
 		// same broadcast bump broadcasts to 2 (each is a distinct viewer).
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let viewer1 = stats.tier(Tier::External).publisher_broadcasts();
-		let viewer2 = stats.tier(Tier::External).publisher_broadcasts();
+		let viewer1 = stats.tier(Tier::default()).publisher_broadcasts();
+		let viewer2 = stats.tier(Tier::default()).publisher_broadcasts();
 
-		let raw = || {
-			let entries = stats.shared().entries.lock();
-			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
-			entry.publisher[Tier::External.idx()].snapshot()
-		};
+		let raw = || tier_counters(&stats, "foo/bar", &Tier::default()).publisher.snapshot();
 
 		let s1 = viewer1.subscribe("foo/bar");
 		assert_eq!(raw().broadcasts, 1, "one viewer");
@@ -1610,12 +1731,9 @@ mod tests {
 		// session() counts connected sessions per auth root, independent of any
 		// broadcast: open bumps `sessions`, drop bumps `sessions_closed`.
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let ext = stats.tier(Tier::External);
+		let ext = stats.tier(Tier::default());
 
-		let snap = |root: &str| {
-			let map = stats.shared().sessions[Tier::External.idx()].lock();
-			map.get(&PathOwned::from(root.to_string())).map(|c| c.snapshot())
-		};
+		let snap = |root: &str| session_snapshot(&stats, &Tier::default(), root);
 
 		let a1 = ext.session("acme");
 		let a2 = ext.session("acme");
@@ -1635,9 +1753,9 @@ mod tests {
 	async fn session_track_surfaces_by_root() {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
-		let _a = stats.tier(Tier::External).session("acme");
-		let _b = stats.tier(Tier::External).session("acme");
-		let _c = stats.tier(Tier::Internal).session("peer");
+		let _a = stats.tier(Tier::default()).session("acme");
+		let _b = stats.tier(Tier::default()).session("acme");
+		let _c = stats.tier(Tier::new("internal")).session("peer");
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
@@ -1674,33 +1792,32 @@ mod tests {
 		// Once the last session under a root disconnects, the root leaves the
 		// map on the next tick (its final snapshot already emitted).
 		let (stats, _origin) = test_stats(Some("sjc"));
-		let key = PathOwned::from("acme");
-		let session = stats.tier(Tier::External).session("acme");
+		let session = stats.tier(Tier::default()).session("acme");
 
 		drive_ticks(1).await;
 		assert!(
-			stats.shared().sessions[Tier::External.idx()].lock().contains_key(&key),
+			session_contains(&stats, &Tier::default(), "acme"),
 			"root present while a session is connected"
 		);
 
 		drop(session);
 		drive_ticks(1).await;
 		assert!(
-			!stats.shared().sessions[Tier::External.idx()].lock().contains_key(&key),
+			!session_contains(&stats, &Tier::default(), "acme"),
 			"root GC'd after the last session leaves"
 		);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn unused_slots_dont_surface() {
-		// A broadcast that only sees External Publisher traffic must NOT
-		// appear in the other three tracks with zero counters. Regression
-		// for the "None != Some(default)" first-tick change-detection bug:
-		// without the unwrap_or_default fix, every entry would surface
-		// once in every track even when only one slot had real activity.
+		// A broadcast that only sees default-tier publisher traffic must NOT
+		// surface on its sibling default-tier subscriber track. Regression for
+		// the "None != Some(default)" first-tick change-detection bug: without
+		// the unwrap_or_default fix, the entry would surface once in every track
+		// even when only one slot had real activity.
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 		track.frame();
 
@@ -1709,7 +1826,7 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 
-		// External publisher slot SHOULD include foo/bar.
+		// Default-tier publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
 			.track("publisher.json")
 			.unwrap()
@@ -1721,14 +1838,22 @@ mod tests {
 			"publisher.json must include the active foo/bar entry"
 		);
 
-		// The other three slots had zero activity. The first frame on
-		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
-		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
-			let t = broadcast.track(name).unwrap().subscribe(None).await.expect("subscribe");
-			let frame = read_frame(t).await;
+		// The default-tier subscriber slot had zero activity; its first frame
+		// must be `{}`, not `{"foo/bar": {all zeros}}`.
+		let sub_track = broadcast
+			.track("subscriber.json")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let frame = read_frame(sub_track).await;
+		assert!(frame.is_empty(), "subscriber.json must be empty, got {frame:?}");
+
+		// The internal tier never saw traffic, so its tracks were never created.
+		for name in ["internal/publisher.json", "internal/subscriber.json"] {
 			assert!(
-				frame.is_empty(),
-				"{name} must be empty for an entry with no activity on that slot, got {frame:?}",
+				broadcast.track(name).is_err(),
+				"{name} must not exist for a tier with no traffic",
 			);
 		}
 	}

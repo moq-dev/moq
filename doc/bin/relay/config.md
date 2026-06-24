@@ -212,17 +212,25 @@ interval = 1
 node = "sjc/1"
 ```
 
-Each stats broadcast carries four per-broadcast tracks, one per
-`(tier, role)` pair, plus two session tracks (one per tier):
+Each stats broadcast splits traffic by **tier**, an arbitrary label chosen by
+business logic (see the auth API's [`tier`](/bin/relay/auth#unified-auth-api-auth-api)
+field). The default tier is unprefixed; a named tier prefixes its track names
+with its label. So per tier the broadcast carries a publisher, a subscriber, and
+a session track:
 
 | Track                       | What it covers                              |
 |-----------------------------|---------------------------------------------|
-| `publisher.json`            | external (e.g. customer) egress             |
-| `subscriber.json`           | external ingress                            |
-| `internal/publisher.json`   | internal (e.g. mTLS cluster peer) egress    |
-| `internal/subscriber.json`  | internal ingress                            |
-| `sessions.json`             | external connected sessions, keyed by root  |
-| `internal/sessions.json`    | internal connected sessions, keyed by root  |
+| `publisher.json`            | default-tier egress                         |
+| `subscriber.json`           | default-tier ingress                        |
+| `<label>/publisher.json`    | named-tier egress (e.g. `internal/publisher.json`) |
+| `<label>/subscriber.json`   | named-tier ingress                          |
+| `sessions.json`             | default-tier connected sessions, keyed by root |
+| `<label>/sessions.json`     | named-tier connected sessions, keyed by root |
+
+The default-tier tracks always exist (emitting `{}` while idle). A named tier's
+tracks are created the first time traffic routes to that label, so cluster
+fan-out shows up under `internal/*` (the default mTLS-peer label) and never in
+the default-tier numbers.
 
 Each per-broadcast frame is a JSON object mapping broadcast path to a
 cumulative counter snapshot. An entry surfaces on any tick where the
@@ -265,7 +273,7 @@ Field semantics:
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
   session loops (both the `moq-lite` and IETF `moq-transport` paths).
 
-The session tracks (`sessions.json`, `internal/sessions.json`) instead map
+The session tracks (`sessions.json` and any `<label>/sessions.json`) instead map
 each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`
 bumps when a session authenticated under that root connects and
 `sessions_closed` when it disconnects, so `sessions - sessions_closed` is

@@ -55,13 +55,13 @@ impl Connection {
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(transport, internal = token.internal, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(transport, internal = token.internal, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(transport, internal = token.internal, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(transport, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
 			_ => {
 				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
@@ -69,15 +69,10 @@ impl Connection {
 			}
 		}
 
-		// mTLS-authenticated peers (including other cluster nodes) report through
-		// the internal tier so a billing service can rate-differentiate from
-		// external traffic. The aggregator is shared; the tier picks which counter
-		// set within each level the bumps land in.
-		let tier = match token.internal {
-			true => moq_net::Tier::Internal,
-			false => moq_net::Tier::External,
-		};
-		let stats = self.cluster.stats.tier(tier);
+		// Record this session's stats under its billing tier (chosen by the auth
+		// API; mTLS peers and cluster nodes default to `internal`). The aggregator
+		// is shared; the tier picks which counter set the bumps land in.
+		let stats = self.cluster.stats.tier(token.tier.clone());
 
 		// Count this session against its auth root for the whole connection,
 		// independent of any data flow, so presence-based billing sees a client
@@ -141,9 +136,9 @@ impl Connection {
 			// vanity alias lands on the same tree a JWT would; cluster peers dial
 			// "/", which the API resolves (typically to an unscoped root). The API
 			// also returns the billing tier (defaulting to internal for trusted peers).
-			let (root, internal) = self.auth.resolve_mtls(&params.path).await?;
+			let (root, tier) = self.auth.resolve_mtls(&params.path).await?;
 			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
-			token.internal = internal;
+			token.tier = tier;
 			// Close the session when the client certificate expires, mirroring
 			// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
 			token.expires = identity.expiry();

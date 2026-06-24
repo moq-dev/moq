@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_net::{OriginProducer, StatsHandle, Tier};
+use moq_net::{OriginProducer, StatsHandle};
 
 use crate::{AuthParams, AuthToken, web::AuthQuery, web::MtlsPeer, web::WebState, web::landing_response};
 
@@ -41,21 +41,16 @@ pub(crate) async fn serve_ws(
 	let params = AuthParams { path, jwt: query.jwt };
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, internal) = state.auth.resolve_mtls(&params.path).await?;
+		let (root, tier) = state.auth.resolve_mtls(&params.path).await?;
 		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
-		token.internal = internal;
+		token.tier = tier;
 		token
 	} else {
 		state.auth.verify(&params).await?
 	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
-	// mTLS sessions record on the internal tier; everything else on external.
-	let tier = match token.internal {
-		true => Tier::Internal,
-		false => Tier::External,
-	};
-	let stats = state.cluster.stats.tier(tier);
+	let stats = state.cluster.stats.tier(token.tier.clone());
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.

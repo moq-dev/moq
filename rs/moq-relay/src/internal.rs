@@ -213,7 +213,7 @@ where
 	let token = AuthToken::unrestricted(moq_net::Path::new("").to_owned());
 	let publish = cluster.publisher(&token);
 	let subscribe = cluster.subscriber(&token);
-	let stats = cluster.stats.tier(moq_net::Tier::Internal);
+	let stats = cluster.stats.tier(moq_net::Tier::new("internal"));
 
 	let serve = async move {
 		// subscribe/publish look backwards on purpose: see connection.rs. We publish
