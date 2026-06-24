@@ -27,7 +27,7 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
 		Self {
-			inner: moq_json::Consumer::new(track),
+			inner: moq_json::Consumer::new(track, moq_json::ConsumerConfig::default()),
 		}
 	}
 

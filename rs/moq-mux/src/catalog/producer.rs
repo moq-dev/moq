@@ -75,7 +75,7 @@ impl<E: CatalogExt> Producer<E> {
 		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
-		let mut json_config = moq_json::Config::default();
+		let mut json_config = moq_json::ProducerConfig::default();
 		json_config.delta_ratio = 0;
 		let hang = moq_json::Producer::new(hang_track, json_config);
 
