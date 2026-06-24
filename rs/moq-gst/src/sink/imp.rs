@@ -340,8 +340,9 @@ impl MoqSink {
 	/// error on this pad's streaming thread.
 	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
 		// Map and copy outside the lock: neither needs shared state, so the per-pad lock is held only for
-		// the producer write. An oversized frame is left to moq-net, which rejects it (FrameTooLarge) before
-		// allocating the group slot and so invalidates just this pad.
+		// the producer write. An oversized buffer is still copied here (it already exists upstream), but
+		// moq-net rejects it (FrameTooLarge) before reserving its own group slot, and that error invalidates
+		// just this pad.
 		let pts = buffer.pts();
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
