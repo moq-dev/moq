@@ -33,7 +33,7 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 /// while the track is alive. A subscriber learns them via
 /// [`crate::BroadcastConsumer::track`](crate::BroadcastConsumer::track),
 /// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackInfo {
 	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
@@ -156,9 +156,8 @@ impl TrackInfo {
 #[derive(Default)]
 struct TrackState {
 	// The info for the track; always Some for TrackSubscriber/TrackProducer.
-	// Held behind an Arc so each group can inherit a shared handle (and read the
-	// timescale) rather than being handed a copied-out value.
-	info: Option<Arc<TrackInfo>>,
+	// A small `Copy` value, inherited by each group it creates.
+	info: Option<TrackInfo>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
 	groups: VecDeque<Option<(GroupProducer, web_async::time::Instant)>>,
@@ -194,7 +193,7 @@ struct TrackState {
 impl TrackState {
 	fn poll_info(&self) -> Poll<Result<TrackInfo>> {
 		if let Some(info) = &self.info {
-			Poll::Ready(Ok((**info).clone()))
+			Poll::Ready(Ok(*info))
 		} else {
 			Poll::Pending
 		}
@@ -454,9 +453,9 @@ impl TrackState {
 		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet.
-		let info = self.info.get_or_insert_with(|| Arc::new(info.unwrap_or_default()));
+		let info = *self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = GroupProducer::new(GroupInfo { sequence }, info.clone());
+		let group = GroupProducer::new(GroupInfo { sequence }, info);
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -494,7 +493,7 @@ impl TrackProducer {
 			name: name.into(),
 			broadcast,
 			state: kio::Producer::new(TrackState {
-				info: Some(Arc::new(info)),
+				info: Some(info),
 				..Default::default()
 			}),
 			prev_subscription: None,
@@ -519,7 +518,7 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 		let info = state.info.as_ref().unwrap();
-		let track = info.clone();
+		let track = *info;
 		let cache = info.cache;
 
 		let group = GroupProducer::new(group, track);
@@ -549,7 +548,7 @@ impl TrackProducer {
 		}
 
 		let info = state.info.as_ref().unwrap();
-		let track = info.clone();
+		let track = *info;
 		let cache = info.cache;
 
 		let group = GroupProducer::new(GroupInfo { sequence }, track);
@@ -699,7 +698,7 @@ impl TrackProducer {
 		let mut preferences = subscription.into().unwrap_or_default();
 
 		let mut state = self.modify().expect("track producer state is never closed");
-		let info = (**state.info.as_ref().expect("producer always has info")).clone();
+		let info = *state.info.as_ref().expect("producer always has info");
 		preferences.stale = info.clamp_stale(preferences.stale);
 		let subscription = kio::Producer::new(preferences);
 		state.subscriptions.push(subscription.consume());
@@ -1468,7 +1467,7 @@ impl TrackRequest {
 	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
 	/// mismatch, or the broadcast's abort error if it closed while pending.
 	pub fn accept(self, info: impl Into<Option<TrackInfo>>) -> TrackProducer {
-		self.state.write().ok().unwrap().info = Some(Arc::new(info.into().unwrap_or_default()));
+		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
 		TrackProducer {
 			name: self.name,
 			broadcast: self.broadcast,

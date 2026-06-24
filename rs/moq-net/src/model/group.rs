@@ -8,7 +8,6 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -28,7 +27,7 @@ const MAX_GROUP_FRAMES: usize = 1024;
 /// A group contains a sequence number because they can arrive out of order.
 ///
 /// You can use [crate::TrackProducer::append_group] if you just want to +1 the sequence number.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GroupInfo {
 	/// Per-track sequence number used to detect ordering and gaps. Higher numbers
@@ -44,7 +43,7 @@ impl GroupInfo {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> GroupProducer {
-		GroupProducer::new(self, Arc::new(TrackInfo::default()))
+		GroupProducer::new(self, TrackInfo::default())
 	}
 }
 
@@ -147,16 +146,16 @@ pub struct GroupProducer {
 	// Mutable stream state.
 	state: kio::Producer<GroupState>,
 
-	// The group header containing the sequence number. Held behind an Arc so each
-	// frame can inherit a shared handle (see [`Self::create_frame`]).
-	info: Arc<GroupInfo>,
+	// The group header containing the sequence number. A small `Copy` value,
+	// inherited by each frame (see [`Self::create_frame`]).
+	info: GroupInfo,
 
 	// The parent track's info, inherited rather than passed piecemeal. Its
 	// `timescale` drives per-frame timestamp validation in [`Self::append_frame`]:
 	// `None` means frames must have `FrameInfo::timestamp = None`; `Some(scale)`
 	// requires `FrameInfo::timestamp = Some(ts)` with `ts.scale() == scale`.
-	// Threaded down by [`crate::TrackProducer::create_group`] / `append_group`.
-	track: Arc<TrackInfo>,
+	// Threaded down by value from [`crate::TrackProducer::create_group`] / `append_group`.
+	track: TrackInfo,
 }
 
 impl std::ops::Deref for GroupProducer {
@@ -171,13 +170,13 @@ impl GroupProducer {
 	/// Create a group producer bound to its parent track's [`TrackInfo`].
 	///
 	/// Crate-private: groups are only constructed via [`crate::TrackProducer`],
-	/// which threads its `Arc<TrackInfo>` down so properties like the timescale are
+	/// which threads its [`TrackInfo`] down so properties like the timescale are
 	/// inherited rather than passed in. An untimed track (`timescale = None`)
 	/// requires every frame's `timestamp` to be `None`; a timed track requires
 	/// `Some(ts)` with `ts.scale()` matching the track's scale.
-	pub(crate) fn new(info: GroupInfo, track: Arc<TrackInfo>) -> Self {
+	pub(crate) fn new(info: GroupInfo, track: TrackInfo) -> Self {
 		Self {
-			info: Arc::new(info),
+			info,
 			state: kio::Producer::default(),
 			track,
 		}
@@ -205,7 +204,7 @@ impl GroupProducer {
 	/// Returns [`Error::FrameTooLarge`] if the declared size exceeds the per-frame
 	/// limit, refused before the buffer is allocated.
 	pub fn create_frame(&mut self, info: impl Into<FrameInfo>) -> Result<FrameProducer> {
-		let frame = FrameProducer::new(info.into(), self.info.clone())?;
+		let frame = FrameProducer::new(info.into(), self.info)?;
 		self.append_frame(frame.clone())?;
 		Ok(frame)
 	}
@@ -267,9 +266,9 @@ impl GroupProducer {
 	/// Create a new consumer for the group.
 	pub fn consume(&self) -> GroupConsumer {
 		GroupConsumer {
-			info: self.info.clone(),
+			info: self.info,
 			state: self.state.consume(),
-			track: self.track.clone(),
+			track: self.track,
 			index: 0,
 		}
 	}
@@ -292,9 +291,9 @@ impl GroupProducer {
 impl Clone for GroupProducer {
 	fn clone(&self) -> Self {
 		Self {
-			info: self.info.clone(),
+			info: self.info,
 			state: self.state.clone(),
-			track: self.track.clone(),
+			track: self.track,
 		}
 	}
 }
@@ -323,11 +322,11 @@ pub struct GroupConsumer {
 	state: kio::Consumer<GroupState>,
 
 	// Immutable stream state.
-	info: Arc<GroupInfo>,
+	info: GroupInfo,
 
 	// The parent track's info, inherited from the producer. Its `timescale` lets the
 	// wire publisher decide whether to emit per-frame timestamps for a fetched group.
-	track: Arc<TrackInfo>,
+	track: TrackInfo,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -700,7 +699,7 @@ mod test {
 	fn append_frame_rejects_timestamp_on_untimed_group() {
 		use crate::Timestamp;
 
-		let mut producer = GroupProducer::new(GroupInfo { sequence: 0 }, Arc::new(TrackInfo::default()));
+		let mut producer = GroupProducer::new(GroupInfo { sequence: 0 }, TrackInfo::default());
 		let frame = FrameInfo {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
@@ -715,7 +714,7 @@ mod test {
 
 		let mut producer = GroupProducer::new(
 			GroupInfo { sequence: 0 },
-			Arc::new(TrackInfo::default().with_timescale(Timescale::MICRO)),
+			TrackInfo::default().with_timescale(Timescale::MICRO),
 		);
 		let frame = FrameInfo {
 			size: 3,
@@ -731,7 +730,7 @@ mod test {
 
 		let mut producer = GroupProducer::new(
 			GroupInfo { sequence: 0 },
-			Arc::new(TrackInfo::default().with_timescale(Timescale::MICRO)),
+			TrackInfo::default().with_timescale(Timescale::MICRO),
 		);
 		let frame = FrameInfo {
 			size: 3,
@@ -747,7 +746,7 @@ mod test {
 
 		let mut producer = GroupProducer::new(
 			GroupInfo { sequence: 0 },
-			Arc::new(TrackInfo::default().with_timescale(Timescale::MICRO)),
+			TrackInfo::default().with_timescale(Timescale::MICRO),
 		);
 		let frame = FrameInfo {
 			size: 1,

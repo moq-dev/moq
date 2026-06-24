@@ -25,7 +25,7 @@ pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 ///
 /// Note that this is just the header.
 /// You use [FrameProducer] and [FrameConsumer] to deal with the frame payload, potentially chunked.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FrameInfo {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
@@ -44,13 +44,13 @@ impl FrameInfo {
 	/// Create an unparented producer for the frame.
 	///
 	/// Test-only: real frames are constructed via
-	/// [`crate::GroupProducer::create_frame`], which threads the parent group's
-	/// `Arc<GroupInfo>` down and validates the timestamp against the track's
+	/// [`crate::GroupProducer::create_frame`], which threads the parent
+	/// [`GroupInfo`] down and validates the timestamp against the track's
 	/// timescale. This helper defaults the parent group for in-crate tests. Returns
 	/// [`Error::FrameTooLarge`] if [`FrameInfo::size`] exceeds [`MAX_FRAME_SIZE`].
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Result<FrameProducer> {
-		FrameProducer::new(self, std::sync::Arc::new(GroupInfo { sequence: 0 }))
+		FrameProducer::new(self, GroupInfo { sequence: 0 })
 	}
 }
 
@@ -185,9 +185,9 @@ struct FrameState {
 pub struct FrameProducer {
 	info: FrameInfo,
 	// The parent group's info, inherited from [`crate::GroupProducer::create_frame`]
-	// so the ownership chain reaches the leaf. Carried for identity/debugging; the
-	// timestamp-vs-timescale check lives on the group.
-	group: Arc<GroupInfo>,
+	// so the ownership chain reaches the leaf. A small `Copy` value; carried for
+	// identity/debugging (the timestamp-vs-timescale check lives on the group).
+	group: GroupInfo,
 	state: kio::Producer<FrameState>,
 	buf: FrameBuf,
 }
@@ -206,7 +206,7 @@ impl FrameProducer {
 	/// The single allocation chokepoint: rejects a frame whose declared
 	/// [`FrameInfo::size`] exceeds [`MAX_FRAME_SIZE`] with [`Error::FrameTooLarge`]
 	/// before allocating the (untrusted) buffer.
-	pub(crate) fn new(info: FrameInfo, group: Arc<GroupInfo>) -> Result<Self> {
+	pub(crate) fn new(info: FrameInfo, group: GroupInfo) -> Result<Self> {
 		if info.size > MAX_FRAME_SIZE {
 			return Err(Error::FrameTooLarge);
 		}
@@ -263,7 +263,7 @@ impl FrameProducer {
 	/// Create a new consumer for the frame.
 	pub fn consume(&self) -> FrameConsumer {
 		FrameConsumer {
-			info: self.info.clone(),
+			info: self.info,
 			state: self.state.consume(),
 			buf: self.buf.clone(),
 			read_idx: 0,
@@ -339,8 +339,8 @@ unsafe impl BufMut for FrameProducer {
 impl Clone for FrameProducer {
 	fn clone(&self) -> Self {
 		Self {
-			info: self.info.clone(),
-			group: self.group.clone(),
+			info: self.info,
+			group: self.group,
 			state: self.state.clone(),
 			buf: self.buf.clone(),
 		}
