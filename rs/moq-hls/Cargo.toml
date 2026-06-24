@@ -24,10 +24,11 @@ doc = false
 required-features = ["server"]
 
 [features]
-default = ["server", "iroh", "quinn", "websocket"]
+default = ["server", "iroh", "noq", "websocket"]
 # HTTP export server + the moq-hls binary. Pulls in axum / moq-native / clap.
 server = ["dep:axum", "dep:axum-server", "dep:clap", "dep:humantime", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tower-http"]
 iroh = ["server", "moq-native/iroh"]
+noq = ["server", "moq-native/noq"]
 quinn = ["server", "moq-native/quinn"]
 quiche = ["server", "moq-native/quiche"]
 websocket = ["server", "moq-native/websocket"]

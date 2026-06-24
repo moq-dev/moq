@@ -13,9 +13,9 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result, Subscription, Timescale, coding};
+use crate::{BroadcastInfo, Error, Result, Subscription, Timescale, coding};
 
-use super::{Compression, Fetch, Group, GroupConsumer, GroupProducer};
+use super::{Compression, Fetch, GroupConsumer, GroupInfo, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -33,7 +33,7 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 /// while the track is alive. A subscriber learns them via
 /// [`crate::BroadcastConsumer::track`](crate::BroadcastConsumer::track),
 /// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackInfo {
 	/// The algorithm this track's cached frame payloads are stored in, or `None`
@@ -166,6 +166,7 @@ impl TrackInfo {
 #[derive(Default)]
 struct TrackState {
 	// The info for the track; always Some for TrackSubscriber/TrackProducer.
+	// A small `Copy` value, inherited by each group it creates.
 	info: Option<TrackInfo>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
@@ -202,7 +203,7 @@ struct TrackState {
 impl TrackState {
 	fn poll_info(&self) -> Poll<Result<TrackInfo>> {
 		if let Some(info) = &self.info {
-			Poll::Ready(Ok(info.clone()))
+			Poll::Ready(Ok(*info))
 		} else {
 			Poll::Pending
 		}
@@ -462,9 +463,9 @@ impl TrackState {
 		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet.
-		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
+		let info = *self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = GroupProducer::new(Group { sequence }, info.timescale, info.compression);
+		let group = GroupProducer::new(GroupInfo { sequence }, info);
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -478,16 +479,29 @@ impl TrackState {
 #[derive(Clone)]
 pub struct TrackProducer {
 	name: Arc<str>,
+	// The parent broadcast's info, inherited from [`crate::BroadcastProducer::create_track`].
+	// Top link of the ownership chain; carried for identity and future inheritance.
+	broadcast: Arc<BroadcastInfo>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
 }
 
 impl TrackProducer {
 	/// Build a producer for the given track metadata.
-	pub fn new(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> Self {
+	///
+	/// Crate-private: tracks are born from their broadcast via
+	/// [`crate::BroadcastProducer::create_track`] (or served on demand through a
+	/// [`TrackRequest`]), which threads the broadcast's `Arc<BroadcastInfo>` down so
+	/// the broadcast owns the namespace and there's a single way to mint a track.
+	pub(crate) fn new(
+		broadcast: Arc<BroadcastInfo>,
+		name: impl Into<Arc<str>>,
+		info: impl Into<Option<TrackInfo>>,
+	) -> Self {
 		let info = info.into().unwrap_or_default();
 		Self {
 			name: name.into(),
+			broadcast,
 			state: kio::Producer::new(TrackState {
 				info: Some(info),
 				..Default::default()
@@ -500,8 +514,13 @@ impl TrackProducer {
 		&self.name
 	}
 
+	/// The parent broadcast this track belongs to.
+	pub fn broadcast(&self) -> &BroadcastInfo {
+		&self.broadcast
+	}
+
 	/// Create a new group with the given sequence number.
-	pub fn create_group(&mut self, group: Group) -> Result<GroupProducer> {
+	pub fn create_group(&mut self, group: GroupInfo) -> Result<GroupProducer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.sequence >= fin
@@ -509,11 +528,10 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
-		let compression = info.compression;
+		let track = *info;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(group, timescale, compression);
+		let group = GroupProducer::new(group, track);
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -540,11 +558,10 @@ impl TrackProducer {
 		}
 
 		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
-		let compression = info.compression;
+		let track = *info;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(Group { sequence }, timescale, compression);
+		let group = GroupProducer::new(GroupInfo { sequence }, track);
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
@@ -691,7 +708,7 @@ impl TrackProducer {
 		let mut preferences = subscription.into().unwrap_or_default();
 
 		let mut state = self.modify().expect("track producer state is never closed");
-		let info = state.info.clone().expect("producer always has info");
+		let info = *state.info.as_ref().expect("producer always has info");
 		preferences.stale = info.clamp_stale(preferences.stale);
 		let subscription = kio::Producer::new(preferences);
 		state.subscriptions.push(subscription.consume());
@@ -988,13 +1005,6 @@ impl TrackConsumer {
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
-	}
-
-	pub(crate) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
 	}
 
 	/// Open a live subscription.
@@ -1409,6 +1419,8 @@ impl TrackSubscriber {
 
 pub struct TrackRequest {
 	name: Arc<str>,
+	// The parent broadcast's info, threaded into the [`TrackProducer`] on accept.
+	broadcast: Arc<BroadcastInfo>,
 	state: kio::Producer<TrackState>,
 
 	// The previous subscription that was combined, used to detect changes.
@@ -1422,12 +1434,13 @@ pub struct TrackRequest {
 }
 
 impl TrackRequest {
-	pub fn new(name: impl Into<Arc<str>>) -> Self {
+	pub(crate) fn new(broadcast: Arc<BroadcastInfo>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::<TrackState>::default();
 		let dynamic = TrackDynamic::new(name.clone(), state.clone());
 		Self {
 			name,
+			broadcast,
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
@@ -1467,6 +1480,7 @@ impl TrackRequest {
 		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
 		TrackProducer {
 			name: self.name,
+			broadcast: self.broadcast,
 			state: self.state,
 			prev_subscription: None,
 		}
@@ -1574,6 +1588,12 @@ impl TrackSubscriber {
 mod test {
 	use super::*;
 
+	/// Mint a track for tests with a default parent broadcast, since tracks are
+	/// normally born from a [`crate::BroadcastProducer`].
+	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> TrackProducer {
+		TrackProducer::new(Arc::new(BroadcastInfo::default()), name, info)
+	}
+
 	/// Helper: count non-tombstoned groups in state.
 	fn live_groups(state: &TrackState) -> usize {
 		state.groups.iter().flatten().count()
@@ -1588,7 +1608,7 @@ mod test {
 	async fn evict_expired_groups() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 
 		// Create 3 groups at time 0.
 		producer.append_group().unwrap(); // seq 0
@@ -1625,7 +1645,7 @@ mod test {
 	async fn evict_keeps_max_sequence() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
@@ -1646,7 +1666,7 @@ mod test {
 	async fn no_eviction_when_fresh() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
@@ -1662,7 +1682,7 @@ mod test {
 	async fn consumer_skips_evicted_groups() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
@@ -1680,7 +1700,7 @@ mod test {
 		tokio::time::pause();
 
 		// A shorter cache evicts sooner than the default.
-		let mut producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(1)));
+		let mut producer = track_producer("test", TrackInfo::default().with_cache(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the custom cache but well within DEFAULT_CACHE.
@@ -1695,7 +1715,7 @@ mod test {
 
 	#[test]
 	fn stale_clamped_to_cache() {
-		let producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
+		let producer = track_producer("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
 
 		// A stale window beyond the cache is capped to the cache; a group can't be
 		// waited for longer than the publisher keeps it.
@@ -1714,12 +1734,12 @@ mod test {
 	async fn out_of_order_max_sequence_at_front() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
-		producer.create_group(Group { sequence: 5 }).unwrap();
-		producer.create_group(Group { sequence: 3 }).unwrap();
-		producer.create_group(Group { sequence: 4 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
 
 		// max_sequence = 5, which is at the front of the VecDeque.
 		{
@@ -1750,15 +1770,15 @@ mod test {
 	async fn max_sequence_at_front_blocks_trim() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 
 		// Arrive: seq 5, then seq 3.
-		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
 
 		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
-		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
 
 		// Seq 5 is max_sequence (protected). Seq 3 is not expired (just created).
 		// Nothing should be evicted.
@@ -1772,7 +1792,7 @@ mod test {
 		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
-		producer.create_group(Group { sequence: 2 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 2 }).unwrap();
 
 		// Seq 5 is still max_sequence (protected, at front, blocks trim).
 		// Seq 3 is expired → tombstoned.
@@ -1796,7 +1816,7 @@ mod test {
 
 	#[tokio::test]
 	async fn abort_clears_cached_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap();
 		producer.append_group().unwrap();
 
@@ -1819,7 +1839,7 @@ mod test {
 
 	#[tokio::test]
 	async fn drop_unfinished_clears_cached_groups() {
-		let producer = TrackProducer::new("test", None);
+		let producer = track_producer("test", None);
 		let mut writer = producer.clone();
 		writer.append_group().unwrap();
 
@@ -1837,7 +1857,7 @@ mod test {
 
 	#[tokio::test]
 	async fn drop_finished_keeps_cached_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap();
 		producer.finish().unwrap();
 
@@ -1852,7 +1872,7 @@ mod test {
 
 	#[test]
 	fn append_finish_cannot_be_rewritten() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 
 		// Finishing an empty track is valid (fin = 0, total groups = 0).
 		assert!(producer.finish().is_ok());
@@ -1862,7 +1882,7 @@ mod test {
 
 	#[test]
 	fn finish_after_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 
 		producer.append_group().unwrap();
 		assert!(producer.finish().is_ok());
@@ -1872,8 +1892,8 @@ mod test {
 
 	#[test]
 	fn insert_finish_validates_sequence_and_freezes_to_max() {
-		let mut producer = TrackProducer::new("test", None);
-		producer.create_group(Group { sequence: 5 }).unwrap();
+		let mut producer = track_producer("test", None);
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
 
 		assert!(producer.finish_at(4).is_err());
 		assert!(producer.finish_at(10).is_err());
@@ -1885,14 +1905,14 @@ mod test {
 		}
 
 		assert!(producer.finish_at(5).is_err());
-		assert!(producer.create_group(Group { sequence: 4 }).is_ok());
-		assert!(producer.create_group(Group { sequence: 5 }).is_err());
+		assert!(producer.create_group(GroupInfo { sequence: 4 }).is_ok());
+		assert!(producer.create_group(GroupInfo { sequence: 5 }).is_err());
 	}
 
 	#[tokio::test]
 	async fn recv_group_finishes_without_waiting_for_gaps() {
-		let mut producer = TrackProducer::new("test", None);
-		producer.create_group(Group { sequence: 1 }).unwrap();
+		let mut producer = track_producer("test", None);
+		producer.create_group(GroupInfo { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
 		let mut consumer = producer.subscribe(None);
@@ -1908,11 +1928,11 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_skips_late_arrivals() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 5 arrives first.
-		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
 		let group = consumer
 			.next_group()
 			.now_or_never()
@@ -1922,11 +1942,11 @@ mod test {
 		assert_eq!(group.sequence, 5);
 
 		// Seq 3 arrives late — skipped because 3 <= 5.
-		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
 		// Seq 4 arrives late — also skipped.
-		producer.create_group(Group { sequence: 4 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
 		// Seq 7 arrives — returned.
-		producer.create_group(Group { sequence: 7 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 7 }).unwrap();
 
 		let group = consumer
 			.next_group()
@@ -1945,12 +1965,12 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
-		producer.create_group(Group { sequence: 3 }).unwrap();
-		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
 
 		let group = consumer
 			.next_group()
@@ -1971,12 +1991,12 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_and_recv_group_use_independent_cursors() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
-		producer.create_group(Group { sequence: 5 }).unwrap();
-		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
 
 		// next_group is sequence-ordered: it returns the smallest sequence first,
 		// regardless of arrival order.
@@ -1995,11 +2015,11 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
-			producer.create_group(Group { sequence: s }).unwrap();
+			producer.create_group(GroupInfo { sequence: s }).unwrap();
 		}
 
 		consumer.end_at(2);
@@ -2027,11 +2047,11 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
-			producer.create_group(Group { sequence: s }).unwrap();
+			producer.create_group(GroupInfo { sequence: s }).unwrap();
 		}
 
 		consumer.end_at(1);
@@ -2072,11 +2092,11 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..3 {
-			producer.create_group(Group { sequence: s }).unwrap();
+			producer.create_group(GroupInfo { sequence: s }).unwrap();
 		}
 
 		// Drain everything with no cap.
@@ -2095,8 +2115,8 @@ mod test {
 
 		// Lower the cap below the cursor. New groups beyond the cap are blocked.
 		consumer.end_at(1);
-		producer.create_group(Group { sequence: 3 }).unwrap();
-		producer.create_group(Group { sequence: 4 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
 		assert!(
 			consumer.next_group().now_or_never().is_none(),
 			"cap is below cursor; nothing returnable until cap rises"
@@ -2116,18 +2136,18 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		consumer.end_at(5);
 
 		// Out-of-order arrivals all within the cap.
-		producer.create_group(Group { sequence: 2 }).unwrap();
-		producer.create_group(Group { sequence: 5 }).unwrap();
-		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 2 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
 		// One beyond the cap; should be held even though it arrived in the middle.
-		producer.create_group(Group { sequence: 8 }).unwrap();
-		producer.create_group(Group { sequence: 4 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 8 }).unwrap();
+		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
 
 		// next_group walks in sequence order through everything <= cap.
 		assert_eq!(
@@ -2159,7 +2179,7 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_returns_single_frame_per_group() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"hello".as_slice()).unwrap();
@@ -2184,13 +2204,13 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3: group open, no frame yet (stalled).
-		let _stalled = producer.create_group(Group { sequence: 3 }).unwrap();
+		let _stalled = producer.create_group(GroupInfo { sequence: 3 }).unwrap();
 		// Seq 5: fully-written group with a frame.
-		let mut g5 = producer.create_group(Group { sequence: 5 }).unwrap();
+		let mut g5 = producer.create_group(GroupInfo { sequence: 5 }).unwrap();
 		g5.write_frame(bytes::Bytes::from_static(b"later")).unwrap();
 		g5.finish().unwrap();
 
@@ -2206,11 +2226,11 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_discards_rest_of_multi_frame_group() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Group 0 has two frames; only the first is returned.
-		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		let mut g0 = producer.create_group(GroupInfo { sequence: 0 }).unwrap();
 		g0.write_frame(bytes::Bytes::from_static(b"one")).unwrap();
 		g0.write_frame(bytes::Bytes::from_static(b"two")).unwrap();
 		g0.finish().unwrap();
@@ -2240,10 +2260,10 @@ mod test {
 	async fn read_frame_waits_for_pending_group_after_finish() {
 		// finish() sets final_sequence, but groups already created with lower sequences
 		// can still produce frames. read_frame must not return None prematurely.
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		let mut g0 = producer.create_group(GroupInfo { sequence: 0 }).unwrap();
 		producer.finish().unwrap();
 
 		// Track is finished but group 0 has no frame yet — must block, not return None.
@@ -2267,16 +2287,16 @@ mod test {
 	async fn read_frame_respects_start_at() {
 		// start_at sets min_sequence; read_frame must skip groups below it even though
 		// next_sequence is still 0.
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 		consumer.start_at(5);
 
 		// Seq 3 has a frame but is below min_sequence — must be skipped.
-		let mut g3 = producer.create_group(Group { sequence: 3 }).unwrap();
+		let mut g3 = producer.create_group(GroupInfo { sequence: 3 }).unwrap();
 		g3.write_frame(bytes::Bytes::from_static(b"skip-me")).unwrap();
 		g3.finish().unwrap();
 
-		let mut g5 = producer.create_group(Group { sequence: 5 }).unwrap();
+		let mut g5 = producer.create_group(GroupInfo { sequence: 5 }).unwrap();
 		g5.write_frame(bytes::Bytes::from_static(b"keep")).unwrap();
 		g5.finish().unwrap();
 
@@ -2291,7 +2311,7 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_returns_none_when_finished() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"only".as_slice()).unwrap();
@@ -2315,8 +2335,8 @@ mod test {
 
 	#[tokio::test]
 	async fn get_group_finishes_without_waiting_for_gaps() {
-		let mut producer = TrackProducer::new("test", None);
-		producer.create_group(Group { sequence: 1 }).unwrap();
+		let mut producer = track_producer("test", None);
+		producer.create_group(GroupInfo { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
 		let consumer = producer.subscribe(None);
@@ -2338,7 +2358,7 @@ mod test {
 
 	#[test]
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		{
 			let mut state = producer.state.write().ok().unwrap();
 			state.max_sequence = Some(u64::MAX);
@@ -2349,7 +2369,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_cache_hit() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 
 		// Produce a cached group.
 		let mut group = producer.append_group().unwrap(); // seq 0
@@ -2371,7 +2391,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_miss_signals_dynamic() {
-		let producer = TrackProducer::new("test", None);
+		let producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -2404,7 +2424,7 @@ mod test {
 	async fn fetch_miss_no_dynamic_not_found() {
 		// A track with no `TrackDynamic` can't serve old content, so a cache miss
 		// resolves to NotFound instead of blocking forever.
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0, but we miss on seq 5
 		let consumer = producer.consume();
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
@@ -2412,7 +2432,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_past_final_not_found() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 		producer.finish().unwrap(); // final_sequence = 1
 
@@ -2428,7 +2448,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_aborts_with_track() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
