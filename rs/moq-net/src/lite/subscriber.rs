@@ -11,9 +11,10 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
-	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle,
-	SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
+	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, FrameInfo, FrameProducer,
+	GroupInfo, GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned,
+	StatsHandle, SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer,
+	TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 };
@@ -569,7 +570,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
-			let group_info = Group { sequence: hdr.sequence };
+			let group_info = GroupInfo { sequence: hdr.sequence };
 			let group = entry.producer.create_group(group_info)?;
 			(
 				group,
@@ -649,7 +650,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// oversized `size` before allocating, so no pre-check is needed.
 					// No wire timestamp (pre-lite-05) means wall-clock at receive.
 					let mut frame = match timestamp {
-						Some(ts) => group.create_frame(Frame { size, timestamp: ts })?,
+						Some(ts) => group.create_frame(FrameInfo { size, timestamp: ts })?,
 						None => group.create_frame_now(size)?,
 					};
 					track_stats.frame();
@@ -677,7 +678,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let payload = compression.decompress(&packed)?;
 					let size = payload.len() as u64;
 					let mut frame = match timestamp {
-						Some(ts) => group.create_frame(Frame { size, timestamp: ts })?,
+						Some(ts) => group.create_frame(FrameInfo { size, timestamp: ts })?,
 						None => group.create_frame_now(size)?,
 					};
 					frame.write(bytes::Bytes::from(payload))?;

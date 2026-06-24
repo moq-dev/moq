@@ -289,7 +289,7 @@ pub(crate) fn encode(
 	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
 	// The fragment may carry several samples; the net frame's timestamp is the
 	// fragment's earliest presentation time so a relay can order it.
-	let mut writer = group.create_frame(moq_net::Frame {
+	let mut writer = group.create_frame(moq_net::FrameInfo {
 		size: bytes.len() as u64,
 		timestamp: frames[0].timestamp,
 	})?;

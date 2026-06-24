@@ -90,7 +90,7 @@ impl<C: Container> Producer<C> {
 				return Err(super::MissingKeyframe.into());
 			}
 			self.group = Some(match self.pending_sequence.take() {
-				Some(sequence) => self.inner.create_group(moq_net::Group { sequence })?,
+				Some(sequence) => self.inner.create_group(moq_net::GroupInfo { sequence })?,
 				None => self.inner.append_group()?,
 			});
 		}
@@ -208,6 +208,18 @@ mod tests {
 	use crate::catalog::hang::Container;
 	use moq_net::Timestamp;
 
+	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
+	/// born from their broadcast (no public `TrackProducer::new`).
+	fn track_producer(
+		name: impl Into<std::sync::Arc<str>>,
+		info: impl Into<Option<moq_net::TrackInfo>>,
+	) -> moq_net::TrackProducer {
+		moq_net::BroadcastInfo::new()
+			.produce()
+			.create_track(name, info)
+			.unwrap()
+	}
+
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
 			timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
@@ -233,7 +245,7 @@ mod tests {
 	/// Explicit keyframe closes the current group and starts a new one.
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
-		let track = moq_net::TrackProducer::new(
+		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		);
@@ -252,7 +264,7 @@ mod tests {
 	/// `finish_group()` flushes the current group immediately; the next write must be a keyframe.
 	#[tokio::test]
 	async fn finish_group_closes_immediately() {
-		let track = moq_net::TrackProducer::new(
+		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		);
@@ -271,7 +283,7 @@ mod tests {
 	/// Writing a non-keyframe with no open group returns MissingKeyframe.
 	#[test]
 	fn first_frame_must_be_keyframe() {
-		let track = moq_net::TrackProducer::new(
+		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		);
@@ -293,7 +305,7 @@ mod tests {
 	/// `seek(n)` opens the next group at sequence `n`.
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
-		let track = moq_net::TrackProducer::new(
+		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		);
@@ -311,7 +323,7 @@ mod tests {
 	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
-		let track = moq_net::TrackProducer::new(
+		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		);
@@ -352,7 +364,7 @@ mod tests {
 	/// group's last frame, without buffering an extra frame.
 	#[tokio::test]
 	async fn keyframe_backfills_last_frame_duration() {
-		let track = moq_net::TrackProducer::new(
+		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		);

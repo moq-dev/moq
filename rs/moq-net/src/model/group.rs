@@ -12,9 +12,9 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale, Timestamp};
+use crate::{Error, Result, Timescale, Timestamp, TrackInfo};
 
-use super::{Frame, FrameConsumer, FrameProducer};
+use super::{FrameConsumer, FrameInfo, FrameProducer};
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
 ///
@@ -27,27 +27,27 @@ const MAX_GROUP_FRAMES: usize = 1024;
 /// A group contains a sequence number because they can arrive out of order.
 ///
 /// You can use [crate::TrackProducer::append_group] if you just want to +1 the sequence number.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Group {
+pub struct GroupInfo {
 	/// Per-track sequence number used to detect ordering and gaps. Higher numbers
 	/// supersede lower ones; consumers may skip late arrivals.
 	pub sequence: u64,
 }
 
-impl Group {
+impl GroupInfo {
 	/// Create an untimed producer for this group.
 	///
 	/// Test-only: real groups are created via [`crate::TrackProducer`], which
-	/// supplies the track's negotiated timescale. This helper exists for in-crate
+	/// supplies the parent track's [`TrackInfo`]. This helper exists for in-crate
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> GroupProducer {
-		GroupProducer::new(self, Timescale::default())
+		GroupProducer::new(self, TrackInfo::default())
 	}
 }
 
-impl From<usize> for Group {
+impl From<usize> for GroupInfo {
 	fn from(sequence: usize) -> Self {
 		Self {
 			sequence: sequence as u64,
@@ -55,13 +55,13 @@ impl From<usize> for Group {
 	}
 }
 
-impl From<u64> for Group {
+impl From<u64> for GroupInfo {
 	fn from(sequence: u64) -> Self {
 		Self { sequence }
 	}
 }
 
-impl From<u32> for Group {
+impl From<u32> for GroupInfo {
 	fn from(sequence: u32) -> Self {
 		Self {
 			sequence: sequence as u64,
@@ -69,7 +69,7 @@ impl From<u32> for Group {
 	}
 }
 
-impl From<u16> for Group {
+impl From<u16> for GroupInfo {
 	fn from(sequence: u16) -> Self {
 		Self {
 			sequence: sequence as u64,
@@ -146,17 +146,20 @@ pub struct GroupProducer {
 	// Mutable stream state.
 	state: kio::Producer<GroupState>,
 
-	// The group header containing the sequence number.
-	info: Group,
+	// The group header containing the sequence number. A small `Copy` value,
+	// inherited by each frame (see [`Self::create_frame`]).
+	info: GroupInfo,
 
-	// Parent track's timescale, used by [`Self::create_frame`] to normalize every
-	// frame's timestamp into this scale before it enters the stream. Populated by
+	// The parent track's info, inherited rather than passed piecemeal. Its
+	// `timescale` is used by [`Self::create_frame`] to normalize every frame's
+	// timestamp into the track scale before it enters the stream, and enforced in
+	// [`Self::append_frame`]. Threaded down by value from
 	// [`crate::TrackProducer::create_group`] / `append_group`.
-	timescale: Timescale,
+	track: TrackInfo,
 }
 
 impl std::ops::Deref for GroupProducer {
-	type Target = Group;
+	type Target = GroupInfo;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
@@ -164,22 +167,23 @@ impl std::ops::Deref for GroupProducer {
 }
 
 impl GroupProducer {
-	/// Create a group producer bound to its parent track's timescale.
+	/// Create a group producer bound to its parent track's [`TrackInfo`].
 	///
-	/// Crate-private: groups are only constructed via [`crate::TrackProducer`], which
-	/// supplies the track's timescale. Every frame added to this group is normalized to
-	/// that scale by [`Self::create_frame`].
-	pub(crate) fn new(info: Group, timescale: Timescale) -> Self {
+	/// Crate-private: groups are only constructed via [`crate::TrackProducer`],
+	/// which threads its [`TrackInfo`] down so properties like the timescale are
+	/// inherited rather than passed in. Every frame added to this group is
+	/// normalized to the track's timescale by [`Self::create_frame`].
+	pub(crate) fn new(info: GroupInfo, track: TrackInfo) -> Self {
 		Self {
 			info,
 			state: kio::Producer::default(),
-			timescale,
+			track,
 		}
 	}
 
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
-		self.timescale
+		self.track.timescale
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -191,7 +195,7 @@ impl GroupProducer {
 	/// [Self::write_frame_now] to stamp wall-clock time instead of supplying one.
 	pub fn write_frame<B: Into<Bytes>>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
 		let data = data.into();
-		let mut frame = self.create_frame(Frame {
+		let mut frame = self.create_frame(FrameInfo {
 			size: data.len() as u64,
 			timestamp,
 		})?;
@@ -214,14 +218,14 @@ impl GroupProducer {
 	/// if the declared size exceeds the per-frame limit (refused before the buffer is
 	/// allocated) or [`Error::TimestampMismatch`] if the timestamp can't be converted
 	/// (overflow).
-	pub fn create_frame(&mut self, frame: Frame) -> Result<FrameProducer> {
+	pub fn create_frame(&mut self, frame: FrameInfo) -> Result<FrameProducer> {
 		let mut frame = frame;
 		frame.timestamp = frame
 			.timestamp
-			.convert(self.timescale)
+			.convert(self.track.timescale)
 			.map_err(|_| Error::TimestampMismatch)?;
 
-		let frame = frame.produce()?;
+		let frame = FrameProducer::new(frame, self.info)?;
 		self.append_frame(frame.clone())?;
 		Ok(frame)
 	}
@@ -229,7 +233,7 @@ impl GroupProducer {
 	/// Like [Self::create_frame] but stamps the frame with wall-clock now
 	/// ([`Timestamp::now`]).
 	pub fn create_frame_now(&mut self, size: u64) -> Result<FrameProducer> {
-		self.create_frame(Frame {
+		self.create_frame(FrameInfo {
 			size,
 			timestamp: Timestamp::now(),
 		})
@@ -244,7 +248,7 @@ impl GroupProducer {
 		// Catch the contract violation here, at the model layer, so peers that
 		// downstream-encode (e.g. the lite publisher's `serve_frame`) can rely
 		// on the invariant instead of re-validating per byte.
-		if frame.timestamp.scale() != self.timescale {
+		if frame.timestamp.scale() != self.track.timescale {
 			return Err(Error::TimestampMismatch);
 		}
 
@@ -290,9 +294,9 @@ impl GroupProducer {
 	/// Create a new consumer for the group.
 	pub fn consume(&self) -> GroupConsumer {
 		GroupConsumer {
-			info: self.info.clone(),
+			info: self.info,
 			state: self.state.consume(),
-			timescale: self.timescale,
+			track: self.track,
 			index: 0,
 		}
 	}
@@ -315,9 +319,9 @@ impl GroupProducer {
 impl Clone for GroupProducer {
 	fn clone(&self) -> Self {
 		Self {
-			info: self.info.clone(),
+			info: self.info,
 			state: self.state.clone(),
-			timescale: self.timescale,
+			track: self.track,
 		}
 	}
 }
@@ -346,11 +350,11 @@ pub struct GroupConsumer {
 	state: kio::Consumer<GroupState>,
 
 	// Immutable stream state.
-	info: Group,
+	info: GroupInfo,
 
-	// Parent track's timescale, copied from the producer. Lets the wire publisher
-	// emit per-frame timestamps at the right scale for a fetched group.
-	timescale: Timescale,
+	// The parent track's info, inherited from the producer. Its `timescale` lets the
+	// wire publisher emit per-frame timestamps at the right scale for a fetched group.
+	track: TrackInfo,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -358,7 +362,7 @@ pub struct GroupConsumer {
 }
 
 impl std::ops::Deref for GroupConsumer {
-	type Target = Group;
+	type Target = GroupInfo;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
@@ -368,7 +372,7 @@ impl std::ops::Deref for GroupConsumer {
 impl GroupConsumer {
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
-		self.timescale
+		self.track.timescale
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -481,7 +485,7 @@ mod test {
 
 	#[test]
 	fn basic_frame_reading() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"frame0")).unwrap();
 		producer.write_frame_now(Bytes::from_static(b"frame1")).unwrap();
 		producer.finish().unwrap();
@@ -497,7 +501,7 @@ mod test {
 
 	#[test]
 	fn read_frame_all_at_once() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"hello")).unwrap();
 		producer.finish().unwrap();
 
@@ -508,7 +512,7 @@ mod test {
 
 	#[test]
 	fn read_frame_chunks() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		let mut frame = producer.create_frame_now(10).unwrap();
 		frame.write(Bytes::from_static(b"hello")).unwrap();
 		frame.write(Bytes::from_static(b"world")).unwrap();
@@ -525,7 +529,7 @@ mod test {
 
 	#[test]
 	fn get_frame_by_index() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
 		producer.write_frame_now(Bytes::from_static(b"bb")).unwrap();
 		producer.finish().unwrap();
@@ -541,7 +545,7 @@ mod test {
 
 	#[test]
 	fn group_finish_returns_none() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -551,7 +555,7 @@ mod test {
 
 	#[test]
 	fn abort_propagates() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 		producer.abort(crate::Error::Cancel).unwrap();
 
@@ -561,7 +565,7 @@ mod test {
 
 	#[test]
 	fn abort_clears_cached_frames() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 
 		// A stale consumer that never reads must not pin the cached frames.
@@ -577,7 +581,7 @@ mod test {
 
 	#[test]
 	fn drop_unfinished_clears_cached_frames() {
-		let producer = Group { sequence: 0 }.produce();
+		let producer = GroupInfo { sequence: 0 }.produce();
 		let mut writer = producer.clone();
 		writer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 
@@ -595,7 +599,7 @@ mod test {
 
 	#[test]
 	fn drop_finished_keeps_cached_frames() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
 		producer.finish().unwrap();
 
@@ -609,7 +613,7 @@ mod test {
 
 	#[tokio::test]
 	async fn pending_then_ready() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 
 		// Consumer blocks because no frames yet.
@@ -624,7 +628,7 @@ mod test {
 
 	#[test]
 	fn eviction_drops_old_frames() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 
 		// Write frames that total more than MAX_GROUP_CACHE.
 		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
@@ -643,7 +647,7 @@ mod test {
 
 	#[test]
 	fn no_eviction_under_limit() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"small")).unwrap();
 		producer.write_frame_now(Bytes::from_static(b"frames")).unwrap();
 		producer.finish().unwrap();
@@ -657,7 +661,7 @@ mod test {
 
 	#[test]
 	fn eviction_by_frame_count() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 
 		// Write more than MAX_GROUP_FRAMES frames.
 		for _ in 0..=MAX_GROUP_FRAMES {
@@ -681,7 +685,7 @@ mod test {
 
 	#[test]
 	fn next_frame_returns_cache_full_on_tombstone() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 
 		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
 		producer.write_frame_now(big.clone()).unwrap();
@@ -695,7 +699,7 @@ mod test {
 
 	#[test]
 	fn clone_consumer_independent() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
 
 		let mut c1 = producer.consume();
@@ -722,8 +726,11 @@ mod test {
 	fn create_frame_converts_mismatched_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
-		let frame = Frame {
+		let mut producer = GroupProducer::new(
+			GroupInfo { sequence: 0 },
+			TrackInfo::default().with_timescale(Timescale::MICRO),
+		);
+		let frame = FrameInfo {
 			size: 3,
 			timestamp: Timestamp::from_millis(1).unwrap(), // 1ms -> 1000µs
 		};
@@ -737,7 +744,10 @@ mod test {
 	async fn create_frame_now_stamps_wall_clock() {
 		use crate::Timescale;
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
+		let mut producer = GroupProducer::new(
+			GroupInfo { sequence: 0 },
+			TrackInfo::default().with_timescale(Timescale::MICRO),
+		);
 		let writer = producer.create_frame_now(3).unwrap();
 		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
 		assert!(!writer.timestamp.is_zero(), "wall clock should be non-zero");
@@ -748,8 +758,11 @@ mod test {
 	fn create_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Timescale::MICRO);
-		let frame = Frame {
+		let mut producer = GroupProducer::new(
+			GroupInfo { sequence: 0 },
+			TrackInfo::default().with_timescale(Timescale::MICRO),
+		);
+		let frame = FrameInfo {
 			size: 1,
 			timestamp: Timestamp::from_micros(7).unwrap(),
 		};
@@ -759,11 +772,30 @@ mod test {
 		writer.finish().unwrap();
 	}
 
+	/// `append_frame` is the low-level path: unlike `create_frame` it does not
+	/// convert, so a timestamp at a different scale than the track is rejected.
+	#[test]
+	fn append_frame_rejects_mismatched_scale() {
+		use crate::{Timescale, Timestamp};
+
+		let mut producer = GroupProducer::new(
+			GroupInfo { sequence: 0 },
+			TrackInfo::default().with_timescale(Timescale::MICRO),
+		);
+		let frame = FrameInfo {
+			size: 1,
+			timestamp: Timestamp::from_millis(1).unwrap(), // millis, not micros
+		}
+		.produce()
+		.unwrap();
+		assert!(matches!(producer.append_frame(frame), Err(Error::TimestampMismatch)));
+	}
+
 	/// The per-frame size cap is enforced at allocation, so create_frame surfaces
 	/// it as FrameTooLarge before allocating the buffer.
 	#[test]
 	fn create_frame_rejects_oversized() {
-		let mut producer = Group { sequence: 0 }.produce();
+		let mut producer = GroupInfo { sequence: 0 }.produce();
 		let result = producer.create_frame_now(crate::MAX_FRAME_SIZE + 1);
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}

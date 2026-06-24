@@ -385,7 +385,10 @@ mod test {
 	use serde_json::json;
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::TrackSubscriber) {
-		let track = moq_net::TrackProducer::new("test", None);
+		let track = moq_net::BroadcastInfo::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
 	}
@@ -541,7 +544,10 @@ mod test {
 			scte35: Option<u32>,
 		}
 
-		let track = moq_net::TrackProducer::new("test", None);
+		let track = moq_net::BroadcastInfo::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 

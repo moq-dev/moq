@@ -53,7 +53,7 @@ impl Frame {
 		// Stamp the moq-net frame timestamp too so Lite05+ can delta-encode it on the
 		// wire independently of the container-level prefix. `create_frame` converts it
 		// into the track's timescale; older drafts simply don't put it on the wire.
-		let net_frame = moq_net::Frame {
+		let net_frame = moq_net::FrameInfo {
 			size,
 			timestamp: self.timestamp,
 		};

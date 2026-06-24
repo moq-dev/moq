@@ -31,7 +31,7 @@ impl Container for Wire {
 
 			// Carry the timestamp on the net frame too (converted to the track's
 			// timescale), so a relay sees it without parsing the LOC payload.
-			let mut chunked = group.create_frame(moq_net::Frame {
+			let mut chunked = group.create_frame(moq_net::FrameInfo {
 				size: data.len() as u64,
 				timestamp: frame.timestamp,
 			})?;

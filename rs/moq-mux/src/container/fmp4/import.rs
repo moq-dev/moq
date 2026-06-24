@@ -599,7 +599,7 @@ impl Import {
 					prev.finish()?;
 				}
 				match track.pending_sequence.take() {
-					Some(sequence) => track.track.create_group(moq_net::Group { sequence })?,
+					Some(sequence) => track.track.create_group(moq_net::GroupInfo { sequence })?,
 					None => track.track.append_group()?,
 				}
 			} else {
@@ -610,7 +610,7 @@ impl Import {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			let mut frame = g.create_frame(moq_net::Frame {
+			let mut frame = g.create_frame(moq_net::FrameInfo {
 				size: fragment_bytes.len() as u64,
 				timestamp,
 			})?;

@@ -52,6 +52,18 @@ mod test {
 
 	use super::*;
 
+	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
+	/// born from their broadcast (no public `TrackProducer::new`).
+	fn track_producer(
+		name: impl Into<std::sync::Arc<str>>,
+		info: impl Into<Option<moq_net::TrackInfo>>,
+	) -> moq_net::TrackProducer {
+		moq_net::BroadcastInfo::new()
+			.produce()
+			.create_track(name, info)
+			.unwrap()
+	}
+
 	// Build a base catalog distinguished by an audio rendition named `name`, plus its JSON payload.
 	fn catalog_payload(name: &str) -> (Catalog, String) {
 		let mut catalog = Catalog::default();
@@ -72,7 +84,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -88,7 +100,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -106,7 +118,7 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -132,7 +144,7 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -159,7 +171,7 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -189,7 +201,7 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
