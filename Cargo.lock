@@ -3827,6 +3827,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-flate"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "flate2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "moq-gst"
 version = "0.2.8"
 dependencies = [
@@ -3846,12 +3855,12 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "bytes",
- "flate2",
  "json-patch",
  "kio",
+ "moq-flate",
  "moq-net",
  "serde",
  "serde_json",

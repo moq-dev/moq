@@ -29,6 +29,7 @@
 		"js/net",
 		"js/clock",
 		"js/token",
+		"js/flate",
 		"js/json",
 		"js/hang",
 		"js/loc",

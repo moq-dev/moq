@@ -1,8 +1,8 @@
+import { Encoder } from "@moq/flate";
 import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type * as z from "zod/mini";
 
-import { Encoder } from "./compression.ts";
 import { deepEqual, diff } from "./diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept

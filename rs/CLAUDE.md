@@ -17,7 +17,8 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `hang` (lib): media layer on `moq-net`. `catalog/` is the JSON manifest (`Catalog`, root.rs); `container/` is the frame format (timestamp + codec payload, `container::Frame`).
 - `moq-loc` (lib): LOC (Low Overhead Container) wire frame codec. Top-level `encode`/`decode` + `Frame`. QUIC varints, property KVPs.
 - `moq-msf` (lib): IETF MSF/CMSF catalog types (`Catalog`, `Track`, `Packaging`, `Role`). serde JSON. Alternative to hang's catalog.
-- `moq-json` (lib): generic snapshot/delta value publishing over a track using RFC 7396 JSON Merge Patch. `Producer<T>`/`Consumer<T>`, `Guard<T>` (RAII edit). Late joiners reconstruct from snapshot + deltas.
+- `moq-json` (lib): generic snapshot/delta value publishing over a track using RFC 7396 JSON Merge Patch. `Producer<T>`/`Consumer<T>`, `Guard<T>` (RAII edit). Late joiners reconstruct from snapshot + deltas. DEFLATE via `moq-flate`.
+- `moq-flate` (lib): group-scoped DEFLATE primitive (no moq deps). `Encoder`/`Decoder` turn a stream of payloads into self-delimited sync-flushed frames sharing one window (RFC 7692 marker trick), so similar frames compress against the earlier ones. Used by `moq-json`; reusable by any framed stream.
 
 **Media bridge / codecs**
 - `moq-mux` (lib): the conversion layer. File/stream formats (`container/`: fmp4, flv, hls, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts. `Container` trait + generic `Producer<C>`/`Consumer<C>`. Dual catalog (`catalog::hang`, `catalog::msf`).

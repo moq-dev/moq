@@ -14,7 +14,8 @@ Bun workspaces; members listed in the repo-root `package.json` (not in `js/`). D
 
 **Container / catalog formats**
 - `@moq/loc` (`loc/`): Low Overhead Container frame encoding. Thin layer on `@moq/net`.
-- `@moq/json` (`json/`): snapshot/delta JSON over a track via RFC 7396 merge-patch. Exposes the base `Producer`/`Consumer` that `@moq/hang`'s catalog extends.
+- `@moq/json` (`json/`): snapshot/delta JSON over a track via RFC 7396 merge-patch. Exposes the base `Producer`/`Consumer` that `@moq/hang`'s catalog extends. DEFLATE via `@moq/flate`.
+- `@moq/flate` (`flate/`): group-scoped DEFLATE primitive (only deps on `pako`). `Encoder`/`Decoder` turn a stream of payloads into self-delimited sync-flushed frames sharing one window; wire-interoperable with the Rust `moq-flate` crate. Used by `@moq/json`.
 - `@moq/msf` (`msf/`): MOQT Streaming Format catalog types (zod schemas).
 
 **Media**
