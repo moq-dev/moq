@@ -166,46 +166,34 @@ impl axum::response::IntoResponse for AuthError {
 	}
 }
 
-/// DEPRECATED. The auth client now reuses the cluster client's `--client-tls-*`
-/// configuration ([`moq_native::tls::Client`]) for its outbound HTTP (JWK and
-/// auth/public-API fetches), so a single client identity covers both.
-///
-/// These `--auth-tls-*` flags are kept only for backwards compatibility: setting
-/// any of them overrides `--client-tls-*` for the auth client and logs a
-/// deprecation warning. Migrate by dropping `--auth-tls-*` and configuring
-/// `--client-tls-*` instead. This struct will be removed in a future release.
+/// Deprecated `--auth-tls-*` overrides, kept for backwards compatibility. The
+/// auth client otherwise reuses the cluster client's `--client-tls-*` config.
+/// Hidden from `--help`; setting any field logs a deprecation warning.
+#[doc(hidden)]
 #[serde_as]
 #[derive(Clone, Default, Debug, clap::Args, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthTls {
-	/// Deprecated, use `--client-tls-root`. PEM file(s) of root CAs. If empty, the
-	/// platform's native roots are used. In config files, accepts either a
-	/// single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
+	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT", hide = true)]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
-	/// Deprecated, use `--client-tls-cert`. PEM file containing the client
-	/// certificate chain for mTLS.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT")]
+	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT", hide = true)]
 	pub cert: Option<PathBuf>,
 
-	/// Deprecated, use `--client-tls-key`. PEM file containing the private key
-	/// for mTLS.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY")]
+	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
 	pub key: Option<PathBuf>,
 
-	/// Deprecated, use `--client-tls-disable-verify`. Danger: disable TLS
-	/// certificate verification on auth requests.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "auth-tls-disable-verify",
 		long = "auth-tls-disable-verify",
 		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
+		hide = true,
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -261,8 +249,7 @@ pub struct AuthConfig {
 	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
 
-	/// Deprecated TLS overrides for outbound HTTP auth requests. Prefer
-	/// `--client-tls-*`, which the auth client now reuses; see [`AuthTls`].
+	/// Deprecated `--auth-tls-*` overrides; see [`AuthTls`].
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: AuthTls,

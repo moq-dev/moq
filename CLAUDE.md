@@ -86,6 +86,16 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 - Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough. Skip throat-clearing like "This function is responsible for...".
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
 
+## Deprecation
+
+Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `--help`, and doc comments should describe only the current/canonical surface, so a reader is steered to the right thing and never learns the dead one. Keep the deprecated path *working* but invisible:
+
+- A deprecated CLI flag stays a hidden alias (clap `alias = "..."`, or a separate `#[arg(..., hide = true)]` when it needs its own deprecation warning). No `--help` entry, no "deprecated, use X" note in the doc comment.
+- A deprecated public item gets `#[doc(hidden)]` (Rust) / `@internal` or omission (JS) so it drops off the published docs.
+- Remove the example invocations and prose that mention it from `/doc`.
+
+The rename/removal rationale lives in the commit message and PR description, not in docs that users read. A runtime warning when someone *uses* the deprecated path is fine (it fires on use, it isn't documentation); a standing note that advertises the dead name is not.
+
 ## AI Attribution
 
 LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with `(Written by Claude)` or similar. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.

@@ -110,8 +110,6 @@ pub struct Client {
 	/// roots are only loaded when no custom root is given, so passing a root
 	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
-	///
-	/// The bare `--tls-root` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(
 		id = "client-tls-root",
@@ -128,8 +126,6 @@ pub struct Client {
 	/// explicitly to trust the system roots alongside any custom roots, or set it
 	/// to false to trust only the custom roots. Trusting neither (no custom root
 	/// and system roots disabled) is rejected, since verification could never pass.
-	///
-	/// The bare `--tls-system-roots` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-tls-system-roots",
@@ -153,8 +149,6 @@ pub struct Client {
 	///
 	/// This value can be provided multiple times to accept any of several fingerprints (e.g.
 	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
-	///
-	/// The bare `--tls-fingerprint` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(
 		id = "client-tls-fingerprint",
@@ -184,8 +178,6 @@ pub struct Client {
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
-	///
-	/// The bare `--tls-disable-verify` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-tls-disable-verify",
