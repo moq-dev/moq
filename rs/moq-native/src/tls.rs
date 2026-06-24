@@ -111,12 +111,7 @@ pub struct Client {
 	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(
-		id = "client-tls-root",
-		long = "client-tls-root",
-		alias = "tls-root",
-		env = "MOQ_CLIENT_TLS_ROOT"
-	)]
+	#[arg(id = "client-tls-root", long = "client-tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
@@ -130,7 +125,6 @@ pub struct Client {
 	#[arg(
 		id = "client-tls-system-roots",
 		long = "client-tls-system-roots",
-		alias = "tls-system-roots",
 		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
 		default_missing_value = "true",
 		num_args = 0..=1,
@@ -153,7 +147,6 @@ pub struct Client {
 	#[arg(
 		id = "client-tls-fingerprint",
 		long = "client-tls-fingerprint",
-		alias = "tls-fingerprint",
 		env = "MOQ_CLIENT_TLS_FINGERPRINT"
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -182,7 +175,6 @@ pub struct Client {
 	#[arg(
 		id = "client-tls-disable-verify",
 		long = "client-tls-disable-verify",
-		alias = "tls-disable-verify",
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
 		default_missing_value = "true",
 		num_args = 0..=1,
@@ -190,27 +182,115 @@ pub struct Client {
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
+
+	/// Deprecated `--tls-*` spellings, folded into the canonical fields above with
+	/// a warning. Private and hidden so they stay off the public surface; not a
+	/// TOML field (config files use the canonical names).
+	#[command(flatten)]
+	#[serde(skip)]
+	deprecated: Deprecated,
+}
+
+/// Holds the deprecated bare `--tls-*` flag spellings (renamed to `--client-tls-*`).
+/// Flattened into [`Client`] so they keep parsing; folded into the canonical
+/// fields by [`Client::build`] with a deprecation warning. No env (the env names
+/// were never renamed) and no TOML.
+#[derive(Clone, Default, Debug, clap::Args)]
+struct Deprecated {
+	#[arg(long = "tls-root", hide = true)]
+	root: Vec<PathBuf>,
+
+	#[arg(
+		long = "tls-system-roots",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	system_roots: Option<bool>,
+
+	#[arg(long = "tls-fingerprint", hide = true)]
+	fingerprint: Vec<String>,
+
+	#[arg(
+		long = "tls-disable-verify",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	disable_verify: Option<bool>,
 }
 
 impl Client {
+	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
+	/// [`Self::build`], which every backend runs, so a deprecated flag warns once.
+	pub(crate) fn warn_deprecated(&self) {
+		if !self.deprecated.root.is_empty() {
+			tracing::warn!("--tls-root is deprecated; use --client-tls-root");
+		}
+		if self.deprecated.system_roots.is_some() {
+			tracing::warn!("--tls-system-roots is deprecated; use --client-tls-system-roots");
+		}
+		if !self.deprecated.fingerprint.is_empty() {
+			tracing::warn!("--tls-fingerprint is deprecated; use --client-tls-fingerprint");
+		}
+		if self.deprecated.disable_verify.is_some() {
+			tracing::warn!("--tls-disable-verify is deprecated; use --client-tls-disable-verify");
+		}
+	}
+
+	/// Roots from the canonical field plus the deprecated `--tls-root` spelling.
+	pub(crate) fn effective_root(&self) -> Vec<PathBuf> {
+		let mut root = self.root.clone();
+		root.extend(self.deprecated.root.iter().cloned());
+		root
+	}
+
+	/// Fingerprints from the canonical field plus the deprecated `--tls-fingerprint`.
+	pub(crate) fn effective_fingerprint(&self) -> Vec<String> {
+		let mut fp = self.fingerprint.clone();
+		fp.extend(self.deprecated.fingerprint.iter().cloned());
+		fp
+	}
+
+	/// `system_roots`, preferring the canonical flag over the deprecated alias.
+	pub(crate) fn effective_system_roots(&self) -> Option<bool> {
+		self.system_roots.or(self.deprecated.system_roots)
+	}
+
+	/// `disable_verify`, preferring the canonical flag over the deprecated alias.
+	pub(crate) fn effective_disable_verify(&self) -> Option<bool> {
+		self.disable_verify.or(self.deprecated.disable_verify)
+	}
+
 	/// Build a [`rustls::ClientConfig`] from this configuration.
 	///
 	/// Trusts the configured roots plus the platform's native roots (the latter
 	/// gated by `system_roots`), optionally attaches a client identity for mTLS,
 	/// and swaps in fingerprint pinning or disabled verification when requested.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
+		self.warn_deprecated();
 		let provider = crypto::provider();
+
+		// Fold the deprecated --tls-* spellings into the canonical values so the
+		// rest of build() sees a single configuration.
+		let root = self.effective_root();
+		let fingerprint = self.effective_fingerprint();
+		let disable_verify = self.effective_disable_verify().unwrap_or_default();
 
 		// Default to system roots only when no custom root is given, so passing a
 		// root replaces them unless the system roots are explicitly re-enabled.
-		let system_roots = self.system_roots.unwrap_or(self.root.is_empty());
+		let system_roots = self.effective_system_roots().unwrap_or(root.is_empty());
 
 		// fingerprint pinning and disable_verify swap in their own verifier below,
 		// so an empty root store is fine in those cases. Otherwise WebPKI needs at
 		// least one trusted root to ever succeed, so fail fast instead of producing
 		// confusing handshake errors later.
-		let custom_verifier = self.disable_verify.unwrap_or_default() || !self.fingerprint.is_empty();
-		if !system_roots && self.root.is_empty() && !custom_verifier {
+		let custom_verifier = disable_verify || !fingerprint.is_empty();
+		if !system_roots && root.is_empty() && !custom_verifier {
 			return Err(Error::NoRoots);
 		}
 
@@ -224,7 +304,7 @@ impl Client {
 				roots.add(cert).map_err(Error::AddRoot)?;
 			}
 		}
-		for root in &self.root {
+		for root in &root {
 			let certs = read_certs(root)?;
 			if certs.is_empty() {
 				return Err(Error::EmptyRoots(root.clone()));
@@ -257,13 +337,12 @@ impl Client {
 			_ => return Err(Error::IncompleteClientAuth),
 		};
 
-		if self.disable_verify.unwrap_or_default() {
+		if disable_verify {
 			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
 			let noop = NoCertificateVerification(provider);
 			tls.dangerous().set_certificate_verifier(Arc::new(noop));
-		} else if !self.fingerprint.is_empty() {
-			let fingerprints = self
-				.fingerprint
+		} else if !fingerprint.is_empty() {
+			let fingerprints = fingerprint
 				.iter()
 				.map(|fp| {
 					let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;

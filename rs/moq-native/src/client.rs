@@ -490,11 +490,33 @@ mod tests {
 	}
 
 	#[test]
-	fn test_cli_deprecated_tls_aliases() {
-		// The bare --tls-* forms are deprecated aliases of the --client-tls-* flags.
+	fn test_cli_deprecated_tls_flags_fold_into_canonical() {
+		// The bare --tls-* forms are deprecated. They parse into a hidden field and
+		// fold into the canonical values via the effective_* accessors build() uses,
+		// so they keep working without touching the public Client fields.
 		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true", "--tls-fingerprint", "abcd1234"]);
-		assert_eq!(config.tls.disable_verify, Some(true));
-		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
+		assert_eq!(
+			config.tls.disable_verify, None,
+			"deprecated flag must not set the canonical field"
+		);
+		assert_eq!(config.tls.effective_disable_verify(), Some(true));
+		assert_eq!(config.tls.effective_fingerprint(), vec!["abcd1234"]);
+	}
+
+	#[test]
+	fn test_canonical_tls_flag_wins_over_deprecated() {
+		// Both spellings given: canonical wins for scalar options, vecs concatenate.
+		let config = ClientConfig::parse_from([
+			"test",
+			"--client-tls-disable-verify=false",
+			"--tls-disable-verify=true",
+			"--client-tls-fingerprint",
+			"aaaa",
+			"--tls-fingerprint",
+			"bbbb",
+		]);
+		assert_eq!(config.tls.effective_disable_verify(), Some(false));
+		assert_eq!(config.tls.effective_fingerprint(), vec!["aaaa", "bbbb"]);
 	}
 
 	#[test]

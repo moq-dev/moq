@@ -93,13 +93,13 @@ pub(crate) struct QuicheClient {
 
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		if !config.tls.root.is_empty() {
+		if !config.tls.effective_root().is_empty() {
 			tracing::warn!("--client-tls-root is not supported with the quiche backend; system roots will be used");
 		}
 
 		Ok(Self {
 			bind: config.bind,
-			disable_verify: config.tls.disable_verify.unwrap_or_default(),
+			disable_verify: config.tls.effective_disable_verify().unwrap_or_default(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 			versions: config.versions(),
 		})
