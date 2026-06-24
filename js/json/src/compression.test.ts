@@ -93,6 +93,24 @@ test("codec rejects frames that inflate past the cap", async () => {
 	expect(() => decoder.frame(slice)).toThrow(/exceeded/);
 });
 
+test("a frame larger than pako's chunk size round-trips", () => {
+	// High-entropy data barely compresses, so the slice spans multiple pako chunks (>16 KB), which
+	// exercises the encoder's multi-chunk assembly and the decoder's multi-chunk concat.
+	let state = 0x9e3779b9 >>> 0;
+	const payload = new Uint8Array(64 * 1024);
+	for (let i = 0; i < payload.length; i++) {
+		state ^= state << 13;
+		state ^= state >>> 17;
+		state ^= state << 5;
+		state >>>= 0;
+		payload[i] = state & 0xff;
+	}
+
+	const slice = new Encoder().frame(payload);
+	expect(slice.length).toBeGreaterThan(16 * 1024); // pako's default chunkSize
+	expect(new Decoder().frame(slice)).toEqual(payload);
+});
+
 test("cross-frame context shrinks a repeated frame", async () => {
 	// A later frame identical to an earlier one compresses far smaller once the window holds it.
 	const encoder = new Encoder();

@@ -192,6 +192,28 @@ mod test {
 	}
 
 	#[test]
+	fn frame_larger_than_chunk_roundtrips() {
+		// High-entropy data barely compresses, so its slice exceeds the streaming `CHUNK` scratch
+		// buffer and the (de)compress loops must iterate. Verify it still round-trips byte for byte.
+		let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+		let payload: Vec<u8> = (0..64 * 1024)
+			.map(|_| {
+				state ^= state << 13;
+				state ^= state >> 7;
+				state ^= state << 17;
+				(state >> 56) as u8
+			})
+			.collect();
+
+		let mut enc = Encoder::new();
+		let slice = enc.frame(&payload);
+		assert!(slice.len() > CHUNK, "slice {} should exceed CHUNK {CHUNK}", slice.len());
+
+		let mut dec = Decoder::new();
+		assert_eq!(dec.frame(&slice).unwrap(), Bytes::from(payload));
+	}
+
+	#[test]
 	fn decompress_rejects_garbage() {
 		let mut dec = Decoder::new();
 		assert!(matches!(
