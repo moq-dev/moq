@@ -530,8 +530,13 @@ impl AuthApiResponse {
 		if let Some(label) = &self.tier {
 			return Some(Tier::new(label.clone()));
 		}
-		self.internal
-			.map(|internal| if internal { Tier::new("internal") } else { Tier::default() })
+		self.internal.map(|internal| {
+			if internal {
+				Tier::new("internal")
+			} else {
+				Tier::default()
+			}
+		})
 	}
 }
 
