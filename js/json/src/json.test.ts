@@ -186,6 +186,19 @@ test("array change is a wholesale delta", async () => {
 	expect(await structure(track)).toEqual([2]);
 });
 
+test("late joiner collapses a buffered backlog to the latest value", async () => {
+	const track = new Track("test");
+	const producer = new Producer<Value>(track, { deltaRatio: 100 });
+	for (let n = 0; n <= 20; n++) {
+		producer.update({ n });
+	}
+	producer.finish();
+
+	// A whole group's worth of snapshot + deltas is buffered before the consumer reads, so it applies
+	// them all but yields only the latest value once, not every superseded state.
+	expect(await drain(track)).toEqual([{ n: 20 }]);
+});
+
 test("frame cap rolls snapshot", async () => {
 	const track = new Track("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 1_000_000 });

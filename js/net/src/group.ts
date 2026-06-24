@@ -1,7 +1,7 @@
 import { Signal } from "@moq/signals";
 
 /** Reactive backing state for a {@link Group}: buffered frames, a closed flag, and the running frame count. */
-export class GroupState {
+class GroupState {
 	frames = new Signal<Uint8Array[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	total = new Signal<number>(0); // The total number of frames in the group thus far
@@ -12,8 +12,9 @@ export class Group {
 	/** Sequence number of this group within its track. */
 	readonly sequence: number;
 
-	/** Reactive backing state. */
-	state = new GroupState();
+	// Reactive backing state, deliberately private: read through the read* methods so callers can't
+	// poke the signals directly (and so the internal representation can change).
+	#state = new GroupState();
 
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
@@ -23,7 +24,7 @@ export class Group {
 
 		// Cache the closed promise to avoid recreating it every time.
 		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
+			const dispose = this.#state.closed.subscribe((closed) => {
 				if (!closed) return;
 				resolve(closed instanceof Error ? closed : undefined);
 				dispose();
@@ -36,13 +37,13 @@ export class Group {
 	 * @param frame - The frame to write
 	 */
 	writeFrame(frame: Uint8Array) {
-		if (this.state.closed.peek()) throw new Error("group is closed");
+		if (this.#state.closed.peek()) throw new Error("group is closed");
 
-		this.state.frames.mutate((frames) => {
+		this.#state.frames.mutate((frames) => {
 			frames.push(frame);
 		});
 
-		this.state.total.update((total) => total + 1);
+		this.#state.total.update((total) => total + 1);
 	}
 
 	/** Write a string as a single UTF-8 encoded frame. */
@@ -61,35 +62,59 @@ export class Group {
 	}
 
 	/**
+	 * Reads the next already-buffered frame without blocking.
+	 *
+	 * Returns `undefined` when nothing is buffered right now, which does *not* mean end-of-group: the
+	 * group may still receive more frames, or may be finished. Use {@link readable} to wait for the
+	 * next frame, or the blocking {@link readFrame} to wait and detect the end. Drain a backlog by
+	 * looping until this returns `undefined`.
+	 */
+	tryReadFrame(): Uint8Array | undefined {
+		return this.tryReadFrameSequence()?.data;
+	}
+
+	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
+	tryReadFrameSequence(): { sequence: number; data: Uint8Array } | undefined {
+		const frames = this.#state.frames.peek();
+		const data = frames.shift();
+		if (data === undefined) return undefined;
+		return { sequence: this.#state.total.peek() - frames.length - 1, data };
+	}
+
+	/**
+	 * Resolves once {@link readFrame} would not block: a frame is buffered, or the group has closed.
+	 *
+	 * Lets a caller fold "this group has a frame" into a larger wait (e.g. racing it against a new
+	 * group arriving) without touching the group's internal signals.
+	 */
+	async readable(): Promise<void> {
+		for (;;) {
+			if (this.#state.frames.peek().length > 0) return;
+			if (this.#state.closed.peek()) return;
+			await Signal.race(this.#state.frames, this.#state.closed);
+		}
+	}
+
+	/**
 	 * Reads the next frame from the group.
 	 * @returns A promise that resolves to the next frame or undefined
 	 */
 	async readFrame(): Promise<Uint8Array | undefined> {
-		for (;;) {
-			const frames = this.state.frames.peek();
-			const frame = frames.shift();
-			if (frame) return frame;
-
-			const closed = this.state.closed.peek();
-			if (closed instanceof Error) throw closed;
-			if (closed) return;
-
-			await Signal.race(this.state.frames, this.state.closed);
-		}
+		return (await this.readFrameSequence())?.data;
 	}
 
 	/** Reads the next frame along with its sequence number within the group. */
 	async readFrameSequence(): Promise<{ sequence: number; data: Uint8Array } | undefined> {
 		for (;;) {
-			const frames = this.state.frames.peek();
-			const frame = frames.shift();
-			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, data: frame };
+			const next = this.tryReadFrameSequence();
+			if (next) return next;
 
-			const closed = this.state.closed.peek();
+			// Drain buffered frames before observing the close, so a closed group still yields them.
+			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return;
+			if (closed) return undefined;
 
-			await Signal.race(this.state.frames, this.state.closed);
+			await this.readable();
 		}
 	}
 
@@ -113,6 +138,6 @@ export class Group {
 
 	/** Closes the group, optionally with an error to abort readers. */
 	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
+		this.#state.closed.set(abort ?? true);
 	}
 }

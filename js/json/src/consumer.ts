@@ -7,8 +7,9 @@ import type { Config } from "./producer.ts";
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
  *
- * Reads each group's snapshot (frame 0) and applies the following frames as merge patches,
- * yielding the reconstructed value after each one.
+ * Reads each group's snapshot (frame 0) and applies the following frames as merge patches. A live
+ * consumer yields each update as it arrives; a consumer that has fallen behind (or just joined)
+ * collapses the buffered backlog and yields only the latest value. See {@link next}.
  */
 export class Consumer<T> {
 	#track: Moq.Track;
@@ -28,7 +29,15 @@ export class Consumer<T> {
 		this.#decompress = config.compression ?? false;
 	}
 
-	/** Get the next reconstructed value, or `undefined` once the track ends. */
+	/**
+	 * Get the next reconstructed value, or `undefined` once the track ends.
+	 *
+	 * Applies every frame already buffered in the group but yields only the latest reconstructed
+	 * value: the intermediate reconstructions are stale, so a late joiner (or any consumer that has
+	 * fallen behind) catches up to the head in one step instead of replaying every superseded state.
+	 * Frames are still decoded in order (the DEFLATE window and merge patches are sequential); only
+	 * the per-frame yield is skipped.
+	 */
 	async next(): Promise<T | undefined> {
 		for (;;) {
 			if (!this.#group) {
@@ -41,6 +50,16 @@ export class Consumer<T> {
 				this.#decoder = undefined;
 			}
 
+			// Drain every frame already buffered, keeping only the latest reconstructed value.
+			let value: T | undefined;
+			let advanced = false;
+			for (let frame = this.#group.tryReadFrame(); frame !== undefined; frame = this.#group.tryReadFrame()) {
+				value = this.#apply(frame);
+				advanced = true;
+			}
+			if (advanced) return value;
+
+			// Nothing buffered: block for the next frame (or the group's end).
 			const frame = await this.#group.readFrame();
 			if (frame === undefined) {
 				// The group is exhausted; advance to the next one.
