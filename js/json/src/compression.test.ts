@@ -25,6 +25,17 @@ async function firstFrame(track: Track): Promise<Uint8Array> {
 	return frame;
 }
 
+// Count the groups a (finished) track published, draining each so the reads terminate.
+async function groupCount(track: Track): Promise<number> {
+	let groups = 0;
+	for (;;) {
+		const group = await track.nextGroupOrdered();
+		if (!group) return groups;
+		groups++;
+		while ((await group.readFrame()) !== undefined) {}
+	}
+}
+
 test("compressed snapshot per group round-trips", async () => {
 	const track = new Track("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 0, compression: true });
@@ -113,4 +124,25 @@ test("compression shrinks a repetitive frame", async () => {
 	const plainLen = (await firstFrame(plain)).length;
 	const compressedLen = (await firstFrame(compressed)).length;
 	expect(compressedLen).toBeLessThan(plainLen);
+});
+
+test("compressed deltas roll on the compressed budget", async () => {
+	// With compression the budget is measured on compressed frame sizes: #snapshotLen and #deltaBytes
+	// are the written slice lengths, not the raw JSON. A tight ratio over many distinct updates must
+	// roll more than one group, and a late joiner must still rebuild the final value across the
+	// compressed group boundary. Guards against the budget regressing to raw lengths. Two identical
+	// producers (deterministic output) keep the group-count and reconstruction reads independent.
+	const fill = (track: Track) => {
+		const producer = new Producer<Value>(track, { deltaRatio: 2, compression: true });
+		for (let n = 0; n <= 40; n++) producer.update({ n });
+		producer.finish();
+	};
+
+	const layout = new Track("layout");
+	fill(layout);
+	expect(await groupCount(layout)).toBeGreaterThan(1);
+
+	const reconstruct = new Track("reconstruct");
+	fill(reconstruct);
+	expect((await drainCompressed(reconstruct)).at(-1)).toEqual({ n: 40 });
 });

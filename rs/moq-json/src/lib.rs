@@ -925,6 +925,26 @@ mod test {
 	}
 
 	#[test]
+	fn compressed_deltas_roll_on_compressed_budget() {
+		// With compression the budget is measured on compressed frame sizes: `snapshot_len` and
+		// `delta_bytes` are the compressed slice lengths, not the raw JSON. A tight ratio over many
+		// distinct updates must therefore roll at least one group, and a late joiner must still rebuild
+		// the final value across the compressed group boundary (per-group decoder reset). Guards against
+		// the budget regressing to raw lengths.
+		let (mut producer, track) = producer(cfg_deflate(2));
+		for n in 0..=40 {
+			producer.update(&json!({ "n": n })).unwrap();
+		}
+		producer.finish().unwrap();
+
+		assert!(
+			track.latest().unwrap() > 0,
+			"a tight ratio should roll at least one compressed group"
+		);
+		assert_eq!(drain_with(deflate_consumer(track)).last().unwrap(), &json!({ "n": 40 }));
+	}
+
+	#[test]
 	fn compressed_cloned_consumer_reconstructs_mid_group() {
 		// A clone taken mid-group has no decoder window; it must rebuild from the retained slices.
 		let (mut producer, track) = producer(cfg_deflate(100));
