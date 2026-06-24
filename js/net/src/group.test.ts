@@ -46,7 +46,7 @@ test("readable resolves once a frame is buffered", async () => {
 	// No frame yet: readable() must stay pending for an empty, open group.
 	const readable = group.readable();
 	let settled = false;
-	readable.then(() => {
+	void readable.then(() => {
 		settled = true;
 	});
 	await Promise.resolve();
