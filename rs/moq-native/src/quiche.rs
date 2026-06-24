@@ -101,58 +101,44 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
-	pub disable_verify: bool,
-	/// SHA-256 pins from `--tls-fingerprint`; bypass the CA chain when present.
-	pub fingerprints: Vec<[u8; 32]>,
-	/// Trust roots (system + custom) used when not pinning by fingerprint.
-	pub roots: Vec<CertificateDer<'static>>,
+	/// Resolved server-verification policy, shared with the other backends.
+	pub verification: crate::tls::Verification,
 	pub max_streams: u64,
 	pub versions: moq_net::Versions,
 }
 
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let disable_verify = config.tls.disable_verify.unwrap_or_default();
-		let fingerprints = config.tls.fingerprints()?;
-
-		// Roots are only consulted for standard verification, i.e. when we're
-		// neither skipping verification nor pinning by fingerprint.
-		let roots = if disable_verify || !fingerprints.is_empty() {
-			Vec::new()
-		} else {
-			let roots = config.tls.root_certs()?;
-			if roots.is_empty() {
-				return Err(crate::tls::Error::NoRoots.into());
-			}
-			roots
-		};
-
 		Ok(Self {
 			bind: config.bind,
-			disable_verify,
-			fingerprints,
-			roots,
+			verification: config.tls.verification()?,
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 			versions: config.versions(),
 		})
 	}
 
 	pub async fn connect(&self, url: Url) -> Result<web_transport_quiche::Connection> {
+		use crate::tls::Verification;
+
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Per-connection cert pins start from the configured fingerprints.
-		let mut hashes = self.fingerprints.clone();
-
 		// `http://` fetches the relay's self-signed certificate fingerprint over
-		// an insecure request, then pins it. The URL is treated as https after.
-		let url = if url.scheme() == "http" {
-			hashes.push(fetch_fingerprint(&url).await?);
+		// an insecure request, then pins it. The URL is treated as https after,
+		// and the fetched pin forces pin mode for this connection (matching the
+		// quinn/noq backends), in addition to any configured fingerprints.
+		let (url, verification) = if url.scheme() == "http" {
+			let pin = fetch_fingerprint(&url).await?;
 			let mut https = url.clone();
 			https.set_scheme("https").expect("https is a valid scheme");
-			https
+
+			let mut hashes = vec![pin];
+			if let Verification::Fingerprints(fps) = &self.verification {
+				hashes.extend_from_slice(fps);
+			}
+			(https, Verification::Fingerprints(hashes))
 		} else {
-			url
+			(url, self.verification.clone())
 		};
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
@@ -167,7 +153,7 @@ impl QuicheClient {
 		};
 
 		let mut settings = web_transport_quiche::Settings::default();
-		settings.verify_peer = !self.disable_verify;
+		settings.verify_peer = !matches!(verification, Verification::Disabled);
 		settings.alpn = alpns;
 		settings.initial_max_streams_bidi = self.max_streams;
 		settings.initial_max_streams_uni = self.max_streams;
@@ -176,12 +162,15 @@ impl QuicheClient {
 			.with_settings(settings)
 			.with_bind(self.bind)?;
 
-		// Fingerprint pinning bypasses the CA chain; otherwise verify against the
-		// resolved trust roots. `disable_verify` leaves both unset.
-		if !hashes.is_empty() {
-			builder = builder.with_server_certificate_hashes(hashes);
-		} else if !self.roots.is_empty() {
-			builder = builder.with_root_certificates(self.roots.clone());
+		match verification {
+			// No hook: tokio-quiche's default config with verify_peer = false.
+			Verification::Disabled => {}
+			Verification::Fingerprints(hashes) => {
+				builder = builder.with_server_certificate_hashes(hashes);
+			}
+			Verification::Roots(roots) => {
+				builder = builder.with_root_certificates(roots);
+			}
 		}
 
 		tracing::debug!(%url, "connecting via quiche");
