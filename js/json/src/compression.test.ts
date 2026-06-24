@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Track } from "@moq/net";
+import { Track, Varint } from "@moq/net";
 import { Decoder, Encoder } from "./compression.ts";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
@@ -44,6 +44,25 @@ test("codec round-trips an empty frame", async () => {
 test("codec rejects garbage", async () => {
 	const decoder = await Decoder.create();
 	expect(() => decoder.frame(new Uint8Array(64).fill(0xff))).toThrow();
+});
+
+test("codec rejects frames that declare more than the cap", async () => {
+	// The length prefix bounds the frame before inflating, so a payload past the 64 MiB cap is
+	// rejected on the declared length without materializing it.
+	const encoder = await Encoder.create();
+	const decoder = await Decoder.create();
+	const slice = encoder.frame(enc.encode("a".repeat(64 * 1024 * 1024 + 1)));
+	expect(() => decoder.frame(slice)).toThrow(/exceeded/);
+});
+
+test("codec rejects a length-prefix mismatch", async () => {
+	// A prefix that disagrees with the inflated output is rejected as corrupt.
+	const encoder = await Encoder.create();
+	const decoder = await Decoder.create();
+	const slice = encoder.frame(enc.encode("hello world"));
+	const [, deflate] = Varint.decode(slice);
+	const tampered = new Uint8Array([...Varint.encode(4), ...deflate]); // payload is 11 bytes
+	expect(() => decoder.frame(tampered)).toThrow(/mismatch/);
 });
 
 test("cross-frame context shrinks a repeated frame", async () => {

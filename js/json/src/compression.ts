@@ -12,11 +12,16 @@
  * it and {@link Decoder.frame} re-appends it, saving 4 bytes per frame, the same trick
  * [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692.html#section-7.2.1) (permessage-deflate) uses.
  *
+ * Each slice is prefixed with its decompressed length as a QUIC varint (via `@moq/net`'s `Varint`),
+ * so the decoder bounds the frame before inflating and matches the Rust producer on the wire.
+ *
  * `pako` is an optional peer dependency loaded on demand, so consumers that never compress a track
  * never bundle it.
  *
  * @module
  */
+
+import { Varint } from "@moq/net";
 
 // Maximum decompressed size of a single frame. A malicious publisher could otherwise send a tiny
 // slice that inflates hugely, so {@link Decoder.frame} stops rather than allocating without limit.
@@ -58,6 +63,8 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
 /**
  * Encodes a group's frame payloads into one shared DEFLATE stream, one self-delimited slice per
  * frame. Hold one per group; create a new one at each group boundary. Build with {@link create}.
+ *
+ * @public
  */
 export class Encoder {
 	#deflate: import("pako").Deflate;
@@ -81,8 +88,9 @@ export class Encoder {
 	}
 
 	/**
-	 * Compress the next frame's `payload`, returning its slice of the group stream (minus the fixed
-	 * sync-flush marker). Empty in yields empty out. Slices must be produced in frame order.
+	 * Compress the next frame's `payload`, returning its slice of the group stream: a decompressed-
+	 * length varint prefix, then the DEFLATE bytes minus the fixed sync-flush marker. Empty in yields
+	 * empty out. Slices must be produced in frame order.
 	 */
 	frame(payload: Uint8Array): Uint8Array {
 		if (payload.length === 0) return payload;
@@ -90,14 +98,21 @@ export class Encoder {
 		this.#total = 0;
 		this.#deflate.push(payload, this.#flush);
 		const full = concat(this.#chunks, this.#total);
-		// Drop the trailing sync-flush marker; the decoder re-appends it.
-		return full.subarray(0, full.length - SYNC_FLUSH_TAIL.length);
+		// Drop the trailing sync-flush marker (the decoder re-appends it) and prefix the length.
+		const deflate = full.subarray(0, full.length - SYNC_FLUSH_TAIL.length);
+		const prefix = Varint.encode(payload.length);
+		const out = new Uint8Array(prefix.length + deflate.length);
+		out.set(prefix);
+		out.set(deflate, prefix.length);
+		return out;
 	}
 }
 
 /**
  * Decodes a group's frame slices back into the original payloads. Hold one per group; feed slices
  * in frame order (each frame builds on the earlier ones). Build with {@link create}.
+ *
+ * @public
  */
 export class Decoder {
 	#inflate: import("pako").Inflate;
@@ -128,22 +143,36 @@ export class Decoder {
 
 	/**
 	 * Decompress the next frame's `slice` back into its payload. Empty in yields empty out. Throws
-	 * if the input is malformed or inflates past the per-frame size limit.
+	 * if the input is malformed, declares more than the per-frame size limit, or inflates to a length
+	 * that doesn't match its prefix.
 	 */
 	frame(slice: Uint8Array): Uint8Array {
 		if (slice.length === 0) return slice;
+
+		// The decompressed-length prefix bounds the frame before any inflation.
+		const [declared, deflate] = Varint.decode(slice);
+		if (declared > MAX_DECOMPRESSED_FRAME) {
+			throw new Error(`decompressed frame exceeded ${MAX_DECOMPRESSED_FRAME} bytes`);
+		}
+
 		this.#chunks = [];
 		this.#total = 0;
 		this.#tooLarge = false;
 
 		// Re-append the stripped sync-flush marker, which delimits the frame and flushes its bytes out.
-		const input = new Uint8Array(slice.length + SYNC_FLUSH_TAIL.length);
-		input.set(slice);
-		input.set(SYNC_FLUSH_TAIL, slice.length);
+		const input = new Uint8Array(deflate.length + SYNC_FLUSH_TAIL.length);
+		input.set(deflate);
+		input.set(SYNC_FLUSH_TAIL, deflate.length);
 
 		this.#inflate.push(input, this.#flush);
 		if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
 		if (this.#tooLarge) throw new Error(`decompressed frame exceeded ${MAX_DECOMPRESSED_FRAME} bytes`);
-		return concat(this.#chunks, this.#total);
+
+		const out = concat(this.#chunks, this.#total);
+		// A mismatch with the declared length means a corrupt or lying frame.
+		if (out.length !== declared) {
+			throw new Error(`decompressed length mismatch: expected ${declared}, got ${out.length}`);
+		}
+		return out;
 	}
 }

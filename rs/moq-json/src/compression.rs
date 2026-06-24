@@ -7,17 +7,23 @@
 //! every group boundary.
 //!
 //! This is plain raw DEFLATE with a `Z_SYNC_FLUSH` after each frame, so a browser (`@moq/json`)
-//! peer interoperates on the wire using the same primitive (zlib's sync flush). The window is at
-//! most 32 KiB, so a single frame can't inflate without bound, and [`Decoder::frame`] additionally
-//! caps each frame's output.
+//! peer interoperates on the wire using the same primitive (zlib's sync flush). A small slice can
+//! still inflate to far more than its own size, so [`Decoder::frame`] bounds each frame's output by
+//! its declared length, capped at [`MAX_DECOMPRESSED_FRAME`].
 //!
 //! A sync flush always ends in the 4-byte empty-block marker `00 00 ff ff`. That marker is fixed,
 //! so [`Encoder::frame`] drops it from each slice and [`Decoder::frame`] re-appends it before
 //! inflating, saving 4 bytes per frame. This is the same trick [RFC 7692] (permessage-deflate)
 //! uses for WebSocket messages.
 //!
+//! Each slice is prefixed with its decompressed length as a [QUIC varint][RFC 9000] (matching
+//! `@moq/net`'s `Varint`). The decoder sizes its output buffer up front and rejects an oversized
+//! frame before inflating; a future browser decoder can use it to delimit `DecompressionStream`
+//! output, which carries no frame boundary of its own.
+//!
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951.html
 //! [RFC 7692]: https://www.rfc-editor.org/rfc/rfc7692.html#section-7.2.1
+//! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html#section-16
 
 use bytes::Bytes;
 use flate2::{Compress, Decompress, FlushCompress, FlushDecompress, Status};
@@ -39,6 +45,38 @@ const MAX_DECOMPRESSED_FRAME: u64 = 64 * 1024 * 1024;
 
 /// Scratch buffer size for the streaming (de)compress loops.
 const CHUNK: usize = 8 * 1024;
+
+/// Append `v` as a QUIC varint (RFC 9000 §16). `v` must fit in 62 bits, which a frame length always
+/// does. Matches `@moq/net`'s `Varint` so the two ends agree on the wire.
+fn put_varint(out: &mut Vec<u8>, v: u64) {
+	if v <= 0x3f {
+		out.push(v as u8);
+	} else if v <= 0x3fff {
+		out.extend_from_slice(&((v as u16) | 0x4000).to_be_bytes());
+	} else if v <= 0x3fff_ffff {
+		out.extend_from_slice(&((v as u32) | 0x8000_0000).to_be_bytes());
+	} else {
+		out.extend_from_slice(&(v | 0xc000_0000_0000_0000).to_be_bytes());
+	}
+}
+
+/// Read a QUIC varint from the front of `buf`, returning the value and the rest. Errors if `buf` is
+/// empty or shorter than the encoded length.
+fn get_varint(buf: &[u8]) -> Result<(u64, &[u8])> {
+	let first = *buf.first().ok_or(Error::Decompress)?;
+	let len = 1usize << (first >> 6);
+	if buf.len() < len {
+		return Err(Error::Decompress);
+	}
+	let (head, rest) = buf.split_at(len);
+	let value = match len {
+		1 => (head[0] & 0x3f) as u64,
+		2 => (u16::from_be_bytes([head[0], head[1]]) & 0x3fff) as u64,
+		4 => (u32::from_be_bytes([head[0], head[1], head[2], head[3]]) & 0x3fff_ffff) as u64,
+		_ => u64::from_be_bytes(head.try_into().expect("8 bytes")) & 0x3fff_ffff_ffff_ffff,
+	};
+	Ok((value, rest))
+}
 
 /// A DEFLATE compression level in the valid `0..=9` range.
 ///
@@ -96,7 +134,8 @@ impl Compression {
 pub(crate) struct Encoder(Compress);
 
 impl Encoder {
-	/// Compress the next frame's `payload`, returning its slice of the group stream.
+	/// Compress the next frame's `payload`, returning its slice of the group stream: a decompressed-
+	/// length varint prefix, then the DEFLATE bytes minus the fixed sync-flush marker.
 	///
 	/// An empty payload contributes nothing and yields an empty slice. Later frames reuse earlier
 	/// ones as context, so slices must be produced (and later decoded) in frame order.
@@ -106,6 +145,9 @@ impl Encoder {
 		}
 
 		let mut out = Vec::with_capacity(payload.len() / 2 + 16);
+		// Decompressed-length prefix, so the decoder sizes its buffer and bounds the frame up front.
+		put_varint(&mut out, payload.len() as u64);
+		let prefix = out.len();
 		let mut tmp = [0u8; CHUNK];
 		let mut input = payload;
 
@@ -124,9 +166,10 @@ impl Encoder {
 			}
 		}
 
-		// Drop the fixed sync-flush marker; the decoder re-appends it (see the module docs).
+		// Drop the fixed sync-flush marker; the decoder re-appends it (see the module docs). It sits
+		// after the varint prefix, so there's always a full marker to strip.
 		debug_assert!(
-			out.ends_with(&SYNC_FLUSH_TAIL),
+			out.len() >= prefix + SYNC_FLUSH_TAIL.len() && out.ends_with(&SYNC_FLUSH_TAIL),
 			"a sync flush must end in the deflate marker"
 		);
 		out.truncate(out.len() - SYNC_FLUSH_TAIL.len());
@@ -147,24 +190,25 @@ impl Decoder {
 
 	/// Decompress the next frame's `slice` back into its payload.
 	///
-	/// An empty slice yields an empty payload. Returns [`Error::TooLarge`] if the frame inflates
-	/// past the per-frame bound, and [`Error::Decompress`] on malformed input.
+	/// An empty slice yields an empty payload. Returns [`Error::TooLarge`] if the declared length
+	/// exceeds the per-frame bound, and [`Error::Decompress`] on malformed input or a length that
+	/// doesn't match the inflated output.
 	pub(crate) fn frame(&mut self, slice: &[u8]) -> Result<Bytes> {
 		if slice.is_empty() {
 			return Ok(Bytes::new());
 		}
 
-		let initial = slice
-			.len()
-			.saturating_mul(2)
-			.saturating_add(16)
-			.min(MAX_DECOMPRESSED_FRAME as usize);
-		let mut out = Vec::with_capacity(initial);
+		// The decompressed-length prefix bounds and sizes the output before any inflation.
+		let (declared, deflate) = get_varint(slice)?;
+		if declared > MAX_DECOMPRESSED_FRAME {
+			return Err(Error::TooLarge(MAX_DECOMPRESSED_FRAME));
+		}
+		let mut out = Vec::with_capacity(declared as usize);
 		let mut tmp = [0u8; CHUNK];
 
-		// Feed the wire slice followed by the re-appended sync-flush marker, which delimits the frame
-		// and flushes its last bytes out of the inflate buffer.
-		for segment in [slice, &SYNC_FLUSH_TAIL] {
+		// Feed the DEFLATE bytes followed by the re-appended sync-flush marker, which delimits the
+		// frame and flushes its last bytes out of the inflate buffer.
+		for segment in [deflate, &SYNC_FLUSH_TAIL] {
 			let mut input = segment;
 			loop {
 				let before_in = self.0.total_in();
@@ -192,6 +236,10 @@ impl Decoder {
 			}
 		}
 
+		// The inflated output must match the declared length; a mismatch means a corrupt or lying frame.
+		if out.len() as u64 != declared {
+			return Err(Error::Decompress);
+		}
 		Ok(Bytes::from(out))
 	}
 }
@@ -268,5 +316,41 @@ mod test {
 			dec.frame(b"not a deflate stream at all"),
 			Err(Error::Decompress)
 		));
+	}
+
+	#[test]
+	fn rejects_oversized_declared_length() {
+		// A forged prefix claiming more than the cap is rejected before any inflation, so the guard
+		// holds without materializing a huge buffer.
+		let mut forged = Vec::new();
+		put_varint(&mut forged, MAX_DECOMPRESSED_FRAME + 1);
+		forged.push(0);
+		let mut dec = Decoder::new();
+		assert!(matches!(dec.frame(&forged), Err(Error::TooLarge(_))));
+	}
+
+	#[test]
+	fn rejects_length_mismatch() {
+		// A prefix that disagrees with the inflated output (here understated) is rejected as corrupt.
+		let mut enc = Compression::default().encoder();
+		let slice = enc.frame(b"hello world");
+		let (_, deflate) = get_varint(&slice).unwrap();
+		let mut tampered = Vec::new();
+		put_varint(&mut tampered, 4); // the payload is 11 bytes
+		tampered.extend_from_slice(deflate);
+		let mut dec = Decoder::new();
+		assert!(matches!(dec.frame(&tampered), Err(Error::Decompress)));
+	}
+
+	#[test]
+	fn varint_round_trips() {
+		// Spot-check the QUIC varint boundaries the prefix relies on.
+		for v in [0u64, 0x3f, 0x40, 0x3fff, 0x4000, 0x3fff_ffff, MAX_DECOMPRESSED_FRAME] {
+			let mut buf = Vec::new();
+			put_varint(&mut buf, v);
+			let (got, rest) = get_varint(&buf).unwrap();
+			assert_eq!(got, v);
+			assert!(rest.is_empty());
+		}
 	}
 }
