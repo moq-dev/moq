@@ -4,6 +4,7 @@ import { Compression, compress } from "../compression.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
+import { Milli } from "../time.ts";
 import type { TrackSubscriber } from "../track.ts";
 import { error } from "../util/error.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest, epochNow } from "./announce.ts";
@@ -422,7 +423,8 @@ export class Publisher {
 					if (!frame) break;
 
 					if (timestamps) {
-						const ts = BigInt(Math.round(frame.timestamp));
+						// A frame read back always carries a timestamp; guard the type anyway.
+						const ts = BigInt(Math.round(frame.timestamp ?? Milli.now()));
 						await stream.u62(zigzag(ts - prevTs));
 						prevTs = ts;
 					}

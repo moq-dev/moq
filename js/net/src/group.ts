@@ -15,10 +15,14 @@ export const MAX_GROUP_FRAMES = 1024;
  * A future `Timestamp` type (mirroring Rust) will let a track pick its own scale.
  */
 export interface Frame {
-	/** Presentation timestamp in milliseconds. */
-	timestamp: Milli;
 	/** The frame payload. */
 	data: Uint8Array;
+	/**
+	 * Presentation timestamp in milliseconds. Optional on write: omit it for data with
+	 * no presentation time of its own (a JSON catalog, control state) and it defaults to
+	 * wall-clock now (`performance.now()`). Always populated on a frame read back.
+	 */
+	timestamp?: Milli;
 }
 
 /**
@@ -77,17 +81,18 @@ export class Group {
 	}
 
 	/**
-	 * Writes a frame to the group.
-	 * @param data - The frame payload
-	 * @param timestamp - Presentation time in milliseconds; defaults to wall-clock now
-	 *   (`performance.now()`) for data with no presentation time of its own.
+	 * Writes a frame to the group. A frame with no `timestamp` is stamped with
+	 * wall-clock now (`performance.now()`).
 	 */
-	writeFrame(data: Uint8Array, timestamp: Milli = Milli.now()) {
+	writeFrame(frame: Frame) {
 		if (this.state.closed.peek()) throw new Error("group is closed");
+
+		const data = frame.data;
+		const timestamp = frame.timestamp ?? Milli.now();
 
 		this.#cacheBytes += data.byteLength;
 		this.state.frames.mutate((frames) => {
-			frames.push({ timestamp, data });
+			frames.push({ data, timestamp });
 
 			// Bound an unbounded (e.g. never-closed) group: drop the oldest frames once
 			// over either cap. A consumer too far behind silently skips them.
@@ -105,7 +110,7 @@ export class Group {
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
 				if (mirror.state.closed.peek()) this.#mirrors.delete(mirror);
-				else mirror.writeFrame(data, timestamp);
+				else mirror.writeFrame({ data, timestamp });
 			}
 		}
 	}
@@ -119,7 +124,7 @@ export class Group {
 	 */
 	mirror(): Group {
 		const dst = new Group(this.sequence);
-		for (const frame of this.state.frames.peek()) dst.writeFrame(frame.data, frame.timestamp);
+		for (const frame of this.state.frames.peek()) dst.writeFrame(frame);
 		// Inherit the evicted prefix: frames dropped before this copy was made are a gap
 		// for its reader too, so reading them throws CacheFull.
 		dst.state.offset = this.state.offset;
@@ -137,7 +142,7 @@ export class Group {
 
 	/** Write a string as a single UTF-8 encoded frame, stamped with wall-clock now. */
 	writeString(str: string) {
-		this.writeFrame(new TextEncoder().encode(str));
+		this.writeFrame({ data: new TextEncoder().encode(str) });
 	}
 
 	/** Write a value as a single JSON-encoded frame, stamped with wall-clock now. */
@@ -147,7 +152,7 @@ export class Group {
 
 	/** Write a boolean as a single one-byte frame, stamped with wall-clock now. */
 	writeBool(bool: boolean) {
-		this.writeFrame(new Uint8Array([bool ? 1 : 0]));
+		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]) });
 	}
 
 	/**

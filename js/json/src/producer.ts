@@ -53,7 +53,7 @@ export class Producer<T> {
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
-			this.#group.writeFrame(delta);
+			this.#group.writeFrame({ data: delta });
 			this.#groupBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
@@ -122,7 +122,7 @@ export class Producer<T> {
 		this.#group?.close();
 
 		const group = this.#track.appendGroup();
-		group.writeFrame(snapshot);
+		group.writeFrame({ data: snapshot });
 		this.#groupBytes = snapshot.length;
 		this.#groupFrames = 1;
 

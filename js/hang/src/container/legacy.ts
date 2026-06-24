@@ -57,7 +57,7 @@ export class Producer {
 			throw new Error("must start with a keyframe");
 		}
 
-		this.#group?.writeFrame(encodeFrame(data, timestamp), Time.Milli.fromMicro(timestamp));
+		this.#group?.writeFrame({ data: encodeFrame(data, timestamp), timestamp: Time.Milli.fromMicro(timestamp) });
 	}
 
 	/** Close the track and current group, optionally with an error. */

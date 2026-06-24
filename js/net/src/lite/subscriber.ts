@@ -524,7 +524,7 @@ export class Subscriber {
 				// On a compressed track the wire size is the compressed length;
 				// inflate it back to the original frame the consumer sees.
 				const data = codec === Compression.None ? payload : await decompress(codec, payload);
-				producer.writeFrame(data, timestamp);
+				producer.writeFrame({ data, timestamp });
 			}
 
 			producer.close();
