@@ -171,6 +171,19 @@ auth_api = "https://api.moq.dev/cluster/auth"
 
 Unlike the standalone flags, the unified call **fails closed**: any network error, non-2xx status, or unparseable response rejects the connection. The verifying key itself comes from this call, so there is no safe fallback; the endpoint's `Cache-Control` softens transient failures. This applies to mTLS peers as well, including root (`/`) connections such as cluster peers: when an auth API is configured it is the source of truth for every connection (so it can alias and tier the root too), and a failed lookup rejects the connection so the peer reconnects and self-heals once the API recovers. The only fail-open case is when **no** auth API is configured, where the client certificate is the sole credential and the path is used unchanged.
 
+### Authenticating the relay to the auth API
+
+The outbound HTTP the relay makes to `--auth-api` (and the deprecated `--auth-key-dir` URL and `--auth-public-api` endpoints) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--client-tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.
+
+```toml
+[client.tls]
+cert = "/etc/moq/relay-client.pem"
+key  = "/etc/moq/relay-client.key"
+root = ["/etc/moq/auth-api-ca.pem"]
+```
+
+The legacy `--auth-tls-*` flags still override this when set, but are deprecated and will be removed. Migrate to `--client-tls-*`.
+
 ## Supported Algorithms
 
 ### Symmetric (HMAC)

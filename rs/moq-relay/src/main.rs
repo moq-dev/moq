@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 	let auth = if config.auth.is_empty() {
 		Auth::default()
 	} else {
-		config.auth.init().await?
+		config.auth.init(&config.client.tls).await?
 	};
 
 	let cluster = Cluster::new(config.cluster)?

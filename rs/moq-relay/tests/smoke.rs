@@ -46,7 +46,10 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let public = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
-	let auth = auth_config.init().await.expect("auth init");
+	let auth = auth_config
+		.init(&moq_native::tls::Client::default())
+		.await
+		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
