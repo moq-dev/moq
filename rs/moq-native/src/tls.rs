@@ -258,6 +258,18 @@ impl Client {
 		Ok(Verification::Roots(roots))
 	}
 
+	/// Whether an insecure `http://` certificate-fingerprint bootstrap may be
+	/// honored for a connection.
+	///
+	/// Only when no stronger verification is configured: an explicit
+	/// `--tls-fingerprint` must never be weakened by an attacker-controlled
+	/// plaintext fetch, and there is nothing to bootstrap when verification is
+	/// disabled. With CA roots (the default), `http://` is the deliberate
+	/// per-connection way to pin a self-signed relay, so it is allowed.
+	pub(crate) fn allows_http_bootstrap(&self) -> bool {
+		self.fingerprint.is_empty() && !self.disable_verify.unwrap_or_default()
+	}
+
 	/// Parse the configured fingerprints into fixed-size SHA-256 digests.
 	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
 		self.fingerprint

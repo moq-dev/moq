@@ -30,6 +30,9 @@ pub enum Error {
 	#[error("failed to fetch certificate fingerprint")]
 	FetchFingerprint(#[source] reqwest::Error),
 
+	#[error("certificate fingerprint request failed")]
+	FingerprintStatus(#[source] reqwest::Error),
+
 	#[error("failed to read certificate fingerprint")]
 	ReadFingerprint(#[source] reqwest::Error),
 
@@ -103,6 +106,8 @@ pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	/// Resolved server-verification policy, shared with the other backends.
 	pub verification: crate::tls::Verification,
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
+	pub http_bootstrap: bool,
 	pub max_streams: u64,
 	pub versions: moq_net::Versions,
 }
@@ -112,6 +117,7 @@ impl QuicheClient {
 		Ok(Self {
 			bind: config.bind,
 			verification: config.tls.verification()?,
+			http_bootstrap: config.tls.allows_http_bootstrap(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 			versions: config.versions(),
 		})
@@ -124,19 +130,23 @@ impl QuicheClient {
 		let port = url.port().unwrap_or(443);
 
 		// `http://` fetches the relay's self-signed certificate fingerprint over
-		// an insecure request, then pins it. The URL is treated as https after,
-		// and the fetched pin forces pin mode for this connection (matching the
-		// quinn/noq backends), in addition to any configured fingerprints.
+		// an insecure request and pins it for this connection. It is only honored
+		// when no stronger verification is configured: an attacker who controls
+		// the plaintext fetch must not be able to weaken an explicit pin or
+		// re-enable verification we were told to skip.
 		let (url, verification) = if url.scheme() == "http" {
-			let pin = fetch_fingerprint(&url).await?;
 			let mut https = url.clone();
 			https.set_scheme("https").expect("https is a valid scheme");
 
-			let mut hashes = vec![pin];
-			if let Verification::Fingerprints(fps) = &self.verification {
-				hashes.extend_from_slice(fps);
+			if self.http_bootstrap {
+				let pin = fetch_fingerprint(&url).await?;
+				(https, Verification::Fingerprints(vec![pin]))
+			} else {
+				tracing::warn!(
+					"ignoring insecure http:// fingerprint bootstrap; using the configured TLS verification"
+				);
+				(https, self.verification.clone())
 			}
-			(https, Verification::Fingerprints(hashes))
 		} else {
 			(url, self.verification.clone())
 		};
@@ -228,7 +238,11 @@ async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
 
 	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate fingerprint");
 
-	let resp = reqwest::get(fp.as_str()).await.map_err(Error::FetchFingerprint)?;
+	let resp = reqwest::get(fp.as_str())
+		.await
+		.map_err(Error::FetchFingerprint)?
+		.error_for_status()
+		.map_err(Error::FingerprintStatus)?;
 	let text = resp.text().await.map_err(Error::ReadFingerprint)?;
 	let bytes = hex::decode(text.trim()).map_err(Error::InvalidFingerprint)?;
 	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
