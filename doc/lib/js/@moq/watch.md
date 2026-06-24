@@ -73,7 +73,7 @@ a real bundler (the examples below).
 - `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Collapses `latency-min` and `latency-max` to one value (minimize latency).
 - `latency-min`: Latency floor (the jitter/startup buffer). Same units as `latency`; leaves the ceiling untouched.
 - `latency-max`: Latency ceiling. `"real-time"` (default) minimizes latency; a number caps at that many ms. A ceiling above the floor enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
-- `catalog-format`: Catalog format. One of `"hang"`, `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`.
+- `catalog-format`: Catalog format. One of `"hang"`, `"hangz"` (the [DEFLATE-compressed](/concept/layer/hang#compression) `catalog.json.z` track), `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`. `"hangz"` is opt-in only and never auto-detected (it shares the `.hang` suffix).
 
 ## Catalog Formats
 

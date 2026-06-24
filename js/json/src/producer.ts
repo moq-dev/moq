@@ -171,13 +171,19 @@ export class Producer<T> {
 	 *
 	 * Only available on a track-less (fan-out) producer. The subscriber is removed and finished when
 	 * `effect` is cleaned up.
+	 *
+	 * Pass `opts.compression` to override the producer's configured compression for this subscriber
+	 * only, so one fan-out producer can serve the same value both plaintext and `deflate-raw` (e.g.
+	 * the catalog served on `catalog.json` and `catalog.json.z`).
 	 */
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.Track, effect: Effect, opts?: { compression?: boolean }): void {
 		if (!this.#outputs) {
 			throw new Error("serve() is only available on a track-less Producer");
 		}
 
-		const output = new Producer<T>(track, this.#config);
+		const config =
+			opts?.compression === undefined ? this.#config : { ...this.#config, compression: opts.compression };
+		const output = new Producer<T>(track, config);
 		if (this.#value !== undefined) output.update(this.#value);
 
 		this.#outputs.add(output);

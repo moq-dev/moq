@@ -46,6 +46,15 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
 }
 ```
 
+### Compression
+
+The catalog is published on two tracks with identical content: `catalog.json` (plain JSON) and `catalog.json.z` (the same JSON, DEFLATE-compressed per group).
+A publisher always serves both; a consumer reads whichever it prefers and defaults to the uncompressed `catalog.json`.
+
+The compression is the group-scoped `deflate-raw` ([RFC 1951](https://www.rfc-editor.org/rfc/rfc1951.html)) stream used by `@moq/json` / `moq-json`, interoperable between the browser and native.
+To read the compressed track, opt in explicitly: pass `--catalog hangz` to `moq-cli subscribe`, `CatalogFormat::HangZ` in Rust, or `catalogFormat: "hangz"` to `@moq/watch`.
+The `.hang` broadcast suffix is unchanged: the compressed track is an extra track on the same broadcast, not a different broadcast name.
+
 ### Audio
 
 [See the latest schema](https://github.com/moq-dev/moq/blob/main/js/hang/src/catalog/audio.ts).

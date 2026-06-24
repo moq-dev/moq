@@ -24,10 +24,21 @@ impl<E: CatalogExt> Clone for Consumer<E> {
 }
 
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a MoQ track consumer.
+	/// Create a new catalog consumer from a MoQ track consumer (uncompressed `catalog.json`).
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
 		Self {
 			inner: moq_json::Consumer::new(track, moq_json::ConsumerConfig::default()),
+		}
+	}
+
+	/// Create a consumer for the DEFLATE-compressed catalog track (`catalog.json.z`).
+	///
+	/// The track must be the compressed one; pair this with [`hang::Catalog::compressed_track`].
+	pub fn compressed(track: moq_net::TrackConsumer) -> Self {
+		let mut config = moq_json::ConsumerConfig::default();
+		config.compression = true;
+		Self {
+			inner: moq_json::Consumer::new(track, config),
 		}
 	}
 
