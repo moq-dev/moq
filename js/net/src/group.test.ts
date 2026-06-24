@@ -43,8 +43,16 @@ test("done distinguishes a finished group from one that is merely empty", () => 
 
 test("readable resolves once a frame is buffered", async () => {
 	const group = new Group(0);
-	// No frame yet: readable() is pending. Resolve it by writing on the next tick.
+	// No frame yet: readable() must stay pending for an empty, open group.
 	const readable = group.readable();
+	let settled = false;
+	readable.then(() => {
+		settled = true;
+	});
+	await Promise.resolve();
+	expect(settled).toBe(false);
+
+	// Writing makes it resolve.
 	group.writeString("hi");
 	await readable; // must not hang
 	expect(dec.decode(group.tryReadFrame())).toBe("hi");
