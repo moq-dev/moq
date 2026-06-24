@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { CacheFull, Group, MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES } from "./group.ts";
+import { Timestamp } from "./time.ts";
 
 test("a group caps its frame count, dropping from the front", () => {
 	const group = new Group(0);
 
 	const extra = 100;
 	for (let i = 0; i < MAX_GROUP_FRAMES + extra; i++) {
-		group.writeFrame({ data: new Uint8Array([i & 0xff]) });
+		group.writeFrame({ data: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	}
 
 	const frames = group.state.frames.peek();
@@ -23,7 +24,7 @@ test("a group caps its byte size, dropping from the front", () => {
 	// 40 x 1 MiB = 40 MiB, over the 32 MiB cap.
 	const oneMiB = 1024 * 1024;
 	for (let i = 0; i < 40; i++) {
-		group.writeFrame({ data: new Uint8Array(oneMiB) });
+		group.writeFrame({ data: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
 	}
 
 	const frames = group.state.frames.peek();
@@ -37,7 +38,7 @@ test("reading a group whose frames were evicted throws CacheFull", async () => {
 
 	// Overflow the frame cap without reading, so the front frames are evicted.
 	for (let i = 0; i < MAX_GROUP_FRAMES + 10; i++) {
-		group.writeFrame({ data: new Uint8Array([i & 0xff]) });
+		group.writeFrame({ data: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	}
 
 	// The reader fell behind the eviction window: it must error, not skip the gap.
@@ -46,8 +47,8 @@ test("reading a group whose frames were evicted throws CacheFull", async () => {
 
 test("a group with no eviction reads every frame without error", async () => {
 	const group = new Group(0);
-	group.writeFrame({ data: new Uint8Array([1]) });
-	group.writeFrame({ data: new Uint8Array([2]) });
+	group.writeFrame({ data: new Uint8Array([1]), timestamp: Timestamp.now() });
+	group.writeFrame({ data: new Uint8Array([2]), timestamp: Timestamp.now() });
 	group.close();
 
 	expect((await group.readFrame())?.data[0]).toBe(1);

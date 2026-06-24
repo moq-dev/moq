@@ -67,6 +67,78 @@ export const Milli = Object.assign((value: number): Milli => value as Milli, {
 	min: (a: Milli, b: Milli): Milli => Math.min(a, b) as Milli,
 });
 
+/** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
+export type Timescale = number & { readonly _brand: "timescale" };
+
+/** Named timescales and a checked constructor (rejects non-positive / non-integer values). */
+export const Timescale = Object.assign(
+	(unitsPerSecond: number): Timescale => {
+		if (!Number.isInteger(unitsPerSecond) || unitsPerSecond <= 0) {
+			throw new Error(`invalid timescale: ${unitsPerSecond}`);
+		}
+		return unitsPerSecond as Timescale;
+	},
+	{
+		/** One unit per second. */
+		SECOND: 1 as Timescale,
+		/** 1,000 units per second. */
+		MILLI: 1_000 as Timescale,
+		/** 1,000,000 units per second. */
+		MICRO: 1_000_000 as Timescale,
+		/** 1,000,000,000 units per second. */
+		NANO: 1_000_000_000 as Timescale,
+	},
+);
+
+/**
+ * A presentation timestamp: a raw value in a given {@link Timescale}.
+ *
+ * Mirrors the Rust `Timestamp`. Unlike the bare `Milli`/`Micro` aliases it carries its
+ * own scale, so a track can pick its units and conversions can't silently mix them up.
+ */
+export class Timestamp {
+	/** The raw value, in `scale` units. */
+	readonly value: number;
+	/** Units per second the {@link value} is measured in. */
+	readonly scale: Timescale;
+
+	/** Build a timestamp of `value` units at `scale`. */
+	constructor(value: number, scale: Timescale) {
+		this.value = value;
+		this.scale = scale;
+	}
+
+	/** Wall-clock now, in milliseconds (`performance.now()`). */
+	static now(): Timestamp {
+		return new Timestamp(performance.now(), Timescale.MILLI);
+	}
+
+	/** A timestamp of `ms` milliseconds. */
+	static fromMillis(ms: number): Timestamp {
+		return new Timestamp(ms, Timescale.MILLI);
+	}
+
+	/** A timestamp of `us` microseconds. */
+	static fromMicros(us: number): Timestamp {
+		return new Timestamp(us, Timescale.MICRO);
+	}
+
+	/** This timestamp's value re-expressed at `scale` (a raw number, not a new Timestamp). */
+	as(scale: Timescale): number {
+		return scale === this.scale ? this.value : (this.value * scale) / this.scale;
+	}
+
+	/** The value in milliseconds. */
+	asMillis(): number {
+		return this.as(Timescale.MILLI);
+	}
+
+	/** The value in microseconds. */
+	asMicros(): number {
+		return this.as(Timescale.MICRO);
+	}
+}
+
 /** A duration in seconds, branded so it can't be mixed with other units. */
 export type Second = number & { readonly _brand: "second" };
 

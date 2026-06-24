@@ -296,7 +296,7 @@ export class Encoder {
 					// waiting for a group boundary. Loss is handled by the codec's PLC.
 					track.writeFrame({
 						data: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
-						timestamp: Time.Milli.fromMicro(frame.timestamp as Time.Micro),
+						timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
 					});
 				},
 				error: (err) => {

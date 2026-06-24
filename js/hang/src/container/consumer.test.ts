@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, type Time, TrackProducer, Varint } from "@moq/net";
+import { Group, Time, TrackProducer, Varint } from "@moq/net";
 import type { InitSegment } from "./cmaf/decode.ts";
 import { encodeDataSegment } from "./cmaf/encode.ts";
 import { Format as CmafFormat } from "./cmaf/format.ts";
@@ -138,7 +138,7 @@ function encodeLegacy(timestamp: Time.Micro): Uint8Array {
 function writeGroupWithLegacyFrames(track: TrackProducer, sequence: number, timestamps: Time.Micro[]) {
 	const group = new Group(sequence);
 	for (const ts of timestamps) {
-		group.writeFrame({ data: encodeLegacy(ts) });
+		group.writeFrame({ data: encodeLegacy(ts), timestamp: Time.Timestamp.now() });
 	}
 	group.close();
 	track.writeGroup(group);
@@ -205,8 +205,8 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	const consumer = new Consumer(track.subscribe(), { format: multiFormat, latency: 500 as Time.Milli });
 
 	const group = new Group(0);
-	group.writeFrame({ data: new Uint8Array([0x01]) }); // first MoQ frame → 3 samples
-	group.writeFrame({ data: new Uint8Array([0x02]) }); // second MoQ frame → 3 samples
+	group.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // first MoQ frame → 3 samples
+	group.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // second MoQ frame → 3 samples
 	group.close();
 	track.writeGroup(group);
 	track.close();
@@ -234,15 +234,15 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 
 	// Group 0: 2 valid frames then a tail-truncating error.
 	const g0 = new Group(0);
-	g0.writeFrame({ data: new Uint8Array([0x01]) });
-	g0.writeFrame({ data: new Uint8Array([0x02]) });
-	g0.writeFrame({ data: new Uint8Array([0xff]) });
+	g0.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ data: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
 	g0.close();
 	track.writeGroup(g0);
 
 	// Group 1 decodes cleanly.
 	const g1 = new Group(1);
-	g1.writeFrame({ data: new Uint8Array([0x04]) });
+	g1.writeFrame({ data: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
 	g1.close();
 	track.writeGroup(g1);
 
@@ -430,8 +430,8 @@ test("Consumer handles empty decode result without deadlock", async () => {
 	const consumer = new Consumer(track.subscribe(), { format: emptyThenValid, latency: 500 as Time.Milli });
 
 	const group = new Group(0);
-	group.writeFrame({ data: new Uint8Array([0x01]) }); // empty decode
-	group.writeFrame({ data: new Uint8Array([0x02]) }); // valid decode
+	group.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // empty decode
+	group.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // valid decode
 	group.close();
 	track.writeGroup(group);
 	track.close();
@@ -464,6 +464,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 			keyframe: true,
 			sequence: 0,
 		}),
+		timestamp: Time.Timestamp.now(),
 	});
 	group.writeFrame({
 		data: encodeDataSegment({
@@ -473,6 +474,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 			keyframe: false,
 			sequence: 0,
 		}),
+		timestamp: Time.Timestamp.now(),
 	});
 	group.close();
 	track.writeGroup(group);
@@ -525,11 +527,11 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 
 	// Group 0: one frame at ts=0 lasting 33ms, never closed (stalled).
 	const g0 = new Group(0);
-	g0.writeFrame({ data: new Uint8Array([0]) });
+	g0.writeFrame({ data: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
 
 	// Group 1: closed, starts exactly where group 0's frame ends.
 	const g1 = new Group(1);
-	g1.writeFrame({ data: new Uint8Array([33]) });
+	g1.writeFrame({ data: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
 
 	track.writeGroup(g0);
@@ -563,10 +565,10 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	// Group 0 stays open and later receives a second frame; nothing covers the gap,
 	// so that late frame must survive rather than being skipped.
 	const g0 = new Group(0);
-	g0.writeFrame({ data: new Uint8Array([0]) });
+	g0.writeFrame({ data: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
 
 	const g1 = new Group(1);
-	g1.writeFrame({ data: new Uint8Array([33]) });
+	g1.writeFrame({ data: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
 
 	track.writeGroup(g0);
@@ -574,7 +576,7 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 
 	// Let the consumer settle on group 0, then extend it before closing.
 	await new Promise((resolve) => setTimeout(resolve, 20));
-	g0.writeFrame({ data: new Uint8Array([20]) });
+	g0.writeFrame({ data: new Uint8Array([20]), timestamp: Time.Timestamp.now() });
 	g0.close();
 	track.close();
 

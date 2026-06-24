@@ -1,4 +1,5 @@
 import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import type * as z from "zod/mini";
 
 import { deepEqual, diff } from "./diff.ts";
@@ -53,7 +54,7 @@ export class Producer<T> {
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
-			this.#group.writeFrame({ data: delta });
+			this.#group.writeFrame({ data: delta, timestamp: Time.Timestamp.now() });
 			this.#groupBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
@@ -122,7 +123,7 @@ export class Producer<T> {
 		this.#group?.close();
 
 		const group = this.#track.appendGroup();
-		group.writeFrame({ data: snapshot });
+		group.writeFrame({ data: snapshot, timestamp: Time.Timestamp.now() });
 		this.#groupBytes = snapshot.length;
 		this.#groupFrames = 1;
 

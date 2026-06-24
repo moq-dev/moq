@@ -1,5 +1,5 @@
 import { Signal } from "@moq/signals";
-import { Milli } from "./time.ts";
+import { Timestamp } from "./time.ts";
 
 /** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
 export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
@@ -18,11 +18,10 @@ export interface Frame {
 	/** The frame payload. */
 	data: Uint8Array;
 	/**
-	 * Presentation timestamp in milliseconds. Optional on write: omit it for data with
-	 * no presentation time of its own (a JSON catalog, control state) and it defaults to
-	 * wall-clock now (`performance.now()`). Always populated on a frame read back.
+	 * Presentation timestamp. Required: for data with no presentation time of its own
+	 * (a JSON catalog, control state) pass {@link Timestamp.now} explicitly.
 	 */
-	timestamp?: Milli;
+	timestamp: Timestamp;
 }
 
 /**
@@ -80,19 +79,15 @@ export class Group {
 		});
 	}
 
-	/**
-	 * Writes a frame to the group. A frame with no `timestamp` is stamped with
-	 * wall-clock now (`performance.now()`).
-	 */
+	/** Writes a frame to the group. */
 	writeFrame(frame: Frame) {
 		if (this.state.closed.peek()) throw new Error("group is closed");
 
-		const data = frame.data;
-		const timestamp = frame.timestamp ?? Milli.now();
+		const { data } = frame;
 
 		this.#cacheBytes += data.byteLength;
 		this.state.frames.mutate((frames) => {
-			frames.push({ data, timestamp });
+			frames.push(frame);
 
 			// Bound an unbounded (e.g. never-closed) group: drop the oldest frames once
 			// over either cap. A consumer too far behind silently skips them.
@@ -110,7 +105,7 @@ export class Group {
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
 				if (mirror.state.closed.peek()) this.#mirrors.delete(mirror);
-				else mirror.writeFrame({ data, timestamp });
+				else mirror.writeFrame(frame);
 			}
 		}
 	}
@@ -142,7 +137,7 @@ export class Group {
 
 	/** Write a string as a single UTF-8 encoded frame, stamped with wall-clock now. */
 	writeString(str: string) {
-		this.writeFrame({ data: new TextEncoder().encode(str) });
+		this.writeFrame({ data: new TextEncoder().encode(str), timestamp: Timestamp.now() });
 	}
 
 	/** Write a value as a single JSON-encoded frame, stamped with wall-clock now. */
@@ -152,7 +147,7 @@ export class Group {
 
 	/** Write a boolean as a single one-byte frame, stamped with wall-clock now. */
 	writeBool(bool: boolean) {
-		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]) });
+		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
 
 	/**

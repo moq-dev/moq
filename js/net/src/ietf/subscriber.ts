@@ -3,6 +3,7 @@ import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
+import { Timestamp } from "../time.ts";
 import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
@@ -487,7 +488,7 @@ export class Subscriber {
 				const frame = await Frame.decode(stream, group.flags);
 				if (frame.payload === undefined) break;
 
-				producer.writeFrame({ data: frame.payload });
+				producer.writeFrame({ data: frame.payload, timestamp: Timestamp.now() });
 			}
 
 			producer.close();
