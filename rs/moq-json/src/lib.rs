@@ -69,10 +69,11 @@ pub struct ProducerConfig {
 	///
 	/// A ratio of `0` disables deltas: every change is published as a new snapshot group.
 	///
-	/// A positive ratio enables deltas. A delta is appended to the current group as long as the
-	/// accumulated deltas (excluding the snapshot frame) stay within `ratio` times the size of a
-	/// snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up
-	/// to one snapshot before rolling, and a larger ratio tolerates more deltas per snapshot.
+	/// A positive ratio enables deltas. A new snapshot group is started once the deltas *already
+	/// written* to the current group (excluding the snapshot frame) exceed `ratio` times the snapshot
+	/// size. The pending delta is excluded from that check, so the one that first crosses the budget
+	/// still lands before the group rolls. So `1` allows roughly one snapshot's worth of deltas before
+	/// rolling, and a larger ratio tolerates more.
 	///
 	/// When [`compression`](Self::compression) is on, both sides of the comparison are measured on
 	/// the *compressed* frame sizes (the real wire cost).
