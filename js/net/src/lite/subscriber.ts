@@ -501,8 +501,9 @@ export class Subscriber {
 
 			// timescale resolves together with compression (from TRACK_INFO). A non-zero
 			// scale means every frame is prefixed with a zigzag-delta timestamp (the
-			// lite-05 FRAME format), which we decode and convert to microseconds (the
-			// model's unit). Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock.
+			// lite-05 FRAME format), which we decode and convert to milliseconds (the
+			// model's unit). Scale 0 (pre-lite-05) carries no timestamp, so writeFrame
+			// falls back to wall-clock.
 			const scale = timescale.peek() ?? 0;
 			let prevTs = 0n;
 
@@ -510,10 +511,10 @@ export class Subscriber {
 				const done = await Promise.race([stream.done(), track.closed, producer.closed]);
 				if (done !== false) break;
 
-				let timestamp: Time.Micro | undefined;
+				let timestamp: Time.Milli | undefined;
 				if (scale !== 0) {
 					prevTs += unzigzag(await stream.u62());
-					timestamp = Time.Micro((Number(prevTs) * 1_000_000) / scale);
+					timestamp = Time.Milli((Number(prevTs) * 1000) / scale);
 				}
 
 				const size = await stream.u53();
@@ -523,8 +524,7 @@ export class Subscriber {
 				// On a compressed track the wire size is the compressed length;
 				// inflate it back to the original frame the consumer sees.
 				const data = codec === Compression.None ? payload : await decompress(codec, payload);
-				if (timestamp !== undefined) producer.writeFrame(timestamp, data);
-				else producer.writeFrameNow(data);
+				producer.writeFrame(data, timestamp);
 			}
 
 			producer.close();

@@ -1,5 +1,5 @@
 import { Signal } from "@moq/signals";
-import { Micro } from "./time.ts";
+import { Milli } from "./time.ts";
 
 /** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
 export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
@@ -10,13 +10,13 @@ export const MAX_GROUP_FRAMES = 1024;
 /**
  * A frame buffered in a {@link Group}: its presentation timestamp and payload bytes.
  *
- * The timestamp is in microseconds (the unit the hang container and WebCodecs use); the
- * wire layer converts it into the track's timescale. Frames written without an explicit
- * timestamp (catalogs, JSON state) are stamped with wall-clock now.
+ * The timestamp is in milliseconds; wall-clock accuracy doesn't warrant finer units for
+ * transport-level timing, and the wire layer converts it into the track's timescale.
+ * A future `Timestamp` type (mirroring Rust) will let a track pick its own scale.
  */
 export interface Frame {
-	/** Presentation timestamp in microseconds. */
-	timestamp: Micro;
+	/** Presentation timestamp in milliseconds. */
+	timestamp: Milli;
 	/** The frame payload. */
 	data: Uint8Array;
 }
@@ -77,11 +77,12 @@ export class Group {
 	}
 
 	/**
-	 * Writes a frame to the group at the given presentation timestamp (microseconds).
-	 * @param timestamp - Presentation time in microseconds
+	 * Writes a frame to the group.
 	 * @param data - The frame payload
+	 * @param timestamp - Presentation time in milliseconds; defaults to wall-clock now
+	 *   (`performance.now()`) for data with no presentation time of its own.
 	 */
-	writeFrame(timestamp: Micro, data: Uint8Array) {
+	writeFrame(data: Uint8Array, timestamp: Milli = Milli.now()) {
 		if (this.state.closed.peek()) throw new Error("group is closed");
 
 		this.#cacheBytes += data.byteLength;
@@ -104,17 +105,9 @@ export class Group {
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
 				if (mirror.state.closed.peek()) this.#mirrors.delete(mirror);
-				else mirror.writeFrame(timestamp, data);
+				else mirror.writeFrame(data, timestamp);
 			}
 		}
-	}
-
-	/**
-	 * Writes a frame stamped with wall-clock now, for data with no presentation time of
-	 * its own (a JSON catalog, control state) or a source whose protocol can't carry one.
-	 */
-	writeFrameNow(data: Uint8Array) {
-		this.writeFrame(Micro.now(), data);
 	}
 
 	/**
@@ -126,7 +119,7 @@ export class Group {
 	 */
 	mirror(): Group {
 		const dst = new Group(this.sequence);
-		for (const frame of this.state.frames.peek()) dst.writeFrame(frame.timestamp, frame.data);
+		for (const frame of this.state.frames.peek()) dst.writeFrame(frame.data, frame.timestamp);
 		// Inherit the evicted prefix: frames dropped before this copy was made are a gap
 		// for its reader too, so reading them throws CacheFull.
 		dst.state.offset = this.state.offset;
@@ -144,7 +137,7 @@ export class Group {
 
 	/** Write a string as a single UTF-8 encoded frame, stamped with wall-clock now. */
 	writeString(str: string) {
-		this.writeFrameNow(new TextEncoder().encode(str));
+		this.writeFrame(new TextEncoder().encode(str));
 	}
 
 	/** Write a value as a single JSON-encoded frame, stamped with wall-clock now. */
@@ -154,19 +147,14 @@ export class Group {
 
 	/** Write a boolean as a single one-byte frame, stamped with wall-clock now. */
 	writeBool(bool: boolean) {
-		this.writeFrameNow(new Uint8Array([bool ? 1 : 0]));
+		this.writeFrame(new Uint8Array([bool ? 1 : 0]));
 	}
 
 	/**
-	 * Reads the next frame's payload from the group.
-	 * @returns A promise that resolves to the next payload or undefined
+	 * Reads the next frame (timestamp + payload) from the group.
+	 * @returns A promise that resolves to the next frame or undefined
 	 */
-	async readFrame(): Promise<Uint8Array | undefined> {
-		return (await this.readFrameTimed())?.data;
-	}
-
-	/** Reads the next frame, including its presentation timestamp. */
-	async readFrameTimed(): Promise<Frame | undefined> {
+	async readFrame(): Promise<Frame | undefined> {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
@@ -199,22 +187,22 @@ export class Group {
 		}
 	}
 
-	/** Reads the next frame and decodes it as a UTF-8 string. */
+	/** Reads the next frame and decodes its payload as a UTF-8 string. */
 	async readString(): Promise<string | undefined> {
 		const frame = await this.readFrame();
-		return frame ? new TextDecoder().decode(frame) : undefined;
+		return frame ? new TextDecoder().decode(frame.data) : undefined;
 	}
 
-	/** Reads the next frame and parses it as JSON. */
+	/** Reads the next frame and parses its payload as JSON. */
 	async readJson(): Promise<unknown | undefined> {
 		const frame = await this.readString();
 		return frame ? JSON.parse(frame) : undefined;
 	}
 
-	/** Reads the next frame and decodes it as a one-byte boolean. */
+	/** Reads the next frame and decodes its payload as a one-byte boolean. */
 	async readBool(): Promise<boolean | undefined> {
 		const frame = await this.readFrame();
-		return frame ? frame[0] === 1 : undefined;
+		return frame ? frame.data[0] === 1 : undefined;
 	}
 
 	/** Closes the group, optionally with an error to abort readers. */

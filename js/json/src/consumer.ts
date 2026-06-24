@@ -33,7 +33,7 @@ export class Consumer<T> {
 				this.#framesRead = 0;
 			}
 
-			let frame: Uint8Array | undefined;
+			let frame: Moq.Frame | undefined;
 			try {
 				frame = await this.#group.readFrame();
 			} catch {
@@ -50,7 +50,7 @@ export class Consumer<T> {
 				continue;
 			}
 
-			return this.#apply(frame);
+			return this.#apply(frame.data);
 		}
 	}
 

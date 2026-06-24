@@ -295,8 +295,8 @@ export class Encoder {
 					// Each audio frame is its own group so the relay can forward it without
 					// waiting for a group boundary. Loss is handled by the codec's PLC.
 					track.writeFrame(
-						frame.timestamp as Time.Micro,
 						Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
+						Time.Milli.fromMicro(frame.timestamp as Time.Micro),
 					);
 				},
 				error: (err) => {

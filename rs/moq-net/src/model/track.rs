@@ -47,7 +47,7 @@ pub struct TrackInfo {
 	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
 	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to wall-clock milliseconds.
-	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "is_default_timescale"))]
+	#[cfg_attr(feature = "serde", serde(default))]
 	pub timescale: Timescale,
 	/// How long the publisher keeps old groups available before evicting them
 	/// (the newest group is always retained). A subscriber's
@@ -82,11 +82,6 @@ fn default_cache() -> Duration {
 #[cfg(feature = "serde")]
 fn is_default_cache(cache: &Duration) -> bool {
 	*cache == DEFAULT_CACHE
-}
-
-#[cfg(feature = "serde")]
-fn is_default_timescale(timescale: &Timescale) -> bool {
-	*timescale == Timescale::default()
 }
 
 /// Serialize [`TrackInfo::cache`] as a bare integer of milliseconds, matching the

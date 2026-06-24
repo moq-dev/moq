@@ -162,7 +162,7 @@ async function subscribe(config: Config) {
 			continue;
 		}
 
-		const base = new TextDecoder().decode(baseFrame);
+		const base = new TextDecoder().decode(baseFrame.data);
 
 		// Read individual second frames
 		for (;;) {

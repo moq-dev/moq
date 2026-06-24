@@ -25,9 +25,9 @@ const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 
-/** Wire timescale (units per second) the publisher advertises: microseconds, matching
+/** Wire timescale (units per second) the publisher advertises: milliseconds, matching
  * the model frame timestamp unit. */
-const MICRO_TIMESCALE = 1_000_000;
+const MILLI_TIMESCALE = 1000;
 
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `VarInt::from_zigzag`). */
 function zigzag(delta: bigint): bigint {
@@ -383,10 +383,10 @@ export class Publisher {
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,
-				// Lite05 mandates per-frame timestamps. Model frames carry a microsecond
+				// Lite05 mandates per-frame timestamps. Model frames carry a millisecond
 				// timestamp (the app's, or wall-clock for timeless data), so we advertise
-				// microseconds and emit each frame's own timestamp in `#runGroup`.
-				timescale: MICRO_TIMESCALE,
+				// milliseconds and emit each frame's own timestamp in `#runGroup`.
+				timescale: MILLI_TIMESCALE,
 				compression: info.compress ? Compression.Deflate : Compression.None,
 			});
 		})();
@@ -412,13 +412,13 @@ export class Publisher {
 			await msg.encode(stream);
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// timescale (microseconds here); older drafts omit it.
+			// timescale (milliseconds here); older drafts omit it.
 			const timestamps = supportsTrackStream(this.version);
 			let prevTs = 0n;
 
 			try {
 				for (;;) {
-					const frame = await Promise.race([group.readFrameTimed(), stream.closed]);
+					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
 					if (timestamps) {

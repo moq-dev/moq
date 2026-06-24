@@ -1,5 +1,5 @@
-import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
@@ -57,7 +57,7 @@ export class Producer {
 			throw new Error("must start with a keyframe");
 		}
 
-		this.#group?.writeFrame(timestamp, encodeFrame(data, timestamp));
+		this.#group?.writeFrame(encodeFrame(data, timestamp), Time.Milli.fromMicro(timestamp));
 	}
 
 	/** Close the track and current group, optionally with an error. */

@@ -1,6 +1,6 @@
 import { Signal } from "@moq/signals";
 import { CacheFull, Group } from "./group.ts";
-import type { Micro } from "./time.ts";
+import type { Milli } from "./time.ts";
 
 /** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
@@ -262,17 +262,10 @@ export class TrackProducer extends TrackHandle {
 		this.#sinks.clear();
 	}
 
-	/** Append a frame as its own single-frame group, at the given presentation timestamp (µs). */
-	writeFrame(timestamp: Micro, frame: Uint8Array) {
+	/** Append a frame as its own single-frame group; `timestamp` (ms) defaults to wall-clock now. */
+	writeFrame(frame: Uint8Array, timestamp?: Milli) {
 		const group = this.appendGroup();
-		group.writeFrame(timestamp, frame);
-		group.close();
-	}
-
-	/** Append a frame stamped with wall-clock now, as its own single-frame group. */
-	writeFrameNow(frame: Uint8Array) {
-		const group = this.appendGroup();
-		group.writeFrameNow(frame);
+		group.writeFrame(frame, timestamp);
 		group.close();
 	}
 

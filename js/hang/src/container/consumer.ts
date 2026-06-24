@@ -97,7 +97,7 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 
-				const decoded = this.#format.decode(next);
+				const decoded = this.#format.decode(next.data);
 
 				for (const sample of decoded) {
 					const frame: Frame = {
