@@ -1,4 +1,4 @@
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError, VarInt};
 use crate::{Timescale, Timestamp};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -12,19 +12,26 @@ const PROP_TIMESTAMP: u64 = 0x06;
 const PROP_TIMESCALE: u64 = 0x08;
 
 /// Encode a frame's presentation timestamp as moq-transport Object Properties:
-/// Timestamp (0x06, absolute) in Timescale (0x08) units. Matches the LOC encoding
-/// of the same registry ids so a relay or LOC-aware peer reads the same bytes.
+/// Timestamp (0x06) in Timescale (0x08) units.
 ///
-/// Writes the raw KVP bytes (no outer length prefix); the caller frames the
-/// extension block with its byte length.
+/// The Timestamp is a zigzag delta against `*prev` (the previous object's raw value
+/// in this subgroup; pass `&mut 0` for the first object), so out-of-order PTS (e.g.
+/// B-frames) stay compact. The Timescale is the absolute units-per-second. Writes the
+/// raw KVP bytes (no outer length prefix); the caller frames the block with its length.
 pub fn encode_object_time<W: bytes::BufMut>(
 	w: &mut W,
 	timestamp: Timestamp,
+	prev: &mut u64,
 	version: Version,
 ) -> Result<(), EncodeError> {
 	// KVP type ids are delta-encoded ascending: 0x06 then 0x08 (delta 0x02).
 	PROP_TIMESTAMP.encode(w, version)?;
-	timestamp.value().encode(w, version)?;
+	let delta: i64 = (timestamp.value() as i128 - *prev as i128)
+		.try_into()
+		.map_err(|_| EncodeError::from(crate::coding::BoundsExceeded))?;
+	VarInt::from_zigzag(delta)?.encode(w, version)?;
+	*prev = timestamp.value();
+
 	(PROP_TIMESCALE - PROP_TIMESTAMP).encode(w, version)?;
 	u64::from(timestamp.scale()).encode(w, version)?;
 	Ok(())
@@ -33,28 +40,37 @@ pub fn encode_object_time<W: bytes::BufMut>(
 /// Decode the Timestamp (0x06) + Timescale (0x08) Object Properties from an object's
 /// extension block, skipping any other properties. Returns `None` when no Timestamp
 /// property is present; a missing Timescale defaults to microseconds (the registry default).
-pub fn decode_object_time<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Option<Timestamp>, DecodeError> {
-	let mut timestamp: Option<u64> = None;
+///
+/// The Timestamp is a zigzag delta against `*prev`, which is advanced to the decoded
+/// raw value. Mirrors [`encode_object_time`].
+pub fn decode_object_time<R: bytes::Buf>(
+	r: &mut R,
+	prev: &mut u64,
+	version: Version,
+) -> Result<Option<Timestamp>, DecodeError> {
+	let mut delta: Option<i64> = None;
 	let mut timescale: Option<u64> = None;
 	let mut prev_type: u64 = 0;
 	let mut first = true;
 
 	while r.has_remaining() {
-		let delta = u64::decode(r, version)?;
+		let step = u64::decode(r, version)?;
 		let abs = if first {
-			delta
+			step
 		} else {
-			prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+			prev_type.checked_add(step).ok_or(DecodeError::BoundsExceeded)?
 		};
 		first = false;
 		prev_type = abs;
 
 		if abs % 2 == 0 {
-			let value = u64::decode(r, version)?;
+			// Even type: a single varint value. 0x06 carries a zigzag delta.
 			match abs {
-				PROP_TIMESTAMP => timestamp = Some(value),
-				PROP_TIMESCALE => timescale = Some(value),
-				_ => {}
+				PROP_TIMESTAMP => delta = Some(VarInt::decode(r, version)?.to_zigzag()),
+				PROP_TIMESCALE => timescale = Some(u64::decode(r, version)?),
+				_ => {
+					let _ = u64::decode(r, version)?;
+				}
 			}
 		} else {
 			// Odd type: length-prefixed bytes we don't care about.
@@ -66,9 +82,14 @@ pub fn decode_object_time<R: bytes::Buf>(r: &mut R, version: Version) -> Result<
 		}
 	}
 
-	let Some(value) = timestamp else {
+	let Some(delta) = delta else {
 		return Ok(None);
 	};
+	let value: u64 = (*prev as i128 + delta as i128)
+		.try_into()
+		.map_err(|_| DecodeError::BoundsExceeded)?;
+	*prev = value;
+
 	let scale = match timescale {
 		Some(s) => Timescale::new(s).map_err(|_| DecodeError::InvalidValue)?,
 		None => Timescale::MICRO,
@@ -310,30 +331,52 @@ mod tests {
 
 	use bytes::Buf;
 
-	/// Object Property timestamp round-trips through encode/decode at its own scale.
+	/// A sequence of object timestamps round-trips through the zigzag-delta encoding,
+	/// including a backwards step (B-frame ordering) that yields a negative delta.
 	#[test]
 	fn test_object_time_roundtrip() {
-		let ts = Timestamp::new(96_000, Timescale::MICRO).unwrap();
-		let mut buf = bytes::BytesMut::new();
-		encode_object_time(&mut buf, ts, Version::Draft18).unwrap();
+		// Each object's extension block is length-framed on the wire and decoded on its
+		// own, so encode/decode one block per object while threading `prev`.
+		let values = [10_000u64, 30_000, 20_000];
+		let mut enc_prev = 0u64;
+		let blocks: Vec<bytes::Bytes> = values
+			.iter()
+			.map(|&v| {
+				let ts = Timestamp::new(v, Timescale::MICRO).unwrap();
+				let mut buf = bytes::BytesMut::new();
+				encode_object_time(&mut buf, ts, &mut enc_prev, Version::Draft18).unwrap();
+				buf.freeze()
+			})
+			.collect();
 
-		let mut bytes = buf.freeze();
-		let decoded = decode_object_time(&mut bytes, Version::Draft18).unwrap().unwrap();
-		assert_eq!(decoded.value(), 96_000);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
-		assert!(!bytes.has_remaining());
+		let mut dec_prev = 0u64;
+		for (&v, block) in values.iter().zip(&blocks) {
+			let mut bytes = block.clone();
+			let decoded = decode_object_time(&mut bytes, &mut dec_prev, Version::Draft18)
+				.unwrap()
+				.unwrap();
+			assert_eq!(decoded.value(), v);
+			assert_eq!(decoded.scale(), Timescale::MICRO);
+			assert!(!bytes.has_remaining());
+		}
 	}
 
 	/// A timescale-less extension block falls back to microseconds (registry default).
 	#[test]
 	fn test_object_time_defaults_to_micros() {
 		let mut buf = bytes::BytesMut::new();
-		// Just a 0x06 Timestamp property, no 0x08.
+		// Just a 0x06 Timestamp property (zigzag delta from 0 = 1234), no 0x08.
 		PROP_TIMESTAMP.encode(&mut buf, Version::Draft18).unwrap();
-		1234u64.encode(&mut buf, Version::Draft18).unwrap();
+		VarInt::from_zigzag(1234)
+			.unwrap()
+			.encode(&mut buf, Version::Draft18)
+			.unwrap();
 
 		let mut bytes = buf.freeze();
-		let decoded = decode_object_time(&mut bytes, Version::Draft18).unwrap().unwrap();
+		let mut prev = 0u64;
+		let decoded = decode_object_time(&mut bytes, &mut prev, Version::Draft18)
+			.unwrap()
+			.unwrap();
 		assert_eq!(decoded.value(), 1234);
 		assert_eq!(decoded.scale(), Timescale::MICRO);
 	}
@@ -342,7 +385,12 @@ mod tests {
 	#[test]
 	fn test_object_time_absent() {
 		let mut empty = bytes::Bytes::new();
-		assert!(decode_object_time(&mut empty, Version::Draft18).unwrap().is_none());
+		let mut prev = 0u64;
+		assert!(
+			decode_object_time(&mut empty, &mut prev, Version::Draft18)
+				.unwrap()
+				.is_none()
+		);
 	}
 
 	// Test table from draft-ietf-moq-transport-14 Section 10.4.2 Table 7

@@ -799,6 +799,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut producer: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
+		// Previous object's raw timestamp value, for the zigzag-delta extension header.
+		let mut prev_ts = 0u64;
+
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
 				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
@@ -810,7 +813,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let timestamp = if group.flags.has_extensions {
 				let size: usize = stream.decode().await?;
 				let mut ext = stream.read_exact(size).await?;
-				ietf::decode_object_time(&mut ext, self.version)?
+				ietf::decode_object_time(&mut ext, &mut prev_ts, self.version)?
 			} else {
 				None
 			};
