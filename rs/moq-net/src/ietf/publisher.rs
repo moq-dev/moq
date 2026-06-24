@@ -316,9 +316,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&msg).await?;
 		track_stats.group();
 
-		// Previous object's raw timestamp value, for the zigzag-delta extension header.
-		let mut prev_ts = 0u64;
-
 		loop {
 			let frame = tokio::select! {
 				biased;
@@ -337,7 +334,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// Per-object extension headers carry the frame's presentation timestamp.
 			if msg.flags.has_extensions {
 				let mut ext = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut ext, frame.timestamp, &mut prev_ts, version)?;
+				ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
 				stream.encode(&(ext.len() as u64)).await?;
 				let mut ext = ext.freeze();
 				stream.write_all(&mut ext).await?;
