@@ -17,6 +17,7 @@ doctest = false
 
 [dependencies]
 bytes = "1"
+flate2 = { workspace = true }
 json-patch = "4"
 kio = { workspace = true }
 moq-net = { workspace = true }

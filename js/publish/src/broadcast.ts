@@ -16,7 +16,9 @@ export type BroadcastProps = {
 export type ServeTrack = (track: Moq.Track, effect: Effect) => void;
 
 export class Broadcast {
-	static readonly CATALOG_TRACK = "catalog.json";
+	static readonly CATALOG_TRACK = Catalog.TRACK;
+	/** The DEFLATE-compressed catalog track, served alongside {@link CATALOG_TRACK} with identical content. */
+	static readonly CATALOG_TRACK_COMPRESSED = Catalog.TRACK_COMPRESSED;
 
 	connection: Signal<Moq.Connection.Established | undefined>;
 	enabled: Signal<boolean>;
@@ -39,6 +41,7 @@ export class Broadcast {
 	// these would never run. `publishTrack` rejects them to fail fast.
 	static readonly #RESERVED_TRACKS: ReadonlySet<string> = new Set([
 		Broadcast.CATALOG_TRACK,
+		Broadcast.CATALOG_TRACK_COMPRESSED,
 		Audio.Encoder.TRACK,
 		Video.Root.TRACK_HD,
 		Video.Root.TRACK_SD,
@@ -106,6 +109,10 @@ export class Broadcast {
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
 						this.catalog.serve(request.track, effect);
+						break;
+					case Broadcast.CATALOG_TRACK_COMPRESSED:
+						// Same catalog, DEFLATE-compressed; consumers opt in by subscribing to this track.
+						this.catalog.serve(request.track, effect, { compression: true });
 						break;
 					case Audio.Encoder.TRACK:
 						this.audio.serve(request.track, effect);

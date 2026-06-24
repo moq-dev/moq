@@ -44,6 +44,10 @@ impl<E: CatalogExt> CatalogSource<E> {
 				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
 				CatalogSource::Hang(crate::catalog::hang::Consumer::new(track))
 			}
+			CatalogFormat::HangZ => {
+				let track = broadcast.subscribe_track(&hang::Catalog::compressed_track())?;
+				CatalogSource::Hang(crate::catalog::hang::Consumer::compressed(track))
+			}
 			CatalogFormat::Msf => {
 				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 				CatalogSource::Msf(crate::catalog::msf::Consumer::new(track))

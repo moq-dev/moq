@@ -9,9 +9,11 @@ import { toHang } from "./msf";
 /** Consumes a custom track once subscribed, scoped to the subscription's lifetime. */
 export type ConsumeTrack = (track: Moq.Track, effect: Effect) => void;
 
-// Watch supports the two on-the-wire catalog formats from @moq/hang plus a
-// "manual" mode where the user supplies the catalog directly without fetching.
-export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
+// Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
+// DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
+// catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
+// and is never auto-detected, so set it explicitly via `catalogFormat`.
+export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
@@ -39,7 +41,8 @@ export interface BroadcastProps {
 	// Which catalog format to use. When `undefined` (the default), the format is
 	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
 	// back to `"hang"` if the name has no recognized extension. Set to a
-	// specific value to override auto-detection.
+	// specific value to override auto-detection. `"hangz"` (the compressed
+	// `catalog.json.z` track) is opt-in only and never auto-detected.
 	catalogFormat?: CatalogFormat | Signal<CatalogFormat | undefined>;
 
 	// Initial catalog. Used directly when catalogFormat is "manual"; otherwise it's
@@ -155,15 +158,15 @@ export class Broadcast {
 
 		this.status.set("loading");
 
-		const trackName = format === "hang" ? "catalog.json" : "catalog";
+		const trackName = format === "hang" ? Catalog.TRACK : format === "hangz" ? Catalog.TRACK_COMPRESSED : "catalog";
 		const track = broadcast.subscribe(trackName, Catalog.PRIORITY.catalog);
 		effect.cleanup(() => track.close());
 
-		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json;
-		// MSF stays on its own one-blob-per-group fetch.
+		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, with
+		// "hangz" decompressing the `.z` track; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
-		if (format === "hang") {
-			const consumer = new Catalog.Consumer(track);
+		if (format === "hang" || format === "hangz") {
+			const consumer = new Catalog.Consumer(track, { compression: format === "hangz" });
 			fetchNext = () => consumer.next();
 		} else {
 			fetchNext = async () => {

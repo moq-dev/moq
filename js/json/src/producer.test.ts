@@ -59,6 +59,30 @@ test("mutate without a value or initial throws", () => {
 	expect(() => source.mutate(() => {})).toThrow();
 });
 
+test("serve() can override compression per subscriber", async () => {
+	// One fan-out producer serves the same value both plaintext and compressed.
+	const source = new Producer<Record<string, unknown>>({ initial: {} });
+	source.mutate((v) => {
+		v.video = { renditions: { hd: { codec: "avc1.640028" } } };
+	});
+
+	const effect = new Effect();
+
+	const plainTrack = new Track("catalog.json");
+	source.serve(plainTrack, effect);
+	const plain = await new Consumer<Record<string, unknown>>(plainTrack).next();
+
+	const zTrack = new Track("catalog.json.z");
+	source.serve(zTrack, effect, { compression: true });
+	const compressed = await new Consumer<Record<string, unknown>>(zTrack, { compression: true }).next();
+
+	// Both tracks reconstruct the identical value despite different wire encodings.
+	expect(compressed).toEqual(plain);
+	expect(compressed?.video).toEqual({ renditions: { hd: { codec: "avc1.640028" } } });
+
+	effect.close();
+});
+
 test("serve() throws on a track-bound producer", () => {
 	const producer = new Producer<Record<string, unknown>>(new Track("meta.json"));
 	const effect = new Effect();

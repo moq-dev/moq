@@ -119,6 +119,8 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) struct NoqClient {
 	pub quic: noq::Endpoint,
 	pub transport: Arc<noq::TransportConfig>,
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
+	pub http_bootstrap: bool,
 	pub versions: moq_net::Versions,
 }
 
@@ -149,6 +151,7 @@ impl NoqClient {
 		Ok(Self {
 			quic,
 			transport,
+			http_bootstrap: config.tls.allows_http_bootstrap(),
 			versions: config.versions(),
 		})
 	}
@@ -172,25 +175,34 @@ impl NoqClient {
 		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
 
 		if url.scheme() == "http" {
-			// Perform a HTTP request to fetch the certificate fingerprint.
-			let mut fingerprint = url.clone();
-			fingerprint.set_path("/certificate.sha256");
-			fingerprint.set_query(None);
-			fingerprint.set_fragment(None);
+			// Insecure per-connection bootstrap: only honored when no stronger
+			// verification is configured, so an attacker controlling the plaintext
+			// fetch can't weaken an explicit pin or re-enable disabled verification.
+			if self.http_bootstrap {
+				// Perform a HTTP request to fetch the certificate fingerprint.
+				let mut fingerprint = url.clone();
+				fingerprint.set_path("/certificate.sha256");
+				fingerprint.set_query(None);
+				fingerprint.set_fragment(None);
 
-			tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
+				tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
 
-			let resp = reqwest::get(fingerprint.as_str())
-				.await
-				.map_err(Error::FetchFingerprint)?
-				.error_for_status()
-				.map_err(Error::FingerprintStatus)?;
+				let resp = reqwest::get(fingerprint.as_str())
+					.await
+					.map_err(Error::FetchFingerprint)?
+					.error_for_status()
+					.map_err(Error::FingerprintStatus)?;
 
-			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
-			let fingerprint = hex::decode(fingerprint.trim())?;
+				let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
+				let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
-			config.dangerous().set_certificate_verifier(Arc::new(verifier));
+				let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
+				config.dangerous().set_certificate_verifier(Arc::new(verifier));
+			} else {
+				tracing::warn!(
+					"ignoring insecure http:// fingerprint bootstrap; using the configured TLS verification"
+				);
+			}
 
 			url.set_scheme("https").expect("failed to set scheme");
 		}

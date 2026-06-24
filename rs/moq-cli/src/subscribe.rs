@@ -18,6 +18,8 @@ pub enum SubscribeFormat {
 #[derive(ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
+	#[value(name = "hangz")]
+	HangZ,
 	Msf,
 }
 
@@ -25,6 +27,7 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	fn from(format: CatalogFormatArg) -> Self {
 		match format {
 			CatalogFormatArg::Hang => Self::Hang,
+			CatalogFormatArg::HangZ => Self::HangZ,
 			CatalogFormatArg::Msf => Self::Msf,
 		}
 	}
@@ -51,7 +54,8 @@ pub struct SubscribeArgs {
 	/// Catalog format to subscribe to for track discovery.
 	///
 	/// When omitted, the format is auto-detected from the broadcast name suffix
-	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang.
+	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang. Pass `hangz` to read
+	/// the DEFLATE-compressed `catalog.json.z` track instead (same `.hang` broadcast).
 	#[arg(long)]
 	pub catalog: Option<CatalogFormatArg>,
 }

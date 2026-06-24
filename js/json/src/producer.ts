@@ -2,6 +2,7 @@ import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type * as z from "zod/mini";
 
+import { Encoder } from "./compression.ts";
 import { deepEqual, diff } from "./diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
@@ -30,6 +31,12 @@ export interface Config<T> {
 	// Starting value for {@link Producer.mutate} before anything has been published. Required to
 	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
 	initial?: T;
+
+	// Compress each group as one sync-flushed `deflate-raw` (RFC 1951) stream, so deltas reuse the
+	// snapshot as context and shrink sharply. Interoperable with the Rust `moq-json` producer.
+	// `false`/unset (the default) writes plaintext JSON frames. A {@link Consumer} reading the track
+	// must set the same flag.
+	compression?: boolean;
 }
 
 /**
@@ -49,9 +56,17 @@ export class Producer<T> {
 	#track?: Moq.Track;
 	#group?: Moq.Group;
 	#last?: unknown;
-	// Bytes of deltas accumulated in the current group, excluding the snapshot frame.
+	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Always raw
+	// (uncompressed) sizes, even when compressing: the delta-vs-snapshot decision measures raw bytes,
+	// so a compressed producer rolls groups on raw sizes (still valid on the wire, just a touch sooner
+	// than the Rust producer, which measures compressed sizes).
 	#deltaBytes = 0;
 	#groupFrames = 0;
+
+	// Group-scoped `deflate-raw` compression. `#encoder` is the current group's stream, swapped for a
+	// fresh one (cold window) at each snapshot, so a snapshot and its deltas share one DEFLATE stream.
+	#compress = false;
+	#encoder?: Encoder;
 
 	// Fan-out mode: retains the value and serves a child (leaf) Producer per subscriber.
 	#outputs?: Set<Producer<T>>;
@@ -70,6 +85,7 @@ export class Producer<T> {
 			this.#outputs = new Set();
 			this.#value = this.#config.initial;
 		}
+		this.#compress = this.#config.compression ?? false;
 	}
 
 	/** The current value, or `undefined` if nothing has been published yet. */
@@ -110,7 +126,7 @@ export class Producer<T> {
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
-			this.#group.writeFrame(delta);
+			this.#writeDelta(this.#group, delta);
 			this.#deltaBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
@@ -155,13 +171,19 @@ export class Producer<T> {
 	 *
 	 * Only available on a track-less (fan-out) producer. The subscriber is removed and finished when
 	 * `effect` is cleaned up.
+	 *
+	 * Pass `opts.compression` to override the producer's configured compression for this subscriber
+	 * only, so one fan-out producer can serve the same value both plaintext and `deflate-raw` (e.g.
+	 * the catalog served on `catalog.json` and `catalog.json.z`).
 	 */
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.Track, effect: Effect, opts?: { compression?: boolean }): void {
 		if (!this.#outputs) {
 			throw new Error("serve() is only available on a track-less Producer");
 		}
 
-		const output = new Producer<T>(track, this.#config);
+		const config =
+			opts?.compression === undefined ? this.#config : { ...this.#config, compression: opts.compression };
+		const output = new Producer<T>(track, config);
 		if (this.#value !== undefined) output.update(this.#value);
 
 		this.#outputs.add(output);
@@ -211,7 +233,7 @@ export class Producer<T> {
 		this.#group?.close();
 
 		const group = track.appendGroup();
-		group.writeFrame(snapshot);
+		this.#writeSnapshot(group, snapshot);
 		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
 
@@ -223,5 +245,26 @@ export class Producer<T> {
 			group.close();
 			this.#group = undefined;
 		}
+	}
+
+	// Write a group's snapshot (frame 0). On the compressed path this opens a fresh per-group encoder
+	// (cold window), so the snapshot and its deltas share one DEFLATE stream.
+	#writeSnapshot(group: Moq.Group, frame: Uint8Array): void {
+		if (!this.#compress) {
+			group.writeFrame(frame);
+			return;
+		}
+		this.#encoder = new Encoder();
+		group.writeFrame(this.#encoder.frame(frame));
+	}
+
+	// Write a delta frame, compressed against the current group's encoder when compressing.
+	#writeDelta(group: Moq.Group, frame: Uint8Array): void {
+		if (!this.#compress) {
+			group.writeFrame(frame);
+			return;
+		}
+		if (!this.#encoder) throw new Error("compressed delta requires an open group");
+		group.writeFrame(this.#encoder.frame(frame));
 	}
 }

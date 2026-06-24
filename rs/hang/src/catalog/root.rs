@@ -33,6 +33,12 @@ impl Catalog {
 	/// The default name for the catalog track.
 	pub const DEFAULT_NAME: &str = "catalog.json";
 
+	/// The track name for the DEFLATE-compressed catalog: the `.z` sibling of [`DEFAULT_NAME`](Self::DEFAULT_NAME).
+	///
+	/// Carries the identical catalog JSON, compressed per group (see `moq-json`). A publisher serves
+	/// both tracks; a consumer reads whichever it prefers.
+	pub const COMPRESSED_NAME: &str = "catalog.json.z";
+
 	/// Parse a catalog from a string.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> Result<Self> {
@@ -72,6 +78,14 @@ impl Catalog {
 	pub fn default_track() -> moq_net::Track {
 		moq_net::Track {
 			name: Catalog::DEFAULT_NAME.to_string(),
+			priority: 100,
+		}
+	}
+
+	/// The track carrying the DEFLATE-compressed catalog ([`COMPRESSED_NAME`](Self::COMPRESSED_NAME)).
+	pub fn compressed_track() -> moq_net::Track {
+		moq_net::Track {
+			name: Catalog::COMPRESSED_NAME.to_string(),
 			priority: 100,
 		}
 	}

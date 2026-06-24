@@ -12,6 +12,12 @@ pub enum CatalogFormat {
 	/// `hang` JSON catalog (track `catalog.json`).
 	#[default]
 	Hang,
+	/// DEFLATE-compressed `hang` JSON catalog (track `catalog.json.z`).
+	///
+	/// Same broadcast-name suffix as [`Hang`](Self::Hang) (`.hang`): the compression is a track-level
+	/// choice, not a different broadcast. Opt in explicitly. [`detect`](Self::detect) never returns
+	/// this, so name-based auto-detection stays on the uncompressed track until consumers are moved over.
+	HangZ,
 	/// MSF catalog (track `catalog`).
 	Msf,
 }
@@ -23,9 +29,12 @@ impl CatalogFormat {
 	pub const DEFAULT: Self = Self::Hang;
 
 	/// The filename-style suffix (including leading dot) for this format.
+	///
+	/// [`Hang`](Self::Hang) and [`HangZ`](Self::HangZ) share `.hang`: the compressed track is an
+	/// extra track on the same broadcast, not a different broadcast name.
 	pub fn extension(self) -> &'static str {
 		match self {
-			Self::Hang => ".hang",
+			Self::Hang | Self::HangZ => ".hang",
 			Self::Msf => ".msf",
 		}
 	}
@@ -64,5 +73,13 @@ mod test {
 		assert_eq!(CatalogFormat::detect("demo/bbb"), None);
 		assert_eq!(CatalogFormat::detect(""), None);
 		assert_eq!(CatalogFormat::detect("demo/foo.v2"), None);
+	}
+
+	#[test]
+	fn hangz_shares_hang_suffix_and_is_never_detected() {
+		// HangZ is an explicit opt-in: it reuses the `.hang` broadcast suffix and detection always
+		// resolves `.hang` to the uncompressed track.
+		assert_eq!(CatalogFormat::HangZ.extension(), ".hang");
+		assert_eq!(CatalogFormat::detect("demo/bbb.hang"), Some(CatalogFormat::Hang));
 	}
 }

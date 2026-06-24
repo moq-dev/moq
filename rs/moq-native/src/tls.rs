@@ -46,6 +46,11 @@ pub enum Error {
 	#[error("invalid TLS fingerprint length: expected 32 bytes (SHA-256), got {0}")]
 	FingerprintLength(usize),
 
+	#[error(
+		"--client-tls-fingerprint cannot be combined with --client-tls-root or --client-tls-system-roots: fingerprint pinning bypasses CA verification"
+	)]
+	FingerprintWithRoots,
+
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
@@ -224,9 +229,29 @@ struct Deprecated {
 	disable_verify: Option<bool>,
 }
 
+/// The resolved server-certificate verification policy.
+///
+/// Computed once by [Client::verification] and shared by every backend (the
+/// rustls-based quinn/noq via [Client::build], and quiche directly) so they
+/// agree on precedence, the system-roots default, and which flag combinations
+/// are valid.
+#[derive(Clone)]
+pub(crate) enum Verification {
+	/// No verification at all. Insecure; only via `--client-tls-disable-verify`.
+	Disabled,
+
+	/// Pin the leaf certificate by SHA-256. The CA chain is not consulted, so
+	/// this is mutually exclusive with any roots.
+	Fingerprints(Vec<[u8; 32]>),
+
+	/// Standard verification against these roots (system and/or custom, already
+	/// resolved). The two sets are additive.
+	Roots(Vec<CertificateDer<'static>>),
+}
+
 impl Client {
 	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
-	/// [`Self::build`], which every backend runs, so a deprecated flag warns once.
+	/// [`Self::verification`], which every backend runs, so a deprecated flag warns once.
 	pub(crate) fn warn_deprecated(&self) {
 		if !self.deprecated.root.is_empty() {
 			tracing::warn!("--tls-root is deprecated; use --client-tls-root");
@@ -266,51 +291,96 @@ impl Client {
 		self.disable_verify.or(self.deprecated.disable_verify)
 	}
 
-	/// Build a [`rustls::ClientConfig`] from this configuration.
+	/// Resolve the verification policy from the configured flags.
 	///
-	/// Trusts the configured roots plus the platform's native roots (the latter
-	/// gated by `system_roots`), optionally attaches a client identity for mTLS,
-	/// and swaps in fingerprint pinning or disabled verification when requested.
-	pub fn build(&self) -> Result<rustls::ClientConfig> {
+	/// Precedence and rules (shared by all backends):
+	/// - `--client-tls-disable-verify` wins and disables verification.
+	/// - `--client-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
+	///   it with `--client-tls-root` or `--client-tls-system-roots` is rejected rather than
+	///   silently ignoring one of them.
+	/// - Otherwise, verify against the system roots (default) plus any custom
+	///   roots. The system roots are dropped once a custom root is given unless
+	///   `--client-tls-system-roots` re-enables them.
+	pub(crate) fn verification(&self) -> Result<Verification> {
 		self.warn_deprecated();
-		let provider = crypto::provider();
 
-		// Fold the deprecated --tls-* spellings into the canonical values so the
-		// rest of build() sees a single configuration.
+		if self.effective_disable_verify().unwrap_or_default() {
+			return Ok(Verification::Disabled);
+		}
+
+		let fingerprints = self.fingerprints()?;
+		if !fingerprints.is_empty() {
+			if !self.effective_root().is_empty() || self.effective_system_roots() == Some(true) {
+				return Err(Error::FingerprintWithRoots);
+			}
+			return Ok(Verification::Fingerprints(fingerprints));
+		}
+
 		let root = self.effective_root();
-		let fingerprint = self.effective_fingerprint();
-		let disable_verify = self.effective_disable_verify().unwrap_or_default();
-
 		// Default to system roots only when no custom root is given, so passing a
 		// root replaces them unless the system roots are explicitly re-enabled.
 		let system_roots = self.effective_system_roots().unwrap_or(root.is_empty());
 
-		// fingerprint pinning and disable_verify swap in their own verifier below,
-		// so an empty root store is fine in those cases. Otherwise WebPKI needs at
-		// least one trusted root to ever succeed, so fail fast instead of producing
-		// confusing handshake errors later.
-		let custom_verifier = disable_verify || !fingerprint.is_empty();
-		if !system_roots && root.is_empty() && !custom_verifier {
-			return Err(Error::NoRoots);
-		}
-
-		let mut roots = rustls::RootCertStore::empty();
+		let mut roots = Vec::new();
 		if system_roots {
 			let native = rustls_native_certs::load_native_certs();
 			for err in native.errors {
 				tracing::warn!(%err, "failed to load root cert");
 			}
-			for cert in native.certs {
-				roots.add(cert).map_err(Error::AddRoot)?;
-			}
+			roots.extend(native.certs);
 		}
 		for root in &root {
 			let certs = read_certs(root)?;
 			if certs.is_empty() {
 				return Err(Error::EmptyRoots(root.clone()));
 			}
+			roots.extend(certs);
+		}
+
+		// WebPKI needs at least one trusted root to ever succeed, so fail fast
+		// instead of producing confusing handshake errors later.
+		if roots.is_empty() {
+			return Err(Error::NoRoots);
+		}
+
+		Ok(Verification::Roots(roots))
+	}
+
+	/// Whether an insecure `http://` certificate-fingerprint bootstrap may be
+	/// honored for a connection.
+	///
+	/// Only when no stronger verification is configured: an explicit
+	/// `--client-tls-fingerprint` must never be weakened by an attacker-controlled
+	/// plaintext fetch, and there is nothing to bootstrap when verification is
+	/// disabled. With CA roots (the default), `http://` is the deliberate
+	/// per-connection way to pin a self-signed relay, so it is allowed.
+	pub(crate) fn allows_http_bootstrap(&self) -> bool {
+		self.effective_fingerprint().is_empty() && !self.effective_disable_verify().unwrap_or_default()
+	}
+
+	/// Parse the configured fingerprints into fixed-size SHA-256 digests.
+	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
+		self.effective_fingerprint()
+			.iter()
+			.map(|fp| {
+				let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
+				bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
+			})
+			.collect()
+	}
+
+	/// Build a [`rustls::ClientConfig`] from this configuration.
+	///
+	/// Resolves the verification policy, optionally attaches a client identity
+	/// for mTLS, and installs the matching verifier.
+	pub fn build(&self) -> Result<rustls::ClientConfig> {
+		let provider = crypto::provider();
+		let verification = self.verification()?;
+
+		let mut roots = rustls::RootCertStore::empty();
+		if let Verification::Roots(certs) = &verification {
 			for cert in certs {
-				roots.add(cert).map_err(Error::AddRoot)?;
+				roots.add(cert.clone()).map_err(Error::AddRoot)?;
 			}
 		}
 
@@ -337,24 +407,21 @@ impl Client {
 			_ => return Err(Error::IncompleteClientAuth),
 		};
 
-		if disable_verify {
-			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
-			let noop = NoCertificateVerification(provider);
-			tls.dangerous().set_certificate_verifier(Arc::new(noop));
-		} else if !fingerprint.is_empty() {
-			let fingerprints = fingerprint
-				.iter()
-				.map(|fp| {
-					let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
-					match bytes.len() {
-						32 => Ok(bytes),
-						len => Err(Error::FingerprintLength(len)),
-					}
-				})
-				.collect::<Result<Vec<_>>>()?;
-
-			let verifier = FingerprintVerifier::new(provider, fingerprints);
-			tls.dangerous().set_certificate_verifier(Arc::new(verifier));
+		match verification {
+			Verification::Disabled => {
+				tracing::warn!(
+					"TLS server certificate verification is disabled; A man-in-the-middle attack is possible."
+				);
+				tls.dangerous()
+					.set_certificate_verifier(Arc::new(NoCertificateVerification(provider)));
+			}
+			Verification::Fingerprints(fingerprints) => {
+				let fingerprints = fingerprints.into_iter().map(|fp| fp.to_vec()).collect();
+				let verifier = FingerprintVerifier::new(provider, fingerprints);
+				tls.dangerous().set_certificate_verifier(Arc::new(verifier));
+			}
+			// Roots are already in the store above; use the default WebPKI verifier.
+			Verification::Roots(_) => {}
 		}
 
 		Ok(tls)
@@ -700,6 +767,30 @@ mod tests {
 			..Default::default()
 		};
 		assert!(config.build().is_ok());
+	}
+
+	#[test]
+	fn build_rejects_fingerprint_with_roots() {
+		let cert = self_signed();
+		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
+
+		// Fingerprint pinning bypasses the CA chain, so combining it with roots
+		// is rejected rather than silently ignoring one of them.
+		let with_system = Client {
+			fingerprint: vec![fingerprint.clone()],
+			system_roots: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(with_system.build(), Err(Error::FingerprintWithRoots)));
+
+		// The conflict is detected before any root file is read, so the path
+		// need not exist.
+		let with_custom = Client {
+			fingerprint: vec![fingerprint],
+			root: vec![PathBuf::from("/does-not-exist.pem")],
+			..Default::default()
+		};
+		assert!(matches!(with_custom.build(), Err(Error::FingerprintWithRoots)));
 	}
 }
 
