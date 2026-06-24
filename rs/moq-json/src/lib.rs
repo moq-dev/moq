@@ -24,7 +24,6 @@ use serde_json::Value;
 
 pub use compression::Compression;
 
-use crate::compression::{Decoder, Encoder};
 use crate::diff::diff;
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
@@ -51,8 +50,8 @@ pub enum Error {
 	#[error("decompression failed")]
 	Decompress,
 
-	/// A group's cumulative decompressed size exceeded the limit (zip-bomb guard).
-	#[error("decompressed group exceeded {0} bytes")]
+	/// A frame's decompressed size exceeded the limit (zip-bomb guard).
+	#[error("decompressed frame exceeded {0} bytes")]
 	TooLarge(u64),
 }
 
@@ -82,18 +81,16 @@ pub struct Config {
 	/// to one snapshot before rolling, and a larger ratio tolerates more deltas per snapshot.
 	///
 	/// When [`compression`](Self::compression) is set, both sides of the comparison are measured
-	/// on *compressed* bytes (a warm per-group window shrinks each successive delta), so more
-	/// deltas pack into a group than the raw sizes would suggest.
+	/// on the *compressed* frame sizes (the real wire cost).
 	///
 	/// Defaults to `8`.
 	pub delta_ratio: u32,
 
-	/// Optional zstd compression for the frame stream.
+	/// Optional per-frame DEFLATE compression for the frame stream.
 	///
-	/// `None` (the default) writes plaintext JSON frames, identical on the wire to a track with
-	/// no compression. `Some(..)` compresses each group as one zstd stream (see [`Compression`]);
-	/// a [`Consumer`] reading the track must be created with the matching settings via
-	/// [`Consumer::with_compression`].
+	/// `None` (the default) writes plaintext JSON frames, identical on the wire to a track with no
+	/// compression. `Some(..)` compresses each frame independently (see [`Compression`]); a
+	/// [`Consumer`] reading the track must be created via [`Consumer::with_compression`].
 	pub compression: Option<Compression>,
 }
 
@@ -138,7 +135,6 @@ impl<T: Serialize> Producer<T> {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
 				group: None,
-				encoder: None,
 				last: None,
 				delta_bytes: 0,
 				snapshot_len: 0,
@@ -241,14 +237,12 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 struct Inner {
 	track: moq_net::TrackProducer,
 	group: Option<moq_net::GroupProducer>,
-	// Per-group zstd encoder, `Some` while a compressed group is open (recreated per group).
-	encoder: Option<Encoder>,
 	last: Option<Value>,
-	// Bytes of deltas accumulated in the current group, excluding the snapshot frame.
-	// Compressed slice sizes when compressing, raw patch sizes otherwise.
+	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Compressed
+	// frame sizes when compressing, raw patch sizes otherwise.
 	delta_bytes: u64,
-	// Reference size the delta budget is measured against: the current group's snapshot frame,
-	// as its compressed slice size. Only consulted on the compressed path.
+	// Reference size the delta budget is measured against: the current group's snapshot frame.
+	// Compressed when compressing, raw otherwise.
 	snapshot_len: u64,
 	group_frames: usize,
 	config: Config,
@@ -275,7 +269,7 @@ impl Inner {
 		Ok(())
 	}
 
-	/// Serialize (and, when compressing, encode) a delta if deltas are enabled and appending one
+	/// Serialize (and, when compressing, compress) a delta if deltas are enabled and appending one
 	/// keeps the group within budget; otherwise `None`, signalling that a fresh snapshot should be
 	/// published instead. Returns the frame slice ready to write.
 	fn delta(&mut self, value: &Value, snapshot_len: usize) -> Result<Option<Bytes>> {
@@ -298,13 +292,12 @@ impl Inner {
 			serde_json::to_vec(&diff.patch)?
 		};
 
-		match self.encoder.as_mut() {
-			// Compressed: measure against the group's anchoring snapshot's compressed size and the
-			// delta's *compressed* slice size (the real wire cost). Encoding advances the per-group
-			// window; if the delta doesn't fit we roll a new group with a fresh encoder, discarding
-			// this slice (the abandoned window has no effect on the new group).
-			Some(encoder) => {
-				let slice = encoder.frame(&patch);
+		match &self.config.compression {
+			// Compressed: measure the delta's *compressed* size (the real wire cost) against the
+			// group's anchoring snapshot, also compressed. If it doesn't fit we roll a new group and
+			// discard this slice (frames compress independently, so nothing carries over).
+			Some(compression) => {
+				let slice = compression.compress(&patch);
 				let projected = self.delta_bytes + slice.len() as u64;
 				if projected > ratio as u64 * self.snapshot_len {
 					return Ok(None);
@@ -331,27 +324,21 @@ impl Inner {
 
 		let mut group = self.track.append_group()?;
 
-		// Open a fresh per-group encoder (cold window) and compress the snapshot as frame 0.
-		let (slice, encoder) = match &self.config.compression {
-			Some(config) => {
-				let mut encoder = config.encoder();
-				let slice = encoder.frame(&snapshot);
-				(slice, Some(encoder))
-			}
-			None => (Bytes::from(snapshot), None),
+		// Compress the snapshot as frame 0 if enabled, recording its wire size as the delta anchor.
+		let slice = match &self.config.compression {
+			Some(compression) => compression.compress(&snapshot),
+			None => Bytes::from(snapshot),
 		};
 		self.snapshot_len = slice.len() as u64;
 		group.write_frame(slice)?;
 		self.delta_bytes = 0;
 		self.group_frames = 1;
-		self.encoder = encoder;
 
 		if self.config.delta_ratio != 0 {
-			// Keep the group (and its encoder) open so future deltas can be appended.
+			// Keep the group open so future deltas can be appended.
 			self.group = Some(group);
 		} else {
 			// Deltas disabled: one frame per group, identical to a plain JSON track.
-			self.encoder = None;
 			group.finish()?;
 		}
 
@@ -371,13 +358,8 @@ impl Inner {
 pub struct Consumer<T> {
 	track: moq_net::TrackConsumer,
 	group: Option<moq_net::GroupConsumer>,
-	// Compression settings, matching the producer's; `None` reads plaintext frames.
-	compression: Option<Compression>,
-	// Per-group zstd decoder, built lazily on the first compressed frame of a group.
-	decoder: Option<Decoder>,
-	// Compressed slices read so far in the current group, in order. Lets a cloned consumer
-	// rebuild the (non-cloneable) decoder window by replaying them. Empty when uncompressed.
-	group_slices: Vec<Bytes>,
+	// Whether frames are DEFLATE-compressed, matching the producer's [`Config::compression`].
+	compressed: bool,
 	current: Option<Value>,
 	frames_read: usize,
 	_marker: PhantomData<fn() -> T>,
@@ -390,11 +372,7 @@ impl<T> Clone for Consumer<T> {
 		Self {
 			track: self.track.clone(),
 			group: self.group.clone(),
-			compression: self.compression.clone(),
-			// A zstd decoder can't be cloned (per-group window state), so the clone starts without
-			// one and rebuilds it from `group_slices` on its next compressed read.
-			decoder: None,
-			group_slices: self.group_slices.clone(),
+			compressed: self.compressed,
 			current: self.current.clone(),
 			frames_read: self.frames_read,
 			_marker: PhantomData,
@@ -405,24 +383,23 @@ impl<T> Clone for Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading plaintext frames from the given track subscriber.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
-		Self::build(track, None)
+		Self::build(track, false)
 	}
 
-	/// Create a consumer that decompresses frames with the given [`Compression`] settings.
+	/// Create a consumer that decompresses DEFLATE frames written by a producer with
+	/// [`Config::compression`] set.
 	///
-	/// These must match the producer's [`Config::compression`], including the
-	/// [`dictionary`](Compression::dictionary).
-	pub fn with_compression(track: moq_net::TrackConsumer, compression: Compression) -> Self {
-		Self::build(track, Some(compression))
+	/// Decompression is self-describing, so no settings are needed beyond knowing the track is
+	/// compressed (the producer's level does not have to be matched).
+	pub fn with_compression(track: moq_net::TrackConsumer) -> Self {
+		Self::build(track, true)
 	}
 
-	fn build(track: moq_net::TrackConsumer, compression: Option<Compression>) -> Self {
+	fn build(track: moq_net::TrackConsumer, compressed: bool) -> Self {
 		Self {
 			track,
 			group: None,
-			compression,
-			decoder: None,
-			group_slices: Vec::new(),
+			compressed,
 			current: None,
 			frames_read: 0,
 			_marker: PhantomData,
@@ -449,9 +426,6 @@ impl<T: DeserializeOwned> Consumer<T> {
 					self.group = Some(group);
 					self.current = None;
 					self.frames_read = 0;
-					// Each group is its own compressed stream, so reset the decoder state.
-					self.decoder = None;
-					self.group_slices.clear();
 				}
 				Poll::Ready(None) => break true,
 				Poll::Pending => break false,
@@ -476,25 +450,13 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Decompress a frame slice, or pass it through when the track is uncompressed.
 	///
-	/// The per-group decoder is built lazily on the first compressed frame. A cloned consumer
-	/// starts without a decoder, so the first call replays the group's already-read slices to
-	/// rebuild the (non-cloneable) zstd window before decoding the new frame.
-	fn decode(&mut self, slice: Bytes) -> Result<Bytes> {
-		let Some(compression) = &self.compression else {
-			return Ok(slice);
-		};
-
-		if self.decoder.is_none() {
-			let mut decoder = compression.decoder();
-			for prev in &self.group_slices {
-				decoder.frame(prev)?;
-			}
-			self.decoder = Some(decoder);
+	/// Each frame is its own DEFLATE blob, so this needs no per-group state.
+	fn decode(&self, slice: Bytes) -> Result<Bytes> {
+		if self.compressed {
+			compression::decompress(&slice)
+		} else {
+			Ok(slice)
 		}
-
-		let plain = self.decoder.as_mut().unwrap().frame(&slice)?;
-		self.group_slices.push(slice);
-		Ok(plain)
 	}
 
 	/// Apply one frame: frame 0 of a group is a snapshot, the rest are merge patches.
@@ -530,8 +492,8 @@ mod test {
 		}
 	}
 
-	/// A zstd-compressed config with the given delta ratio.
-	fn cfg_zstd(delta_ratio: u32) -> Config {
+	/// A DEFLATE-compressed config with the given delta ratio.
+	fn cfg_deflate(delta_ratio: u32) -> Config {
 		Config {
 			delta_ratio,
 			compression: Some(Compression::default()),
@@ -789,49 +751,50 @@ mod test {
 
 	#[test]
 	fn compressed_snapshot_per_group_roundtrips() {
-		let (mut producer, track) = producer(cfg_zstd(0));
+		let (mut producer, track) = producer(cfg_deflate(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
 
 		// Deltas disabled: one compressed snapshot per group, latest reconstructs identically.
 		assert_eq!(track.latest(), Some(1));
-		let values = drain_with(Consumer::with_compression(track, Compression::default()));
+		let values = drain_with(Consumer::with_compression(track));
 		assert_eq!(values, vec![json!({ "a": 2 })]);
 	}
 
 	#[test]
 	fn compressed_deltas_share_one_group() {
-		let (mut producer, track) = producer(cfg_zstd(100));
+		let (mut producer, track) = producer(cfg_deflate(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
 		producer.finish().unwrap();
 
-		// Snapshot + deltas in one group, reconstructed through the per-group decoder.
+		// Snapshot + deltas in one group, each frame decompressed independently.
 		assert_eq!(track.latest(), Some(0));
-		let values = drain_with(Consumer::with_compression(track, Compression::default()));
+		let values = drain_with(Consumer::with_compression(track));
 		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
 	}
 
 	#[test]
 	fn compressed_late_joiner_reconstructs_from_deltas() {
-		let (mut producer, track) = producer(cfg_zstd(100));
+		let (mut producer, track) = producer(cfg_deflate(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
 		producer.finish().unwrap();
 
 		// A consumer created only now rebuilds the final value from the compressed snapshot + deltas.
-		let values = drain_with(Consumer::with_compression(track, Compression::default()));
+		let values = drain_with(Consumer::with_compression(track));
 		assert_eq!(values.last().unwrap(), &json!({ "a": 5, "b": 2 }));
 	}
 
 	#[test]
 	fn compressed_cloned_consumer_reconstructs_mid_group() {
-		// A clone taken mid-group has no decoder window; it must rebuild from the retained slices.
-		let (mut producer, track) = producer(cfg_zstd(100));
-		let mut consumer = Consumer::<Value>::with_compression(track, Compression::default());
+		// Frames compress independently, so a clone taken mid-group just inherits the reconstruction
+		// state and keeps decoding each frame on its own.
+		let (mut producer, track) = producer(cfg_deflate(100));
+		let mut consumer = Consumer::<Value>::with_compression(track);
 		let waiter = kio::Waiter::noop();
 
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap(); // compressed snapshot, group 0
@@ -855,39 +818,12 @@ mod test {
 	}
 
 	#[test]
-	fn dictionary_roundtrips() {
-		// A shared dictionary on both ends primes the window; the value still reconstructs exactly.
-		let dict = bytes::Bytes::from_static(br#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
-		let compression = Compression {
-			dictionary: Some(dict),
-			..Default::default()
-		};
-
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
-		let mut producer = Producer::<Value>::new(
-			track,
-			Config {
-				delta_ratio: 8,
-				compression: Some(compression.clone()),
-			},
-		);
-
-		let value = json!({ "video": { "renditions": { "v0": { "codec": "avc1.64001f" } } } });
-		producer.update(&value).unwrap();
-		producer.finish().unwrap();
-
-		let values = drain_with(Consumer::with_compression(consumer, compression));
-		assert_eq!(values.last().unwrap(), &value);
-	}
-
-	#[test]
 	fn compression_shrinks_wire_frames() {
 		// A repetitive payload should serialize to fewer wire bytes compressed than plaintext.
 		let value = json!({ "renditions": ["video".repeat(50), "video".repeat(50), "video".repeat(50)] });
 
 		let plaintext_bytes = wire_frame_len(cfg(0), &value);
-		let compressed_bytes = wire_frame_len(cfg_zstd(0), &value);
+		let compressed_bytes = wire_frame_len(cfg_deflate(0), &value);
 		assert!(
 			compressed_bytes < plaintext_bytes,
 			"compressed frame {compressed_bytes} should be smaller than plaintext {plaintext_bytes}"

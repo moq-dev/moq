@@ -2,6 +2,7 @@ import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type * as z from "zod/mini";
 
+import { deflate } from "./compression.ts";
 import { deepEqual, diff } from "./diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
@@ -30,6 +31,12 @@ export interface Config<T> {
 	// Starting value for {@link Producer.mutate} before anything has been published. Required to
 	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
 	initial?: T;
+
+	// Compress each frame independently with `deflate-raw` (RFC 1951), interoperable with the Rust
+	// `moq-json` producer. `false`/unset (the default) writes plaintext JSON frames. A
+	// {@link Consumer} reading the track must set the same flag. The browser deflate exposes no
+	// level or dictionary knobs, so this is a plain on/off toggle.
+	compression?: boolean;
 }
 
 /**
@@ -49,9 +56,18 @@ export class Producer<T> {
 	#track?: Moq.Track;
 	#group?: Moq.Group;
 	#last?: unknown;
-	// Bytes of deltas accumulated in the current group, excluding the snapshot frame.
+	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Always raw
+	// (uncompressed) sizes, even when compressing: the delta-vs-snapshot decision is made
+	// synchronously in `update()`, before the async compression runs.
 	#deltaBytes = 0;
 	#groupFrames = 0;
+
+	// Per-frame `deflate-raw` compression. Compression is async (the platform CompressionStream),
+	// so on the compressed path every track write is serialized through `#chain` to preserve frame
+	// and group order while `update()` stays synchronous. Decisions still run synchronously above.
+	#compress = false;
+	#chain: Promise<void> = Promise.resolve();
+	#failed = false;
 
 	// Fan-out mode: retains the value and serves a child (leaf) Producer per subscriber.
 	#outputs?: Set<Producer<T>>;
@@ -70,6 +86,7 @@ export class Producer<T> {
 			this.#outputs = new Set();
 			this.#value = this.#config.initial;
 		}
+		this.#compress = this.#config.compression ?? false;
 	}
 
 	/** The current value, or `undefined` if nothing has been published yet. */
@@ -110,7 +127,7 @@ export class Producer<T> {
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
-			this.#group.writeFrame(delta);
+			this.#writeFrame(this.#group, delta);
 			this.#deltaBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
@@ -179,9 +196,9 @@ export class Producer<T> {
 			return;
 		}
 
-		this.#group?.close();
+		if (this.#group) this.#closeGroup(this.#group);
 		this.#group = undefined;
-		this.#track.close();
+		this.#closeTrack(this.#track);
 	}
 
 	// Resolved delta ratio: the configured value, or the default when unset. `0` disables deltas.
@@ -208,10 +225,10 @@ export class Producer<T> {
 
 	#snapshot(track: Moq.Track, snapshot: Uint8Array): void {
 		// The previous group is complete; no more frames will be appended to it.
-		this.#group?.close();
+		if (this.#group) this.#closeGroup(this.#group);
 
 		const group = track.appendGroup();
-		group.writeFrame(snapshot);
+		this.#writeFrame(group, snapshot);
 		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
 
@@ -220,8 +237,51 @@ export class Producer<T> {
 			this.#group = group;
 		} else {
 			// Deltas disabled: one frame per group, identical to a plain JSON track.
-			group.close();
+			this.#closeGroup(group);
 			this.#group = undefined;
 		}
+	}
+
+	// Write a frame to `group`. Synchronous when uncompressed; on the compressed path the frame is
+	// deflated and written through `#chain` so frames and groups still land in order.
+	#writeFrame(group: Moq.Group, frame: Uint8Array): void {
+		if (!this.#compress) {
+			group.writeFrame(frame);
+			return;
+		}
+		this.#enqueue(async () => group.writeFrame(await deflate(frame)));
+	}
+
+	// Close `group`, ordered after its pending compressed writes when compressing.
+	#closeGroup(group: Moq.Group): void {
+		if (!this.#compress) {
+			group.close();
+			return;
+		}
+		this.#enqueue(() => group.close());
+	}
+
+	// Close the track, ordered after every pending compressed write when compressing.
+	#closeTrack(track: Moq.Track): void {
+		if (!this.#compress) {
+			track.close();
+			return;
+		}
+		this.#enqueue(() => track.close());
+	}
+
+	// Append an ordered step to the compressed-write pipeline. The first failure tears the track
+	// down and turns later steps into no-ops, mirroring the synchronous path's fail-fast behavior.
+	#enqueue(step: () => Promise<void> | void): void {
+		this.#chain = this.#chain
+			.then(() => {
+				if (!this.#failed) return step();
+			})
+			.catch((err) => {
+				if (this.#failed) return;
+				this.#failed = true;
+				console.warn("dropping json producer after a compressed write failed", err);
+				this.#track?.close();
+			});
 	}
 }

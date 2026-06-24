@@ -1,5 +1,6 @@
 import type * as Moq from "@moq/net";
 import type * as z from "zod/mini";
+import { inflate } from "./compression.ts";
 import { merge } from "./diff.ts";
 import type { Config } from "./producer.ts";
 
@@ -12,6 +13,8 @@ import type { Config } from "./producer.ts";
 export class Consumer<T> {
 	#track: Moq.Track;
 	#schema?: z.ZodMiniType<T>;
+	// Whether frames are `deflate-raw` compressed. Must match the producer's {@link Config.compression}.
+	#decompress: boolean;
 
 	#group?: Moq.Group;
 	#current?: unknown;
@@ -20,6 +23,7 @@ export class Consumer<T> {
 	constructor(track: Moq.Track, config: Config<T> = {}) {
 		this.#track = track;
 		this.#schema = config.schema;
+		this.#decompress = config.compression ?? false;
 	}
 
 	/** Get the next reconstructed value, or `undefined` once the track ends. */
@@ -40,7 +44,7 @@ export class Consumer<T> {
 				continue;
 			}
 
-			return this.#apply(frame);
+			return await this.#apply(frame);
 		}
 	}
 
@@ -52,9 +56,11 @@ export class Consumer<T> {
 		}
 	}
 
-	// Frame 0 of a group is a snapshot, the rest are merge patches.
-	#apply(frame: Uint8Array): T {
-		const parsed = JSON.parse(new TextDecoder().decode(frame));
+	// Frame 0 of a group is a snapshot, the rest are merge patches. Each frame is its own DEFLATE
+	// blob when compressed, so decoding needs no per-group state.
+	async #apply(frame: Uint8Array): Promise<T> {
+		const payload = this.#decompress ? await inflate(frame) : frame;
+		const parsed = JSON.parse(new TextDecoder().decode(payload));
 		if (this.#framesRead === 0) {
 			this.#current = parsed;
 		} else {
