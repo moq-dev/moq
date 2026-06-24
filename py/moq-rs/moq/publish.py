@@ -244,7 +244,7 @@ class BroadcastProducer:
         """Set or replace an untyped application section in the catalog.
 
         `value` is a JSON string that lands as a top-level catalog key alongside
-        `video`/`audio` and reaches subscribers via `Catalog.extra`. `name` must not
+        `video`/`audio` and reaches subscribers via `Catalog.sections`. `name` must not
         be a reserved media section ("video"/"audio"). The catalog is republished
         automatically. Use this to advertise a side-channel track (e.g. a transcript
         or captions track) that the catalog doesn't model natively.

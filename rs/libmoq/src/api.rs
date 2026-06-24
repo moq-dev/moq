@@ -68,6 +68,37 @@ pub struct moq_frame {
 	pub keyframe: bool,
 }
 
+/// A borrowed UTF-8 string slice, NOT NULL terminated.
+///
+/// Used to hand a C caller a JSON document that lives inside libmoq's storage.
+/// The pointer borrows that storage and is only valid until the owning resource
+/// is freed (see the function that fills it for the exact lifetime).
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_string {
+	/// Pointer to `len` bytes of UTF-8, NOT NULL terminated.
+	pub data: *const c_char,
+	pub len: usize,
+}
+
+/// One untyped application catalog section: a name and its JSON value.
+///
+/// Both `name` and `json` are UTF-8, NOT NULL terminated, and borrow the catalog
+/// snapshot's storage. They stay valid until the snapshot is freed with
+/// [moq_consume_catalog_free]. `json` is the section's value serialized as JSON
+/// (parse it yourself); a top-level catalog key beyond `video`/`audio`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_section {
+	/// The section name, NOT NULL terminated.
+	pub name: *const c_char,
+	pub name_len: usize,
+
+	/// The section value as a JSON document, NOT NULL terminated.
+	pub json: *const c_char,
+	pub json_len: usize,
+}
+
 /// Information about a broadcast announced by an origin.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -735,6 +766,57 @@ pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c
 	})
 }
 
+/// Set (or replace) a top-level application catalog section by name.
+///
+/// This is the producer counterpart to [moq_catalog_get_section] /
+/// [moq_catalog_section_at]: it writes an arbitrary top-level JSON key into the
+/// catalog of a broadcast created with [moq_publish_create], beyond the
+/// `video`/`audio` keys owned by the media pipeline. Calling it again with the
+/// same name replaces the section. The updated catalog is published to
+/// subscribers automatically.
+///
+/// `json` is a JSON document (object, array, string, ...) as `json_len` bytes of
+/// UTF-8. Returns a zero on success, or a negative code on failure: invalid JSON
+/// yields a Json error (-37); a reserved `name` (`video`/`audio`) yields a mux error.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must ensure that json is a valid pointer to json_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_catalog_section(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	json: *const c_char,
+	json_len: usize,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let json = unsafe { ffi::parse_str(json, json_len)? };
+		let value: serde_json::Value = serde_json::from_str(json)?;
+		State::lock().publish.catalog_section_set(broadcast, name, value)
+	})
+}
+
+/// Remove a top-level application catalog section by name.
+///
+/// This is a no-op if no section with that name exists. The updated catalog is
+/// published to subscribers automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_remove_catalog_section(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.catalog_section_remove(broadcast, name)
+	})
+}
+
 /// Create a raw track on a broadcast for arbitrary byte payloads.
 ///
 /// Unlike [moq_publish_media_ordered], this is the bare moq-net primitive: no
@@ -916,6 +998,71 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 		let index = index as usize;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.audio_config(catalog, index, dst)
+	})
+}
+
+/// Number of untyped application catalog sections in a catalog snapshot.
+///
+/// These are the top-level catalog keys beyond `video`/`audio`, carried through
+/// verbatim. Iterate them by index with [moq_catalog_section_at], or look one up
+/// directly by name with [moq_catalog_get_section].
+///
+/// Returns the count (>= 0) on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_catalog_section_count(catalog: u32) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		State::lock().consume.catalog_section_count(catalog)
+	})
+}
+
+/// Query an application catalog section by index, keyed by name.
+///
+/// Fills `dst` with the section's name and JSON value at `index`, in the range
+/// `[0, moq_catalog_section_count)`. Both pointers borrow the snapshot's storage
+/// and stay valid until it is freed with [moq_consume_catalog_free].
+///
+/// Returns a zero on success, or a negative code on failure (e.g. `index` out of
+/// range).
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_section] struct.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_catalog_section_at(catalog: u32, index: u32, dst: *mut moq_section) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		let index = index as usize;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.catalog_section_at(catalog, index, dst)
+	})
+}
+
+/// Look up an application catalog section by name.
+///
+/// Fills `dst` with the section's JSON value (the document to parse yourself).
+/// The pointer borrows the snapshot's storage and stays valid until it is freed
+/// with [moq_consume_catalog_free].
+///
+/// Returns a zero on success, or a negative code on failure: no section with that
+/// name yields a not-found error.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_string] struct.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_catalog_get_section(
+	catalog: u32,
+	name: *const c_char,
+	name_len: usize,
+	dst: *mut moq_string,
+) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.catalog_section_get(catalog, name, dst)
 	})
 }
 

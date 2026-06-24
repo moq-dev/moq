@@ -12,4 +12,4 @@ mod ext;
 
 pub use consumer::Consumer;
 pub use container::Container;
-pub use ext::{Catalog, CatalogExt};
+pub use ext::{Catalog, CatalogExt, Extra};

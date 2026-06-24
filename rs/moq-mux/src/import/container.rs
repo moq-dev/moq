@@ -10,28 +10,28 @@ use crate::Result;
 /// The concrete container importers, shared by [`Container`] and
 /// [`ContainerStream`]. Containers parse their own internal framing, so a whole
 /// chunk and a stream chunk decode identically.
-enum ContainerImpl {
+enum ContainerImpl<E: crate::container::ts::catalog::Catalog = ()> {
 	// Boxed because it's a large struct and clippy complains about the size.
-	Fmp4(Box<crate::container::fmp4::Import>),
-	Mkv(Box<crate::container::mkv::Import>),
-	Ts(Box<crate::container::ts::Import>),
-	Flv(Box<crate::container::flv::Import>),
+	Fmp4(Box<crate::container::fmp4::Import<E>>),
+	Mkv(Box<crate::container::mkv::Import<E>>),
+	Ts(Box<crate::container::ts::Import<E>>),
+	Flv(Box<crate::container::flv::Import<E>>),
 }
 
-impl ContainerImpl {
-	fn fmp4(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
+	fn fmp4(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
 	}
 
-	fn mkv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	fn mkv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog)))
 	}
 
-	fn ts(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	fn ts(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog)))
 	}
 
-	fn flv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	fn flv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, catalog)))
 	}
 
@@ -67,15 +67,15 @@ impl ContainerImpl {
 ///
 /// Use this when the caller hands over discrete buffers (the typical case for
 /// files and reassembled network input). May publish more than one track.
-pub struct Container {
-	inner: ContainerImpl,
+pub struct Container<E: crate::container::ts::catalog::Catalog = ()> {
+	inner: ContainerImpl<E>,
 }
 
-impl Container {
+impl<E: crate::container::ts::catalog::Catalog> Container<E> {
 	/// Create a new container importer, decoding the initial chunk.
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
+		catalog: crate::catalog::Producer<E>,
 		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
@@ -110,13 +110,17 @@ impl Container {
 ///
 /// Use this when the caller pushes arbitrary byte chunks and the container
 /// recovers its own framing. May publish more than one track.
-pub struct ContainerStream {
-	inner: ContainerImpl,
+pub struct ContainerStream<E: crate::container::ts::catalog::Catalog = ()> {
+	inner: ContainerImpl<E>,
 }
 
-impl ContainerStream {
+impl<E: crate::container::ts::catalog::Catalog> ContainerStream<E> {
 	/// Create a new container stream importer.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer, format: &str) -> Result<Self> {
+	pub fn new(
+		broadcast: moq_net::BroadcastProducer,
+		catalog: crate::catalog::Producer<E>,
+		format: &str,
+	) -> Result<Self> {
 		// A separate list from [`Container::new`]: only containers that can be
 		// recovered from a raw byte stream belong here. Today that's all of them,
 		// but a non-streamable container (e.g. RTP) would be added to `Container`

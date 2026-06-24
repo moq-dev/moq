@@ -146,6 +146,16 @@ pub enum Error {
 	/// Error from the moq-video codec layer.
 	#[error("video error: {0}")]
 	Video(Arc<moq_video::Error>),
+
+	/// Invalid JSON passed for a catalog section.
+	#[error("json error: {0}")]
+	Json(Arc<serde_json::Error>),
+}
+
+impl From<serde_json::Error> for Error {
+	fn from(err: serde_json::Error) -> Self {
+		Error::Json(Arc::new(err))
+	}
 }
 
 impl From<moq_audio::AudioError> for Error {
@@ -206,6 +216,7 @@ impl ffi::ReturnCode for Error {
 			Error::Unauthorized => -34,
 			Error::Forbidden => -35,
 			Error::Video(_) => -36,
+			Error::Json(_) => -37,
 		}
 	}
 }

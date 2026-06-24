@@ -6,17 +6,18 @@
 //! directly rather than fallibly.
 
 use crate::Result;
+use crate::catalog::hang::CatalogExt;
 
 /// Build an H.264 avc3 split + import pair, resolving the config from `init`.
 ///
 /// The import reads `init` for the codec config; the split then reads it as the
 /// leading bytes of the stream (caching any inline SPS/PPS). Any frames in the
 /// init buffer are published.
-fn build_h264_avc3(
+fn build_h264_avc3<E: CatalogExt>(
 	track: moq_net::TrackProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
-) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import)> {
+) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
 	let mut import = crate::codec::h264::Import::new(track, catalog);
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
@@ -28,11 +29,11 @@ fn build_h264_avc3(
 /// Build an H.264 avc1 import, resolving the config and the NALU length size from
 /// the avcC. avc1 has no splitter: each access unit is wrapped directly via
 /// [`crate::codec::h264::avc1_frame`].
-fn build_h264_avc1(
+fn build_h264_avc1<E: CatalogExt>(
 	track: moq_net::TrackProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
-) -> Result<(usize, crate::codec::h264::Import)> {
+) -> Result<(usize, crate::codec::h264::Import<E>)> {
 	let mut import = crate::codec::h264::Import::new(track, catalog);
 	import.initialize(init)?;
 	let length_size = crate::codec::h264::Avcc::parse(init)?.length_size;
@@ -40,11 +41,11 @@ fn build_h264_avc1(
 }
 
 /// Build an H.265 split + import pair, resolving the config from `init`.
-fn build_h265(
+fn build_h265<E: CatalogExt>(
 	track: moq_net::TrackProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
-) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import)> {
+) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
 	let mut import = crate::codec::h265::Import::new(track, catalog);
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
@@ -54,11 +55,11 @@ fn build_h265(
 }
 
 /// Build an AV1 split + import pair, resolving the config from `init`.
-fn build_av1(
+fn build_av1<E: CatalogExt>(
 	track: moq_net::TrackProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
-) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import)> {
+) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
 	let mut import = crate::codec::av1::Import::new(track, catalog);
 	import.initialize(init)?;
 	let mut split = crate::codec::av1::Split::new();
@@ -74,32 +75,32 @@ fn build_av1(
 	Ok((split, import))
 }
 
-enum TrackKind {
+enum TrackKind<E: CatalogExt = ()> {
 	/// H.264 avc3 (Annex-B, inline SPS/PPS). The split owns byte parsing; the
 	/// import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
-		import: crate::codec::h264::Import,
+		import: crate::codec::h264::Import<E>,
 	},
 	/// H.264 avc1 (length-prefixed NALU, out-of-band avcC). No splitter: each
 	/// access unit is wrapped directly. `length_size` is the NALU length prefix
 	/// width read from the avcC.
 	Avc1 {
 		length_size: usize,
-		import: crate::codec::h264::Import,
+		import: crate::codec::h264::Import<E>,
 	},
 	Hev1 {
 		split: crate::codec::h265::Split,
-		import: crate::codec::h265::Import,
+		import: crate::codec::h265::Import<E>,
 	},
 	Av01 {
 		split: crate::codec::av1::Split,
-		import: crate::codec::av1::Import,
+		import: crate::codec::av1::Import<E>,
 	},
-	Vp8(crate::codec::vp8::Import),
-	Vp9(crate::codec::vp9::Import),
-	Aac(crate::codec::aac::Import),
-	Opus(crate::codec::opus::Import),
+	Vp8(crate::codec::vp8::Import<E>),
+	Vp9(crate::codec::vp9::Import<E>),
+	Aac(crate::codec::aac::Import<E>),
+	Opus(crate::codec::opus::Import<E>),
 }
 
 /// A single-codec importer for whole frames.
@@ -107,11 +108,11 @@ enum TrackKind {
 /// Use this when the caller already has whole frames (the typical case for files
 /// and reassembled network input). Each [`decode`](Self::decode) call takes one
 /// complete frame.
-pub struct Track {
-	kind: TrackKind,
+pub struct Track<E: CatalogExt = ()> {
+	kind: TrackKind<E>,
 }
 
-impl Track {
+impl<E: CatalogExt> Track<E> {
 	/// Create an importer that publishes a single codec onto a reserved track.
 	///
 	/// The caller reserves the track (by name) with
@@ -120,7 +121,7 @@ impl Track {
 	/// The catalog rendition is registered once the codec config is resolved.
 	pub fn new(
 		request: moq_net::TrackRequest,
-		catalog: crate::catalog::Producer,
+		catalog: crate::catalog::Producer<E>,
 		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
@@ -288,36 +289,36 @@ impl Track {
 // Lift an already-built opus importer into a `Track` so callers that build their
 // config out-of-band (e.g. moq-gst, which constructs `opus::Config` from gstreamer
 // caps instead of an OpusHead buffer) can keep using `.into()`.
-impl From<crate::codec::opus::Import> for Track {
-	fn from(opus: crate::codec::opus::Import) -> Self {
+impl<E: CatalogExt> From<crate::codec::opus::Import<E>> for Track<E> {
+	fn from(opus: crate::codec::opus::Import<E>) -> Self {
 		Self {
 			kind: TrackKind::Opus(opus),
 		}
 	}
 }
 
-impl From<crate::codec::aac::Import> for Track {
-	fn from(aac: crate::codec::aac::Import) -> Self {
+impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
+	fn from(aac: crate::codec::aac::Import<E>) -> Self {
 		Self {
 			kind: TrackKind::Aac(aac),
 		}
 	}
 }
 
-enum TrackStreamKind {
+enum TrackStreamKind<E: CatalogExt = ()> {
 	/// H.264 in avc3 wire shape (Annex-B with inline SPS/PPS). The split owns
 	/// byte parsing; the import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
-		import: crate::codec::h264::Import,
+		import: crate::codec::h264::Import<E>,
 	},
 	Hev1 {
 		split: crate::codec::h265::Split,
-		import: crate::codec::h265::Import,
+		import: crate::codec::h265::Import<E>,
 	},
 	Av01 {
 		split: crate::codec::av1::Split,
-		import: crate::codec::av1::Import,
+		import: crate::codec::av1::Import<E>,
 	},
 }
 
@@ -325,18 +326,18 @@ enum TrackStreamKind {
 ///
 /// Use this when the caller does not know the frame boundaries (piped Annex-B
 /// H.264, an fMP4 reader, …); the importer infers them.
-pub struct TrackStream {
-	kind: TrackStreamKind,
+pub struct TrackStream<E: CatalogExt = ()> {
+	kind: TrackStreamKind<E>,
 }
 
-impl TrackStream {
+impl<E: CatalogExt> TrackStream<E> {
 	/// Create an importer that publishes a single codec onto a reserved track.
 	///
 	/// The caller reserves the track with
 	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
 	/// the importer accepts it here at the legacy microsecond timescale (where a
 	/// codec-specific timescale would be chosen).
-	pub fn new(request: moq_net::TrackRequest, catalog: crate::catalog::Producer, format: &str) -> Result<Self> {
+	pub fn new(request: moq_net::TrackRequest, catalog: crate::catalog::Producer<E>, format: &str) -> Result<Self> {
 		let track = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match format {

@@ -1,3 +1,4 @@
+use moq_mux::catalog::hang::Extra;
 use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};
@@ -7,14 +8,14 @@ use crate::{Error, Id, NonZeroSlab};
 enum Media {
 	// Boxed because the codec splitters/imports make this variant much larger
 	// than the (already boxed) container one.
-	Track(Box<import::Track>),
-	Container(import::Container),
+	Track(Box<import::Track<Extra>>),
+	Container(import::Container<Extra>),
 }
 
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
-	broadcasts: NonZeroSlab<(moq_net::BroadcastProducer, moq_mux::catalog::Producer)>,
+	broadcasts: NonZeroSlab<(moq_net::BroadcastProducer, moq_mux::catalog::Producer<Extra>)>,
 
 	/// Active media encoders/decoders for publishing.
 	media: NonZeroSlab<Media>,
@@ -29,7 +30,7 @@ pub struct Publish {
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new_extra(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)
@@ -48,7 +49,7 @@ impl Publish {
 	pub fn pair_mut(
 		&mut self,
 		id: Id,
-	) -> Result<(&mut moq_net::BroadcastProducer, &mut moq_mux::catalog::Producer), Error> {
+	) -> Result<(&mut moq_net::BroadcastProducer, &mut moq_mux::catalog::Producer<Extra>), Error> {
 		let (broadcast, catalog) = self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?;
 		Ok((broadcast, catalog))
 	}
@@ -136,6 +137,25 @@ impl Publish {
 	pub fn audio_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		catalog.lock().audio.remove(name);
+		Ok(())
+	}
+
+	/// Insert or replace a top-level application catalog section by name.
+	///
+	/// `value` is any JSON document. Errors if `name` is reserved (`video`/`audio`).
+	/// The catalog is republished automatically.
+	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog.set_section(name.to_string(), value)?;
+		Ok(())
+	}
+
+	/// Remove a top-level application catalog section by name.
+	///
+	/// A no-op if no section with that name exists. Republishes the catalog if it did.
+	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog.remove_section(name);
 		Ok(())
 	}
 

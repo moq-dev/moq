@@ -36,9 +36,9 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - Opus (`A_OPUS`)
 ///
 /// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
-pub struct Import {
+pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
@@ -69,8 +69,8 @@ struct MkvTrack {
 	last_emitted_ticks: Option<i64>,
 }
 
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -397,7 +397,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 		for track in self.tracks.values() {

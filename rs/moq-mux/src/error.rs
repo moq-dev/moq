@@ -100,6 +100,11 @@ pub enum Error {
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
 	Other(std::sync::Arc<anyhow::Error>),
+
+	/// Tried to set an application catalog section whose name collides with a
+	/// reserved media section (`video`/`audio`).
+	#[error("reserved catalog section: {0}")]
+	ReservedSection(String),
 }
 
 impl From<anyhow::Error> for Error {

@@ -80,6 +80,20 @@ public final class BroadcastProducer: Sendable {
         AudioProducer(try ffi.publishAudio(name: name, input: input, output: output))
     }
 
+    /// Set (or replace) an untyped application catalog section by name.
+    ///
+    /// `json` is any JSON document as a string; it rides alongside `video`/`audio` and reaches
+    /// subscribers via `Catalog.sections`. `name` must not be a reserved media section
+    /// (`video`/`audio`). The catalog is republished automatically.
+    public func setCatalogSection(name: String, json: String) throws {
+        try ffi.setCatalogSection(name: name, json: json)
+    }
+
+    /// Remove an untyped application catalog section by name. A no-op if it was absent.
+    public func removeCatalogSection(name: String) throws {
+        try ffi.removeCatalogSection(name: name)
+    }
+
     /// Finish the broadcast, finalizing the catalog stream.
     public func finish() throws {
         try ffi.finish()

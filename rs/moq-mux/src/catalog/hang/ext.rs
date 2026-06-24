@@ -31,6 +31,60 @@ pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + Un
 
 impl CatalogExt for () {}
 
+/// The untyped catalog extension: arbitrary top-level JSON sections beyond the base
+/// `video`/`audio` media sections, captured and republished verbatim.
+///
+/// This is the extension a caller reaches for when the section names aren't known at
+/// compile time, e.g. across the FFI/C boundary where a typed [`CatalogExt`] struct can't
+/// cross. Publish/consume a [`Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
+/// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
+///
+/// `video` and `audio` are reserved for the base media sections, so [`set`](Self::set)
+/// rejects them to keep the wire JSON free of duplicate keys.
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+#[serde(transparent)]
+pub struct Extra(serde_json::Map<String, serde_json::Value>);
+
+impl CatalogExt for Extra {}
+
+impl Extra {
+	/// Look up a section by name.
+	pub fn get(&self, name: &str) -> Option<&serde_json::Value> {
+		self.0.get(name)
+	}
+
+	/// Iterate over every section as `(name, value)` pairs, sorted by name.
+	pub fn iter(&self) -> impl Iterator<Item = (&String, &serde_json::Value)> {
+		self.0.iter()
+	}
+
+	/// The number of sections.
+	pub fn len(&self) -> usize {
+		self.0.len()
+	}
+
+	/// Whether there are no sections.
+	pub fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+
+	/// Set (or replace) a section. Errors if `name` collides with a reserved media
+	/// section (`video`/`audio`).
+	pub fn set(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
+		let name = name.into();
+		if matches!(name.as_str(), "video" | "audio") {
+			return Err(crate::Error::ReservedSection(name));
+		}
+		self.0.insert(name, value);
+		Ok(())
+	}
+
+	/// Remove a section, returning its previous value if present.
+	pub fn remove(&mut self, name: &str) -> Option<serde_json::Value> {
+		self.0.remove(name)
+	}
+}
+
 /// The base media sections plus an application extension `E` (defaulting to `()` for none),
 /// serialized as a flat union: the `video`/`audio` sections and the extension's sections share one
 /// JSON object on the wire.
@@ -58,6 +112,18 @@ impl<E: CatalogExt> Catalog<E> {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
 		}
+	}
+}
+
+impl Catalog<Extra> {
+	/// Look up an application catalog section by name, returning its raw JSON value.
+	pub fn section(&self, name: &str) -> Option<&serde_json::Value> {
+		self.ext.get(name)
+	}
+
+	/// Iterate over the application catalog sections as `(name, value)` pairs.
+	pub fn sections(&self) -> impl Iterator<Item = (&String, &serde_json::Value)> {
+		self.ext.iter()
 	}
 }
 
@@ -122,5 +188,41 @@ mod test {
 		let catalog = latest.expect("catalog published");
 		assert!(catalog.audio.renditions.contains_key("audio0"));
 		assert_eq!(catalog.scte35, Some(Scte35 { splice_id: 42 }));
+	}
+
+	#[test]
+	fn untyped_extra_roundtrip() {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut producer = crate::catalog::Producer::new_extra(&mut broadcast).unwrap();
+		let mut consumer = producer.consume().unwrap();
+
+		// A media section (flat field) coexists with an arbitrary untyped application section.
+		producer.lock().audio.renditions.insert(
+			"audio0".to_string(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		producer
+			.set_section("transcript", serde_json::json!({ "track": "transcript.json" }))
+			.unwrap();
+
+		// Reserved media keys can't be smuggled in as application sections.
+		assert!(matches!(
+			producer.set_section("video", serde_json::json!({})),
+			Err(crate::Error::ReservedSection(_))
+		));
+
+		let waiter = kio::Waiter::noop();
+		let mut latest = None;
+		while let Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
+			latest = Some(catalog);
+		}
+
+		let catalog = latest.expect("catalog published");
+		assert!(catalog.audio.renditions.contains_key("audio0"));
+		assert_eq!(
+			catalog.section("transcript"),
+			Some(&serde_json::json!({ "track": "transcript.json" }))
+		);
+		assert_eq!(catalog.sections().count(), 1);
 	}
 }

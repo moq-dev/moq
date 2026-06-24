@@ -24,12 +24,12 @@ use crate::Result;
 /// **Audio:**
 /// - AAC (MP4A)
 /// - Opus
-pub struct Import {
+pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::BroadcastProducer,
 
 	/// The catalog being produced
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
@@ -71,11 +71,11 @@ struct Fmp4Track {
 	pending_sequence: Option<u64>,
 }
 
-impl Import {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			catalog,
 			tracks: HashMap::default(),
@@ -653,7 +653,7 @@ impl Import {
 	}
 }
 
-impl Import {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
@@ -680,7 +680,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 

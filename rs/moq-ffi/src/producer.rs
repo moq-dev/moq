@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use moq_mux::catalog::hang::Extra;
+
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -53,11 +55,13 @@ impl TryFrom<MoqTrackInfo> for moq_net::TrackInfo {
 
 pub(crate) struct BroadcastProducer {
 	pub(crate) broadcast: moq_net::BroadcastProducer,
-	pub(crate) catalog: moq_mux::catalog::Producer,
+	// Carries the untyped `Extra` extension so callers can attach application catalog
+	// sections by name (the only extension shape that crosses the FFI boundary).
+	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
 }
 
 struct MediaProducer {
-	decoder: moq_mux::import::Track,
+	decoder: moq_mux::import::Track<Extra>,
 	demand: moq_net::TrackDemand,
 }
 
@@ -66,8 +70,8 @@ struct MediaProducer {
 enum StreamDecoder {
 	// Boxed because the codec splitter/import make this variant much larger than
 	// the (already boxed) container one.
-	Track(Box<moq_mux::import::TrackStream>),
-	Container(moq_mux::import::ContainerStream),
+	Track(Box<moq_mux::import::TrackStream<Extra>>),
+	Container(moq_mux::import::ContainerStream<Extra>),
 }
 
 struct MediaStreamProducer {
@@ -160,10 +164,33 @@ impl MoqBroadcastProducer {
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new_extra(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
+	}
+
+	/// Set (or replace) a top-level application catalog section by name.
+	///
+	/// `json` is any JSON document (object, array, string, ...) serialized as a UTF-8 string.
+	/// Errors with [`MoqError::Json`] if `json` doesn't parse, or with the reserved-section
+	/// error if `name` is `video`/`audio` (owned by the media pipeline). The section is
+	/// republished on the catalog track immediately.
+	pub fn set_catalog_section(&self, name: String, json: String) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let value: serde_json::Value = serde_json::from_str(&json)?;
+		self.with_state(|state| Ok(state.catalog.set_section(name, value)?))
+	}
+
+	/// Remove a top-level application catalog section by name.
+	///
+	/// Republishes the catalog if the section existed; a no-op otherwise.
+	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		self.with_state(|state| {
+			state.catalog.remove_section(&name);
+			Ok(())
+		})
 	}
 
 	/// Create a new media track for this broadcast.

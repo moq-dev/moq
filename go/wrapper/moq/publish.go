@@ -71,6 +71,20 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
+// SetCatalogSection sets (or replaces) an untyped application catalog section by
+// name. json is any JSON document as a string; it rides alongside video/audio and
+// reaches subscribers via Catalog.Sections. name must not be a reserved media
+// section ("video"/"audio"). The catalog is republished automatically.
+func (b *BroadcastProducer) SetCatalogSection(name string, json string) error {
+	return b.inner.SetCatalogSection(name, json)
+}
+
+// RemoveCatalogSection removes an untyped application catalog section by name. It
+// is a no-op if the section was absent.
+func (b *BroadcastProducer) RemoveCatalogSection(name string) error {
+	return b.inner.RemoveCatalogSection(name)
+}
+
 // Finish closes the broadcast.
 func (b *BroadcastProducer) Finish() error {
 	return b.inner.Finish()

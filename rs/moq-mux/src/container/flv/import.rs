@@ -43,9 +43,9 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 /// `ffmpeg -f flv`. Unsupported codecs, plus `onMetaData` script tags, are logged
 /// and dropped. A single FLV stream carries at most one video and one audio
 /// track; a new sequence header replaces the previous configuration.
-pub struct Import {
+pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
@@ -70,9 +70,9 @@ struct AudioStream {
 	config: AudioConfig,
 }
 
-impl Import {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -421,7 +421,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 		if let Some(stream) = &self.video {

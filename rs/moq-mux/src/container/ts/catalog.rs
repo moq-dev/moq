@@ -164,6 +164,14 @@ impl Catalog for () {
 	}
 }
 
+// The untyped passthrough carries no typed mpegts section (a TS importer driving an `Extra`
+// catalog records verbatim streams as raw JSON sections, not the typed `Mpegts` view).
+impl Catalog for crate::catalog::hang::Extra {
+	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
+		None
+	}
+}
+
 impl Catalog for Ext {
 	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
 		Some(&mut self.mpegts)

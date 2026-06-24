@@ -74,7 +74,7 @@ async for announcement in client.announced("prefix/"):
 
 ### Catalog extensions
 
-Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON string; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.extra`.
+Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON string; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.
 
 ```python
 import json
@@ -86,8 +86,8 @@ client.publish("my-stream", broadcast)
 
 # Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
 catalog = await announcement.broadcast.catalog()
-if "transcript" in catalog.extra:
-    info = json.loads(catalog.extra["transcript"])
+if "transcript" in catalog.sections:
+    info = json.loads(catalog.sections["transcript"])
 ```
 
 `"video"` and `"audio"` are reserved names. Remove a section with `broadcast.remove_catalog_section("transcript")`.

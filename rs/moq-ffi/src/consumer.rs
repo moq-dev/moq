@@ -64,7 +64,9 @@ pub struct MoqCatalogConsumer {
 }
 
 struct Catalog {
-	inner: moq_mux::catalog::hang::Consumer,
+	// Consume with the untyped `Extra` extension so application sections survive into
+	// `MoqCatalog.sections` instead of being dropped.
+	inner: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
 }
 
 impl Catalog {

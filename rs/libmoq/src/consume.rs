@@ -2,16 +2,22 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
+use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_string, moq_video_config};
 
 struct ConsumeCatalog {
 	broadcast: moq_net::BroadcastConsumer,
 
-	catalog: moq_mux::catalog::hang::Catalog,
+	// Carries the untyped `Extra` extension so application catalog sections survive
+	// into `moq_catalog_section_*` instead of being dropped on parse.
+	catalog: moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>,
 
 	/// We need to store the codec information on the heap unfortunately.
 	audio_codec: Vec<String>,
 	video_codec: Vec<String>,
+
+	/// Section names and their JSON, serialized on the heap so the section iterator
+	/// and direct-lookup APIs can hand C borrowed pointers into stable storage.
+	sections: Vec<(String, String)>,
 }
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
@@ -90,7 +96,7 @@ impl Consume {
 	async fn run_catalog(
 		callback: OnStatus,
 		broadcast: moq_net::BroadcastConsumer,
-		mut catalog: moq_mux::catalog::hang::Consumer,
+		mut catalog: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -121,11 +127,19 @@ impl Consume {
 				.map(|config| config.codec.to_string())
 				.collect();
 
+			// Serialize the untyped application sections to owned strings so the
+			// C section APIs can borrow stable pointers from the snapshot.
+			let sections = update
+				.sections()
+				.map(|(name, value)| (name.clone(), value.to_string()))
+				.collect();
+
 			let snapshot = ConsumeCatalog {
 				broadcast: broadcast.clone(),
 				catalog: update,
 				audio_codec,
 				video_codec,
+				sections,
 			};
 
 			// Hold the lock only to buffer the snapshot; release it before the callback.
@@ -197,6 +211,47 @@ impl Consume {
 			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
 			sample_rate: config.sample_rate,
 			channel_count: config.channel_count,
+		};
+
+		Ok(())
+	}
+
+	/// Number of untyped application catalog sections in this snapshot.
+	pub fn catalog_section_count(&self, catalog: Id) -> Result<usize, Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		Ok(consume.sections.len())
+	}
+
+	/// Fill `dst` with the section at `index` (name + JSON value). The pointers
+	/// borrow the snapshot and stay valid until it is freed.
+	pub fn catalog_section_at(&self, catalog: Id, index: usize, dst: &mut moq_section) -> Result<(), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (name, json) = consume.sections.get(index).ok_or(Error::NoIndex)?;
+
+		*dst = moq_section {
+			name: name.as_ptr() as *const c_char,
+			name_len: name.len(),
+			json: json.as_ptr() as *const c_char,
+			json_len: json.len(),
+		};
+
+		Ok(())
+	}
+
+	/// Fill `dst` with the JSON value of the section named `name`. The pointer
+	/// borrows the snapshot and stays valid until it is freed. Errors with
+	/// [`Error::NotFound`] if no section with that name exists.
+	pub fn catalog_section_get(&self, catalog: Id, name: &str, dst: &mut moq_string) -> Result<(), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (_, json) = consume
+			.sections
+			.iter()
+			.find(|(section, _)| section == name)
+			.ok_or(Error::NotFound)?;
+
+		*dst = moq_string {
+			data: json.as_ptr() as *const c_char,
+			len: json.len(),
 		};
 
 		Ok(())

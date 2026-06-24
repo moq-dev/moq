@@ -27,6 +27,9 @@ pub enum MoqError {
 	#[error(transparent)]
 	Task(#[from] tokio::task::JoinError),
 
+	#[error("json: {0}")]
+	Json(#[from] serde_json::Error),
+
 	#[error("cancelled")]
 	Cancelled,
 

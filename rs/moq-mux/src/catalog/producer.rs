@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
 
-use super::hang::{Catalog, CatalogExt, Consumer};
+use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 
 /// Produces both a hang and MSF catalog track for a broadcast.
 ///
@@ -50,6 +50,33 @@ impl Producer<()> {
 	/// To publish an extended catalog, use [`with_catalog`](Self::with_catalog) with a `Catalog<E>`.
 	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, Catalog::default())
+	}
+}
+
+impl Producer<Extra> {
+	/// Create a catalog producer carrying the untyped [`Extra`] extension, so application
+	/// sections can be set later via [`set_section`](Self::set_section). This is the entry
+	/// point for callers that work with sections by name (e.g. the FFI boundary); for a typed
+	/// extension use [`with_catalog`](Self::with_catalog) with a `Catalog<YourExt>`.
+	pub fn new_extra(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
+		Self::with_catalog(broadcast, Catalog::default())
+	}
+
+	/// Set (or replace) a top-level application catalog section, publishing the updated catalog.
+	///
+	/// `value` is any JSON document (object, array, string, ...). Errors if `name` collides with a
+	/// reserved media section (`video`/`audio`). This is the untyped counterpart to mutating a
+	/// typed extension through [`lock`](Self::lock), used where section names aren't known at
+	/// compile time (e.g. across the FFI boundary).
+	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
+		self.lock().set_section(name, value)
+	}
+
+	/// Remove a top-level application catalog section, publishing the updated catalog if it existed.
+	///
+	/// Returns the section's previous value, or `None` if it was absent.
+	pub fn remove_section(&mut self, name: &str) -> Option<serde_json::Value> {
+		self.lock().remove_section(name)
 	}
 }
 
@@ -154,6 +181,28 @@ impl<E: CatalogExt> DerefMut for Guard<'_, E> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.updated = true;
 		&mut self.catalog
+	}
+}
+
+impl Guard<'_, Extra> {
+	/// Set (or replace) a top-level application catalog section, republished on drop.
+	///
+	/// Errors if `name` collides with a reserved media section (`video`/`audio`).
+	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
+		self.catalog.ext.set(name, value)?;
+		self.updated = true;
+		Ok(())
+	}
+
+	/// Remove a top-level application catalog section, republished on drop if it existed.
+	///
+	/// Returns the section's previous value, or `None` if it was absent.
+	pub fn remove_section(&mut self, name: &str) -> Option<serde_json::Value> {
+		let removed = self.catalog.ext.remove(name);
+		if removed.is_some() {
+			self.updated = true;
+		}
+		removed
 	}
 }
 

@@ -327,6 +327,158 @@ fn publish_catalog_roundtrip() {
 }
 
 #[test]
+fn catalog_section_roundtrip() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	// Set two untyped application sections on the publish-side catalog.
+	let name_a = b"viewers";
+	let json_a = br#"{"count":42}"#;
+	assert_eq!(
+		unsafe {
+			moq_publish_catalog_section(
+				broadcast,
+				name_a.as_ptr() as *const c_char,
+				name_a.len(),
+				json_a.as_ptr() as *const c_char,
+				json_a.len(),
+			)
+		},
+		0
+	);
+
+	let name_b = b"title";
+	let json_b = br#""hello world""#;
+	assert_eq!(
+		unsafe {
+			moq_publish_catalog_section(
+				broadcast,
+				name_b.as_ptr() as *const c_char,
+				name_b.len(),
+				json_b.as_ptr() as *const c_char,
+				json_b.len(),
+			)
+		},
+		0
+	);
+
+	// A reserved section name (video/audio) is rejected.
+	let reserved = b"video";
+	let empty = b"{}";
+	assert!(
+		unsafe {
+			moq_publish_catalog_section(
+				broadcast,
+				reserved.as_ptr() as *const c_char,
+				reserved.len(),
+				empty.as_ptr() as *const c_char,
+				empty.len(),
+			)
+		} < 0,
+		"reserved section name should fail"
+	);
+
+	// Invalid JSON is rejected with the Json error code (-37).
+	let bad = b"not json";
+	assert_eq!(
+		unsafe {
+			moq_publish_catalog_section(
+				broadcast,
+				name_a.as_ptr() as *const c_char,
+				name_a.len(),
+				bad.as_ptr() as *const c_char,
+				bad.len(),
+			)
+		},
+		-37,
+		"invalid JSON should return the Json error code"
+	);
+
+	// Publish and consume to verify the sections survive the wire.
+	let path = b"catalog-sections";
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	// Both sections come back; iterate by index to find each by name.
+	let count = moq_catalog_section_count(catalog_id);
+	assert_eq!(count, 2, "expected two sections, got {count}");
+
+	let mut found_a = false;
+	let mut found_b = false;
+	for index in 0..count as u32 {
+		let mut section = moq_section {
+			name: std::ptr::null(),
+			name_len: 0,
+			json: std::ptr::null(),
+			json_len: 0,
+		};
+		assert_eq!(unsafe { moq_catalog_section_at(catalog_id, index, &mut section) }, 0);
+		let name = unsafe { std::slice::from_raw_parts(section.name.cast::<u8>(), section.name_len) };
+		let json = unsafe { std::slice::from_raw_parts(section.json.cast::<u8>(), section.json_len) };
+		match name {
+			n if n == name_a => {
+				found_a = true;
+				assert_eq!(json, json_a);
+			}
+			n if n == name_b => {
+				found_b = true;
+				assert_eq!(json, json_b);
+			}
+			other => panic!("unexpected section name: {:?}", std::str::from_utf8(other)),
+		}
+	}
+	assert!(found_a && found_b, "both sections should be present");
+
+	// Direct lookup by name returns the JSON value.
+	let mut value = moq_string {
+		data: std::ptr::null(),
+		len: 0,
+	};
+	assert_eq!(
+		unsafe { moq_catalog_get_section(catalog_id, name_a.as_ptr() as *const c_char, name_a.len(), &mut value) },
+		0
+	);
+	let got = unsafe { std::slice::from_raw_parts(value.data.cast::<u8>(), value.len) };
+	assert_eq!(got, json_a);
+
+	// A missing section fails.
+	let missing = b"nope";
+	assert!(
+		unsafe { moq_catalog_get_section(catalog_id, missing.as_ptr() as *const c_char, missing.len(), &mut value) }
+			< 0,
+		"missing section should fail"
+	);
+
+	// Removing a section republishes the catalog without it.
+	assert_eq!(
+		unsafe { moq_remove_catalog_section(broadcast, name_a.as_ptr() as *const c_char, name_a.len()) },
+		0
+	);
+	let catalog_id2 = id(catalog_cb.recv());
+	assert_eq!(
+		moq_catalog_section_count(catalog_id2),
+		1,
+		"one section should remain after remove"
+	);
+	assert!(
+		unsafe { moq_catalog_get_section(catalog_id2, name_a.as_ptr() as *const c_char, name_a.len(), &mut value) } < 0,
+		"removed section should be gone"
+	);
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn publish_track_invalid_broadcast() {
 	let name = b"data";
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len()) } < 0);

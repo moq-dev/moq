@@ -137,7 +137,7 @@ impl From<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
-	inner: std::sync::Mutex<Option<moq_audio::AudioProducer>>,
+	inner: std::sync::Mutex<Option<moq_audio::AudioProducer<moq_mux::catalog::hang::Extra>>>,
 }
 
 #[uniffi::export]
