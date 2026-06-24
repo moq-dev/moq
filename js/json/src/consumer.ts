@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/net";
 import type * as z from "zod/mini";
-import { inflate } from "./compression.ts";
+import { Decoder } from "./compression.ts";
 import { merge } from "./diff.ts";
 import type { Config } from "./producer.ts";
 
@@ -17,6 +17,8 @@ export class Consumer<T> {
 	#decompress: boolean;
 
 	#group?: Moq.Group;
+	// Per-group DEFLATE decoder, built lazily on the first frame of a group and reset at each boundary.
+	#decoder?: Decoder;
 	#current?: unknown;
 	#framesRead = 0;
 
@@ -35,6 +37,8 @@ export class Consumer<T> {
 				if (!this.#group) return undefined;
 				this.#current = undefined;
 				this.#framesRead = 0;
+				// Each group is its own compressed stream, so start a fresh decoder.
+				this.#decoder = undefined;
 			}
 
 			const frame = await this.#group.readFrame();
@@ -56,10 +60,14 @@ export class Consumer<T> {
 		}
 	}
 
-	// Frame 0 of a group is a snapshot, the rest are merge patches. Each frame is its own DEFLATE
-	// blob when compressed, so decoding needs no per-group state.
+	// Frame 0 of a group is a snapshot, the rest are merge patches. When compressed, frames share one
+	// per-group DEFLATE stream, so they decode in order through a decoder built on the group's first frame.
 	async #apply(frame: Uint8Array): Promise<T> {
-		const payload = this.#decompress ? await inflate(frame) : frame;
+		let payload = frame;
+		if (this.#decompress) {
+			this.#decoder ??= await Decoder.create();
+			payload = this.#decoder.frame(frame);
+		}
 		const parsed = JSON.parse(new TextDecoder().decode(payload));
 		if (this.#framesRead === 0) {
 			this.#current = parsed;

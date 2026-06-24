@@ -1,24 +1,44 @@
-//! Per-frame DEFLATE compression for the JSON frame stream.
+//! Group-scoped DEFLATE compression for the JSON frame stream.
 //!
-//! Each frame payload is compressed on its own as a raw DEFLATE ([RFC 1951]) blob, the same
-//! format the browser's `CompressionStream("deflate-raw")` produces and consumes. That keeps a
-//! Rust producer and a browser (`@moq/json`) consumer interoperable on the wire, at the cost of
-//! no cross-frame context: each frame compresses in isolation, so snapshots and large frames
-//! shrink well while tiny deltas barely benefit.
+//! Within a group the frame payloads form a single raw DEFLATE ([RFC 1951]) stream, sync-flushed
+//! at each frame boundary so every frame carries its own self-delimited slice while later frames
+//! reuse the earlier ones as context (a snapshot followed by deltas compresses far better than
+//! each frame alone). The [`Encoder`]/[`Decoder`] hold that per-group state; both are recreated at
+//! every group boundary.
+//!
+//! This is plain raw DEFLATE with a `Z_SYNC_FLUSH` after each frame, so a browser (`@moq/json`)
+//! peer interoperates on the wire using the same primitive (zlib's sync flush). The window is at
+//! most 32 KiB, so a single frame can't inflate without bound, and [`Decoder::frame`] additionally
+//! caps each frame's output.
+//!
+//! A sync flush always ends in the 4-byte empty-block marker `00 00 ff ff`. That marker is fixed,
+//! so [`Encoder::frame`] drops it from each slice and [`Decoder::frame`] re-appends it before
+//! inflating, saving 4 bytes per frame. This is the same trick [RFC 7692] (permessage-deflate)
+//! uses for WebSocket messages.
 //!
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951.html
-
-use std::io::{Read, Write};
+//! [RFC 7692]: https://www.rfc-editor.org/rfc/rfc7692.html#section-7.2.1
 
 use bytes::Bytes;
-use flate2::read::DeflateDecoder;
-use flate2::write::DeflateEncoder;
+use flate2::{Compress, Decompress, FlushCompress, FlushDecompress, Status};
 
 use crate::{Error, Result};
 
-/// Default DEFLATE level: zlib's own default, a good size/speed balance for the small,
-/// repetitive payloads this targets.
+/// Default DEFLATE level: zlib's own default, a good size/speed balance for the small, repetitive
+/// payloads this targets.
 const DEFAULT_LEVEL: u32 = 6;
+
+/// The trailing bytes of a DEFLATE sync flush, stripped on the wire and re-appended to decode.
+const SYNC_FLUSH_TAIL: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
+
+/// Maximum decompressed size of a single frame.
+///
+/// A malicious publisher could otherwise send a tiny slice that inflates hugely, so
+/// [`Decoder::frame`] stops and returns [`Error::TooLarge`] rather than allocating without limit.
+const MAX_DECOMPRESSED_FRAME: u64 = 64 * 1024 * 1024;
+
+/// Scratch buffer size for the streaming (de)compress loops.
+const CHUNK: usize = 8 * 1024;
 
 /// A DEFLATE compression level in the valid `0..=9` range.
 ///
@@ -47,15 +67,6 @@ impl Default for Level {
 	}
 }
 
-/// Maximum decompressed size of a single frame.
-///
-/// A malicious publisher could otherwise send a tiny slice that inflates hugely, so
-/// [`decompress`] stops and returns [`Error::TooLarge`] rather than allocating without limit.
-const MAX_DECOMPRESSED_FRAME: u64 = 64 * 1024 * 1024;
-
-/// Scratch buffer size for the streaming decompress loop.
-const CHUNK: usize = 8 * 1024;
-
 /// DEFLATE compression settings for a JSON track.
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
@@ -73,69 +84,133 @@ pub struct Compression {
 }
 
 impl Compression {
-	/// Compress one frame `payload` into a standalone raw DEFLATE blob.
+	/// Start a fresh per-group encoder with a cold window.
+	pub(crate) fn encoder(&self) -> Encoder {
+		// `false`: raw DEFLATE, no zlib header/trailer, matching `deflate-raw` on the browser side.
+		Encoder(Compress::new(flate2::Compression::new(self.level.get()), false))
+	}
+}
+
+/// Encodes a group's frame payloads into one shared DEFLATE stream, one self-delimited slice per
+/// frame. Hold one per group; the stream is recreated at each group boundary.
+pub(crate) struct Encoder(Compress);
+
+impl Encoder {
+	/// Compress the next frame's `payload`, returning its slice of the group stream.
 	///
-	/// An empty payload yields an empty slice (compressing nothing).
-	pub(crate) fn compress(&self, payload: &[u8]) -> Bytes {
+	/// An empty payload contributes nothing and yields an empty slice. Later frames reuse earlier
+	/// ones as context, so slices must be produced (and later decoded) in frame order.
+	pub(crate) fn frame(&mut self, payload: &[u8]) -> Bytes {
 		if payload.is_empty() {
 			return Bytes::new();
 		}
 
-		let level = flate2::Compression::new(self.level.get());
-		let mut encoder = DeflateEncoder::new(Vec::with_capacity(payload.len() / 2 + 16), level);
-		encoder.write_all(payload).expect("deflate write");
-		Bytes::from(encoder.finish().expect("deflate finish"))
+		let mut out = Vec::with_capacity(payload.len() / 2 + 16);
+		let mut tmp = [0u8; CHUNK];
+		let mut input = payload;
+
+		// Drive the stream with a sync flush so this frame's slice is self-delimited (byte-aligned,
+		// window retained). The classic zlib loop: keep going while the output buffer fills up.
+		loop {
+			let before_in = self.0.total_in();
+			let before_out = self.0.total_out();
+			self.0.compress(input, &mut tmp, FlushCompress::Sync).expect("deflate");
+			let consumed = (self.0.total_in() - before_in) as usize;
+			let produced = (self.0.total_out() - before_out) as usize;
+			out.extend_from_slice(&tmp[..produced]);
+			input = &input[consumed..];
+			if produced < tmp.len() {
+				break;
+			}
+		}
+
+		// Drop the fixed sync-flush marker; the decoder re-appends it (see the module docs).
+		debug_assert!(
+			out.ends_with(&SYNC_FLUSH_TAIL),
+			"a sync flush must end in the deflate marker"
+		);
+		out.truncate(out.len() - SYNC_FLUSH_TAIL.len());
+		Bytes::from(out)
 	}
 }
 
-/// Decompress one frame `slice` back into its raw DEFLATE payload.
-///
-/// An empty slice yields an empty payload. Returns [`Error::TooLarge`] if the frame inflates past
-/// the per-frame bound, and [`Error::Decompress`] on malformed or truncated input.
-pub(crate) fn decompress(slice: &[u8]) -> Result<Bytes> {
-	if slice.is_empty() {
-		return Ok(Bytes::new());
+/// Decodes a group's frame slices back into the original payloads. Hold one per group; feed slices
+/// in frame order (each frame builds on the earlier ones).
+pub(crate) struct Decoder(Decompress);
+
+impl Decoder {
+	/// Start a fresh per-group decoder with a cold window.
+	pub(crate) fn new() -> Self {
+		// `false`: raw DEFLATE, matching the encoder.
+		Self(Decompress::new(false))
 	}
 
-	let mut decoder = DeflateDecoder::new(slice);
-	// `slice.len()` is publisher-controlled, so cap the initial guess at the per-frame ceiling: a
-	// huge compressed frame can't force a huge allocation before the streaming guard below runs.
-	let initial_capacity = slice
-		.len()
-		.saturating_mul(2)
-		.saturating_add(16)
-		.min(MAX_DECOMPRESSED_FRAME as usize);
-	let mut out = Vec::with_capacity(initial_capacity);
-	let mut tmp = [0u8; CHUNK];
+	/// Decompress the next frame's `slice` back into its payload.
+	///
+	/// An empty slice yields an empty payload. Returns [`Error::TooLarge`] if the frame inflates
+	/// past the per-frame bound, and [`Error::Decompress`] on malformed input.
+	pub(crate) fn frame(&mut self, slice: &[u8]) -> Result<Bytes> {
+		if slice.is_empty() {
+			return Ok(Bytes::new());
+		}
 
-	loop {
-		let n = decoder.read(&mut tmp).map_err(|_| Error::Decompress)?;
-		if n == 0 {
-			break;
+		let initial = slice
+			.len()
+			.saturating_mul(2)
+			.saturating_add(16)
+			.min(MAX_DECOMPRESSED_FRAME as usize);
+		let mut out = Vec::with_capacity(initial);
+		let mut tmp = [0u8; CHUNK];
+
+		// Feed the wire slice followed by the re-appended sync-flush marker, which delimits the frame
+		// and flushes its last bytes out of the inflate buffer.
+		for segment in [slice, &SYNC_FLUSH_TAIL] {
+			let mut input = segment;
+			loop {
+				let before_in = self.0.total_in();
+				let before_out = self.0.total_out();
+				let status = self
+					.0
+					.decompress(input, &mut tmp, FlushDecompress::Sync)
+					.map_err(|_| Error::Decompress)?;
+				let consumed = (self.0.total_in() - before_in) as usize;
+				let produced = (self.0.total_out() - before_out) as usize;
+				if out.len() as u64 + produced as u64 > MAX_DECOMPRESSED_FRAME {
+					return Err(Error::TooLarge(MAX_DECOMPRESSED_FRAME));
+				}
+				out.extend_from_slice(&tmp[..produced]);
+				input = &input[consumed..];
+
+				// Move to the next segment once this one is drained and the buffer wasn't saturated. The
+				// no-progress guard avoids spinning when the marker needs no further output.
+				if matches!(status, Status::StreamEnd) || (input.is_empty() && produced < tmp.len()) {
+					break;
+				}
+				if consumed == 0 && produced == 0 {
+					break;
+				}
+			}
 		}
-		if out.len() as u64 + n as u64 > MAX_DECOMPRESSED_FRAME {
-			return Err(Error::TooLarge(MAX_DECOMPRESSED_FRAME));
-		}
-		out.extend_from_slice(&tmp[..n]);
+
+		Ok(Bytes::from(out))
 	}
-
-	Ok(Bytes::from(out))
 }
 
 #[cfg(test)]
 mod test {
 	use super::*;
 
-	/// Round-trip a sequence of frames, each compressed and decompressed independently.
+	/// Round-trip a sequence of frames through a group encoder/decoder pair.
 	fn roundtrip(config: &Compression, frames: &[&[u8]]) -> Vec<Vec<u8>> {
-		frames
-			.iter()
-			.map(|f| decompress(&config.compress(f)).unwrap().to_vec())
-			.collect()
+		let mut enc = config.encoder();
+		let slices: Vec<Bytes> = frames.iter().map(|f| enc.frame(f)).collect();
+
+		let mut dec = Decoder::new();
+		slices.iter().map(|s| dec.frame(s).unwrap().to_vec()).collect()
 	}
 
 	#[test]
-	fn frame_roundtrip() {
+	fn group_roundtrip() {
 		let frames: &[&[u8]] = &[b"the quick brown fox", b"the quick brown dog", b"the lazy fox"];
 		let got = roundtrip(&Compression::default(), frames);
 		for (a, b) in frames.iter().zip(&got) {
@@ -144,24 +219,38 @@ mod test {
 	}
 
 	#[test]
-	fn empty_frame_roundtrips() {
-		assert!(Compression::default().compress(b"").is_empty());
-		assert!(decompress(b"").unwrap().is_empty());
+	fn empty_frames_roundtrip() {
+		let frames: &[&[u8]] = &[b"", b"hello", b"", b"world"];
+		let got = roundtrip(&Compression::default(), frames);
+		assert_eq!(
+			got,
+			vec![b"".to_vec(), b"hello".to_vec(), b"".to_vec(), b"world".to_vec()]
+		);
 	}
 
 	#[test]
-	fn repetitive_payload_shrinks() {
-		// A payload with lots of internal redundancy compresses well even on its own.
+	fn large_frame_roundtrips() {
+		// A frame larger than the scratch buffer exercises the multi-iteration (de)compress loops.
+		let payload = b"abcdefghij".repeat(4096); // 40 KiB, > CHUNK
+		let got = roundtrip(&Compression::default(), &[&payload]);
+		assert_eq!(got[0], payload);
+	}
+
+	#[test]
+	fn cross_frame_context_shrinks() {
+		// A later frame identical to an earlier one compresses to far fewer bytes once the window
+		// holds the earlier copy: this is the whole point of a shared per-group stream.
 		let config = Compression::default();
 		let payload = b"Media over QUIC delivers real-time latency at massive scale.".repeat(6);
-		let compressed = config.compress(&payload);
+		let mut enc = config.encoder();
+		let first = enc.frame(&payload);
+		let second = enc.frame(&payload);
 		assert!(
-			compressed.len() < payload.len(),
-			"compressed {} should beat raw {}",
-			compressed.len(),
-			payload.len()
+			second.len() < first.len(),
+			"repeat frame {} should be smaller than first {}",
+			second.len(),
+			first.len()
 		);
-		assert_eq!(decompress(&compressed).unwrap(), Bytes::from(payload));
 	}
 
 	#[test]
@@ -174,7 +263,10 @@ mod test {
 
 	#[test]
 	fn decompress_rejects_garbage() {
-		// Random bytes that don't form a valid DEFLATE stream are rejected, not silently truncated.
-		assert!(matches!(decompress(&[0xff; 64]), Err(Error::Decompress)));
+		let mut dec = Decoder::new();
+		assert!(matches!(
+			dec.frame(b"not a deflate stream at all"),
+			Err(Error::Decompress)
+		));
 	}
 }

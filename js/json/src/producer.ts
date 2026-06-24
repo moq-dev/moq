@@ -2,7 +2,7 @@ import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type * as z from "zod/mini";
 
-import { deflate } from "./compression.ts";
+import { Encoder } from "./compression.ts";
 import { deepEqual, diff } from "./diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
@@ -32,10 +32,10 @@ export interface Config<T> {
 	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
 	initial?: T;
 
-	// Compress each frame independently with `deflate-raw` (RFC 1951), interoperable with the Rust
-	// `moq-json` producer. `false`/unset (the default) writes plaintext JSON frames. A
-	// {@link Consumer} reading the track must set the same flag. The browser deflate exposes no
-	// level or dictionary knobs, so this is a plain on/off toggle.
+	// Compress each group as one sync-flushed `deflate-raw` (RFC 1951) stream, so deltas reuse the
+	// snapshot as context and shrink sharply. Interoperable with the Rust `moq-json` producer.
+	// `false`/unset (the default) writes plaintext JSON frames. A {@link Consumer} reading the track
+	// must set the same flag. Enabling this loads the optional `pako` peer dependency on demand.
 	compression?: boolean;
 }
 
@@ -58,14 +58,17 @@ export class Producer<T> {
 	#last?: unknown;
 	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Always raw
 	// (uncompressed) sizes, even when compressing: the delta-vs-snapshot decision is made
-	// synchronously in `update()`, before the async compression runs.
+	// synchronously in `update()`, before the async compression runs, so a compressed producer rolls
+	// groups on raw sizes (still valid on the wire, just a touch sooner than the Rust producer).
 	#deltaBytes = 0;
 	#groupFrames = 0;
 
-	// Per-frame `deflate-raw` compression. Compression is async (the platform CompressionStream),
-	// so on the compressed path every track write is serialized through `#chain` to preserve frame
-	// and group order while `update()` stays synchronous. Decisions still run synchronously above.
+	// Group-scoped `deflate-raw` compression. Loading pako and (de)compressing is async, so on the
+	// compressed path every track write is serialized through `#chain` to preserve frame and group
+	// order while `update()` stays synchronous. The `#encoder` is the current group's stream, swapped
+	// for a fresh one at each snapshot inside the chain. Decisions still run synchronously above.
 	#compress = false;
+	#encoder?: Encoder;
 	#chain: Promise<void> = Promise.resolve();
 	#failed = false;
 
@@ -131,7 +134,7 @@ export class Producer<T> {
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
-			this.#writeFrame(this.#group, delta);
+			this.#writeDelta(this.#group, delta);
 			this.#deltaBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
@@ -232,7 +235,7 @@ export class Producer<T> {
 		if (this.#group) this.#closeGroup(this.#group);
 
 		const group = track.appendGroup();
-		this.#writeFrame(group, snapshot);
+		this.#writeSnapshot(group, snapshot);
 		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
 
@@ -246,14 +249,31 @@ export class Producer<T> {
 		}
 	}
 
-	// Write a frame to `group`. Synchronous when uncompressed; on the compressed path the frame is
-	// deflated and written through `#chain` so frames and groups still land in order.
-	#writeFrame(group: Moq.Group, frame: Uint8Array): void {
+	// Write a group's snapshot (frame 0). On the compressed path this opens a fresh per-group encoder
+	// (cold window) inside the chain, so the snapshot and its deltas share one DEFLATE stream.
+	#writeSnapshot(group: Moq.Group, frame: Uint8Array): void {
 		if (!this.#compress) {
 			group.writeFrame(frame);
 			return;
 		}
-		this.#enqueue(async () => group.writeFrame(await deflate(frame)));
+		this.#enqueue(async () => {
+			this.#encoder = await Encoder.create();
+			group.writeFrame(this.#encoder.frame(frame));
+		});
+	}
+
+	// Write a delta frame, compressed against the current group's encoder when compressing. The
+	// snapshot step that opened the encoder is ordered before this one in `#chain`.
+	#writeDelta(group: Moq.Group, frame: Uint8Array): void {
+		if (!this.#compress) {
+			group.writeFrame(frame);
+			return;
+		}
+		this.#enqueue(() => {
+			const encoder = this.#encoder;
+			if (!encoder) throw new Error("compressed delta requires an open group");
+			group.writeFrame(encoder.frame(frame));
+		});
 	}
 
 	// Close `group`, ordered after its pending compressed writes when compressing.

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Track } from "@moq/net";
-import { deflate, inflate } from "./compression.ts";
+import { Decoder, Encoder } from "./compression.ts";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
@@ -25,18 +25,34 @@ async function firstFrame(track: Track): Promise<Uint8Array> {
 	return frame;
 }
 
-test("codec round-trips a frame", async () => {
-	const payload = enc.encode("the quick brown fox");
-	expect(dec.decode(await inflate(await deflate(payload)))).toBe("the quick brown fox");
+test("codec round-trips a group of frames in order", async () => {
+	const frames = ["the quick brown fox", "the quick brown dog", "the lazy fox"];
+	const encoder = await Encoder.create();
+	const slices = frames.map((f) => encoder.frame(enc.encode(f)));
+
+	const decoder = await Decoder.create();
+	expect(slices.map((s) => dec.decode(decoder.frame(s)))).toEqual(frames);
 });
 
 test("codec round-trips an empty frame", async () => {
-	expect((await deflate(new Uint8Array())).length).toBe(0);
-	expect((await inflate(new Uint8Array())).length).toBe(0);
+	const encoder = await Encoder.create();
+	const decoder = await Decoder.create();
+	expect(encoder.frame(new Uint8Array()).length).toBe(0);
+	expect(decoder.frame(new Uint8Array()).length).toBe(0);
 });
 
 test("codec rejects garbage", async () => {
-	await expect(inflate(new Uint8Array(64).fill(0xff))).rejects.toThrow();
+	const decoder = await Decoder.create();
+	expect(() => decoder.frame(new Uint8Array(64).fill(0xff))).toThrow();
+});
+
+test("cross-frame context shrinks a repeated frame", async () => {
+	// A later frame identical to an earlier one compresses far smaller once the window holds it.
+	const encoder = await Encoder.create();
+	const payload = enc.encode("Media over QUIC delivers real-time latency at massive scale.".repeat(6));
+	const first = encoder.frame(payload);
+	const second = encoder.frame(payload);
+	expect(second.length).toBeLessThan(first.length);
 });
 
 test("compressed snapshot per group round-trips", async () => {
@@ -51,8 +67,8 @@ test("compressed snapshot per group round-trips", async () => {
 });
 
 test("compressed live consumer sees each update in order", async () => {
-	// Compression makes writes async, so this exercises that the per-frame deflate pipeline still
-	// delivers frames (and groups) strictly in order.
+	// Compression makes writes async, so this exercises that the streaming pipeline still delivers
+	// frames (and groups) strictly in order.
 	const track = new Track("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100, compression: true });
 	const consumer = new Consumer<Value>(track, { compression: true });
@@ -82,20 +98,39 @@ test("compressed late joiner reconstructs from snapshot + deltas", async () => {
 	producer.update({ a: 5, b: 2 });
 	producer.finish();
 
-	// A consumer created only now still rebuilds the final value.
+	// A consumer created only now still rebuilds the final value from the snapshot + deltas.
 	expect((await drainCompressed(track)).at(-1)).toEqual({ a: 5, b: 2 });
 });
 
-test("each compressed frame is valid standalone deflate-raw", async () => {
-	// The frame the producer stored should decode on its own back to the original snapshot, which
-	// is what keeps it interoperable with the Rust producer's per-frame format.
+test("a group's snapshot decodes from a fresh decoder", async () => {
+	// Frame 0 opens a cold window, so a brand-new decoder reconstructs it, which is what lets a late
+	// joiner (or the Rust consumer) start mid-stream at any group boundary.
 	const track = new Track("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 0, compression: true });
 	producer.update({ hello: "world" });
 	producer.finish();
 
-	const frame = await firstFrame(track);
-	expect(JSON.parse(dec.decode(await inflate(frame)))).toEqual({ hello: "world" });
+	const decoder = await Decoder.create();
+	expect(JSON.parse(dec.decode(decoder.frame(await firstFrame(track))))).toEqual({ hello: "world" });
+});
+
+test("compressed deltas reuse the window", async () => {
+	// The shared per-group window is the point: a delta restating snapshot content shrinks sharply.
+	const track = new Track("test");
+	const producer = new Producer<Value>(track, { deltaRatio: 100, compression: true });
+	const phrase = "Media over QUIC delivers real-time latency at massive scale";
+	producer.update({ note: phrase });
+	producer.update({ note: phrase, echo: phrase });
+	producer.finish();
+
+	const group = await track.nextGroupOrdered();
+	if (!group) throw new Error("expected a group");
+	await group.readFrame(); // snapshot
+	const delta = await group.readFrame();
+	if (!delta) throw new Error("expected a delta");
+
+	const rawDelta = enc.encode(JSON.stringify({ echo: phrase }));
+	expect(delta.length).toBeLessThan(rawDelta.length / 2);
 });
 
 test("compression shrinks a repetitive frame", async () => {

@@ -24,6 +24,7 @@ use serde_json::Value;
 
 pub use compression::{Compression, Level};
 
+use crate::compression::{Decoder, Encoder};
 use crate::diff::diff;
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
@@ -86,11 +87,12 @@ pub struct Config {
 	/// Defaults to `8`.
 	pub delta_ratio: u32,
 
-	/// Optional per-frame DEFLATE compression for the frame stream.
+	/// Optional group-scoped DEFLATE compression for the frame stream.
 	///
 	/// `None` (the default) writes plaintext JSON frames, identical on the wire to a track with no
-	/// compression. `Some(..)` compresses each frame independently (see [`Compression`]); a
-	/// [`Consumer`] reading the track must be created via [`Consumer::with_compression`].
+	/// compression. `Some(..)` compresses each group as one sync-flushed DEFLATE stream (see
+	/// [`Compression`]), so deltas reuse the snapshot as context and shrink sharply; a [`Consumer`]
+	/// reading the track must be created via [`Consumer::with_compression`].
 	pub compression: Option<Compression>,
 }
 
@@ -135,6 +137,7 @@ impl<T: Serialize> Producer<T> {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
 				group: None,
+				encoder: None,
 				last: None,
 				delta_bytes: 0,
 				snapshot_len: 0,
@@ -237,12 +240,14 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 struct Inner {
 	track: moq_net::TrackProducer,
 	group: Option<moq_net::GroupProducer>,
+	// Per-group DEFLATE encoder, `Some` while a compressed group is open (recreated per group).
+	encoder: Option<Encoder>,
 	last: Option<Value>,
 	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Compressed
-	// frame sizes when compressing, raw patch sizes otherwise.
+	// slice sizes when compressing, raw patch sizes otherwise.
 	delta_bytes: u64,
 	// Reference size the delta budget is measured against: the current group's snapshot frame.
-	// Compressed when compressing, raw otherwise.
+	// Its compressed slice size when compressing, raw otherwise.
 	snapshot_len: u64,
 	group_frames: usize,
 	config: Config,
@@ -292,12 +297,13 @@ impl Inner {
 			serde_json::to_vec(&diff.patch)?
 		};
 
-		match &self.config.compression {
-			// Compressed: measure the delta's *compressed* size (the real wire cost) against the
-			// group's anchoring snapshot, also compressed. If it doesn't fit we roll a new group and
-			// discard this slice (frames compress independently, so nothing carries over).
-			Some(compression) => {
-				let slice = compression.compress(&patch);
+		match self.encoder.as_mut() {
+			// Compressed: measure the delta's *compressed* slice size (the real wire cost) against the
+			// group's anchoring snapshot, also compressed. Encoding advances the per-group window; if
+			// the delta doesn't fit we roll a new group with a fresh encoder, discarding this slice
+			// (the abandoned window has no effect on the new group).
+			Some(encoder) => {
+				let slice = encoder.frame(&patch);
 				let projected = self.delta_bytes + slice.len() as u64;
 				if projected > ratio as u64 * self.snapshot_len {
 					return Ok(None);
@@ -324,21 +330,28 @@ impl Inner {
 
 		let mut group = self.track.append_group()?;
 
-		// Compress the snapshot as frame 0 if enabled, recording its wire size as the delta anchor.
-		let slice = match &self.config.compression {
-			Some(compression) => compression.compress(&snapshot),
-			None => Bytes::from(snapshot),
+		// Open a fresh per-group encoder (cold window) and compress the snapshot as frame 0, recording
+		// its wire size as the delta anchor.
+		let (slice, encoder) = match &self.config.compression {
+			Some(compression) => {
+				let mut encoder = compression.encoder();
+				let slice = encoder.frame(&snapshot);
+				(slice, Some(encoder))
+			}
+			None => (Bytes::from(snapshot), None),
 		};
 		self.snapshot_len = slice.len() as u64;
 		group.write_frame(slice)?;
 		self.delta_bytes = 0;
 		self.group_frames = 1;
+		self.encoder = encoder;
 
 		if self.config.delta_ratio != 0 {
-			// Keep the group open so future deltas can be appended.
+			// Keep the group (and its encoder) open so future deltas can be appended.
 			self.group = Some(group);
 		} else {
 			// Deltas disabled: one frame per group, identical to a plain JSON track.
+			self.encoder = None;
 			group.finish()?;
 		}
 
@@ -360,6 +373,11 @@ pub struct Consumer<T> {
 	group: Option<moq_net::GroupConsumer>,
 	// Whether frames are DEFLATE-compressed, matching the producer's [`Config::compression`].
 	compressed: bool,
+	// Per-group DEFLATE decoder, built lazily on the first compressed frame of a group.
+	decoder: Option<Decoder>,
+	// Compressed slices read so far in the current group, in order. Lets a cloned consumer rebuild
+	// the (non-cloneable) decoder window by replaying them. Empty when uncompressed.
+	group_slices: Vec<Bytes>,
 	current: Option<Value>,
 	frames_read: usize,
 	_marker: PhantomData<fn() -> T>,
@@ -373,6 +391,10 @@ impl<T> Clone for Consumer<T> {
 			track: self.track.clone(),
 			group: self.group.clone(),
 			compressed: self.compressed,
+			// A DEFLATE decoder can't be cloned (per-group window state), so the clone starts without
+			// one and rebuilds it from `group_slices` on its next compressed read.
+			decoder: None,
+			group_slices: self.group_slices.clone(),
 			current: self.current.clone(),
 			frames_read: self.frames_read,
 			_marker: PhantomData,
@@ -400,6 +422,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 			track,
 			group: None,
 			compressed,
+			decoder: None,
+			group_slices: Vec::new(),
 			current: None,
 			frames_read: 0,
 			_marker: PhantomData,
@@ -426,6 +450,9 @@ impl<T: DeserializeOwned> Consumer<T> {
 					self.group = Some(group);
 					self.current = None;
 					self.frames_read = 0;
+					// Each group is its own compressed stream, so reset the decoder state.
+					self.decoder = None;
+					self.group_slices.clear();
 				}
 				Poll::Ready(None) => break true,
 				Poll::Pending => break false,
@@ -450,13 +477,25 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Decompress a frame slice, or pass it through when the track is uncompressed.
 	///
-	/// Each frame is its own DEFLATE blob, so this needs no per-group state.
-	fn decode(&self, slice: Bytes) -> Result<Bytes> {
-		if self.compressed {
-			compression::decompress(&slice)
-		} else {
-			Ok(slice)
+	/// The per-group decoder is built lazily on the first compressed frame. A cloned consumer starts
+	/// without a decoder, so the first call replays the group's already-read slices to rebuild the
+	/// (non-cloneable) DEFLATE window before decoding the new frame.
+	fn decode(&mut self, slice: Bytes) -> Result<Bytes> {
+		if !self.compressed {
+			return Ok(slice);
 		}
+
+		if self.decoder.is_none() {
+			let mut decoder = Decoder::new();
+			for prev in &self.group_slices {
+				decoder.frame(prev)?;
+			}
+			self.decoder = Some(decoder);
+		}
+
+		let plain = self.decoder.as_mut().unwrap().frame(&slice)?;
+		self.group_slices.push(slice);
+		Ok(plain)
 	}
 
 	/// Apply one frame: frame 0 of a group is a snapshot, the rest are merge patches.
@@ -791,8 +830,7 @@ mod test {
 
 	#[test]
 	fn compressed_cloned_consumer_reconstructs_mid_group() {
-		// Frames compress independently, so a clone taken mid-group just inherits the reconstruction
-		// state and keeps decoding each frame on its own.
+		// A clone taken mid-group has no decoder window; it must rebuild from the retained slices.
 		let (mut producer, track) = producer(cfg_deflate(100));
 		let mut consumer = Consumer::<Value>::with_compression(track);
 		let waiter = kio::Waiter::noop();
@@ -827,6 +865,37 @@ mod test {
 		assert!(
 			compressed_bytes < plaintext_bytes,
 			"compressed frame {compressed_bytes} should be smaller than plaintext {plaintext_bytes}"
+		);
+	}
+
+	#[test]
+	fn compressed_deltas_reuse_window() {
+		// The shared per-group window is the whole point: a delta that restates content already in
+		// the snapshot compresses to far fewer bytes than the raw patch.
+		let (mut producer, mut track) = producer(cfg_deflate(100));
+		let phrase = "Media over QUIC delivers real-time latency at massive scale";
+		producer.update(&json!({ "note": phrase })).unwrap();
+		producer.update(&json!({ "note": phrase, "echo": phrase })).unwrap();
+		producer.finish().unwrap();
+
+		// Both frames land in group 0; read the delta (frame 1) verbatim.
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
+			panic!("expected a group");
+		};
+		let mut frames = Vec::new();
+		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+			frames.push(frame);
+		}
+		assert_eq!(frames.len(), 2, "snapshot + one delta in a single group");
+
+		// The raw patch repeats the whole phrase; compressed against the window it's a fraction.
+		let raw_delta = serde_json::to_vec(&json!({ "echo": phrase })).unwrap();
+		assert!(
+			frames[1].len() < raw_delta.len() / 2,
+			"windowed delta {} should be far below the raw patch {}",
+			frames[1].len(),
+			raw_delta.len()
 		);
 	}
 

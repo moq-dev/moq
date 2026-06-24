@@ -20,10 +20,18 @@
 		"@moq/signals": "workspace:^"
 	},
 	"peerDependencies": {
+		"pako": "^2.2.0",
 		"zod": "^4.0.0"
+	},
+	"peerDependenciesMeta": {
+		"pako": {
+			"optional": true
+		}
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3.14",
+		"@types/pako": "^2.0.4",
+		"pako": "^2.2.0",
 		"rimraf": "^6.1.3",
 		"typescript": "^6.0.3"
 	}
