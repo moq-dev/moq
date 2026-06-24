@@ -283,8 +283,8 @@ impl Client {
 
 	/// Build a [`rustls::ClientConfig`] from this configuration.
 	///
-	/// Resolves the [verification](Client::verification) policy, optionally
-	/// attaches a client identity for mTLS, and installs the matching verifier.
+	/// Resolves the verification policy, optionally attaches a client identity
+	/// for mTLS, and installs the matching verifier.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
