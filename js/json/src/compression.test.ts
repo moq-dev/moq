@@ -66,38 +66,38 @@ async function firstFrame(track: Track): Promise<Uint8Array> {
 
 test("codec round-trips a group of frames in order", async () => {
 	const frames = ["the quick brown fox", "the quick brown dog", "the lazy fox"];
-	const encoder = await Encoder.create();
+	const encoder = new Encoder();
 	const slices = frames.map((f) => encoder.frame(enc.encode(f)));
 
-	const decoder = await Decoder.create();
+	const decoder = new Decoder();
 	expect(slices.map((s) => dec.decode(decoder.frame(s)))).toEqual(frames);
 });
 
 test("codec round-trips an empty frame", async () => {
-	const encoder = await Encoder.create();
-	const decoder = await Decoder.create();
+	const encoder = new Encoder();
+	const decoder = new Decoder();
 	expect(encoder.frame(new Uint8Array()).length).toBe(0);
 	expect(decoder.frame(new Uint8Array()).length).toBe(0);
 });
 
 test("codec rejects garbage", async () => {
-	const decoder = await Decoder.create();
+	const decoder = new Decoder();
 	expect(() => decoder.frame(new Uint8Array(64).fill(0xff))).toThrow();
 });
 
 test("codec rejects frames that declare more than the cap", async () => {
 	// The length prefix bounds the frame before inflating, so a payload past the 64 MiB cap is
 	// rejected on the declared length without materializing it.
-	const encoder = await Encoder.create();
-	const decoder = await Decoder.create();
+	const encoder = new Encoder();
+	const decoder = new Decoder();
 	const slice = encoder.frame(enc.encode("a".repeat(64 * 1024 * 1024 + 1)));
 	expect(() => decoder.frame(slice)).toThrow(/exceeded/);
 });
 
 test("codec rejects a length-prefix mismatch", async () => {
 	// A prefix that disagrees with the inflated output is rejected as corrupt.
-	const encoder = await Encoder.create();
-	const decoder = await Decoder.create();
+	const encoder = new Encoder();
+	const decoder = new Decoder();
 	const slice = encoder.frame(enc.encode("hello world"));
 	const [, deflate] = Varint.decode(slice);
 	const tampered = new Uint8Array([...Varint.encode(4), ...deflate]); // payload is 11 bytes
@@ -106,7 +106,7 @@ test("codec rejects a length-prefix mismatch", async () => {
 
 test("cross-frame context shrinks a repeated frame", async () => {
 	// A later frame identical to an earlier one compresses far smaller once the window holds it.
-	const encoder = await Encoder.create();
+	const encoder = new Encoder();
 	const payload = enc.encode("Media over QUIC delivers real-time latency at massive scale.".repeat(6));
 	const first = encoder.frame(payload);
 	const second = encoder.frame(payload);
@@ -125,8 +125,7 @@ test("compressed snapshot per group round-trips", async () => {
 });
 
 test("compressed live consumer sees each update in order", async () => {
-	// Compression makes writes async, so this exercises that the streaming pipeline still delivers
-	// frames (and groups) strictly in order.
+	// A live consumer reconstructs each update in order from the shared per-group stream.
 	const track = new Track("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100, compression: true });
 	const consumer = new Consumer<Value>(track, { compression: true });
@@ -168,7 +167,7 @@ test("a group's snapshot decodes from a fresh decoder", async () => {
 	producer.update({ hello: "world" });
 	producer.finish();
 
-	const decoder = await Decoder.create();
+	const decoder = new Decoder();
 	expect(JSON.parse(dec.decode(decoder.frame(await firstFrame(track))))).toEqual({ hello: "world" });
 });
 
@@ -213,8 +212,8 @@ test("pako round-trips a group that fflate's flush corrupts", async () => {
 	const frames = group.map((value) => enc.encode(JSON.stringify(value)));
 
 	// Our pako codec round-trips every frame of the group exactly.
-	const encoder = await Encoder.create();
-	const decoder = await Decoder.create();
+	const encoder = new Encoder();
+	const decoder = new Decoder();
 	for (const frame of frames) {
 		expect(decoder.frame(encoder.frame(frame))).toEqual(frame);
 	}

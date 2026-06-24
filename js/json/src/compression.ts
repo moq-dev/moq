@@ -15,13 +15,14 @@
  * Each slice is prefixed with its decompressed length as a QUIC varint (via `@moq/net`'s `Varint`),
  * so the decoder bounds the frame before inflating and matches the Rust producer on the wire.
  *
- * `pako` is an optional peer dependency loaded on demand, so consumers that never compress a track
- * never bundle it.
+ * pako is synchronous, so the whole codec is synchronous: only an enabled track pulls it in, but it
+ * is a normal dependency rather than a lazily loaded one.
  *
  * @module
  */
 
 import { Varint } from "@moq/net";
+import * as pako from "pako";
 
 // Maximum decompressed size of a single frame. A malicious publisher could otherwise send a tiny
 // slice that inflates hugely, so {@link Decoder.frame} stops rather than allocating without limit.
@@ -30,23 +31,6 @@ const MAX_DECOMPRESSED_FRAME = 64 * 1024 * 1024;
 
 // The trailing bytes of a DEFLATE sync flush, stripped on the wire and re-appended to decode.
 const SYNC_FLUSH_TAIL = new Uint8Array([0x00, 0x00, 0xff, 0xff]);
-
-type Pako = typeof import("pako");
-let pako: Promise<Pako> | undefined;
-
-// Load pako once, on demand. The optional peer dependency keeps it out of bundles that never
-// enable compression; a clear error points at the missing install if it's reached without it.
-function loadPako(): Promise<Pako> {
-	pako ??= import("pako")
-		.then((m) => (m as { default?: Pako }).default ?? (m as Pako))
-		.catch((err) => {
-			pako = undefined;
-			throw new Error("@moq/json compression requires the optional peer dependency `pako` to be installed", {
-				cause: err,
-			});
-		});
-	return pako;
-}
 
 // Concatenate chunks into one buffer (a single chunk passes through untouched).
 function concat(chunks: Uint8Array[], total: number): Uint8Array {
@@ -62,29 +46,22 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
 
 /**
  * Encodes a group's frame payloads into one shared DEFLATE stream, one self-delimited slice per
- * frame. Hold one per group; create a new one at each group boundary. Build with {@link create}.
+ * frame. Hold one per group; create a new one at each group boundary.
  *
  * @public
  */
 export class Encoder {
-	#deflate: import("pako").Deflate;
-	#flush: number;
+	#deflate = new pako.Deflate({ raw: true });
 	#chunks: Uint8Array[] = [];
 	#total = 0;
 
-	private constructor(lib: Pako) {
-		this.#deflate = new lib.Deflate({ raw: true });
-		this.#flush = lib.constants.Z_SYNC_FLUSH;
+	/** Start a fresh per-group encoder with a cold window. */
+	constructor() {
 		this.#deflate.onData = (chunk) => {
 			const bytes = chunk as Uint8Array;
 			this.#chunks.push(bytes);
 			this.#total += bytes.length;
 		};
-	}
-
-	/** Start a fresh per-group encoder with a cold window. */
-	static async create(): Promise<Encoder> {
-		return new Encoder(await loadPako());
 	}
 
 	/**
@@ -96,7 +73,7 @@ export class Encoder {
 		if (payload.length === 0) return payload;
 		this.#chunks = [];
 		this.#total = 0;
-		this.#deflate.push(payload, this.#flush);
+		this.#deflate.push(payload, pako.constants.Z_SYNC_FLUSH);
 		const full = concat(this.#chunks, this.#total);
 		// Drop the trailing sync-flush marker (the decoder re-appends it) and prefix the length.
 		const deflate = full.subarray(0, full.length - SYNC_FLUSH_TAIL.length);
@@ -110,20 +87,18 @@ export class Encoder {
 
 /**
  * Decodes a group's frame slices back into the original payloads. Hold one per group; feed slices
- * in frame order (each frame builds on the earlier ones). Build with {@link create}.
+ * in frame order (each frame builds on the earlier ones).
  *
  * @public
  */
 export class Decoder {
-	#inflate: import("pako").Inflate;
-	#flush: number;
+	#inflate = new pako.Inflate({ raw: true });
 	#chunks: Uint8Array[] = [];
 	#total = 0;
 	#tooLarge = false;
 
-	private constructor(lib: Pako) {
-		this.#inflate = new lib.Inflate({ raw: true });
-		this.#flush = lib.constants.Z_SYNC_FLUSH;
+	/** Start a fresh per-group decoder with a cold window. */
+	constructor() {
 		this.#inflate.onData = (chunk) => {
 			const bytes = chunk as Uint8Array;
 			this.#total += bytes.length;
@@ -134,11 +109,6 @@ export class Decoder {
 			}
 			this.#chunks.push(bytes);
 		};
-	}
-
-	/** Start a fresh per-group decoder with a cold window. */
-	static async create(): Promise<Decoder> {
-		return new Decoder(await loadPako());
 	}
 
 	/**
@@ -164,7 +134,7 @@ export class Decoder {
 		input.set(deflate);
 		input.set(SYNC_FLUSH_TAIL, deflate.length);
 
-		this.#inflate.push(input, this.#flush);
+		this.#inflate.push(input, pako.constants.Z_SYNC_FLUSH);
 		if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
 		if (this.#tooLarge) throw new Error(`decompressed frame exceeded ${MAX_DECOMPRESSED_FRAME} bytes`);
 

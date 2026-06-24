@@ -48,7 +48,7 @@ export class Consumer<T> {
 				continue;
 			}
 
-			return await this.#apply(frame);
+			return this.#apply(frame);
 		}
 	}
 
@@ -62,10 +62,10 @@ export class Consumer<T> {
 
 	// Frame 0 of a group is a snapshot, the rest are merge patches. When compressed, frames share one
 	// per-group DEFLATE stream, so they decode in order through a decoder built on the group's first frame.
-	async #apply(frame: Uint8Array): Promise<T> {
+	#apply(frame: Uint8Array): T {
 		let payload = frame;
 		if (this.#decompress) {
-			this.#decoder ??= await Decoder.create();
+			this.#decoder ??= new Decoder();
 			payload = this.#decoder.frame(frame);
 		}
 		const parsed = JSON.parse(new TextDecoder().decode(payload));
