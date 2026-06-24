@@ -9,6 +9,7 @@
 //! Deltas are controlled by [`Config::delta_ratio`]. A ratio of `0` disables them, so every
 //! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
 
+mod compression;
 mod diff;
 
 use std::marker::PhantomData;
@@ -16,10 +17,14 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
+use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+pub use compression::Compression;
+
+use crate::compression::{Decoder, Encoder};
 use crate::diff::diff;
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
@@ -41,6 +46,14 @@ pub enum Error {
 	/// Stored as a string since [`serde_json::Error`] is not [`Clone`].
 	#[error("json: {0}")]
 	Json(String),
+
+	/// A compressed frame could not be decoded (malformed or truncated stream).
+	#[error("decompression failed")]
+	Decompress,
+
+	/// A group's cumulative decompressed size exceeded the limit (zip-bomb guard).
+	#[error("decompressed group exceeded {0} bytes")]
+	TooLarge(u64),
 }
 
 impl From<serde_json::Error> for Error {
@@ -53,7 +66,11 @@ impl From<serde_json::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Configuration for a [`Producer`].
+///
+/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
+/// options stay additive): `let mut config = Config::default(); config.delta_ratio = 0;`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Config {
 	/// Controls how aggressively the producer emits deltas (merge patches) instead of full snapshots.
 	///
@@ -61,16 +78,31 @@ pub struct Config {
 	///
 	/// A positive ratio enables deltas. A delta is appended to the current group as long as the
 	/// accumulated deltas (excluding the snapshot frame) stay within `ratio` times the size of a
-	/// fresh snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up
+	/// snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up
 	/// to one snapshot before rolling, and a larger ratio tolerates more deltas per snapshot.
+	///
+	/// When [`compression`](Self::compression) is set, both sides of the comparison are measured
+	/// on *compressed* bytes (a warm per-group window shrinks each successive delta), so more
+	/// deltas pack into a group than the raw sizes would suggest.
 	///
 	/// Defaults to `8`.
 	pub delta_ratio: u32,
+
+	/// Optional zstd compression for the frame stream.
+	///
+	/// `None` (the default) writes plaintext JSON frames, identical on the wire to a track with
+	/// no compression. `Some(..)` compresses each group as one zstd stream (see [`Compression`]);
+	/// a [`Consumer`] reading the track must be created with the matching settings via
+	/// [`Consumer::with_compression`].
+	pub compression: Option<Compression>,
 }
 
 impl Default for Config {
 	fn default() -> Self {
-		Self { delta_ratio: 8 }
+		Self {
+			delta_ratio: 8,
+			compression: None,
+		}
 	}
 }
 
@@ -106,8 +138,10 @@ impl<T: Serialize> Producer<T> {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
 				group: None,
+				encoder: None,
 				last: None,
 				delta_bytes: 0,
+				snapshot_len: 0,
 				group_frames: 0,
 				config,
 			})),
@@ -207,9 +241,15 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 struct Inner {
 	track: moq_net::TrackProducer,
 	group: Option<moq_net::GroupProducer>,
+	// Per-group zstd encoder, `Some` while a compressed group is open (recreated per group).
+	encoder: Option<Encoder>,
 	last: Option<Value>,
 	// Bytes of deltas accumulated in the current group, excluding the snapshot frame.
+	// Compressed slice sizes when compressing, raw patch sizes otherwise.
 	delta_bytes: u64,
+	// Reference size the delta budget is measured against: the current group's snapshot frame,
+	// as its compressed slice size. Only consulted on the compressed path.
+	snapshot_len: u64,
 	group_frames: usize,
 	config: Config,
 }
@@ -221,10 +261,10 @@ impl Inner {
 		}
 
 		match self.delta(&json, snapshot.len())? {
-			Some(delta) => {
+			Some(slice) => {
 				let group = self.group.as_mut().expect("delta requires an open group");
-				let len = delta.len() as u64;
-				group.write_frame(delta)?;
+				let len = slice.len() as u64;
+				group.write_frame(slice)?;
 				self.delta_bytes += len;
 				self.group_frames += 1;
 			}
@@ -235,34 +275,51 @@ impl Inner {
 		Ok(())
 	}
 
-	/// Serialize a delta if deltas are enabled and appending one keeps the group within budget;
-	/// otherwise `None`, signalling that a fresh snapshot should be published instead.
-	fn delta(&self, value: &Value, snapshot_len: usize) -> Result<Option<Vec<u8>>> {
+	/// Serialize (and, when compressing, encode) a delta if deltas are enabled and appending one
+	/// keeps the group within budget; otherwise `None`, signalling that a fresh snapshot should be
+	/// published instead. Returns the frame slice ready to write.
+	fn delta(&mut self, value: &Value, snapshot_len: usize) -> Result<Option<Bytes>> {
 		let ratio = self.config.delta_ratio;
 		if ratio == 0 {
 			return Ok(None);
 		}
-		let Some(last) = &self.last else {
-			return Ok(None);
-		};
 		if self.group.is_none() || self.group_frames >= MAX_DELTA_FRAMES {
 			return Ok(None);
 		}
 
-		let diff = diff(last, value);
-		if diff.forced_snapshot {
-			return Ok(None);
+		let patch = {
+			let Some(last) = &self.last else {
+				return Ok(None);
+			};
+			let diff = diff(last, value);
+			if diff.forced_snapshot {
+				return Ok(None);
+			}
+			serde_json::to_vec(&diff.patch)?
+		};
+
+		match self.encoder.as_mut() {
+			// Compressed: measure against the group's anchoring snapshot's compressed size and the
+			// delta's *compressed* slice size (the real wire cost). Encoding advances the per-group
+			// window; if the delta doesn't fit we roll a new group with a fresh encoder, discarding
+			// this slice (the abandoned window has no effect on the new group).
+			Some(encoder) => {
+				let slice = encoder.frame(&patch);
+				let projected = self.delta_bytes + slice.len() as u64;
+				if projected > ratio as u64 * self.snapshot_len {
+					return Ok(None);
+				}
+				Ok(Some(slice))
+			}
+			// Uncompressed: raw delta bytes against a fresh snapshot of the current value.
+			None => {
+				let projected = self.delta_bytes + patch.len() as u64;
+				if projected > ratio as u64 * snapshot_len as u64 {
+					return Ok(None);
+				}
+				Ok(Some(Bytes::from(patch)))
+			}
 		}
-
-		let delta = serde_json::to_vec(&diff.patch)?;
-
-		// Roll a snapshot once the deltas would outgrow the budget (snapshot frame excluded).
-		let projected = self.delta_bytes + delta.len() as u64;
-		if projected > ratio as u64 * snapshot_len as u64 {
-			return Ok(None);
-		}
-
-		Ok(Some(delta))
 	}
 
 	/// Start a new group with a full snapshot as its first frame.
@@ -273,15 +330,28 @@ impl Inner {
 		}
 
 		let mut group = self.track.append_group()?;
-		group.write_frame(snapshot)?;
+
+		// Open a fresh per-group encoder (cold window) and compress the snapshot as frame 0.
+		let (slice, encoder) = match &self.config.compression {
+			Some(config) => {
+				let mut encoder = config.encoder();
+				let slice = encoder.frame(&snapshot);
+				(slice, Some(encoder))
+			}
+			None => (Bytes::from(snapshot), None),
+		};
+		self.snapshot_len = slice.len() as u64;
+		group.write_frame(slice)?;
 		self.delta_bytes = 0;
 		self.group_frames = 1;
+		self.encoder = encoder;
 
 		if self.config.delta_ratio != 0 {
-			// Keep the group open so future deltas can be appended.
+			// Keep the group (and its encoder) open so future deltas can be appended.
 			self.group = Some(group);
 		} else {
 			// Deltas disabled: one frame per group, identical to a plain JSON track.
+			self.encoder = None;
 			group.finish()?;
 		}
 
@@ -301,6 +371,13 @@ impl Inner {
 pub struct Consumer<T> {
 	track: moq_net::TrackConsumer,
 	group: Option<moq_net::GroupConsumer>,
+	// Compression settings, matching the producer's; `None` reads plaintext frames.
+	compression: Option<Compression>,
+	// Per-group zstd decoder, built lazily on the first compressed frame of a group.
+	decoder: Option<Decoder>,
+	// Compressed slices read so far in the current group, in order. Lets a cloned consumer
+	// rebuild the (non-cloneable) decoder window by replaying them. Empty when uncompressed.
+	group_slices: Vec<Bytes>,
 	current: Option<Value>,
 	frames_read: usize,
 	_marker: PhantomData<fn() -> T>,
@@ -313,6 +390,11 @@ impl<T> Clone for Consumer<T> {
 		Self {
 			track: self.track.clone(),
 			group: self.group.clone(),
+			compression: self.compression.clone(),
+			// A zstd decoder can't be cloned (per-group window state), so the clone starts without
+			// one and rebuilds it from `group_slices` on its next compressed read.
+			decoder: None,
+			group_slices: self.group_slices.clone(),
 			current: self.current.clone(),
 			frames_read: self.frames_read,
 			_marker: PhantomData,
@@ -321,11 +403,26 @@ impl<T> Clone for Consumer<T> {
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
-	/// Create a consumer reading from the given track subscriber.
+	/// Create a consumer reading plaintext frames from the given track subscriber.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
+		Self::build(track, None)
+	}
+
+	/// Create a consumer that decompresses frames with the given [`Compression`] settings.
+	///
+	/// These must match the producer's [`Config::compression`], including the
+	/// [`dictionary`](Compression::dictionary).
+	pub fn with_compression(track: moq_net::TrackConsumer, compression: Compression) -> Self {
+		Self::build(track, Some(compression))
+	}
+
+	fn build(track: moq_net::TrackConsumer, compression: Option<Compression>) -> Self {
 		Self {
 			track,
 			group: None,
+			compression,
+			decoder: None,
+			group_slices: Vec::new(),
 			current: None,
 			frames_read: 0,
 			_marker: PhantomData,
@@ -352,6 +449,9 @@ impl<T: DeserializeOwned> Consumer<T> {
 					self.group = Some(group);
 					self.current = None;
 					self.frames_read = 0;
+					// Each group is its own compressed stream, so reset the decoder state.
+					self.decoder = None;
+					self.group_slices.clear();
 				}
 				Poll::Ready(None) => break true,
 				Poll::Pending => break false,
@@ -374,8 +474,32 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 	}
 
+	/// Decompress a frame slice, or pass it through when the track is uncompressed.
+	///
+	/// The per-group decoder is built lazily on the first compressed frame. A cloned consumer
+	/// starts without a decoder, so the first call replays the group's already-read slices to
+	/// rebuild the (non-cloneable) zstd window before decoding the new frame.
+	fn decode(&mut self, slice: Bytes) -> Result<Bytes> {
+		let Some(compression) = &self.compression else {
+			return Ok(slice);
+		};
+
+		if self.decoder.is_none() {
+			let mut decoder = compression.decoder();
+			for prev in &self.group_slices {
+				decoder.frame(prev)?;
+			}
+			self.decoder = Some(decoder);
+		}
+
+		let plain = self.decoder.as_mut().unwrap().frame(&slice)?;
+		self.group_slices.push(slice);
+		Ok(plain)
+	}
+
 	/// Apply one frame: frame 0 of a group is a snapshot, the rest are merge patches.
-	fn apply(&mut self, frame: bytes::Bytes) -> Result<T> {
+	fn apply(&mut self, frame: Bytes) -> Result<T> {
+		let frame = self.decode(frame)?;
 		if self.frames_read == 0 {
 			self.current = Some(serde_json::from_slice(&frame)?);
 		} else {
@@ -398,15 +522,35 @@ mod test {
 	use super::*;
 	use serde_json::json;
 
+	/// An uncompressed config with the given delta ratio.
+	fn cfg(delta_ratio: u32) -> Config {
+		Config {
+			delta_ratio,
+			..Default::default()
+		}
+	}
+
+	/// A zstd-compressed config with the given delta ratio.
+	fn cfg_zstd(delta_ratio: u32) -> Config {
+		Config {
+			delta_ratio,
+			compression: Some(Compression::default()),
+		}
+	}
+
 	fn producer(config: Config) -> (Producer<Value>, moq_net::TrackConsumer) {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
 		(Producer::new(track, config), consumer)
 	}
 
-	/// Drain every value currently available from a consumer without blocking.
+	/// Drain every value currently available from a plaintext consumer without blocking.
 	fn drain(track: moq_net::TrackConsumer) -> Vec<Value> {
-		let mut consumer = Consumer::<Value>::new(track);
+		drain_with(Consumer::<Value>::new(track))
+	}
+
+	/// Drain every value currently available from an already-built consumer without blocking.
+	fn drain_with(mut consumer: Consumer<Value>) -> Vec<Value> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
@@ -417,7 +561,7 @@ mod test {
 
 	#[test]
 	fn deltas_off_snapshot_per_group() {
-		let (mut producer, track) = producer(Config { delta_ratio: 0 });
+		let (mut producer, track) = producer(cfg(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
@@ -456,7 +600,7 @@ mod test {
 
 	#[test]
 	fn deltas_share_one_group() {
-		let config = Config { delta_ratio: 100 };
+		let config = cfg(100);
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
@@ -474,7 +618,7 @@ mod test {
 		// A ratio of 1 admits deltas only up to the snapshot size: with equal 7-byte frames that is a
 		// single delta per group, so it rolls every other update. (Still distinct from 0, which would
 		// disable deltas entirely and never produce the group-0 delta below.)
-		let config = Config { delta_ratio: 1 };
+		let config = cfg(1);
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
 		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0
@@ -491,7 +635,7 @@ mod test {
 		// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a
 		// `ratio = 8` admits 8 deltas (8x the snapshot, the inclusive limit) on top of the snapshot
 		// before the 9th delta rolls.
-		let config = Config { delta_ratio: 8 };
+		let config = cfg(8);
 		let (mut producer, track) = producer(config);
 		for n in 0..=9 {
 			producer.update(&json!({ "n": n })).unwrap();
@@ -505,7 +649,7 @@ mod test {
 
 	#[test]
 	fn array_change_is_delta() {
-		let config = Config { delta_ratio: 100 };
+		let config = cfg(100);
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "list": [1, 2] })).unwrap();
 		producer.update(&json!({ "list": [1, 2, 3] })).unwrap();
@@ -518,7 +662,7 @@ mod test {
 
 	#[test]
 	fn frame_cap_rolls_snapshot() {
-		let config = Config { delta_ratio: 1_000_000 };
+		let config = cfg(1_000_000);
 		let (mut producer, track) = producer(config);
 		// First update is the snapshot (frame 0); then MAX_DELTA_FRAMES - 1 deltas fill the group.
 		for i in 0..=MAX_DELTA_FRAMES {
@@ -533,7 +677,7 @@ mod test {
 
 	#[test]
 	fn late_joiner_reconstructs_from_deltas() {
-		let config = Config { delta_ratio: 100 };
+		let config = cfg(100);
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
@@ -588,7 +732,7 @@ mod test {
 	#[test]
 	fn newer_group_supersedes_in_progress_reconstruction() {
 		// A tight ratio lets one delta fit, then forces the next update into a new snapshot group.
-		let config = Config { delta_ratio: 1 };
+		let config = cfg(1);
 		let (mut producer, track) = producer(config);
 		let observer = producer.consume();
 		let mut consumer = Consumer::<Value>::new(track);
@@ -616,7 +760,7 @@ mod test {
 	#[test]
 	fn cloned_consumer_reconstructs_independently() {
 		// Deltas share one group, so a clone taken mid-group carries in-progress reconstruction state.
-		let config = Config { delta_ratio: 100 };
+		let config = cfg(100);
 		let (mut producer, track) = producer(config);
 		let mut consumer = Consumer::<Value>::new(track);
 		let waiter = kio::Waiter::noop();
@@ -641,5 +785,129 @@ mod test {
 				other => panic!("expected delta, got {other:?}"),
 			}
 		}
+	}
+
+	#[test]
+	fn compressed_snapshot_per_group_roundtrips() {
+		let (mut producer, track) = producer(cfg_zstd(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.update(&json!({ "a": 2 })).unwrap();
+		producer.finish().unwrap();
+
+		// Deltas disabled: one compressed snapshot per group, latest reconstructs identically.
+		assert_eq!(track.latest(), Some(1));
+		let values = drain_with(Consumer::with_compression(track, Compression::default()));
+		assert_eq!(values, vec![json!({ "a": 2 })]);
+	}
+
+	#[test]
+	fn compressed_deltas_share_one_group() {
+		let (mut producer, track) = producer(cfg_zstd(100));
+		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
+		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
+		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
+		producer.finish().unwrap();
+
+		// Snapshot + deltas in one group, reconstructed through the per-group decoder.
+		assert_eq!(track.latest(), Some(0));
+		let values = drain_with(Consumer::with_compression(track, Compression::default()));
+		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
+	}
+
+	#[test]
+	fn compressed_late_joiner_reconstructs_from_deltas() {
+		let (mut producer, track) = producer(cfg_zstd(100));
+		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
+		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
+		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
+		producer.finish().unwrap();
+
+		// A consumer created only now rebuilds the final value from the compressed snapshot + deltas.
+		let values = drain_with(Consumer::with_compression(track, Compression::default()));
+		assert_eq!(values.last().unwrap(), &json!({ "a": 5, "b": 2 }));
+	}
+
+	#[test]
+	fn compressed_cloned_consumer_reconstructs_mid_group() {
+		// A clone taken mid-group has no decoder window; it must rebuild from the retained slices.
+		let (mut producer, track) = producer(cfg_zstd(100));
+		let mut consumer = Consumer::<Value>::with_compression(track, Compression::default());
+		let waiter = kio::Waiter::noop();
+
+		producer.update(&json!({ "a": 1, "b": 1 })).unwrap(); // compressed snapshot, group 0
+		match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "a": 1, "b": 1 })),
+			other => panic!("expected snapshot, got {other:?}"),
+		}
+
+		let mut clone = consumer.clone();
+
+		producer.update(&json!({ "a": 1, "b": 2 })).unwrap(); // compressed delta, group 0
+		producer.finish().unwrap();
+
+		let expected = json!({ "a": 1, "b": 2 });
+		for consumer in [&mut consumer, &mut clone] {
+			match consumer.poll_next(&waiter) {
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value, expected),
+				other => panic!("expected delta, got {other:?}"),
+			}
+		}
+	}
+
+	#[test]
+	fn dictionary_roundtrips() {
+		// A shared dictionary on both ends primes the window; the value still reconstructs exactly.
+		let dict = bytes::Bytes::from_static(br#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+		let compression = Compression {
+			dictionary: Some(dict),
+			..Default::default()
+		};
+
+		let track = moq_net::Track::new("test").produce();
+		let consumer = track.consume();
+		let mut producer = Producer::<Value>::new(
+			track,
+			Config {
+				delta_ratio: 8,
+				compression: Some(compression.clone()),
+			},
+		);
+
+		let value = json!({ "video": { "renditions": { "v0": { "codec": "avc1.64001f" } } } });
+		producer.update(&value).unwrap();
+		producer.finish().unwrap();
+
+		let values = drain_with(Consumer::with_compression(consumer, compression));
+		assert_eq!(values.last().unwrap(), &value);
+	}
+
+	#[test]
+	fn compression_shrinks_wire_frames() {
+		// A repetitive payload should serialize to fewer wire bytes compressed than plaintext.
+		let value = json!({ "renditions": ["video".repeat(50), "video".repeat(50), "video".repeat(50)] });
+
+		let plaintext_bytes = wire_frame_len(cfg(0), &value);
+		let compressed_bytes = wire_frame_len(cfg_zstd(0), &value);
+		assert!(
+			compressed_bytes < plaintext_bytes,
+			"compressed frame {compressed_bytes} should be smaller than plaintext {plaintext_bytes}"
+		);
+	}
+
+	/// Publish a single value and return the byte length of the resulting (frame 0) wire frame.
+	fn wire_frame_len(config: Config, value: &Value) -> usize {
+		let (mut producer, mut track) = producer(config);
+		producer.update(value).unwrap();
+		producer.finish().unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
+			panic!("expected a group");
+		};
+		// Read the stored (possibly compressed) frame bytes verbatim, without reconstructing JSON.
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected a frame");
+		};
+		frame.len()
 	}
 }
