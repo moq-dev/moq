@@ -50,10 +50,6 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: OriginProducer,
 	stats: StatsHandle,
-	/// Per-session ingress broadcast-subscription tracker. Each upstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
-	/// distinct upstream sessions feeding each broadcast.
-	broadcasts: crate::SessionBroadcasts,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
@@ -76,6 +72,9 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 #[derive(Clone)]
 struct TrackEntry {
 	producer: TrackProducer,
+	// Held for its `Drop`, which records the `subscriptions` lifecycle; payload is
+	// metered by the model, so the guard is never read.
+	#[allow(dead_code)]
 	stats: Arc<SubscriberTrack>,
 	/// Codec + timestamp scale from this track's TRACK_INFO, known before the
 	/// SUBSCRIBE is even opened, so group streams decode frames without blocking.
@@ -90,12 +89,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = *config.origin;
-		let broadcasts = config.stats.subscriber_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
-			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: crate::Origin::random(),
@@ -445,9 +442,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
+		// Bake the ingress usage sink so the model meters everything this upstream
+		// subscription writes into the broadcast.
+		let ingress = self.stats.broadcast(self.origin.absolute(&path)).ingress_usage();
 		let broadcast = BroadcastInfo {
 			hops,
 			epoch: BroadcastInfo::epoch_from_wire(epoch),
+			stats: crate::BroadcastStats {
+				producer: ingress,
+				..Default::default()
+			},
 		}
 		.produce();
 
@@ -503,9 +507,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
+		// Bake the ingress usage sink so the model meters everything this upstream
+		// subscription writes into the broadcast.
+		let ingress = self.stats.broadcast(self.origin.absolute(&path)).ingress_usage();
 		let broadcast = BroadcastInfo {
 			hops,
 			epoch: BroadcastInfo::epoch_from_wire(epoch),
+			stats: crate::BroadcastStats {
+				producer: ingress,
+				..Default::default()
+			},
 		}
 		.produce();
 		let dynamic = broadcast.dynamic();
@@ -565,23 +576,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, compression, timescale) = {
+		let (mut group, track, compression, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
+			// `create_group` bumps the broadcast's ingress usage (groups); the model
+			// meters frames/bytes as they're written below.
 			let group = entry.producer.create_group(group_info)?;
-			(
-				group,
-				entry.producer.clone(),
-				entry.stats.clone(),
-				entry.compression,
-				entry.timescale,
-			)
+			(group, entry.producer.clone(), entry.compression, entry.timescale)
 		};
-
-		// Bump groups counter for this incoming group on the subscriber side.
-		track_stats.group();
 
 		// The codec/timescale came from TRACK_INFO (read before this subscription was
 		// even registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
@@ -589,7 +593,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), compression, timescale) => res,
+			res = self.run_group(stream, group.clone(), compression, timescale) => res,
 		};
 
 		match res {
@@ -612,7 +616,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
-		track_stats: Arc<SubscriberTrack>,
 		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
@@ -648,9 +651,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// `create_frame` is the allocation chokepoint and rejects an
 					// oversized `size` before allocating, so no pre-check is needed.
 					let mut frame = group.create_frame(Frame { size, timestamp })?;
-					track_stats.frame();
 
-					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+					if let Err(err) = self.run_frame(stream, &mut frame).await {
 						let _ = frame.abort(err.clone());
 						return Err(err);
 					}
@@ -667,9 +669,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// Pull the compressed bytes off the wire, then inflate. The frame
 					// the consumer sees carries the original (decompressed) size.
 					let packed = stream.read_exact(size as usize).await?;
-					track_stats.frame();
-					track_stats.bytes(size);
-
 					let payload = compression.decompress(&packed)?;
 					let mut frame = group.create_frame(Frame {
 						size: payload.len() as u64,
@@ -688,17 +687,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
-		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
 		// read_buf writes QUIC stream bytes directly into the frame — no
 		// intermediate Bytes allocations, and quinn's reassembly arena is freed
-		// as we drain it.
+		// as we drain it. The model already metered this frame's bytes at
+		// `create_frame` (ingress), so no per-chunk counting here.
 		while bytes::BufMut::has_remaining_mut(frame) {
 			match stream.read_buf(frame).await? {
-				Some(n) if n > 0 => {
-					track_stats.bytes(n as u64);
-				}
+				Some(n) if n > 0 => {}
 				_ => return Err(Error::WrongSize),
 			}
 		}
@@ -766,8 +763,6 @@ struct SubStream<S: web_transport_trait::Session> {
 	max_latency: Duration,
 	start_group: Option<u64>,
 	priority: u8,
-	/// Per-(session, broadcast) viewer sentinel, held for the subscription's life.
-	_broadcast_sub: crate::BroadcastSubscription,
 }
 
 enum Sub<S: web_transport_trait::Session> {
@@ -1155,11 +1150,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			producer
 		};
 
-		// This session is now actively feeding the broadcast, so take the per-(session,
-		// broadcast) viewer sentinel for the subscription's life.
-		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
-		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
-
+		// The accepted producer holds a live-publisher token (taken when the
+		// broadcast served this track request), so the model counts this session as
+		// feeding the broadcast for the producer's lifetime.
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -1178,7 +1171,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: subscription.stale,
 			start_group: subscription.group_start,
 			priority: subscription.priority,
-			_broadcast_sub: broadcast_sub,
 		});
 
 		Ok(())
@@ -1206,7 +1198,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			mut subscriber,
 			path,
 			broadcast: _,
-			track_stats,
+			// Held for the fetch's lifetime so it counts as one subscription; the
+			// model meters the fetched group's payload.
+			track_stats: _track_stats,
 			name,
 		} = self;
 		let group = request.sequence();
@@ -1255,13 +1249,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 
 		let res = subscriber
-			.run_group(
-				&mut stream.reader,
-				producer.clone(),
-				track_stats,
-				compression,
-				timescale,
-			)
+			.run_group(&mut stream.reader, producer.clone(), compression, timescale)
 			.await;
 		match res {
 			Ok(()) => {
@@ -1287,6 +1275,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 			Track::Pending(request) => request.reject(err),
 		}
-		// Dropping `sub` releases the BroadcastSubscription viewer sentinel.
+		// Dropping the producer releases its live-publisher token.
 	}
 }

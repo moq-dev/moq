@@ -27,6 +27,15 @@ pub fn start<S: web_transport_trait::Session>(
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| OriginProducer::empty(Origin::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
+
+		// Attach this session's egress sink provider so the model meters every
+		// broadcast the publisher serves downstream, keyed by absolute path and tier.
+		let publish = {
+			let stats = stats.clone();
+			publish.with_egress(std::sync::Arc::new(move |abs: &str| {
+				stats.broadcast(abs).egress_usage()
+			}))
+		};
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {

@@ -1179,6 +1179,10 @@ impl BroadcastRequest {
 /// handler drops before serving it.
 pub struct BroadcastRequested {
 	inner: Requested,
+	// When set, stamp the resolved (dynamically served) consumer with this
+	// session's egress sink for the absolute path. The already-announced path
+	// (`Ready`) is stamped by `get_broadcast` instead.
+	stamp: Option<(EgressSink, PathOwned)>,
 }
 
 enum Requested {
@@ -1195,18 +1199,21 @@ impl BroadcastRequested {
 	fn ready(broadcast: BroadcastConsumer) -> Self {
 		Self {
 			inner: Requested::Ready(broadcast),
+			stamp: None,
 		}
 	}
 
 	fn failed(error: Error) -> Self {
 		Self {
 			inner: Requested::Failed(error),
+			stamp: None,
 		}
 	}
 
-	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
+	fn pending(consumer: kio::Consumer<PendingBroadcast>, stamp: Option<(EgressSink, PathOwned)>) -> Self {
 		Self {
 			inner: Requested::Pending(consumer),
+			stamp,
 		}
 	}
 
@@ -1220,7 +1227,13 @@ impl BroadcastRequested {
 					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
 				})) {
-					Ok(result) => result,
+					Ok(Ok(mut broadcast)) => {
+						if let Some((egress, path)) = &self.stamp {
+							broadcast.set_consumer_sink(egress(path.as_str()));
+						}
+						Ok(broadcast)
+					}
+					Ok(Err(err)) => Err(err),
 					// Every handler dropped without resolving: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
 				},
@@ -1298,6 +1311,15 @@ impl Consume<crate::TrackConsumer> for crate::TrackConsumer {
 /// Clones share the underlying tree state without allocating any per-cursor
 /// resources. To actually receive announce / unannounce events, call
 /// [`Self::announced`] to obtain an [`AnnounceConsumer`].
+/// Per-session egress sink provider.
+///
+/// Given a broadcast's absolute path, returns the [`crate::Usage`] sink that this
+/// session's downstream delivery should be metered against. Supplied by the relay
+/// when it scopes an origin per session; `None` means no metering (the consumer
+/// keeps its default no-op egress sink). Keeps the model independent of the stats
+/// layer, which is the only thing that knows about tiers.
+pub(crate) type EgressSink = std::sync::Arc<dyn Fn(&str) -> std::sync::Arc<crate::Usage> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct OriginConsumer {
 	// Identity of the origin this consumer was derived from.
@@ -1310,6 +1332,10 @@ pub struct OriginConsumer {
 	// Shared fallback request queue, fed to any `OriginDynamic` handler on the
 	// producer side. Used only by `request_broadcast`; announced lookups ignore it.
 	dynamic: kio::Consumer<OriginDynamicState>,
+
+	// Per-session egress sink provider. When set, every `BroadcastConsumer` this
+	// handle yields is stamped with the session's egress sink for its path.
+	egress: Option<EgressSink>,
 }
 
 impl std::ops::Deref for OriginConsumer {
@@ -1327,7 +1353,25 @@ impl OriginConsumer {
 			nodes,
 			root,
 			dynamic,
+			egress: None,
 		}
+	}
+
+	/// Attach a per-session egress sink provider (see [`EgressSink`]).
+	///
+	/// Every `BroadcastConsumer` this handle (and the [`AnnounceConsumer`]s it
+	/// spawns) yields is stamped with the session's egress sink for its path, so
+	/// downstream delivery is metered without any per-handler setter.
+	pub(crate) fn with_egress(mut self, egress: EgressSink) -> Self {
+		self.egress = Some(egress);
+		self
+	}
+
+	/// The absolute egress sink for `path` (relative to this consumer's root), or
+	/// `None` when no provider is attached.
+	fn egress_sink(&self, path: &Path) -> Option<std::sync::Arc<crate::Usage>> {
+		let egress = self.egress.as_ref()?;
+		Some(egress(self.root.join(path).as_str()))
 	}
 
 	/// A view with this consumer's identity and root but no broadcasts:
@@ -1340,6 +1384,7 @@ impl OriginConsumer {
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
+			egress: self.egress.clone(),
 		}
 	}
 
@@ -1350,7 +1395,7 @@ impl OriginConsumer {
 	/// set as initial announcements. Drop the returned [`AnnounceConsumer`]
 	/// to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.egress.clone())
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -1367,8 +1412,15 @@ impl OriginConsumer {
 	fn get_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 		let (root, rest) = self.nodes.get(&path)?;
-		let state = root.lock();
-		state.consume_broadcast(&rest)
+		let mut broadcast = {
+			let state = root.lock();
+			state.consume_broadcast(&rest)?
+		};
+		// Stamp this session's egress sink so downstream delivery is metered.
+		if let Some(usage) = self.egress_sink(&path) {
+			broadcast.set_consumer_sink(usage);
+		}
+		Some(broadcast)
 	}
 
 	/// Block until a broadcast with the given path is announced and return it.
@@ -1414,12 +1466,14 @@ impl OriginConsumer {
 	// TODO accept PathPrefixes instead of &[Path]
 	pub fn scope(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
 		let prefixes = PathPrefixes::new(prefixes);
-		Some(OriginConsumer::new(
+		let mut scoped = OriginConsumer::new(
 			self.info,
 			self.root.clone(),
 			self.nodes.select(&prefixes)?,
 			self.dynamic.clone(),
-		))
+		);
+		scoped.egress = self.egress.clone();
+		Some(scoped)
 	}
 
 	/// Get a broadcast by path, falling back to a dynamic request when it is not announced.
@@ -1465,11 +1519,13 @@ impl OriginConsumer {
 			let producer = kio::Producer::<PendingBroadcast>::default();
 			let consumer = producer.consume();
 			state.requests.insert(absolute.clone(), producer);
-			state.request_order.push_back(absolute);
+			state.request_order.push_back(absolute.clone());
 			consumer
 		};
 
-		kio::Pending::new(BroadcastRequested::pending(consumer))
+		// Stamp the served consumer with this session's egress sink when it resolves.
+		let stamp = self.egress.clone().map(|e| (e, absolute));
+		kio::Pending::new(BroadcastRequested::pending(consumer, stamp))
 	}
 
 	/// Returns a new OriginConsumer that automatically strips out the provided prefix.
@@ -1479,12 +1535,14 @@ impl OriginConsumer {
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
 		let prefix = prefix.as_path();
 
-		Some(Self::new(
+		let mut rooted = Self::new(
 			self.info,
 			self.root.join(&prefix).to_owned(),
 			self.nodes.root(&prefix)?,
 			self.dynamic.clone(),
-		))
+		);
+		rooted.egress = self.egress.clone();
+		Some(rooted)
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -1525,7 +1583,7 @@ impl AnnounceProducer {
 	/// as initial announcements. Drop the returned [`AnnounceConsumer`] to
 	/// unregister.
 	pub fn consume(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), None)
 	}
 
 	/// Returns the prefix that is automatically stripped from announced paths.
@@ -1546,10 +1604,14 @@ pub struct AnnounceConsumer {
 	// Pending updates queued for this cursor. Coalesced so a slow consumer
 	// can't accumulate redundant announce/unannounce pairs.
 	state: kio::Producer<OriginConsumerState>,
+
+	// Per-session egress sink provider, inherited from the originating
+	// `OriginConsumer`. Stamps each delivered broadcast with this session's sink.
+	egress: Option<EgressSink>,
 }
 
 impl AnnounceConsumer {
-	fn new(root: PathOwned, nodes: OriginNodes) -> Self {
+	fn new(root: PathOwned, nodes: OriginNodes, egress: Option<EgressSink>) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -1561,7 +1623,33 @@ impl AnnounceConsumer {
 			node.lock().consume(id, notify);
 		}
 
-		Self { id, nodes, root, state }
+		Self {
+			id,
+			nodes,
+			root,
+			state,
+			egress,
+		}
+	}
+
+	/// Stamp this session's egress sink onto a delivered broadcast. `path` is
+	/// relative to this cursor's root, so the absolute path is `root.join(path)`.
+	fn stamp(&self, path: &Path, announced: Announced) -> Announced {
+		let Some(egress) = &self.egress else {
+			return announced;
+		};
+		let usage = egress(self.root.join(path).as_str());
+		match announced {
+			Announced::Active(mut b) => {
+				b.set_consumer_sink(usage);
+				Announced::Active(b)
+			}
+			Announced::Restart(mut b) => {
+				b.set_consumer_sink(usage);
+				Announced::Restart(b)
+			}
+			Announced::Ended => Announced::Ended,
+		}
 	}
 
 	/// Returns the next (un)announced broadcast and its path relative to this
@@ -1591,7 +1679,10 @@ impl AnnounceConsumer {
 			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
 			Err(_) => return Poll::Ready(None),
 		};
-		Poll::Ready(Some(state.take().expect("predicate guaranteed an update")))
+		let (path, announced) = state.take().expect("predicate guaranteed an update");
+		drop(state);
+		let announced = self.stamp(&path, announced);
+		Poll::Ready(Some((path, announced)))
 	}
 
 	/// Returns the next (un)announced broadcast without blocking.
@@ -1599,7 +1690,9 @@ impl AnnounceConsumer {
 	/// Returns None if there is no update available; NOT because the cursor is closed.
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<OriginAnnounce> {
-		self.state.write().ok()?.take()
+		let (path, announced) = self.state.write().ok()?.take()?;
+		let announced = self.stamp(&path, announced);
+		Some((path, announced))
 	}
 
 	/// Returns true if the cursor is closed (no more updates will arrive).
@@ -1711,6 +1804,40 @@ mod tests {
 	use crate::BroadcastInfo;
 
 	use super::*;
+
+	/// A consumer scoped with `with_egress` stamps every broadcast it yields, so
+	/// downstream reads are metered against this session's egress sink even though
+	/// the producer baked only an ingress sink.
+	#[tokio::test]
+	async fn egress_sink_stamped_by_origin() {
+		use std::sync::Arc;
+
+		use crate::Usage;
+
+		let origin = Origin::random().produce();
+		let mut producer = BroadcastInfo::new().produce();
+		let mut track = producer.create_track("video", None).unwrap();
+		let _publish = origin.publish_broadcast("demo", &producer).unwrap();
+
+		let egress = Arc::new(Usage::default());
+		let sink = egress.clone();
+		let consumer = origin.consume().with_egress(Arc::new(move |_abs: &str| sink.clone()));
+
+		// Resolve the announced broadcast (stamped with this session's egress sink).
+		let bc = consumer.request_broadcast("demo").await.unwrap();
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hi")).unwrap();
+		group.finish().unwrap();
+
+		let mut sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut g = sub.next_group().await.unwrap().expect("group");
+		assert_eq!(g.read_frame().await.unwrap().unwrap(), bytes::Bytes::from_static(b"hi"));
+
+		assert_eq!(egress.groups(), 1);
+		assert_eq!(egress.frames(), 1);
+		assert_eq!(egress.bytes(), 2);
+	}
 
 	#[test]
 	fn origin_list_push_fails_at_limit() {
@@ -1950,6 +2077,7 @@ mod tests {
 			BroadcastInfo {
 				hops,
 				epoch: BroadcastInfo::epoch_from_wire(0),
+				..Default::default()
 			}
 			.produce()
 		}

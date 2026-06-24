@@ -31,10 +31,6 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
 	stats: MoqStats,
-	/// Per-session egress broadcast-subscription tracker. Each downstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
-	/// the distinct sessions (viewers) watching each broadcast.
-	broadcasts: crate::SessionBroadcasts,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
@@ -46,12 +42,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
 		let self_origin = *config.origin;
-		let broadcasts = config.stats.publisher_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
-			broadcasts,
 			self_origin,
 			priority: Default::default(),
 			version: config.version,
@@ -494,10 +488,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// handler (or resolves to an error when there is none).
 		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
-		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
-		// broadcast) `broadcasts` sentinel that counts viewers is taken inside
-		// `run_subscribe`, only once the subscription is validated and active, so
-		// a stale/invalid SUBSCRIBE isn't counted as a viewer.
+		// Per-track subscription guard (bumps `subscriptions`). The viewer count
+		// (`broadcasts`) is owned by the model: `broadcast.track()` hands the
+		// subscription a live-viewer token for its lifetime.
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
 		if let Err(err) = Self::run_subscribe(
@@ -506,7 +499,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			&subscribe,
 			broadcast,
 			self.priority.clone(),
-			(track_stats, self.broadcasts.clone(), absolute.clone()),
+			track_stats,
 			self.version,
 		)
 		.await
@@ -534,13 +527,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		broadcast: kio::Pending<crate::BroadcastRequested>,
 		priority: PriorityQueue,
-		// The track guard (bumps `subscriptions`), the per-session broadcast
-		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
-		// below, after the subscription is validated, and held for its lifetime.
-		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
+		// The track guard, bumping `subscriptions` for its lifetime. The viewer
+		// count is owned by the model (see the caller).
+		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let (track_stats, broadcasts, absolute) = stats;
 		let subscription = crate::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
@@ -574,10 +565,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		} else {
 			None
 		};
-
-		// Subscription is now active: count this session as a viewer of the
-		// broadcast. Dropping this guard (subscription end) releases it.
-		let _broadcast_sub = broadcasts.subscribe(&absolute);
 
 		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties live
 		// in TRACK_INFO, and the resolved range arrives as SUBSCRIBE_START/END emitted
@@ -670,7 +657,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
 		broadcast: kio::Pending<crate::BroadcastRequested>,
-		track_stats: crate::PublisherTrack,
+		// Held for the fetch's lifetime so it counts as one subscription; payload is
+		// metered by the model.
+		_track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
 		let broadcast = broadcast.await?;
@@ -687,16 +676,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// FETCH is gated to lite-05+, which always carries timestamps when the track
 		// advertised a timescale; `None` means an untimed track (frames omit them).
-		let timescale = if version.has_timestamps() {
-			group.timescale()
-		} else {
-			None
-		};
-
-		// Compression is an immutable per-track property (reported in TRACK_INFO), so
-		// fetched frames use the same codec as live ones. The group resolved above, so
-		// the track's info is set and this resolves immediately.
-		let compression = if track.info().await?.compress && version.has_timestamps() {
+		// Codec + timescale are immutable per-track properties (reported in
+		// TRACK_INFO), so fetched frames use the same codec/timing as live ones. The
+		// group resolved above, so the track's info is set and this resolves immediately.
+		let info = track.info().await?;
+		let timescale = if version.has_timestamps() { info.timescale } else { None };
+		let compression = if info.compress && version.has_timestamps() {
 			Compression::Deflate
 		} else {
 			Compression::None
@@ -704,7 +689,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
 		// the codec/timescale from TRACK_INFO and the group sequence from its request.
-		track_stats.group();
+		// A fetch re-serves an existing group, so the model meters its frames/bytes
+		// (via `get_frame`) but not `groups`.
 
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
 		// delta-timestamp baseline resets to 0, so the first served frame's delta is
@@ -712,15 +698,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
-			write_fetch_frame(
-				&mut stream.writer,
-				&mut frame,
-				compression,
-				timescale,
-				&mut prev_ts,
-				&track_stats,
-			)
-			.await?;
+			write_fetch_frame(&mut stream.writer, &mut frame, compression, timescale, &mut prev_ts).await?;
 			index += 1;
 		}
 
@@ -784,28 +762,21 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
 	match compression {
 		Compression::None => {
 			writer.encode(&frame.size).await?;
-			track_stats.frame();
 			while let Some(mut chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
 				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
 			}
 		}
 		compression => {
 			let payload = frame.read_all().await?;
 			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
-			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
+			writer.encode(&(chunk.len() as u64)).await?;
 			writer.write_all(&mut chunk).await?;
-			track_stats.bytes(n);
 		}
 	}
 
@@ -821,6 +792,9 @@ struct Subscription<S: web_transport_trait::Session> {
 	session: S,
 	id: u64,
 	track_name: Arc<str>,
+	// Held for its `Drop`, which records the `subscriptions` lifecycle; egress
+	// payload is metered by the model, so the guard is never read.
+	#[allow(dead_code)]
 	track_stats: Arc<crate::PublisherTrack>,
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
@@ -941,7 +915,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		self.track_stats.group();
 
 		// Lite05+ delta-encodes per-frame timestamps within the group. The first
 		// frame's delta is absolute (against an implicit prev value of 0), every
@@ -976,7 +949,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		match self.compression {
 			Compression::None => {
 				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
 
 				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 					self.write_chunk(stream, priority, chunk).await?;
@@ -986,7 +958,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				let payload = self.read_all(stream, priority, &mut frame).await?;
 				let chunk = bytes::Bytes::from(compression.compress(&payload));
 				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
 				self.write_chunk(stream, priority, chunk).await?;
 			}
 		}
@@ -1057,7 +1028,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
-		let n = chunk.len() as u64;
 		loop {
 			tokio::select! {
 				biased;
@@ -1069,7 +1039,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
 			}
 		}
-		self.track_stats.bytes(n);
+		// Egress bytes are metered by the model when the frame is read
+		// (`GroupConsumer::next_frame`), not per wire chunk.
 		Ok(())
 	}
 }

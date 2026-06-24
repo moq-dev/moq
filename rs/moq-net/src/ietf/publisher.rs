@@ -19,22 +19,16 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	origin: OriginConsumer,
 	control: Control,
 	stats: StatsHandle,
-	/// Per-session egress broadcast-subscription tracker. Each downstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
-	/// the distinct sessions (viewers) watching each broadcast.
-	broadcasts: crate::SessionBroadcasts,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: OriginConsumer, control: Control, stats: StatsHandle, version: Version) -> Self {
-		let broadcasts = stats.publisher_broadcasts();
 		Self {
 			session,
 			origin,
 			control,
 			stats,
-			broadcasts,
 			version,
 		}
 	}
@@ -125,9 +119,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Per-track subscription guard (bumps `subscriptions`). Taken before
 		// validation so a stale/invalid SUBSCRIBE still counts as an attempt,
-		// matching the lite path. The per-(session, broadcast) `broadcasts`
-		// sentinel that counts viewers is taken only once the subscription is
-		// validated and active, below.
+		// matching the lite path. The viewer count (`broadcasts`) is owned by the
+		// model: `broadcast.track()` hands the subscription a live-viewer token.
 		let track_stats = std::sync::Arc::new(self.stats.broadcast(&absolute).publisher_track(&track_name));
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
@@ -155,10 +148,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				return Ok(());
 			}
 		};
-
-		// Subscription is now active: count this session as a viewer of the
-		// broadcast. Dropping this guard (subscription end) releases it.
-		let _broadcast_sub = self.broadcasts.subscribe(&absolute);
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
@@ -300,7 +289,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: GroupConsumer,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
+		// Held for the group's lifetime so it counts as one subscription; payload
+		// is metered by the model when the frames are read.
+		_track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -309,7 +300,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stream = Writer::new(stream, version);
 
 		stream.encode(&msg).await?;
-		track_stats.group();
 
 		loop {
 			let frame = tokio::select! {
@@ -333,7 +323,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Write the size of the frame.
 			stream.encode(&frame.size).await?;
-			track_stats.frame();
 
 			if frame.size == 0 {
 				// Have to write the object status too.
@@ -349,9 +338,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match chunk? {
 						Some(mut chunk) => {
-							let n = chunk.len() as u64;
 							stream.write_all(&mut chunk).await?;
-							track_stats.bytes(n);
 						}
 						None => break,
 					}

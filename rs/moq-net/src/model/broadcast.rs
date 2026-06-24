@@ -1,13 +1,23 @@
 use std::{
 	collections::{HashMap, VecDeque, hash_map},
-	sync::Arc,
+	sync::{Arc, LazyLock},
 	task::{Poll, ready},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
-use super::{OriginList, TrackInfo};
+use super::{BroadcastStats, OriginList, TrackInfo, Usage, usage::Live};
+
+/// Shared no-op broadcast metadata for tracks created outside a broadcast.
+///
+/// A standalone [`TrackProducer::new`] track has no broadcast to inherit from, so
+/// it points at this default instance; its usage sinks have no reader, so bumping
+/// them is harmless. Shared so a fresh standalone track is a cheap `Arc` clone.
+pub(crate) fn noop_broadcast() -> Arc<BroadcastInfo> {
+	static NOOP: LazyLock<Arc<BroadcastInfo>> = LazyLock::new(|| Arc::new(BroadcastInfo::default()));
+	NOOP.clone()
+}
 
 /// Wall-clock base for the broadcast epoch: 2020-01-01T00:00:00 UTC, expressed as
 /// seconds since the Unix epoch. The wire carries milliseconds since this base
@@ -32,6 +42,13 @@ pub struct BroadcastInfo {
 	/// created). Origin-assigned and forwarded unchanged by relays. On the wire
 	/// (ANNOUNCE_BROADCAST, lite-05+) it is encoded as milliseconds since 2020-01-01 UTC.
 	pub epoch: SystemTime,
+
+	/// Usage sinks for this broadcast, carried immutably to every track, group,
+	/// and frame. The ingress sink is baked in by the publisher at construction;
+	/// the egress sink is stamped per consuming session by the origin. Defaults to
+	/// unreferenced no-op sinks, so a broadcast is unmetered unless a stats layer
+	/// supplies them.
+	pub stats: BroadcastStats,
 }
 
 impl Default for BroadcastInfo {
@@ -40,6 +57,7 @@ impl Default for BroadcastInfo {
 			hops: OriginList::new(),
 			// A fresh broadcast instance is stamped with the current wall clock.
 			epoch: SystemTime::now(),
+			stats: BroadcastStats::default(),
 		}
 	}
 }
@@ -101,6 +119,13 @@ struct BroadcastState {
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
 	dynamic: usize,
+
+	// Live-publisher refcount over the ingress sink: the broadcast counts as one
+	// live publisher while >= 1 `TrackProducer` (created here or via the dynamic
+	// handler) is alive. Shared by every producer/dynamic handle through the kio
+	// channel. Set by `BroadcastProducer::new`; a default-constructed state has a
+	// no-op sink.
+	publishers: Arc<Live>,
 }
 
 impl BroadcastState {
@@ -133,17 +158,20 @@ impl BroadcastState {
 /// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Producer<BroadcastState>,
 }
 
 impl BroadcastProducer {
 	/// Create a producer for the given broadcast metadata. Prefer [`BroadcastInfo::produce`].
 	pub fn new(info: BroadcastInfo) -> Self {
-		Self {
-			info,
-			state: Default::default(),
-		}
+		let info = Arc::new(info);
+		// Key the live-publisher count to this broadcast's ingress sink.
+		let state = kio::Producer::new(BroadcastState {
+			publishers: Live::new(info.stats.producer.clone()),
+			..Default::default()
+		});
+		Self { info, state }
 	}
 
 	pub fn info(&self) -> &BroadcastInfo {
@@ -179,8 +207,9 @@ impl BroadcastProducer {
 		info: impl Into<Option<TrackInfo>>,
 	) -> Result<TrackProducer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = TrackProducer::new(name, info);
 		let mut state = BroadcastState::modify(&self.state)?;
+		let publisher = state.publishers.enter();
+		let track = TrackProducer::for_broadcast(name, info, self.info.clone(), Some(publisher));
 		state.insert_track(track.weak())?;
 		drop(state);
 		Ok(track)
@@ -194,8 +223,10 @@ impl BroadcastProducer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`BroadcastDynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
-		let request = TrackRequest::new(name);
 		let mut state = BroadcastState::modify(&self.state)?;
+		let mut request = TrackRequest::for_broadcast(name, self.info.clone());
+		// The reserved track is published into by this producer, so count it.
+		request.set_publisher(state.publishers.enter());
 		state.insert_track(request.weak())?;
 		drop(state);
 		Ok(request)
@@ -233,6 +264,7 @@ impl BroadcastProducer {
 		BroadcastConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			viewers: Live::new(self.info.stats.consumer.clone()),
 		}
 	}
 
@@ -265,7 +297,7 @@ impl BroadcastProducer {
 /// [`TrackRequest::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 pub struct BroadcastDynamic {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Producer<BroadcastState>,
 }
 
@@ -287,7 +319,7 @@ impl Clone for BroadcastDynamic {
 }
 
 impl BroadcastDynamic {
-	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>) -> Self {
+	fn new(info: Arc<BroadcastInfo>, state: kio::Producer<BroadcastState>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
@@ -323,7 +355,10 @@ impl BroadcastDynamic {
 		}))?;
 
 		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
-		let pending = state.requests.remove(&name).expect("request_order out of sync");
+		let mut pending = state.requests.remove(&name).expect("request_order out of sync");
+		// Serving this request makes the broadcast a live publisher (the relay's
+		// ingress tracks are created on this path).
+		pending.set_publisher(state.publishers.enter());
 		state.tracks.insert(name, pending.weak());
 		Poll::Ready(Ok(pending))
 	}
@@ -338,6 +373,7 @@ impl BroadcastDynamic {
 		BroadcastConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			viewers: Live::new(self.info.stats.consumer.clone()),
 		}
 	}
 
@@ -388,13 +424,33 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Consumer<BroadcastState>,
+
+	// Live-viewer refcount over the egress sink: this consumer (and its clones)
+	// counts as one viewer while it has >= 1 outstanding `TrackConsumer`.
+	viewers: Arc<Live>,
 }
 
 impl BroadcastConsumer {
 	pub fn info(&self) -> &BroadcastInfo {
 		&self.info
+	}
+
+	/// Replace this consumer's egress usage sink, attributing everything it
+	/// delivers to a particular session/tier.
+	///
+	/// The shared channel is untouched (so [`Self::is_clone`] and origin routing
+	/// are unaffected); only this handle's `Arc<BroadcastInfo>` is swapped for one
+	/// with a different `stats.consumer`. The origin calls this once per session
+	/// when it hands the consumer out.
+	pub(crate) fn set_consumer_sink(&mut self, usage: Arc<Usage>) {
+		let mut info = (*self.info).clone();
+		info.stats.consumer = usage.clone();
+		self.info = Arc::new(info);
+		// Re-key the viewer count to the session's sink. The origin stamps before
+		// the consumer is cloned or used, so the count is still zero here.
+		self.viewers = Live::new(usage);
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -408,7 +464,12 @@ impl BroadcastConsumer {
 		// Reuse a live producer if one is already publishing the track.
 		if let Some(weak) = state.tracks.get(name) {
 			if !weak.is_closed() {
-				return Ok(weak.consume());
+				let mut consumer = weak.consume();
+				// Attribute egress to this consuming session, not whoever produced
+				// or first requested the track, and count it toward this viewer.
+				consumer.set_broadcast(self.info.clone());
+				consumer.set_viewer(self.viewers.enter());
+				return Ok(consumer);
 			}
 			// Drop the stale entry and fall through to a fresh request.
 			state.tracks.remove(name);
@@ -416,7 +477,10 @@ impl BroadcastConsumer {
 
 		if let Some(pending) = state.requests.get_mut(name) {
 			// Coalesce onto an in-flight request for the same name.
-			return Ok(pending.consume());
+			let mut consumer = pending.consume();
+			consumer.set_broadcast(self.info.clone());
+			consumer.set_viewer(self.viewers.enter());
+			return Ok(consumer);
 		}
 
 		if state.dynamic == 0 {
@@ -424,10 +488,12 @@ impl BroadcastConsumer {
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
-		// requests map, and the FIFO order.
+		// requests map, and the FIFO order. The request carries this broadcast's
+		// info so the accepted producer meters ingress and this consumer meters egress.
 		let name: Arc<str> = name.into();
-		let request = TrackRequest::new(name.clone());
-		let consumer = request.consume();
+		let request = TrackRequest::for_broadcast(name.clone(), self.info.clone());
+		let mut consumer = request.consume();
+		consumer.set_viewer(self.viewers.enter());
 
 		state.requests.insert(name.clone(), request);
 		state.request_order.push_back(name);
@@ -686,5 +752,104 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// Ingress is metered once (single writer) and egress per consumer: two viewers
+	/// of the same track count the payload twice on the egress sink while the
+	/// ingress sink counts it once.
+	#[tokio::test]
+	async fn usage_ingress_once_egress_per_viewer() {
+		use std::sync::Arc;
+
+		use crate::{BroadcastStats, Usage};
+
+		let ingress = Arc::new(Usage::default());
+		let egress = Arc::new(Usage::default());
+		let info = BroadcastInfo {
+			stats: BroadcastStats {
+				producer: ingress.clone(),
+				consumer: egress.clone(),
+			},
+			..Default::default()
+		};
+
+		let mut broadcast = info.produce();
+		let mut track = broadcast.assert_create_track("video", None);
+		let consumer = broadcast.consume();
+
+		// Ingress: one group of two frames (5 + 6 bytes).
+		let mut group = track.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"world!")).unwrap();
+		group.finish().unwrap();
+
+		assert_eq!(ingress.groups(), 1);
+		assert_eq!(ingress.frames(), 2);
+		assert_eq!(ingress.bytes(), 11);
+		// Nothing delivered yet.
+		assert_eq!(egress.groups(), 0);
+		assert_eq!(egress.bytes(), 0);
+
+		// Two viewers each read the group and its frames.
+		for _ in 0..2 {
+			let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut g = sub.next_group().await.unwrap().expect("group");
+			assert_eq!(
+				g.read_frame().await.unwrap().unwrap(),
+				bytes::Bytes::from_static(b"hello")
+			);
+			assert_eq!(
+				g.read_frame().await.unwrap().unwrap(),
+				bytes::Bytes::from_static(b"world!")
+			);
+		}
+
+		// Ingress unchanged; egress counted once per viewer.
+		assert_eq!(ingress.groups(), 1);
+		assert_eq!(egress.groups(), 2);
+		assert_eq!(egress.frames(), 4);
+		assert_eq!(egress.bytes(), 22);
+	}
+
+	/// Live counts: a producer with >= 1 track is one publisher; a consumer with
+	/// >= 1 outstanding `TrackConsumer` is one viewer regardless of track count.
+	#[tokio::test]
+	async fn live_viewer_and_publisher_counts() {
+		use std::sync::Arc;
+
+		use crate::{BroadcastStats, Usage};
+
+		let ingress = Arc::new(Usage::default());
+		let egress = Arc::new(Usage::default());
+		let info = BroadcastInfo {
+			stats: BroadcastStats {
+				producer: ingress.clone(),
+				consumer: egress.clone(),
+			},
+			..Default::default()
+		};
+
+		let mut producer = info.produce();
+
+		// Publisher: creating a track opens one publisher.
+		assert_eq!(ingress.opened(), 0);
+		let track = producer.assert_create_track("video", None);
+		assert_eq!((ingress.opened(), ingress.closed()), (1, 0));
+
+		// Viewer: one consumer counts once regardless of how many tracks it holds.
+		let consumer = producer.consume();
+		let t1 = consumer.track("video").unwrap();
+		assert_eq!((egress.opened(), egress.closed()), (1, 0));
+		let t2 = consumer.track("video").unwrap();
+		assert_eq!(egress.opened(), 1, "same consumer, still one viewer");
+
+		drop(t1);
+		assert_eq!(egress.closed(), 0, "a track is still outstanding");
+		drop(t2);
+		assert_eq!(egress.closed(), 1, "last track dropped closes the viewer");
+
+		// Publisher closes when its last track drops.
+		drop(track);
+		assert_eq!(ingress.closed(), 1);
 	}
 }

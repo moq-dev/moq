@@ -7,6 +7,7 @@ mod origin;
 mod subscription;
 mod time;
 mod track;
+mod usage;
 
 pub use bandwidth::*;
 pub use broadcast::*;
@@ -17,3 +18,4 @@ pub use origin::*;
 pub use subscription::*;
 pub use time::*;
 pub use track::*;
+pub use usage::*;
