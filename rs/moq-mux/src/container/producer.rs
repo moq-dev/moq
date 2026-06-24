@@ -236,7 +236,7 @@ mod tests {
 		let track = moq_net::TrackProducer::new(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		);
+		).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -255,7 +255,7 @@ mod tests {
 		let track = moq_net::TrackProducer::new(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		);
+		).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -274,7 +274,7 @@ mod tests {
 		let track = moq_net::TrackProducer::new(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		);
+		).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
@@ -296,7 +296,7 @@ mod tests {
 		let track = moq_net::TrackProducer::new(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		);
+		).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -314,7 +314,7 @@ mod tests {
 		let track = moq_net::TrackProducer::new(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		);
+		).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -355,7 +355,7 @@ mod tests {
 		let track = moq_net::TrackProducer::new(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		);
+		).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let recording = Recording::default();
 		let mut producer = Producer::new(track, recording.clone()).with_latency(std::time::Duration::from_secs(10));
 

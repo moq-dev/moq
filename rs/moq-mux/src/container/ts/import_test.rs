@@ -7,7 +7,7 @@ use bytes::BytesMut;
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -190,7 +190,7 @@ fn resyncs_across_chunk_boundaries() {
 	let mut misaligned = vec![0x00, 0x11, 0x22];
 	misaligned.extend_from_slice(data);
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	for chunk in misaligned.chunks(100) {
@@ -216,7 +216,7 @@ async fn import_export_import_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
 
 	// Import the fixture into a broadcast.
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -263,7 +263,7 @@ async fn survives_midstream_join() {
 	buf.extend_from_slice(pkt(8)); // IDR AU: flushes the delta, then anchors the first group
 	buf.extend_from_slice(pkt(9));
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -298,7 +298,7 @@ async fn survives_midstream_join() {
 #[tokio::test(start_paused = true)]
 async fn kyrion_dirtystart_extracts_real_cues() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::with_catalog(
 		&mut broadcast,
@@ -351,7 +351,7 @@ fn import_handles_unaligned_chunks() {
 	// exercising the partial-packet retention across calls.
 	let data = include_bytes!("test_data/bbb.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 

@@ -418,7 +418,10 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = BroadcastInfo::new().produce();
+		// Publish-then-subscribe: cache so the late subscriber still sees group 0.
+		let mut broadcast = BroadcastInfo::new()
+			.produce()
+			.with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -456,7 +459,10 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = BroadcastInfo::new().produce();
+		// Publish-then-subscribe: cache so the late subscriber still sees group 0.
+		let mut broadcast = BroadcastInfo::new()
+			.produce()
+			.with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
