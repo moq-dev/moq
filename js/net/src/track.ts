@@ -1,5 +1,6 @@
 import { Signal } from "@moq/signals";
 import { CacheFull, type Frame, Group } from "./group.ts";
+import { Timescale } from "./time.ts";
 
 /** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
@@ -14,6 +15,12 @@ export const DEFAULT_CACHE_MS = 5000;
 export interface TrackInfo {
 	/** Hint that frames are worth compressing (e.g. a JSON catalog). */
 	compress: boolean;
+	/**
+	 * Units per second for this track's frame timestamps (reported in TRACK_INFO on
+	 * Lite05+). Defaults to milliseconds; set it finer (e.g. {@link Timescale.MICRO})
+	 * for media that needs sub-millisecond timing.
+	 */
+	timescale: Timescale;
 	/** How long (milliseconds) old groups stay available before eviction. */
 	cache: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
@@ -26,6 +33,7 @@ export interface TrackInfo {
 export function trackInfoDefaults(info: Partial<TrackInfo> = {}): TrackInfo {
 	return {
 		compress: info.compress ?? false,
+		timescale: info.timescale ?? Timescale.MILLI,
 		cache: info.cache ?? DEFAULT_CACHE_MS,
 		priority: info.priority ?? 0,
 		ordered: info.ordered ?? true,

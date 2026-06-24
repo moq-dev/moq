@@ -26,10 +26,6 @@ const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 
-/** Wire timescale (units per second) the publisher advertises: milliseconds, matching
- * the model frame timestamp unit. */
-const MILLI_TIMESCALE = 1000;
-
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `VarInt::from_zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
@@ -244,19 +240,21 @@ export class Publisher {
 
 		try {
 			let compression: Compression = Compression.None;
+			let timescale: Timescale = Timescale.MILLI;
 
 			if (supportsTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
 				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
 				//
-				// The frame codec is one of those immutable properties, so serving
+				// The frame codec and timescale are immutable properties, so serving
 				// MUST use exactly what TRACK_INFO advertised. Both come from the
 				// producer's accept(), so they always agree. Awaiting info() also
 				// surfaces a rejected track (accept never called, track closed) as an
 				// error here, which resets the stream.
 				const info = await track.info();
 				compression = info.compress ? Compression.Deflate : Compression.None;
+				timescale = info.timescale;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({ priority: msg.priority });
@@ -265,7 +263,7 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, compression);
+			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, compression, timescale);
 
 			for (;;) {
 				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
@@ -307,6 +305,7 @@ export class Publisher {
 		track: TrackSubscriber,
 		stream: Writer,
 		compression: Compression,
+		timescale: Timescale,
 	) {
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
@@ -329,7 +328,7 @@ export class Publisher {
 				}
 				lastSequence = group.sequence;
 
-				void this.#runGroup(sub, group, compression);
+				void this.#runGroup(sub, group, compression, timescale);
 			}
 
 			if (emitRange) {
@@ -384,10 +383,9 @@ export class Publisher {
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,
-				// Lite05 mandates per-frame timestamps. Model frames carry a millisecond
-				// timestamp (the app's, or wall-clock for timeless data), so we advertise
-				// milliseconds and emit each frame's own timestamp in `#runGroup`.
-				timescale: MILLI_TIMESCALE,
+				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
+				// `#runGroup` emits each frame converted to it.
+				timescale: info.timescale,
 				compression: info.compress ? Compression.Deflate : Compression.None,
 			});
 		})();
@@ -405,7 +403,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: Group, compression: Compression) {
+	async #runGroup(sub: bigint, group: Group, compression: Compression, timescale: Timescale) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			const stream = await Writer.open(this.#quic);
@@ -413,7 +411,7 @@ export class Publisher {
 			await msg.encode(stream);
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// timescale (milliseconds here); older drafts omit it.
+			// advertised timescale; older drafts omit it.
 			const timestamps = supportsTrackStream(this.version);
 			let prevTs = 0n;
 
@@ -423,9 +421,8 @@ export class Publisher {
 					if (!frame) break;
 
 					if (timestamps) {
-						// Emit at the advertised (millisecond) timescale, converting from
-						// whatever scale the frame carries.
-						const ts = BigInt(Math.round(frame.timestamp.as(Timescale.MILLI)));
+						// Convert each frame to the track's advertised timescale.
+						const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
 						await stream.u62(zigzag(ts - prevTs));
 						prevTs = ts;
 					}

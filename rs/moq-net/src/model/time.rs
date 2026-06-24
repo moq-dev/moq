@@ -409,6 +409,13 @@ impl std::ops::SubAssign for Timestamp {
 	}
 }
 
+/// Epoch the wall-clock timestamps are measured from: 2020-01-01T00:00:00Z.
+///
+/// A [`Timestamp`] isn't a real clock, it just needs to be non-negative and roughly
+/// monotonic with wall time. Anchoring 50 years after the Unix epoch keeps the value
+/// ~1.5e12 ms smaller, trimming a byte or two off the first frame's varint.
+const ANCHOR_EPOCH_SECS: u64 = 1_577_836_800;
+
 // There's no zero Instant, so we need to use a reference point.
 static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|| {
 	// To deter nerds trying to use timestamp as wall clock time, we subtract a random amount of time from the anchor.
@@ -420,7 +427,8 @@ static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|
 
 impl From<std::time::Instant> for Timestamp {
 	/// Convert an [`std::time::Instant`] into a millisecond-scale timestamp (the default
-	/// timescale) anchored to a jittered wall-clock reference (see `TIME_ANCHOR`).
+	/// timescale), anchored at 2020 (see [`ANCHOR_EPOCH_SECS`]) plus a per-process jitter
+	/// (see `TIME_ANCHOR`).
 	///
 	/// One-way only: there is no inverse, since the anchor is jittered to keep a
 	/// [`Timestamp`] from being read back as a clock.
@@ -432,11 +440,10 @@ impl From<std::time::Instant> for Timestamp {
 			None => anchor_system - anchor_instant.duration_since(instant),
 		};
 
-		let duration = system
-			.duration_since(UNIX_EPOCH)
-			.expect("dude your clock is earlier than 1970");
+		let epoch = UNIX_EPOCH + std::time::Duration::from_secs(ANCHOR_EPOCH_SECS);
+		let duration = system.duration_since(epoch).expect("clock is earlier than 2020");
 
-		Self::from_millis(duration.as_millis() as u64).expect("dude your clock is later than 2116")
+		Self::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
 	}
 }
 

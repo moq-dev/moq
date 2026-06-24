@@ -234,6 +234,7 @@ export class Subscriber {
 			const info = await this.#trackInfo(path, name);
 			return {
 				compress: info.compression !== Compression.None,
+				timescale: Time.Timescale(info.timescale),
 				// The wire no longer carries a cache hint (retention is best-effort),
 				// so the local retention window falls back to the model default.
 				cache: DEFAULT_CACHE_MS,
@@ -353,6 +354,7 @@ export class Subscriber {
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
 			producer = request.accept({
 				compress: info.compression !== Compression.None,
+				timescale: Time.Timescale(info.timescale),
 				// The wire no longer carries a cache hint (retention is best-effort),
 				// so the local retention window falls back to the model default.
 				cache: DEFAULT_CACHE_MS,
