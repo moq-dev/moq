@@ -11,7 +11,6 @@
 use std::io::{Read, Write};
 
 use bytes::Bytes;
-use flate2::Compression as Level;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 
@@ -20,6 +19,33 @@ use crate::{Error, Result};
 /// Default DEFLATE level: zlib's own default, a good size/speed balance for the small,
 /// repetitive payloads this targets.
 const DEFAULT_LEVEL: u32 = 6;
+
+/// A DEFLATE compression level in the valid `0..=9` range.
+///
+/// `0` stores without compressing, `9` is smallest but slowest. Construct via [`Level::new`],
+/// which clamps out-of-range values, so an invalid level (e.g. `99`) is unrepresentable rather
+/// than producing backend-dependent output. The level is a sender-only choice and need not match
+/// the consumer.
+#[derive(Debug, Clone, Copy)]
+pub struct Level(u32);
+
+impl Level {
+	/// Wrap a raw level, clamping to the valid `0..=9` range.
+	pub fn new(level: u32) -> Self {
+		Self(level.min(9))
+	}
+
+	/// The raw level, guaranteed to be in `0..=9`.
+	pub fn get(self) -> u32 {
+		self.0
+	}
+}
+
+impl Default for Level {
+	fn default() -> Self {
+		Self(DEFAULT_LEVEL)
+	}
+}
 
 /// Maximum decompressed size of a single frame.
 ///
@@ -36,20 +62,14 @@ const CHUNK: usize = 8 * 1024;
 /// stay additive). Only the producer needs these; decompression is self-describing, so a
 /// [`Consumer`](crate::Consumer) is told via [`Consumer::with_compression`](crate::Consumer::with_compression)
 /// only *that* a track is compressed, not how.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Compression {
-	/// DEFLATE level, `0..=9`. Higher is smaller but slower. Defaults to `6`.
+	/// DEFLATE [`Level`]. Higher is smaller but slower. Defaults to `6`.
 	///
 	/// This is a sender-only choice and need not match the consumer (the wire format is the same
 	/// at any level). Browser producers can't set it; the platform deflate picks its own level.
-	pub level: u32,
-}
-
-impl Default for Compression {
-	fn default() -> Self {
-		Self { level: DEFAULT_LEVEL }
-	}
+	pub level: Level,
 }
 
 impl Compression {
@@ -61,7 +81,8 @@ impl Compression {
 			return Bytes::new();
 		}
 
-		let mut encoder = DeflateEncoder::new(Vec::with_capacity(payload.len() / 2 + 16), Level::new(self.level));
+		let level = flate2::Compression::new(self.level.get());
+		let mut encoder = DeflateEncoder::new(Vec::with_capacity(payload.len() / 2 + 16), level);
 		encoder.write_all(payload).expect("deflate write");
 		Bytes::from(encoder.finish().expect("deflate finish"))
 	}
@@ -141,6 +162,14 @@ mod test {
 			payload.len()
 		);
 		assert_eq!(decompress(&compressed).unwrap(), Bytes::from(payload));
+	}
+
+	#[test]
+	fn level_clamps_out_of_range() {
+		// An out-of-range level is clamped, not stored verbatim, so it can't reach the backend.
+		assert_eq!(Level::new(99).get(), 9);
+		assert_eq!(Level::new(6).get(), 6);
+		assert_eq!(Level::default().get(), DEFAULT_LEVEL);
 	}
 
 	#[test]

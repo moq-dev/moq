@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-pub use compression::Compression;
+pub use compression::{Compression, Level};
 
 use crate::diff::diff;
 
