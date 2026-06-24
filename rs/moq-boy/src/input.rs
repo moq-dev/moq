@@ -105,7 +105,7 @@ async fn handle_viewer_commands(
 	};
 
 	let track = broadcast.subscribe_track(&command_track)?;
-	let mut commands = moq_json::Consumer::<RawCommand>::new(track);
+	let mut commands = moq_json::Consumer::<RawCommand>::new(track, moq_json::ConsumerConfig::default());
 
 	loop {
 		let command = match commands.next().await {
