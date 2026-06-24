@@ -97,6 +97,9 @@ export class TrackInfo {
 		const priority = await r.u8();
 		const ordered = await r.bool();
 		const timescale = await r.u53();
+		// Mandatory on Lite05: a zero scale is invalid (mirrors Rust's Timescale::new rejection),
+		// and would otherwise throw later when wrapped in Timescale().
+		if (timescale === 0) throw new Error("track timescale must be non-zero");
 		const compression = compressionFromCode(await r.u53());
 		return new TrackInfo({ priority, ordered, timescale, compression });
 	}

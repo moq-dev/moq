@@ -586,7 +586,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Accept right away: IETF group data can arrive before SubscribeOk, so we
 		// need the producer in place to route it. This also unblocks the
 		// downstream subscriber's `consume_track`.
-		let mut track = request.accept(None);
+		//
+		// Set the track timescale to microseconds: IETF object timestamps default to
+		// microseconds, and `create_frame` normalizes each frame into the track scale.
+		// Accepting at milliseconds (the default) would truncate microsecond precision.
+		let info = crate::TrackInfo::default().with_timescale(crate::Timescale::MICRO);
+		let mut track = request.accept(info);
 
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,

@@ -731,7 +731,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 /// (catalogs, control channels, IETF transport).
 ///
 /// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
-/// The model layer (`GroupProducer::create_frame`) already converted the timestamp
+/// model layer (`GroupProducer::create_frame`) already converted the timestamp
 /// into the track timescale, so its raw value goes straight onto the wire. Mirrors
 /// the decode in the subscriber's `run_group`.
 async fn encode_frame_timing<W: web_transport_trait::SendStream>(

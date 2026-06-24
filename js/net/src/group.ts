@@ -8,11 +8,10 @@ export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
 export const MAX_GROUP_FRAMES = 1024;
 
 /**
- * A frame buffered in a {@link Group}: its presentation timestamp and payload bytes.
+ * A frame buffered in a {@link Group}: its presentation {@link Timestamp} and payload bytes.
  *
- * The timestamp is in milliseconds; wall-clock accuracy doesn't warrant finer units for
- * transport-level timing, and the wire layer converts it into the track's timescale.
- * A future `Timestamp` type (mirroring Rust) will let a track pick its own scale.
+ * The timestamp carries its own scale, so a track can pick its units; the wire layer
+ * converts it into the track's negotiated timescale.
  */
 export interface Frame {
 	/** The frame payload. */

@@ -440,7 +440,9 @@ impl From<std::time::Instant> for Timestamp {
 		};
 
 		let epoch = UNIX_EPOCH + std::time::Duration::from_secs(ANCHOR_EPOCH_SECS);
-		let duration = system.duration_since(epoch).expect("clock is earlier than 2020");
+		// Saturate to zero rather than panic if the wall clock is before 2020 (an unsynced
+		// clock on a peer-driven path), since the only requirement is a non-negative start.
+		let duration = system.duration_since(epoch).unwrap_or(std::time::Duration::ZERO);
 
 		Self::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
 	}
