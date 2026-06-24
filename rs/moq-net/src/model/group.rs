@@ -13,7 +13,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result};
+use crate::{Error, Result, Timescale};
 
 #[cfg(test)]
 use super::broadcast::noop_broadcast;
@@ -183,6 +183,14 @@ impl GroupProducer {
 			track,
 			broadcast,
 		}
+	}
+
+	/// The parent track's negotiated timescale, or `None` for untimed tracks.
+	///
+	/// A frame writer (e.g. `hang`) queries this to decide whether to attach a
+	/// per-frame timestamp, which is only meaningful on a timed track.
+	pub fn timescale(&self) -> Option<Timescale> {
+		self.track.timescale
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
