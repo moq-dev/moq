@@ -1,10 +1,25 @@
 import { Signal } from "@moq/signals";
+import { Micro } from "./time.ts";
 
 /** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
 export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
 
 /** Maximum number of frames cached in a group before old frames are evicted from the front. */
 export const MAX_GROUP_FRAMES = 1024;
+
+/**
+ * A frame buffered in a {@link Group}: its presentation timestamp and payload bytes.
+ *
+ * The timestamp is in microseconds (the unit the hang container and WebCodecs use); the
+ * wire layer converts it into the track's timescale. Frames written without an explicit
+ * timestamp (catalogs, JSON state) are stamped with wall-clock now.
+ */
+export interface Frame {
+	/** Presentation timestamp in microseconds. */
+	timestamp: Micro;
+	/** The frame payload. */
+	data: Uint8Array;
+}
 
 /**
  * Thrown by a frame read when the reader fell behind the group's eviction window: frames
@@ -21,7 +36,7 @@ export class CacheFull extends Error {
 
 /** Reactive backing state for a {@link Group}: buffered frames, a closed flag, and the running frame count. */
 export class GroupState {
-	frames = new Signal<Uint8Array[]>([]);
+	frames = new Signal<Frame[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
@@ -62,22 +77,23 @@ export class Group {
 	}
 
 	/**
-	 * Writes a frame to the group.
-	 * @param frame - The frame to write
+	 * Writes a frame to the group at the given presentation timestamp (microseconds).
+	 * @param timestamp - Presentation time in microseconds
+	 * @param data - The frame payload
 	 */
-	writeFrame(frame: Uint8Array) {
+	writeFrame(timestamp: Micro, data: Uint8Array) {
 		if (this.state.closed.peek()) throw new Error("group is closed");
 
-		this.#cacheBytes += frame.byteLength;
+		this.#cacheBytes += data.byteLength;
 		this.state.frames.mutate((frames) => {
-			frames.push(frame);
+			frames.push({ timestamp, data });
 
 			// Bound an unbounded (e.g. never-closed) group: drop the oldest frames once
 			// over either cap. A consumer too far behind silently skips them.
 			while (frames.length > MAX_GROUP_FRAMES || this.#cacheBytes > MAX_GROUP_CACHE_BYTES) {
 				const evicted = frames.shift();
 				if (!evicted) break;
-				this.#cacheBytes -= evicted.byteLength;
+				this.#cacheBytes -= evicted.data.byteLength;
 				this.state.offset++;
 			}
 		});
@@ -88,9 +104,17 @@ export class Group {
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
 				if (mirror.state.closed.peek()) this.#mirrors.delete(mirror);
-				else mirror.writeFrame(frame);
+				else mirror.writeFrame(timestamp, data);
 			}
 		}
+	}
+
+	/**
+	 * Writes a frame stamped with wall-clock now, for data with no presentation time of
+	 * its own (a JSON catalog, control state) or a source whose protocol can't carry one.
+	 */
+	writeFrameNow(data: Uint8Array) {
+		this.writeFrame(Micro.now(), data);
 	}
 
 	/**
@@ -102,7 +126,7 @@ export class Group {
 	 */
 	mirror(): Group {
 		const dst = new Group(this.sequence);
-		for (const frame of this.state.frames.peek()) dst.writeFrame(frame);
+		for (const frame of this.state.frames.peek()) dst.writeFrame(frame.timestamp, frame.data);
 		// Inherit the evicted prefix: frames dropped before this copy was made are a gap
 		// for its reader too, so reading them throws CacheFull.
 		dst.state.offset = this.state.offset;
@@ -118,26 +142,31 @@ export class Group {
 		return dst;
 	}
 
-	/** Write a string as a single UTF-8 encoded frame. */
+	/** Write a string as a single UTF-8 encoded frame, stamped with wall-clock now. */
 	writeString(str: string) {
-		this.writeFrame(new TextEncoder().encode(str));
+		this.writeFrameNow(new TextEncoder().encode(str));
 	}
 
-	/** Write a value as a single JSON-encoded frame. */
+	/** Write a value as a single JSON-encoded frame, stamped with wall-clock now. */
 	writeJson(json: unknown) {
 		this.writeString(JSON.stringify(json));
 	}
 
-	/** Write a boolean as a single one-byte frame. */
+	/** Write a boolean as a single one-byte frame, stamped with wall-clock now. */
 	writeBool(bool: boolean) {
-		this.writeFrame(new Uint8Array([bool ? 1 : 0]));
+		this.writeFrameNow(new Uint8Array([bool ? 1 : 0]));
 	}
 
 	/**
-	 * Reads the next frame from the group.
-	 * @returns A promise that resolves to the next frame or undefined
+	 * Reads the next frame's payload from the group.
+	 * @returns A promise that resolves to the next payload or undefined
 	 */
 	async readFrame(): Promise<Uint8Array | undefined> {
+		return (await this.readFrameTimed())?.data;
+	}
+
+	/** Reads the next frame, including its presentation timestamp. */
+	async readFrameTimed(): Promise<Frame | undefined> {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
@@ -153,14 +182,14 @@ export class Group {
 		}
 	}
 
-	/** Reads the next frame along with its sequence number within the group. */
+	/** Reads the next frame's payload along with its sequence number within the group. */
 	async readFrameSequence(): Promise<{ sequence: number; data: Uint8Array } | undefined> {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
 			const frames = this.state.frames.peek();
 			const frame = frames.shift();
-			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, data: frame };
+			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, data: frame.data };
 
 			const closed = this.state.closed.peek();
 			if (closed instanceof Error) throw closed;

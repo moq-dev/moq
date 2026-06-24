@@ -26,6 +26,11 @@ import { Version } from "./version.ts";
 // The timeout turns that into a clear error.
 const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
 
+/** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
+function unzigzag(v: bigint): bigint {
+	return (v >> 1n) ^ -(v & 1n);
+}
+
 // The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
 function supportsTrackStream(version: Version): boolean {
 	switch (version) {
@@ -494,20 +499,21 @@ export class Subscriber {
 				codec = compression.peek();
 			}
 
-			// timescale resolves together with compression (from TRACK_INFO). A
-			// non-zero scale means every frame is prefixed with a zigzag-delta
-			// timestamp (see the lite-05 FRAME format). We don't surface it to the
-			// application yet, but we must still read the varint to keep the frame
-			// framing in sync with the publisher.
+			// timescale resolves together with compression (from TRACK_INFO). A non-zero
+			// scale means every frame is prefixed with a zigzag-delta timestamp (the
+			// lite-05 FRAME format), which we decode and convert to microseconds (the
+			// model's unit). Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock.
 			const scale = timescale.peek() ?? 0;
+			let prevTs = 0n;
 
 			for (;;) {
 				const done = await Promise.race([stream.done(), track.closed, producer.closed]);
 				if (done !== false) break;
 
+				let timestamp: Time.Micro | undefined;
 				if (scale !== 0) {
-					// Consume (and discard) the per-frame timestamp delta.
-					await stream.u62();
+					prevTs += unzigzag(await stream.u62());
+					timestamp = Time.Micro((Number(prevTs) * 1_000_000) / scale);
 				}
 
 				const size = await stream.u53();
@@ -516,7 +522,9 @@ export class Subscriber {
 
 				// On a compressed track the wire size is the compressed length;
 				// inflate it back to the original frame the consumer sees.
-				producer.writeFrame(codec === Compression.None ? payload : await decompress(codec, payload));
+				const data = codec === Compression.None ? payload : await decompress(codec, payload);
+				if (timestamp !== undefined) producer.writeFrame(timestamp, data);
+				else producer.writeFrameNow(data);
 			}
 
 			producer.close();

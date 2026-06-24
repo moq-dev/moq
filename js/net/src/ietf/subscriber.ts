@@ -487,7 +487,7 @@ export class Subscriber {
 				const frame = await Frame.decode(stream, group.flags);
 				if (frame.payload === undefined) break;
 
-				producer.writeFrame(frame.payload);
+				producer.writeFrameNow(frame.payload);
 			}
 
 			producer.close();

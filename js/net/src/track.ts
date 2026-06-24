@@ -1,5 +1,6 @@
 import { Signal } from "@moq/signals";
 import { CacheFull, Group } from "./group.ts";
+import type { Micro } from "./time.ts";
 
 /** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
@@ -261,10 +262,17 @@ export class TrackProducer extends TrackHandle {
 		this.#sinks.clear();
 	}
 
-	/** Append a frame as its own single-frame group. */
-	writeFrame(frame: Uint8Array) {
+	/** Append a frame as its own single-frame group, at the given presentation timestamp (µs). */
+	writeFrame(timestamp: Micro, frame: Uint8Array) {
 		const group = this.appendGroup();
-		group.writeFrame(frame);
+		group.writeFrame(timestamp, frame);
+		group.close();
+	}
+
+	/** Append a frame stamped with wall-clock now, as its own single-frame group. */
+	writeFrameNow(frame: Uint8Array) {
+		const group = this.appendGroup();
+		group.writeFrameNow(frame);
 		group.close();
 	}
 
@@ -363,7 +371,7 @@ export class TrackSubscriber extends TrackHandle {
 				const next = frames.shift();
 				if (next) {
 					const frame = groups[0].state.total.peek() - frames.length - 1;
-					return { group: groups[0].sequence, frame, data: next };
+					return { group: groups[0].sequence, frame, data: next.data };
 				}
 
 				// Skip this old group
@@ -393,7 +401,7 @@ export class TrackSubscriber extends TrackHandle {
 			const next = frames.shift();
 			if (next) {
 				const frame = group.state.total.peek() - frames.length - 1;
-				return { group: group.sequence, frame, data: next };
+				return { group: group.sequence, frame, data: next.data };
 			}
 
 			// If the track is closed, return undefined.

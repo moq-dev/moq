@@ -64,12 +64,12 @@ test("a read throws CacheFull on a gap, then resyncs to the next group", async (
 
 	// Group 0 overflows its frame cap without being read, evicting the front: a gap.
 	const g0 = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES + 10; i++) g0.writeFrame(new Uint8Array([i & 0xff]));
+	for (let i = 0; i < MAX_GROUP_FRAMES + 10; i++) g0.writeFrameNow(new Uint8Array([i & 0xff]));
 	g0.close();
 
 	// Group 1 is clean.
 	const g1 = producer.appendGroup();
-	g1.writeFrame(new TextEncoder().encode("ok"));
+	g1.writeFrameNow(new TextEncoder().encode("ok"));
 	g1.close();
 
 	// The reader hits the gap in group 0 (error, not a silent skip), then the next

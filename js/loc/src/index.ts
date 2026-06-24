@@ -116,7 +116,7 @@ export class Producer {
 			throw new Error("must start with a keyframe");
 		}
 
-		this.#group?.writeFrame(this.#encode(data, timestamp));
+		this.#group?.writeFrame(timestamp, this.#encode(data, timestamp));
 	}
 
 	#encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
