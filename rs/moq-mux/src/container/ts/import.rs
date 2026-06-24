@@ -1632,7 +1632,7 @@ mod test {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
@@ -1654,7 +1654,7 @@ mod test {
 	// the publishing lock is never taken and the catalog is never republished empty.
 	#[tokio::test(start_paused = true)]
 	async fn base_catalog_routes_cue_pid_to_ignored() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1698,7 +1698,7 @@ mod test {
 		const SECTION_PID: u16 = 0x0021;
 		let pid = mpeg2ts::ts::Pid::new(SECTION_PID).unwrap();
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1781,7 +1781,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const PRIVATE_PID: u16 = 0x0051;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog);
 
@@ -1856,7 +1856,7 @@ mod test {
 		const AAC_PID: u16 = 0x0060;
 		const MP2_PID: u16 = 0x0061;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
@@ -1925,7 +1925,7 @@ mod test {
 	async fn legacy_frame_split_across_pes_reassembles() {
 		const MP2_PID: u16 = 0x0061;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1971,7 +1971,7 @@ mod test {
 	async fn legacy_header_split_keeps_origin_pts() {
 		const MP2_PID: u16 = 0x0061;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -2019,7 +2019,7 @@ mod test {
 
 		const VIDEO_PID: u16 = 0x0050;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -2069,7 +2069,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const SECTION_PID: u16 = 0x0021;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		// catalog::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
@@ -2141,7 +2141,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const DATA_PID: u16 = 0x0052;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());

@@ -104,7 +104,8 @@ struct BroadcastState {
 
 	// Shared cache cascaded onto every track this broadcast produces (created statically via
 	// `create_track`/`reserve_track`, or served on demand). A track-level cache overrides it.
-	// `None` keeps tracks latest-only.
+	// `BroadcastProducer::new` installs a default (5s, no byte cap); `None` (a default-constructed
+	// state) leaves a produced track with its own per-track default instead.
 	cache: Option<Cache>,
 }
 
@@ -161,11 +162,19 @@ pub struct BroadcastProducer {
 
 impl BroadcastProducer {
 	/// Create a producer for the given broadcast metadata. Prefer [`BroadcastInfo::produce`].
+	///
+	/// The broadcast gets its own default [`Cache`] (a 5-second retention window, no byte cap),
+	/// cascaded onto every track it produces so late subscribers can replay the last few seconds.
+	/// Override it with [`Self::with_cache`].
 	pub fn new(info: BroadcastInfo) -> Self {
-		Self {
+		let producer = Self {
 			info,
 			state: Default::default(),
+		};
+		if let Ok(mut state) = producer.state.write() {
+			state.cache = Some(Cache::new(crate::cache::Config::default()));
 		}
+		producer
 	}
 
 	pub fn info(&self) -> &BroadcastInfo {
@@ -173,7 +182,8 @@ impl BroadcastProducer {
 	}
 
 	/// Attach a shared [`Cache`] cascaded onto every track this broadcast produces (created
-	/// statically or served on demand). A track-level [`TrackProducer::with_cache`] overrides it.
+	/// statically or served on demand), replacing the broadcast's default ([`crate::DEFAULT_CACHE`],
+	/// 5 seconds, no byte cap). A track-level [`TrackProducer::with_cache`] overrides it in turn.
 	/// Clone the same [`Cache`] across broadcasts to share one budget. Returns `self` for chaining.
 	pub fn with_cache(self, cache: Cache) -> Self {
 		if let Ok(mut state) = self.state.write() {

@@ -1,17 +1,18 @@
 //! A shared RAM LRU cache for groups, attachable at the origin, broadcast, or track level.
 //!
-//! By default a track keeps only its latest group: a live subscriber can always grab the
-//! current group, but nothing older is retained. Attach a [`Cache`] to keep more history in
-//! RAM, bounded by a byte budget and a wall-clock age. The budget is shared: clone the same
-//! [`Cache`] handle across many tracks (or whole broadcasts / origins) and they all draw from
-//! one `max_bytes` total and one `max_age`. Two distinct [`Cache`] instances have independent
-//! budgets.
+//! By default each broadcast (and each bare track) gets its own [`Cache`] with [`Config::default`]:
+//! a 5-second wall-clock age window and no byte cap. So a late subscriber can replay the last few
+//! seconds of groups, matching the historical behavior. Attach an explicit [`Cache`] to change the
+//! window, cap RAM with a byte budget, or share one budget across many tracks/broadcasts: clone the
+//! same [`Cache`] handle and they all draw from one `max_bytes` total and one `max_age`. Two
+//! distinct [`Cache`] instances have independent budgets.
 //!
 //! Eviction is LRU by wall-clock last-access time (when a group was last read), not by media
 //! timestamp or arrival order. A group is evicted once it is older than `max_age` since its
 //! last access, or once the shared total exceeds `max_bytes` (least-recently-accessed first).
 //! A track's current latest group is never handed to the cache, so it is never evicted out
-//! from under a live subscriber.
+//! from under a live subscriber. A `max_age` of `Duration::ZERO` disables retention entirely
+//! (latest-group-only); a `max_bytes` of `0` means no byte cap.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,7 @@ use crate::Error;
 
 /// Configuration for a [`Cache`]: the shared byte budget and the wall-clock age bound.
 ///
-/// Construct via [`Config::default`] (an empty, do-nothing budget) and the `with_*` setters,
+/// Construct via [`Config::default`] (the 5-second, no-byte-cap default) and the `with_*` setters,
 /// then build a handle with [`Cache::new`]. New fields stay additive, so build via `default()`
 /// plus setters rather than a struct literal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,12 +33,14 @@ use crate::Error;
 pub struct Config {
 	/// Maximum total bytes retained across every track sharing this cache. Summed over all
 	/// cached (non-latest) groups; the least-recently-accessed groups are evicted once the
-	/// total would exceed this. Defaults to `0` (retain nothing beyond the latest group).
+	/// total would exceed this. `0` (the default) means no byte cap; eviction is by `max_age`
+	/// alone.
 	pub max_bytes: u64,
 
 	/// Maximum wall-clock age since a group was last accessed before it is evicted. Measured
 	/// with [`web_async::time::Instant`], so `tokio::time::pause` controls it in tests. Defaults
-	/// to [`Duration::MAX`] (no age bound; eviction is by `max_bytes` alone).
+	/// to [`crate::DEFAULT_CACHE`] (5 seconds). `Duration::ZERO` disables retention (latest group
+	/// only).
 	pub max_age: Duration,
 }
 
@@ -45,7 +48,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			max_bytes: 0,
-			max_age: Duration::MAX,
+			max_age: crate::DEFAULT_CACHE,
 		}
 	}
 }
@@ -208,15 +211,21 @@ struct State {
 
 impl State {
 	fn evict(&mut self, now: Instant) {
-		// Age first: drop anything not accessed within max_age.
+		// Age first: drop anything not accessed within max_age. `Duration::MAX` means no age
+		// bound; `Duration::ZERO` evicts every cached (non-latest) group at once (latest-only).
 		if self.max_age != Duration::MAX {
 			while let Some((key, _)) = self.lru.iter().next() {
 				let key = *key;
-				if now.saturating_duration_since(key.last_access) <= self.max_age {
+				if now.saturating_duration_since(key.last_access) < self.max_age {
 					break;
 				}
 				self.drop_id(key.id, true);
 			}
+		}
+
+		// A byte cap of 0 means unlimited; skip the byte-budget pass entirely.
+		if self.max_bytes == 0 {
+			return;
 		}
 
 		// A cached group can keep growing after it was superseded (late frames on an

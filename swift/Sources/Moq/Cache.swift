@@ -8,7 +8,7 @@ import MoqFFI
 public final class Cache: Sendable {
     let ffi: MoqCache
 
-    /// Create a cache with the given configuration (defaults to a 64 MiB / 5s budget).
+    /// Create a cache with the given configuration (defaults to a 5-second window, no byte cap).
     public init(config: CacheConfig = CacheConfig()) {
         ffi = MoqCache(config: config)
     }

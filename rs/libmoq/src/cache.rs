@@ -2,31 +2,13 @@ use std::time::Duration;
 
 use crate::{Error, Id, NonZeroSlab};
 
-/// Default shared-cache byte budget for a broadcast: 64 MiB.
-///
-/// The age window is what governs retention for normal media; `max_bytes` is a RAM ceiling so a
-/// misconfigured huge window can't grow unbounded. 64 MiB comfortably holds a few seconds of
-/// audio/video.
-pub(crate) const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
-
-/// Default shared-cache age window, matching [`moq_net::DEFAULT_CACHE`].
-pub(crate) const DEFAULT_MAX_AGE: Duration = moq_net::DEFAULT_CACHE;
-
-/// Build a [`moq_net::Cache`] from a byte budget and an age window in milliseconds.
+/// Build a [`moq_net::Cache`] from a byte budget and an age window in milliseconds. A `max_bytes`
+/// of `0` means no byte cap; eviction is by age alone.
 pub(crate) fn build(max_bytes: u64, max_age_ms: u64) -> moq_net::Cache {
 	moq_net::Cache::new(
 		moq_net::cache::Config::default()
 			.with_max_bytes(max_bytes)
 			.with_max_age(Duration::from_millis(max_age_ms)),
-	)
-}
-
-/// The cache attached to a broadcast/origin when the caller passes no explicit handle.
-pub(crate) fn default_cache() -> moq_net::Cache {
-	moq_net::Cache::new(
-		moq_net::cache::Config::default()
-			.with_max_bytes(DEFAULT_MAX_BYTES)
-			.with_max_age(DEFAULT_MAX_AGE),
 	)
 }
 

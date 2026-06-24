@@ -11,8 +11,21 @@ type Cache struct {
 	inner *ffi.MoqCache
 }
 
-// NewCache creates a cache with the given configuration. Use the zero CacheConfig for the default
-// 64 MiB / 5s budget.
+// DefaultCacheMaxAgeMs is the default retention window (5 seconds), matching moq-net's
+// DEFAULT_CACHE. It is what a broadcast gets when no cache is attached.
+const DefaultCacheMaxAgeMs uint64 = 5000
+
+// DefaultCacheConfig returns the default cache configuration: a 5-second window and no byte cap.
+//
+// Prefer this over a zero-valued CacheConfig: a zero MaxAgeMs means a zero retention window
+// (latest group only), not the 5-second default.
+func DefaultCacheConfig() CacheConfig {
+	return CacheConfig{MaxBytes: 0, MaxAgeMs: DefaultCacheMaxAgeMs}
+}
+
+// NewCache creates a cache with the given configuration. A MaxBytes of 0 means no byte cap; a
+// MaxAgeMs of 0 means a zero retention window (latest group only). For the standard 5-second
+// window use DefaultCacheConfig.
 func NewCache(config CacheConfig) *Cache {
 	return &Cache{inner: ffi.NewMoqCache(config)}
 }

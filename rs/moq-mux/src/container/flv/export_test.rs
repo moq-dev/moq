@@ -110,7 +110,7 @@ async fn drain_export(mut exporter: Export, mut importer: Import) -> Vec<u8> {
 
 #[tokio::test(start_paused = true)]
 async fn export_roundtrips_through_import() {
-	let mut producer = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -125,7 +125,7 @@ async fn export_roundtrips_through_import() {
 	assert_eq!(&exported[0..3], b"FLV");
 
 	// Re-import the exported bytes and confirm the catalog rebuilds identically.
-	let mut bcast2 = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.clone());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
@@ -147,7 +147,7 @@ async fn export_roundtrips_through_import() {
 
 #[tokio::test(start_paused = true)]
 async fn export_emits_sequence_headers_and_frames() {
-	let mut producer = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -228,7 +228,7 @@ fn synth_enhanced_flv() -> Vec<u8> {
 /// round trip as enhanced-RTMP FourCC payloads.
 #[tokio::test(start_paused = true)]
 async fn export_roundtrips_enhanced() {
-	let mut producer = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -258,7 +258,7 @@ async fn export_roundtrips_enhanced() {
 	);
 
 	// Re-import the exported bytes and confirm the codecs rebuild.
-	let mut bcast2 = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.clone());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
@@ -307,7 +307,7 @@ fn parse_tags(flv: &[u8]) -> Vec<ParsedTag> {
 /// A frame's tag timestamp must survive the round trip (PTS in milliseconds).
 #[tokio::test(start_paused = true)]
 async fn export_preserves_timestamps() {
-	let mut producer = moq_net::BroadcastInfo::new().produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 

@@ -152,16 +152,14 @@ impl MoqBroadcastProducer {
 	///
 	/// NOTE: This will do nothing until published to an origin.
 	///
-	/// Attaches a default cache (its own 64 MiB / 5s budget) so superseded groups stay in RAM
-	/// long enough for an in-process consumer (which may lag the publisher) to drain them, instead
-	/// of moq-net's latest-group-only default. Override it, or share one budget across broadcasts,
-	/// with [`Self::with_cache`].
+	/// The broadcast inherits moq-net's default cache (its own 5-second, no-byte-cap budget), so
+	/// superseded groups stay in RAM long enough for an in-process consumer (which may lag the
+	/// publisher) to drain them. Override it, or share one budget across broadcasts and cap RAM
+	/// with a byte budget, via [`Self::with_cache`].
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_net::BroadcastInfo::new()
-			.produce()
-			.with_cache(crate::cache::default_cache());
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),

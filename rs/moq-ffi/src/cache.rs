@@ -3,8 +3,9 @@
 //! Construct a [`MoqCache`] from a [`MoqCacheConfig`] (byte budget + wall-clock age) and attach
 //! it when creating a broadcast (or an origin, which cascades to the broadcasts it creates). Many
 //! broadcasts/tracks can share one [`MoqCache`] handle and draw from a single budget. Without an
-//! explicit cache, an FFI broadcast gets a default one (see [`MoqCacheConfig::default`]) so the
-//! common publish -> consume path isn't silently lossy under load.
+//! explicit cache, a broadcast inherits moq-net's default (a 5-second window, no byte cap), so the
+//! common publish -> consume path isn't silently lossy under load. Attach an explicit cache to
+//! change the window or cap RAM with a byte budget.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,16 +13,17 @@ use std::time::Duration;
 /// Configuration for a [`MoqCache`]: the shared byte budget and the wall-clock age bound.
 ///
 /// Mirrors [`moq_net::cache::Config`]. The age bound is expressed in milliseconds at the FFI
-/// boundary. Defaults to a 64 MiB budget and a 5s window, the same retention the publish path
-/// uses when no cache is attached.
+/// boundary. Defaults to the same retention a broadcast gets with no cache attached: a 5-second
+/// window and no byte cap (`max_bytes == 0`).
 #[derive(Clone, Copy, uniffi::Record)]
 pub struct MoqCacheConfig {
 	/// Maximum total bytes retained across every track sharing this cache. The
-	/// least-recently-accessed groups are evicted once the total would exceed this.
-	#[uniffi(default = 67108864)]
+	/// least-recently-accessed groups are evicted once the total would exceed this. `0` (the
+	/// default) means no byte cap; eviction is by age alone.
+	#[uniffi(default = 0)]
 	pub max_bytes: u64,
 	/// Maximum wall-clock age, in milliseconds, since a group was last accessed before it is
-	/// evicted (least-recently-accessed first).
+	/// evicted (least-recently-accessed first). Defaults to [`moq_net::DEFAULT_CACHE`] (5000 ms).
 	#[uniffi(default = 5000)]
 	pub max_age_ms: u64,
 }
@@ -29,21 +31,11 @@ pub struct MoqCacheConfig {
 impl Default for MoqCacheConfig {
 	fn default() -> Self {
 		Self {
-			max_bytes: DEFAULT_MAX_BYTES,
-			max_age_ms: DEFAULT_MAX_AGE.as_millis() as u64,
+			max_bytes: 0,
+			max_age_ms: moq_net::DEFAULT_CACHE.as_millis() as u64,
 		}
 	}
 }
-
-/// Default shared-cache byte budget for an FFI broadcast: 64 MiB.
-///
-/// The age bound is what actually governs retention for normal media; `max_bytes` is a RAM
-/// ceiling so a misconfigured huge window can't grow unbounded. 64 MiB comfortably holds a few
-/// seconds of audio/video.
-pub(crate) const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
-
-/// Default shared-cache age window for an FFI broadcast, matching [`moq_net::DEFAULT_CACHE`].
-pub(crate) const DEFAULT_MAX_AGE: Duration = moq_net::DEFAULT_CACHE;
 
 /// A shared, cheaply cloneable handle to a RAM LRU group cache.
 ///
@@ -85,13 +77,4 @@ impl MoqCache {
 	pub fn is_clone(&self, other: &MoqCache) -> bool {
 		self.inner.is_clone(&other.inner)
 	}
-}
-
-/// The default cache attached to an FFI broadcast when the caller provides none.
-pub(crate) fn default_cache() -> moq_net::Cache {
-	moq_net::Cache::new(
-		moq_net::cache::Config::default()
-			.with_max_bytes(DEFAULT_MAX_BYTES)
-			.with_max_age(DEFAULT_MAX_AGE),
-	)
 }

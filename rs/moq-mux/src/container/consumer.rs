@@ -422,22 +422,6 @@ mod tests {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
-	/// Build a timescaled track producer with an unbounded cache attached.
-	///
-	/// These tests publish several groups and read them back through a single in-process
-	/// subscriber. Without a cache the track keeps only its latest group, so a consumer that
-	/// hasn't drained yet loses the earlier ones; the cache retains the full history (mirroring
-	/// production, where the broadcast carries a cache).
-	fn test_track(name: &str) -> moq_net::TrackProducer {
-		moq_net::TrackProducer::new(
-			name,
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
-		.with_cache(moq_net::Cache::new(
-			moq_net::cache::Config::default().with_max_bytes(u64::MAX),
-		))
-	}
-
 	/// Test-only container that round-trips a per-sample duration on the wire, so the
 	/// duration-based skip can be exercised without building a real CMAF init segment.
 	/// Each frame is `[timestamp_us: u64 LE][duration_us: u64 LE][payload]`.
@@ -529,7 +513,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_single_group() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -547,7 +534,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_multiple_frames_single_group() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -565,7 +555,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_multiple_groups_within_latency() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -584,7 +577,10 @@ mod tests {
 	#[tokio::test]
 	async fn latency_skip_delivers_recent_groups() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -626,7 +622,10 @@ mod tests {
 	#[tokio::test]
 	async fn zero_latency_skips_aggressively() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::ZERO);
 
@@ -663,7 +662,10 @@ mod tests {
 	#[tokio::test]
 	async fn latency_skip_correctness() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -706,7 +708,10 @@ mod tests {
 	#[tokio::test]
 	async fn groups_delivered_in_sequence_order() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -742,7 +747,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn adjacent_group_flushed_immediately() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -760,7 +768,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn bframes_within_group() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -779,7 +790,10 @@ mod tests {
 	#[tokio::test]
 	async fn empty_track_returns_none() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -797,7 +811,10 @@ mod tests {
 	#[tokio::test]
 	async fn track_closed_with_error() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -819,7 +836,10 @@ mod tests {
 	#[tokio::test]
 	async fn closed_resolves_when_track_ends() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -842,7 +862,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn gap_in_group_sequence_recovery() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -860,7 +883,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn gap_at_start_of_sequence() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(80));
 
@@ -883,7 +909,10 @@ mod tests {
 	/// group + the sequences after it evict, then it resumes).
 	#[tokio::test]
 	async fn evicted_group_with_gap_skips_to_live() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -926,7 +955,10 @@ mod tests {
 	/// higher group is buffered, and the track never finishes.
 	#[tokio::test]
 	async fn missing_sequence_skips_on_live_track() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -952,7 +984,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn frame_timestamp_and_index_decoding() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -972,7 +1007,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn frame_payload_preserved() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1010,7 +1048,10 @@ mod tests {
 	#[tokio::test]
 	async fn no_infinite_loop_with_buffered_frames() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
@@ -1056,7 +1097,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn large_timestamps() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(3700));
 
@@ -1072,7 +1116,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn set_latency_changes_behavior() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
@@ -1090,7 +1137,10 @@ mod tests {
 	#[tokio::test]
 	async fn max_timestamp_tracks_through_bframes() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the latency skip and test B-frame timestamp tracking.
@@ -1142,7 +1192,10 @@ mod tests {
 	#[tokio::test]
 	async fn startup_selects_earliest_group() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -1195,7 +1248,10 @@ mod tests {
 	#[tokio::test]
 	async fn startup_skips_groups_without_data() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1218,7 +1274,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn startup_single_group_mid_stream() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1232,7 +1291,10 @@ mod tests {
 	#[tokio::test]
 	async fn multiple_sequential_latency_skips() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(50));
 
@@ -1268,7 +1330,10 @@ mod tests {
 	#[tokio::test]
 	async fn latency_skip_boundary_exact() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -1306,7 +1371,10 @@ mod tests {
 	#[tokio::test]
 	async fn single_newer_group_triggers_skip() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -1344,7 +1412,10 @@ mod tests {
 	#[tokio::test]
 	async fn single_missing_sequence_near_eof_skips() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
@@ -1360,7 +1431,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn group_error_skips_to_next() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1377,7 +1451,10 @@ mod tests {
 	#[tokio::test]
 	async fn track_finishes_while_reading() {
 		tokio::time::pause();
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1406,7 +1483,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn empty_group_advances() {
-		let mut track = test_track("test");
+		let mut track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1426,7 +1506,10 @@ mod tests {
 	async fn video_container_legacy() {
 		tokio::time::pause();
 
-		let mut track = test_track("video");
+		let mut track = moq_net::TrackProducer::new(
+			"video",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
@@ -1468,7 +1551,7 @@ mod tests {
 		tokio::time::pause();
 		// DurationWire is a test-only container that doesn't stamp moq_net frame
 		// timestamps; leave the track untimed so model-layer validation matches.
-		let mut track = moq_net::TrackProducer::new("test", None).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut track = moq_net::TrackProducer::new("test", None);
 		let consumer_track = track.subscribe(None);
 		// Latency dwarfs the gap, so only duration coverage can trigger the skip.
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
@@ -1509,7 +1592,7 @@ mod tests {
 	async fn duration_below_gap_does_not_skip() {
 		tokio::time::pause();
 		// DurationWire is untimed at the moq_net frame layer.
-		let mut track = moq_net::TrackProducer::new("test", None).with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+		let mut track = moq_net::TrackProducer::new("test", None);
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 

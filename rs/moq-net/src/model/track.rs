@@ -25,10 +25,11 @@ use std::{
 	time::Duration,
 };
 
-/// Default local retention window for cached groups when no explicit age is configured.
+/// Default local retention window for cached groups: 5 seconds.
 ///
-/// Used as the default [`crate::cache::Config::max_age`] by callers (e.g. the FFI layer's default
-/// [`Cache`]). Not carried on the wire: retention is a local policy, not a publisher guarantee.
+/// This is the default [`crate::cache::Config::max_age`], so every broadcast and bare track keeps
+/// roughly the last 5 seconds of groups unless an explicit [`Cache`] overrides it. Not carried on
+/// the wire: retention is a local policy, not a publisher guarantee.
 pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 
 /// Publisher-side properties of a track.
@@ -106,11 +107,10 @@ impl TrackInfo {
 
 /// Clamp a subscriber's stale window to a track's local retention.
 ///
-/// A subscriber can't usefully wait for a late group longer than the track keeps it around. With
-/// a [`Cache`] attached, that bound is the cache's `max_age`. With no cache, retention is
-/// latest-group-only: nothing beyond the current group is kept, so waiting for a late group is
-/// pointless and the window collapses to `Duration::ZERO` (skip immediately). `Duration::ZERO` is
-/// left untouched by the `min`.
+/// A subscriber can't usefully wait for a late group longer than the track keeps it around. The
+/// bound is the attached [`Cache`]'s `max_age` (the 5-second default unless overridden). A cache
+/// with `max_age == Duration::ZERO` is latest-group-only, so the window collapses to
+/// `Duration::ZERO` (skip immediately). With no cache at all the bound is also `Duration::ZERO`.
 fn clamp_stale(cache: Option<&Cache>, stale: Duration) -> Duration {
 	let bound = cache.map(|c| c.max_age()).unwrap_or(Duration::ZERO);
 	stale.min(bound)
@@ -135,8 +135,9 @@ struct TrackState {
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
 	groups: VecDeque<Option<Cached>>,
 
-	// Shared RAM cache governing retention of non-latest groups. `None` (the default) keeps
-	// only the latest group: every superseded group is dropped at once.
+	// Shared RAM cache governing retention of non-latest groups. `TrackProducer::new` installs a
+	// default (5s, no byte cap); `None` (e.g. a default-constructed state) keeps only the latest
+	// group, dropping every superseded group at once.
 	cache: Option<Cache>,
 
 	// TODO Do we need this?
@@ -519,12 +520,17 @@ pub struct TrackProducer {
 
 impl TrackProducer {
 	/// Build a producer for the given track metadata.
+	///
+	/// The track gets its own default [`Cache`] (a 5-second retention window, no byte cap), so a
+	/// late subscriber can replay the last few seconds. Override it with [`Self::with_cache`], or
+	/// produce the track from a [`crate::BroadcastProducer`] to share that broadcast's cache.
 	pub fn new(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> Self {
 		let info = info.into().unwrap_or_default();
 		Self {
 			name: name.into(),
 			state: kio::Producer::new(TrackState {
 				info: Some(info),
+				cache: Some(Cache::new(cache::Config::default())),
 				..Default::default()
 			}),
 			prev_subscription: None,
@@ -535,13 +541,13 @@ impl TrackProducer {
 		&self.name
 	}
 
-	/// Attach a shared [`Cache`] governing how much of this track's history is retained.
+	/// Attach a shared [`Cache`] governing how much of this track's history is retained, replacing
+	/// the track's default ([`crate::DEFAULT_CACHE`], 5 seconds, no byte cap).
 	///
-	/// Without a cache, the track keeps only its latest group (a superseded group is dropped at
-	/// once). With one, superseded groups are retained in RAM up to the cache's shared byte and
-	/// age budget, evicted least-recently-accessed first. Clone the same [`Cache`] across tracks
-	/// to share one budget. Set this before producing groups; it takes effect on the next group.
-	/// Returns `self` for chaining.
+	/// Superseded groups are retained in RAM up to the cache's shared byte and age budget, evicted
+	/// least-recently-accessed first; a cache with `max_age == Duration::ZERO` keeps only the
+	/// latest group. Clone the same [`Cache`] across tracks to share one budget. Set this before
+	/// producing groups; it takes effect on the next group. Returns `self` for chaining.
 	pub fn with_cache(self, cache: Cache) -> Self {
 		if let Ok(mut state) = self.state.write() {
 			state.cache = Some(cache);
@@ -1656,10 +1662,43 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn default_keeps_only_latest_group() {
+	async fn default_retains_recent_groups() {
+		tokio::time::pause();
 		let mut producer = TrackProducer::new("test", None);
 
-		// Without a cache, each appended group supersedes the previous one immediately.
+		// The default 5-second cache keeps recently appended groups for late subscribers.
+		producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1
+		producer.append_group().unwrap(); // seq 2
+
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 3, "the default cache retains recent groups");
+		assert!(state.duplicates.contains(&0));
+		assert!(state.duplicates.contains(&2));
+	}
+
+	#[tokio::test]
+	async fn default_evicts_after_window() {
+		tokio::time::pause();
+		let mut producer = TrackProducer::new("test", None);
+
+		producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1 supersedes seq 0
+
+		// Past the 5-second default window, the next append's retain pass evicts the aged group.
+		tokio::time::advance(Duration::from_secs(6)).await;
+		producer.append_group().unwrap(); // seq 2
+
+		let state = producer.state.read();
+		assert!(!state.duplicates.contains(&0), "group older than the window is evicted");
+	}
+
+	#[tokio::test]
+	async fn zero_age_keeps_only_latest_group() {
+		let mut producer = TrackProducer::new("test", None)
+			.with_cache(Cache::new(cache::Config::default().with_max_age(Duration::ZERO)));
+
+		// A zero-age cache is latest-only: each append supersedes the previous one immediately.
 		producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
@@ -1892,9 +1931,14 @@ mod test {
 		assert_eq!(first_live_sequence(&state), 0);
 	}
 
+	/// A latest-group-only cache: zero retention window, so every superseded group is dropped.
+	fn latest_only_cache() -> Cache {
+		Cache::new(cache::Config::default().with_max_age(Duration::ZERO))
+	}
+
 	#[tokio::test]
 	async fn consumer_skips_evicted_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = TrackProducer::new("test", None).with_cache(latest_only_cache());
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
@@ -1908,7 +1952,7 @@ mod test {
 
 	#[tokio::test]
 	async fn out_of_order_max_sequence_at_front() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = TrackProducer::new("test", None).with_cache(latest_only_cache());
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -2007,10 +2051,18 @@ mod test {
 	}
 
 	#[test]
-	fn stale_clamped_to_zero_without_cache() {
-		// With no cache attached, retention is latest-group-only: nothing beyond the current
-		// group is kept, so a stale window is pointless and collapses to ZERO.
+	fn stale_clamped_to_default_window() {
+		// A bare track carries the 5-second default cache, so a long stale window clamps to it.
 		let producer = TrackProducer::new("test", None);
+		let subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
+		assert_eq!(subscriber.subscription().stale, DEFAULT_CACHE);
+	}
+
+	#[test]
+	fn stale_clamped_to_zero_for_latest_only() {
+		// A zero-age (latest-only) cache keeps nothing beyond the current group, so a stale window
+		// is pointless and collapses to ZERO.
+		let producer = TrackProducer::new("test", None).with_cache(latest_only_cache());
 		let subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
 		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
 	}

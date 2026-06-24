@@ -761,7 +761,8 @@ pub struct OriginProducer {
 	dynamic: kio::Producer<OriginDynamicState>,
 
 	// Shared cache cascaded onto broadcasts created via `create_broadcast` (and thus their
-	// tracks). A broadcast- or track-level cache overrides it. `None` keeps tracks latest-only.
+	// tracks). A broadcast- or track-level cache overrides it. `None` (the default) leaves each
+	// created broadcast with its own per-broadcast default cache (5s, no byte cap).
 	cache: Option<Cache>,
 }
 
@@ -787,10 +788,11 @@ impl OriginProducer {
 	}
 
 	/// Attach a shared [`Cache`] cascaded onto broadcasts created via
-	/// [`create_broadcast`](Self::create_broadcast) (and in turn their tracks). A broadcast-level
+	/// [`create_broadcast`](Self::create_broadcast) (and in turn their tracks), replacing each
+	/// broadcast's own default ([`crate::DEFAULT_CACHE`], 5 seconds, no byte cap). A broadcast-level
 	/// [`BroadcastProducer::with_cache`] or track-level [`crate::TrackProducer::with_cache`]
-	/// overrides it. Clone the same [`Cache`] across origins to share one budget. Returns `self`
-	/// for chaining.
+	/// overrides it in turn. Clone the same [`Cache`] across origins to share one budget. Returns
+	/// `self` for chaining.
 	pub fn with_cache(mut self, cache: Cache) -> Self {
 		self.cache = Some(cache);
 		self

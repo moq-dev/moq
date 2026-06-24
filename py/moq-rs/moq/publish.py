@@ -209,10 +209,10 @@ class BroadcastDynamic:
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    A bare broadcast gets its own default cache (a 64 MiB / 5s budget) so an
-    in-process consumer that lags the publisher can still drain superseded
-    groups. Call :meth:`with_cache` to override it or to share one budget across
-    broadcasts.
+    A bare broadcast gets its own default cache (a 5-second window, no byte cap)
+    so an in-process consumer that lags the publisher can still drain superseded
+    groups. Call :meth:`with_cache` to override it (e.g. to cap RAM with a byte
+    budget) or to share one budget across broadcasts.
     """
 
     def __init__(self) -> None:

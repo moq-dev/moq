@@ -27,13 +27,12 @@ pub struct Publish {
 }
 
 impl Publish {
-	/// Create a broadcast whose tracks retain history per `cache` (cascaded onto every track,
-	/// including the catalog track). The cache keeps superseded groups around so an in-process
-	/// consumer that lags the publisher can still drain them, instead of moq-net's
-	/// latest-group-only default. Callers pass the default cache; override it with
-	/// [`Self::set_cache`].
-	pub fn create(&mut self, cache: moq_net::Cache) -> Result<Id, Error> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(cache);
+	/// Create a broadcast. It inherits moq-net's default cache (a 5-second window, no byte cap),
+	/// cascaded onto every track including the catalog, so superseded groups stay around long
+	/// enough for an in-process consumer that lags the publisher to drain them. Override it (e.g.
+	/// to cap RAM with a byte budget or share one budget across broadcasts) with [`Self::set_cache`].
+	pub fn create(&mut self) -> Result<Id, Error> {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;

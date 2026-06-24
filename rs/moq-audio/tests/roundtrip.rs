@@ -30,14 +30,7 @@ fn f32_bytes(samples: &[f32]) -> Bytes {
 
 #[tokio::test]
 async fn opus_round_trip_48k_stereo() {
-	// Publish-then-late-subscribe: attach a cache so the broadcast retains all 10 written
-	// groups for the consumer created afterward (the default is latest-group-only). Mirrors
-	// production, where the FFI publish path attaches a default cache.
-	let mut broadcast = moq_net::BroadcastInfo::new()
-		.produce()
-		.with_cache(moq_net::Cache::new(
-			moq_net::cache::Config::default().with_max_bytes(u64::MAX),
-		));
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
@@ -117,13 +110,7 @@ async fn opus_round_trip_48k_stereo() {
 
 #[tokio::test]
 async fn opus_round_trip_44100_s16_resampled() {
-	// Publish-then-late-subscribe: attach a cache so the broadcast retains all written groups
-	// for the consumer created afterward (the default is latest-group-only).
-	let mut broadcast = moq_net::BroadcastInfo::new()
-		.produce()
-		.with_cache(moq_net::Cache::new(
-			moq_net::cache::Config::default().with_max_bytes(u64::MAX),
-		));
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();

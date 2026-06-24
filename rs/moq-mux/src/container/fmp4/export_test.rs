@@ -20,7 +20,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	use moq_net::Timestamp;
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
@@ -124,7 +124,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	use moq_net::Timestamp;
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
@@ -219,7 +219,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	use moq_net::Timestamp;
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
@@ -297,7 +297,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	use moq_net::Timestamp;
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
@@ -387,7 +387,7 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 	use moq_net::Timestamp;
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
@@ -487,7 +487,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let data = include_bytes!("test_data/bbb.mp4");
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
@@ -543,7 +543,7 @@ async fn next_fragment_reports_segment_metadata() {
 	use moq_net::Timestamp;
 
 	let broadcast = moq_net::BroadcastInfo::new();
-	let mut producer = broadcast.produce().with_cache(moq_net::Cache::new(moq_net::cache::Config::default().with_max_bytes(u64::MAX)));
+	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();

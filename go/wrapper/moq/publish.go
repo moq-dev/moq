@@ -14,9 +14,9 @@ type BroadcastProducer struct {
 
 // NewBroadcastProducer creates an empty broadcast.
 //
-// It gets its own default cache (a 64 MiB / 5s budget) so an in-process consumer that lags the
-// publisher can still drain superseded groups. Use WithCache to override it or to share one
-// budget across broadcasts.
+// It gets its own default cache (a 5-second window, no byte cap) so an in-process consumer that
+// lags the publisher can still drain superseded groups. Use WithCache to override it (e.g. to cap
+// RAM with a byte budget) or to share one budget across broadcasts.
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
