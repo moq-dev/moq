@@ -77,7 +77,14 @@ pub(crate) fn decompress(slice: &[u8]) -> Result<Bytes> {
 	}
 
 	let mut decoder = DeflateDecoder::new(slice);
-	let mut out = Vec::with_capacity(slice.len() * 2 + 16);
+	// `slice.len()` is publisher-controlled, so cap the initial guess at the per-frame ceiling: a
+	// huge compressed frame can't force a huge allocation before the streaming guard below runs.
+	let initial_capacity = slice
+		.len()
+		.saturating_mul(2)
+		.saturating_add(16)
+		.min(MAX_DECOMPRESSED_FRAME as usize);
+	let mut out = Vec::with_capacity(initial_capacity);
 	let mut tmp = [0u8; CHUNK];
 
 	loop {

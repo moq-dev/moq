@@ -116,6 +116,10 @@ export class Producer<T> {
 			return;
 		}
 
+		// A failed compressed write has already torn the track down; stay quiet rather than throw
+		// from the synchronous path (e.g. `#snapshot()` calling `appendGroup()` on a closed track).
+		if (this.#failed) return;
+
 		const valid = this.#config.schema ? this.#config.schema.parse(value) : value;
 
 		// Serialize once; parse it back to a normalized JSON value for diffing and comparison
