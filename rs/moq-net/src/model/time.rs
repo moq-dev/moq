@@ -427,8 +427,7 @@ static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|
 
 impl From<std::time::Instant> for Timestamp {
 	/// Convert an [`std::time::Instant`] into a millisecond-scale timestamp (the default
-	/// timescale), anchored at 2020 (see [`ANCHOR_EPOCH_SECS`]) plus a per-process jitter
-	/// (see `TIME_ANCHOR`).
+	/// timescale), anchored at 2020-01-01 plus a per-process jitter (see `TIME_ANCHOR`).
 	///
 	/// One-way only: there is no inverse, since the anchor is jittered to keep a
 	/// [`Timestamp`] from being read back as a clock.
