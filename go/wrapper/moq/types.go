@@ -13,6 +13,7 @@ type (
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
 	AudioFormat        = ffi.MoqAudioFormat
 	AudioFrame         = ffi.MoqAudioFrame
+	CacheConfig        = ffi.MoqCacheConfig
 	Catalog            = ffi.MoqCatalog
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame

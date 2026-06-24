@@ -15,6 +15,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
+from .cache import Cache
 from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Subscription, TrackInfo
 
 if TYPE_CHECKING:
@@ -206,10 +207,22 @@ class BroadcastDynamic:
 
 
 class BroadcastProducer:
-    """Wraps MoqBroadcastProducer with a cleaner interface."""
+    """Wraps MoqBroadcastProducer with a cleaner interface.
+
+    A bare broadcast gets its own default cache (a 64 MiB / 5s budget) so an
+    in-process consumer that lags the publisher can still drain superseded
+    groups. Call :meth:`with_cache` to override it or to share one budget across
+    broadcasts.
+    """
 
     def __init__(self) -> None:
         self._inner = MoqBroadcastProducer()
+
+    def with_cache(self, cache: Cache) -> BroadcastProducer:
+        """Attach a shared :class:`Cache`, overriding the default and cascading onto
+        every track. Returns ``self`` for chaining."""
+        self._inner = self._inner.with_cache(cache._inner)
+        return self
 
     def dynamic(self) -> BroadcastDynamic:
         """Accept subscriptions to tracks that are not published yet."""
@@ -237,7 +250,7 @@ class BroadcastProducer:
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
-        properties (priority, cache, compression); omit for defaults."""
+        properties (priority, ordering, compression); omit for defaults."""
         return TrackProducer(self._inner.publish_track(name, info))
 
     def consume(self) -> BroadcastConsumer:

@@ -4,6 +4,7 @@
 //! Uses async UniFFI objects instead of callbacks for a native async experience.
 
 pub mod audio;
+pub mod cache;
 pub mod consumer;
 pub mod error;
 mod ffi;

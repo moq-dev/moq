@@ -25,7 +25,10 @@ use std::{
 	time::Duration,
 };
 
-/// Default [`TrackInfo::cache`] age when the publisher doesn't set one.
+/// Default local retention window for cached groups when no explicit age is configured.
+///
+/// Used as the default [`crate::cache::Config::max_age`] by callers (e.g. the FFI layer's default
+/// [`Cache`]). Not carried on the wire: retention is a local policy, not a publisher guarantee.
 pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 
 /// Publisher-side properties of a track.
@@ -51,20 +54,6 @@ pub struct TrackInfo {
 	/// the wrong scale prevents silent corruption.
 	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
 	pub timescale: Option<Timescale>,
-	/// How long the publisher keeps old groups available before evicting them
-	/// (the newest group is always retained). A subscriber's
-	/// [`Subscription::stale`] window is clamped to this, since a group can't be
-	/// waited for longer than it's kept around. Reported in TRACK_INFO so
-	/// relays re-serve with the same window. Defaults to [`DEFAULT_CACHE`].
-	#[cfg_attr(
-		feature = "serde",
-		serde(
-			default = "default_cache",
-			skip_serializing_if = "is_default_cache",
-			with = "cache_millis"
-		)
-	)]
-	pub cache: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+);
 	/// kept out of the catalog (a transport property, not media metadata).
@@ -76,37 +65,11 @@ pub struct TrackInfo {
 	pub ordered: bool,
 }
 
-#[cfg(feature = "serde")]
-fn default_cache() -> Duration {
-	DEFAULT_CACHE
-}
-
-#[cfg(feature = "serde")]
-fn is_default_cache(cache: &Duration) -> bool {
-	*cache == DEFAULT_CACHE
-}
-
-/// Serialize [`TrackInfo::cache`] as a bare integer of milliseconds, matching the
-/// catalog's other durations (and the wire), rather than serde's `{secs, nanos}`.
-#[cfg(feature = "serde")]
-mod cache_millis {
-	use std::time::Duration;
-
-	pub fn serialize<S: serde::Serializer>(cache: &Duration, s: S) -> Result<S::Ok, S::Error> {
-		s.serialize_u64(cache.as_millis() as u64)
-	}
-
-	pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-		let ms = <u64 as serde::Deserialize>::deserialize(d)?;
-		Ok(Duration::from_millis(ms))
-	}
-}
 impl Default for TrackInfo {
 	fn default() -> Self {
 		Self {
 			compress: false,
 			timescale: None,
-			cache: DEFAULT_CACHE,
 			priority: 0,
 			ordered: true,
 		}
@@ -128,12 +91,6 @@ impl TrackInfo {
 		self
 	}
 
-	/// Set how long old groups stay available before eviction, returning `self` for chaining.
-	pub fn with_cache(mut self, cache: Duration) -> Self {
-		self.cache = cache;
-		self
-	}
-
 	/// Set the publisher's tie-break priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
@@ -145,13 +102,18 @@ impl TrackInfo {
 		self.ordered = ordered;
 		self
 	}
+}
 
-	/// Clamp a subscriber's stale window to this track's [`Self::cache`]: a
-	/// subscriber can't wait for a late group longer than the publisher keeps it.
-	/// `Duration::ZERO` (skip immediately) is left untouched by the `min`.
-	fn clamp_stale(&self, stale: Duration) -> Duration {
-		stale.min(self.cache)
-	}
+/// Clamp a subscriber's stale window to a track's local retention.
+///
+/// A subscriber can't usefully wait for a late group longer than the track keeps it around. With
+/// a [`Cache`] attached, that bound is the cache's `max_age`. With no cache, retention is
+/// latest-group-only: nothing beyond the current group is kept, so waiting for a late group is
+/// pointless and the window collapses to `Duration::ZERO` (skip immediately). `Duration::ZERO` is
+/// left untouched by the `min`.
+fn clamp_stale(cache: Option<&Cache>, stale: Duration) -> Duration {
+	let bound = cache.map(|c| c.max_age()).unwrap_or(Duration::ZERO);
+	stale.min(bound)
 }
 
 /// A cached group plus its registration in the shared [`Cache`], if any.
@@ -778,13 +740,14 @@ impl TrackProducer {
 	///
 	/// The info is fixed at creation, so there's nothing to wait for (no
 	/// SUBSCRIBE_OK round trip). The subscriber's stale window is clamped to the
-	/// track's cache. Pass `None` for [`Subscription::default`].
+	/// track's local retention (the attached [`Cache`]'s age bound, or `Duration::ZERO`
+	/// when none). Pass `None` for [`Subscription::default`].
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
 		let mut preferences = subscription.into().unwrap_or_default();
 
 		let mut state = self.modify().expect("track producer state is never closed");
 		let info = state.info.clone().expect("producer always has info");
-		preferences.stale = info.clamp_stale(preferences.stale);
+		preferences.stale = clamp_stale(state.cache.as_ref(), preferences.stale);
 		let subscription = kio::Producer::new(preferences);
 		state.subscriptions.push(subscription.consume());
 		drop(state);
@@ -2022,19 +1985,33 @@ mod test {
 	}
 
 	#[test]
-	fn stale_clamped_to_cache() {
-		let producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
+	fn stale_clamped_to_cache_max_age() {
+		// The stale window is clamped to the attached cache's max_age: a subscriber can't wait
+		// for a late group longer than the cache keeps it.
+		let cache = Cache::new(
+			cache::Config::default()
+				.with_max_bytes(u64::MAX)
+				.with_max_age(Duration::from_secs(2)),
+		);
+		let producer = TrackProducer::new("test", None).with_cache(cache);
 
-		// A stale window beyond the cache is capped to the cache; a group can't be
-		// waited for longer than the publisher keeps it.
 		let mut subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
 		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
 
-		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
+		// A window within max_age is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber.update(Subscription::default().with_stale(Duration::from_millis(500)));
 		assert_eq!(subscriber.subscription().stale, Duration::from_millis(500));
 
 		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
+		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
+	}
+
+	#[test]
+	fn stale_clamped_to_zero_without_cache() {
+		// With no cache attached, retention is latest-group-only: nothing beyond the current
+		// group is kept, so a stale window is pointless and collapses to ZERO.
+		let producer = TrackProducer::new("test", None);
+		let subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
 		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
 	}
 

@@ -1,7 +1,12 @@
 import { Signal } from "@moq/signals";
 import { CacheFull, Group } from "./group.ts";
 
-/** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
+/**
+ * Local retention window (milliseconds) for a producer's cached groups.
+ *
+ * Not a wire/publisher property: retention is a local policy, so a closed group is kept this long
+ * for late subscribers to replay, then pruned. Mirrors `moq_net::DEFAULT_CACHE`.
+ */
 export const DEFAULT_CACHE_MS = 5000;
 
 /**
@@ -14,8 +19,6 @@ export const DEFAULT_CACHE_MS = 5000;
 export interface TrackInfo {
 	/** Hint that frames are worth compressing (e.g. a JSON catalog). */
 	compress: boolean;
-	/** How long (milliseconds) old groups stay available before eviction. */
-	cache: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
 	priority: number;
 	/** Group ordering preference (newest-first when `false`). */
@@ -26,7 +29,6 @@ export interface TrackInfo {
 export function trackInfoDefaults(info: Partial<TrackInfo> = {}): TrackInfo {
 	return {
 		compress: info.compress ?? false,
-		cache: info.cache ?? DEFAULT_CACHE_MS,
 		priority: info.priority ?? 0,
 		ordered: info.ordered ?? true,
 	};
@@ -197,8 +199,7 @@ export class TrackProducer extends TrackHandle {
 	// Evict cached groups that are closed and older than the cache window, dropping
 	// each evicted group's mirror from every sink so no consumer can pin it.
 	#prune(): void {
-		const cacheMs = this.state.info.peek()?.cache ?? DEFAULT_CACHE_MS;
-		const cutoff = Date.now() - cacheMs;
+		const cutoff = Date.now() - DEFAULT_CACHE_MS;
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {

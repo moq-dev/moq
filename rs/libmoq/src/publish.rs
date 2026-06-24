@@ -27,12 +27,28 @@ pub struct Publish {
 }
 
 impl Publish {
-	pub fn create(&mut self) -> Result<Id, Error> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	/// Create a broadcast whose tracks retain history per `cache` (cascaded onto every track,
+	/// including the catalog track). The cache keeps superseded groups around so an in-process
+	/// consumer that lags the publisher can still drain them, instead of moq-net's
+	/// latest-group-only default. Callers pass the default cache; override it with
+	/// [`Self::set_cache`].
+	pub fn create(&mut self, cache: moq_net::Cache) -> Result<Id, Error> {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce().with_cache(cache);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)
+	}
+
+	/// Attach a shared `cache` to an existing broadcast, overriding its default cache and
+	/// cascading onto every track it produces. Pass the same cache to several broadcasts to pool
+	/// one retention budget across them.
+	pub fn set_cache(&mut self, broadcast: Id, cache: moq_net::Cache) -> Result<(), Error> {
+		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		// `with_cache` writes to the broadcast's shared state, so applying it to a clone updates
+		// this same broadcast; the returned handle is redundant and dropped.
+		let _ = broadcast.clone().with_cache(cache);
+		Ok(())
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::BroadcastProducer, Error> {

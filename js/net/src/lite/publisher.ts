@@ -369,8 +369,8 @@ export class Publisher {
 			if (!published) throw new Error("not found");
 
 			const info = await published.track(track).info();
-			// The wire no longer carries a cache hint (retention is best-effort, not a
-			// guarantee); the local `info.cache` stays a purely local retention window.
+			// Retention is a local policy, not a wire/publisher property, so TRACK_INFO
+			// carries no cache field.
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,

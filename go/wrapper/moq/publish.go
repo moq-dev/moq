@@ -13,8 +13,22 @@ type BroadcastProducer struct {
 }
 
 // NewBroadcastProducer creates an empty broadcast.
+//
+// It gets its own default cache (a 64 MiB / 5s budget) so an in-process consumer that lags the
+// publisher can still drain superseded groups. Use WithCache to override it or to share one
+// budget across broadcasts.
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastProducer{inner: inner}, nil
+}
+
+// WithCache attaches a shared Cache, overriding the default cache and cascading onto every track.
+// Pass the same Cache to several broadcasts to pool one retention budget across them.
+func (b *BroadcastProducer) WithCache(cache *Cache) (*BroadcastProducer, error) {
+	inner, err := b.inner.WithCache(cache.inner)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +66,7 @@ func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, o
 }
 
 // PublishTrack creates a track that carries arbitrary byte payloads with no
-// codec validation. info sets track properties (priority, cache, compression);
+// codec validation. info sets track properties (priority, ordering, compression);
 // pass nil for defaults.
 func (b *BroadcastProducer) PublishTrack(name string, info *TrackInfo) (*TrackProducer, error) {
 	inner, err := b.inner.PublishTrack(name, info)

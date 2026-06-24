@@ -13,6 +13,13 @@ public final class OriginProducer: Sendable {
         self.ffi = ffi
     }
 
+    /// Cascade a shared `Cache` onto broadcasts this origin *creates* (and their tracks). Does
+    /// not affect broadcasts created separately and then announced; attach the cache to those via
+    /// `BroadcastProducer.withCache`.
+    public func withCache(_ cache: Cache) -> OriginProducer {
+        OriginProducer(ffi.withCache(cache: cache.ffi))
+    }
+
     /// A read handle for this origin.
     public func consume() -> OriginConsumer {
         OriginConsumer(ffi.consume())

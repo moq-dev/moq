@@ -20,6 +20,13 @@ func NewOriginProducer() *OriginProducer {
 	return &OriginProducer{inner: ffi.NewMoqOriginProducer()}
 }
 
+// WithCache cascades a shared Cache onto broadcasts this origin creates (and their tracks). It
+// does not affect broadcasts created separately and then published; attach the cache to those via
+// BroadcastProducer.WithCache.
+func (o *OriginProducer) WithCache(cache *Cache) *OriginProducer {
+	return &OriginProducer{inner: o.inner.WithCache(cache.inner)}
+}
+
 // Consume returns a consumer that observes broadcasts published to this origin.
 func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}

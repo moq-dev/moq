@@ -7,7 +7,7 @@ import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
-import { DEFAULT_CACHE_MS, type TrackProducer } from "../track.ts";
+import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
@@ -229,9 +229,6 @@ export class Subscriber {
 			const info = await this.#trackInfo(path, name);
 			return {
 				compress: info.compression !== Compression.None,
-				// The wire no longer carries a cache hint (retention is best-effort),
-				// so the local retention window falls back to the model default.
-				cache: DEFAULT_CACHE_MS,
 				priority: info.priority,
 				ordered: info.ordered,
 			};
@@ -348,9 +345,6 @@ export class Subscriber {
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
 			producer = request.accept({
 				compress: info.compression !== Compression.None,
-				// The wire no longer carries a cache hint (retention is best-effort),
-				// so the local retention window falls back to the model default.
-				cache: DEFAULT_CACHE_MS,
 				priority: info.priority,
 				ordered: info.ordered,
 			});

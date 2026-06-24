@@ -51,6 +51,16 @@ public final class BroadcastProducer: Sendable {
         ffi = try MoqBroadcastProducer()
     }
 
+    init(_ ffi: MoqBroadcastProducer) {
+        self.ffi = ffi
+    }
+
+    /// Attach a shared `Cache`, overriding the default cache and cascading onto every track.
+    /// Pass the same `Cache` to several broadcasts to pool one retention budget.
+    public func withCache(_ cache: Cache) throws -> BroadcastProducer {
+        BroadcastProducer(try ffi.withCache(cache: cache.ffi))
+    }
+
     /// A read handle for this broadcast's tracks.
     public func consume() throws -> BroadcastConsumer {
         BroadcastConsumer(try ffi.consume())
@@ -69,7 +79,7 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
-    /// `info` sets track properties (priority, cache, compression); omit for defaults.
+    /// `info` sets track properties (priority, ordering, compression); omit for defaults.
     public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
         TrackProducer(try ffi.publishTrack(name: name, info: info))
     }

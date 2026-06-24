@@ -98,6 +98,12 @@ impl Cache {
 		Arc::ptr_eq(&self.state, &other.state)
 	}
 
+	/// The configured wall-clock age bound. A track uses this to clamp a subscriber's stale
+	/// window: a late group can't be waited for longer than the cache keeps it.
+	pub(crate) fn max_age(&self) -> Duration {
+		self.state.lock().unwrap().max_age
+	}
+
 	/// Register a group with the cache, recording its byte size and an initial access time of
 	/// `now`, then evict anything now over budget. Returns a [`Token`] identifying the entry.
 	///

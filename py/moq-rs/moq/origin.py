@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from moq_ffi import MoqAnnounced, MoqAnnouncedBroadcast, MoqAnnouncement, MoqOriginConsumer, MoqOriginProducer
 
+from .cache import Cache
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 
@@ -104,6 +105,14 @@ class OriginProducer:
         """Wrap an existing FFI producer (e.g. the one a `Session` owns)."""
         self = cls.__new__(cls)
         self._inner = inner
+        return self
+
+    def with_cache(self, cache: Cache) -> OriginProducer:
+        """Cascade a shared :class:`Cache` onto broadcasts this origin *creates*
+        (and their tracks). Does not affect broadcasts created separately and then
+        published; attach the cache to those via :meth:`BroadcastProducer.with_cache`.
+        Returns ``self`` for chaining."""
+        self._inner = self._inner.with_cache(cache._inner)
         return self
 
     def consume(self) -> OriginConsumer:
