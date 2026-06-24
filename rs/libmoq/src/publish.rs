@@ -27,12 +27,27 @@ pub struct Publish {
 }
 
 impl Publish {
+	/// Create a broadcast. It inherits moq-net's default cache (a 5-second window, no byte cap),
+	/// cascaded onto every track including the catalog, so superseded groups stay around long
+	/// enough for an in-process consumer that lags the publisher to drain them. Override it (e.g.
+	/// to cap RAM with a byte budget or share one budget across broadcasts) with [`Self::set_cache`].
 	pub fn create(&mut self) -> Result<Id, Error> {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)
+	}
+
+	/// Attach a shared `cache` to an existing broadcast, overriding its default cache and
+	/// cascading onto every track it produces. Pass the same cache to several broadcasts to pool
+	/// one retention budget across them.
+	pub fn set_cache(&mut self, broadcast: Id, cache: moq_net::Cache) -> Result<(), Error> {
+		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		// `with_cache` writes to the broadcast's shared state, so applying it to a clone updates
+		// this same broadcast; the returned handle is redundant and dropped.
+		let _ = broadcast.clone().with_cache(cache);
+		Ok(())
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::BroadcastProducer, Error> {

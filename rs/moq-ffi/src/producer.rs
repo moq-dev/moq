@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::cache::MoqCache;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -7,7 +8,8 @@ use crate::ffi::Task;
 /// Publisher-side track properties, mirroring [`moq_net::TrackInfo`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
-/// (priority 0, ordered, uncompressed, default cache, untimed).
+/// (priority 0, ordered, uncompressed, untimed). Local retention is governed by a
+/// [`MoqCache`] attached to the broadcast, not by this struct.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
@@ -19,9 +21,6 @@ pub struct MoqTrackInfo {
 	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
 	#[uniffi(default = false)]
 	pub compress: bool,
-	/// How long the relay should cache past groups, in milliseconds. Null uses the default.
-	#[uniffi(default = None)]
-	pub cache_ms: Option<u64>,
 	/// Per-frame timescale in ticks per second. Null leaves the track untimed; set it only
 	/// when writing timestamped frames, since raw `write_frame` is untimed and would mismatch.
 	#[uniffi(default = None)]
@@ -36,9 +35,6 @@ impl TryFrom<MoqTrackInfo> for moq_net::TrackInfo {
 			.with_priority(info.priority)
 			.with_ordered(info.ordered)
 			.with_compress(info.compress);
-		if let Some(ms) = info.cache_ms {
-			out = out.with_cache(std::time::Duration::from_millis(ms));
-		}
 		if let Some(ticks) = info.timescale {
 			let scale =
 				moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec(format!("invalid timescale: {ticks}")))?;
@@ -155,6 +151,11 @@ impl MoqBroadcastProducer {
 	/// Create a new broadcast for publishing media tracks.
 	///
 	/// NOTE: This will do nothing until published to an origin.
+	///
+	/// The broadcast inherits moq-net's default cache (its own 5-second, no-byte-cap budget), so
+	/// superseded groups stay in RAM long enough for an in-process consumer (which may lag the
+	/// publisher) to drain them. Override it, or share one budget across broadcasts and cap RAM
+	/// with a byte budget, via [`Self::with_cache`].
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
@@ -163,6 +164,20 @@ impl MoqBroadcastProducer {
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
+	}
+
+	/// Attach a shared [`MoqCache`], overriding the default cache and cascading onto every track
+	/// this broadcast produces. Pass the same [`MoqCache`] to several broadcasts to pool one
+	/// retention budget across them. Returns the same handle for chaining.
+	pub fn with_cache(self: Arc<Self>, cache: &MoqCache) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
+		// `with_cache` writes to the broadcast's shared state, so applying it to a clone updates
+		// this same broadcast; the returned handle is redundant and dropped.
+		let _ = state.broadcast.clone().with_cache(cache.inner());
+		drop(guard);
+		Ok(self)
 	}
 
 	/// Create a new media track for this broadcast.
@@ -263,7 +278,8 @@ impl MoqBroadcastProducer {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		let info = info.map(moq_net::TrackInfo::try_from).transpose()?;
-		// Clone the broadcast handle (shared Arc internally) to get &mut access.
+		// Clone the broadcast handle (shared Arc internally) to get &mut access. The track
+		// inherits the broadcast's cascaded cache.
 		let mut broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(name, info)?;
 		Ok(Arc::new(MoqTrackProducer {

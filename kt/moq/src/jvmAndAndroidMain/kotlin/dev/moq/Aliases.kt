@@ -29,6 +29,9 @@ typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
+// Shared RAM LRU group cache (attach via BroadcastProducer.withCache / OriginProducer.withCache).
+typealias Cache = uniffi.moq.MoqCache
+
 // Media (codec-aware) producers and consumers.
 typealias MediaProducer = uniffi.moq.MoqMediaProducer
 typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
@@ -45,6 +48,7 @@ typealias Audio = uniffi.moq.MoqAudio
 typealias Dimensions = uniffi.moq.MoqDimensions
 typealias Subscription = uniffi.moq.MoqSubscription
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
+typealias CacheConfig = uniffi.moq.MoqCacheConfig
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
 typealias AudioCodec = uniffi.moq.MoqAudioCodec
 typealias AudioFormat = uniffi.moq.MoqAudioFormat

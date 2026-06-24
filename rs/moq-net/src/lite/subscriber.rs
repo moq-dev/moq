@@ -1002,13 +1002,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 
-		// The wire no longer carries a cache hint (the publisher's retention is now
-		// best-effort, not a guarantee), so the local retention window falls back to
-		// the model default.
 		let model = crate::TrackInfo {
 			compress: info.compression != Compression::None,
 			timescale: info.timescale,
-			cache: crate::DEFAULT_CACHE,
 			priority: info.priority,
 			ordered: info.ordered,
 		};

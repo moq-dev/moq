@@ -318,6 +318,38 @@ pub extern "C" fn moq_origin_create() -> i32 {
 	ffi::enter(move || State::lock().origin.create())
 }
 
+/// Create a shared RAM LRU group cache.
+///
+/// A cache retains superseded groups in RAM so an in-process consumer that lags the publisher can
+/// still drain them, bounded by a byte budget and a wall-clock age. Attach it to a broadcast with
+/// [moq_publish_with_cache]; pass the same handle to several broadcasts to share one budget.
+/// Without an explicit cache, [moq_publish_create] inherits moq-net's default (a 5-second window,
+/// no byte cap).
+///
+/// `max_bytes` caps the total retained bytes (`0` means no cap, eviction by age alone); `max_age_ms`
+/// is the wall-clock window since a group was last accessed before it is evicted
+/// (least-recently-accessed first).
+///
+/// Returns a non-zero handle to the cache on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_cache_create(max_bytes: u64, max_age_ms: u64) -> i32 {
+	ffi::enter(move || State::lock().cache.create(max_bytes, max_age_ms))
+}
+
+/// Release a cache handle from [moq_cache_create].
+///
+/// The underlying budget stays alive while any broadcast attached to it is still live (each holds
+/// its own clone), so closing the handle just stops new attachments from using it.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_cache_close(cache: u32) -> i32 {
+	ffi::enter(move || {
+		let cache = ffi::parse_id(cache)?;
+		State::lock().cache.close(cache)
+	})
+}
+
 /// Publish a broadcast to an origin.
 ///
 /// The broadcast will be announced to any origin consumers, such as over the network.
@@ -544,10 +576,31 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 
 /// Create a new broadcast for publishing media tracks.
 ///
+/// The broadcast inherits moq-net's default cache (a 5-second window, no byte cap), so superseded
+/// groups stay in RAM long enough for an in-process consumer (which may lag the publisher) to
+/// drain them. Override it, or share one budget across broadcasts and cap RAM with a byte budget,
+/// with [moq_publish_with_cache].
+///
 /// Returns a non-zero handle to the broadcast on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_create() -> i32 {
 	ffi::enter(move || State::lock().publish.create())
+}
+
+/// Attach a shared cache (from [moq_cache_create]) to an existing broadcast, overriding its
+/// default cache and cascading onto every track it produces.
+///
+/// Pass the same cache handle to several broadcasts to pool one retention budget across them.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_with_cache(broadcast: u32, cache: u32) -> i32 {
+	ffi::enter(move || {
+		let mut state = State::lock();
+		let broadcast = ffi::parse_id(broadcast)?;
+		let cache = state.cache.get(ffi::parse_id(cache)?)?;
+		state.publish.set_cache(broadcast, cache)
+	})
 }
 
 /// Close a broadcast and clean up its resources.

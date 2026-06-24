@@ -18,6 +18,7 @@
 
 mod api;
 mod audio;
+mod cache;
 mod consume;
 mod error;
 mod ffi;

@@ -1,5 +1,6 @@
 mod bandwidth;
 mod broadcast;
+pub mod cache;
 mod compression;
 mod frame;
 mod group;
@@ -10,6 +11,7 @@ mod track;
 
 pub use bandwidth::*;
 pub use broadcast::*;
+pub use cache::Cache;
 pub use compression::*;
 pub use frame::*;
 pub use group::*;

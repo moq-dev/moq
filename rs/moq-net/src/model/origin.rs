@@ -8,7 +8,7 @@ use std::{
 use rand::RngExt;
 use web_async::Lock;
 
-use super::BroadcastConsumer;
+use super::{BroadcastConsumer, Cache};
 use crate::{
 	AsPath, BroadcastInfo, BroadcastProducer, Error, Path, PathOwned, PathPrefixes,
 	coding::{Decode, DecodeError, Encode, EncodeError},
@@ -759,6 +759,11 @@ pub struct OriginProducer {
 	// `nodes` because dynamic broadcasts are never announced: they only resolve a
 	// consumer's `request_broadcast` when no live announcement exists.
 	dynamic: kio::Producer<OriginDynamicState>,
+
+	// Shared cache cascaded onto broadcasts created via `create_broadcast` (and thus their
+	// tracks). A broadcast- or track-level cache overrides it. `None` (the default) leaves each
+	// created broadcast with its own per-broadcast default cache (5s, no byte cap).
+	cache: Option<Cache>,
 }
 
 impl std::ops::Deref for OriginProducer {
@@ -778,7 +783,19 @@ impl OriginProducer {
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
 			dynamic: kio::Producer::default(),
+			cache: None,
 		}
+	}
+
+	/// Attach a shared [`Cache`] cascaded onto broadcasts created via
+	/// [`create_broadcast`](Self::create_broadcast) (and in turn their tracks), replacing each
+	/// broadcast's own default ([`crate::DEFAULT_CACHE`], 5 seconds, no byte cap). A broadcast-level
+	/// [`BroadcastProducer::with_cache`] or track-level [`crate::TrackProducer::with_cache`]
+	/// overrides it in turn. Clone the same [`Cache`] across origins to share one budget. Returns
+	/// `self` for chaining.
+	pub fn with_cache(mut self, cache: Cache) -> Self {
+		self.cache = Some(cache);
+		self
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -791,6 +808,7 @@ impl OriginProducer {
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: PathOwned::default(),
 			dynamic: kio::Producer::default(),
+			cache: None,
 		}
 	}
 
@@ -800,8 +818,12 @@ impl OriginProducer {
 	/// The returned [`BroadcastPublish`] derefs to a [`BroadcastProducer`]; dropping it
 	/// unannounces the broadcast. See [`publish_broadcast`](Self::publish_broadcast) for the
 	/// error cases.
+	/// The broadcast inherits this origin's [`with_cache`](Self::with_cache) cache, if any.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<BroadcastPublish, Error> {
-		let producer = BroadcastInfo::new().produce();
+		let mut producer = BroadcastInfo::new().produce();
+		if let Some(cache) = &self.cache {
+			producer = producer.with_cache(cache.clone());
+		}
 		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(BroadcastPublish { producer, publish })
 	}
@@ -866,6 +888,7 @@ impl OriginProducer {
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
+			cache: self.cache.clone(),
 		})
 	}
 
@@ -910,6 +933,7 @@ impl OriginProducer {
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
 			dynamic: self.dynamic.clone(),
+			cache: self.cache.clone(),
 		})
 	}
 
@@ -1711,6 +1735,26 @@ mod tests {
 	use crate::BroadcastInfo;
 
 	use super::*;
+
+	#[tokio::test]
+	async fn cache_cascades_to_created_broadcast() {
+		use crate::cache;
+		let cache = Cache::new(cache::Config::default().with_max_bytes(u64::MAX));
+		let origin = Origin::random().produce().with_cache(cache);
+
+		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let mut track = broadcast.create_track("video", None).unwrap();
+
+		// The origin's cache cascaded through the broadcast onto the track, so a superseded
+		// group is retained instead of dropped.
+		track.append_group().unwrap(); // seq 0
+		track.append_group().unwrap(); // seq 1
+
+		assert!(
+			track.consume().get_group(0).is_some(),
+			"the origin's cache cascaded to the broadcast's track"
+		);
+	}
 
 	#[test]
 	fn origin_list_push_fails_at_limit() {

@@ -5,6 +5,7 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 
 from moq_ffi import MoqError as Error
 
+from .cache import Cache
 from .client import Client, connect
 from .log import log_level
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
@@ -36,6 +37,7 @@ from .types import (
     AudioEncoderOutput,
     AudioFormat,
     AudioFrame,
+    CacheConfig,
     Catalog,
     Container,
     Dimensions,
@@ -61,6 +63,8 @@ __all__ = [
     "BroadcastConsumer",
     "BroadcastDynamic",
     "BroadcastProducer",
+    "Cache",
+    "CacheConfig",
     "Catalog",
     "CatalogConsumer",
     "Client",

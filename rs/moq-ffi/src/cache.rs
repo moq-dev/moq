@@ -1,0 +1,80 @@
+//! FFI wrapper over [`moq_net::Cache`]: a shared RAM LRU group cache.
+//!
+//! Construct a [`MoqCache`] from a [`MoqCacheConfig`] (byte budget + wall-clock age) and attach
+//! it when creating a broadcast (or an origin, which cascades to the broadcasts it creates). Many
+//! broadcasts/tracks can share one [`MoqCache`] handle and draw from a single budget. Without an
+//! explicit cache, a broadcast inherits moq-net's default (a 5-second window, no byte cap), so the
+//! common publish -> consume path isn't silently lossy under load. Attach an explicit cache to
+//! change the window or cap RAM with a byte budget.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Configuration for a [`MoqCache`]: the shared byte budget and the wall-clock age bound.
+///
+/// Mirrors [`moq_net::cache::Config`]. The age bound is expressed in milliseconds at the FFI
+/// boundary. Defaults to the same retention a broadcast gets with no cache attached: a 5-second
+/// window and no byte cap (`max_bytes == 0`).
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct MoqCacheConfig {
+	/// Maximum total bytes retained across every track sharing this cache. The
+	/// least-recently-accessed groups are evicted once the total would exceed this. `0` (the
+	/// default) means no byte cap; eviction is by age alone.
+	#[uniffi(default = 0)]
+	pub max_bytes: u64,
+	/// Maximum wall-clock age, in milliseconds, since a group was last accessed before it is
+	/// evicted (least-recently-accessed first). Defaults to [`moq_net::DEFAULT_CACHE`] (5000 ms).
+	#[uniffi(default = 5000)]
+	pub max_age_ms: u64,
+}
+
+impl Default for MoqCacheConfig {
+	fn default() -> Self {
+		Self {
+			max_bytes: 0,
+			max_age_ms: moq_net::DEFAULT_CACHE.as_millis() as u64,
+		}
+	}
+}
+
+/// A shared, cheaply cloneable handle to a RAM LRU group cache.
+///
+/// Attach it when creating a broadcast or origin; clone the handle (via [`Self::clone_handle`])
+/// to share one budget across many of them. See [`moq_net::Cache`] for the eviction policy.
+#[derive(uniffi::Object)]
+pub struct MoqCache {
+	inner: moq_net::Cache,
+}
+
+impl MoqCache {
+	/// The wrapped moq-net cache handle (a cheap `Arc` clone).
+	pub(crate) fn inner(&self) -> moq_net::Cache {
+		self.inner.clone()
+	}
+}
+
+#[uniffi::export]
+impl MoqCache {
+	/// Create a cache with the given [`MoqCacheConfig`].
+	#[uniffi::constructor]
+	pub fn new(config: MoqCacheConfig) -> Arc<Self> {
+		let inner = moq_net::Cache::new(
+			moq_net::cache::Config::default()
+				.with_max_bytes(config.max_bytes)
+				.with_max_age(Duration::from_millis(config.max_age_ms)),
+		);
+		Arc::new(Self { inner })
+	}
+
+	/// A handle sharing this cache's budget. Attach the clone elsewhere to pool retention.
+	pub fn clone_handle(&self) -> Arc<Self> {
+		Arc::new(Self {
+			inner: self.inner.clone(),
+		})
+	}
+
+	/// Whether two handles share the same underlying budget (one is a clone of the other).
+	pub fn is_clone(&self, other: &MoqCache) -> bool {
+		self.inner.is_clone(&other.inner)
+	}
+}

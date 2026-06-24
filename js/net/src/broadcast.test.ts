@@ -1,7 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Broadcast } from "./broadcast.ts";
 import { CacheFull, MAX_GROUP_FRAMES } from "./group.ts";
-import { TrackProducer } from "./track.ts";
+import { DEFAULT_CACHE_MS, TrackProducer } from "./track.ts";
 
 test("subscribe serves a statically inserted track without a request", async () => {
 	const broadcast = new Broadcast();
@@ -83,7 +83,7 @@ test("a stalled consumer does not pin evicted groups", () => {
 		setSystemTime(new Date(10_000));
 
 		const broadcast = new Broadcast();
-		const producer = broadcast.createTrack("video", { cache: 1000 });
+		const producer = broadcast.createTrack("video");
 
 		// A subscriber that never reads. Its sink must not grow without bound.
 		const stalled = broadcast.track("video").subscribe();
@@ -91,9 +91,9 @@ test("a stalled consumer does not pin evicted groups", () => {
 		producer.writeString("old");
 		expect(stalled.state.groups.peek().length).toBe(1);
 
-		// Advance past the cache window and write again to trigger a prune. The old
-		// (closed, aged-out) group is dropped from the stalled sink, not retained.
-		setSystemTime(new Date(12_000));
+		// Advance past the local retention window (DEFAULT_CACHE_MS) and write again to trigger a
+		// prune. The old (closed, aged-out) group is dropped from the stalled sink, not retained.
+		setSystemTime(new Date(10_000 + DEFAULT_CACHE_MS + 1_000));
 		producer.writeString("fresh");
 
 		const groups = stalled.state.groups.peek();

@@ -25,6 +25,9 @@ from moq_ffi import (
     MoqAudioFrame as AudioFrame,
 )
 from moq_ffi import (
+    MoqCacheConfig as CacheConfig,
+)
+from moq_ffi import (
     MoqCatalog as Catalog,
 )
 from moq_ffi import (
@@ -51,6 +54,7 @@ __all__ = [
     "AudioEncoderOutput",
     "AudioFormat",
     "AudioFrame",
+    "CacheConfig",
     "Catalog",
     "Container",
     "Dimensions",

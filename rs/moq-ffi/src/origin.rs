@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::cache::MoqCache;
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -96,6 +97,21 @@ impl MoqOriginProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			inner: moq_net::Origin::random().produce(),
+		})
+	}
+
+	/// Attach a shared [`MoqCache`] cascaded onto broadcasts this origin *creates* via its
+	/// `create_broadcast` path (and their tracks). Pass the same [`MoqCache`] elsewhere to pool one
+	/// budget. Returns a new handle over the same origin.
+	///
+	/// Note this does not affect broadcasts created separately via
+	/// [`MoqBroadcastProducer::new`](crate::producer::MoqBroadcastProducer::new) and then announced;
+	/// attach the cache to those broadcasts with
+	/// [`MoqBroadcastProducer::with_cache`](crate::producer::MoqBroadcastProducer::with_cache).
+	pub fn with_cache(&self, cache: &MoqCache) -> Arc<Self> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		Arc::new(Self {
+			inner: self.inner.clone().with_cache(cache.inner()),
 		})
 	}
 

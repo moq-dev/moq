@@ -20,6 +20,7 @@ public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias Container = MoqFFI.Container
 public typealias Subscription = MoqFFI.MoqSubscription
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+public typealias CacheConfig = MoqFFI.MoqCacheConfig
 
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.

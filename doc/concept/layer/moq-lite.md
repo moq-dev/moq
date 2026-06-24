@@ -107,8 +107,8 @@ Each Subscription consists of a few properties:
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Group Timeout**: The maximum duration to keep old groups in cache/transit. Defaults to 30 seconds.
 
-The publisher also keeps old groups around for a best-effort **cache** window so relays and late subscribers can still fetch them.
-This is a local hint rather than a guarantee carried on the wire, and a subscriber's Group Timeout is bounded by it: a group can't be waited for longer than it's actually kept around.
+A publisher (or relay) keeps old groups around in a local RAM **cache** so late subscribers can still fetch them.
+This retention is a purely local policy, not advertised on the wire: by default each broadcast keeps roughly the last 5 seconds of groups, and attaching an explicit cache changes the window, caps RAM with a byte budget, or shares one budget across tracks. A subscriber's Group Timeout is bounded by that local window: a group can't be waited for longer than it's actually kept around (so a zero-length window means only the latest group is available).
 
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:
