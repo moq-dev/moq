@@ -247,18 +247,19 @@ impl ElementImpl for MoqSink {
 		name: Option<&str>,
 		_caps: Option<&gst::Caps>,
 	) -> Option<gst::Pad> {
+		// Wrap both pad functions in catch_panic_pad_function: these run on the streaming thread across the
+		// C FFI boundary, and they hit `state.lock().unwrap()` (poisonable) and `expect()`. An escaping
+		// panic would abort the process; here it becomes a clean FlowError / `false` instead.
 		let pad_builder = gst::Pad::builder_from_template(templ)
 			.chain_function(|pad, parent, buffer| {
-				let element = parent
-					.and_then(|p| p.downcast_ref::<super::MoqSink>())
-					.ok_or(gst::FlowError::Error)?;
-				element.imp().forward_buffer(pad, buffer)
+				MoqSink::catch_panic_pad_function(
+					parent,
+					|| Err(gst::FlowError::Error),
+					|this| this.forward_buffer(pad, buffer),
+				)
 			})
 			.event_function(|pad, parent, event| {
-				let Some(element) = parent.and_then(|p| p.downcast_ref::<super::MoqSink>()) else {
-					return false;
-				};
-				element.imp().handle_event(pad, event)
+				MoqSink::catch_panic_pad_function(parent, || false, |this| this.handle_event(pad, event))
 			});
 
 		let pad = match name {
