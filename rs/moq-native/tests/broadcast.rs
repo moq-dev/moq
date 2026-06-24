@@ -136,7 +136,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let mut group = track.append_group().expect("failed to append group");
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_native::moq_net::Frame {
+		let frame = moq_native::moq_net::FrameInfo {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
 		};
@@ -252,7 +252,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	let mut group = track.append_group().expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_native::moq_net::Frame {
+		let frame = moq_native::moq_net::FrameInfo {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
 		};
@@ -357,8 +357,8 @@ async fn broadcast_moq_lite_05_fetch_webtransport() {
 async fn lite05_fetch_during_subscribe(scheme: &str) {
 	use moq_native::moq_net::{Timescale, Timestamp};
 
-	fn timestamped_frame(us: u64, payload: &str) -> moq_net::Frame {
-		moq_net::Frame {
+	fn timestamped_frame(us: u64, payload: &str) -> moq_net::FrameInfo {
+		moq_net::FrameInfo {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
 		}
