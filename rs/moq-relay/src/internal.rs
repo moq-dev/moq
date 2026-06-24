@@ -26,6 +26,13 @@ pub struct InternalConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub uds: InternalUds,
+
+	/// Billing tier label that the internal listener's sessions record stats
+	/// under. Default `internal`. An empty value selects the default
+	/// (unprefixed) tier.
+	#[arg(long = "internal-tier", id = "internal-tier", env = "MOQ_INTERNAL_TIER")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub tier: Option<String>,
 }
 
 /// Plain-TCP internal listener.
@@ -106,11 +113,15 @@ impl InternalAllow {
 /// Used directly in the relay's top-level `select!`. The TCP and Unix listeners
 /// run concurrently when both are configured.
 pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::Result<()> {
+	// Billing tier these sessions record under (--internal-tier, default `internal`).
+	let tier = moq_net::Tier::new(config.tier.clone().unwrap_or_else(|| "internal".to_string()));
+
 	let tcp = {
 		let cluster = cluster.clone();
+		let tier = tier.clone();
 		async move {
 			match config.tcp.listen {
-				Some(addr) => run_tcp(addr, cluster).await,
+				Some(addr) => run_tcp(addr, cluster, tier).await,
 				None => std::future::pending().await,
 			}
 		}
@@ -118,7 +129,7 @@ pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::R
 
 	let uds = async move {
 		match config.uds.listen {
-			Some(path) => run_uds(path, config.uds.allow, cluster).await,
+			Some(path) => run_uds(path, config.uds.allow, cluster, tier).await,
 			None => std::future::pending().await,
 		}
 	};
@@ -129,7 +140,7 @@ pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::R
 	}
 }
 
-async fn run_tcp(addr: SocketAddr, cluster: Cluster) -> anyhow::Result<()> {
+async fn run_tcp(addr: SocketAddr, cluster: Cluster, tier: moq_net::Tier) -> anyhow::Result<()> {
 	// No transport security, so a non-loopback bind is worth flagging. We still
 	// allow it (private VPC interfaces are a valid use), just loudly.
 	if addr.ip().is_loopback() {
@@ -143,7 +154,7 @@ async fn run_tcp(addr: SocketAddr, cluster: Cluster) -> anyhow::Result<()> {
 		.with_protocols(moq_net::ALPNS.iter().copied());
 	while let Some(session) = listener.accept().await {
 		match session {
-			Ok(session) => spawn_session(session, cluster.clone()),
+			Ok(session) => spawn_session(session, cluster.clone(), tier.clone()),
 			Err(err) => tracing::warn!(%err, "internal listener accept failed"),
 		}
 	}
@@ -152,7 +163,7 @@ async fn run_tcp(addr: SocketAddr, cluster: Cluster) -> anyhow::Result<()> {
 }
 
 #[cfg(all(feature = "uds", unix))]
-async fn run_uds(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyhow::Result<()> {
+async fn run_uds(path: PathBuf, allow: InternalAllow, cluster: Cluster, tier: moq_net::Tier) -> anyhow::Result<()> {
 	if allow.is_empty() {
 		tracing::warn!(path = %path.display(), "internal Unix listener has no allow list; any local user able to reach the socket gets full access");
 	} else {
@@ -181,14 +192,14 @@ async fn run_uds(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyho
 			continue;
 		}
 
-		spawn_session(session, cluster.clone());
+		spawn_session(session, cluster.clone(), tier.clone());
 	}
 
 	anyhow::bail!("internal Unix listener stopped accepting connections")
 }
 
 #[cfg(not(all(feature = "uds", unix)))]
-async fn run_uds(path: PathBuf, _allow: InternalAllow, _cluster: Cluster) -> anyhow::Result<()> {
+async fn run_uds(path: PathBuf, _allow: InternalAllow, _cluster: Cluster, _tier: moq_net::Tier) -> anyhow::Result<()> {
 	anyhow::bail!(
 		"internal.uds.listen requests a Unix socket ({}) but this relay was built without the `uds` feature",
 		path.display()
@@ -204,16 +215,17 @@ fn cred_allowed(allow: &InternalAllow, cred: &moq_native::unix::PeerCred) -> boo
 	uid_ok && gid_ok && pid_ok
 }
 
-/// Spawn a task that serves one accepted session with full internal access.
-fn spawn_session<S>(session: S, cluster: Cluster)
+/// Spawn a task that serves one accepted session with full internal access,
+/// recording its stats under `tier`.
+fn spawn_session<S>(session: S, cluster: Cluster, tier: moq_net::Tier)
 where
 	S: web_transport_trait::Session,
 {
-	// Full access to everything under the empty root, on the internal tier.
+	// Full access to everything under the empty root.
 	let token = AuthToken::unrestricted(moq_net::Path::new("").to_owned());
 	let publish = cluster.publisher(&token);
 	let subscribe = cluster.subscriber(&token);
-	let stats = cluster.stats.tier(moq_net::Tier::new("internal"));
+	let stats = cluster.stats.tier(tier);
 
 	let serve = async move {
 		// subscribe/publish look backwards on purpose: see connection.rs. We publish

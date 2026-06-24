@@ -328,6 +328,56 @@ id = 12345
 		);
 	}
 
+	/// The per-site stats tier flags are `Option<String>`, so an absent CLI flag
+	/// must not wipe a TOML value during the `update_from` re-parse.
+	static TIER_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_tiers() {
+		let _guard = TIER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: TIER_ENV_LOCK serializes this with any sibling test touching
+		// the same env vars.
+		unsafe {
+			std::env::remove_var("MOQ_CLUSTER_TIER");
+			std::env::remove_var("MOQ_INTERNAL_TIER");
+			std::env::remove_var("MOQ_AUTH_MTLS_TIER");
+		}
+
+		let toml = r#"
+[cluster]
+tier = "region"
+
+[internal]
+tier = "local"
+
+[auth]
+mtls_tier = "edge"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("tiers-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cluster.tier.as_deref(),
+			Some("region"),
+			"TOML cluster.tier must survive"
+		);
+		assert_eq!(
+			config.internal.tier.as_deref(),
+			Some("local"),
+			"TOML internal.tier must survive"
+		);
+		assert_eq!(
+			config.auth.mtls_tier.as_deref(),
+			Some("edge"),
+			"TOML auth.mtls_tier must survive"
+		);
+	}
+
 	/// Same clap+TOML clobber guard for the internal listeners. Both
 	/// `internal.tcp.listen` (`Option<SocketAddr>`) and `internal.uds.listen`
 	/// (`Option<PathBuf>`) must survive the `update_from` re-parse when their

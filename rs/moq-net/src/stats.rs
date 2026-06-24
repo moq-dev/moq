@@ -10,14 +10,14 @@
 //!
 //! * `publisher.json`           : default-tier egress
 //! * `subscriber.json`          : default-tier ingress
-//! * `<label>/publisher.json`   : named-tier egress (e.g. `internal/publisher.json`)
-//! * `<label>/subscriber.json`  : named-tier ingress
+//! * `<tier>/publisher.json`   : named-tier egress (e.g. `internal/publisher.json`)
+//! * `<tier>/subscriber.json`  : named-tier ingress
 //!
 //! plus one session track per tier that counts connected sessions keyed by
 //! auth root rather than broadcast:
 //!
 //! * `sessions.json`            : default-tier sessions by root
-//! * `<label>/sessions.json`    : named-tier sessions by root
+//! * `<tier>/sessions.json`    : named-tier sessions by root
 //!
 //! The default-tier tracks always exist (emitting `{}` while idle); a named
 //! tier's tracks are created the first time traffic routes to that label.
@@ -257,7 +257,7 @@ impl Tier {
 		self.0.is_empty()
 	}
 
-	/// Track name for this tier: `name` on the default tier, else `<label>/<name>`.
+	/// Track name for this tier: `name` on the default tier, else `<tier>/<name>`.
 	fn track_name(&self, name: &str) -> String {
 		if self.0.is_empty() {
 			name.to_string()

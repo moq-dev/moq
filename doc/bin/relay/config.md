@@ -101,6 +101,10 @@ connection is granted full, unrestricted access. A TCP and a Unix-socket
 listener can each be enabled independently; both default to disabled.
 
 ```toml
+# Billing tier these sessions record stats under (default "internal"; empty = the
+# default unprefixed tier). See the Stats section.
+tier = "internal"
+
 # Plain-TCP listener (tcp:// scheme).
 [internal.tcp]
 listen = "127.0.0.1:4444"
@@ -222,15 +226,21 @@ a session track:
 |-----------------------------|---------------------------------------------|
 | `publisher.json`            | default-tier egress                         |
 | `subscriber.json`           | default-tier ingress                        |
-| `<label>/publisher.json`    | named-tier egress (e.g. `internal/publisher.json`) |
-| `<label>/subscriber.json`   | named-tier ingress                          |
+| `<tier>/publisher.json`    | named-tier egress (e.g. `internal/publisher.json`) |
+| `<tier>/subscriber.json`   | named-tier ingress                          |
 | `sessions.json`             | default-tier connected sessions, keyed by root |
-| `<label>/sessions.json`     | named-tier connected sessions, keyed by root |
+| `<tier>/sessions.json`     | named-tier connected sessions, keyed by root |
 
 The default-tier tracks always exist (emitting `{}` while idle). A named tier's
 tracks are created the first time traffic routes to that label, so cluster
-fan-out shows up under `internal/*` (the default mTLS-peer label) and never in
+fan-out shows up under `internal/*` (the default trusted-peer label) and never in
 the default-tier numbers.
+
+Trusted (non-JWT/public) traffic defaults to the `internal` tier, configurable
+per source: `--cluster-tier` (relay-to-relay dials), `--internal-tier` (the
+`[internal]` listener), and `--auth-mtls-tier` (mTLS peers, when the auth API
+doesn't return a `tier`). Set any of them to a different label, or to `""` to
+record on the default unprefixed tier.
 
 Each per-broadcast frame is a JSON object mapping broadcast path to a
 cumulative counter snapshot. An entry surfaces on any tick where the
@@ -273,7 +283,7 @@ Field semantics:
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
   session loops (both the `moq-lite` and IETF `moq-transport` paths).
 
-The session tracks (`sessions.json` and any `<label>/sessions.json`) instead map
+The session tracks (`sessions.json` and any `<tier>/sessions.json`) instead map
 each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`
 bumps when a session authenticated under that root connects and
 `sessions_closed` when it disconnects, so `sessions - sessions_closed` is

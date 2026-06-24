@@ -360,6 +360,13 @@ pub struct AuthConfig {
 	#[arg(long = "auth-api", env = "MOQ_AUTH_API")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub auth_api: Option<String>,
+
+	/// Default billing tier label for mTLS peers when the auth API doesn't
+	/// return one (or no `--auth-api` is configured). Default `internal`. An
+	/// empty value selects the default (unprefixed) tier.
+	#[arg(long = "auth-mtls-tier", env = "MOQ_AUTH_MTLS_TIER")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub mtls_tier: Option<String>,
 }
 
 /// Public access configuration.
@@ -575,7 +582,8 @@ pub struct AuthToken {
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full publish and subscribe access
-	/// within `root` and are flagged as internal. The cert's trust chain
+	/// within `root`. The billing tier is left at the default; the caller (mTLS
+	/// handshake, internal listener, or cluster dial) sets it from config. The cert's trust chain
 	/// (verified against the configured CA) is the only credential we require;
 	/// nothing else in the cert is inspected.
 	///
@@ -589,7 +597,7 @@ impl AuthToken {
 			root,
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
-			tier: Tier::new("internal"),
+			tier: Tier::default(),
 			// Filled in by the caller from the peer certificate's notAfter.
 			expires: None,
 		}
@@ -675,6 +683,10 @@ pub struct Auth {
 	/// public access, and alias together. Mutually exclusive with the standalone
 	/// key/public sources. See [`AuthConfig::auth_api`].
 	auth_api: Option<(url::Url, ClientWithMiddleware)>,
+	/// Billing tier recorded for an mTLS peer when the auth API doesn't return a
+	/// tier (or none is configured). See [`AuthConfig::mtls_tier`]; default
+	/// `internal`, set via [`Auth::with_mtls_tier`].
+	mtls_tier: Tier,
 }
 
 impl Auth {
@@ -813,7 +825,17 @@ impl Auth {
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
 			auth_api,
+			mtls_tier: Tier::new(config.mtls_tier.unwrap_or_else(|| "internal".to_string())),
 		})
+	}
+
+	/// Override the mTLS fallback billing tier (default `internal`). For the
+	/// mTLS-only stub built via [`Auth::default`], where there is no
+	/// [`AuthConfig`] to carry `--auth-mtls-tier`. An empty label selects the
+	/// default (unprefixed) tier.
+	pub fn with_mtls_tier(mut self, tier: Option<String>) -> Self {
+		self.mtls_tier = Tier::new(tier.unwrap_or_else(|| "internal".to_string()));
+		self
 	}
 
 	/// Build [`AuthParams`] from an incoming connection URL, applying any
@@ -838,12 +860,12 @@ impl Auth {
 	/// Failing closed lets the client retry and self-heal once the API recovers.
 	pub(crate) async fn resolve_mtls(&self, path: &str) -> Result<(String, Tier), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
-			return Ok((path.to_string(), Tier::new("internal")));
+			return Ok((path.to_string(), self.mtls_tier.clone()));
 		};
 
 		let resp = Self::fetch_auth_api(client, base, path, None, true).await?;
-		// Trusted peers default to the internal tier when the API omits one.
-		let tier = resp.tier.map_or_else(|| Tier::new("internal"), Tier::new);
+		// Fall back to the configured mTLS tier when the API omits one.
+		let tier = resp.tier.map_or_else(|| self.mtls_tier.clone(), Tier::new);
 		Ok((resp.alias.unwrap_or_else(|| path.to_string()), tier))
 	}
 
@@ -2805,7 +2827,8 @@ api = "https://api.example.com/access"
 		assert_eq!(token.root, "demo".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
-		assert_eq!(token.tier, Tier::new("internal"));
+		// The billing tier is set by the caller, not baked into the token.
+		assert_eq!(token.tier, Tier::default());
 	}
 
 	#[test]
@@ -2814,7 +2837,7 @@ api = "https://api.example.com/access"
 		// grant unscoped across the whole cluster.
 		let token = AuthToken::unrestricted(Path::new("/").to_owned());
 		assert_eq!(token.root, "".as_path());
-		assert_eq!(token.tier, Tier::new("internal"));
+		assert_eq!(token.tier, Tier::default());
 	}
 
 	// ---------------------------------------------------------------------

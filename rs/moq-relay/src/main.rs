@@ -44,7 +44,8 @@ async fn main() -> anyhow::Result<()> {
 	}
 
 	let auth = if config.auth.is_empty() {
-		Auth::default()
+		// mTLS-only: no JWT/public source, but `--auth-mtls-tier` still applies.
+		Auth::default().with_mtls_tier(config.auth.mtls_tier.clone())
 	} else {
 		config.auth.init().await?
 	};

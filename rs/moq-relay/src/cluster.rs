@@ -313,6 +313,12 @@ pub struct ClusterConfig {
 	/// token). For static `--cluster-connect` peers, prefer an inline `?jwt=`.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
+
+	/// Billing tier label that cluster-peer (relay-to-relay) traffic records
+	/// stats under. Default `internal`. An empty value selects the default
+	/// (unprefixed) tier.
+	#[arg(id = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
+	pub tier: Option<String>,
 }
 
 /// A relay cluster built around a single [`OriginProducer`].
@@ -401,6 +407,12 @@ impl Cluster {
 	pub fn with_stats(mut self, stats: Stats) -> Self {
 		self.stats = stats;
 		self
+	}
+
+	/// Billing tier cluster-peer traffic records under (`--cluster-tier`,
+	/// default `internal`). An empty label is the default (unprefixed) tier.
+	fn cluster_tier(&self) -> Tier {
+		Tier::new(self.config.tier.clone().unwrap_or_else(|| "internal".to_string()))
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
@@ -847,7 +859,7 @@ impl Cluster {
 		let cs = client
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
-			.with_stats(self.stats.tier(Tier::new("internal")))
+			.with_stats(self.stats.tier(self.cluster_tier()))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
