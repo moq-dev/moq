@@ -263,7 +263,7 @@ auth_api = "https://api.moq.dev/cluster/auth"
 	}
 
 	/// Same clap+TOML clobber guard for `client.system_roots`. It's typed as
-	/// `Option<bool>` so an absent `--tls-system-roots` CLI flag must not wipe a
+	/// `Option<bool>` so an absent `--client-tls-system-roots` CLI flag must not wipe a
 	/// TOML-configured value during the `update_from` re-parse. A bare `bool`
 	/// would reset it to `false`, silently dropping the system roots for a
 	/// cluster client that opted into trusting both system and custom roots.

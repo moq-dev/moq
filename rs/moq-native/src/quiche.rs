@@ -94,7 +94,7 @@ pub(crate) struct QuicheClient {
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
 		if !config.tls.root.is_empty() {
-			tracing::warn!("--tls-root is not supported with the quiche backend; system roots will be used");
+			tracing::warn!("--client-tls-root is not supported with the quiche backend; system roots will be used");
 		}
 
 		Ok(Self {

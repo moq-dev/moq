@@ -173,7 +173,7 @@ Unlike the standalone flags, the unified call **fails closed**: any network erro
 
 ### Authenticating the relay to the auth API
 
-The outbound HTTP the relay makes to `--auth-api` (and the deprecated `--auth-key-dir` URL and `--auth-public-api` endpoints) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.
+The outbound HTTP the relay makes to `--auth-api` (and the deprecated `--auth-key-dir` URL and `--auth-public-api` endpoints) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--client-tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.
 
 ```toml
 [client.tls]

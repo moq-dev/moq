@@ -466,27 +466,35 @@ mod tests {
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
 		assert_eq!(config.tls.disable_verify, Some(true));
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --tls-disable-verify flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-disable-verify flag).
 		config.update_from(["test"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_flag() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_explicit_false() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=false"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify=false"]);
 		assert_eq!(config.tls.disable_verify, Some(false));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_explicit_true() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify=true"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
+	}
+
+	#[test]
+	fn test_cli_deprecated_tls_aliases() {
+		// The bare --tls-* forms are deprecated aliases of the --client-tls-* flags.
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true", "--tls-fingerprint", "abcd1234"]);
+		assert_eq!(config.tls.disable_verify, Some(true));
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
 	}
 
 	#[test]
@@ -504,7 +512,7 @@ mod tests {
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --tls-fingerprint flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-fingerprint flag).
 		config.update_from(["test"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 	}
@@ -521,7 +529,7 @@ mod tests {
 
 	#[test]
 	fn test_cli_fingerprint() {
-		let config = ClientConfig::parse_from(["test", "--tls-fingerprint", "abcd1234"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-fingerprint", "abcd1234"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
 	}
 

@@ -36,7 +36,7 @@ pub enum Error {
 	EmptyRoots(PathBuf),
 
 	#[error(
-		"no trusted roots: provide --tls-root, enable --tls-system-roots, or use --tls-fingerprint / --tls-disable-verify"
+		"no trusted roots: provide --client-tls-root, enable --client-tls-system-roots, or use --client-tls-fingerprint / --client-tls-disable-verify"
 	)]
 	NoRoots,
 
@@ -108,23 +108,33 @@ pub struct Client {
 	///
 	/// These roots are added on top of the system roots. By default the system
 	/// roots are only loaded when no custom root is given, so passing a root
-	/// replaces them; set `--tls-system-roots` to trust both (e.g. to reach a
+	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
+	///
+	/// The bare `--tls-root` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[arg(
+		id = "client-tls-root",
+		long = "client-tls-root",
+		alias = "tls-root",
+		env = "MOQ_CLIENT_TLS_ROOT"
+	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// Also trust the platform's native root certificates.
 	///
-	/// Defaults to enabled only when no `--tls-root` is given. Set it explicitly
-	/// to trust the system roots alongside any custom roots, or set it to false
-	/// to trust only the custom roots. Trusting neither (no custom root and
-	/// system roots disabled) is rejected, since verification could never pass.
+	/// Defaults to enabled only when no `--client-tls-root` is given. Set it
+	/// explicitly to trust the system roots alongside any custom roots, or set it
+	/// to false to trust only the custom roots. Trusting neither (no custom root
+	/// and system roots disabled) is rejected, since verification could never pass.
+	///
+	/// The bare `--tls-system-roots` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "tls-system-roots",
-		long = "tls-system-roots",
+		id = "client-tls-system-roots",
+		long = "client-tls-system-roots",
+		alias = "tls-system-roots",
 		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
 		default_missing_value = "true",
 		num_args = 0..=1,
@@ -143,8 +153,15 @@ pub struct Client {
 	///
 	/// This value can be provided multiple times to accept any of several fingerprints (e.g.
 	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
+	///
+	/// The bare `--tls-fingerprint` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "tls-fingerprint", long = "tls-fingerprint", env = "MOQ_CLIENT_TLS_FINGERPRINT")]
+	#[arg(
+		id = "client-tls-fingerprint",
+		long = "client-tls-fingerprint",
+		alias = "tls-fingerprint",
+		env = "MOQ_CLIENT_TLS_FINGERPRINT"
+	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub fingerprint: Vec<String>,
 
@@ -167,10 +184,13 @@ pub struct Client {
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
+	///
+	/// The bare `--tls-disable-verify` form is a deprecated alias and will be removed.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "tls-disable-verify",
-		long = "tls-disable-verify",
+		id = "client-tls-disable-verify",
+		long = "client-tls-disable-verify",
+		alias = "tls-disable-verify",
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
 		default_missing_value = "true",
 		num_args = 0..=1,

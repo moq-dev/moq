@@ -179,7 +179,7 @@ impl axum::response::IntoResponse for AuthError {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthTls {
-	/// Deprecated, use `--tls-root`. PEM file(s) of root CAs. If empty, the
+	/// Deprecated, use `--client-tls-root`. PEM file(s) of root CAs. If empty, the
 	/// platform's native roots are used. In config files, accepts either a
 	/// single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
@@ -199,8 +199,8 @@ pub struct AuthTls {
 	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY")]
 	pub key: Option<PathBuf>,
 
-	/// Deprecated, use `--tls-disable-verify`. Danger: disable TLS certificate
-	/// verification on auth requests.
+	/// Deprecated, use `--client-tls-disable-verify`. Danger: disable TLS
+	/// certificate verification on auth requests.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "auth-tls-disable-verify",
@@ -723,7 +723,7 @@ impl Auth {
 		let tls_config = if config.tls.is_set() {
 			tracing::warn!(
 				"the --auth-tls-* flags are deprecated and will be removed; the auth client now \
-				 reuses the cluster client TLS (--tls-root, --client-tls-cert, --client-tls-key). \
+				 reuses the cluster client TLS (--client-tls-root, --client-tls-cert, --client-tls-key). \
 				 Drop --auth-tls-* and configure those instead."
 			);
 			config.tls.to_client_tls()?
