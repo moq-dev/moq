@@ -151,6 +151,14 @@ Subscribe (`--format`):
 - `ts` - MPEG-TS
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
 
+`subscribe` also takes `--catalog` to pick which catalog track to read for track
+discovery. When omitted, it's auto-detected from the broadcast name suffix
+(`.hang` -> `hang`, `.msf` -> `msf`), falling back to `hang`:
+
+- `hang` - the `catalog.json` JSON catalog (default)
+- `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
+- `msf` - the MSF `catalog` track
+
 ### MPEG-TS
 
 Ingest an MPEG-TS stream from FFmpeg and play one back out:

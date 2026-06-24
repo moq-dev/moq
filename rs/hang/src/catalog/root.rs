@@ -33,7 +33,7 @@ impl Catalog {
 	/// The default name for the catalog track.
 	pub const DEFAULT_NAME: &str = "catalog.json";
 
-	/// The track name for the DEFLATE-compressed catalog: the `.z` sibling of [`DEFAULT_NAME`].
+	/// The track name for the DEFLATE-compressed catalog: the `.z` sibling of [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
 	/// Carries the identical catalog JSON, compressed per group (see `moq-json`). A publisher serves
 	/// both tracks; a consumer reads whichever it prefers.
