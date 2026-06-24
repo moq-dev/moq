@@ -59,7 +59,7 @@ impl Frame {
 			.timescale()
 			.map(|scale| self.timestamp.convert(scale))
 			.transpose()?;
-		let net_frame = moq_net::Frame {
+		let net_frame = moq_net::FrameInfo {
 			size,
 			timestamp: net_timestamp,
 		};
