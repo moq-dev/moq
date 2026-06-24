@@ -21,8 +21,17 @@ pub enum Error {
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
-	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
-	FingerprintUnsupported,
+	#[error("failed to fetch certificate fingerprint")]
+	FetchFingerprint(#[source] reqwest::Error),
+
+	#[error("failed to read certificate fingerprint")]
+	ReadFingerprint(#[source] reqwest::Error),
+
+	#[error("invalid certificate fingerprint")]
+	InvalidFingerprint(#[source] hex::FromHexError),
+
+	#[error("certificate fingerprint must be 32 bytes (SHA-256), got {0}")]
+	FingerprintLength(usize),
 
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
@@ -87,19 +96,36 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	pub disable_verify: bool,
+	/// SHA-256 pins from `--tls-fingerprint`; bypass the CA chain when present.
+	pub fingerprints: Vec<[u8; 32]>,
+	/// Trust roots (system + custom) used when not pinning by fingerprint.
+	pub roots: Vec<CertificateDer<'static>>,
 	pub max_streams: u64,
 	pub versions: moq_net::Versions,
 }
 
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		if !config.tls.root.is_empty() {
-			tracing::warn!("--tls-root is not supported with the quiche backend; system roots will be used");
-		}
+		let disable_verify = config.tls.disable_verify.unwrap_or_default();
+		let fingerprints = config.tls.fingerprints()?;
+
+		// Roots are only consulted for standard verification, i.e. when we're
+		// neither skipping verification nor pinning by fingerprint.
+		let roots = if disable_verify || !fingerprints.is_empty() {
+			Vec::new()
+		} else {
+			let roots = config.tls.root_certs()?;
+			if roots.is_empty() {
+				return Err(crate::tls::Error::NoRoots.into());
+			}
+			roots
+		};
 
 		Ok(Self {
 			bind: config.bind,
-			disable_verify: config.tls.disable_verify.unwrap_or_default(),
+			disable_verify,
+			fingerprints,
+			roots,
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 			versions: config.versions(),
 		})
@@ -109,9 +135,19 @@ impl QuicheClient {
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		if url.scheme() == "http" {
-			return Err(Error::FingerprintUnsupported);
-		}
+		// Per-connection cert pins start from the configured fingerprints.
+		let mut hashes = self.fingerprints.clone();
+
+		// `http://` fetches the relay's self-signed certificate fingerprint over
+		// an insecure request, then pins it. The URL is treated as https after.
+		let url = if url.scheme() == "http" {
+			hashes.push(fetch_fingerprint(&url).await?);
+			let mut https = url.clone();
+			https.set_scheme("https").expect("https is a valid scheme");
+			https
+		} else {
+			url
+		};
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
@@ -130,9 +166,17 @@ impl QuicheClient {
 		settings.initial_max_streams_bidi = self.max_streams;
 		settings.initial_max_streams_uni = self.max_streams;
 
-		let builder = web_transport_quiche::ez::ClientBuilder::default()
+		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
 			.with_bind(self.bind)?;
+
+		// Fingerprint pinning bypasses the CA chain; otherwise verify against the
+		// resolved trust roots. `disable_verify` leaves both unset.
+		if !hashes.is_empty() {
+			builder = builder.with_server_certificate_hashes(hashes);
+		} else if !self.roots.is_empty() {
+			builder = builder.with_root_certificates(self.roots.clone());
+		}
 
 		tracing::debug!(%url, "connecting via quiche");
 
@@ -175,6 +219,24 @@ impl QuicheClient {
 			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
 		}
 	}
+}
+
+/// Fetch a relay's certificate SHA-256 over an insecure `http://` request.
+///
+/// This is the native equivalent of how a browser bootstraps trust for a
+/// self-signed relay: GET `/certificate.sha256` and pin the returned hash.
+async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
+	let mut fp = url.clone();
+	fp.set_path("/certificate.sha256");
+	fp.set_query(None);
+	fp.set_fragment(None);
+
+	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate fingerprint");
+
+	let resp = reqwest::get(fp.as_str()).await.map_err(Error::FetchFingerprint)?;
+	let text = resp.text().await.map_err(Error::ReadFingerprint)?;
+	let bytes = hex::decode(text.trim()).map_err(Error::InvalidFingerprint)?;
+	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
 }
 
 impl Error {

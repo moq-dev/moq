@@ -268,6 +268,45 @@ impl Client {
 
 		Ok(tls)
 	}
+
+	/// Resolve the trust roots as DER for backends that can't consume a
+	/// [rustls::ClientConfig] (e.g. quiche/BoringSSL).
+	///
+	/// Like [Client::build], system roots are included only when no custom root
+	/// is given unless `system_roots` is set explicitly.
+	pub(crate) fn root_certs(&self) -> Result<Vec<CertificateDer<'static>>> {
+		let system_roots = self.system_roots.unwrap_or(self.root.is_empty());
+
+		let mut out = Vec::new();
+		if system_roots {
+			let native = rustls_native_certs::load_native_certs();
+			for err in native.errors {
+				tracing::warn!(%err, "failed to load root cert");
+			}
+			out.extend(native.certs);
+		}
+		for root in &self.root {
+			let certs = read_certs(root)?;
+			if certs.is_empty() {
+				return Err(Error::EmptyRoots(root.clone()));
+			}
+			out.extend(certs);
+		}
+
+		Ok(out)
+	}
+
+	/// Parse the configured fingerprints into fixed-size SHA-256 digests, for
+	/// backends that pin by hash directly rather than via a rustls verifier.
+	pub(crate) fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
+		self.fingerprint
+			.iter()
+			.map(|fp| {
+				let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
+				bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
+			})
+			.collect()
+	}
 }
 
 // ── Server ──────────────────────────────────────────────────────────
