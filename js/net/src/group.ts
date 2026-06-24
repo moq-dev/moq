@@ -61,13 +61,18 @@ export class Group {
 		this.writeFrame(new Uint8Array([bool ? 1 : 0]));
 	}
 
+	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
+	get done(): boolean {
+		return this.#state.frames.peek().length === 0 && this.#state.closed.peek() !== false;
+	}
+
 	/**
 	 * Reads the next already-buffered frame without blocking.
 	 *
-	 * Returns `undefined` when nothing is buffered right now, which does *not* mean end-of-group: the
-	 * group may still receive more frames, or may be finished. Use {@link readable} to wait for the
-	 * next frame, or the blocking {@link readFrame} to wait and detect the end. Drain a backlog by
-	 * looping until this returns `undefined`.
+	 * Returns `undefined` when nothing is buffered right now. That is *not* by itself end-of-group:
+	 * check {@link done} to tell "no frame buffered yet" (more may arrive) from "the group finished".
+	 * Drain a backlog by looping until this returns `undefined`, then branch on {@link done}: if not
+	 * done, {@link readable} resolves when the next frame arrives.
 	 */
 	tryReadFrame(): Uint8Array | undefined {
 		return this.tryReadFrameSequence()?.data;
@@ -83,6 +88,8 @@ export class Group {
 
 	/**
 	 * Resolves once {@link readFrame} would not block: a frame is buffered, or the group has closed.
+	 * Always settles (never hangs), so on a finished group it resolves immediately; pair it with
+	 * {@link done} to avoid re-waiting on a group that has nothing left.
 	 *
 	 * Lets a caller fold "this group has a frame" into a larger wait (e.g. racing it against a new
 	 * group arriving) without touching the group's internal signals.

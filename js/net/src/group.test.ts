@@ -24,6 +24,23 @@ test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 	expect(group.tryReadFrameSequence()).toBeUndefined();
 });
 
+test("done distinguishes a finished group from one that is merely empty", () => {
+	const group = new Group(0);
+	// Open and empty: not done (more frames may arrive), and tryReadFrame is undefined.
+	expect(group.tryReadFrame()).toBeUndefined();
+	expect(group.done).toBe(false);
+
+	group.writeString("a");
+	// Buffered but closed: still not done until the frame is drained.
+	group.close();
+	expect(group.done).toBe(false);
+
+	group.tryReadFrame();
+	// Drained and closed: now done.
+	expect(group.tryReadFrame()).toBeUndefined();
+	expect(group.done).toBe(true);
+});
+
 test("readable resolves once a frame is buffered", async () => {
 	const group = new Group(0);
 	// No frame yet: readable() is pending. Resolve it by writing on the next tick.

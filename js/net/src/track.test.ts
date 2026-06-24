@@ -49,3 +49,23 @@ test("nextGroupOrdered returns undefined when track closes", async () => {
 	track.close();
 	expect(await track.nextGroupOrdered()).toBeUndefined();
 });
+
+test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
+	const track = new Track("test");
+
+	// A group is appended then finished empty while the track stays open. A finished group's
+	// readable() resolves immediately, so the reader must not busy-wait on it (which would starve the
+	// macrotask queue and never observe the next group).
+	const g0 = track.appendGroup();
+	g0.close();
+
+	// The next group arrives via a macrotask; if the reader livelocks on microtasks it never runs.
+	setTimeout(() => {
+		const g1 = track.appendGroup();
+		g1.writeString("hello");
+		g1.close();
+		track.close();
+	}, 10);
+
+	expect(await track.readString()).toBe("hello");
+}, 2000);

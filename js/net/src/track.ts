@@ -193,9 +193,14 @@ export class Track {
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			// Wake on a new group, the track closing, or the current group becoming readable (a frame
-			// arriving or the group closing). NOTE: We don't care if the latest group was closed or not.
-			await Promise.race([Signal.race(this.state.groups, this.state.closed), group.readable()]);
+			// Wake on a new group or the track closing. Only fold in the current group's readability
+			// while it can still deliver frames: a finished group's readable() resolves immediately, so
+			// racing it would busy-loop until a newer group arrives instead of waiting.
+			if (group.done) {
+				await Signal.race(this.state.groups, this.state.closed);
+			} else {
+				await Promise.race([Signal.race(this.state.groups, this.state.closed), group.readable()]);
+			}
 		}
 	}
 
