@@ -21,6 +21,12 @@ pub enum Error {
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
+	/// No longer returned: the `http://` scheme now fetches and pins the
+	/// certificate fingerprint instead of failing.
+	#[deprecated(note = "fingerprint verification over http:// is now supported; this is never returned")]
+	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
+	FingerprintUnsupported,
+
 	#[error("failed to fetch certificate fingerprint")]
 	FetchFingerprint(#[source] reqwest::Error),
 
