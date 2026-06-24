@@ -457,10 +457,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 			}
 		};
 
-		// Apply every frame currently buffered in the group, tracking whether any moved us forward.
+		// Apply every frame currently buffered in the group, tracking whether any moved us forward and
+		// whether the group is still open with nothing buffered yet (vs. exhausted).
 		// `poll_read_frame` returns an owned `Poll`, so the borrow of `self.group` ends before the
 		// match arms, leaving `apply` (and clearing the group) free to take `&mut self`.
 		let mut advanced = false;
+		let mut group_pending = false;
 		while let Some(group) = &mut self.group {
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => {
@@ -472,13 +474,23 @@ impl<T: DeserializeOwned> Consumer<T> {
 					self.group = None;
 					break;
 				}
-				Poll::Pending => break,
+				// The group is still open but has nothing buffered yet.
+				Poll::Pending => {
+					group_pending = true;
+					break;
+				}
 			}
 		}
 
 		if advanced {
 			// Deserialize once, from the head of the backlog we just drained.
 			return Poll::Ready(Ok(Some(self.reconstruct()?)));
+		}
+
+		// An open group may still deliver frames even after the track finishes (it was appended before
+		// the finish), so wait on it rather than ending the stream.
+		if group_pending {
+			return Poll::Pending;
 		}
 
 		if track_finished {
@@ -809,6 +821,31 @@ mod test {
 				Poll::Ready(Ok(Some(value))) => assert_eq!(value, expected),
 				other => panic!("expected delta, got {other:?}"),
 			}
+		}
+	}
+
+	#[test]
+	fn open_group_pends_after_track_finish() {
+		// A group appended before the track finishes may still deliver frames, so the consumer must
+		// keep waiting on it rather than ending the stream. Regression for the backlog-collapse poll.
+		let mut track = moq_net::Track::new("test").produce();
+		let mut group = track.append_group().unwrap();
+		track.finish().unwrap();
+
+		let mut consumer = Consumer::<Value>::new(track.consume(), ConsumerConfig::default());
+		let waiter = kio::Waiter::noop();
+
+		// Track is finished but the open group is empty: pending, not end-of-stream.
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
+
+		group
+			.write_frame(Bytes::from(serde_json::to_vec(&json!({ "a": 1 })).unwrap()))
+			.unwrap();
+		group.finish().unwrap();
+
+		match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "a": 1 })),
+			other => panic!("expected the catalog value, got {other:?}"),
 		}
 	}
 
