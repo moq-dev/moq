@@ -152,11 +152,14 @@ impl BroadcastState {
 
 /// Manages tracks within a broadcast.
 ///
-/// Insert tracks statically with [Self::insert_track] / [Self::create_track],
-/// or handle on-demand requests via [Self::dynamic].
+/// Create tracks up front with [Self::create_track], reserve a name to fill in
+/// later with [Self::reserve_track], or handle on-demand consumer requests via
+/// [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
-	info: BroadcastInfo,
+	// Held behind an Arc so each track born from this broadcast can inherit a shared
+	// handle (threaded down by [`Self::create_track`] / [`Self::reserve_track`]).
+	info: Arc<BroadcastInfo>,
 	state: kio::Producer<BroadcastState>,
 }
 
@@ -168,7 +171,7 @@ impl BroadcastProducer {
 	/// Override it with [`Self::with_cache`].
 	pub fn new(info: BroadcastInfo) -> Self {
 		let producer = Self {
-			info,
+			info: Arc::new(info),
 			state: Default::default(),
 		};
 		if let Ok(mut state) = producer.state.write() {
@@ -192,18 +195,6 @@ impl BroadcastProducer {
 		self
 	}
 
-	/// Insert a track into the lookup, returning an error on duplicate.
-	///
-	/// Stores a weak handle to the track. The caller (or the owner of the
-	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
-	/// when all producers are dropped, the entry becomes closed and is
-	/// eventually evicted.
-	pub fn insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) -> Result<(), Error> {
-		let track = track.consume();
-		let mut state = BroadcastState::modify(&self.state)?;
-		state.insert_track(track.weak())
-	}
-
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
 		let mut state = BroadcastState::modify(&self.state)?;
@@ -223,7 +214,7 @@ impl BroadcastProducer {
 	) -> Result<TrackProducer, Error> {
 		let info = info.into().unwrap_or_default();
 		let mut state = BroadcastState::modify(&self.state)?;
-		let track = state.apply_cache(TrackProducer::new(name, info));
+		let track = state.apply_cache(TrackProducer::new(self.info.clone(), name, info));
 		state.insert_track(track.weak())?;
 		drop(state);
 		Ok(track)
@@ -238,7 +229,7 @@ impl BroadcastProducer {
 	/// [`BroadcastDynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
 		let mut state = BroadcastState::modify(&self.state)?;
-		let request = state.apply_cache_request(TrackRequest::new(name));
+		let request = state.apply_cache_request(TrackRequest::new(self.info.clone(), name));
 		state.insert_track(request.weak())?;
 		drop(state);
 		Ok(request)
@@ -294,10 +285,6 @@ impl BroadcastProducer {
 	) -> TrackProducer {
 		self.create_track(name, info).expect("should not have errored")
 	}
-
-	pub fn assert_insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) {
-		self.insert_track(track).expect("should not have errored")
-	}
 }
 
 /// Handles on-demand track creation for a broadcast.
@@ -308,7 +295,7 @@ impl BroadcastProducer {
 /// [`TrackRequest::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 pub struct BroadcastDynamic {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Producer<BroadcastState>,
 }
 
@@ -330,7 +317,7 @@ impl Clone for BroadcastDynamic {
 }
 
 impl BroadcastDynamic {
-	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>) -> Self {
+	fn new(info: Arc<BroadcastInfo>, state: kio::Producer<BroadcastState>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
@@ -431,7 +418,7 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
-	info: BroadcastInfo,
+	info: Arc<BroadcastInfo>,
 	state: kio::Consumer<BroadcastState>,
 }
 
@@ -470,7 +457,7 @@ impl BroadcastConsumer {
 		// requests map, and the FIFO order. The on-demand track inherits the broadcast's
 		// cascaded cache, if any, so a served track retains history like a static one.
 		let name: Arc<str> = name.into();
-		let request = state.apply_cache_request(TrackRequest::new(name.clone()));
+		let request = state.apply_cache_request(TrackRequest::new(self.info.clone(), name.clone()));
 		let consumer = request.consume();
 
 		state.requests.insert(name.clone(), request);
@@ -578,10 +565,9 @@ mod test {
 	#[tokio::test]
 	async fn insert() {
 		let mut producer = BroadcastInfo::new().produce();
-		let mut track1 = TrackProducer::new("track1", None);
 
-		// Make sure we can insert before a consumer is created.
-		producer.assert_insert_track(&track1);
+		// Create the track before any consumer exists.
+		let mut track1 = producer.assert_create_track("track1", None);
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
@@ -590,8 +576,7 @@ mod test {
 		let mut track1_sub = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 		track1_sub.assert_group();
 
-		let mut track2 = TrackProducer::new("track2", None);
-		producer.assert_insert_track(&track2);
+		let mut track2 = producer.assert_create_track("track2", None);
 
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();

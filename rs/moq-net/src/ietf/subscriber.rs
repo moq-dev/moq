@@ -3,8 +3,8 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::{
-	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, OriginPublish,
-	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
+	BroadcastDynamic, BroadcastInfo, Error, FrameInfo, FrameProducer, GroupInfo, GroupProducer, OriginProducer,
+	OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -521,8 +521,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
+		let namespace = msg.track_namespace.to_owned();
 
-		let track = TrackProducer::new(msg.track_name.to_string(), None);
+		// Announce the broadcast first so the track is born from it (inheriting the
+		// broadcast's Arc<BroadcastInfo>). Undo the announce on any error path below.
+		let mut broadcast = self.start_announce(namespace.clone())?;
+		let track = match broadcast.create_track(msg.track_name.to_string(), None) {
+			Ok(track) => track,
+			Err(err) => {
+				let _ = self.stop_announce(namespace);
+				return Err(err);
+			}
+		};
 
 		let abs = self.origin.absolute(&msg.track_namespace).to_owned();
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&msg.track_name));
@@ -536,7 +546,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					stats: track_stats,
 				});
 			}
-			Entry::Occupied(_) => return Err(Error::Duplicate),
+			Entry::Occupied(_) => {
+				drop(state);
+				let _ = self.stop_announce(namespace);
+				return Err(Error::Duplicate);
+			}
 		};
 
 		match state.aliases.entry(msg.track_alias) {
@@ -545,14 +559,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Occupied(_) => {
 				state.subscribes.remove(&request_id);
+				drop(state);
+				let _ = self.stop_announce(namespace);
 				return Err(Error::Duplicate);
 			}
 		}
-		state.publishes.insert(request_id, msg.track_namespace.to_owned());
+		state.publishes.insert(request_id, namespace);
 		drop(state);
-
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}
@@ -760,7 +773,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
-			let group_info = Group {
+			let group_info = GroupInfo {
 				sequence: group.group_id,
 			};
 			let producer = track.producer.create_group(group_info)?;
@@ -814,7 +827,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					let mut frame = producer.create_frame(Frame {
+					let mut frame = producer.create_frame(FrameInfo {
 						size: 0,
 						timestamp: None,
 					})?;
@@ -828,7 +841,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			} else {
 				// `create_frame` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
-				let mut frame = producer.create_frame(Frame { size, timestamp: None })?;
+				let mut frame = producer.create_frame(FrameInfo { size, timestamp: None })?;
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, frame.clone(), &track_stats).await {

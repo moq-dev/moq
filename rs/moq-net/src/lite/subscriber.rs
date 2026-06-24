@@ -11,9 +11,10 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
-	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle,
-	SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
+	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, FrameInfo, FrameProducer,
+	GroupInfo, GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned,
+	StatsHandle, SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer,
+	TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 };
@@ -569,7 +570,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
-			let group_info = Group { sequence: hdr.sequence };
+			let group_info = GroupInfo { sequence: hdr.sequence };
 			let group = entry.producer.create_group(group_info)?;
 			(
 				group,
@@ -647,7 +648,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				Compression::None => {
 					// `create_frame` is the allocation chokepoint and rejects an
 					// oversized `size` before allocating, so no pre-check is needed.
-					let mut frame = group.create_frame(Frame { size, timestamp })?;
+					let mut frame = group.create_frame(FrameInfo { size, timestamp })?;
 					track_stats.frame();
 
 					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
@@ -671,7 +672,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					track_stats.bytes(size);
 
 					let payload = compression.decompress(&packed)?;
-					let mut frame = group.create_frame(Frame {
+					let mut frame = group.create_frame(FrameInfo {
 						size: payload.len() as u64,
 						timestamp,
 					})?;

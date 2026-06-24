@@ -278,12 +278,12 @@ impl State {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use crate::Group;
+	use crate::{GroupInfo, TrackInfo};
 
 	/// Build a group carrying `bytes` of real frame data, so `cached_size()` matches the byte
 	/// count handed to `insert` (the cache refreshes from the live group during eviction).
 	fn group(seq: u64, bytes: usize) -> GroupProducer {
-		let mut g = GroupProducer::new(Group { sequence: seq }, None);
+		let mut g = GroupProducer::new(GroupInfo { sequence: seq }, TrackInfo::default());
 		if bytes > 0 {
 			g.write_frame(bytes::Bytes::from(vec![0u8; bytes])).unwrap();
 		}
