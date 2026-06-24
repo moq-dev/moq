@@ -949,6 +949,10 @@ impl Auth {
 		};
 
 		let resp = Self::fetch_auth_api(client, base, &params.path, kid.as_deref(), false).await?;
+		// Resolve the tier before consuming `resp`'s other fields below.
+		// Non-mTLS connections default to the unprefixed tier; the API may bucket
+		// specific ones (e.g. a first-party dashboard token to `internal`).
+		let tier = resp.tier().unwrap_or_default();
 		// Absent alias -> use the request path unchanged.
 		let root = resp.alias.unwrap_or_else(|| params.path.clone());
 
@@ -971,9 +975,7 @@ impl Auth {
 		};
 
 		let mut token = Self::finalize(&root, claims)?;
-		// Non-mTLS connections default to the unprefixed tier; the API may bucket
-		// specific ones (e.g. a first-party dashboard token to `internal`).
-		token.tier = resp.tier().unwrap_or_default();
+		token.tier = tier;
 		Ok(token)
 	}
 
