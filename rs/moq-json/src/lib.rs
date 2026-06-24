@@ -263,7 +263,7 @@ impl Inner {
 			return Ok(());
 		}
 
-		match self.delta(&json, snapshot.len())? {
+		match self.delta(&json)? {
 			Some(slice) => {
 				let group = self.group.as_mut().expect("delta requires an open group");
 				let len = slice.len() as u64;
@@ -278,11 +278,14 @@ impl Inner {
 		Ok(())
 	}
 
-	/// Serialize (and, when compressing, compress) a delta if deltas are enabled and appending one
-	/// keeps the group within budget; otherwise `None`, signalling that a fresh snapshot should be
-	/// published instead. Returns the frame slice ready to write.
-	fn delta(&mut self, value: &Value, snapshot_len: usize) -> Result<Option<Bytes>> {
-		let ratio = self.config.delta_ratio;
+	/// Build a delta frame for `value`, or `None` to signal that a fresh snapshot should be published.
+	///
+	/// The budget gate runs first, against the deltas *already written*, so rolling a new group costs
+	/// no merge-patch or compression work. Because the gate doesn't include the frame about to be
+	/// written, the delta that tips the group past `ratio * snapshot` still lands: a group overshoots
+	/// the budget by at most one delta before rolling.
+	fn delta(&mut self, value: &Value) -> Result<Option<Bytes>> {
+		let ratio = self.config.delta_ratio as u64;
 		if ratio == 0 {
 			return Ok(None);
 		}
@@ -290,39 +293,28 @@ impl Inner {
 			return Ok(None);
 		}
 
-		let patch = {
-			let Some(last) = &self.last else {
-				return Ok(None);
-			};
-			let diff = diff(last, value);
-			if diff.forced_snapshot {
-				return Ok(None);
-			}
-			serde_json::to_vec(&diff.patch)?
-		};
-
-		match self.encoder.as_mut() {
-			// Compressed: measure the delta's *compressed* slice size (the real wire cost) against the
-			// group's anchoring snapshot, also compressed. Encoding advances the per-group window; if
-			// the delta doesn't fit we roll a new group with a fresh encoder, discarding this slice
-			// (the abandoned window has no effect on the new group).
-			Some(encoder) => {
-				let slice = encoder.frame(&patch);
-				let projected = self.delta_bytes + slice.len() as u64;
-				if projected > ratio as u64 * self.snapshot_len {
-					return Ok(None);
-				}
-				Ok(Some(slice))
-			}
-			// Uncompressed: raw delta bytes against a fresh snapshot of the current value.
-			None => {
-				let projected = self.delta_bytes + patch.len() as u64;
-				if projected > ratio as u64 * snapshot_len as u64 {
-					return Ok(None);
-				}
-				Ok(Some(Bytes::from(patch)))
-			}
+		// Gate on the deltas accumulated so far, measured against the group's snapshot frame. Both are
+		// compressed sizes when compressing and raw otherwise, so the comparison is always like-for-like.
+		// Cheap: no diff, no merge patch, no compression yet.
+		if self.delta_bytes > ratio * self.snapshot_len {
+			return Ok(None);
 		}
+
+		let Some(last) = &self.last else {
+			return Ok(None);
+		};
+		let diff = diff(last, value);
+		if diff.forced_snapshot {
+			return Ok(None);
+		}
+		let patch = serde_json::to_vec(&diff.patch)?;
+
+		// Compress into the per-group window only now, for a frame we are committed to writing.
+		let slice = match self.encoder.as_mut() {
+			Some(encoder) => encoder.frame(&patch),
+			None => Bytes::from(patch),
+		};
+		Ok(Some(slice))
 	}
 
 	/// Start a new group with a full snapshot as its first frame.
@@ -652,15 +644,16 @@ mod test {
 
 	#[test]
 	fn tight_ratio_rolls_snapshots() {
-		// A ratio of 1 admits deltas only up to the snapshot size: with equal 7-byte frames that is a
-		// single delta per group, so it rolls every other update. (Still distinct from 0, which would
-		// disable deltas entirely and never produce the group-0 delta below.)
+		// A ratio of 1 budgets deltas up to one snapshot (equal 7-byte frames => 7 bytes). The gate
+		// checks the deltas already written, so the delta that tips the group over budget still lands
+		// (a one-frame overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls
+		// group 1. (Still distinct from 0, which disables deltas entirely.)
 		let config = cfg(1);
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
-		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0
-		producer.update(&json!({ "a": 3 })).unwrap(); // exceeds budget, rolls group 1
-		producer.update(&json!({ "a": 4 })).unwrap(); // delta, group 1
+		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0 (deltas = 7)
+		producer.update(&json!({ "a": 3 })).unwrap(); // delta, group 0 (deltas = 14, now over budget)
+		producer.update(&json!({ "a": 4 })).unwrap(); // budget already exceeded, rolls group 1
 		producer.finish().unwrap();
 
 		assert_eq!(track.latest(), Some(1));
@@ -668,20 +661,21 @@ mod test {
 
 	#[test]
 	fn deltas_stay_within_ratio_times_snapshot() {
-		// The budget covers only the deltas, not the snapshot frame, measured against the current
-		// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a
-		// `ratio = 8` admits 8 deltas (8x the snapshot, the inclusive limit) on top of the snapshot
-		// before the 9th delta rolls.
+		// The budget covers only the deltas, not the snapshot frame, measured against the group's
+		// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so
+		// `ratio = 8` budgets 56 bytes of deltas. The gate checks the deltas already written, so the
+		// group keeps filling until the accumulated deltas first exceed 56 (nine deltas = 63 bytes) and
+		// the next update rolls (a one-frame overshoot past the 56-byte budget).
 		let config = cfg(8);
 		let (mut producer, track) = producer(config);
-		for n in 0..=9 {
+		for n in 0..=10 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
-		// Group 0 carries the snapshot plus 8 deltas (9 frames); the 9th delta opens group 1.
+		// Group 0 carries the snapshot plus 9 deltas (10 frames); the 10th delta opens group 1.
 		assert_eq!(track.latest(), Some(1));
-		assert_eq!(drain(track).last().unwrap(), &json!({ "n": 9 }));
+		assert_eq!(drain(track).last().unwrap(), &json!({ "n": 10 }));
 	}
 
 	#[test]
@@ -768,7 +762,8 @@ mod test {
 
 	#[test]
 	fn newer_group_supersedes_in_progress_reconstruction() {
-		// A tight ratio lets one delta fit, then forces the next update into a new snapshot group.
+		// A tight ratio fills group 0 with a couple of deltas, then forces a later update into a new
+		// snapshot group (the gate overshoots the budget by one delta before rolling).
 		let config = cfg(1);
 		let (mut producer, track) = producer(config);
 		let observer = producer.consume();
@@ -781,8 +776,9 @@ mod test {
 			other => panic!("expected first value, got {other:?}"),
 		}
 
-		producer.update(&json!({ "a": 2 })).unwrap(); // delta in group 0
-		producer.update(&json!({ "a": 3 })).unwrap(); // exceeds budget, rolls group 1
+		producer.update(&json!({ "a": 2 })).unwrap(); // delta in group 0 (deltas = 7)
+		producer.update(&json!({ "a": 3 })).unwrap(); // delta in group 0 (deltas = 14, now over budget)
+		producer.update(&json!({ "a": 4 })).unwrap(); // budget already exceeded, rolls group 1
 		producer.finish().unwrap();
 		assert_eq!(observer.latest(), Some(1));
 
@@ -791,7 +787,7 @@ mod test {
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
 			last = Some(value);
 		}
-		assert_eq!(last.unwrap(), json!({ "a": 3 }));
+		assert_eq!(last.unwrap(), json!({ "a": 4 }));
 	}
 
 	#[test]

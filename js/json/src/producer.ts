@@ -18,9 +18,12 @@ export interface Config<T> {
 	// `0` disables deltas: every change is published as a new snapshot group.
 	//
 	// A positive number enables deltas: a delta is appended to the current group as long as the
-	// accumulated deltas (excluding the snapshot frame) stay within `deltaRatio` times the size of a
-	// fresh snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up to
-	// one snapshot before rolling.
+	// accumulated deltas (excluding the snapshot frame) stay within `deltaRatio` times the snapshot
+	// size; otherwise a new snapshot group is started. So `1` allows deltas totalling up to one snapshot
+	// before rolling.
+	//
+	// When {@link compression} is on, both sides of the comparison are measured on the compressed frame
+	// sizes (the real wire cost).
 	//
 	// Defaults to `8` when unset.
 	deltaRatio?: number;
@@ -56,11 +59,13 @@ export class Producer<T> {
 	#track?: Moq.Track;
 	#group?: Moq.Group;
 	#last?: unknown;
-	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Always raw
-	// (uncompressed) sizes, even when compressing: the delta-vs-snapshot decision measures raw bytes,
-	// so a compressed producer rolls groups on raw sizes (still valid on the wire, just a touch sooner
-	// than the Rust producer, which measures compressed sizes).
+	// Bytes of deltas already written to the current group, excluding the snapshot frame. Compressed
+	// frame sizes when compressing, raw otherwise, matching {@link #snapshotLen} so the budget check is
+	// like-for-like (and identical to the Rust producer).
 	#deltaBytes = 0;
+	// Size of the current group's snapshot frame, the reference the delta budget is measured against.
+	// Compressed when compressing, raw otherwise.
+	#snapshotLen = 0;
 	#groupFrames = 0;
 
 	// Group-scoped `deflate-raw` compression. `#encoder` is the current group's stream, swapped for a
@@ -124,10 +129,9 @@ export class Producer<T> {
 		if (this.#last !== undefined && deepEqual(this.#last, json)) return;
 
 		const snapshot = new TextEncoder().encode(text);
-		const delta = this.#delta(json, snapshot.length);
+		const delta = this.#delta(json);
 		if (delta && this.#group) {
-			this.#writeDelta(this.#group, delta);
-			this.#deltaBytes += delta.length;
+			this.#deltaBytes += this.#writeDelta(this.#group, delta);
 			this.#groupFrames += 1;
 		} else {
 			this.#snapshot(this.#track, snapshot);
@@ -211,21 +215,24 @@ export class Producer<T> {
 		return this.#config.deltaRatio ?? DEFAULT_DELTA_RATIO;
 	}
 
-	#delta(json: unknown, snapshotLen: number): Uint8Array | undefined {
+	// Build a delta frame, or `undefined` to signal that a fresh snapshot should be published.
+	//
+	// The budget gate runs first, against the deltas already written, so rolling a new group costs no
+	// merge-patch work. Since the gate excludes the frame about to be written, the delta that tips the
+	// group past `ratio * snapshot` still lands: a group overshoots the budget by at most one delta.
+	#delta(json: unknown): Uint8Array | undefined {
 		const ratio = this.#deltaRatio;
 		if (ratio === 0) return undefined;
 		if (this.#last === undefined) return undefined;
 		if (!this.#group || this.#groupFrames >= MAX_DELTA_FRAMES) return undefined;
 
+		// Gate on the deltas accumulated so far (snapshot frame excluded), before computing the patch.
+		if (this.#deltaBytes > ratio * this.#snapshotLen) return undefined;
+
 		const result = diff(this.#last, json);
 		if (result.forcedSnapshot) return undefined;
 
-		const delta = new TextEncoder().encode(JSON.stringify(result.patch));
-
-		// Roll a snapshot once the deltas would outgrow the budget (snapshot frame excluded).
-		if (this.#deltaBytes + delta.length > ratio * snapshotLen) return undefined;
-
-		return delta;
+		return new TextEncoder().encode(JSON.stringify(result.patch));
 	}
 
 	#snapshot(track: Moq.Track, snapshot: Uint8Array): void {
@@ -233,7 +240,7 @@ export class Producer<T> {
 		this.#group?.close();
 
 		const group = track.appendGroup();
-		this.#writeSnapshot(group, snapshot);
+		this.#snapshotLen = this.#writeSnapshot(group, snapshot);
 		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
 
@@ -247,24 +254,29 @@ export class Producer<T> {
 		}
 	}
 
-	// Write a group's snapshot (frame 0). On the compressed path this opens a fresh per-group encoder
-	// (cold window), so the snapshot and its deltas share one DEFLATE stream.
-	#writeSnapshot(group: Moq.Group, frame: Uint8Array): void {
+	// Write a group's snapshot (frame 0), returning the bytes written. On the compressed path this opens
+	// a fresh per-group encoder (cold window), so the snapshot and its deltas share one DEFLATE stream.
+	#writeSnapshot(group: Moq.Group, frame: Uint8Array): number {
 		if (!this.#compress) {
 			group.writeFrame(frame);
-			return;
+			return frame.length;
 		}
 		this.#encoder = new Encoder();
-		group.writeFrame(this.#encoder.frame(frame));
+		const slice = this.#encoder.frame(frame);
+		group.writeFrame(slice);
+		return slice.length;
 	}
 
-	// Write a delta frame, compressed against the current group's encoder when compressing.
-	#writeDelta(group: Moq.Group, frame: Uint8Array): void {
+	// Write a delta frame, compressed against the current group's encoder when compressing. Returns the
+	// bytes written.
+	#writeDelta(group: Moq.Group, frame: Uint8Array): number {
 		if (!this.#compress) {
 			group.writeFrame(frame);
-			return;
+			return frame.length;
 		}
 		if (!this.#encoder) throw new Error("compressed delta requires an open group");
-		group.writeFrame(this.#encoder.frame(frame));
+		const slice = this.#encoder.frame(frame);
+		group.writeFrame(slice);
+		return slice.length;
 	}
 }

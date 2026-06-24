@@ -151,28 +151,31 @@ test("mutate removes a section", async () => {
 
 test("tight ratio rolls snapshots", async () => {
 	const track = new Track("test");
-	// A ratio of 1 admits deltas only up to the snapshot size: with equal 7-byte frames that is a
-	// single delta per group, so it rolls every other update.
+	// A ratio of 1 budgets deltas up to one snapshot (equal 7-byte frames => 7 bytes). The gate checks
+	// the deltas already written, so the delta that tips the group over budget still lands (a one-frame
+	// overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls group 1.
 	const producer = new Producer<Value>(track, { deltaRatio: 1 });
 	producer.update({ a: 1 }); // snapshot, group 0
-	producer.update({ a: 2 }); // delta, group 0
-	producer.update({ a: 3 }); // exceeds budget, rolls group 1
-	producer.update({ a: 4 }); // delta, group 1
+	producer.update({ a: 2 }); // delta, group 0 (deltas = 7)
+	producer.update({ a: 3 }); // delta, group 0 (deltas = 14, now over budget)
+	producer.update({ a: 4 }); // budget already exceeded, rolls group 1
 	producer.finish();
 
-	expect(await structure(track)).toEqual([2, 2]);
+	expect(await structure(track)).toEqual([3, 1]);
 });
 
 test("deltas stay within ratio times snapshot", async () => {
 	const track = new Track("test");
-	// The budget covers only the deltas, not the snapshot frame, measured against the current
-	// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a
-	// ratio of 8 admits 8 deltas (8x the snapshot) on top of the snapshot before the 9th rolls.
+	// The budget covers only the deltas, not the snapshot frame, measured against the group's snapshot
+	// size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a ratio of 8
+	// budgets 56 bytes of deltas. The gate checks the deltas already written, so the group keeps filling
+	// until they first exceed 56 (nine deltas = 63 bytes) and the next update rolls (a one-frame
+	// overshoot past the 56-byte budget).
 	const producer = new Producer<Value>(track, { deltaRatio: 8 });
-	for (let n = 0; n <= 9; n++) producer.update({ n });
+	for (let n = 0; n <= 10; n++) producer.update({ n });
 	producer.finish();
 
-	expect(await structure(track)).toEqual([9, 1]);
+	expect(await structure(track)).toEqual([10, 1]);
 });
 
 test("array change is a wholesale delta", async () => {
