@@ -15,6 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
+use super::cache::{self, Cache};
 use super::{Fetch, Group, GroupConsumer, GroupProducer};
 
 use std::{
@@ -153,13 +154,28 @@ impl TrackInfo {
 	}
 }
 
+/// A cached group plus its registration in the shared [`Cache`], if any.
+///
+/// A group is registered with the cache only once it stops being the latest; the latest group
+/// is never handed to the cache (a live subscriber must always reach it). `token` is `Some`
+/// once the group has been registered.
+struct Cached {
+	group: GroupProducer,
+	created_at: web_async::time::Instant,
+	token: Option<cache::Token>,
+}
+
 #[derive(Default)]
 struct TrackState {
 	// The info for the track; always Some for TrackSubscriber/TrackProducer.
 	info: Option<TrackInfo>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
-	groups: VecDeque<Option<(GroupProducer, web_async::time::Instant)>>,
+	groups: VecDeque<Option<Cached>>,
+
+	// Shared RAM cache governing retention of non-latest groups. `None` (the default) keeps
+	// only the latest group: every superseded group is dropped at once.
+	cache: Option<Cache>,
 
 	// TODO Do we need this?
 	duplicates: HashSet<u64>,
@@ -204,10 +220,11 @@ impl TrackState {
 	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
-			if let Some((group, _)) = slot
-				&& group.sequence >= min_sequence
+			if let Some(cached) = slot
+				&& cached.group.sequence >= min_sequence
+				&& self.touch(cached)
 			{
-				return Poll::Ready(Ok(Some((group.consume(), self.offset + i))));
+				return Poll::Ready(Ok(Some((cached.group.consume(), self.offset + i))));
 			}
 		}
 
@@ -233,7 +250,8 @@ impl TrackState {
 		let start = index.saturating_sub(self.offset);
 		let mut pending_seen = false;
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
-			let Some((group, _)) = slot else { continue };
+			let Some(cached) = slot else { continue };
+			let group = &cached.group;
 			if group.sequence < next_sequence {
 				continue;
 			}
@@ -241,6 +259,12 @@ impl TrackState {
 			let mut consumer = group.consume();
 			match consumer.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
+					// A frame read keeps the group recent (and evicts it first if already aged
+					// out, in which case we skip it). Without touching here, a group read only
+					// at the frame level would age out wrongly.
+					if !self.touch(cached) {
+						continue;
+					}
 					return Poll::Ready(Ok(Some((frame, self.offset + i, group.sequence))));
 				}
 				Poll::Ready(Ok(None)) => continue,
@@ -287,8 +311,9 @@ impl TrackState {
 			return Poll::Pending;
 		}
 
-		let mut best: Option<&GroupProducer> = None;
-		for (group, _) in self.groups.iter().flatten() {
+		let mut best: Option<&Cached> = None;
+		for cached in self.groups.iter().flatten() {
+			let group = &cached.group;
 			if group.sequence < next_sequence {
 				continue;
 			}
@@ -297,13 +322,15 @@ impl TrackState {
 			{
 				continue;
 			}
-			if best.is_none_or(|b| group.sequence < b.sequence) {
-				best = Some(group);
+			if best.is_none_or(|b| group.sequence < b.group.sequence) {
+				best = Some(cached);
 			}
 		}
 
-		if let Some(group) = best {
-			return Poll::Ready(Ok(Some(group.consume())));
+		if let Some(cached) = best
+			&& self.touch(cached)
+		{
+			return Poll::Ready(Ok(Some(cached.group.consume())));
 		}
 
 		// No in-range group is cached. Decide whether more could ever arrive.
@@ -321,12 +348,12 @@ impl TrackState {
 	}
 
 	/// Find a cached group by sequence, skipping tombstones. Synchronous, never blocks.
+	///
+	/// Records the access (touch-before-evict): a group already past the cache's `max_age` is
+	/// evicted here rather than revived, so it reads as a miss.
 	fn cached_group(&self, sequence: u64) -> Option<GroupConsumer> {
-		self.groups
-			.iter()
-			.flatten()
-			.find(|(group, _)| group.sequence == sequence)
-			.map(|(group, _)| group.consume())
+		let cached = self.groups.iter().flatten().find(|c| c.group.sequence == sequence)?;
+		self.touch(cached).then(|| cached.group.consume())
 	}
 
 	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
@@ -384,38 +411,91 @@ impl TrackState {
 		}
 	}
 
-	/// Evict groups older than `max_age`, never evicting the max_sequence group.
+	/// Apply the retention policy after a group is added, then trim evicted slots.
 	///
-	/// Groups are in arrival order, so we can stop early when we hit a non-expired,
-	/// non-max_sequence group (everything after it arrived even later).
-	/// When max_sequence is at the front, we skip past it and tombstone expired groups
-	/// behind it.
-	fn evict_expired(&mut self, now: web_async::time::Instant, max_age: Duration) {
-		for slot in self.groups.iter_mut() {
-			let Some((group, created_at)) = slot else { continue };
+	/// The current max_sequence group is always kept (a live subscriber must be able to grab
+	/// it), so it is never handed to the shared cache. Every other live group is either dropped
+	/// at once (no cache: latest-only) or registered with the cache, which evicts by the shared
+	/// byte/age budget across all tracks. A group the cache has aborted (here or via another
+	/// track's insert) is tombstoned so consumers skip it.
+	fn retain(&mut self, now: web_async::time::Instant) {
+		let max_sequence = self.max_sequence;
 
-			if Some(group.sequence) == self.max_sequence {
+		for slot in self.groups.iter_mut() {
+			let Some(cached) = slot else { continue };
+
+			// Never evict the current latest group.
+			if Some(cached.group.sequence) == max_sequence {
 				continue;
 			}
 
-			if now.duration_since(*created_at) <= max_age {
-				break;
+			match &self.cache {
+				None => {
+					// Latest-only: a superseded group is dropped immediately. Abort it first so
+					// any parked reader surfaces `Error::Old` instead of hanging on a frame that
+					// will never arrive.
+					self.duplicates.remove(&cached.group.sequence);
+					let _ = cached.group.abort(Error::Old);
+					*slot = None;
+				}
+				Some(cache) => {
+					// Hand the group to the shared budget the first time it is superseded.
+					if cached.token.is_none() {
+						let bytes = cached.group.cached_size();
+						cached.token = Some(cache.insert(cached.group.clone(), bytes, cached.created_at));
+					}
+				}
 			}
+		}
 
-			self.duplicates.remove(&group.sequence);
-			// Abort the group before dropping it so any consumer still reading it
-			// surfaces `Error::Old` instead of blocking forever on a frame that will
-			// never arrive (the cached producer is about to be gone). Without this a
-			// reader parked on an aged-out group hangs indefinitely, since the group
-			// was never finished or aborted -- it just silently disappeared.
-			let _ = group.abort(Error::Old);
-			*slot = None;
+		// Run age/byte eviction on the shared budget now, so an active track ages out stale
+		// groups (its own and its peers') even when no new group needed registering this round.
+		if let Some(cache) = &self.cache {
+			cache.evict(now);
+		}
+
+		// The shared cache may have aborted some of our (or another track's) groups; tombstone
+		// any that are now aborted so consumers skip them and the budget bookkeeping matches.
+		for slot in self.groups.iter_mut() {
+			if let Some(cached) = slot
+				&& Some(cached.group.sequence) != max_sequence
+				&& cached.group.is_aborted()
+			{
+				self.duplicates.remove(&cached.group.sequence);
+				*slot = None;
+			}
 		}
 
 		// Trim leading tombstones to advance the offset.
 		while let Some(None) = self.groups.front() {
 			self.groups.pop_front();
 			self.offset += 1;
+		}
+	}
+
+	/// Record a read of a cached group as a wall-clock access, returning whether the group is
+	/// still valid afterward (i.e. the read should be served).
+	///
+	/// Touch-before-evict: the shared cache runs eviction before refreshing recency, so a group
+	/// already past `max_age` is dropped here rather than revived by the read. Returns `false`
+	/// when the group is gone (evicted now or earlier, or otherwise aborted) so the caller
+	/// treats it as a miss. The latest group (no token) and the no-cache case are always valid.
+	fn touch(&self, cached: &Cached) -> bool {
+		match (&self.cache, cached.token) {
+			(Some(cache), Some(token)) => cache.touch(token, web_async::time::Instant::now()),
+			_ => !cached.group.is_aborted(),
+		}
+	}
+
+	/// Drop this track's entries from the shared cache, freeing the budget without aborting the
+	/// groups (the track is going away on its own terms). Called when the track is cleared.
+	fn release_cache(&mut self) {
+		if let Some(cache) = &self.cache {
+			for cached in self.groups.iter_mut().flatten() {
+				if let Some(token) = cached.token.take() {
+					cache.remove(token);
+				}
+			}
 		}
 	}
 
@@ -455,11 +535,14 @@ impl TrackState {
 		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
 
 		let group = GroupProducer::new(Group { sequence }, info.timescale);
-		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
-		self.groups.push_back(Some((group.clone(), now)));
-		self.evict_expired(now, cache);
+		self.groups.push_back(Some(Cached {
+			group: group.clone(),
+			created_at: now,
+			token: None,
+		}));
+		self.retain(now);
 		Ok(group)
 	}
 }
@@ -490,6 +573,20 @@ impl TrackProducer {
 		&self.name
 	}
 
+	/// Attach a shared [`Cache`] governing how much of this track's history is retained.
+	///
+	/// Without a cache, the track keeps only its latest group (a superseded group is dropped at
+	/// once). With one, superseded groups are retained in RAM up to the cache's shared byte and
+	/// age budget, evicted least-recently-accessed first. Clone the same [`Cache`] across tracks
+	/// to share one budget. Set this before producing groups; it takes effect on the next group.
+	/// Returns `self` for chaining.
+	pub fn with_cache(self, cache: Cache) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.cache = Some(cache);
+		}
+		self
+	}
+
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&mut self, group: Group) -> Result<GroupProducer> {
 		let mut state = self.modify()?;
@@ -500,7 +597,6 @@ impl TrackProducer {
 		}
 		let info = state.info.as_ref().unwrap();
 		let timescale = info.timescale;
-		let cache = info.cache;
 
 		let group = GroupProducer::new(group, timescale);
 		if !state.duplicates.insert(group.sequence) {
@@ -509,8 +605,12 @@ impl TrackProducer {
 
 		let now = web_async::time::Instant::now();
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
-		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now, cache);
+		state.groups.push_back(Some(Cached {
+			group: group.clone(),
+			created_at: now,
+			token: None,
+		}));
+		state.retain(now);
 
 		Ok(group)
 	}
@@ -530,15 +630,18 @@ impl TrackProducer {
 
 		let info = state.info.as_ref().unwrap();
 		let timescale = info.timescale;
-		let cache = info.cache;
 
 		let group = GroupProducer::new(Group { sequence }, timescale);
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
-		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now, cache);
+		state.groups.push_back(Some(Cached {
+			group: group.clone(),
+			created_at: now,
+			token: None,
+		}));
+		state.retain(now);
 
 		Ok(group)
 	}
@@ -593,6 +696,7 @@ impl TrackProducer {
 	/// own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
+		guard.release_cache();
 		guard.abort = Some(err);
 		guard.groups.clear();
 		guard.duplicates.clear();
@@ -868,6 +972,7 @@ impl Drop for TrackProducer {
 		if let Ok(mut state) = self.state.write()
 			&& state.final_sequence.is_none()
 		{
+			state.release_cache();
 			state.groups.clear();
 			state.duplicates.clear();
 		}
@@ -1427,6 +1532,16 @@ impl TrackRequest {
 		&self.name
 	}
 
+	/// Attach a shared [`Cache`] to the track this request will become, so a cascaded
+	/// broadcast/origin cache governs retention once the request is [`accept`](Self::accept)ed.
+	/// The cache lives on the shared state, so it survives the request -> producer handoff.
+	pub(crate) fn with_cache(self, cache: Cache) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.cache = Some(cache);
+		}
+		self
+	}
+
 	pub fn consume(&self) -> TrackConsumer {
 		TrackConsumer {
 			name: self.name.clone(),
@@ -1569,139 +1684,267 @@ mod test {
 
 	/// Helper: get the sequence number of the first live group.
 	fn first_live_sequence(state: &TrackState) -> u64 {
-		state.groups.iter().flatten().next().unwrap().0.sequence
+		state.groups.iter().flatten().next().unwrap().group.sequence
+	}
+
+	/// A cache large enough to retain many small groups, with no age bound.
+	fn unbounded_cache() -> Cache {
+		Cache::new(cache::Config::default().with_max_bytes(u64::MAX))
 	}
 
 	#[tokio::test]
-	async fn evict_expired_groups() {
-		tokio::time::pause();
-
+	async fn default_keeps_only_latest_group() {
 		let mut producer = TrackProducer::new("test", None);
 
-		// Create 3 groups at time 0.
+		// Without a cache, each appended group supersedes the previous one immediately.
 		producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
 
-		{
-			let state = producer.state.read();
-			assert_eq!(live_groups(&state), 3);
-			assert_eq!(state.offset, 0);
-		}
-
-		// Advance time past the eviction threshold.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
-
-		// Append a new group to trigger eviction.
-		producer.append_group().unwrap(); // seq 3
-
-		// Groups 0, 1, 2 are expired but seq 3 (max_sequence) is kept.
-		// Leading tombstones are trimmed, so only seq 3 remains.
-		{
-			let state = producer.state.read();
-			assert_eq!(live_groups(&state), 1);
-			assert_eq!(first_live_sequence(&state), 3);
-			assert_eq!(state.offset, 3);
-			assert!(!state.duplicates.contains(&0));
-			assert!(!state.duplicates.contains(&1));
-			assert!(!state.duplicates.contains(&2));
-			assert!(state.duplicates.contains(&3));
-		}
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 1, "only the latest group is retained");
+		assert_eq!(first_live_sequence(&state), 2);
+		assert!(!state.duplicates.contains(&0));
+		assert!(!state.duplicates.contains(&1));
+		assert!(state.duplicates.contains(&2));
 	}
 
 	#[tokio::test]
-	async fn evict_keeps_max_sequence() {
-		tokio::time::pause();
+	async fn cache_retains_history_up_to_bytes() {
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 
-		let mut producer = TrackProducer::new("test", None);
-		producer.append_group().unwrap(); // seq 0
-
-		// Advance time past threshold.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
-
-		// Append another group; seq 0 is expired and evicted.
-		producer.append_group().unwrap(); // seq 1
-
-		{
-			let state = producer.state.read();
-			assert_eq!(live_groups(&state), 1);
-			assert_eq!(first_live_sequence(&state), 1);
-			assert_eq!(state.offset, 1);
+		// With a cache, superseded groups stay retained.
+		for _ in 0..4 {
+			let mut g = producer.append_group().unwrap();
+			g.write_frame(bytes::Bytes::from_static(b"x")).unwrap();
 		}
+
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 4, "cache retains every group within budget");
 	}
 
 	#[tokio::test]
-	async fn no_eviction_when_fresh() {
+	async fn cache_bytes_evicts_oldest() {
+		let mut producer =
+			TrackProducer::new("test", None).with_cache(Cache::new(cache::Config::default().with_max_bytes(20)));
+
+		// Each non-latest group costs 10 bytes; the 20-byte budget holds two of them plus the
+		// (uncounted) latest group.
+		for _ in 0..4 {
+			let mut g = producer.append_group().unwrap();
+			g.write_frame(bytes::Bytes::from(vec![0u8; 10])).unwrap();
+		}
+
+		let state = producer.state.read();
+		// seq 3 is the latest (not in the cache); seq 1 and 2 fit the budget; seq 0 is evicted.
+		assert!(
+			!state.duplicates.contains(&0),
+			"oldest group evicted under byte pressure"
+		);
+		assert!(state.duplicates.contains(&1));
+		assert!(state.duplicates.contains(&2));
+		assert!(state.duplicates.contains(&3));
+	}
+
+	#[tokio::test]
+	async fn cache_age_evicts_by_wall_clock() {
 		tokio::time::pause();
 
-		let mut producer = TrackProducer::new("test", None);
-		producer.append_group().unwrap(); // seq 0
-		producer.append_group().unwrap(); // seq 1
+		let mut producer = TrackProducer::new("test", None).with_cache(Cache::new(
+			cache::Config::default()
+				.with_max_bytes(u64::MAX)
+				.with_max_age(Duration::from_secs(5)),
+		));
+
+		producer.append_group().unwrap(); // seq 0 (will be cached once superseded)
+		producer.append_group().unwrap(); // seq 1, supersedes seq 0
+
+		// seq 0 is cached and fresh: still retained.
+		assert_eq!(live_groups(&producer.state.read()), 2);
+
+		// Advance past max_age, then append to trigger age eviction.
+		tokio::time::advance(Duration::from_secs(6)).await;
 		producer.append_group().unwrap(); // seq 2
 
-		{
-			let state = producer.state.read();
-			assert_eq!(live_groups(&state), 3);
-			assert_eq!(state.offset, 0);
+		let state = producer.state.read();
+		// seq 0 aged out; seq 1 was just superseded (fresh access at its own insert time) and
+		// kept; seq 2 is the latest.
+		assert!(!state.duplicates.contains(&0), "group older than max_age is evicted");
+		assert!(state.duplicates.contains(&2));
+	}
+
+	#[tokio::test]
+	async fn cache_access_keeps_group_alive() {
+		tokio::time::pause();
+
+		let mut producer = TrackProducer::new("test", None).with_cache(Cache::new(
+			cache::Config::default()
+				.with_max_bytes(u64::MAX)
+				.with_max_age(Duration::from_secs(5)),
+		));
+
+		producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1, supersedes seq 0 (now cached)
+
+		let consumer = producer.consume();
+
+		// Keep accessing seq 0 so its last-access stays recent.
+		for _ in 0..4 {
+			tokio::time::advance(Duration::from_secs(2)).await;
+			assert!(consumer.get_group(0).is_some());
+			producer.append_group().unwrap(); // bump max_sequence + run eviction
 		}
+
+		// Despite total elapsed time well past max_age, seq 0 survived because it was accessed
+		// within every window.
+		assert!(
+			producer.state.read().duplicates.contains(&0),
+			"a recently accessed group is not aged out"
+		);
+	}
+
+	#[tokio::test]
+	async fn cache_access_via_read_frame_keeps_group_alive() {
+		tokio::time::pause();
+
+		let mut producer = TrackProducer::new("test", None).with_cache(Cache::new(
+			cache::Config::default()
+				.with_max_bytes(u64::MAX)
+				.with_max_age(Duration::from_secs(5)),
+		));
+
+		// seq 0 is a single-frame group, superseded (and cached) by seq 1.
+		producer.write_frame(b"hello".as_slice()).unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1
+
+		// Read seq 0's frame within each window so the frame-level read keeps it recent.
+		for _ in 0..4 {
+			tokio::time::advance(Duration::from_secs(2)).await;
+			let mut sub = producer.subscribe(None);
+			sub.end_at(0);
+			let frame = sub.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(&frame[..], b"hello");
+			producer.append_group().unwrap();
+		}
+
+		assert!(
+			producer.state.read().duplicates.contains(&0),
+			"a group kept alive by frame reads is not aged out"
+		);
+	}
+
+	#[tokio::test]
+	async fn cache_aged_group_evicted_on_read_not_revived() {
+		tokio::time::pause();
+
+		let mut producer = TrackProducer::new("test", None).with_cache(Cache::new(
+			cache::Config::default()
+				.with_max_bytes(u64::MAX)
+				.with_max_age(Duration::from_secs(5)),
+		));
+
+		let g0 = producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1, supersedes (and caches) seq 0
+
+		let consumer = producer.consume();
+
+		// Let seq 0 age out, then read it: the read must evict it, not revive it.
+		tokio::time::advance(Duration::from_secs(6)).await;
+		assert!(consumer.get_group(0).is_none(), "an aged-out group reads as a miss");
+		assert!(
+			g0.is_aborted(),
+			"the stale group is evicted (aborted) on read, not refreshed"
+		);
+	}
+
+	#[tokio::test]
+	async fn shared_cache_one_budget_across_tracks() {
+		let cache = Cache::new(cache::Config::default().with_max_bytes(20));
+
+		let mut track_a = TrackProducer::new("a", None).with_cache(cache.clone());
+		let mut track_b = TrackProducer::new("b", None).with_cache(cache.clone());
+
+		assert!(cache.is_clone(&cache.clone()), "clones share one budget");
+
+		// Fill track A with two 10-byte non-latest groups (seq 0, 1) under the latest (seq 2).
+		// That alone is exactly the 20-byte budget across A.
+		let a0 = {
+			let mut g = track_a.append_group().unwrap(); // seq 0
+			g.write_frame(bytes::Bytes::from(vec![0u8; 10])).unwrap();
+			g
+		};
+		for _ in 0..2 {
+			let mut g = track_a.append_group().unwrap(); // seq 1, then 2
+			g.write_frame(bytes::Bytes::from(vec![0u8; 10])).unwrap();
+		}
+		assert!(!a0.is_aborted(), "A's oldest fits the budget so far");
+
+		// Producing on track B draws from the same 20-byte budget, evicting A's oldest first.
+		for _ in 0..2 {
+			let mut g = track_b.append_group().unwrap();
+			g.write_frame(bytes::Bytes::from(vec![0u8; 10])).unwrap();
+		}
+
+		// A's oldest group was aborted by the shared cache to make room for B's cached group.
+		assert!(a0.is_aborted(), "shared budget evicts across tracks");
+	}
+
+	#[tokio::test]
+	async fn cache_grown_group_counted_at_current_size() {
+		// A superseded group can still receive late frames and grow; eviction must count its
+		// current size, not the snapshot captured when it was first cached.
+		let mut producer =
+			TrackProducer::new("test", None).with_cache(Cache::new(cache::Config::default().with_max_bytes(25)));
+
+		// seq 0 starts at 10 bytes, then gets superseded and cached.
+		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		g0.write_frame(bytes::Bytes::from(vec![0u8; 10])).unwrap();
+		producer.create_group(Group { sequence: 1 }).unwrap(); // latest, uncounted
+
+		assert!(producer.state.read().duplicates.contains(&0), "seq 0 fits at 10 bytes");
+
+		// A late frame grows seq 0 from 10 to 30 bytes (over the 25-byte budget).
+		g0.write_frame(bytes::Bytes::from(vec![0u8; 20])).unwrap();
+
+		// Append another group to run an eviction pass; seq 0 is now over budget at its grown
+		// size and is evicted.
+		producer.create_group(Group { sequence: 2 }).unwrap();
+		assert!(
+			!producer.state.read().duplicates.contains(&0),
+			"a grown superseded group is evicted at its current size"
+		);
+	}
+
+	#[tokio::test]
+	async fn cache_never_evicts_max_sequence() {
+		// A budget of 0 still keeps the latest group: it is never handed to the cache.
+		let mut producer =
+			TrackProducer::new("test", None).with_cache(Cache::new(cache::Config::default().with_max_bytes(0)));
+
+		let mut g = producer.append_group().unwrap();
+		g.write_frame(bytes::Bytes::from(vec![0u8; 1024])).unwrap();
+
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 1, "the latest group survives a zero budget");
+		assert_eq!(first_live_sequence(&state), 0);
 	}
 
 	#[tokio::test]
 	async fn consumer_skips_evicted_groups() {
-		tokio::time::pause();
-
 		let mut producer = TrackProducer::new("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
 
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
-		producer.append_group().unwrap(); // seq 1
+		producer.append_group().unwrap(); // seq 1, supersedes (and drops) seq 0
 
-		// Group 0 was evicted. Consumer should get group 1.
+		// Group 0 was evicted (latest-only). Consumer should get group 1.
 		let group = consumer.assert_group();
 		assert_eq!(group.sequence, 1);
 	}
 
 	#[tokio::test]
-	async fn cache_age_controls_eviction() {
-		tokio::time::pause();
-
-		// A shorter cache evicts sooner than the default.
-		let mut producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(1)));
-		producer.append_group().unwrap(); // seq 0
-
-		// Past the custom cache but well within DEFAULT_CACHE.
-		tokio::time::advance(Duration::from_secs(2)).await;
-		producer.append_group().unwrap(); // seq 1
-
-		// Seq 0 is gone because the publisher only keeps groups for 1s.
-		let state = producer.state.read();
-		assert_eq!(live_groups(&state), 1);
-		assert_eq!(first_live_sequence(&state), 1);
-	}
-
-	#[test]
-	fn stale_clamped_to_cache() {
-		let producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
-
-		// A stale window beyond the cache is capped to the cache; a group can't be
-		// waited for longer than the publisher keeps it.
-		let mut subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
-
-		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
-		subscriber.update(Subscription::default().with_stale(Duration::from_millis(500)));
-		assert_eq!(subscriber.subscription().stale, Duration::from_millis(500));
-
-		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
-		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
-	}
-
-	#[tokio::test]
 	async fn out_of_order_max_sequence_at_front() {
-		tokio::time::pause();
-
 		let mut producer = TrackProducer::new("test", None);
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
@@ -1709,26 +1952,21 @@ mod test {
 		producer.create_group(Group { sequence: 3 }).unwrap();
 		producer.create_group(Group { sequence: 4 }).unwrap();
 
-		// max_sequence = 5, which is at the front of the VecDeque.
+		// max_sequence stays 5; without a cache every non-latest arrival is dropped at once.
 		{
 			let state = producer.state.read();
 			assert_eq!(state.max_sequence, Some(5));
+			assert_eq!(live_groups(&state), 1);
+			assert_eq!(first_live_sequence(&state), 5);
 		}
 
-		// Expire all three groups.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
-
-		// Append seq 6 (becomes new max_sequence).
+		// Append seq 6 (becomes new max_sequence); seq 5 is now superseded and dropped.
 		producer.append_group().unwrap(); // seq 6
 
-		// Seq 3, 4, 5 are all expired. Seq 5 was the old max_sequence but now 6 is.
-		// All old groups are evicted.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 6);
-			assert!(!state.duplicates.contains(&3));
-			assert!(!state.duplicates.contains(&4));
 			assert!(!state.duplicates.contains(&5));
 			assert!(state.duplicates.contains(&6));
 		}
@@ -1736,55 +1974,33 @@ mod test {
 
 	#[tokio::test]
 	async fn max_sequence_at_front_blocks_trim() {
-		tokio::time::pause();
+		// With a cache, an out-of-order late arrival behind the protected max_sequence is
+		// retained and a consumer can read through to it.
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 
-		let mut producer = TrackProducer::new("test", None);
-
-		// Arrive: seq 5, then seq 3.
 		producer.create_group(Group { sequence: 5 }).unwrap();
-
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
-
-		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(Group { sequence: 3 }).unwrap();
-
-		// Seq 5 is max_sequence (protected). Seq 3 is not expired (just created).
-		// Nothing should be evicted.
-		{
-			let state = producer.state.read();
-			assert_eq!(live_groups(&state), 2);
-			assert_eq!(state.offset, 0);
-		}
-
-		// Expire seq 3 as well.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
-
-		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(Group { sequence: 2 }).unwrap();
 
-		// Seq 5 is still max_sequence (protected, at front, blocks trim).
-		// Seq 3 is expired → tombstoned.
-		// Seq 2 is fresh → kept.
-		// VecDeque: [Some(5), None, Some(2)]. Leading entry is Some, so offset stays.
 		{
 			let state = producer.state.read();
-			assert_eq!(live_groups(&state), 2);
+			// seq 5 is the protected latest; 3 and 2 are cached behind it.
+			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 			assert!(state.duplicates.contains(&5));
-			assert!(!state.duplicates.contains(&3));
+			assert!(state.duplicates.contains(&3));
 			assert!(state.duplicates.contains(&2));
 		}
 
-		// Consumer should still be able to read through the hole.
+		// consume() starts at index 0, first group in arrival order is seq 5.
 		let mut consumer = producer.subscribe(None);
-		let group = consumer.assert_group();
-		// consume() starts at index 0, first non-tombstoned group is seq 5.
-		assert_eq!(group.sequence, 5);
+		assert_eq!(consumer.assert_group().sequence, 5);
 	}
 
 	#[tokio::test]
 	async fn abort_clears_cached_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		// A cache retains both groups so we can verify abort drops them and releases the budget.
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		producer.append_group().unwrap();
 		producer.append_group().unwrap();
 
@@ -1803,6 +2019,23 @@ mod test {
 		// The consumer now surfaces the abort error rather than the leftover cache.
 		let result = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(result, Err(Error::Cancel)));
+	}
+
+	#[test]
+	fn stale_clamped_to_cache() {
+		let producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
+
+		// A stale window beyond the cache is capped to the cache; a group can't be
+		// waited for longer than the publisher keeps it.
+		let mut subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
+		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
+
+		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
+		subscriber.update(Subscription::default().with_stale(Duration::from_millis(500)));
+		assert_eq!(subscriber.subscription().stale, Duration::from_millis(500));
+
+		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
+		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
 	}
 
 	#[tokio::test]
@@ -1933,7 +2166,8 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
-		let mut producer = TrackProducer::new("test", None);
+		// A cache keeps both groups retained so the consumer sees the full arrival order.
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
@@ -1959,7 +2193,8 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_and_recv_group_use_independent_cursors() {
-		let mut producer = TrackProducer::new("test", None);
+		// A cache retains the late seq 3 behind the protected latest seq 5.
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
@@ -1983,7 +2218,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
@@ -2015,7 +2250,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
@@ -2060,7 +2295,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..3 {
@@ -2104,7 +2339,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
-		let mut producer = TrackProducer::new("test", None);
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		consumer.end_at(5);
@@ -2147,7 +2382,8 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_returns_single_frame_per_group() {
-		let mut producer = TrackProducer::new("test", None);
+		// A cache retains both single-frame groups so the consumer can read each in turn.
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"hello".as_slice()).unwrap();
@@ -2194,7 +2430,8 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_discards_rest_of_multi_frame_group() {
-		let mut producer = TrackProducer::new("test", None);
+		// A cache retains group 0 so the consumer reads its first frame before group 1.
+		let mut producer = TrackProducer::new("test", None).with_cache(unbounded_cache());
 		let mut consumer = producer.subscribe(None);
 
 		// Group 0 has two frames; only the first is returned.

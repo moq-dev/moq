@@ -238,6 +238,19 @@ impl GroupProducer {
 		state.offset + state.frames.len()
 	}
 
+	/// Total bytes currently buffered for this group (the sum of its cached frame sizes).
+	///
+	/// Used by the track [`crate::Cache`] to budget retained groups. Excludes frames already
+	/// evicted from the group's own per-group cache.
+	pub fn cached_size(&self) -> u64 {
+		self.state.read().cache
+	}
+
+	/// Whether the group has been aborted (e.g. evicted from the [`crate::Cache`]).
+	pub fn is_aborted(&self) -> bool {
+		self.state.read().abort.is_some()
+	}
+
 	/// Mark the group as complete; no more frames will be written.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.state)?;

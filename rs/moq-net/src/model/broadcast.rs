@@ -7,7 +7,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
-use super::{OriginList, TrackInfo};
+use super::{Cache, OriginList, TrackInfo};
 
 /// Wall-clock base for the broadcast epoch: 2020-01-01T00:00:00 UTC, expressed as
 /// seconds since the Unix epoch. The wire carries milliseconds since this base
@@ -101,11 +101,33 @@ struct BroadcastState {
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
 	dynamic: usize,
+
+	// Shared cache cascaded onto every track this broadcast produces (created statically via
+	// `create_track`/`reserve_track`, or served on demand). A track-level cache overrides it.
+	// `None` keeps tracks latest-only.
+	cache: Option<Cache>,
 }
 
 impl BroadcastState {
 	fn modify(state: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>, Error> {
 		state.write().map_err(|_| Error::Dropped)
+	}
+
+	/// Apply the broadcast's cascaded cache to a freshly produced track, if one is set.
+	fn apply_cache(&self, track: TrackProducer) -> TrackProducer {
+		match &self.cache {
+			Some(cache) => track.with_cache(cache.clone()),
+			None => track,
+		}
+	}
+
+	/// Apply the broadcast's cascaded cache to a track request, if one is set, so the
+	/// served-on-demand track inherits it once accepted.
+	fn apply_cache_request(&self, request: TrackRequest) -> TrackRequest {
+		match &self.cache {
+			Some(cache) => request.with_cache(cache.clone()),
+			None => request,
+		}
 	}
 
 	/// Insert a track weak handle into the lookup, returning an error on duplicate.
@@ -150,6 +172,16 @@ impl BroadcastProducer {
 		&self.info
 	}
 
+	/// Attach a shared [`Cache`] cascaded onto every track this broadcast produces (created
+	/// statically or served on demand). A track-level [`TrackProducer::with_cache`] overrides it.
+	/// Clone the same [`Cache`] across broadcasts to share one budget. Returns `self` for chaining.
+	pub fn with_cache(self, cache: Cache) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.cache = Some(cache);
+		}
+		self
+	}
+
 	/// Insert a track into the lookup, returning an error on duplicate.
 	///
 	/// Stores a weak handle to the track. The caller (or the owner of the
@@ -172,15 +204,16 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	///
 	/// Pass a name and an optional [`TrackInfo`], so a bare name works:
-	/// `create_track("video", None)`.
+	/// `create_track("video", None)`. The track inherits the broadcast's
+	/// [`with_cache`](Self::with_cache) cache, if any.
 	pub fn create_track(
 		&mut self,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<TrackInfo>>,
 	) -> Result<TrackProducer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = TrackProducer::new(name, info);
 		let mut state = BroadcastState::modify(&self.state)?;
+		let track = state.apply_cache(TrackProducer::new(name, info));
 		state.insert_track(track.weak())?;
 		drop(state);
 		Ok(track)
@@ -194,8 +227,8 @@ impl BroadcastProducer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`BroadcastDynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
-		let request = TrackRequest::new(name);
 		let mut state = BroadcastState::modify(&self.state)?;
+		let request = state.apply_cache_request(TrackRequest::new(name));
 		state.insert_track(request.weak())?;
 		drop(state);
 		Ok(request)
@@ -424,9 +457,10 @@ impl BroadcastConsumer {
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
-		// requests map, and the FIFO order.
+		// requests map, and the FIFO order. The on-demand track inherits the broadcast's
+		// cascaded cache, if any, so a served track retains history like a static one.
 		let name: Arc<str> = name.into();
-		let request = TrackRequest::new(name.clone());
+		let request = state.apply_cache_request(TrackRequest::new(name.clone()));
 		let consumer = request.consume();
 
 		state.requests.insert(name.clone(), request);
@@ -490,6 +524,45 @@ mod test {
 			);
 			pending
 		}};
+	}
+
+	#[tokio::test]
+	async fn cache_cascades_to_created_track() {
+		use crate::cache;
+		let cache = Cache::new(cache::Config::default().with_max_bytes(u64::MAX));
+		let mut broadcast = BroadcastInfo::new().produce().with_cache(cache);
+
+		let mut track = broadcast.assert_create_track("video", None);
+
+		// Without the cascaded cache the track would keep only its latest group; with it, the
+		// earlier group survives.
+		track.append_group().unwrap(); // seq 0
+		track.append_group().unwrap(); // seq 1
+
+		assert!(
+			track.consume().get_group(0).is_some(),
+			"the broadcast's cache retained the superseded group on its track"
+		);
+	}
+
+	#[tokio::test]
+	async fn cache_cascades_to_dynamic_track() {
+		use crate::cache;
+		let cache = Cache::new(cache::Config::default().with_max_bytes(u64::MAX));
+		let broadcast = BroadcastInfo::new().produce().with_cache(cache);
+		let mut dynamic = broadcast.dynamic();
+
+		// A consumer-driven (dynamic) track also inherits the broadcast cache.
+		let _pending = subscribe_pending!(broadcast.consume(), "audio");
+		let mut track = dynamic.assert_request().accept(None);
+
+		track.append_group().unwrap(); // seq 0
+		track.append_group().unwrap(); // seq 1
+
+		assert!(
+			track.consume().get_group(0).is_some(),
+			"a dynamically served track inherits the broadcast cache"
+		);
 	}
 
 	#[tokio::test]
