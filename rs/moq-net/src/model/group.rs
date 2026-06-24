@@ -13,7 +13,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale};
+use crate::{Error, Result};
 
 #[cfg(test)]
 use super::broadcast::noop_broadcast;
@@ -185,11 +185,6 @@ impl GroupProducer {
 		}
 	}
 
-	/// The parent track's negotiated timescale, or `None` for untimed tracks.
-	pub fn timescale(&self) -> Option<Timescale> {
-		self.track.timescale
-	}
-
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
@@ -357,11 +352,6 @@ impl std::ops::Deref for GroupConsumer {
 }
 
 impl GroupConsumer {
-	/// The parent track's negotiated timescale, or `None` for untimed tracks.
-	pub fn timescale(&self) -> Option<Timescale> {
-		self.track.timescale
-	}
-
 	/// Stamp the egress usage sink (and shared track info) onto this consumer, so
 	/// frames read from it are metered against the consuming session. Used by
 	/// [`crate::TrackSubscriber`] when delivering a group.

@@ -166,11 +166,11 @@ impl BroadcastProducer {
 	/// Create a producer for the given broadcast metadata. Prefer [`BroadcastInfo::produce`].
 	pub fn new(info: BroadcastInfo) -> Self {
 		let info = Arc::new(info);
-		let state = kio::Producer::<BroadcastState>::default();
-		if let Ok(mut s) = state.write() {
-			// Key the live-publisher count to this broadcast's ingress sink.
-			s.publishers = Live::new(info.stats.producer.clone());
-		}
+		// Key the live-publisher count to this broadcast's ingress sink.
+		let state = kio::Producer::new(BroadcastState {
+			publishers: Live::new(info.stats.producer.clone()),
+			..Default::default()
+		});
 		Self { info, state }
 	}
 

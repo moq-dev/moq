@@ -676,16 +676,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// FETCH is gated to lite-05+, which always carries timestamps when the track
 		// advertised a timescale; `None` means an untimed track (frames omit them).
-		let timescale = if version.has_timestamps() {
-			group.timescale()
-		} else {
-			None
-		};
-
-		// Compression is an immutable per-track property (reported in TRACK_INFO), so
-		// fetched frames use the same codec as live ones. The group resolved above, so
-		// the track's info is set and this resolves immediately.
-		let compression = if track.info().await?.compress && version.has_timestamps() {
+		// Codec + timescale are immutable per-track properties (reported in
+		// TRACK_INFO), so fetched frames use the same codec/timing as live ones. The
+		// group resolved above, so the track's info is set and this resolves immediately.
+		let info = track.info().await?;
+		let timescale = if version.has_timestamps() { info.timescale } else { None };
+		let compression = if info.compress && version.has_timestamps() {
 			Compression::Deflate
 		} else {
 			Compression::None
