@@ -30,20 +30,6 @@ impl Version {
 		}
 	}
 
-	/// Whether Hop IDs (ANNOUNCE / ANNOUNCE_OK) and `Exclude Hop` (ANNOUNCE_INTEREST)
-	/// are carried as fixed-width 64-bit integers rather than varints. Added in lite-05:
-	/// Hop IDs are randomly assigned, so a varint would almost never be shorter than its
-	/// fixed-width equivalent, and the fixed width buys the full 64-bit space (a varint
-	/// caps at 62 bits).
-	#[allow(clippy::match_like_matches_macro)]
-	pub fn hops_fixed_width(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
-		match self {
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
-			_ => true,
-		}
-	}
-
 	/// Whether ANNOUNCE_BROADCAST carries a per-broadcast Epoch varint (after the
 	/// suffix, before the hop chain). Added in lite-05 so a consumer can tell a newer
 	/// instance of a broadcast from an older one. Older versions omit the field.

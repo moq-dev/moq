@@ -124,7 +124,6 @@ pub struct AnnounceRequest<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
 	// If non-zero, the publisher SHOULD skip announces whose hop IDs contain this value.
-	// Carried as a Hop ID (varint on Lite04, fixed-width 64-bit on Lite05+); 0 means no exclusion.
 	pub exclude_hop: u64,
 }
 
@@ -133,8 +132,7 @@ impl Message for AnnounceRequest<'_> {
 		let prefix = Path::decode(r, version)?;
 		let exclude_hop = match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => 0,
-			// Decode as a Hop ID so the fixed-width vs varint choice tracks the version.
-			_ => Origin::decode(r, version)?.id,
+			_ => u64::decode(r, version)?,
 		};
 		Ok(Self { prefix, exclude_hop })
 	}
@@ -144,7 +142,7 @@ impl Message for AnnounceRequest<'_> {
 		match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
 			_ => {
-				Origin::from(self.exclude_hop).encode(w, version)?;
+				self.exclude_hop.encode(w, version)?;
 			}
 		}
 
@@ -350,49 +348,6 @@ mod tests {
 		assert_eq!(round_trip(&msg), msg);
 	}
 
-	#[test]
-	fn announce_ok_full_64_bit_origin() {
-		// lite-05 carries the Hop ID fixed-width, so the full 64-bit space round-trips
-		// (a value a 62-bit varint could not hold).
-		let msg = AnnounceOk {
-			origin: Origin { id: u64::MAX },
-			active: 1,
-		};
-		assert_eq!(round_trip(&msg), msg);
-	}
-
-	#[test]
-	fn announce_ok_origin_is_fixed_width() {
-		let mut buf = bytes::BytesMut::new();
-		AnnounceOk {
-			origin: Origin { id: 1 },
-			active: 0,
-		}
-		.encode(&mut buf, Version::Lite05Wip)
-		.unwrap();
-		// size(1) + origin(8 fixed) + active(1 varint) = 10 bytes; a varint origin id of 1
-		// would have been a single byte, giving 3.
-		assert_eq!(buf.len(), 10);
-	}
-
-	#[test]
-	fn announce_request_exclude_hop_round_trip() {
-		// A value above the old 62-bit varint ceiling only survives the fixed-width lite-05 path.
-		for &exclude_hop in &[0u64, 7, 1u64 << 53, u64::MAX] {
-			let msg = AnnounceRequest {
-				prefix: Path::new("foo/bar"),
-				exclude_hop,
-			};
-			let mut buf = bytes::BytesMut::new();
-			msg.encode(&mut buf, Version::Lite05Wip).unwrap();
-			let mut slice = &buf[..];
-			let got = AnnounceRequest::decode(&mut slice, Version::Lite05Wip).unwrap();
-			assert!(slice.is_empty(), "trailing bytes after decode");
-			assert_eq!(got.exclude_hop, exclude_hop);
-			assert_eq!(got.prefix, msg.prefix);
-		}
-	}
-
 	fn broadcast_round_trip(msg: &AnnounceBroadcast, version: Version) -> AnnounceBroadcast<'static> {
 		let mut buf = bytes::BytesMut::new();
 		msg.encode(&mut buf, version).unwrap();
@@ -470,13 +425,11 @@ mod tests {
 		}
 		.encode(&mut buf, Version::Lite05Wip)
 		.unwrap();
-		// origin sits right after the size prefix; rewrite it to 0.
+		// origin id 1 sits right after the size prefix; rewrite it to 0.
 		let bytes = &buf[..];
 		let mut patched = bytes.to_vec();
-		// size(1 byte) | origin fixed-width 64-bit (8 bytes) | active varint(1 byte)
-		for b in &mut patched[1..9] {
-			*b = 0x00;
-		}
+		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)
+		patched[1] = 0x00;
 		let mut slice = &patched[..];
 		assert!(matches!(
 			AnnounceOk::decode(&mut slice, Version::Lite05Wip),

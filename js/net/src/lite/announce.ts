@@ -2,7 +2,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { type Origin, OriginSchema } from "./origin.ts";
-import { hasBroadcastEpoch, hopsFixedWidth, Version } from "./version.ts";
+import { hasBroadcastEpoch, Version } from "./version.ts";
 
 // Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
 // hop chains are rejected; this keeps loop-detection bounded and rejects
@@ -68,15 +68,10 @@ export class AnnounceBroadcast {
 				await w.u53(this.hops.length);
 				break;
 			default:
-				// Lite04+: hop count + individual Hop IDs. Lite05+ carries each id
-				// fixed-width (64-bit); Lite04 used a 62-bit varint.
+				// Lite04+: hop count + individual Origin varints.
 				await w.u53(this.hops.length);
 				for (const origin of this.hops) {
-					if (hopsFixedWidth(version)) {
-						await w.u64(origin);
-					} else {
-						await w.u62(origin);
-					}
+					await w.u62(origin);
 				}
 				break;
 		}
@@ -104,13 +99,12 @@ export class AnnounceBroadcast {
 				break;
 			}
 			default: {
-				// Lite04+: hop count + individual Hop IDs. Lite05+ carries each id
-				// fixed-width (64-bit); Lite04 used a 62-bit varint.
+				// Lite04+: hop count + individual Origin varints.
 				const count = await r.u53();
 				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 				hops = [];
 				for (let i = 0; i < count; i++) {
-					hops.push(OriginSchema.parse(hopsFixedWidth(version) ? await r.u64() : await r.u62()));
+					hops.push(OriginSchema.parse(await r.u62()));
 				}
 				break;
 			}
@@ -138,8 +132,8 @@ export class AnnounceBroadcast {
  */
 export class AnnounceRequest {
 	prefix: Path.Valid;
-	// Hop ID of the peer asking for announces. Zero means "no exclusion".
-	// Must be a bigint: peer origins are up to 64 bits and overflow u53.
+	// 62-bit Origin id of the peer asking for announces. Zero means "no exclusion".
+	// Must be a bigint: peer origins are up to 62 bits and overflow u53.
 	excludeHop: bigint;
 
 	constructor(prefix: Path.Valid, excludeHop: bigint = 0n) {
@@ -155,12 +149,8 @@ export class AnnounceRequest {
 			case Version.DRAFT_03:
 				break;
 			default:
-				// Lite04+: exclude_hop Hop ID. Lite05+ fixed-width (64-bit); Lite04 a 62-bit varint.
-				if (hopsFixedWidth(version)) {
-					await w.u64(this.excludeHop);
-				} else {
-					await w.u62(this.excludeHop);
-				}
+				// Lite04+: exclude_hop field (u62 varint).
+				await w.u62(this.excludeHop);
 				break;
 		}
 	}
@@ -174,7 +164,7 @@ export class AnnounceRequest {
 			case Version.DRAFT_03:
 				break;
 			default:
-				excludeHop = hopsFixedWidth(version) ? await r.u64() : await r.u62();
+				excludeHop = await r.u62();
 				break;
 		}
 		return new AnnounceRequest(prefix, excludeHop);
@@ -261,13 +251,12 @@ export class AnnounceOk {
 	}
 
 	async #encode(w: Writer) {
-		// lite-05 carries the Hop ID fixed-width (64-bit).
-		await w.u64(this.origin);
+		await w.u62(this.origin);
 		await w.u53(this.active);
 	}
 
 	static async #decode(r: Reader): Promise<AnnounceOk> {
-		const raw = await r.u64();
+		const raw = await r.u62();
 		// A zero responder id is never legitimate; it would stamp a placeholder onto chains.
 		if (raw === 0n) throw new Error("announce ok origin must be non-zero");
 		const origin = OriginSchema.parse(raw);

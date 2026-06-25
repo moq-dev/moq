@@ -1,18 +1,16 @@
 import * as z from "zod/mini";
 
 /**
- * A relay origin id (Hop ID), randomly assigned and carried in the hop chain.
+ * A relay origin id, encoded as a 62-bit varint on the wire.
  *
- * On the wire lite-05+ encodes it as a fixed-width 64-bit integer (the full
- * 64-bit space); older versions used a 62-bit varint. The {@link OriginSchema}
- * validates any incoming value and brands it so the type system enforces "only
- * validated origins flow into hop lists." Internal code that synthesizes an id
- * (e.g. {@link randomOrigin}) uses `OriginSchema.parse(...)` to produce a
- * branded value from the raw bigint.
+ * The {@link OriginSchema} validates any incoming value and brands it so the
+ * type system enforces "only validated origins flow into hop lists." Internal
+ * code that synthesizes an id (e.g. {@link randomOrigin}) uses
+ * `OriginSchema.parse(...)` to produce a branded value from the raw bigint.
  */
 export const OriginSchema = z
 	.bigint()
-	.check(z.refine((value) => value >= 0n && value < 1n << 64n, "Origin must be a non-negative 64-bit integer"))
+	.check(z.refine((value) => value >= 0n && value < 1n << 62n, "Origin must be a non-negative 62-bit integer"))
 	.brand("Origin");
 
 export type Origin = z.infer<typeof OriginSchema>;
