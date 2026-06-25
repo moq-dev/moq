@@ -89,38 +89,71 @@ impl Bounds {
 	}
 }
 
-/// The disk spill tier: an object store, a key prefix, retention bounds, and an optional remote
-/// store the disk tier rolls up into. Native-only (`object_store` does not build on wasm). Build
-/// with [`Disk::new`], optionally [`with_remote`](Disk::with_remote), then attach via
-/// [`crate::TrackProducer::with_cache`].
+/// The disk spill tier: an object store, a key prefix, and retention bounds. Native-only
+/// (`object_store` does not build on wasm). Build with [`Disk::new`], wrap in a [`Config`], and
+/// attach via [`crate::TrackProducer::with_cache`].
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Disk {
 	/// The object store for the disk tier (e.g. a `LocalFileSystem`).
 	pub store: Arc<dyn ObjectStore>,
-	/// Key prefix under which segments are written.
+	/// Key prefix under which disk segments are written.
 	pub prefix: Path,
-	/// Retention bounds on the disk tier; exceeding them rolls up to `remote` (or evicts).
+	/// Retention bounds on the disk tier; exceeding them rolls up to the [`Remote`] tier (or evicts).
 	pub bounds: Bounds,
-	/// Optional remote store the disk tier rolls up into when over its bounds.
-	pub remote: Option<Arc<dyn ObjectStore>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Disk {
-	/// A disk tier over `store`, writing under `prefix`, capped by `bounds`. No remote rollup.
+	/// A disk tier over `store`, writing under `prefix`, capped by `bounds`.
 	pub fn new(store: Arc<dyn ObjectStore>, prefix: Path, bounds: Bounds) -> Self {
-		Self {
-			store,
-			prefix,
-			bounds,
-			remote: None,
-		}
+		Self { store, prefix, bounds }
+	}
+}
+
+/// The remote rollup tier: an object store and its own key prefix (distinct from the disk tier's).
+/// The disk tier concatenates its oldest segments into one object here when over its bounds.
+/// Native-only.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Remote {
+	/// The object store for the remote tier (e.g. an S3 bucket).
+	pub store: Arc<dyn ObjectStore>,
+	/// Key prefix under which rolled-up remote objects are written.
+	pub prefix: Path,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Remote {
+	/// A remote tier over `store`, writing rolled-up objects under `prefix`.
+	pub fn new(store: Arc<dyn ObjectStore>, prefix: Path) -> Self {
+		Self { store, prefix }
+	}
+}
+
+/// A durable cache configuration: a [`Disk`] tier and an optional [`Remote`] rollup tier. Native-only.
+/// Pass to [`crate::TrackProducer::with_cache`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Config {
+	/// The disk spill tier.
+	pub disk: Disk,
+	/// The optional remote rollup tier the disk tier promotes into when over its bounds.
+	pub remote: Option<Remote>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Config {
+	/// A cache that spills to `disk` only (no remote rollup).
+	pub fn new(disk: Disk) -> Self {
+		Self { disk, remote: None }
 	}
 
-	/// Set the remote store the disk tier rolls up into.
-	pub fn with_remote(mut self, remote: Arc<dyn ObjectStore>) -> Self {
+	/// Set the remote tier the disk tier rolls up into.
+	pub fn with_remote(mut self, remote: Remote) -> Self {
 		self.remote = Some(remote);
 		self
 	}
@@ -217,16 +250,22 @@ pub(crate) struct Tiers {
 	/// Hands each batch of evicted live groups to the background flush task. Bounded (see
 	/// [`FLUSH_BACKLOG`]); a full channel drops rather than blocks the eviction path.
 	flush: tokio::sync::mpsc::Sender<Vec<crate::GroupConsumer>>,
-	/// The disk/remote store, shared with the flush task; used to serve fetch misses.
-	store: Arc<tokio::sync::RwLock<store::Store>>,
+	/// The disk/remote store, shared with the flush task; used to serve fetch misses. Its methods
+	/// take `&self` and lock only the in-RAM index, never across I/O, so a fetch and the flush task
+	/// share it without a coarse lock.
+	store: Arc<store::Store>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Tiers {
 	/// Build the store and spawn the background task that serializes evicted groups into it.
-	pub(crate) fn spawn(disk: Disk) -> Self {
-		let store = store::Store::new(disk.store, disk.remote, disk.prefix, disk.bounds);
-		let store = Arc::new(tokio::sync::RwLock::new(store));
+	pub(crate) fn spawn(config: Config) -> Self {
+		let store = Arc::new(store::Store::new(
+			config.disk.store,
+			config.disk.prefix,
+			config.disk.bounds,
+			config.remote,
+		));
 		let (flush, mut rx) = tokio::sync::mpsc::channel::<Vec<crate::GroupConsumer>>(FLUSH_BACKLOG);
 		let writer = store.clone();
 		web_async::spawn(async move {
@@ -251,28 +290,14 @@ impl Tiers {
 				}
 				// Keep groups in ascending sequence so the segment's footer is ordered.
 				batch.sort_by_key(|group| group.sequence);
-				if let Err(err) = writer.write().await.flush(batch).await {
+				if let Err(err) = writer.flush(batch).await {
 					tracing::warn!(%err, "cache disk flush failed");
 					continue;
 				}
-
-				// Compact in phases so the slow remote upload runs without the store lock that
-				// fetches need: plan (locked) snapshots the rollup, upload (unlocked) does the remote
-				// put, apply (locked) repoints the index. Bind each phase to its own statement so the
-				// lock guard drops at the `;` rather than being held (a held guard would also
-				// deadlock the re-entrant `write()` in apply).
-				let planned = writer.write().await.plan_compaction().await;
-				match planned {
-					Ok(Some(rollup)) => {
-						if let Err(err) = rollup.upload().await {
-							// The index still points at the intact disk segments; safe to leave.
-							tracing::warn!(%err, "cache remote rollup upload failed");
-						} else if let Err(err) = writer.write().await.apply_compaction(rollup).await {
-							tracing::warn!(%err, "cache rollup apply failed");
-						}
-					}
-					Ok(None) => {}
-					Err(err) => tracing::warn!(%err, "cache compaction planning failed"),
+				// Roll the disk tier up into remote when over budget. No lock is held across the
+				// remote upload (the store locks only its in-RAM index, for sync ops).
+				if let Err(err) = writer.compact().await {
+					tracing::warn!(%err, "cache compaction failed");
 				}
 			}
 		});
@@ -296,7 +321,7 @@ impl Tiers {
 	}
 
 	/// A handle to the shared disk/remote store, for serving a fetch off the track's poll path.
-	pub(crate) fn store_handle(&self) -> Arc<tokio::sync::RwLock<store::Store>> {
+	pub(crate) fn store_handle(&self) -> Arc<store::Store> {
 		self.store.clone()
 	}
 
@@ -304,7 +329,7 @@ impl Tiers {
 	/// tier read / rebuild error (a fetch falls through to the live path).
 	#[cfg(test)]
 	pub(crate) async fn fetch(&self, sequence: u64, timescale: Option<Timescale>) -> Option<crate::GroupConsumer> {
-		let group = self.store.read().await.get(sequence).await.ok()??;
+		let group = self.store.get(sequence).await.ok()??;
 		group.produce(timescale).ok()
 	}
 }
@@ -392,8 +417,8 @@ mod tests {
 		use object_store::path::Path;
 
 		// Disk is unbounded so it keeps everything handed to it.
-		let disk = Disk::new(Arc::new(InMemory::new()), Path::from("cache"), Bounds::default());
-		let tiers = Tiers::spawn(disk);
+		let disk = Disk::new(Arc::new(InMemory::new()), Path::from("disk"), Bounds::default());
+		let tiers = Tiers::spawn(Config::new(disk));
 
 		// Build three finished live groups and hand them to the flush task as one eviction pass.
 		let mut consumers = Vec::new();
@@ -428,11 +453,11 @@ mod tests {
 		use object_store::path::Path;
 
 		// Disk keeps ~1 segment (promote over budget); the rolled-up bytes go to the remote tier.
-		// This exercises the phased plan -> upload (off-lock) -> apply path in the flush task.
+		// This exercises the flush -> compact (off-lock remote upload) path in the flush task.
 		let bounds = Bounds::new(Limit::bytes(1100), Limit::bytes(2000));
-		let disk =
-			Disk::new(Arc::new(InMemory::new()), Path::from("cache"), bounds).with_remote(Arc::new(InMemory::new()));
-		let tiers = Tiers::spawn(disk);
+		let config = Config::new(Disk::new(Arc::new(InMemory::new()), Path::from("disk"), bounds))
+			.with_remote(Remote::new(Arc::new(InMemory::new()), Path::from("remote")));
+		let tiers = Tiers::spawn(config);
 
 		// Evict five ~1 KB groups, one pass at a time, so the disk tier exceeds budget and rolls up.
 		for seq in 0..5u64 {

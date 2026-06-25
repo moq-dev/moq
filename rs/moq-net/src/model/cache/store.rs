@@ -2,18 +2,22 @@
 //!
 //! A `Store` persists flush bands from the RAM tier as segments (one object each), serves a group
 //! by ranged-reading its blob, and compacts: once the disk tier is over its bounds, the oldest
-//! segments roll up into one remote object (or are evicted if there is no remote tier). All the
-//! decisions live in the `index` module; this module is the object_store glue.
+//! segments roll up into one remote object (or are evicted if there is no remote tier).
+//!
+//! Object I/O never holds a lock. The only shared mutable state is the in-RAM `Index`, guarded by
+//! a `Mutex` taken solely for synchronous lookups and updates and dropped before any `.await`. (A
+//! `std::sync::MutexGuard` isn't `Send`, so holding one across `.await` wouldn't even compile, which
+//! makes the "lock held across I/O" mistake structurally impossible.) The index is the source of
+//! truth for what lives where; the object stores are consulted only to read, write, or delete a blob.
 
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use bytes::Bytes;
 use object_store::{ObjectStore, PutPayload, path::Path};
 
 use super::index::{Index, SegmentId, Tier};
 use super::segment::{self, Segment};
-use super::{Batch, Bounds, Group};
+use super::{Batch, Bounds, Group, Remote};
 
 /// An error from a tiered [`Store`].
 #[derive(Debug, thiserror::Error)]
@@ -27,174 +31,143 @@ pub enum Error {
 	Store(#[from] object_store::Error),
 }
 
-/// A tiered durable store: a disk object store, an optional remote one, and the index mapping
+/// A tiered durable store: a disk object store, an optional remote tier, and an in-RAM index mapping
 /// group sequences to their location. Bands flushed from the RAM tier land here; old disk segments
 /// roll up into the remote tier, or are evicted when there is none.
+///
+/// All methods take `&self`; the only lock is the index `Mutex`, never held across object I/O.
+/// [`flush`](Self::flush) and [`compact`](Self::compact) mutate the index and must be driven
+/// serially (a single flush driver); [`get`](Self::get) only reads it and may run concurrently.
 pub struct Store {
 	disk: Arc<dyn ObjectStore>,
-	remote: Option<Arc<dyn ObjectStore>>,
+	disk_prefix: Path,
+	remote: Option<Remote>,
 	bounds: Bounds,
-	prefix: Path,
-	index: Index,
+	index: Mutex<Index>,
 }
 
 impl Store {
-	/// Create a store over `disk` with an optional `remote` tier, keyed under `prefix`. `bounds`
-	/// caps the disk tier; exceeding the high watermark promotes (or evicts) the oldest segments.
-	pub fn new(disk: Arc<dyn ObjectStore>, remote: Option<Arc<dyn ObjectStore>>, prefix: Path, bounds: Bounds) -> Self {
+	/// Create a store over a disk tier (keyed under `disk_prefix`, capped by `bounds`) and an
+	/// optional remote tier. Exceeding the disk high watermark promotes the oldest segments to the
+	/// remote tier, or evicts them when there is none.
+	pub fn new(disk: Arc<dyn ObjectStore>, disk_prefix: Path, bounds: Bounds, remote: Option<Remote>) -> Self {
 		Self {
 			disk,
+			disk_prefix,
 			remote,
 			bounds,
-			prefix,
-			index: Index::new(),
+			index: Mutex::new(Index::new()),
 		}
 	}
 
-	fn store_of(&self, tier: Tier) -> &Arc<dyn ObjectStore> {
+	fn index(&self) -> MutexGuard<'_, Index> {
+		self.index.lock().expect("cache index poisoned")
+	}
+
+	fn object_store(&self, tier: Tier) -> &Arc<dyn ObjectStore> {
 		match tier {
 			// A remote location is only ever recorded when a remote tier is configured (see
 			// `compact`), so this never falls back.
-			Tier::Remote => self
-				.remote
-				.as_ref()
-				.expect("a remote location implies a configured remote tier"),
+			Tier::Remote => {
+				&self
+					.remote
+					.as_ref()
+					.expect("a remote location implies a configured remote tier")
+					.store
+			}
 			Tier::Disk => &self.disk,
 		}
 	}
 
 	fn key(&self, tier: Tier, id: SegmentId) -> Path {
-		let dir = match tier {
-			Tier::Disk => "disk",
-			Tier::Remote => "remote",
-		};
-		self.prefix.child(dir).child(id.to_string())
+		match tier {
+			Tier::Disk => self.disk_prefix.child(id.to_string()),
+			Tier::Remote => self
+				.remote
+				.as_ref()
+				.expect("a remote location implies a configured remote tier")
+				.prefix
+				.child(id.to_string()),
+		}
 	}
 
-	/// Persist a flushed band as one disk segment. Does not compact: the caller drives compaction
-	/// (see [`Self::plan_compaction`]) so the slow remote upload can run without the store lock.
-	pub async fn flush(&mut self, batch: Batch) -> Result<(), Error> {
+	/// Persist a flushed band as one disk segment. Compaction is separate (the flush driver calls
+	/// [`compact`](Self::compact) after).
+	pub async fn flush(&self, batch: Batch) -> Result<(), Error> {
 		if batch.is_empty() {
 			return Ok(());
 		}
 		let bytes = segment::encode(&batch)?;
 		let segment = Segment::open(bytes.clone())?;
-		// Write the object before recording it, so a failed put leaves the index unchanged.
-		let id = self.index.next_id();
+		// Reserve the id, write the object (unlocked), then record it; a failed put leaves the index
+		// unchanged. The flush driver is serial, so the reserved id is still next when we add.
+		let id = self.index().next_id();
 		self.disk
 			.put(&self.key(Tier::Disk, id), PutPayload::from_bytes(bytes))
 			.await?;
-		let added = self.index.add(Tier::Disk, &segment);
+		let added = self.index().add(Tier::Disk, &segment);
 		debug_assert_eq!(added, id, "index id drifted from the written key");
 		Ok(())
 	}
 
-	/// Fetch a group by sequence: locate it, ranged-read its blob, decode it. `None` if not stored.
+	/// Fetch a group by sequence: locate it (index lock), ranged-read its blob (unlocked), decode it.
+	/// `None` if not stored.
 	pub async fn get(&self, sequence: u64) -> Result<Option<Group>, Error> {
-		let Some(loc) = self.index.locate(sequence) else {
+		let Some(loc) = self.index().locate(sequence) else {
 			return Ok(None);
 		};
 		let end = loc.offset.checked_add(loc.length).ok_or(segment::Error::Truncated)?;
 		let range: Range<u64> = loc.offset..end;
 		let bytes = self
-			.store_of(loc.tier)
+			.object_store(loc.tier)
 			.get_range(&self.key(loc.tier, loc.segment), range)
 			.await?;
 		Ok(Some(segment::group_from_blob(sequence, bytes)?))
 	}
 
-	/// Phase 1 of compaction, run **under the store lock**: if the disk tier is over bounds, snapshot
-	/// a rollup of the oldest segments (read their bytes and build the rolled object), reserving the
-	/// remote segment id. With no remote tier, drop the oldest disk segments inline instead. Returns
-	/// the snapshot to [upload](Rollup::upload), or `None` when within bounds or evicted inline.
+	/// Bring the disk tier within bounds: roll the oldest disk segments up into one remote object, or
+	/// evict them when there is no remote tier. A no-op when the disk tier is within bounds.
 	///
-	/// Disk reads happen here (local, fast); only the remote upload is slow, and it runs after this
-	/// returns so the lock can be released across it. The disk segments stay in place and indexed
-	/// until [`Self::apply_compaction`], so a concurrent fetch still reads them.
-	pub async fn plan_compaction(&mut self) -> Result<Option<Rollup>, Error> {
-		let promoted = self.index.promotion(self.bounds);
+	/// No object I/O holds the index lock: the index is locked only to pick the promotion, reserve
+	/// the remote id, repoint, and evict. The disk segments stay in place and indexed until the
+	/// repoint, so a concurrent [`get`](Self::get) still reads them; a failed upload leaves the index
+	/// pointing at the intact disk segments (safe to retry).
+	pub async fn compact(&self) -> Result<(), Error> {
+		let promoted = self.index().promotion(self.bounds);
 		if promoted.is_empty() {
-			return Ok(None);
+			return Ok(());
 		}
 
-		let Some(remote) = self.remote.clone() else {
-			// No remote tier: drop the oldest disk segments outright (local deletes, fast).
+		let Some(remote) = &self.remote else {
+			// No remote tier: delete the oldest disk segments (unlocked), then drop them from the index.
 			for id in &promoted {
 				self.disk.delete(&self.key(Tier::Disk, *id)).await?;
 			}
-			self.index.evict(&promoted);
-			return Ok(None);
+			self.index().evict(&promoted);
+			return Ok(());
 		};
 
-		// Read the promoted disk segments whole and roll them into one.
+		// Read the promoted disk segments whole (unlocked) and roll them into one.
 		let mut segments = Vec::with_capacity(promoted.len());
 		for id in &promoted {
 			let bytes = self.disk.get(&self.key(Tier::Disk, *id)).await?.bytes().await?;
 			segments.push(bytes);
 		}
 		let rolled = segment::rollup(&segments)?;
-		let segment = Segment::open(rolled.clone())?;
-		// Reserve the id (and thus the key) the upload writes to. Only the flush task mutates the
-		// index, so `next_id` is stable until `apply_compaction` consumes it.
-		let new_id = self.index.next_id();
-		let key = self.key(Tier::Remote, new_id);
-		Ok(Some(Rollup {
-			promoted,
-			rolled,
-			segment,
-			new_id,
-			remote,
-			key,
-		}))
-	}
+		let rolled_segment = Segment::open(rolled.clone())?;
 
-	/// Phase 3 of compaction, run **under the store lock** after [`Rollup::upload`] succeeds: repoint
-	/// the index at the uploaded remote object and delete the now-orphaned disk segments.
-	pub async fn apply_compaction(&mut self, rollup: Rollup) -> Result<(), Error> {
-		let applied = self.index.apply_promotion(&rollup.promoted, &rollup.segment);
-		debug_assert_eq!(applied, rollup.new_id, "index id drifted from the uploaded key");
-		// Best-effort cleanup; an index now pointing at remote makes any leftover disk objects
-		// orphans, not inconsistency.
-		for id in &rollup.promoted {
+		// Reserve the remote id/key, upload (unlocked, before repointing so a failed put leaves the
+		// index on the disk segments), then repoint the index at the remote object.
+		let new_id = self.index().next_id();
+		let key = remote.prefix.child(new_id.to_string());
+		remote.store.put(&key, PutPayload::from_bytes(rolled)).await?;
+		let applied = self.index().apply_promotion(&promoted, &rolled_segment);
+		debug_assert_eq!(applied, new_id, "index id drifted from the uploaded key");
+
+		// Best-effort cleanup of the now-orphaned disk objects (unlocked).
+		for id in &promoted {
 			self.disk.delete(&self.key(Tier::Disk, *id)).await?;
 		}
-		Ok(())
-	}
-
-	/// Bring the disk tier within bounds in one call, holding the lock across the remote upload.
-	/// Convenience for callers that don't need to release the lock (tests, single-tier setups); the
-	/// tiered cache path uses [`plan_compaction`](Self::plan_compaction) /
-	/// [`Rollup::upload`] / [`apply_compaction`](Self::apply_compaction) so a slow remote upload
-	/// doesn't block fetches.
-	pub async fn compact(&mut self) -> Result<(), Error> {
-		if let Some(rollup) = self.plan_compaction().await? {
-			rollup.upload().await?;
-			self.apply_compaction(rollup).await?;
-		}
-		Ok(())
-	}
-}
-
-/// A snapshot of a planned disk -> remote rollup, taken under the store lock by
-/// [`Store::plan_compaction`] so the slow remote upload can run without holding it. The rolled
-/// bytes are reference-counted, so the snapshot is cheap to carry across the unlocked upload.
-pub struct Rollup {
-	promoted: Vec<SegmentId>,
-	rolled: Bytes,
-	segment: Segment,
-	new_id: SegmentId,
-	remote: Arc<dyn ObjectStore>,
-	key: Path,
-}
-
-impl Rollup {
-	/// Upload the rolled object to the remote tier. Run this **without** holding the store lock; the
-	/// index still points at the (intact) disk segments until [`Store::apply_compaction`], so a
-	/// failed upload is a safe no-op to retry and a concurrent fetch is unaffected.
-	pub async fn upload(&self) -> Result<(), Error> {
-		self.remote
-			.put(&self.key, PutPayload::from_bytes(self.rolled.clone()))
-			.await?;
 		Ok(())
 	}
 }
@@ -221,9 +194,13 @@ mod tests {
 		Arc::new(InMemory::new())
 	}
 
+	fn remote() -> Remote {
+		Remote::new(memory(), Path::from("remote"))
+	}
+
 	#[tokio::test]
 	async fn flush_and_get_from_disk() {
-		let mut store = Store::new(memory(), None, Path::from("cache"), Bounds::default());
+		let store = Store::new(memory(), Path::from("disk"), Bounds::default(), None);
 		store.flush(vec![group(0, 10), group(1, 20)]).await.unwrap();
 
 		assert_eq!(store.get(0).await.unwrap().unwrap(), group(0, 10));
@@ -235,7 +212,7 @@ mod tests {
 	async fn promotes_to_remote_over_budget() {
 		// Segments are ~1 KB; keep ~1 in disk (min 1100), promote at 2 (max 2000).
 		let bounds = Bounds::new(Limit::bytes(1100), Limit::bytes(2000));
-		let mut store = Store::new(memory(), Some(memory()), Path::from("cache"), bounds);
+		let store = Store::new(memory(), Path::from("disk"), bounds, Some(remote()));
 
 		for seq in 0..5 {
 			store.flush(vec![group(seq, 1000)]).await.unwrap();
@@ -247,13 +224,13 @@ mod tests {
 			assert_eq!(store.get(seq).await.unwrap().unwrap(), group(seq, 1000));
 		}
 		// Some bytes ended up in the remote tier.
-		assert!(store.index.bytes(Tier::Remote) > 0);
+		assert!(store.index().bytes(Tier::Remote) > 0);
 	}
 
 	#[tokio::test]
 	async fn evicts_oldest_without_remote() {
 		let bounds = Bounds::new(Limit::bytes(1100), Limit::bytes(2000));
-		let mut store = Store::new(memory(), None, Path::from("cache"), bounds);
+		let store = Store::new(memory(), Path::from("disk"), bounds, None);
 
 		for seq in 0..5 {
 			store.flush(vec![group(seq, 1000)]).await.unwrap();

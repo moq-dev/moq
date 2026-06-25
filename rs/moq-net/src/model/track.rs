@@ -753,15 +753,15 @@ impl TrackProducer {
 
 	/// Attach a durable disk (and optional remote) cache below this track's live window.
 	///
-	/// Groups aged out of the live `groups` window are serialized to `disk` instead of just
-	/// dropped, and a [`fetch_group`](TrackConsumer::fetch_group) that misses the live window reads
-	/// them back from disk (or the rolled-up remote tier). The cache lives on the shared track
-	/// state, so every [`TrackConsumer`] of this track serves from it automatically. Native-only
-	/// (`object_store` does not build on wasm).
+	/// Groups aged out of the live `groups` window are serialized to the [`cache::Config`]'s disk
+	/// tier instead of just dropped, and a [`fetch_group`](TrackConsumer::fetch_group) that misses
+	/// the live window reads them back from disk (or the rolled-up remote tier). The cache lives on
+	/// the shared track state, so every [`TrackConsumer`] of this track serves from it automatically.
+	/// Native-only (`object_store` does not build on wasm).
 	#[cfg(not(target_arch = "wasm32"))]
-	pub fn with_cache(self, disk: cache::Disk) -> Self {
+	pub fn with_cache(self, config: cache::Config) -> Self {
 		if let Ok(mut state) = self.modify() {
-			state.cache = Some(cache::Tiers::spawn(disk));
+			state.cache = Some(cache::Tiers::spawn(config));
 		}
 		self
 	}
@@ -1129,7 +1129,7 @@ impl TrackConsumer {
 			// 2. Durable cache (native only): read across the disk/remote tiers, no lock held.
 			#[cfg(not(target_arch = "wasm32"))]
 			if let Some((store, timescale)) = &cache
-				&& let Ok(Some(group)) = store.read().await.get(sequence).await
+				&& let Ok(Some(group)) = store.get(sequence).await
 				&& let Ok(consumer) = group.produce(*timescale)
 			{
 				return Ok(consumer);
@@ -1719,8 +1719,9 @@ mod test {
 	fn disk_cached_producer() -> TrackProducer {
 		use object_store::memory::InMemory;
 		use object_store::path::Path;
-		let disk = cache::Disk::new(Arc::new(InMemory::new()), Path::from("test"), cache::Bounds::default());
-		TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(1))).with_cache(disk)
+		let disk = cache::Disk::new(Arc::new(InMemory::new()), Path::from("disk"), cache::Bounds::default());
+		TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(1)))
+			.with_cache(cache::Config::new(disk))
 	}
 
 	/// Write+finish a single-frame group at the next sequence.

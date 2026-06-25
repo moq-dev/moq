@@ -14,12 +14,17 @@ tiers hang off the same state. One store therefore backs the track's `TrackProdu
 ```rust
 // module moq_net::cache (native-only types are target-gated to non-wasm)
 
-let disk = cache::Disk::new(store, prefix, bounds)         // object_store + key prefix + bounds
-    .with_remote(remote);                                  // optional rollup target
+let config = cache::Config::new(
+        cache::Disk::new(disk_store, disk_prefix, bounds), // object_store + key prefix + bounds
+    )
+    .with_remote(cache::Remote::new(remote_store, remote_prefix)); // optional rollup tier (own prefix)
 
-let producer = TrackProducer::new(name, info).with_cache(disk);
+let producer = TrackProducer::new(name, info).with_cache(config);
 let consumer = producer.consume();                         // shares the same store
 ```
+
+The disk and remote tiers are separate `cache::Disk` / `cache::Remote` structs (each with its own
+object store and key prefix), bundled in a `cache::Config`.
 
 ## Principles
 
@@ -101,6 +106,13 @@ duration accounting, and the promotion that picks the oldest disk segments over 
 watermark. `store.rs` is the `object_store` glue tying them together. The disk `Bounds` (a
 low/high watermark) govern when disk segments roll up to remote, independent of the RAM retention
 window above.
+
+The `Store` does no I/O under a lock. Its methods take `&self`; the in-RAM index is the only shared
+mutable state, behind a `Mutex` taken solely for the synchronous lookup/update steps and dropped
+before any `.await` (a `std::sync::MutexGuard` isn't `Send`, so a guard held across `.await` would
+not compile). So a slow remote upload during `compact` never blocks a concurrent `get`/fetch. The
+flush and compact paths mutate the index and must be driven serially (one flush driver); fetches
+only read it and run concurrently.
 
 ## Bridging live <-> cached
 
