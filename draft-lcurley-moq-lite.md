@@ -631,7 +631,7 @@ A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive a
 ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
-  Exclude Hop (64),
+  Exclude Hop (i),
 }
 ~~~
 
@@ -653,16 +653,16 @@ It carries metadata that is constant for the lifetime of the stream and applies 
 ~~~
 ANNOUNCE_OK Message {
   Message Length (i)
-  Hop ID (64)
+  Hop ID (i)
   Active Count (i)
 }
 ~~~
 
 **Hop ID**:
-The publisher's own Hop ID, encoded as a 64-bit integer.
-Hop IDs are randomly assigned, so they are carried as fixed-width 64 bits rather than a variable-length integer: a varint would almost never be shorter, and the fixed width buys the full 64-bit space (a varint caps at 62 bits).
+The publisher's own Hop ID.
 This is treated as the implicit trailing entry of every ANNOUNCE_BROADCAST's Hop ID list on this stream; ANNOUNCE_BROADCAST messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
-A value of 0 indicates the publisher does not assign Hop IDs (e.g. when bridging from an older protocol version).
+The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
+A publisher that assigns a Hop ID MUST choose a non-zero value.
 Receivers reconstruct the full path as `ANNOUNCE_BROADCAST.Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
 **Active Count**:
@@ -688,7 +688,7 @@ ANNOUNCE_BROADCAST Message {
   Broadcast Path Suffix (s),
   Epoch (i),
   Hop Count (i),
-  Hop ID (64) ...,
+  Hop ID (i) ...,
 }
 ~~~
 
@@ -720,11 +720,11 @@ A value of 0 means no Hop ID entries are present, indicating either that the ann
 A receiver MUST close the stream with a PROTOCOL_VIOLATION if the Hop Count does not match the number of subsequent Hop ID entries.
 
 **Hop ID**:
-A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher, each encoded as a 64-bit integer (see ANNOUNCE_OK's `Hop ID` for the rationale).
+A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher.
 The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK as `Hop ID`.
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list (since that ID is no longer implicit downstream) and then send its own `Hop ID` in the ANNOUNCE_OK it sends to the downstream subscriber.
 The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`); this total breaks ties between multiple paths to the same broadcast that carry the same `Epoch` (the larger `Epoch` wins outright).
-A Hop ID value of 0 indicates an unknown or bridged relay hop (e.g. when bridging from an older protocol version that does not assign Hop IDs); the Hop Count still reflects the total number of entries including unknown hops.
+A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
 
 
 ## SUBSCRIBE
@@ -1065,7 +1065,6 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
 - Allowed a duplicate `active` ANNOUNCE_BROADCAST to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE_BROADCAST). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
 - Added ANNOUNCE_OK message, sent once at the head of the Announce Stream response. Carries the publisher's `Hop ID` (hoisted out of every ANNOUNCE_BROADCAST's Hop ID list) and an `Active Count` so subscribers can batch the initial set instead of reporting each ANNOUNCE_BROADCAST as it trickles in.
-- Encoded `Hop ID` (in ANNOUNCE_BROADCAST and ANNOUNCE_OK) and `Exclude Hop` (in ANNOUNCE_REQUEST) as fixed-width 64-bit integers instead of varints. Hop IDs are random, so a varint would almost never be shorter, and the fixed width restores the 2 bits a 62-bit varint would have cost.
 - Added a mandatory `Timescale` to TRACK_INFO: the units (ticks per second) for every frame timestamp on the Track. It MUST be non-zero — every Track has a media timeline, so the timestamp fields are never conditional on the wire.
 - Added `Timestamp Delta` to FRAME, a zigzag-encoded signed varint delta from the previous frame's timestamp (the first frame's delta is its absolute timestamp).
 - Added `Timestamp` to the QUIC datagram body: the absolute timestamp of the group's single frame.
