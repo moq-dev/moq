@@ -60,6 +60,10 @@ struct State {
 	max_sequence: Option<u64>,
 	final_sequence: Option<u64>,
 	abort: Option<Error>,
+	/// Per-track override for how long evicted-eligible groups are retained.
+	/// `None` falls back to [`MAX_GROUP_AGE`]. Lets a publisher trade memory for
+	/// a deeper late-join / replay window.
+	max_group_age: Option<std::time::Duration>,
 }
 
 impl State {
@@ -169,6 +173,7 @@ impl State {
 	/// When max_sequence is at the front, we skip past it and tombstone expired groups
 	/// behind it.
 	fn evict_expired(&mut self, now: tokio::time::Instant) {
+		let max_group_age = self.max_group_age.unwrap_or(MAX_GROUP_AGE);
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
@@ -176,7 +181,7 @@ impl State {
 				continue;
 			}
 
-			if now.duration_since(*created_at) <= MAX_GROUP_AGE {
+			if now.duration_since(*created_at) <= max_group_age {
 				break;
 			}
 
@@ -223,6 +228,15 @@ impl TrackProducer {
 			info,
 			state: kio::Producer::default(),
 		}
+	}
+
+	/// Override how long groups are retained in the cache before eviction
+	/// (default [`MAX_GROUP_AGE`]). A larger value gives late-joining
+	/// subscribers a deeper replay window at the cost of memory. The
+	/// max-sequence (latest) group is always retained regardless.
+	pub fn set_max_group_age(&mut self, age: std::time::Duration) -> Result<()> {
+		self.modify()?.max_group_age = Some(age);
+		Ok(())
 	}
 
 	/// Create a new group with the given sequence number.
@@ -782,6 +796,37 @@ mod test {
 			assert!(!state.duplicates.contains(&1));
 			assert!(!state.duplicates.contains(&2));
 			assert!(state.duplicates.contains(&3));
+		}
+	}
+
+	#[tokio::test]
+	async fn set_max_group_age_extends_retention() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+		// Retain groups far longer than the default.
+		let window = MAX_GROUP_AGE + Duration::from_secs(30);
+		producer.set_max_group_age(window).unwrap();
+
+		producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1
+
+		// Past the *default* threshold but within the override: nothing evicted.
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		producer.append_group().unwrap(); // seq 2 (triggers an eviction pass)
+		{
+			let state = producer.state.read();
+			assert_eq!(live_groups(&state), 3, "override should keep groups past 5s");
+			assert_eq!(first_live_sequence(&state), 0);
+		}
+
+		// Past the override window: the old groups now evict (seq 2 is kept as max).
+		tokio::time::advance(window + Duration::from_secs(1)).await;
+		producer.append_group().unwrap(); // seq 3
+		{
+			let state = producer.state.read();
+			assert_eq!(live_groups(&state), 1);
+			assert_eq!(first_live_sequence(&state), 3);
 		}
 	}
 
