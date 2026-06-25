@@ -304,6 +304,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					probe: lite::ProbeLevel::Report,
 					path: None,
 				};
+				let path = client_setup.path.clone();
 				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
@@ -314,7 +315,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					our_setup,
 					Some(client_setup),
 				)?;
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
+				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw).with_path(path));
 			}
 			Handshake::Legacy {
 				session,
@@ -552,5 +553,13 @@ mod tests {
 		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_group(), lite05_setup(Some("/team/room"))]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), Some("/team/room"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn established_session_carries_lite05_path() {
+		// The path survives `ok()` onto the established session.
+		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_setup(Some("/team/room"))]);
+		let session = Server::new().accept(session).await.unwrap();
+		assert_eq!(session.path(), Some("/team/room"));
 	}
 }

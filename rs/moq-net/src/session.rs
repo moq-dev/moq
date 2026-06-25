@@ -52,6 +52,7 @@ pub struct ConnectionStats {
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 	version: Version,
+	path: Option<String>,
 	send_bandwidth: Option<BandwidthConsumer>,
 	recv_bandwidth: Option<BandwidthConsumer>,
 	closed: bool,
@@ -81,15 +82,34 @@ impl Session {
 		Self {
 			session: Arc::new(session),
 			version,
+			path: None,
 			send_bandwidth,
 			recv_bandwidth,
 			closed: false,
 		}
 	}
 
+	/// Attach the request path the peer advertised in its SETUP (lite-05 over a
+	/// URL-less transport). Set by [`crate::Server::accept`] / the accept request.
+	pub(super) fn with_path(mut self, path: Option<String>) -> Self {
+		self.path = path;
+		self
+	}
+
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
+	}
+
+	/// The request path the peer addressed, or `None` if it provided none.
+	///
+	/// On URL-less transports (native QUIC, qmux over TCP/TLS/UDS) this is the path the
+	/// client advertised in the lite-05 SETUP. URL-carrying transports (WebTransport,
+	/// WebSocket) put the path in the connection URL, which is not visible at this layer
+	/// yet, so this currently returns `None` for them; read the URL from the transport
+	/// instead until `web-transport` surfaces it here.
+	pub fn path(&self) -> Option<&str> {
+		self.path.as_deref()
 	}
 
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
