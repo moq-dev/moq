@@ -221,27 +221,31 @@ fn spawn_session<S>(session: S, cluster: Cluster, tier: moq_net::Tier)
 where
 	S: web_transport_trait::Session,
 {
-	// Full access to everything under the empty root.
-	let token = AuthToken::unrestricted(moq_net::Path::new("").to_owned());
-	let publish = cluster.publisher(&token);
-	let subscribe = cluster.subscriber(&token);
-	let stats = cluster.stats.tier(tier);
-
 	let serve = async move {
+		// Read the SETUP first so a trusted worker can scope its grant to a path
+		// (e.g. `tcp://relay/team`). No path means the empty root: everything.
+		let request = moq_net::Server::new().accept_request(session).await?;
+		let root = moq_net::Path::new(request.path().unwrap_or_default()).to_owned();
+
+		// Full access within `root`.
+		let token = AuthToken::unrestricted(root.clone());
+		let publish = cluster.publisher(&token);
+		let subscribe = cluster.subscriber(&token);
+
 		// subscribe/publish look backwards on purpose: see connection.rs. We publish
 		// the tracks the client may subscribe to, and subscribe to what it may publish.
 		// Only set the side the token grants; moq-net defaults the unset side to a
 		// fresh no-op origin.
-		let mut server = moq_net::Server::new().with_stats(stats);
+		let mut request = request.with_stats(cluster.stats.tier(tier));
 		if let Some(subscribe) = subscribe {
-			server = server.with_publisher(&subscribe);
+			request = request.with_publisher(&subscribe);
 		}
 		if let Some(publish) = publish {
-			server = server.with_subscriber(publish);
+			request = request.with_subscriber(publish);
 		}
-		let session = server.accept(session).await?;
+		let session = request.ok().await?;
 
-		tracing::info!(version = %session.version(), "negotiated");
+		tracing::info!(version = %session.version(), %root, "negotiated");
 		session.closed().await?;
 		anyhow::Ok(())
 	};

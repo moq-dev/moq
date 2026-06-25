@@ -1,10 +1,38 @@
 use crate::{
 	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, StatsHandle,
-	coding::{Stream, Writer},
+	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 };
 
-use super::{Connecting, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version};
+use super::{
+	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
+};
+
+/// Server: read the peer's single SETUP message off its Setup Stream before starting
+/// the session, so the caller can inspect the advertised path (and gate on it) before
+/// serving. lite-05+ only.
+///
+/// Blocks on the peer's Setup Stream, which every lite-05 endpoint opens at startup.
+/// Almost always the first unidirectional stream; any other uni stream that races
+/// ahead of it is `STOP_SENDING`-ed and skipped (we don't support proactive uni
+/// PUBLISH, so nothing legitimate precedes the SETUP today). The eventual home for
+/// out-of-order tolerance is the full session loop with deferred origin binding.
+///
+/// Pass the returned [`Setup`] to [`start`] as its `peer_setup` so PROBE gating still
+/// resolves without re-reading the (consumed) stream.
+pub async fn accept_setup<S: web_transport_trait::Session>(session: &S, version: Version) -> Result<Setup, Error> {
+	loop {
+		let stream = session.accept_uni().await.map_err(Error::from_transport)?;
+		let mut reader = Reader::new(stream, version);
+
+		match reader.decode::<DataType>().await? {
+			DataType::Setup => return reader.decode::<Setup>().await,
+			// A non-SETUP uni stream this early is unexpected (GROUP needs a prior
+			// subscribe). Reject it and keep waiting rather than failing the session.
+			_ => reader.abort(&Error::UnexpectedStream),
+		}
+	}
+}
 
 /// Start a lite session.
 ///
@@ -12,6 +40,9 @@ use super::{Connecting, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber
 /// becomes ready once the initial announce set has been inserted into the subscribe
 /// origin, letting `connect()` block past the startup race. It is ready immediately
 /// when there is nothing to wait on (a version without an initial-set boundary).
+// Internal entry point wiring a session together; the knobs are all distinct and
+// positional clarity beats a one-off config struct here.
+#[allow(clippy::too_many_arguments)]
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to set up the session, after exchanging setup messages.
@@ -28,6 +59,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// The capabilities (and optional request path) we advertise in our SETUP message.
 	// Only sent on versions with a Setup Stream (lite-05+); ignored otherwise.
 	our_setup: Setup,
+	// The peer's SETUP, when it was already read before `start` (e.g. a server that
+	// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
+	// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
+	peer_setup: Option<Setup>,
 ) -> Result<(Option<BandwidthConsumer>, Connecting), Error> {
 	let recv_bw = BandwidthProducer::new();
 
@@ -69,7 +104,13 @@ pub fn start<S: web_transport_trait::Session>(
 	// Required for cross-session cluster loop detection.
 	// Shared slot for the peer's SETUP (lite-05+). The subscriber writes it when it
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
-	let peer_setup = PeerSetup::default();
+	// When the caller already read it (a gated server accept), seed the slot so the
+	// Setup stream isn't expected on the wire again.
+	let peer_setup_slot = PeerSetup::default();
+	if let Some(setup) = peer_setup {
+		peer_setup_slot.set(setup);
+	}
+	let peer_setup = peer_setup_slot;
 
 	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
 	// a failure here just means the peer falls back to "no capabilities" for us.

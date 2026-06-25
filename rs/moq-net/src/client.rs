@@ -171,6 +171,7 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
 					our_setup,
+					None,
 				)?;
 
 				// Block until the initial announce set has landed (Lite05 reports it
@@ -193,6 +194,7 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite04,
 					lite::Setup::default(),
+					None,
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
@@ -214,6 +216,7 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite03,
 					lite::Setup::default(),
+					None,
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
@@ -266,6 +269,7 @@ impl Client {
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
 					lite::Setup::default(),
+					None,
 				)?;
 
 				// Block until the initial announce set has landed (for versions that

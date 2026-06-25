@@ -287,21 +287,38 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
+	/// The moq client builder, with `path` advertised in the lite-05 SETUP if present.
+	#[cfg(any(feature = "tcp", feature = "uds"))]
+	fn moq_with_path(&self, path: Option<String>) -> moq_net::Client {
+		match path {
+			Some(path) => self.moq.clone().with_path(path),
+			None => self.moq.clone(),
+		}
+	}
+
 	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
+		//
+		// qmux carries no request URI, so the resource path travels in the lite-05
+		// SETUP. The URL path is the resource for `tcp://`.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
+			let path = setup_path(&url, false);
 			let session = crate::tcp::connect(url, &self.versions.alpns()).await?;
-			return Ok(self.moq.connect(session).await?);
+			return Ok(self.moq_with_path(path).connect(session).await?);
 		}
 
 		// Unix domain socket (qmux, no TLS). Same-host only; the server can
 		// authenticate us by uid/gid via SO_PEERCRED.
+		//
+		// The URL path is the socket location, so the resource path rides in the
+		// `?path=` query and travels in the lite-05 SETUP.
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
+			let path = setup_path(&url, true);
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			return Ok(self.moq.connect(session).await?);
+			return Ok(self.moq_with_path(path).connect(session).await?);
 		}
 
 		#[cfg(feature = "iroh")]
@@ -395,6 +412,22 @@ impl Client {
 			TransportRace::Quic(quic) => Ok(self.moq.connect(quic).await?),
 			TransportRace::WebSocket(websocket) => Ok(self.moq.connect(websocket).await?),
 		}
+	}
+}
+
+/// The resource path to advertise in the lite-05 SETUP, derived from the dial URL.
+///
+/// When `path_is_address` (Unix sockets, whose URL path is the socket file), the
+/// resource path rides in the `?path=` query; otherwise the URL path is it.
+#[cfg(any(feature = "tcp", feature = "uds"))]
+fn setup_path(url: &Url, path_is_address: bool) -> Option<String> {
+	if path_is_address {
+		url.query_pairs()
+			.find(|(k, _)| k == "path")
+			.map(|(_, v)| v.into_owned())
+	} else {
+		let path = url.path();
+		(!path.is_empty()).then(|| path.to_string())
 	}
 }
 
