@@ -239,6 +239,10 @@ impl Client {
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
+		if let Some(path) = &self.setup_path {
+			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
+		}
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {

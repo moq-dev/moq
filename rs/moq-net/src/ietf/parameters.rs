@@ -211,7 +211,6 @@ impl Parameters {
 		self.vars.insert(kind, value);
 	}
 
-	#[cfg(test)]
 	pub fn get_bytes(&self, kind: ParameterBytes) -> Option<&[u8]> {
 		self.bytes.get(&kind).map(|v| v.as_slice())
 	}

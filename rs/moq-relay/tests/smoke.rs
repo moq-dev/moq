@@ -92,10 +92,18 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 }
 
 fn client() -> moq_native::Client {
+	client_version(None)
+}
+
+/// A client pinned to a single MoQ version, or all versions when `None`.
+fn client_version(version: Option<moq_net::Version>) -> moq_native::Client {
 	let mut config = moq_native::ClientConfig::default();
 	config.tls.disable_verify = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
 	config.websocket.delay = None;
+	if let Some(version) = version {
+		config.version = vec![version];
+	}
 	config.init().expect("client init")
 }
 
@@ -516,11 +524,23 @@ async fn internal_unix_round_trip() {
 	handle.abort();
 }
 
-/// Publisher and subscriber that announce/observe `broadcast` over the internal
-/// listener at `pub_url` / `sub_url`. Returns the path the subscriber sees the
-/// publisher's broadcast announced at, proving whether the request path reached
-/// the server (it scopes the publisher's grant to that root).
-async fn path_round_trip(pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
+/// The versions whose SETUP carries a request path that the server reads today:
+/// moq-lite-05 (Setup Stream) and the legacy moq-transport drafts (14-16, in-band
+/// SETUP parameter). draft-17/18 send the path too but the server doesn't surface
+/// it yet (the SETUP is read in the background), so they're left out for now.
+fn path_versions() -> Vec<moq_net::Version> {
+	["moq-lite-05-wip", "moq-transport-14"]
+		.iter()
+		.map(|alpn| alpn.parse().expect("parse version alpn"))
+		.collect()
+}
+
+/// Publisher and subscriber (both pinned to `version`) that announce/observe
+/// `broadcast` over the internal listener at `pub_url` / `sub_url`. Returns the
+/// path the subscriber sees the publisher's broadcast announced at, proving
+/// whether the request path reached the server (it scopes the publisher's grant
+/// to that root).
+async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
 	let pub_origin = Origin::random().produce();
 	let mut bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
 	let mut track = bc.create_track("video", None).expect("create track");
@@ -528,14 +548,16 @@ async fn path_round_trip(pub_url: url::Url, sub_url: url::Url, broadcast: &str) 
 	group.write_frame_now(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(TIMEOUT, client().with_publisher(pub_origin.consume()).connect(pub_url))
+	let pub_client = client_version(Some(version)).with_publisher(pub_origin.consume());
+	let pub_session = tokio::time::timeout(TIMEOUT, pub_client.connect(pub_url))
 		.await
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
 
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(sub_url))
+	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
+	let sub_session = tokio::time::timeout(TIMEOUT, sub_client.connect(sub_url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -554,7 +576,8 @@ async fn path_round_trip(pub_url: url::Url, sub_url: url::Url, broadcast: &str) 
 
 /// A `tcp://host:port/<path>` client advertises `<path>` in the SETUP; the relay
 /// scopes its grant to that root, so the publisher's broadcast lands prefixed.
-/// Proves the request path can be specified and reaches the server over plain TCP.
+/// Proves the request path can be specified and reaches the server over plain TCP,
+/// across every version whose SETUP carries a path.
 #[tokio::test]
 async fn internal_tcp_path_reaches_server() {
 	let (port, handle) = spawn_internal_relay().await;
@@ -563,18 +586,20 @@ async fn internal_tcp_path_reaches_server() {
 	let pub_url: url::Url = format!("tcp://127.0.0.1:{port}/room").parse().expect("parse url");
 	let sub_url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let announced = path_round_trip(pub_url, sub_url, "test").await;
-	assert_eq!(
-		announced, "room/test",
-		"the SETUP path should scope the publisher's grant"
-	);
+	for version in path_versions() {
+		let announced = path_round_trip(version, pub_url.clone(), sub_url.clone(), "test").await;
+		assert_eq!(
+			announced, "room/test",
+			"the SETUP path should scope the publisher's grant ({version})"
+		);
+	}
 
 	handle.abort();
 }
 
 /// `unix://<socket>` carries no resource path in its URL (that's the socket), so
-/// the request path rides in the `?path=` query. Same assertion as TCP: the path
-/// reaches the server and scopes the publisher's grant.
+/// the request path rides in the `?path=` query. Same assertion as TCP, across
+/// every version whose SETUP carries a path.
 #[cfg(unix)]
 #[tokio::test]
 async fn internal_unix_path_reaches_server() {
@@ -585,11 +610,13 @@ async fn internal_unix_path_reaches_server() {
 		.expect("parse url");
 	let sub_url: url::Url = format!("unix://{}", path.display()).parse().expect("parse url");
 
-	let announced = path_round_trip(pub_url, sub_url, "test").await;
-	assert_eq!(
-		announced, "room/test",
-		"the SETUP path should scope the publisher's grant"
-	);
+	for version in path_versions() {
+		let announced = path_round_trip(version, pub_url.clone(), sub_url.clone(), "test").await;
+		assert_eq!(
+			announced, "room/test",
+			"the SETUP path should scope the publisher's grant ({version})"
+		);
+	}
 
 	handle.abort();
 }

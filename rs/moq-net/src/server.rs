@@ -74,14 +74,17 @@ impl Server {
 		self.accept_request(session).await?.ok().await
 	}
 
-	/// Two-phase accept: negotiate the version and, for lite-05, read the client's
-	/// SETUP so [`Request::path`] is available before the caller commits to
-	/// [`Request::ok`] or [`Request::close`]. Mirrors the WebTransport-level
-	/// `Request` in moq-native.
+	/// Begin the MoQ handshake, pausing once the client's request path is known so
+	/// the caller can authorize/scope before serving.
 	///
-	/// Every regime defers its session start to `ok()`, so origins set on the
-	/// Request (after inspecting the path) always take effect. The path is surfaced
-	/// for lite-05, whose Setup Stream carries it; other versions report `None`.
+	/// Reads the client's SETUP (the in-band path lives there on URL-less transports),
+	/// then returns a [`Request`]: inspect [`path`](Request::path), set the origins to
+	/// serve, and call [`ok`](Request::ok) or [`close`](Request::close). Session start
+	/// is deferred to `ok()`, so origins set on the `Request` always take effect.
+	///
+	/// The path is surfaced for moq-lite-05 and the legacy moq-transport drafts
+	/// (14-16). draft-17/18 also send a path, but the server reads their SETUP in the
+	/// background and doesn't surface it yet, so it reports `None` there for now.
 	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
 		// Regimes without a path to read defer to `ok()` without surfacing one.
 		let deferred = |handshake| Request {
@@ -182,18 +185,26 @@ impl Server {
 			.find(|v| supported.contains(v))
 			.ok_or(Error::Version)?;
 
-		// Pull the client's max request ID out now (IETF only) so `ok()` doesn't
-		// re-decode the consumed parameters.
-		let request_id_max = match version {
-			Version::Ietf(v) => ietf::Parameters::decode(&mut client.parameters, v)?
-				.get_varint(ietf::ParameterVarInt::MaxRequestId)
-				.map(ietf::RequestId),
-			Version::Lite(_) => None,
+		// Pull the request path and max request ID out now (IETF only) so `ok()`
+		// doesn't re-decode the consumed parameters. moq-transport carries the path
+		// in its SETUP just like lite-05.
+		let (path, request_id_max) = match version {
+			Version::Ietf(v) => {
+				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
+				let path = params
+					.get_bytes(ietf::ParameterBytes::Path)
+					.map(|b| String::from_utf8_lossy(b).into_owned());
+				let request_id_max = params
+					.get_varint(ietf::ParameterVarInt::MaxRequestId)
+					.map(ietf::RequestId);
+				(path, request_id_max)
+			}
+			Version::Lite(_) => (None, None),
 		};
 
 		Ok(Request {
 			server: self.clone(),
-			path: None,
+			path,
 			handshake: Handshake::Legacy {
 				session,
 				stream,
@@ -220,12 +231,15 @@ pub struct Request<S: web_transport_trait::Session> {
 /// The handshake state captured at the pause point. Every variant defers its
 /// session start to [`Request::ok`] so origins set on the Request still apply.
 enum Handshake<S: web_transport_trait::Session> {
-	/// Modern IETF (17/18): no readable client SETUP (exchanged in the background).
+	/// Modern IETF (17/18): the client's SETUP (with its path) is read in the
+	/// background by `ietf::start`, so it isn't surfaced here yet. TODO: read it
+	/// before serving like lite-05 / legacy IETF so `path()` works on 17/18 too.
 	IetfModern { session: S, version: ietf::Version },
 	/// moq-lite 03/04: no Setup Stream.
 	LiteBare { session: S, version: lite::Version },
 	/// Legacy IETF (draft 14-16) and lite 01/02: the client SETUP has been read off
-	/// the bidi stream but the server SETUP hasn't been sent. `ok()` finishes it.
+	/// the bidi stream (including its request path) but the server SETUP hasn't been
+	/// sent. `ok()` finishes it.
 	Legacy {
 		session: S,
 		stream: Stream<S, Version>,
@@ -240,8 +254,9 @@ enum Handshake<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Request<S> {
 	/// The request path the client advertised in its SETUP, if any.
 	///
-	/// Populated for moq-lite 05+ (its Setup Stream carries it). `None` on other
-	/// versions; see the note on [`Server::accept_request`].
+	/// Populated for moq-lite-05 and the legacy moq-transport drafts (14-16);
+	/// `None` on draft-17/18 (not surfaced yet) and versions without an in-band
+	/// path. See the note on [`Server::accept_request`].
 	pub fn path(&self) -> Option<&str> {
 		self.path.as_deref()
 	}
@@ -268,10 +283,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 	/// Accept the session, completing the handshake.
 	pub async fn ok(self) -> Result<Session, Error> {
 		let server = self.server;
+		let path = self.path;
 
 		let (session, mut stream, version, request_id_max) = match self.handshake {
 			Handshake::IetfModern { session, version } => {
-				// Draft-17+: SETUP is exchanged in the background by the session.
+				// Draft-17+: both SETUPs are exchanged in the background by the session.
+				// TODO: read the client's first so its request path reaches `path()`.
 				ietf::start(
 					session.clone(),
 					None,
@@ -304,7 +321,6 @@ impl<S: web_transport_trait::Session> Request<S> {
 					probe: lite::ProbeLevel::Report,
 					path: None,
 				};
-				let path = client_setup.path.clone();
 				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
@@ -374,7 +390,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw))
+		Ok(Session::new(session, version, recv_bw).with_path(path))
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
