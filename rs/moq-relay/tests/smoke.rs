@@ -524,15 +524,21 @@ async fn internal_unix_round_trip() {
 	handle.abort();
 }
 
-/// The versions whose SETUP carries a request path that the server reads today:
-/// moq-lite-05 (Setup Stream) and the legacy moq-transport drafts (14-16, in-band
-/// SETUP parameter). draft-17/18 send the path too but the server doesn't surface
-/// it yet (the SETUP is read in the background), so they're left out for now.
+/// Every version whose SETUP carries a request path the server reads: moq-lite-05
+/// (Setup Stream) and moq-transport 14-18 (the `Path` SETUP parameter, in-band on
+/// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
 fn path_versions() -> Vec<moq_net::Version> {
-	["moq-lite-05-wip", "moq-transport-14"]
-		.iter()
-		.map(|alpn| alpn.parse().expect("parse version alpn"))
-		.collect()
+	[
+		"moq-lite-05-wip",
+		"moq-transport-14",
+		"moq-transport-15",
+		"moq-transport-16",
+		"moq-transport-17",
+		"moq-transport-18",
+	]
+	.iter()
+	.map(|alpn| alpn.parse().expect("parse version alpn"))
+	.collect()
 }
 
 /// Publisher and subscriber (both pinned to `version`) that announce/observe

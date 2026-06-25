@@ -1,6 +1,6 @@
 use crate::{
 	Error, Origin, OriginConsumer, OriginProducer, StatsHandle,
-	coding::{Encode, Reader, Stream, Writer},
+	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
 };
@@ -20,6 +20,13 @@ pub fn start<S: web_transport_trait::Session>(
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	version: Version,
+	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
+	// transports). A server passes `None`.
+	path: Option<String>,
+	// The peer's SETUP stream, when it was already read before `start` (a draft-17+
+	// server that gated on the client's path via [`accept_setup`]). It becomes the
+	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
+	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
@@ -71,7 +78,7 @@ pub fn start<S: web_transport_trait::Session>(
 				web_async::spawn({
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version).await {
+						if let Err(err) = run_setup(session, version, path).await {
 							tracing::warn!(%err, "setup send error");
 						}
 					}
@@ -84,10 +91,21 @@ pub fn start<S: web_transport_trait::Session>(
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();
 
+				// When the peer's SETUP was pre-read (a gated server accept), monitor
+				// GOAWAY on that stream here; otherwise `run_unis` does it when the SETUP
+				// arrives on the wire.
+				let goaway = async move {
+					match peer_setup {
+						Some(reader) => run_goaway(reader.with_version(version), version).await,
+						None => std::future::pending().await,
+					}
+				};
+
 				tokio::select! {
 									Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
 									Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
 									Err(err) = publisher.run() => Err(err),
+									Err(err) = goaway => Err(err),
 									Err(err) = async {
 				let stream = Stream::open(&sub_ns_session, version).await?;
 										if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
@@ -118,8 +136,49 @@ pub fn start<S: web_transport_trait::Session>(
 	Ok(())
 }
 
+/// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
+/// session, returning that stream (it becomes the GOAWAY channel) and the request
+/// path the peer advertised.
+///
+/// Blocks on the peer's Setup Stream; any other uni stream racing ahead of it is
+/// `STOP_SENDING`-ed and skipped (group data needs a prior subscribe, so nothing
+/// legitimate precedes the SETUP at connect). Pass the returned reader to [`start`]
+/// as its `peer_setup` so GOAWAY monitoring continues without re-reading it.
+pub async fn accept_setup<S: web_transport_trait::Session>(
+	session: &S,
+	version: Version,
+) -> Result<(Reader<S::RecvStream, crate::Version>, Option<String>), Error> {
+	let outer_version = crate::Version::Ietf(version);
+
+	loop {
+		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
+		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
+
+		if reader.decode_peek::<u64>().await? != setup::SETUP_V17 {
+			// Not the SETUP (group data this early is unexpected). Reject and keep waiting.
+			reader.abort(&Error::UnexpectedStream);
+			continue;
+		}
+
+		let setup: setup::Setup = reader.decode().await?;
+		let mut bytes = setup.parameters;
+		let path = ietf::Parameters::decode(&mut bytes, version)?
+			.get_bytes(ietf::ParameterBytes::Path)
+			.map(|b| String::from_utf8_lossy(b).into_owned());
+
+		return Ok((reader, path));
+	}
+}
+
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
-async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version) -> Result<(), Error> {
+///
+/// `path` is the request path we advertise (clients on URL-less transports); a
+/// server passes `None`.
+async fn run_setup<S: web_transport_trait::Session>(
+	session: S,
+	version: Version,
+	path: Option<String>,
+) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
 	let send = session.open_uni().await.map_err(Error::from_transport)?;
@@ -127,6 +186,9 @@ async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version
 
 	let mut parameters = ietf::Parameters::default();
 	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+	if let Some(path) = path {
+		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
+	}
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;

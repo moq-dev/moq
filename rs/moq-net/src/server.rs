@@ -1,7 +1,7 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Consume,
 	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
-	coding::{Decode, Encode, Stream},
+	coding::{Decode, Encode, Reader, Stream},
 	ietf, lite, setup,
 };
 
@@ -82,9 +82,8 @@ impl Server {
 	/// serve, and call [`ok`](Request::ok) or [`close`](Request::close). Session start
 	/// is deferred to `ok()`, so origins set on the `Request` always take effect.
 	///
-	/// The path is surfaced for moq-lite-05 and the legacy moq-transport drafts
-	/// (14-16). draft-17/18 also send a path, but the server reads their SETUP in the
-	/// background and doesn't surface it yet, so it reports `None` there for now.
+	/// The path is surfaced for moq-lite-05 and every moq-transport draft (14-18);
+	/// it's `None` on versions with no in-band request path (e.g. lite 01-04).
 	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
 		// Regimes without a path to read defer to `ok()` without surfacing one.
 		let deferred = |handshake| Request {
@@ -98,19 +97,13 @@ impl Server {
 				self.versions
 					.select(Version::Ietf(ietf::Version::Draft18))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::IetfModern {
-					session,
-					version: ietf::Version::Draft18,
-				}));
+				return self.accept_ietf_modern(session, ietf::Version::Draft18).await;
 			}
 			Some(ALPN_17) => {
 				self.versions
 					.select(Version::Ietf(ietf::Version::Draft17))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::IetfModern {
-					session,
-					version: ietf::Version::Draft17,
-				}));
+				return self.accept_ietf_modern(session, ietf::Version::Draft17).await;
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -213,6 +206,25 @@ impl Server {
 			},
 		})
 	}
+
+	/// Read a draft-17/18 client's SETUP (with its request path) off its uni stream,
+	/// then pause. `ok()` starts the session and hands the stream back for GOAWAY.
+	async fn accept_ietf_modern<S: web_transport_trait::Session>(
+		&self,
+		session: S,
+		version: ietf::Version,
+	) -> Result<Request<S>, Error> {
+		let (peer_setup, path) = ietf::accept_setup(&session, version).await?;
+		Ok(Request {
+			server: self.clone(),
+			path,
+			handshake: Handshake::IetfModern {
+				session,
+				version,
+				peer_setup,
+			},
+		})
+	}
 }
 
 /// A paused server-side handshake.
@@ -231,10 +243,14 @@ pub struct Request<S: web_transport_trait::Session> {
 /// The handshake state captured at the pause point. Every variant defers its
 /// session start to [`Request::ok`] so origins set on the Request still apply.
 enum Handshake<S: web_transport_trait::Session> {
-	/// Modern IETF (17/18): the client's SETUP (with its path) is read in the
-	/// background by `ietf::start`, so it isn't surfaced here yet. TODO: read it
-	/// before serving like lite-05 / legacy IETF so `path()` works on 17/18 too.
-	IetfModern { session: S, version: ietf::Version },
+	/// Modern IETF (17/18): the client's SETUP (with its request path) has been read
+	/// off its uni stream; `ok()` starts the session, handing that stream back for
+	/// GOAWAY monitoring.
+	IetfModern {
+		session: S,
+		version: ietf::Version,
+		peer_setup: Reader<S::RecvStream, Version>,
+	},
 	/// moq-lite 03/04: no Setup Stream.
 	LiteBare { session: S, version: lite::Version },
 	/// Legacy IETF (draft 14-16) and lite 01/02: the client SETUP has been read off
@@ -254,9 +270,8 @@ enum Handshake<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Request<S> {
 	/// The request path the client advertised in its SETUP, if any.
 	///
-	/// Populated for moq-lite-05 and the legacy moq-transport drafts (14-16);
-	/// `None` on draft-17/18 (not surfaced yet) and versions without an in-band
-	/// path. See the note on [`Server::accept_request`].
+	/// Populated for moq-lite-05 and moq-transport 14-18; `None` on versions without
+	/// an in-band request path. See the note on [`Server::accept_request`].
 	pub fn path(&self) -> Option<&str> {
 		self.path.as_deref()
 	}
@@ -286,9 +301,13 @@ impl<S: web_transport_trait::Session> Request<S> {
 		let path = self.path;
 
 		let (session, mut stream, version, request_id_max) = match self.handshake {
-			Handshake::IetfModern { session, version } => {
-				// Draft-17+: both SETUPs are exchanged in the background by the session.
-				// TODO: read the client's first so its request path reaches `path()`.
+			Handshake::IetfModern {
+				session,
+				version,
+				peer_setup,
+			} => {
+				// The client's SETUP was read in `accept_request`; hand the stream back
+				// for GOAWAY. A server never advertises a path, hence `None`.
 				ietf::start(
 					session.clone(),
 					None,
@@ -298,9 +317,11 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.subscribe,
 					server.stats,
 					version,
+					None,
+					Some(peer_setup),
 				)?;
 				tracing::debug!(?version, "connected");
-				return Ok(Session::new(session, version.into(), None));
+				return Ok(Session::new(session, version.into(), None).with_path(path));
 			}
 			Handshake::LiteBare { session, version } => {
 				let (recv_bw, _connecting) = lite::start(
@@ -376,6 +397,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			}
 			Version::Ietf(v) => {
 				let stream = stream.with_version(v);
+				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
 				ietf::start(
 					session.clone(),
 					Some(stream),
@@ -385,6 +407,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.subscribe,
 					server.stats,
 					v,
+					None,
+					None,
 				)?;
 				None
 			}

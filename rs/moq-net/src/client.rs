@@ -95,6 +95,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17+: SETUP is exchanged in the background by the session.
+				// We advertise the request path in our SETUP for URL-less transports.
 				ietf::start(
 					session.clone(),
 					None,
@@ -104,6 +105,8 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft18,
+					self.setup_path.clone(),
+					None,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -116,6 +119,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17+: SETUP is exchanged in the background by the session.
+				// We advertise the request path in our SETUP for URL-less transports.
 				ietf::start(
 					session.clone(),
 					None,
@@ -125,6 +129,8 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft17,
+					self.setup_path.clone(),
+					None,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -290,6 +296,7 @@ impl Client {
 					.map(ietf::RequestId);
 
 				let stream = stream.with_version(v);
+				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				ietf::start(
 					session.clone(),
 					Some(stream),
@@ -299,6 +306,8 @@ impl Client {
 					self.subscribe.clone(),
 					self.stats.clone(),
 					v,
+					None,
+					None,
 				)?;
 				None
 			}
