@@ -278,6 +278,15 @@ impl Client {
 		Ok(session)
 	}
 
+	/// The moq client builder, with `path` advertised in the SETUP if present.
+	#[cfg(any(feature = "tcp", feature = "uds"))]
+	fn moq_with_path(&self, path: Option<String>) -> moq_net::Client {
+		match path {
+			Some(path) => self.moq.clone().with_path(path),
+			None => self.moq.clone(),
+		}
+	}
+
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -287,15 +296,6 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	/// The moq client builder, with `path` advertised in the lite-05 SETUP if present.
-	#[cfg(any(feature = "tcp", feature = "uds"))]
-	fn moq_with_path(&self, path: Option<String>) -> moq_net::Client {
-		match path {
-			Some(path) => self.moq.clone().with_path(path),
-			None => self.moq.clone(),
-		}
-	}
-
 	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.

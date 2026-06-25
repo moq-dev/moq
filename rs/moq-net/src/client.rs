@@ -68,12 +68,13 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in the lite-05 SETUP message.
+	/// Set the request path to advertise in the SETUP (moq-lite-05 and moq-transport
+	/// 14-18).
 	///
 	/// Required on transports that carry no request URI (native QUIC, qmux over
 	/// TCP/TLS) so the server learns which path the client wants; omit it on bindings
-	/// that already carry a URI (WebTransport). Ignored by the IETF transport and by
-	/// pre-lite-05 versions, which have no SETUP message.
+	/// that already carry a URI (WebTransport). Ignored by versions with no in-band
+	/// request path (lite 01-04).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		self.setup_path = Some(path.into());
 		self
