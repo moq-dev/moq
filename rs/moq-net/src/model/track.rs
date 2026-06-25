@@ -1066,7 +1066,10 @@ impl TrackConsumer {
 	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`TrackDynamic`]
 	/// will serve on demand.
 	pub fn get_group(&self, sequence: u64) -> Option<GroupConsumer> {
-		self.state.read().cached_group(sequence)
+		let mut group = self.state.read().cached_group(sequence)?;
+		group.set_meter(self.meter.clone());
+		self.meter.add_group();
+		Some(group)
 	}
 
 	/// Fetch a single past group, without holding a live subscription.
@@ -1102,6 +1105,7 @@ impl TrackConsumer {
 		Ok(kio::Pending::new(TrackFetch {
 			state: self.state.clone(),
 			sequence,
+			meter: self.meter.clone(),
 		}))
 	}
 
@@ -1244,6 +1248,7 @@ impl GroupRequest {
 pub struct TrackFetch {
 	state: kio::Consumer<TrackState>,
 	sequence: u64,
+	meter: Arc<Usage>,
 }
 
 impl kio::Future for TrackFetch {
@@ -1252,12 +1257,14 @@ impl kio::Future for TrackFetch {
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		// `poll_fetch` already yields a `Result<GroupConsumer>` (group, or NotFound /
 		// abort); the outer error is the channel closing without one.
-		Poll::Ready(
-			match ready!(self.state.poll(waiter, |state| state.poll_fetch(self.sequence))) {
-				Ok(res) => res,
-				Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
-			},
-		)
+		let mut group = match ready!(self.state.poll(waiter, |state| state.poll_fetch(self.sequence))) {
+			Ok(res) => res?,
+			Err(closed) => return Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+		};
+
+		group.set_meter(self.meter.clone());
+		self.meter.add_group();
+		Poll::Ready(Ok(group))
 	}
 }
 
@@ -1408,7 +1415,13 @@ impl TrackSubscriber {
 
 	/// Poll for the group with the given sequence, without blocking.
 	pub fn poll_get_group(&self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
-		self.poll(waiter, |state| state.poll_get_group(sequence))
+		let Some(mut group) = ready!(self.poll(waiter, |state| state.poll_get_group(sequence))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		group.set_meter(self.meter.clone());
+		self.meter.add_group();
+		Poll::Ready(Ok(Some(group)))
 	}
 
 	/// Wait until the group with the given sequence becomes available.
@@ -2567,6 +2580,59 @@ mod test {
 
 		// Nothing was queued for the dynamic handler to serve.
 		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
+	}
+
+	#[tokio::test]
+	async fn consumer_get_group_counts_egress() {
+		let counts = std::sync::Arc::new(Usage::default());
+		let mut producer = TrackProducer::new("test", None);
+
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group.finish().unwrap();
+
+		let consumer = producer.consume().with_meter(counts.clone());
+		let mut group = consumer.get_group(0).expect("cached group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap()[..], b"hello");
+
+		assert_eq!(usage(&counts), (1, 1, 5));
+	}
+
+	#[tokio::test]
+	async fn consumer_fetch_group_counts_egress() {
+		let counts = std::sync::Arc::new(Usage::default());
+		let producer = TrackProducer::new("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume().with_meter(counts.clone());
+
+		let pending = consumer.fetch_group(5, None).unwrap();
+		let request = dynamic.requested_group().await.unwrap();
+		let mut group = request.accept(None).unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group.finish().unwrap();
+
+		let mut fetched = pending.await.unwrap();
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap()[..], b"hello");
+
+		assert_eq!(usage(&counts), (1, 1, 5));
+	}
+
+	#[tokio::test]
+	async fn subscriber_get_group_counts_egress() {
+		let counts = std::sync::Arc::new(Usage::default());
+		let mut producer = TrackProducer::new("test", None);
+
+		let mut written = producer.append_group().unwrap();
+		written.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		written.finish().unwrap();
+		producer.finish().unwrap();
+
+		let consumer = producer.consume().with_meter(counts.clone());
+		let subscriber = consumer.subscribe(None).unwrap().await.unwrap();
+		let mut group = subscriber.get_group(0).await.unwrap().expect("cached group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap()[..], b"hello");
+
+		assert_eq!(usage(&counts), (1, 1, 5));
 	}
 
 	#[tokio::test]

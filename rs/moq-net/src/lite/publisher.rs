@@ -677,7 +677,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let broadcast = broadcast?.await?;
+		// Attach the per-viewer egress meter to the broadcast consumer so the
+		// model counts this one-shot fetch the same way it counts a live subscribe.
+		// Holding `track_stats` keeps the stats entry alive for the fetch lifetime.
+		let broadcast = broadcast?.await?.with_meter(track_stats.meter());
 		let track = broadcast.track(&fetch.track)?;
 
 		let group = track
@@ -706,25 +709,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Compression::None
 		};
 
-		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
-		// the codec/timescale from TRACK_INFO and the group sequence from its request.
-		track_stats.group();
-
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
 		// delta-timestamp baseline resets to 0, so the first served frame's delta is
 		// its absolute timestamp (the subscriber decodes against the same baseline).
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
-			write_fetch_frame(
-				&mut stream.writer,
-				&mut frame,
-				compression,
-				timescale,
-				&mut prev_ts,
-				&track_stats,
-			)
-			.await?;
+			write_fetch_frame(&mut stream.writer, &mut frame, compression, timescale, &mut prev_ts).await?;
 			index += 1;
 		}
 
@@ -788,28 +779,21 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
 	match compression {
 		Compression::None => {
 			writer.encode(&frame.size).await?;
-			track_stats.frame();
 			while let Some(mut chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
 				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
 			}
 		}
 		compression => {
 			let payload = frame.read_all().await?;
 			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
-			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
+			writer.encode(&(chunk.len() as u64)).await?;
 			writer.write_all(&mut chunk).await?;
-			track_stats.bytes(n);
 		}
 	}
 
