@@ -298,7 +298,6 @@ impl<S: web_transport_trait::Session> Request<S> {
 	/// Accept the session, completing the handshake.
 	pub async fn ok(self) -> Result<Session, Error> {
 		let server = self.server;
-		let path = self.path;
 
 		let (session, mut stream, version, request_id_max) = match self.handshake {
 			Handshake::IetfModern {
@@ -321,7 +320,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					Some(peer_setup),
 				)?;
 				tracing::debug!(?version, "connected");
-				return Ok(Session::new(session, version.into(), None).with_path(path));
+				return Ok(Session::new(session, version.into(), None));
 			}
 			Handshake::LiteBare { session, version } => {
 				let (recv_bw, _connecting) = lite::start(
@@ -352,7 +351,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					our_setup,
 					Some(client_setup),
 				)?;
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw).with_path(path));
+				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
 			}
 			Handshake::Legacy {
 				session,
@@ -414,7 +413,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw).with_path(path))
+		Ok(Session::new(session, version, recv_bw))
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
@@ -593,13 +592,5 @@ mod tests {
 		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_group(), lite05_setup(Some("/team/room"))]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), Some("/team/room"));
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn established_session_carries_lite05_path() {
-		// The path survives `ok()` onto the established session.
-		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_setup(Some("/team/room"))]);
-		let session = Server::new().accept(session).await.unwrap();
-		assert_eq!(session.path(), Some("/team/room"));
 	}
 }
