@@ -18,7 +18,7 @@
 import "./highlight";
 import "@moq/publish/element"; // defines <moq-publish>
 import "@moq/publish/ui"; // defines <moq-publish-ui>
-import { type Audio, Json, Net, Signals } from "@moq/publish";
+import { type Audio, Net, Signals } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
 import { formatBitrate, formatFps, graph } from "./viz";
@@ -303,18 +303,20 @@ ui.run((effect) => {
 // We serve the metadata as a separate `meta.json` track *within* the broadcast,
 // using `broadcast.net` (the underlying producer the element exposes). `net` is
 // recreated on each (re)connection, so an effect (re)creates the track and seeds
-// it with the latest value; a long cache window lets a late viewer replay the
-// most recent snapshot. The track is advertised in the catalog's `metadata` list
-// so the watch side knows to subscribe.
+// it with the latest value. The default local track retention is only about 5
+// seconds, so we refresh the latest snapshot periodically while live to keep it
+// replayable for late viewers. The track is advertised in the catalog's
+// `metadata` list so the watch side knows to subscribe.
 const META_TRACK = "meta.json";
+const META_REFRESH_MS = 4_000;
 
 // The latest metadata, retained across reconnects so each fresh track is seeded with it.
 let currentMeta: unknown = { title: "My Broadcast", location: "earth", note: "edit me" };
-let activeMeta: Json.Producer<unknown> | undefined;
+let activeMeta: ((value: unknown) => void) | undefined;
 
 const setMeta = (value: unknown) => {
 	currentMeta = value;
-	activeMeta?.update(value);
+	activeMeta?.(value);
 };
 
 new Signals.Effect().run((effect) => {
@@ -324,11 +326,12 @@ new Signals.Effect().run((effect) => {
 	const track = net.createTrack(META_TRACK);
 	effect.cleanup(() => track.close());
 
-	const producer = new Json.Producer<unknown>(track);
-	producer.update(currentMeta);
-	activeMeta = producer;
+	const publishMeta = (value: unknown) => track.writeString(JSON.stringify(value));
+	publishMeta(currentMeta);
+	activeMeta = publishMeta;
+	effect.interval(() => publishMeta(currentMeta), META_REFRESH_MS);
 	effect.cleanup(() => {
-		if (activeMeta === producer) activeMeta = undefined;
+		if (activeMeta === publishMeta) activeMeta = undefined;
 	});
 });
 

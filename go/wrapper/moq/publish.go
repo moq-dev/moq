@@ -2,6 +2,7 @@ package moq
 
 import (
 	"context"
+	"errors"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
@@ -28,6 +29,9 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 // WithCache attaches a shared Cache, overriding the default cache and cascading onto every track.
 // Pass the same Cache to several broadcasts to pool one retention budget across them.
 func (b *BroadcastProducer) WithCache(cache *Cache) (*BroadcastProducer, error) {
+	if cache == nil {
+		return nil, errors.New("moq: nil cache")
+	}
 	inner, err := b.inner.WithCache(cache.inner)
 	if err != nil {
 		return nil, err

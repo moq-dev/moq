@@ -43,10 +43,12 @@ impl Publish {
 	/// cascading onto every track it produces. Pass the same cache to several broadcasts to pool
 	/// one retention budget across them.
 	pub fn set_cache(&mut self, broadcast: Id, cache: moq_net::Cache) -> Result<(), Error> {
-		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let (broadcast, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		// `with_cache` writes to the broadcast's shared state, so applying it to a clone updates
-		// this same broadcast; the returned handle is redundant and dropped.
-		let _ = broadcast.clone().with_cache(cache);
+		// this same broadcast; apply it to the already-created catalog tracks too so the explicit
+		// shared budget really covers the whole broadcast.
+		let _ = broadcast.clone().with_cache(cache.clone());
+		catalog.with_cache(cache);
 		Ok(())
 	}
 

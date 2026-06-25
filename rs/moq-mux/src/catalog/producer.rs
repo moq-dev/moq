@@ -100,6 +100,15 @@ impl<E: CatalogExt> Producer<E> {
 		self.current.lock().unwrap().clone()
 	}
 
+	/// Attach a shared [`moq_net::Cache`] to the already-created catalog tracks.
+	///
+	/// This keeps the hang and MSF catalog tracks under the same budget as the rest of the
+	/// broadcast even when the final cache policy is attached after catalog construction.
+	pub fn with_cache(&self, cache: moq_net::Cache) {
+		self.hang.with_cache(cache.clone());
+		let _ = self.msf_track.clone().with_cache(cache);
+	}
+
 	/// A handle for one importer to publish a video rendition, retired on drop.
 	///
 	/// See [`VideoTrack`](super::VideoTrack).
@@ -268,6 +277,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 #[cfg(test)]
 mod test {
 	use std::collections::BTreeMap;
+	use std::time::Duration;
 
 	use bytes::Bytes;
 	use hang::catalog::{Audio, AudioCodec, AudioConfig, Container, H264, Video, VideoConfig};
@@ -378,6 +388,50 @@ mod test {
 		let catalog = hang::Catalog::default();
 		let msf = to_msf(&catalog);
 		assert!(msf.tracks.is_empty());
+	}
+
+	#[test]
+	fn with_cache_applies_to_existing_catalog_tracks() {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+		let cache = moq_net::Cache::new(moq_net::cache::Config::default().with_max_age(Duration::ZERO));
+		catalog.with_cache(cache);
+
+		{
+			let mut guard = catalog.lock();
+			guard
+				.audio
+				.renditions
+				.insert("audio0".into(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		}
+		{
+			let mut guard = catalog.lock();
+			guard
+				.audio
+				.renditions
+				.insert("audio1".into(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		}
+
+		let consumer = broadcast.consume();
+		let hang = consumer.track(hang::Catalog::DEFAULT_NAME).unwrap();
+		assert!(
+			hang.get_group(0).is_none(),
+			"latest-only cache should evict older hang snapshots"
+		);
+		assert!(
+			hang.get_group(1).is_some(),
+			"latest hang snapshot should still be readable"
+		);
+
+		let msf = consumer.track(moq_msf::DEFAULT_NAME).unwrap();
+		assert!(
+			msf.get_group(0).is_none(),
+			"latest-only cache should evict older MSF snapshots"
+		);
+		assert!(
+			msf.get_group(1).is_some(),
+			"latest MSF snapshot should still be readable"
+		);
 	}
 
 	#[test]

@@ -97,6 +97,16 @@ impl<T> Producer<T> {
 	pub fn consume(&self) -> moq_net::TrackSubscriber {
 		self.inner.lock().unwrap().track.subscribe(None)
 	}
+
+	/// Attach a shared [`moq_net::Cache`] to the underlying track.
+	///
+	/// Useful when the track was created before the final retention policy was known (for example a
+	/// catalog track created during wrapper setup). The cache is applied to the shared track state,
+	/// so future writes and readers all see the same budget.
+	pub fn with_cache(&self, cache: moq_net::Cache) {
+		let guard = self.inner.lock().unwrap();
+		let _ = guard.track.clone().with_cache(cache);
+	}
 }
 
 impl<T: Serialize> Producer<T> {

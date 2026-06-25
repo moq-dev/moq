@@ -174,8 +174,10 @@ impl MoqBroadcastProducer {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 		// `with_cache` writes to the broadcast's shared state, so applying it to a clone updates
-		// this same broadcast; the returned handle is redundant and dropped.
+		// this same broadcast; apply it to the already-created catalog tracks too so the explicit
+		// shared budget really covers the whole broadcast.
 		let _ = state.broadcast.clone().with_cache(cache.inner());
+		state.catalog.with_cache(cache.inner());
 		drop(guard);
 		Ok(self)
 	}
