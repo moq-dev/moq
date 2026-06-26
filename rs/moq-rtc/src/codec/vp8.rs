@@ -6,6 +6,7 @@
 
 use crate::{Result, codec};
 
+/// Forwards str0m's VP8 frames to a `.vp8` track, detecting keyframes inline.
 pub struct Bridge {
 	catalog: moq_mux::catalog::Producer,
 	track: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
@@ -13,6 +14,7 @@ pub struct Bridge {
 }
 
 impl Bridge {
+	/// Publish a `.vp8` track on `broadcast`; the catalog rendition is added on the first frame.
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = broadcast.unique_track(".vp8")?;
 		let producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);

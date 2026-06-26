@@ -185,10 +185,9 @@ async fn run_server(
 	tls_key: Option<PathBuf>,
 	direction: Direction,
 ) -> anyhow::Result<()> {
-	let config = moq_rtc::server::Config {
-		ice_candidates: public_addr,
-		udp_bind,
-	};
+	let mut config = moq_rtc::server::Config::default();
+	config.ice_candidates = public_addr;
+	config.udp_bind = udp_bind;
 	let server = Server::new(config, publisher, subscriber);
 
 	let app = match direction {
@@ -209,9 +208,8 @@ async fn run_client(
 	url: Url,
 	direction: Direction,
 ) -> anyhow::Result<()> {
-	let config = moq_rtc::client::Config {
-		ice_candidates: public_addr,
-	};
+	let mut config = moq_rtc::client::Config::default();
+	config.ice_candidates = public_addr;
 	let client = Client::new(config);
 
 	match direction {

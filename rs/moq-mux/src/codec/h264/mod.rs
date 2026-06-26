@@ -180,13 +180,20 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> anyhow::Resu
 /// Extract the parameter-set NALs (SPS then PPS) and the NALU length size from
 /// an AVCDecoderConfigurationRecord. The inverse of [`build_avcc`]; used to
 /// re-emit out-of-band avc1 parameter sets as inline Annex-B (e.g. for MPEG-TS).
-/// The SPS+PPS NALs (in that order) and NALU length size, flattened for callers
-/// that re-emit every parameter set as one Annex-B prefix (e.g. MPEG-TS export).
 pub(crate) fn avcc_params(avcc: &[u8]) -> anyhow::Result<(usize, Vec<Bytes>)> {
-	let avcc = Avcc::parse(avcc)?;
-	let mut params = avcc.sps;
-	params.extend(avcc.pps);
-	Ok((avcc.length_size, params))
+	anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
+	let length_size = (avcc[4] & 0x03) as usize + 1;
+
+	let mut params = Vec::new();
+	let num_sps = avcc[5] & 0x1f;
+	let mut pos = read_param_set_array(avcc, 6, num_sps as usize, &mut params)?;
+
+	anyhow::ensure!(avcc.len() > pos, "avcC missing PPS count");
+	let num_pps = avcc[pos];
+	pos += 1;
+	read_param_set_array(avcc, pos, num_pps as usize, &mut params)?;
+
+	Ok((length_size, params))
 }
 
 /// Read `count` u16-length-prefixed NALs starting at `pos`, appending each to

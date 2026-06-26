@@ -7,11 +7,13 @@
 
 use crate::{Result, codec};
 
+/// Feeds str0m's Annex-B H.264 access units into a moq-mux avc3 importer.
 pub struct Bridge {
 	import: moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>,
 }
 
 impl Bridge {
+	/// Publish an `.avc3` track on `broadcast`, registering it in `catalog`.
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		// Pin avc3 (Annex-B, inline SPS/PPS) up front: str0m always hands us that wire shape.
 		let import =

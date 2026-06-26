@@ -5,11 +5,13 @@
 
 use crate::{Result, codec};
 
+/// Feeds str0m's Opus packets into a moq-mux Opus importer.
 pub struct Bridge {
 	import: moq_mux::codec::opus::Import,
 }
 
 impl Bridge {
+	/// Publish an `.opus` track on `broadcast` at the negotiated sample rate / channel count.
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::Producer,

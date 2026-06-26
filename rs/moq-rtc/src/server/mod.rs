@@ -36,6 +36,7 @@ pub struct Response {
 
 /// Configuration shared by both `server publish` and `server subscribe`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses that should be advertised as ICE host
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
