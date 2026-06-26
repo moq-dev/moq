@@ -158,10 +158,14 @@ impl<T: Serialize> Producer<T> {
 	/// Does nothing if the value is unchanged from the previous publish.
 	pub fn update(&mut self, value: &T) -> Result<()> {
 		let json = serde_json::to_value(value)?;
-		// Serialize the value directly (not via `json`) so a snapshot preserves the type's own
-		// field order, keeping the wire bytes identical to serializing `T` straight to a frame.
-		let snapshot = serde_json::to_vec(value)?;
-		self.inner.lock().unwrap().update(json, snapshot)
+		// Serialize the snapshot lazily and directly from `value` (not via `json`): directly so a
+		// snapshot preserves the type's own field order, keeping the wire bytes identical to serializing
+		// `T` straight to a frame; lazily so the delta path (the common case) doesn't pay for a full
+		// snapshot serialization it then discards.
+		self.inner
+			.lock()
+			.unwrap()
+			.update(json, || Ok(serde_json::to_vec(value)?))
 	}
 
 	/// Lock the current value for in-place editing, publishing on drop.
@@ -232,12 +236,10 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 		let Ok(json) = serde_json::to_value(&self.value) else {
 			return;
 		};
-		let Ok(snapshot) = serde_json::to_vec(&self.value) else {
-			return;
-		};
 
-		// We already hold the lock, so publish through the held guard rather than re-locking.
-		let _ = self.inner.update(json, snapshot);
+		// We already hold the lock, so publish through the held guard rather than re-locking. The
+		// snapshot is serialized lazily, only if this update rolls a new snapshot group.
+		let _ = self.inner.update(json, || Ok(serde_json::to_vec(&self.value)?));
 	}
 }
 
@@ -259,7 +261,7 @@ struct Inner {
 }
 
 impl Inner {
-	fn update(&mut self, json: Value, snapshot: Vec<u8>) -> Result<()> {
+	fn update(&mut self, json: Value, snapshot: impl FnOnce() -> Result<Vec<u8>>) -> Result<()> {
 		if self.last.as_ref() == Some(&json) {
 			return Ok(());
 		}
@@ -272,7 +274,8 @@ impl Inner {
 				self.delta_bytes += len;
 				self.group_frames += 1;
 			}
-			None => self.snapshot(snapshot)?,
+			// Serialize the full snapshot only now, on the path that actually writes one.
+			None => self.snapshot(snapshot()?)?,
 		}
 
 		self.last = Some(json);
