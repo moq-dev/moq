@@ -29,6 +29,12 @@ Another tool does the encoding (ex. ffmpeg), making it easy to pipe any media in
 ffmpeg -f avfoundation -i "0" -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
+## [moq-rtc](/bin/rtc)
+
+A WebRTC <-> MoQ gateway. Speaks WHIP (publish) and WHEP (subscribe) in either
+HTTP role, so it can accept incoming peers (OBS, browsers) or dial out to a
+remote WebRTC server. Ingest and egress both work for H.264, VP8, VP9, and Opus.
+
 ## [moq-rtmp](/bin/rtmp)
 
 An RTMP / enhanced-RTMP -> MoQ ingest gateway. Accepts RTMP from any encoder
