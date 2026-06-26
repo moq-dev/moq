@@ -876,7 +876,7 @@ impl Publisher {
 		);
 
 		// Feed the FLV file header once up front; media tags follow per message.
-		importer.decode(&mut flv::file_header())?;
+		importer.decode(&flv::file_header())?;
 
 		Ok(Self { importer })
 	}
@@ -890,7 +890,7 @@ impl Publisher {
 			"RTMP message body {} exceeds FLV's 24-bit tag size limit",
 			body.len()
 		);
-		self.importer.decode(&mut flv::tag(tag_type, timestamp, body))
+		self.importer.decode(&flv::tag(tag_type, timestamp, body))
 	}
 
 	/// Flush any buffered media and close out the broadcast's open groups.
@@ -1082,7 +1082,7 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog);
 		assert!(origin.publish_broadcast("live/cam0", broadcast.consume()));
-		importer.decode(&mut flv::file_header()).unwrap();
+		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&mut flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&mut flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
 		importer.finish().unwrap();

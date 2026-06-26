@@ -208,7 +208,7 @@ impl Pad {
 	/// pad.
 	/// Returns `true` the first time a buffer is dropped because the pad has no TIME segment, so the
 	/// caller can surface it once on the bus: without a timeline the pad can never publish.
-	pub fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) -> bool {
+	pub fn push_buffer(&mut self, data: Bytes, pts: Option<gst::ClockTime>) -> bool {
 		if self.failed {
 			return false;
 		}
