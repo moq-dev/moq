@@ -507,9 +507,7 @@ impl<S: Stream> Play<S> {
 			return Ok(());
 		};
 
-		let mut export = FlvExport::new(broadcast)
-			.await
-			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+		let mut export = FlvExport::new(broadcast).map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
 		let result = play_pump(
 			&mut self.stream,
 			&mut self.session,

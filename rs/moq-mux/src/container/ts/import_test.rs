@@ -226,7 +226,7 @@ async fn import_export_import_roundtrip() {
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
-	let mut exporter = crate::container::ts::Export::new(consumer).await.unwrap();
+	let mut exporter = crate::container::ts::Export::new(consumer).unwrap();
 	let mut out = BytesMut::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 		match res.expect("exporter error") {

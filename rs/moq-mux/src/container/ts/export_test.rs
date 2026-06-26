@@ -60,7 +60,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// so we pull until a `next()` blocks (`Pending`, surfaced as a timeout under
 /// paused time) or the stream ends.
 async fn drain(consumer: moq_net::BroadcastConsumer) -> BytesMut {
-	drain_with(Export::new(consumer).await.unwrap()).await
+	drain_with(Export::new(consumer).unwrap()).await
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
@@ -258,7 +258,7 @@ async fn export_lead_audio() -> BytesMut {
 	video.finish().unwrap();
 	audio.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(consumer).unwrap();
 	// The producers stay alive through the drain so the retained tracks are readable.
 	drain_with(exporter).await
 }
@@ -592,12 +592,7 @@ async fn export_scte35_roundtrip() {
 
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
 	// exporter must carry the extension to see the mpegts section.
-	let ts = drain_with(
-		Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
-			.await
-			.unwrap(),
-	)
-	.await;
+	let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
 	assert_packet_aligned(&ts);
 
 	// The first PMT advertises the SCTE-35 ES (0x86) and the CUEI descriptor.
@@ -701,12 +696,7 @@ async fn export_pes_verbatim_roundtrip() {
 	import.finish().unwrap();
 
 	// `import`, `catalog`, and `data_producer` stay alive: retained tracks.
-	let ts = drain_with(
-		Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
-			.await
-			.unwrap(),
-	)
-	.await;
+	let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
 	assert_packet_aligned(&ts);
 
 	// Re-import the exported TS and recover the verbatim PES stream.
@@ -779,9 +769,7 @@ async fn scte35_without_video_export_is_rejected() {
 	producer.finish_group().unwrap();
 	producer.finish().unwrap();
 
-	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
+	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
 	let err = loop {
 		match tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 			Ok(Ok(Some(_))) => continue,
@@ -1228,12 +1216,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		);
 
 		// Export and re-ingest.
-		let ts = drain_with(
-			Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
-				.await
-				.unwrap(),
-		)
-		.await;
+		let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
 		assert_packet_aligned(&ts);
 
 		let mut broadcast2 = moq_net::Broadcast::new().produce();

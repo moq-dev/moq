@@ -165,8 +165,11 @@ impl Sps {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Avcc {
+	/// AVC profile indication (`profile_idc`) from the record.
 	pub profile: u8,
+	/// Packed constraint-set flags byte from the record.
 	pub constraints: u8,
+	/// AVC level indication (`level_idc`) from the record.
 	pub level: u8,
 	/// NALU length size in bytes (typically 4).
 	pub length_size: usize,

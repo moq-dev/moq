@@ -34,6 +34,17 @@ impl PublishDecoder {
 		}
 		Ok(())
 	}
+
+	/// Flush any buffered trailing frame and close the tracks at end of input.
+	fn finish(&mut self) -> anyhow::Result<()> {
+		match self {
+			Self::Avc3(d) => d.finish()?,
+			Self::Fmp4(d) => d.finish()?,
+			Self::Ts(d) => d.finish()?,
+			Self::Flv(d) => d.finish()?,
+		}
+		Ok(())
+	}
 }
 
 pub struct Publish {
@@ -95,6 +106,8 @@ impl Publish {
 			buffer.clear();
 			let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
 			if n == 0 {
+				// EOF: flush the importer's buffered trailing frame and close the tracks.
+				decoder.finish()?;
 				return Ok(());
 			}
 			decoder.decode_chunk(&buffer)?;

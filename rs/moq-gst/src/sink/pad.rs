@@ -121,6 +121,12 @@ impl Pad {
 				let channels: i32 = structure.get("channels").context("Opus caps missing channels")?;
 				let rate: i32 = structure.get("rate").context("Opus caps missing rate")?;
 				ensure!(channels > 0, "Opus caps has non-positive channel count {channels}");
+				// `opus_head` emits channel-mapping family 0, which only describes mono/stereo.
+				// Reject more until a multistream OpusHead is synthesized.
+				ensure!(
+					channels <= 2,
+					"multichannel Opus is not supported yet (channels={channels})"
+				);
 				ensure!(rate > 0, "Opus caps has non-positive sample rate {rate}");
 				let head = opus_head(channels as u8, rate as u32);
 				make("opus", ".opus", &head)?

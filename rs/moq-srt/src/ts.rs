@@ -81,7 +81,7 @@ impl Subscriber {
 			return Ok(None);
 		};
 
-		let export = ts::Export::new(broadcast).await?;
+		let export = ts::Export::new(broadcast)?;
 		Ok(Some(Self { export }))
 	}
 

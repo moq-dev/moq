@@ -28,9 +28,8 @@ async fn export_header_roundtrip_vp9_opus() {
 	importer.finish().unwrap();
 
 	// Now subscribe via the exporter and pull bytes.
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
 
 	// First `next()` should give us the header (EBML + Segment-start + Info + Tracks).
@@ -153,9 +152,7 @@ async fn export_waits_for_catalog_before_header() {
 	// have been published yet: `tracks` stays empty on the first polls.
 	let _catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).unwrap();
 	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
 
 	// next() must remain pending (timing out), not surface a "no catalog
@@ -186,9 +183,8 @@ async fn export_emits_blocks_for_each_frame() {
 	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream)
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
@@ -277,9 +273,8 @@ async fn export_rejects_cmaf_track() {
 	};
 	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -358,9 +353,8 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	let mut catalog = catalog;
 	catalog.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter =
 		crate::container::mkv::Export::new(consumer, catalog_stream).with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
@@ -495,9 +489,8 @@ async fn export_fragment_duration_batches_blocks() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2));
 	let mut exported: Vec<u8> = Vec::new();

@@ -118,7 +118,7 @@ async fn export_roundtrips_through_import() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(consumer).unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	// The export must be a real FLV stream.
@@ -155,7 +155,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(consumer).unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -238,7 +238,7 @@ async fn export_roundtrips_enhanced() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(consumer).unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -315,7 +315,7 @@ async fn export_preserves_timestamps() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(consumer).unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);

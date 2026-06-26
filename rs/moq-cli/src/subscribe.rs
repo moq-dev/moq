@@ -138,12 +138,11 @@ impl Subscribe {
 
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
-		// is re-framed as ADTS. `fragment_duration` does not apply to TS. Undecoded
-		// elementary streams (SCTE-35, teletext, DVB AC-3, ...) are re-emitted
-		// verbatim on their PIDs.
-		let mut ts = moq_mux::container::ts::Export::new(self.broadcast)
-			.await?
-			.with_latency(self.args.max_latency);
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
+		// selects the `mpegts` catalog extension so undecoded elementary streams
+		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
+		let mut ts =
+			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
 		while let Some(frame) = ts.next().await? {
 			stdout.write_all(&frame.payload).await?;
@@ -160,8 +159,7 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let mut flv = moq_mux::container::flv::Export::new(self.broadcast)
-			.await?
+		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = flv.next().await? {

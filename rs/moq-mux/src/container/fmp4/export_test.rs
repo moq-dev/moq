@@ -61,9 +61,8 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -153,9 +152,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -237,9 +234,8 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -321,9 +317,8 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -412,9 +407,8 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -480,9 +474,8 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&buf);
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -578,9 +571,8 @@ async fn next_fragment_reports_segment_metadata() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
 	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
 	let mut exporter =
 		crate::container::fmp4::Export::new(consumer, catalog_stream).with_fragment_duration(Duration::from_millis(20));

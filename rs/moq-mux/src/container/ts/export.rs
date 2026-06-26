@@ -149,17 +149,17 @@ struct PesUnit {
 
 impl Export {
 	/// Subscribe to `broadcast`, using the default catalog format.
-	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
+	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(broadcast, CatalogFormat::default())
 	}
 
 	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
 	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
-	pub async fn with_catalog_format(
+	pub fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format).await
+		Self::build(broadcast, catalog_format)
 	}
 }
 
@@ -168,18 +168,15 @@ impl Export<catalog::Ext> {
 	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
 	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
 	/// plain constructors are media-only).
-	pub async fn with_ts(
-		broadcast: moq_net::BroadcastConsumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format).await
+	pub fn with_ts(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		Self::build(broadcast, catalog_format)
 	}
 }
 
 impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
-	async fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
 		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format)?;
 		Ok(Self {
 			broadcast,

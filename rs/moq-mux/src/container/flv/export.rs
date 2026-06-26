@@ -101,13 +101,13 @@ struct FlvTrack {
 impl Export {
 	/// Subscribe to `broadcast` and produce FLV byte chunks, using the default
 	/// catalog format ([`CatalogFormat::Hang`]).
-	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
+	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(broadcast, CatalogFormat::default())
 	}
 
 	/// Subscribe to `broadcast` and produce FLV byte chunks, selecting an explicit
 	/// `catalog_format` for track discovery.
-	pub async fn with_catalog_format(
+	pub fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {

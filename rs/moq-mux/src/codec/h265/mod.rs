@@ -78,8 +78,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Hvcc {
 	/// NALU length size in bytes (typically 4).
 	pub length_size: usize,
+	/// VPS NAL units carried out-of-band in the record.
 	pub vps: Vec<Bytes>,
+	/// SPS NAL units carried out-of-band in the record.
 	pub sps: Vec<Bytes>,
+	/// PPS NAL units carried out-of-band in the record.
 	pub pps: Vec<Bytes>,
 }
 
