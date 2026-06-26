@@ -22,6 +22,7 @@ use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 /// so deltas can be enabled later without changing the wire format used today.
 pub struct Producer<E: CatalogExt = ()> {
 	hang: moq_json::Producer<Catalog<E>>,
+	hangz: moq_json::Producer<Catalog<E>>,
 	msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<Catalog<E>>>,
@@ -37,6 +38,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 	fn clone(&self) -> Self {
 		Self {
 			hang: self.hang.clone(),
+			hangz: self.hangz.clone(),
 			msf_track: self.msf_track.clone(),
 			current: self.current.clone(),
 			clock: self.clock,
@@ -90,6 +92,7 @@ impl<E: CatalogExt> Producer<E> {
 			name: hang::Catalog::DEFAULT_NAME.to_string(),
 			priority: 0,
 		})?;
+		let hangz_track = broadcast.create_track(hang::Catalog::compressed_track())?;
 		let msf_track = broadcast.create_track(moq_net::Track {
 			name: moq_msf::DEFAULT_NAME.to_string(),
 			priority: 0,
@@ -98,10 +101,16 @@ impl<E: CatalogExt> Producer<E> {
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let mut json_config = moq_json::ProducerConfig::default();
 		json_config.delta_ratio = 0;
-		let hang = moq_json::Producer::new(hang_track, json_config);
+		let hang = moq_json::Producer::new(hang_track, json_config.clone());
+
+		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
+		// with the plaintext track; only the per-group compression differs.
+		json_config.compression = true;
+		let hangz = moq_json::Producer::new(hangz_track, json_config);
 
 		Ok(Self {
 			hang,
+			hangz,
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
 			clock: crate::Clock::new(),
@@ -125,6 +134,7 @@ impl<E: CatalogExt> Producer<E> {
 		Guard {
 			catalog: self.current.lock().unwrap(),
 			hang: &mut self.hang,
+			hangz: &mut self.hangz,
 			msf_track: &mut self.msf_track,
 			updated: false,
 		}
@@ -154,9 +164,15 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Consumer::new(self.hang.consume()))
 	}
 
+	/// Create a consumer for the DEFLATE-compressed (`catalog.json.z`) catalog track.
+	pub fn consume_compressed(&self) -> Result<Consumer<E>, moq_net::Error> {
+		Ok(Consumer::compressed(self.hangz.consume()))
+	}
+
 	/// Finish publishing to this catalog.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.hang.finish()?;
+		self.hangz.finish()?;
 		self.msf_track.finish()?;
 		Ok(())
 	}
@@ -167,10 +183,11 @@ impl<E: CatalogExt> Producer<E> {
 /// Obtained via [`Producer::lock`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so `video`/`audio`
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
-/// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
+/// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was mutated.
 pub struct Guard<'a, E: CatalogExt = ()> {
 	catalog: MutexGuard<'a, Catalog<E>>,
 	hang: &'a mut moq_json::Producer<Catalog<E>>,
+	hangz: &'a mut moq_json::Producer<Catalog<E>>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
 }
@@ -218,9 +235,11 @@ impl<E: CatalogExt> Drop for Guard<'_, E> {
 			return;
 		}
 
-		// Publish the hang catalog (one snapshot per group while deltas are disabled).
+		// Publish the hang catalog (one snapshot per group while deltas are disabled), plus its
+		// DEFLATE-compressed `.z` sibling carrying the identical catalog.
 		let catalog: &Catalog<E> = &self.catalog;
 		let _ = self.hang.update(catalog);
+		let _ = self.hangz.update(catalog);
 
 		// Publish the MSF catalog, derived from the base media sections.
 		let msf = to_msf(&self.catalog.media());
@@ -326,10 +345,45 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 mod test {
 	use std::collections::BTreeMap;
 
+	use std::task::Poll;
+
 	use bytes::Bytes;
 	use hang::catalog::{Audio, AudioCodec, AudioConfig, Container, H264, Video, VideoConfig};
 
 	use super::*;
+
+	#[test]
+	fn publishes_plain_and_compressed_tracks() {
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+
+		let consumer = broadcast.consume();
+		let mut plain = Consumer::new(consumer.subscribe_track(&hang::Catalog::default_track()).unwrap());
+		let mut compressed =
+			Consumer::compressed(consumer.subscribe_track(&hang::Catalog::compressed_track()).unwrap());
+
+		{
+			let mut guard = catalog.lock();
+			guard
+				.audio
+				.renditions
+				.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		}
+		let expected = catalog.snapshot();
+
+		let waiter = kio::Waiter::noop();
+		let got_plain = match plain.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected plain catalog, got {other:?}"),
+		};
+		let got_compressed = match compressed.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected compressed catalog, got {other:?}"),
+		};
+
+		assert_eq!(got_plain, expected);
+		assert_eq!(got_compressed, expected);
+	}
 
 	#[test]
 	fn convert_simple() {

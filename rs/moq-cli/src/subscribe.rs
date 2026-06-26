@@ -1,19 +1,16 @@
 use std::time::Duration;
 
 use clap::ValueEnum;
-use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use hang::moq_net;
-use moq_mux::catalog::{self, CatalogFormat, FilterAudio, FilterVideo, Stream, TargetAudio, TargetVideo};
+use moq_mux::catalog::CatalogFormat;
 use tokio::io::AsyncWriteExt;
 
 #[derive(ValueEnum, Clone, Copy)]
 pub enum SubscribeFormat {
 	Fmp4,
 	Mkv,
-	/// H.264 Annex-B elementary stream (no container).
-	H264,
-	/// H.265 Annex-B elementary stream (no container).
-	H265,
+	Ts,
+	Flv,
 }
 
 /// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
@@ -21,6 +18,8 @@ pub enum SubscribeFormat {
 #[derive(ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
+	#[value(name = "hangz")]
+	HangZ,
 	Msf,
 }
 
@@ -28,45 +27,8 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	fn from(format: CatalogFormatArg) -> Self {
 		match format {
 			CatalogFormatArg::Hang => Self::Hang,
+			CatalogFormatArg::HangZ => Self::HangZ,
 			CatalogFormatArg::Msf => Self::Msf,
-		}
-	}
-}
-
-/// `clap` adapter for [`VideoCodecKind`].
-#[derive(ValueEnum, Clone, Copy)]
-pub enum VideoCodecArg {
-	H264,
-	H265,
-	Vp8,
-	Vp9,
-	Av1,
-}
-
-impl From<VideoCodecArg> for VideoCodecKind {
-	fn from(value: VideoCodecArg) -> Self {
-		match value {
-			VideoCodecArg::H264 => Self::H264,
-			VideoCodecArg::H265 => Self::H265,
-			VideoCodecArg::Vp8 => Self::VP8,
-			VideoCodecArg::Vp9 => Self::VP9,
-			VideoCodecArg::Av1 => Self::AV1,
-		}
-	}
-}
-
-/// `clap` adapter for [`AudioCodecKind`].
-#[derive(ValueEnum, Clone, Copy)]
-pub enum AudioCodecArg {
-	Aac,
-	Opus,
-}
-
-impl From<AudioCodecArg> for AudioCodecKind {
-	fn from(value: AudioCodecArg) -> Self {
-		match value {
-			AudioCodecArg::Aac => Self::AAC,
-			AudioCodecArg::Opus => Self::Opus,
 		}
 	}
 }
@@ -92,45 +54,10 @@ pub struct SubscribeArgs {
 	/// Catalog format to subscribe to for track discovery.
 	///
 	/// When omitted, the format is auto-detected from the broadcast name suffix
-	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang.
+	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang. Pass `hangz` to read
+	/// the DEFLATE-compressed `catalog.json.z` track instead (same `.hang` broadcast).
 	#[arg(long)]
 	pub catalog: Option<CatalogFormatArg>,
-
-	/// Pick the video rendition with this exact name.
-	#[arg(long)]
-	pub video_name: Option<String>,
-
-	/// Keep only video renditions whose codec family matches.
-	#[arg(long)]
-	pub video_codec: Option<VideoCodecArg>,
-
-	/// Prefer a video rendition no wider than this (px).
-	#[arg(long)]
-	pub max_video_width: Option<u32>,
-
-	/// Prefer a video rendition no taller than this (px).
-	#[arg(long)]
-	pub max_video_height: Option<u32>,
-
-	/// Prefer a video rendition with at most this many pixels (`coded_width * coded_height`).
-	#[arg(long)]
-	pub max_video_pixels: Option<u32>,
-
-	/// Prefer a video rendition under this bitrate (bits per second).
-	#[arg(long)]
-	pub max_video_bitrate: Option<u64>,
-
-	/// Pick the audio rendition with this exact name.
-	#[arg(long)]
-	pub audio_name: Option<String>,
-
-	/// Keep only audio renditions whose codec family matches.
-	#[arg(long)]
-	pub audio_codec: Option<AudioCodecArg>,
-
-	/// Prefer an audio rendition under this bitrate (bits per second).
-	#[arg(long)]
-	pub max_audio_bitrate: Option<u64>,
 }
 
 impl SubscribeArgs {
@@ -141,53 +68,6 @@ impl SubscribeArgs {
 			.map(Into::into)
 			.or_else(|| CatalogFormat::detect(broadcast))
 			.unwrap_or_default()
-	}
-
-	/// Build a video filter from the parsed flags, plus any codec defaulted by
-	/// the chosen output format (e.g. `--format h264` implies `codec = H264`).
-	fn filter_video(&self) -> Option<FilterVideo> {
-		let codec = self.video_codec.map(Into::into).or(match self.format {
-			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
-			SubscribeFormat::H265 => Some(VideoCodecKind::H265),
-			_ => None,
-		});
-		if self.video_name.is_none() && codec.is_none() {
-			return None;
-		}
-		Some(FilterVideo {
-			name: self.video_name.clone(),
-			codec,
-		})
-	}
-
-	fn filter_audio(&self) -> Option<FilterAudio> {
-		if self.audio_name.is_none() && self.audio_codec.is_none() {
-			return None;
-		}
-		Some(FilterAudio {
-			name: self.audio_name.clone(),
-			codec: self.audio_codec.map(Into::into),
-		})
-	}
-
-	fn target_video(&self) -> Option<TargetVideo> {
-		if self.max_video_width.is_none()
-			&& self.max_video_height.is_none()
-			&& self.max_video_pixels.is_none()
-			&& self.max_video_bitrate.is_none()
-		{
-			return None;
-		}
-		Some(TargetVideo {
-			width: self.max_video_width,
-			height: self.max_video_height,
-			pixels: self.max_video_pixels,
-			bitrate: self.max_video_bitrate,
-		})
-	}
-
-	fn target_audio(&self) -> Option<TargetAudio> {
-		self.max_audio_bitrate.map(|b| TargetAudio { bitrate: Some(b) })
 	}
 }
 
@@ -206,35 +86,22 @@ impl Subscribe {
 		}
 	}
 
-	/// Build the catalog stream from the configured filter/target flags.
-	fn stream(&self) -> Result<catalog::Target<catalog::Filter<catalog::Consumer>>, moq_mux::Error> {
-		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog)?;
-
-		let mut filter = consumer.filter();
-		filter.set_video(self.args.filter_video());
-		filter.set_audio(self.args.filter_audio());
-
-		let mut target = filter.target();
-		target.set_video(self.args.target_video());
-		target.set_audio(self.args.target_audio());
-
-		Ok(target)
-	}
-
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.args.format {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
 			SubscribeFormat::Mkv => self.run_mkv().await,
-			SubscribeFormat::H264 => self.run_h264().await,
-			SubscribeFormat::H265 => self.run_h265().await,
+			SubscribeFormat::Ts => self.run_ts().await,
+			SubscribeFormat::Flv => self.run_flv().await,
 		}
 	}
 
 	async fn run_fmp4(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
-		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast.clone(), stream)
+		// Fmp4 subscribes to the catalog internally, builds the merged init segment
+		// from the first catalog snapshot, then yields moof+mdat fragments in
+		// timestamp order across tracks.
+		let mut fmp4 = moq_mux::container::fmp4::Export::with_catalog_format(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -249,8 +116,10 @@ impl Subscribe {
 	async fn run_mkv(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
-		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast.clone(), stream)
+		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
+		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
+		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
+		let mut mkv = moq_mux::container::mkv::Export::with_catalog_format(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -262,29 +131,36 @@ impl Subscribe {
 		Ok(())
 	}
 
-	async fn run_h264(self) -> anyhow::Result<()> {
+	async fn run_ts(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
-		let mut h264 =
-			moq_mux::codec::h264::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
+		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
+		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
+		// selects the `mpegts` catalog extension so undecoded elementary streams
+		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
+		let mut ts =
+			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
-		while let Some(chunk) = h264.next().await? {
-			stdout.write_all(&chunk).await?;
+		while let Some(frame) = ts.next().await? {
+			stdout.write_all(&frame.payload).await?;
 			stdout.flush().await?;
 		}
 
 		Ok(())
 	}
 
-	async fn run_h265(self) -> anyhow::Result<()> {
+	async fn run_flv(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
-		let mut h265 =
-			moq_mux::codec::h265::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
+		// FLV emits the file header plus AVC/AAC sequence headers, then one tag per
+		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
+		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
+		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
+		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)?
+			.with_latency(self.args.max_latency);
 
-		while let Some(chunk) = h265.next().await? {
+		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;
 			stdout.flush().await?;
 		}

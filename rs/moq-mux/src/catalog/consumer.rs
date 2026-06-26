@@ -28,6 +28,10 @@ impl<E: CatalogExt> Consumer<E> {
 				let track = broadcast.subscribe_track(&moq_net::Track::new(hang::Catalog::DEFAULT_NAME))?;
 				Self::Hang(super::hang::Consumer::new(track))
 			}
+			CatalogFormat::HangZ => {
+				let track = broadcast.subscribe_track(&hang::Catalog::compressed_track())?;
+				Self::Hang(super::hang::Consumer::compressed(track))
+			}
 			CatalogFormat::Msf => {
 				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 				Self::Msf(super::msf::Consumer::new(track))
