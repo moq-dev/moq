@@ -270,7 +270,11 @@ async fn export_rejects_cmaf_track() {
 	config.coded_width = Some(640);
 	config.coded_height = Some(480);
 	config.description = Some(Bytes::from(vec![0u8; 8]));
-	config.container = Container::Cmaf { init: Bytes::from(vec![0u8; 32]), timescale: None, track_id: None };
+	config.container = Container::Cmaf {
+		init: Bytes::from(vec![0u8; 32]),
+		timescale: None,
+		track_id: None,
+	};
 	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
@@ -291,8 +295,8 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// Annex-B with inline SPS+PPS before keyframes. The exporter must
 	// (a) defer the header until SPS+PPS arrive, (b) emit avcC in CodecPrivate,
 	// (c) length-prefix the sample bytes in each SimpleBlock.
-	use hang::catalog::{Container, H264, VideoConfig};
 	use crate::container::Timestamp;
+	use hang::catalog::{Container, H264, VideoConfig};
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();

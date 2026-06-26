@@ -247,23 +247,23 @@ impl MoqBroadcastProducer {
 		// A container stream may publish several tracks; a single codec fills one
 		// minted track. Try the container first so a codec format doesn't mint a
 		// stray track on the way to being recognized.
-		let decoder = match moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.clone(), &format)
-		{
-			Ok(container) => StreamDecoder::Container(container),
-			Err(moq_mux::Error::UnknownFormat(_)) => {
-				let mut broadcast = state.broadcast.clone();
-				let name = broadcast.unique_name(&format!(".{format}"));
-				let track = broadcast.create_track(moq_net::Track::new(name))?;
-				match moq_mux::import::TrackStream::new(track, state.catalog.clone(), &format) {
-					Ok(import) => StreamDecoder::Track(Box::new(import)),
-					Err(moq_mux::Error::UnknownFormat(_)) => {
-						return Err(MoqError::Codec(format!("unknown stream format: {format}")));
+		let decoder =
+			match moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.clone(), &format) {
+				Ok(container) => StreamDecoder::Container(container),
+				Err(moq_mux::Error::UnknownFormat(_)) => {
+					let mut broadcast = state.broadcast.clone();
+					let name = broadcast.unique_name(&format!(".{format}"));
+					let track = broadcast.create_track(moq_net::Track::new(name))?;
+					match moq_mux::import::TrackStream::new(track, state.catalog.clone(), &format) {
+						Ok(import) => StreamDecoder::Track(Box::new(import)),
+						Err(moq_mux::Error::UnknownFormat(_)) => {
+							return Err(MoqError::Codec(format!("unknown stream format: {format}")));
+						}
+						Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
 					}
-					Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
 				}
-			}
-			Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
-		};
+				Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
+			};
 
 		Ok(Arc::new(MoqMediaStreamProducer {
 			inner: std::sync::Mutex::new(Some(MediaStreamProducer { decoder })),

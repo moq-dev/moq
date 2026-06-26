@@ -501,10 +501,14 @@ mod test {
 		});
 		video_config.coded_width = Some(1920);
 		video_config.coded_height = Some(1080);
-		video_config.container = Container::Cmaf { init: base64::engine::general_purpose::STANDARD
+		video_config.container = Container::Cmaf {
+			init: base64::engine::general_purpose::STANDARD
 				.decode("AAAYZ2Z0eXA=")
 				.unwrap()
-				.into(), timescale: None, track_id: None };
+				.into(),
+			timescale: None,
+			track_id: None,
+		};
 
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0.m4s".to_string(), video_config);

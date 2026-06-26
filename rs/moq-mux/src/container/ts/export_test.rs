@@ -15,9 +15,9 @@ use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
+use crate::container::Timestamp;
 use crate::container::ts::{Export, catalog as tscat};
 use crate::container::{Frame, Producer};
-use crate::container::Timestamp;
 
 const SC: &[u8] = &[0, 0, 0, 1];
 // Reusable H.264 parameter-set and slice NALs (NAL type = first byte & 0x1f).
@@ -561,9 +561,7 @@ async fn export_scte35_roundtrip() {
 	// Create and write the SCTE-35 cue track BEFORE moving `broadcast` into
 	// `Import` (which consumes it); the producer stays alive so the exporter can
 	// subscribe to the retained track.
-	let scte = broadcast
-		.unique_track(".scte35")
-		.unwrap();
+	let scte = broadcast.unique_track(".scte35").unwrap();
 	let scte_name = scte.name().to_string();
 	{
 		let track = tscat::Track {
@@ -674,9 +672,7 @@ async fn export_pes_verbatim_roundtrip() {
 
 	// Build the verbatim PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
-	let data_track = broadcast
-		.unique_track(".data")
-		.unwrap();
+	let data_track = broadcast.unique_track(".data").unwrap();
 	let data_name = data_track.name().to_string();
 	{
 		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
@@ -761,9 +757,7 @@ async fn scte35_without_video_export_is_rejected() {
 			.unwrap();
 
 	// A SCTE-35 cue track and nothing else.
-	let scte = broadcast
-		.unique_track(".scte35")
-		.unwrap();
+	let scte = broadcast.unique_track(".scte35").unwrap();
 	let scte_name = scte.name().to_string();
 	{
 		let track = tscat::Track {

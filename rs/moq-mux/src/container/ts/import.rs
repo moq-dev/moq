@@ -2006,8 +2006,8 @@ mod test {
 	async fn scte35_cue_stamped_with_video_pts() {
 		use crate::catalog::hang::{Catalog, Container};
 		use crate::container::Consumer;
-		use crate::container::ts::catalog::Ext;
 		use crate::container::Timestamp;
+		use crate::container::ts::catalog::Ext;
 
 		const VIDEO_PID: u16 = 0x0050;
 

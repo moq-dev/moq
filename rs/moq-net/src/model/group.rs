@@ -72,7 +72,6 @@ impl From<u16> for Group {
 	}
 }
 
-
 #[derive(Default)]
 struct GroupState {
 	// The frames currently cached in the group.

@@ -701,9 +701,7 @@ mod tests {
 
 	/// Write one DurationWire frame (timestamp and duration in µs) into a group.
 	fn write_duration_frame(group: &mut moq_net::GroupProducer, timestamp: Timestamp, duration: Timestamp) {
-		group
-			.write_frame(encode_duration_frame(timestamp, duration))
-			.unwrap();
+		group.write_frame(encode_duration_frame(timestamp, duration)).unwrap();
 	}
 
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy format).

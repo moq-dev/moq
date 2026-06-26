@@ -574,9 +574,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn opus_import_delivers_frames() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let track = broadcast
-			.create_track(moq_net::Track::new("audio"))
-			.unwrap();
+		let track = broadcast.create_track(moq_net::Track::new("audio")).unwrap();
 		let subscriber = track.consume();
 
 		let config = crate::codec::opus::Config {

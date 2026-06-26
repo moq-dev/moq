@@ -520,7 +520,6 @@ pub struct TrackConsumer {
 	next_sequence: u64,
 }
 
-
 impl std::ops::Deref for TrackConsumer {
 	type Target = Track;
 

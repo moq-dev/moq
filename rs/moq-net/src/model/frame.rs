@@ -66,7 +66,6 @@ impl From<u16> for Frame {
 	}
 }
 
-
 /// Single-allocation buffer shared between a [FrameProducer] and many [FrameConsumer]s.
 ///
 /// Internally an [Arc] over a thin pointer + length owning a heap allocation. The

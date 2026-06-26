@@ -290,7 +290,11 @@ mod tests {
 
 	/// Decode one complete temporal unit handed over as a single buffer: `decode`
 	/// buffers it, `flush` emits it.
-	fn decode_one(split: &mut Split, buf: &mut BytesMut, pts: crate::container::Timestamp) -> Vec<crate::container::Frame> {
+	fn decode_one(
+		split: &mut Split,
+		buf: &mut BytesMut,
+		pts: crate::container::Timestamp,
+	) -> Vec<crate::container::Frame> {
 		let mut frames = split.decode(buf, Some(pts)).unwrap();
 		frames.extend(split.flush(Some(pts)).unwrap());
 		frames

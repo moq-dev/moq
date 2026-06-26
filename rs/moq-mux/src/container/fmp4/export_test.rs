@@ -16,8 +16,8 @@ use mp4_atom::{DecodeMaybe, Encode};
 ///   entry whose avcC is built from the inline SPS+PPS.
 #[tokio::test(start_paused = true)]
 async fn avc3_source_to_cmaf_export_roundtrip() {
-	use hang::catalog::{Container, H264, VideoConfig};
 	use crate::container::Timestamp;
+	use hang::catalog::{Container, H264, VideoConfig};
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
@@ -116,9 +116,9 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 /// carries that AudioSpecificConfig, instead of bailing with UnsupportedSynthesis.
 #[tokio::test(start_paused = true)]
 async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
+	use crate::container::Timestamp;
 	use bytes::Bytes;
 	use hang::catalog::{AAC, AudioConfig, Container};
-	use crate::container::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
@@ -208,9 +208,9 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 /// config, so this exercises the description-less synthesis path.
 #[tokio::test(start_paused = true)]
 async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
+	use crate::container::Timestamp;
 	use bytes::Bytes;
 	use hang::catalog::{Container, VideoCodec, VideoConfig};
-	use crate::container::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
@@ -283,9 +283,9 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 /// the catalog's VP9 parameters.
 #[tokio::test(start_paused = true)]
 async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
+	use crate::container::Timestamp;
 	use bytes::Bytes;
 	use hang::catalog::{Container, VP9, VideoConfig};
-	use crate::container::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
@@ -370,9 +370,9 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 /// stays empty.
 #[tokio::test(start_paused = true)]
 async fn av1_source_to_cmaf_export_synthesizes_av01() {
+	use crate::container::Timestamp;
 	use bytes::Bytes;
 	use hang::catalog::{AV1, Container, VideoConfig};
-	use crate::container::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
@@ -523,9 +523,9 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 async fn next_fragment_reports_segment_metadata() {
 	use std::time::Duration;
 
+	use crate::container::Timestamp;
 	use bytes::BytesMut;
 	use hang::catalog::{Container, H264, VideoConfig};
-	use crate::container::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();

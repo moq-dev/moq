@@ -127,9 +127,7 @@ mod tests {
 	fn setup() -> (moq_net::TrackProducer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let track = broadcast
-			.create_track(moq_net::Track::new("0.vp9"))
-			.unwrap();
+		let track = broadcast.create_track(moq_net::Track::new("0.vp9")).unwrap();
 		(track, catalog)
 	}
 
