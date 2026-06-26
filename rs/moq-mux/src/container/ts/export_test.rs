@@ -67,10 +67,10 @@ async fn drain_with<E: tscat::Catalog>(mut exporter: Export<E>) -> BytesMut {
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
-		let Some(chunk) = res.expect("exporter error") else {
+		let Some(frame) = res.expect("exporter error") else {
 			break;
 		};
-		out.extend_from_slice(&chunk);
+		out.extend_from_slice(&frame.payload);
 	}
 	out
 }
@@ -156,6 +156,130 @@ async fn export_aac_roundtrip() {
 		assert_eq!(*pts, i as u64 * 20 * 90, "PTS should be ms * 90 (90 kHz)");
 		assert_eq!(raw.as_slice(), payload.as_ref(), "raw AAC payload mismatch");
 	}
+}
+
+/// Collect PES presentation timestamps per elementary stream (video H.264, audio AAC),
+/// keyed off the PMT's PID assignments.
+fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {
+	let mut reader = TsPacketReader::new(Cursor::new(ts));
+	let (mut video_pid, mut audio_pid) = (None, None);
+	let (mut video, mut audio) = (Vec::new(), Vec::new());
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		match packet.payload {
+			Some(TsPayload::Pmt(pmt)) => {
+				for es in &pmt.es_info {
+					match es.stream_type {
+						StreamType::H264 => video_pid = Some(es.elementary_pid),
+						StreamType::AdtsAac => audio_pid = Some(es.elementary_pid),
+						_ => {}
+					}
+				}
+			}
+			Some(TsPayload::PesStart(pes)) => {
+				if let Some(pts) = pes.header.pts {
+					let pid = Some(packet.header.pid);
+					if pid == video_pid {
+						video.push(pts.as_u64());
+					} else if pid == audio_pid {
+						audio.push(pts.as_u64());
+					}
+				}
+			}
+			_ => {}
+		}
+	}
+	(video, audio)
+}
+
+/// Build a broadcast whose audio begins before the first video keyframe (the shape a
+/// mid-stream tune-in produces: the audio source is cached further back than the oldest
+/// retained video keyframe), then export it to TS.
+async fn export_lead_audio() -> BytesMut {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	// In-band avc3 video (SPS/PPS inline on keyframes; no out-of-band description).
+	let vtrack = broadcast.unique_track(".avc3").unwrap();
+	let vname = vtrack.name.clone();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vname, cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+
+	let atrack = broadcast.unique_track(".aac").unwrap();
+	let aname = atrack.name.clone();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(aname, cfg);
+	}
+	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+
+	let audio_frame = |ms: u64| Frame {
+		timestamp: Timestamp::from_millis(ms).unwrap(),
+		payload: Bytes::from(vec![0xAAu8; 16]),
+		keyframe: true,
+	};
+	// Lead audio (0..80 ms) precedes the first video keyframe at 100 ms; both continue after.
+	for ms in [0, 20, 40, 60, 80] {
+		audio.write(audio_frame(ms)).unwrap();
+		audio.finish_group().unwrap();
+	}
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 200));
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_millis(100).unwrap(),
+			payload: annexb(&[SPS, PPS, &idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.finish_group().unwrap();
+	for ms in [100, 120, 140] {
+		audio.write(audio_frame(ms)).unwrap();
+		audio.finish_group().unwrap();
+	}
+	video.finish().unwrap();
+	audio.finish().unwrap();
+
+	let exporter = Export::new(consumer).unwrap();
+	// The producers stay alive through the drain so the retained tracks are readable.
+	drain_with(exporter).await
+}
+
+/// The exported stream must begin at the first video keyframe. On a mid-stream tune-in the
+/// audio source can lead the first cached video keyframe by over a second; emitting that
+/// audio first buries the in-band SPS/PPS behind an audio-only preamble, and a live decoder
+/// probing the stream gives up before it ever configures video (RTMP/CMAF carry the codec
+/// config out-of-band, so they don't hit this). The muxer drops the lead audio so the
+/// keyframe leads. Audio from the keyframe onward is still carried.
+#[tokio::test(start_paused = true)]
+async fn export_starts_at_video_keyframe() {
+	// 100 ms (the keyframe PTS) in 90 kHz ticks.
+	const KEYFRAME_PTS: u64 = 100 * 90;
+
+	let ts = export_lead_audio().await;
+	assert_packet_aligned(&ts);
+	let (video, audio) = collect_pes_pts(&ts);
+
+	assert_eq!(
+		video.first(),
+		Some(&KEYFRAME_PTS),
+		"the stream must begin at the video keyframe"
+	);
+	assert!(
+		audio.iter().all(|&p| p >= KEYFRAME_PTS),
+		"lead audio before the first keyframe must be dropped, got {audio:?}"
+	);
+	assert!(!audio.is_empty(), "audio from the keyframe onward is still carried");
 }
 
 /// Re-parse a TS byte stream: assert the single video stream type, that the
@@ -431,9 +555,11 @@ async fn export_scte35_roundtrip() {
 		catalog.lock().mpegts.tracks.insert(scte_name.clone(), track);
 	}
 	let mut scte_producer = Producer::new(scte, HangContainer::Legacy);
+	// bbb's first video keyframe is at 1.4 s; stamp the cue just after it so it survives
+	// the muxer's keyframe-aligned tune-in (which drops non-video frames before the keyframe).
 	scte_producer
 		.write(Frame {
-			timestamp: Timestamp::from_millis(40).unwrap(),
+			timestamp: Timestamp::from_millis(1410).unwrap(),
 			payload: Bytes::from_static(CUE),
 			keyframe: true,
 		})
@@ -533,9 +659,11 @@ async fn export_pes_verbatim_roundtrip() {
 		catalog.lock().mpegts.tracks.insert(data_name.clone(), track);
 	}
 	let mut data_producer = Producer::new(data_track, HangContainer::Legacy);
+	// bbb's first video keyframe is at 1.4 s; stamp the PES just after it so it survives
+	// the muxer's keyframe-aligned tune-in (which drops non-video frames before the keyframe).
 	data_producer
 		.write(Frame {
-			timestamp: Timestamp::from_millis(40).unwrap(),
+			timestamp: Timestamp::from_millis(1410).unwrap(),
 			payload: Bytes::from_static(PAYLOAD),
 			keyframe: true,
 		})
@@ -707,10 +835,16 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 		roundtripped.push(read_frames(&consumer2, name).await);
 	}
 
-	// Track discovery order is not stable across imports; compare as sorted sets.
-	ingested.sort();
-	roundtripped.sort();
-	assert_eq!(roundtripped, ingested, "MP2 frames must survive byte-for-byte");
+	// Keyframe alignment drops the MP2 ahead of the first video keyframe (the dirty-start
+	// lead), so each program's surviving frames are a byte-exact suffix of what was
+	// ingested. Track discovery order is not stable across imports, so match by content.
+	for rt in &roundtripped {
+		assert!(!rt.is_empty(), "a program lost all of its MP2 frames");
+		assert!(
+			ingested.iter().any(|ing| ing.ends_with(rt)),
+			"round-tripped MP2 must be a byte-exact suffix of an ingested program"
+		);
+	}
 }
 
 /// The ffmpeg AC-3 fixture must survive TS -> MoQ -> TS byte-for-byte in an

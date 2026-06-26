@@ -45,9 +45,12 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
-/// Use [`next`](Self::next) to pull byte chunks: the first chunk is PAT+PMT, then
-/// each subsequent chunk is the TS packets for one media frame (preceded by a
-/// fresh PAT+PMT at video keyframes). Returns `None` when the broadcast ends.
+/// Use [`next`](Self::next) to pull one [`Frame`] per media frame: its `payload`
+/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag so
+/// a transport can pace delivery on the media clock. The leading PAT/PMT rides on
+/// the first frame (so it inherits a real timestamp), and is re-emitted at video
+/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
+/// broadcast ends.
 pub struct Export<E: catalog::Catalog = ()> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<CatalogSource<E>>,
@@ -63,6 +66,18 @@ pub struct Export<E: catalog::Catalog = ()> {
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission.
 	last_psi: Option<crate::container::Timestamp>,
+	/// Tune-in point: the first video keyframe's timestamp, captured when the program
+	/// tables are built. Non-video frames before it are dropped so the keyframe leads
+	/// the stream.
+	///
+	/// MPEG-TS carries the H.264/H.265 parameter sets in-band on the keyframe (unlike
+	/// RTMP/CMAF, which carry the codec config out-of-band in the header). On a
+	/// mid-stream join the audio source can start over a second before the oldest
+	/// cached video keyframe; emitting that lead audio first would bury the parameter
+	/// sets behind an audio-only preamble, and a live decoder probing the stream gives
+	/// up before it ever configures video. `None` until the tables are built, and for
+	/// programs with no video track (nothing to align to).
+	video_start: Option<crate::container::Timestamp>,
 }
 
 struct Track {
@@ -172,6 +187,7 @@ impl<E: catalog::Catalog> Export<E> {
 			program_descriptors: Vec::new(),
 			psi: None,
 			last_psi: None,
+			video_start: None,
 		})
 	}
 
@@ -181,12 +197,19 @@ impl<E: catalog::Catalog> Export<E> {
 		self
 	}
 
-	/// Get the next byte chunk.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
+	/// Get the next muxed frame.
+	///
+	/// Each [`Frame`] carries the TS packets for one media frame in `payload`,
+	/// stamped with that frame's media `timestamp` and `keyframe` flag so a
+	/// transport can pace delivery on the media clock. The leading PAT/PMT rides
+	/// on the first frame (inheriting its timestamp), and is re-emitted at video
+	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
+	/// broadcast ends.
+	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -206,14 +229,23 @@ impl<E: catalog::Catalog> Export<E> {
 		// can't use them, and parking them would stop us polling for the keyframe
 		// that carries the parameter sets.
 		let waiting_for_header = self.psi.is_none();
+		let video_start = self.video_start;
 		for track in self.tracks.values_mut() {
 			if track.pending.is_some() || track.finished {
 				continue;
 			}
+			let is_video = matches!(track.kind, Kind::Video(_));
 			loop {
 				match track.source.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
 						if waiting_for_header && !track.source.header_ready() {
+							continue;
+						}
+						// Tune-in alignment: drop non-video frames before the first video
+						// keyframe (see `video_start`) so the in-band SPS/PPS leads the stream.
+						if let Some(start) = video_start
+							&& !is_video && frame.timestamp < start
+						{
 							continue;
 						}
 						track.pending = Some(frame);
@@ -229,8 +261,10 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 		}
 
-		// 3. Emit the program tables once the layout is resolved and every
-		// track's codec config is ready.
+		// 3. Build the program tables once the layout is resolved and every
+		// track's codec config is ready. The tables aren't emitted here: PSI has
+		// no media time of its own, so `write_frame` prepends them to the first
+		// frame instead, letting the leading PAT/PMT inherit a real timestamp.
 		if self.psi.is_none() {
 			if self.tracks.is_empty() {
 				// No tracks yet. If the catalog is also done, the broadcast is empty.
@@ -239,24 +273,38 @@ impl<E: catalog::Catalog> Export<E> {
 				}
 				return Poll::Pending;
 			}
-			if !self.header_ready() {
-				// Still waiting on codec configs. If every track finished without
-				// producing one, the broadcast can't be muxed.
+			if !self.header_ready() || !self.video_ready() {
+				// Hold all output (tables and audio alike) until codec configs resolve
+				// and, when the program has a video rendition, its first keyframe is
+				// buffered: the stream must begin on that keyframe so the in-band
+				// parameter sets lead it. An audio-only program has nothing to wait for.
+				// If every track finished without producing a config, it can't be muxed.
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					return Poll::Ready(Ok(None));
 				}
 				return Poll::Pending;
 			}
 			self.build_psi()?;
-			let header = self.write_psi()?;
-			return Poll::Ready(Ok(Some(header)));
+			// Anchor tune-in to the first video keyframe and drop any non-video frame
+			// already buffered ahead of it (see `video_start`).
+			self.video_start = self.first_video_pts();
+			if let Some(start) = self.video_start {
+				for track in self.tracks.values_mut() {
+					if !matches!(track.kind, Kind::Video(_))
+						&& track.pending.as_ref().is_some_and(|f| f.timestamp < start)
+					{
+						track.pending = None;
+					}
+				}
+			}
 		}
 
-		// 4. Emit the smallest-timestamp pending frame as a PES packet.
+		// 4. Emit the smallest-timestamp pending frame as a PES packet (the first
+		// one carries the buffered PAT/PMT).
 		if let Some(name) = self.pick_next_track() {
 			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
-			let chunk = self.write_frame(&name, frame)?;
-			return Poll::Ready(Ok(Some(chunk)));
+			let out = self.write_frame(&name, frame)?;
+			return Poll::Ready(Ok(Some(out)));
 		}
 
 		// 5. End of stream once every track has drained and the catalog is closed.
@@ -433,6 +481,28 @@ impl<E: catalog::Catalog> Export<E> {
 		self.tracks.values().all(|t| t.source.header_ready())
 	}
 
+	/// Every video track has buffered its first frame (the keyframe) or finished.
+	/// The tables wait for this so the tune-in point ([`Self::video_start`]) can be
+	/// read from the keyframe before any audio is emitted ahead of it. A program
+	/// with no video track is trivially ready.
+	fn video_ready(&self) -> bool {
+		self.tracks
+			.values()
+			.filter(|t| matches!(t.kind, Kind::Video(_)))
+			.all(|t| t.pending.is_some() || t.finished)
+	}
+
+	/// The smallest timestamp among the video tracks' buffered frames: the first
+	/// video keyframe, since pre-keyframe video frames are dropped before the tables
+	/// are built. `None` when no video track has a buffered frame (audio-only program).
+	fn first_video_pts(&self) -> Option<crate::container::Timestamp> {
+		self.tracks
+			.values()
+			.filter(|t| matches!(t.kind, Kind::Video(_)))
+			.filter_map(|t| t.pending.as_ref().map(|f| f.timestamp))
+			.min()
+	}
+
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> anyhow::Result<()> {
 		// Order tracks by PID for a stable layout; first video track carries the PCR.
@@ -552,18 +622,6 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Serialize a fresh PAT + PMT into a chunk.
-	fn write_psi(&mut self) -> anyhow::Result<Bytes> {
-		let psi = self.psi.as_ref().context("PSI not built")?;
-		let pat = TsPayload::Pat(psi.pat.clone());
-		let pmt = TsPayload::Pmt(psi.pmt.clone());
-
-		let mut out = Vec::with_capacity(2 * TsPacket::SIZE);
-		self.write_packet(&mut out, Pid::PAT, None, pat)?;
-		self.write_packet(&mut out, PMT_PID, None, pmt)?;
-		Ok(Bytes::from(out))
-	}
-
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
@@ -574,12 +632,14 @@ impl<E: catalog::Catalog> Export<E> {
 
 	/// Packetize one media frame into a chunk, re-emitting PAT/PMT before video
 	/// keyframes (and periodically) so receivers can tune in mid-stream.
-	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Bytes> {
+	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Frame> {
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
 		let is_pcr = self.psi.as_ref().is_some_and(|p| p.pcr_pid == pid);
 		let is_video = matches!(kind, Kind::Video(_));
+		let timestamp = frame.timestamp;
+		let keyframe = frame.keyframe;
 
 		// Build the elementary-stream payload for this frame. Video needs the
 		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. Section-framed
@@ -660,7 +720,11 @@ impl<E: catalog::Catalog> Export<E> {
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		Ok(Bytes::from(out))
+		Ok(Frame {
+			timestamp,
+			payload: Bytes::from(out),
+			keyframe,
+		})
 	}
 
 	/// Packetize a PES payload into 188-byte TS packets.

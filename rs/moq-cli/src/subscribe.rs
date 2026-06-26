@@ -142,8 +142,8 @@ impl Subscribe {
 		let mut ts =
 			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
-		while let Some(chunk) = ts.next().await? {
-			stdout.write_all(&chunk).await?;
+		while let Some(frame) = ts.next().await? {
+			stdout.write_all(&frame.payload).await?;
 			stdout.flush().await?;
 		}
 
