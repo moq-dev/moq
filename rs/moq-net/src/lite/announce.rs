@@ -1,6 +1,7 @@
+use bytes::{Bytes, BytesMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Origin, OriginList, Path, coding::*};
+use crate::{Origin, OriginList, Path, coding::*, flate};
 
 use super::{Message, Version};
 
@@ -28,7 +29,7 @@ impl Message for Announce<'_> {
 		let hops = match version {
 			Version::Lite01 | Version::Lite02 => OriginList::new(),
 			Version::Lite03 => {
-				// Lite03 sends only a hop count, not individual ids — fill with UNKNOWN placeholders.
+				// Lite03 sends only a hop count, not individual ids. Fill with UNKNOWN placeholders.
 				// push() enforces MAX_HOPS and `?` lifts the overflow to DecodeError::BoundsExceeded.
 				let count = u64::decode(r, version)? as usize;
 				let mut list = OriginList::new();
@@ -61,6 +62,44 @@ impl Message for Announce<'_> {
 		}
 
 		Ok(())
+	}
+}
+
+pub(super) struct AnnounceEncoder(flate::Encoder);
+
+impl AnnounceEncoder {
+	pub(super) fn new() -> Self {
+		Self(flate::Encoder::new())
+	}
+
+	pub(super) fn encode(&mut self, announce: &Announce<'_>, version: Version) -> Result<Bytes, EncodeError> {
+		let mut payload = BytesMut::new();
+		announce.encode_msg(&mut payload, version)?;
+		Ok(self.0.frame(&payload))
+	}
+}
+
+pub(super) struct AnnounceDecoder(flate::Decoder);
+
+impl AnnounceDecoder {
+	pub(super) fn new() -> Self {
+		Self(flate::Decoder::new())
+	}
+
+	pub(super) fn decode(&mut self, compressed: &[u8], version: Version) -> Result<Announce<'static>, DecodeError> {
+		let payload = self.0.frame(compressed).map_err(|err| match err {
+			flate::Error::TooLarge(_) => DecodeError::BoundsExceeded,
+			flate::Error::Decompress => DecodeError::InvalidValue,
+			_ => DecodeError::InvalidValue,
+		})?;
+
+		let mut payload = &payload[..];
+		let announce = Announce::decode_msg(&mut payload, version)?;
+		if !payload.is_empty() {
+			return Err(DecodeError::Long);
+		}
+
+		Ok(announce)
 	}
 }
 
@@ -101,6 +140,56 @@ impl Message for AnnounceInterest<'_> {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn compressed_announce_round_trips() {
+		let mut hops = OriginList::new();
+		hops.push(Origin::random()).unwrap();
+		hops.push(Origin::random()).unwrap();
+
+		let msg = Announce::Active {
+			suffix: Path::new("room/alice/video"),
+			hops,
+		};
+
+		let mut encoder = AnnounceEncoder::new();
+		let compressed = encoder.encode(&msg, Version::Lite05Wip).unwrap();
+		let mut decoder = AnnounceDecoder::new();
+		let decoded = decoder.decode(&compressed, Version::Lite05Wip).unwrap();
+
+		assert_eq!(decoded, msg);
+	}
+
+	#[test]
+	fn compressed_announce_reuses_stream_context() {
+		let mut hops = OriginList::new();
+		hops.push(Origin::random()).unwrap();
+
+		let first = Announce::Active {
+			suffix: Path::new("conference/room-a/participant-a/video"),
+			hops: hops.clone(),
+		};
+		let second = Announce::Active {
+			suffix: Path::new("conference/room-a/participant-b/video"),
+			hops,
+		};
+
+		let mut encoder = AnnounceEncoder::new();
+		let first = encoder.encode(&first, Version::Lite05Wip).unwrap();
+		let second = encoder.encode(&second, Version::Lite05Wip).unwrap();
+
+		assert!(
+			second.len() < first.len(),
+			"second announce {} should reuse context from first {}",
+			second.len(),
+			first.len()
+		);
 	}
 }
 

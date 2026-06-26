@@ -20,6 +20,7 @@ serde = []
 bytes = "1"
 futures = "0.3"
 kio = { workspace = true }
+moq-flate = { workspace = true }
 num_enum = "0.7"
 rand = "0.10.1"
 serde = { workspace = true, features = ["rc"] }

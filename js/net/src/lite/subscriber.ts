@@ -1,3 +1,4 @@
+import { Decoder } from "@moq/flate";
 import type { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
@@ -22,7 +23,7 @@ import { Version } from "./version.ts";
 export interface AnnouncedOptions {
 	/**
 	 * If true, skip announcements whose hop chain contains this connection's
-	 * own origin id — useful for meshes that reflect announces back. Defaults
+	 * own origin id. Useful for meshes that reflect announces back. Defaults
 	 * to false for backwards compatibility: existing code (notably hang.live)
 	 * relies on seeing its own publishes as the signal that a namespace
 	 * published successfully.
@@ -124,9 +125,10 @@ export class Subscriber {
 			}
 
 			// Receive announce updates (for Draft03, this includes initial state)
+			const announceDecoder = this.version === Version.DRAFT_05_WIP ? new Decoder() : undefined;
 			for (;;) {
 				const announce = await Promise.race([
-					Announce.decodeMaybe(stream.reader, this.version),
+					Announce.decodeMaybe(stream.reader, this.version, announceDecoder),
 					announced.closed,
 				]);
 				if (!announce) break;

@@ -179,6 +179,7 @@
       "name": "@moq/net",
       "version": "0.1.5",
       "dependencies": {
+        "@moq/flate": "workspace:*",
         "@moq/qmux": "^0.0.6",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",

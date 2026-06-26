@@ -1,6 +1,6 @@
 import { Reader, Writer } from "../stream.ts";
 
-export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
+export async function encodePayload(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 	let scratch = new Uint8Array();
 
 	const temp = new Writer(
@@ -33,18 +33,27 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 	temp.close();
 	await temp.closed;
 
+	return scratch;
+}
+
+export async function encodeBytes(writer: Writer, scratch: Uint8Array) {
 	await writer.u53(scratch.byteLength);
 	if (scratch.byteLength > 0) {
 		await writer.write(scratch);
 	}
 }
 
-// Reads a message with a varint size prefix.
-export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T> {
-	const size = await reader.u53();
-	const data = await reader.read(size);
+export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
+	return encodeBytes(writer, await encodePayload(f));
+}
 
-	const limit = new Reader(undefined, data);
+export async function decodeBytes(reader: Reader): Promise<Uint8Array> {
+	const size = await reader.u53();
+	return reader.read(size);
+}
+
+export async function decodePayload<T>(payload: Uint8Array, f: (r: Reader) => Promise<T>): Promise<T> {
+	const limit = new Reader(undefined, payload);
 	const msg = await f(limit);
 
 	// Check that we consumed exactly the right number of bytes
@@ -53,6 +62,11 @@ export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): P
 	}
 
 	return msg;
+}
+
+// Reads a message with a varint size prefix.
+export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T> {
+	return decodePayload(await decodeBytes(reader), f);
 }
 
 export async function decodeMaybe<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T | undefined> {

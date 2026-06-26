@@ -19,7 +19,6 @@ doctest = false
 bytes = "1"
 json-patch = "4"
 kio = { workspace = true }
-moq-flate = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"

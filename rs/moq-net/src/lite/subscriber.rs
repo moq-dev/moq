@@ -13,7 +13,7 @@ use crate::{
 	model::BroadcastProducer,
 };
 
-use super::Version;
+use super::{Version, announce::AnnounceDecoder};
 
 use web_async::Lock;
 
@@ -185,7 +185,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
+		let mut announce_decoder = match self.version {
+			Version::Lite05Wip => Some(AnnounceDecoder::new()),
+			_ => None,
+		};
+
+		loop {
+			let announce = if let Some(decoder) = &mut announce_decoder {
+				let Some(compressed) = stream.reader.decode_maybe::<bytes::Bytes>().await? else {
+					break;
+				};
+				decoder.decode(&compressed, self.version).map_err(|err| {
+					tracing::warn!(%err, "compressed announce decode failed");
+					Error::ProtocolViolation
+				})?
+			} else {
+				let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? else {
+					break;
+				};
+				announce
+			};
+
 			match announce {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
@@ -527,7 +547,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
-		// read_buf writes QUIC stream bytes directly into the frame — no
+		// read_buf writes QUIC stream bytes directly into the frame. No
 		// intermediate Bytes allocations, and quinn's reassembly arena is freed
 		// as we drain it.
 		while bytes::BufMut::has_remaining_mut(frame) {

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
 use bytes::Bytes;
-use moq_flate::{Decoder, Encoder};
+use moq_net::flate::{Decoder, Encoder};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -46,7 +46,7 @@ pub enum Error {
 
 	/// A compressed frame could not be decoded (malformed, truncated, or oversized).
 	#[error(transparent)]
-	Flate(#[from] moq_flate::Error),
+	Flate(#[from] moq_net::flate::Error),
 }
 
 impl From<serde_json::Error> for Error {

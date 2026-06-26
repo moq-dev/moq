@@ -1,3 +1,4 @@
+import type { Decoder, Encoder } from "@moq/flate";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -77,16 +78,29 @@ export class Announce {
 		return new Announce({ suffix, active, hops });
 	}
 
-	async encode(w: Writer, version: Version): Promise<void> {
+	async encode(w: Writer, version: Version, encoder?: Encoder): Promise<void> {
+		if (version === Version.DRAFT_05_WIP) {
+			if (!encoder) throw new Error("compressed announce encoder required");
+			const payload = await Message.encodePayload((w) => this.#encode(w, version));
+			return Message.encodeBytes(w, encoder.frame(payload));
+		}
+
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
-	static async decode(r: Reader, version: Version): Promise<Announce> {
+	static async decode(r: Reader, version: Version, decoder?: Decoder): Promise<Announce> {
+		if (version === Version.DRAFT_05_WIP) {
+			if (!decoder) throw new Error("compressed announce decoder required");
+			const payload = decoder.frame(await Message.decodeBytes(r));
+			return Message.decodePayload(payload, (r) => Announce.#decode(r, version));
+		}
+
 		return Message.decode(r, (r) => Announce.#decode(r, version));
 	}
 
-	static async decodeMaybe(r: Reader, version: Version): Promise<Announce | undefined> {
-		return Message.decodeMaybe(r, (r) => Announce.#decode(r, version));
+	static async decodeMaybe(r: Reader, version: Version, decoder?: Decoder): Promise<Announce | undefined> {
+		if (await r.done()) return;
+		return Announce.decode(r, version, decoder);
 	}
 }
 

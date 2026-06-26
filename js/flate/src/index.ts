@@ -10,7 +10,7 @@
  * {@link Encoder}/{@link Decoder} pair per independent stream (in moq-net terms, per group).
  *
  * This is plain raw DEFLATE with a `Z_SYNC_FLUSH` after each frame, so any peer using the same
- * primitive (the Rust `moq-flate` crate, zlib's sync flush) interoperates on the wire. There is no
+ * primitive (Rust `moq-flate` / `moq_net::flate`, zlib's sync flush) interoperates on the wire. There is no
  * length prefix: the caller frames each slice (moq-net already does).
  *
  * A sync flush always ends in the fixed 4-byte marker `00 00 ff ff`. {@link Encoder.frame} drops it

@@ -1,3 +1,4 @@
+import { Encoder } from "@moq/flate";
 import { type Dispose, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
@@ -78,6 +79,7 @@ export class Publisher {
 	 */
 	async runAnnounce(msg: AnnounceInterest, stream: Stream) {
 		console.debug(`announce: prefix=${msg.prefix}`);
+		const announceEncoder = this.version === Version.DRAFT_05_WIP ? new Encoder() : undefined;
 
 		// Send initial announcements
 		let active = new Set<Path.Valid>();
@@ -103,7 +105,7 @@ export class Publisher {
 				// Draft03+: send individual Announce messages for initial state.
 				for (const suffix of active) {
 					const wire = new Announce({ suffix, active: true, hops: [this.origin] });
-					await wire.encode(stream.writer, this.version);
+					await wire.encode(stream.writer, this.version, announceEncoder);
 				}
 				break;
 		}
@@ -134,15 +136,15 @@ export class Publisher {
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
 				const wire = new Announce({ suffix: added, active: true, hops: [this.origin] });
-				await wire.encode(stream.writer, this.version);
+				await wire.encode(stream.writer, this.version, announceEncoder);
 			}
 
 			// Announce any removed broadcasts.
-			// Ended announces don't need hops — the peer matches on path only.
+			// Ended announces don't need hops. The peer matches on path only.
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
 				const wire = new Announce({ suffix: removed, active: false });
-				await wire.encode(stream.writer, this.version);
+				await wire.encode(stream.writer, this.version, announceEncoder);
 			}
 
 			// NOTE: This is kind of a hack that won't work with a rapid UNANNOUNCE/ANNOUNCE cycle.

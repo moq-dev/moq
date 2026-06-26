@@ -15,7 +15,7 @@ use crate::{
 	model::GroupConsumer,
 };
 
-use super::Version;
+use super::{Version, announce::AnnounceEncoder};
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
@@ -225,6 +225,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// new active announcement must always be for a path with no live guard.
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
+		let mut announce_encoder = match version {
+			Version::Lite05Wip => Some(AnnounceEncoder::new()),
+			_ => None,
+		};
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -270,7 +274,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 							if let Some(active) = active {
 								// Skip if the peer asked us to exclude announces whose hop chain
-								// contains their id — they already saw this broadcast upstream.
+								// contains their id. They already saw this broadcast upstream.
 								if exclude_hop != 0 && active.hops.iter().any(|h| h.id == exclude_hop) {
 									tracing::debug!(
 										broadcast = %origin.absolute(&path),
@@ -291,7 +295,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								}
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 								// Append our origin id to the hops so the next relay can detect loops.
-								// If the chain is already at MAX_HOPS, skip the announce — this link is
+								// If the chain is already at MAX_HOPS, skip the announce. This link is
 								// effectively unreachable and the peer will eventually prune the loop.
 								let mut hops = active.hops.clone();
 								if hops.push(self_origin).is_err() {
@@ -306,16 +310,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								let prev = stats_guards.insert(absolute, guard);
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								let msg = lite::Announce::Active { suffix, hops };
-								stream.writer.encode(&msg).await?;
+								if let Some(encoder) = &mut announce_encoder {
+									let compressed = encoder.encode(&msg, version)?;
+									stream.writer.encode(&compressed).await?;
+								} else {
+									stream.writer.encode(&msg).await?;
+								}
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
 								stats_guards.remove(&origin.absolute(&path).to_owned());
-								// An ended announce doesn't need hops — the receiver matches on path only.
+								// An ended announce doesn't need hops. The receiver matches on path only.
 								let msg = lite::Announce::Ended {
 									suffix,
 									hops: OriginList::new(),
 								};
-								stream.writer.encode(&msg).await?;
+								if let Some(encoder) = &mut announce_encoder {
+									let compressed = encoder.encode(&msg, version)?;
+									stream.writer.encode(&compressed).await?;
+								} else {
+									stream.writer.encode(&msg).await?;
+								}
 							}
 						},
 						None => {
@@ -338,7 +352,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
 		// We just received a subscribe for this exact path, so by definition the peer has
-		// already seen an announcement for it — synchronous lookup is appropriate here.
+		// already seen an announcement for it, so synchronous lookup is appropriate here.
 		let broadcast = self.origin.get_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;

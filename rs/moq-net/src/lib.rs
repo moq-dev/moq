@@ -65,6 +65,7 @@ pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError};
 pub use error::*;
 pub use model::*;
+pub use moq_flate as flate;
 pub use path::*;
 pub use server::*;
 pub use session::*;

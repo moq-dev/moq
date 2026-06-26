@@ -14,8 +14,8 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_flate::{Decoder, Encoder};
 use moq_json::diff;
+use moq_net::flate::{Decoder, Encoder};
 use serde_json::{Map, Value, json};
 
 /// One second of telemetry: a big static core plus a few moving numbers. Most fields change a little
