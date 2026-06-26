@@ -98,10 +98,11 @@ impl Subscribe {
 	async fn run_fmp4(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		// Fmp4 subscribes to the catalog internally, builds the merged init segment
-		// from the first catalog snapshot, then yields moof+mdat fragments in
-		// timestamp order across tracks.
-		let mut fmp4 = moq_mux::container::fmp4::Export::with_catalog_format(self.broadcast, self.catalog)?
+		// Fmp4 builds the merged init segment from the first catalog snapshot, then
+		// yields moof+mdat fragments in timestamp order across tracks. The catalog
+		// source honors the requested format (e.g. compressed `HangZ` or `Msf`).
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&self.broadcast, self.catalog).await?;
+		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast, catalog)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -119,7 +120,8 @@ impl Subscribe {
 		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
 		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
-		let mut mkv = moq_mux::container::mkv::Export::with_catalog_format(self.broadcast, self.catalog)?
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&self.broadcast, self.catalog).await?;
+		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast, catalog)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -136,11 +138,12 @@ impl Subscribe {
 
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
-		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
-		// selects the `mpegts` catalog extension so undecoded elementary streams
-		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
-		let mut ts =
-			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS. Undecoded
+		// elementary streams (SCTE-35, teletext, DVB AC-3, ...) are re-emitted
+		// verbatim on their PIDs.
+		let mut ts = moq_mux::container::ts::Export::new(self.broadcast)
+			.await?
+			.with_latency(self.args.max_latency);
 
 		while let Some(frame) = ts.next().await? {
 			stdout.write_all(&frame.payload).await?;
@@ -157,7 +160,8 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)?
+		let mut flv = moq_mux::container::flv::Export::new(self.broadcast)
+			.await?
 			.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = flv.next().await? {

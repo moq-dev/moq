@@ -1,6 +1,6 @@
 use clap::Subcommand;
 use hang::moq_net;
-use moq_mux::container::{flv, fmp4, hls, ts};
+use moq_mux::container::{flv, fmp4, ts};
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -10,34 +10,29 @@ pub enum PublishFormat {
 	Ts,
 	/// FLV (Flash Video / RTMP) read from stdin.
 	Flv,
-	// NOTE: No aac support because it needs framing.
-	Hls {
-		/// URL or file path of an HLS playlist to ingest.
-		#[arg(long)]
-		playlist: String,
-	},
 }
 
 enum PublishDecoder {
-	Avc3(Box<moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>>),
+	Avc3(Box<moq_mux::import::TrackStream>),
 	Fmp4(Box<fmp4::Import>),
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 	// verbatim, so it uses the typed `mpegts` catalog extension rather than the untyped default.
 	Ts(Box<ts::Import<ts::catalog::Ext>>),
 	Flv(Box<flv::Import>),
-	Hls(Box<hls::Import>),
 }
 
 impl PublishDecoder {
-	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, Ts, or Flv).
-	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
+	/// Decode a chunk of stdin bytes. Each importer buffers any partial trailing
+	/// frame internally, so the caller feeds fresh chunks rather than an
+	/// accumulating buffer.
+	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
 		match self {
-			Self::Avc3(d) => d.decode_stream(buffer, None),
-			Self::Fmp4(d) => d.decode(buffer),
-			Self::Ts(d) => d.decode(buffer),
-			Self::Flv(d) => d.decode(buffer),
-			Self::Hls(_) => unreachable!(),
+			Self::Avc3(d) => d.decode(chunk)?,
+			Self::Fmp4(d) => d.decode(chunk)?,
+			Self::Ts(d) => d.decode(chunk)?,
+			Self::Flv(d) => d.decode(chunk)?,
 		}
+		Ok(())
 	}
 }
 
@@ -69,8 +64,8 @@ impl Publish {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = moq_mux::codec::h264::Import::new(broadcast.clone(), catalog.clone())
-					.with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+				let avc3 = moq_mux::import::TrackStream::new(track, catalog.clone(), "avc3")?;
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 => {
@@ -82,10 +77,6 @@ impl Publish {
 				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Flv(Box::new(flv))
 			}
-			PublishFormat::Hls { playlist } => {
-				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
-				PublishDecoder::Hls(Box::new(hls))
-			}
 		};
 
 		Ok(Self { source, broadcast })
@@ -96,23 +87,17 @@ impl Publish {
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
-		match self.source {
-			PublishDecoder::Hls(mut decoder) => {
-				decoder.init().await?;
-				decoder.run().await
-			}
-			mut decoder => {
-				let mut stdin = tokio::io::stdin();
-				let mut buffer = bytes::BytesMut::new();
+		let mut decoder = self.source;
+		let mut stdin = tokio::io::stdin();
+		let mut buffer = bytes::BytesMut::new();
 
-				loop {
-					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
-					if n == 0 {
-						return Ok(());
-					}
-					decoder.decode_buf(&mut buffer)?;
-				}
+		loop {
+			buffer.clear();
+			let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
+			if n == 0 {
+				return Ok(());
 			}
+			decoder.decode_chunk(&buffer)?;
 		}
 	}
 }
