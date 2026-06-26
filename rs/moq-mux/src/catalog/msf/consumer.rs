@@ -80,7 +80,7 @@ impl From<moq_net::TrackConsumer> for Consumer {
 /// video tracks become [`VideoConfig`] entries, audio tracks become [`AudioConfig`] entries.
 /// Tracks with no role, with an unsupported role (caption, subtitle, sign language, audio
 /// description, custom roles), or with packaging other than [`moq_msf::Packaging::Loc`],
-/// [`moq_msf::Packaging::Cmaf`], or [`moq_msf::Packaging::Legacy`] are skipped with a warning.
+/// [`moq_msf::Packaging::Cmaf`], or [`moq_msf::Packaging::Legacy`] are errors.
 ///
 /// Both [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to
 /// [`Container::Legacy`]. [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present
@@ -93,8 +93,7 @@ pub(crate) fn from_msf(msf: &moq_msf::Catalog) -> Result<hang::Catalog> {
 
 	for track in &msf.tracks {
 		let Some(role) = track.role.as_ref() else {
-			tracing::warn!(track = %track.name, "skipping MSF track with no role");
-			continue;
+			return Err(Error::MissingRole(track.name.clone()).into());
 		};
 
 		match role {
@@ -103,11 +102,11 @@ pub(crate) fn from_msf(msf: &moq_msf::Catalog) -> Result<hang::Catalog> {
 					catalog.video.renditions.insert(track.name.clone(), config);
 				}
 				None => {
-					tracing::warn!(
-						track = %track.name,
-						packaging = %track.packaging,
-						"skipping MSF video track with unsupported packaging",
-					);
+					return Err(Error::UnsupportedPackaging {
+						name: track.name.clone(),
+						packaging: track.packaging.to_string(),
+					}
+					.into());
 				}
 			},
 			moq_msf::Role::Audio => match audio_config_from_msf(track)? {
@@ -115,15 +114,19 @@ pub(crate) fn from_msf(msf: &moq_msf::Catalog) -> Result<hang::Catalog> {
 					catalog.audio.renditions.insert(track.name.clone(), config);
 				}
 				None => {
-					tracing::warn!(
-						track = %track.name,
-						packaging = %track.packaging,
-						"skipping MSF audio track with unsupported packaging",
-					);
+					return Err(Error::UnsupportedPackaging {
+						name: track.name.clone(),
+						packaging: track.packaging.to_string(),
+					}
+					.into());
 				}
 			},
 			other => {
-				tracing::warn!(track = %track.name, role = %other, "skipping MSF track with unsupported role");
+				return Err(Error::UnsupportedRole {
+					name: track.name.clone(),
+					role: other.to_string(),
+				}
+				.into());
 			}
 		}
 	}
@@ -133,10 +136,7 @@ pub(crate) fn from_msf(msf: &moq_msf::Catalog) -> Result<hang::Catalog> {
 
 /// Decode the [`Container`] for a track based on its packaging and `init_data`.
 ///
-/// Returns `Ok(None)` when the packaging is unsupported (e.g. `MediaTimeline`,
-/// `EventTimeline`, or an unknown variant). The caller skips these tracks with a warning
-/// rather than failing the whole catalog, since unsupported packaging is a downstream
-/// pipeline limitation, not a malformed catalog.
+/// Returns `Ok(None)` when the packaging is unsupported.
 ///
 /// Returns `Err` when a CMAF track is missing or has malformed `init_data`. This is an
 /// intentional hard error: a CMAF rendition is unusable without its `ftyp+moov` init
@@ -190,8 +190,6 @@ fn legacy_description(track: &moq_msf::Track) -> Result<Option<bytes::Bytes>> {
 }
 
 fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> {
-	// Unsupported packaging (e.g. MediaTimeline) bubbles up as Ok(None) so the caller can
-	// skip the track with a warning rather than fail the whole catalog.
 	let Some(container) = container_from_msf(track)? else {
 		return Ok(None);
 	};
@@ -512,25 +510,23 @@ mod test {
 	}
 
 	#[test]
-	fn track_without_role_is_skipped() {
+	fn track_without_role_errors() {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.role = None;
 		let msf = moq_msf::Catalog { tracks: vec![track] };
 
-		let catalog = from_msf(&msf).expect("no-role track should be skipped, not error");
-		assert!(catalog.video.renditions.is_empty());
-		assert!(catalog.audio.renditions.is_empty());
+		let err = from_msf(&msf).expect_err("no-role track must error");
+		assert!(err.to_string().contains("missing role"), "unexpected error: {err}");
 	}
 
 	#[test]
-	fn unsupported_role_is_skipped() {
+	fn unsupported_role_errors() {
 		let mut track = audio_track("caption0", moq_msf::Packaging::Legacy);
 		track.role = Some(moq_msf::Role::Caption);
 		let msf = moq_msf::Catalog { tracks: vec![track] };
 
-		let catalog = from_msf(&msf).expect("unsupported role should be skipped, not error");
-		assert!(catalog.audio.renditions.is_empty());
-		assert!(catalog.video.renditions.is_empty());
+		let err = from_msf(&msf).expect_err("unsupported role must error");
+		assert!(err.to_string().contains("unsupported role"), "unexpected error: {err}");
 	}
 
 	#[test]
@@ -623,47 +619,45 @@ mod test {
 	}
 
 	#[test]
-	fn unsupported_packaging_video_is_skipped() {
-		// MediaTimeline isn't a media payload, so the track must be skipped (not error).
+	fn unsupported_packaging_video_errors() {
 		let bad = video_track("timeline0", moq_msf::Packaging::MediaTimeline, None);
 		let good = video_track("video0", moq_msf::Packaging::Legacy, None);
 		let msf = moq_msf::Catalog {
 			tracks: vec![bad, good],
 		};
 
-		let catalog = from_msf(&msf).expect("unsupported packaging should be skipped, not error");
+		let err = from_msf(&msf).expect_err("unsupported packaging must error");
 		assert!(
-			!catalog.video.renditions.contains_key("timeline0"),
-			"timeline track must be skipped"
-		);
-		assert!(
-			catalog.video.renditions.contains_key("video0"),
-			"sibling track must still be parsed"
+			err.to_string().contains("unsupported packaging"),
+			"unexpected error: {err}"
 		);
 	}
 
 	#[test]
-	fn unsupported_packaging_audio_is_skipped() {
-		let mut bad = audio_track("event0", moq_msf::Packaging::EventTimeline);
-		// Drop the codec so we'd see a hard error if the skip path didn't short-circuit.
-		bad.codec = None;
+	fn unsupported_packaging_audio_errors() {
+		let bad = audio_track("event0", moq_msf::Packaging::EventTimeline);
 		let good = audio_track("audio0", moq_msf::Packaging::Loc);
 		let msf = moq_msf::Catalog {
 			tracks: vec![bad, good],
 		};
 
-		let catalog = from_msf(&msf).expect("unsupported packaging should be skipped, not error");
-		assert!(!catalog.audio.renditions.contains_key("event0"));
-		assert!(catalog.audio.renditions.contains_key("audio0"));
+		let err = from_msf(&msf).expect_err("unsupported packaging must error");
+		assert!(
+			err.to_string().contains("unsupported packaging"),
+			"unexpected error: {err}"
+		);
 	}
 
 	#[test]
-	fn unknown_packaging_variant_is_skipped() {
+	fn unknown_packaging_variant_errors() {
 		let track = video_track("video0", moq_msf::Packaging::Unknown("custom".to_string()), None);
 		let msf = moq_msf::Catalog { tracks: vec![track] };
 
-		let catalog = from_msf(&msf).expect("unknown packaging should be skipped, not error");
-		assert!(catalog.video.renditions.is_empty());
+		let err = from_msf(&msf).expect_err("unknown packaging must error");
+		assert!(
+			err.to_string().contains("unsupported packaging"),
+			"unexpected error: {err}"
+		);
 	}
 
 	#[test]

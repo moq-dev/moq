@@ -46,6 +46,9 @@ pub enum Error {
 	#[error("TrackEntry missing CodecID")]
 	MissingCodecId,
 
+	#[error("unsupported MKV TrackType {track_type} for CodecID {codec_id}")]
+	UnsupportedTrackType { track_type: u64, codec_id: String },
+
 	#[error("unsupported video CodecID: {0}")]
 	UnsupportedVideoCodec(String),
 

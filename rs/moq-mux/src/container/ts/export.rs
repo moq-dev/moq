@@ -821,13 +821,8 @@ impl<E: catalog::Catalog> Export<E> {
 	/// the unit-start bit so the receiver finds the pointer_field); continuations are
 	/// `Raw`. The section bytes are opaque, so this round-trips byte-for-byte.
 	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
-		// The verbatim track is public; a non-importer producer could publish a frame
-		// that isn't a complete section. Drop it (with a warning) rather than emit a
-		// malformed section a downstream demuxer would choke on. One bad section must
-		// not abort a live export, so this skips instead of erroring.
 		if !is_complete_section(section) {
-			tracing::warn!(pid, len = section.len(), "dropping malformed private section on export");
-			return Ok(());
+			anyhow::bail!("malformed private section on PID {pid}: {} bytes", section.len());
 		}
 
 		let mut offset = 0;

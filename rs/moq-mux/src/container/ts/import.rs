@@ -38,7 +38,7 @@ use crate::container::Timestamp;
 /// streams ride the normal PES reassembly, section-framed streams (SCTE-35, marked
 /// by a program-level 'CUEI' registration descriptor, and other private sections)
 /// are intercepted before the reader and reassembled. With a base `Catalog<()>`
-/// they're logged and dropped instead.
+/// they are rejected.
 pub struct Import<E: catalog::Catalog = ()> {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
@@ -79,7 +79,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// 'CUEI' registration descriptor.
 	sections: HashMap<u16, SectionStream<E>>,
 	/// Whether the catalog can carry the `mpegts` section, sampled once at construction.
-	/// A base `Catalog<()>` can't, so its undecoded PIDs route to `Stream::Ignored`.
+	/// A base `Catalog<()>` discards undecoded private data.
 	supports_mpegts: bool,
 	/// PMT ES-level descriptors per PID, stashed when a PMT is parsed so a decoded
 	/// media track can record them (language, registration, ...) once its track exists.
@@ -184,12 +184,8 @@ impl<E: catalog::Catalog> Import<E> {
 				section.packet(&pkt, pts)?;
 				continue;
 			}
-			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
-			// undecoded streams, or an ambiguous 0x86 PID without CUEI) are dropped here,
-			// not fed to the PES reader, which aborts on private sections (spec section 7:
-			// never fatal).
 			if let Ok(p) = Pid::new(pid)
-				&& matches!(self.streams.get(&p), Some(Stream::Ignored))
+				&& matches!(self.streams.get(&p), Some(Stream::Discard))
 			{
 				continue;
 			}
@@ -251,8 +247,8 @@ impl<E: catalog::Catalog> Import<E> {
 					}
 					// Section-framed private data is intercepted before the reader (which
 					// aborts on private sections): private sections (0x05) and CUEI-marked
-					// SCTE-35 (0x86). Everything else routes through ensure_stream (a decoded
-					// codec, PES-framed verbatim, or dropped).
+					// SCTE-35 (0x86). Everything else routes through ensure_stream as a
+					// decoded codec or PES-framed verbatim stream.
 					if stream_type == 0x05 || (cuei && matches!(es.stream_type, StreamType::Dts8ChannelLosslessAudio)) {
 						self.ensure_section(es.elementary_pid, stream_type, &es.descriptors)?;
 					} else {
@@ -326,8 +322,7 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::Mpeg1Video | StreamType::Mpeg2Video => Stream::Clock,
 			// A codec we don't decode. Carry it verbatim as PES when the catalog supports
 			// the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS audio, or a
-			// non-conformant SCTE-35 mux without CUEI, which is sections the PES reader
-			// would abort on), so drop it rather than risk feeding sections to the reader.
+			// non-conformant SCTE-35 mux without CUEI), so reject it instead of guessing.
 			other => {
 				if self.supports_mpegts && !matches!(other, StreamType::Dts8ChannelLosslessAudio) {
 					let descriptors = to_descriptors(descriptors);
@@ -339,20 +334,18 @@ impl<E: catalog::Catalog> Import<E> {
 						descriptors,
 					) {
 						Ok(stream) => Stream::Verbatim(Box::new(stream)),
-						Err(err) => {
-							tracing::warn!(?err, pid = pid.as_u16(), "failed to create verbatim stream, dropping");
-							Stream::Ignored
-						}
+						Err(err) => return Err(err),
 					}
+				} else if !self.supports_mpegts {
+					Stream::Discard
 				} else {
-					tracing::warn!(?other, pid = pid.as_u16(), "unsupported TS stream type, dropping");
-					Stream::Ignored
+					anyhow::bail!("unsupported TS stream type {:?} on PID {}", other, pid.as_u16());
 				}
 			}
 		};
 
 		// Clock is not a decodable track, so it doesn't initialize the importer.
-		if !matches!(stream, Stream::Ignored | Stream::Clock) {
+		if !matches!(stream, Stream::Clock | Stream::Discard) {
 			self.initialized = true;
 		}
 		self.streams.insert(pid, stream);
@@ -371,9 +364,8 @@ impl<E: catalog::Catalog> Import<E> {
 		}))
 	}
 
-	/// Register a section-framed verbatim PID (SCTE-35 or other private sections):
-	/// intercepted (see [`Self::decode`]) with a verbatim track when the catalog
-	/// carries the `mpegts` section, dropped as `Ignored` when it can't.
+	/// Register a section-framed verbatim PID (SCTE-35 or other private sections).
+	/// Private sections require a catalog that carries the `mpegts` section.
 	fn ensure_section(
 		&mut self,
 		pid: Pid,
@@ -386,17 +378,10 @@ impl<E: catalog::Catalog> Import<E> {
 		// This PID is becoming section-framed; drop any partial PES a prior codec left pending.
 		self.pending.remove(&pid);
 		if !self.supports_mpegts {
-			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
-			// can reassign it), so a private section never reaches the PES reader. Warn once.
-			if !matches!(self.streams.insert(pid, Stream::Ignored), Some(Stream::Ignored)) {
-				tracing::warn!(
-					pid = pid.as_u16(),
-					"private section stream detected without `mpegts` catalog support; dropping"
-				);
-			}
+			self.streams.insert(pid, Stream::Discard);
 			return Ok(());
 		}
-		// A prior PMT may have routed this PID to Ignored; drop it so the PID has one route.
+		// A prior PMT may have routed this PID as PES; drop it so the PID has one route.
 		self.streams.remove(&pid);
 		let descriptors = to_descriptors(descriptors);
 		let stream = SectionStream::new(
@@ -964,7 +949,7 @@ enum Stream<E: catalog::Catalog = ()> {
 	/// MPEG-1/2 video we don't decode, kept only to advance the media clock.
 	/// `is_video` counts it, so never reuse this variant for audio or data.
 	Clock,
-	Ignored,
+	Discard,
 }
 
 impl<E: catalog::Catalog> Stream<E> {
@@ -1002,7 +987,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
-			Stream::Clock | Stream::Ignored => Ok(()),
+			Stream::Clock | Stream::Discard => Ok(()),
 		}
 	}
 
@@ -1019,7 +1004,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.seek(sequence),
 			Stream::Legacy(stream) => stream.seek(sequence),
 			Stream::Verbatim(stream) => stream.seek(sequence),
-			Stream::Clock | Stream::Ignored => Ok(()),
+			Stream::Clock | Stream::Discard => Ok(()),
 		}
 	}
 
@@ -1030,19 +1015,19 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.finish(),
 			Stream::Legacy(stream) => stream.finish(),
 			Stream::Verbatim(stream) => stream.finish(),
-			Stream::Clock | Stream::Ignored => Ok(()),
+			Stream::Clock | Stream::Discard => Ok(()),
 		}
 	}
 
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
-	/// exists. `None` for verbatim/clock/ignored streams (verbatim self-registers).
+	/// exists. `None` for verbatim/clock/discard streams (verbatim self-registers).
 	fn media_track_name(&self) -> Option<String> {
 		match self {
 			Stream::H264 { import, .. } => Some(import.name().to_string()),
 			Stream::H265 { import, .. } => Some(import.name().to_string()),
 			Stream::Aac(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
 			Stream::Legacy(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
-			Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => None,
+			Stream::Verbatim(_) | Stream::Clock | Stream::Discard => None,
 		}
 	}
 }
@@ -1085,7 +1070,7 @@ impl<E: CatalogExt> AacStream<E> {
 					// Synthesize the AudioSpecificConfig from the first ADTS header so
 					// downstream consumers that need out-of-band config (fMP4/MKV export,
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
-					let description = config.encode();
+					let description = config.encode()?;
 					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
 					let mut aac = aac::Import::new(track, self.catalog.clone(), config)?;
 					aac.update_rendition(|rendition| rendition.description = Some(description));
@@ -1641,11 +1626,10 @@ mod test {
 		);
 	}
 
-	// The base catalog (`Catalog<()>`) can't carry cues, so a detected CUEI PID routes to
-	// Stream::Ignored: dropped before the reader (no abort), with no ScteStream created, so
-	// the publishing lock is never taken and the catalog is never republished empty.
+	// The base catalog (`Catalog<()>`) can't carry cues, so a detected CUEI PID is
+	// discarded without creating a section track.
 	#[tokio::test(start_paused = true)]
-	async fn base_catalog_routes_cue_pid_to_ignored() {
+	async fn base_catalog_discards_cue_pid() {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut updates = catalog.consume().unwrap();
@@ -1654,7 +1638,7 @@ mod test {
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, 0x21)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
-		import.decode(&bytes).unwrap(); // must not abort on the private section
+		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
 		assert!(
@@ -1664,12 +1648,10 @@ mod test {
 		assert!(
 			matches!(
 				import.streams.get(&mpeg2ts::ts::Pid::new(0x21).unwrap()),
-				Some(super::Stream::Ignored)
+				Some(super::Stream::Discard)
 			),
-			"the CUEI PID routes to Ignored"
+			"the CUEI PID routes to Discard"
 		);
-		// SCTE detection takes no lock here (video/audio would still publish later): the old
-		// discarding ScteStream took the lock and republished an empty catalog on this path.
 		assert!(
 			tokio::time::timeout(std::time::Duration::from_millis(10), updates.next())
 				.await
@@ -1678,50 +1660,48 @@ mod test {
 		);
 	}
 
-	// A PMT without CUEI first routes the 0x86 PID to Ignored; a later PMT with CUEI upgrades
-	// it to a cue track. ensure_scte drops the stale Ignored route and decode prefers `scte`,
-	// so the cue publishes.
+	// A 0x86 PID without CUEI is ambiguous: DTS audio or a non-conformant SCTE mux.
+	// Reject it instead of guessing and silently dropping later section packets.
 	#[tokio::test(start_paused = true)]
-	async fn pmt_without_cuei_then_with_cuei_upgrades() {
+	async fn dts_pid_without_cuei_errors() {
 		use crate::catalog::hang::{Catalog, Container};
 		use crate::container::Consumer;
 		use crate::container::ts::catalog::Ext;
 
 		const SECTION_PID: u16 = 0x0021;
-		let pid = mpeg2ts::ts::Pid::new(SECTION_PID).unwrap();
+
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.clone());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[(StreamType::Dts8ChannelLosslessAudio, SECTION_PID)],
+			false,
+		));
+		let err = import.decode(&bytes).unwrap_err();
+		assert!(
+			err.to_string().contains("unsupported TS stream type"),
+			"unexpected error: {err}"
+		);
+		assert!(catalog.snapshot().mpegts.tracks.is_empty());
+		drop(import);
 
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
-		// First PMT lacks CUEI: the 0x86 PID is ambiguous and routes to Ignored.
-		let mut bytes = bytes::BytesMut::new();
-		bytes.extend_from_slice(&synth_pmt(
-			&[(StreamType::Dts8ChannelLosslessAudio, SECTION_PID)],
-			false,
-		));
-		import.decode(&bytes).unwrap();
-		assert!(
-			matches!(import.streams.get(&pid), Some(super::Stream::Ignored)),
-			"pre-CUEI PMT routes the PID to Ignored"
-		);
-
-		// Second PMT carries CUEI: upgrade to a cue track, then a section on the same PID.
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, SECTION_PID)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
 		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
-		assert!(
-			!import.streams.contains_key(&pid),
-			"upgrade drops the stale Ignored route"
-		);
 		assert_eq!(
 			catalog.snapshot().mpegts.tracks.len(),
 			1,
-			"upgrade advertises the cue track"
+			"CUEI advertises the cue track"
 		);
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
@@ -2050,11 +2030,10 @@ mod test {
 		);
 	}
 
-	// A 0x86 PID without CUEI is ambiguous (DTS audio or a non-conformant SCTE mux):
-	// it's classified Ignored and dropped, NOT handed to the PES reader (which aborts
-	// on private sections, spec section 7) and NOT cataloged. The rest keeps importing.
+	// A 0x86 PID without CUEI is ambiguous: reject it instead of letting a private
+	// section disappear as an unsupported DTS stream.
 	#[test]
-	fn section_pid_without_cuei_is_dropped_not_cataloged() {
+	fn section_pid_without_cuei_errors() {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
@@ -2078,11 +2057,11 @@ mod test {
 		));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE)); // a private section on 0x21
 		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 90_000)); // valid video after it
-		import.decode(&bytes).unwrap(); // must NOT abort
+		let err = import.decode(&bytes).unwrap_err();
 
 		assert!(
-			import.last_pts.is_some(),
-			"video kept importing past the dropped section PID"
+			err.to_string().contains("unsupported TS stream type"),
+			"unexpected error: {err}"
 		);
 		assert!(
 			catalog.snapshot().mpegts.tracks.is_empty(),

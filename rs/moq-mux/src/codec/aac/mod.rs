@@ -27,6 +27,12 @@ pub enum Error {
 
 	#[error("unsupported sample rate index: {0}")]
 	UnsupportedSampleRateIndex(u8),
+
+	#[error("unsupported AAC channel config: {0}")]
+	UnsupportedChannelConfig(u8),
+
+	#[error("unsupported AAC channel count: {0}")]
+	UnsupportedChannelCount(u32),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -79,7 +85,7 @@ impl Config {
 			let channel_config = (channel_config_high << 3) | ((b1 >> 5) & 0x07);
 
 			let sample_rate = sample_rate_from_index(freq_index, buf)?;
-			let channel_count = channel_count_from_config(channel_config);
+			let channel_count = channel_count_from_config(channel_config)?;
 
 			if buf.remaining() > 0 {
 				buf.advance(buf.remaining());
@@ -102,7 +108,7 @@ impl Config {
 			let channel_config = (b1 >> 3) & 0x0F;
 
 			let sample_rate = sample_rate_from_index(freq_index, buf)?;
-			let channel_count = channel_count_from_config(channel_config);
+			let channel_count = channel_count_from_config(channel_config)?;
 
 			// AudioSpecificConfig can have variable-length extensions (SBR, PS,
 			// etc.). We've already extracted the essential info; consume any
@@ -125,7 +131,7 @@ impl Config {
 	///
 	/// Standard sample rates produce 2 bytes; non-standard rates fall back to
 	/// the 5-byte form with an explicit 24-bit frequency.
-	pub fn encode(&self) -> Bytes {
+	pub fn encode(&self) -> Result<Bytes> {
 		// audioObjectType is a 5-bit field; mask to prevent shift overflow.
 		let profile = self.profile & 0x1F;
 
@@ -146,13 +152,13 @@ impl Config {
 			_ => 0xF, // explicit 24-bit frequency follows
 		};
 
-		let channel_config = channel_config_from_count(self.channel_count) as u64;
+		let channel_config = channel_config_from_count(self.channel_count)? as u64;
 
 		if freq_index != 0xF {
 			// 5 + 4 + 4 = 13 bits → 2 bytes (3 bits padding)
 			let b0 = (profile << 3) | (freq_index >> 1);
 			let b1 = ((freq_index & 1) << 7) | ((channel_config as u8 & 0x0F) << 3);
-			Bytes::from(vec![b0, b1])
+			Ok(Bytes::from(vec![b0, b1]))
 		} else {
 			// 5 + 4 + 24 + 4 = 37 bits → 5 bytes (3 bits padding)
 			let mut bits: u64 = 0;
@@ -161,7 +167,7 @@ impl Config {
 			bits |= (self.sample_rate as u64) << 7;
 			bits |= (channel_config & 0xF) << 3;
 			let all = bits.to_be_bytes();
-			Bytes::copy_from_slice(&all[3..8])
+			Ok(Bytes::copy_from_slice(&all[3..8]))
 		}
 	}
 }
@@ -187,33 +193,21 @@ fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> Result<u32> {
 
 /// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to its real channel count.
 /// Configs 1..=6 happen to be identity (5.1 has config=6 and 6 channels). Config
-/// 7 is 7.1 = 8 channels. Config 0 means "described elsewhere" — we default to
-/// stereo.
-fn channel_count_from_config(channel_config: u8) -> u32 {
+/// 7 is 7.1 = 8 channels.
+fn channel_count_from_config(channel_config: u8) -> Result<u32> {
 	match channel_config {
-		1..=6 => channel_config as u32,
-		7 => 8,
-		0 => {
-			tracing::warn!("channel_config=0 (program config element) unsupported, defaulting to stereo");
-			2
-		}
-		_ => {
-			tracing::warn!(channel_config, "unsupported channel config, defaulting to stereo");
-			2
-		}
+		1..=6 => Ok(channel_config as u32),
+		7 => Ok(8),
+		_ => Err(Error::UnsupportedChannelConfig(channel_config)),
 	}
 }
 
-/// Inverse of [`channel_count_from_config`]. Defaults to stereo for unsupported
-/// counts (channel configs > 7 are reserved).
-fn channel_config_from_count(channel_count: u32) -> u8 {
+/// Inverse of [`channel_count_from_config`].
+fn channel_config_from_count(channel_count: u32) -> Result<u8> {
 	match channel_count {
-		1..=6 => channel_count as u8,
-		8 => 7,
-		_ => {
-			tracing::warn!(channel_count, "unsupported channel count, defaulting to stereo");
-			2
-		}
+		1..=6 => Ok(channel_count as u8),
+		8 => Ok(7),
+		_ => Err(Error::UnsupportedChannelCount(channel_count)),
 	}
 }
 
@@ -247,7 +241,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_count: 6,
 		};
-		let encoded = cfg.encode();
+		let encoded = cfg.encode().unwrap();
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.channel_count, 6);
 	}
@@ -260,19 +254,25 @@ mod tests {
 			sample_rate: 48000,
 			channel_count: 8,
 		};
-		let encoded = cfg.encode();
+		let encoded = cfg.encode().unwrap();
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.channel_count, 8, "7.1 surround should round-trip as 8 channels");
 	}
 
 	#[test]
-	fn channel_config_zero_falls_back_to_stereo() {
+	fn channel_config_zero_errors() {
 		// Config 0 means "described in PCE" which we don't implement.
-		assert_eq!(channel_count_from_config(0), 2);
+		assert!(matches!(
+			channel_count_from_config(0),
+			Err(Error::UnsupportedChannelConfig(0))
+		));
 	}
 
 	#[test]
-	fn unsupported_channel_count_falls_back_to_stereo_config() {
-		assert_eq!(channel_config_from_count(9), 2);
+	fn unsupported_channel_count_errors() {
+		assert!(matches!(
+			channel_config_from_count(9),
+			Err(Error::UnsupportedChannelCount(9))
+		));
 	}
 }

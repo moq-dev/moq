@@ -124,6 +124,22 @@ impl Reset {
 	}
 }
 
+fn is_old_group_error(err: &(dyn std::error::Error + 'static)) -> bool {
+	if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Old)) {
+		return true;
+	}
+
+	let mut source = err.source();
+	while let Some(err) = source {
+		if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Old)) {
+			return true;
+		}
+		source = err.source();
+	}
+
+	false
+}
+
 impl<F: Container> Consumer<F> {
 	/// Create a new Consumer wrapping the given moq-lite consumer.
 	pub fn new(track: moq_net::TrackConsumer, format: F) -> Self {
@@ -207,7 +223,7 @@ impl<F: Container> Consumer<F> {
 			self.poll_classify(waiter)?;
 
 			// Return the next frame from the current group if possible.
-			// If the current group is finished or errored, advance to the next group.
+			// If the current group is finished, advance to the next group.
 			while let Some(group) = self.pending.front_mut()
 				&& group.sequence <= self.current
 			{
@@ -224,16 +240,11 @@ impl<F: Container> Consumer<F> {
 					}
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => break,
-					Poll::Ready(Err(e)) => {
-						// The group was dropped/aborted -- typically it aged out of the relay
-						// cache (`Error::Old`) while we weren't reading it. Any sequences
-						// between it and the next buffered group were evicted alongside it, so
-						// jump straight to that group instead of stepping one-by-one and then
-						// blocking on a sequence gap of groups that will never arrive.
-						tracing::warn!(error = ?e, "current group dropped; skipping to next buffered group");
+					Poll::Ready(Err(e)) if is_old_group_error(&e) => {
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 					}
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
 						self.pending.pop_front();

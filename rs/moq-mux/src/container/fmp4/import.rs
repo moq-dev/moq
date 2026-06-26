@@ -376,7 +376,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					sample_rate,
 					channel_count,
 				}
-				.encode();
+				.encode()?;
 
 				let mut config = AudioConfig::new(AAC { profile }, sample_rate, channel_count);
 				config.bitrate = Some(bitrate.into());

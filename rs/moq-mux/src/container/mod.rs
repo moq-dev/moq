@@ -92,7 +92,7 @@ pub trait Container {
 	/// Container-specific error. Must be convertible from [`moq_net::Error`]
 	/// (so IO errors propagate) and [`MissingKeyframe`] (so the producer can
 	/// reject a group that doesn't open on a keyframe).
-	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error> + From<MissingKeyframe>;
+	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error> + From<MissingKeyframe> + 'static;
 
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;

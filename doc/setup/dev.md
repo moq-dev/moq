@@ -37,8 +37,8 @@ just fix
 # Run the tests
 just test
 
-# Publish a HLS broadcast (CMAF) over MoQ
-just pub hls tos
+# Publish a CMAF broadcast over MoQ
+just pub cmaf tos
 ```
 
 Want more? See the [justfile](https://github.com/moq-dev/moq/blob/main/justfile) for all commands.

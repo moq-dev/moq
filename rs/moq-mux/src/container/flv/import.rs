@@ -16,7 +16,7 @@
 //! codecs (AC-3 / E-AC-3) carry their config in band, so they configure from the
 //! first frame instead. Sample bytes already match the [`Legacy`](crate::catalog::hang::Container)
 //! container, so no codec transform is needed. FLAC (`fLaC`) and MP3 (`.mp3`)
-//! enhanced audio, and any other codec, are logged and dropped.
+//! enhanced audio, and any other codec, are rejected.
 
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
@@ -38,9 +38,9 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 ///
 /// Supports legacy H.264 + AAC and the enhanced-RTMP FourCC codecs (HEVC, AV1,
 /// VP9, Opus, AC-3, E-AC-3), the payloads produced by RTMP encoders and
-/// `ffmpeg -f flv`. Unsupported codecs, plus `onMetaData` script tags, are logged
-/// and dropped. A single FLV stream carries at most one video and one audio
-/// track; a new sequence header replaces the previous configuration.
+/// `ffmpeg -f flv`. Unsupported codecs are rejected; `onMetaData` script tags
+/// are ignored. A single FLV stream carries at most one video and one audio track;
+/// a new sequence header replaces the previous configuration.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
@@ -150,8 +150,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let frame_type = first >> 4;
 		let codec_id = first & 0x0f;
 		if codec_id != VIDEO_CODEC_AVC {
-			tracing::warn!(codec_id, "unsupported FLV video codec, dropping");
-			return Ok(());
+			anyhow::bail!("unsupported FLV video codec: {codec_id}");
 		}
 
 		anyhow::ensure!(body.len() >= 5, "AVC video tag too short");
@@ -186,8 +185,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// redundant with the key-frame header we configure from.
 					b"vp09" => return Ok(()),
 					other => {
-						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV video codec, dropping");
-						return Ok(());
+						anyhow::bail!("unsupported enhanced FLV video codec: {:?}", other);
 					}
 				};
 				self.init_video(config)
@@ -206,12 +204,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// VP9 has no out-of-band config record, so (re)configure from each key
 				// frame's uncompressed header. `init_video` dedups when unchanged, so
 				// this is a no-op except on the first key frame or a resolution change.
-				// A malformed header drops just this frame rather than aborting the stream.
+				// A malformed key frame means the in-band codec config is unusable.
 				if &fourcc == b"vp09" && keyframe {
 					match crate::codec::vp9::config_from_keyframe(data) {
 						Ok(Some(config)) => self.init_video(config)?,
 						Ok(None) => {}
-						Err(err) => tracing::warn!(%err, "dropping malformed VP9 key frame"),
+						Err(err) => return Err(err.into()),
 					}
 				}
 
@@ -234,8 +232,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return self.handle_audio_enhanced(first, body, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
-			tracing::warn!(sound_format, "unsupported FLV audio format, dropping");
-			return Ok(());
+			anyhow::bail!("unsupported FLV audio format: {sound_format}");
 		}
 
 		anyhow::ensure!(body.len() >= 2, "AAC audio tag too short");
@@ -264,8 +261,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
 					other => {
-						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV audio codec, dropping");
-						return Ok(());
+						anyhow::bail!("unsupported enhanced FLV audio codec: {:?}", other);
 					}
 				};
 				self.init_audio(config)

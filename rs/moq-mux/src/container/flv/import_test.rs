@@ -180,6 +180,33 @@ async fn import_enhanced_vp9() {
 	assert_eq!(v.coded_height, Some(240));
 }
 
+/// A malformed VP9 key frame is fatal because it carries the in-band config.
+#[tokio::test(start_paused = true)]
+async fn import_enhanced_vp9_errors_on_malformed_keyframe() {
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x01); // video only
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	let first = super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES;
+	let mut good = vec![first];
+	good.extend_from_slice(b"vp09");
+	good.extend_from_slice(VP9_KEYFRAME_320X240);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &good);
+
+	let mut bad = vec![first];
+	bad.extend_from_slice(b"vp09");
+	write_tag(&mut out, super::TAG_VIDEO, 20, &bad);
+
+	let mut producer = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog);
+
+	assert!(importer.decode(&bytes::BytesMut::from(out.as_slice())).is_err());
+}
+
 /// Enhanced-RTMP (FourCC) Opus audio configures from the `OpusHead` sequence
 /// header and carries the frames through.
 #[tokio::test(start_paused = true)]

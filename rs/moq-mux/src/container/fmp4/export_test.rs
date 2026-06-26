@@ -135,7 +135,8 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 		sample_rate: 44100,
 		channel_count: 2,
 	}
-	.encode();
+	.encode()
+	.unwrap();
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 	config.description = Some(description.clone());
 	config.container = Container::Legacy;

@@ -68,6 +68,10 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
 
+## Input Validation
+
+- Bad or unsupported input should generally return an error, not emit a warning and continue. Silent or warning-only fallback hides publisher bugs and unsupported cases we need to fix. Only skip or discard input when that behavior is explicit API policy (for example, a caller-selected filter or data the selected catalog shape cannot represent), and keep that distinction clear in tests.
+
 ## Development Tips
 
 1. The project uses `just` as the task runner - check `justfile` for all available commands

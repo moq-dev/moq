@@ -241,9 +241,7 @@ fn test_chunked_decode_dedup() {
 }
 
 #[test]
-fn test_unsupported_codec_skipped() {
-	// Mix of supported (Opus) and unsupported (Vorbis) audio tracks. The Vorbis track
-	// should be dropped with a warning; Opus should make it into the catalog.
+fn test_unsupported_codec_errors() {
 	let data = MkvBuilder::new()
 		.header("webm")
 		.segment_start()
@@ -261,10 +259,16 @@ fn test_unsupported_codec_skipped() {
 		.segment_end()
 		.build();
 
-	let catalog = run(&data);
-	assert_eq!(catalog.audio.renditions.len(), 1);
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert!(matches!(a.codec, AudioCodec::Opus));
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog);
+	let err = mkv
+		.decode(&bytes::BytesMut::from(data.as_slice()))
+		.expect_err("Vorbis must error");
+	assert!(
+		err.to_string().contains("unsupported audio CodecID"),
+		"unexpected error: {err}"
+	);
 }
 
 #[test]

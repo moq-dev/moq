@@ -57,7 +57,7 @@ The binary will be in `target/release/moq-cli`.
 ## Basic Usage
 
 `moq-cli publish` reads media from stdin and selects the input container with a
-subcommand (`ts`, `fmp4`, `flv`, `avc3`, `hls`). The destination is set with
+subcommand (`ts`, `fmp4`, `flv`, `avc3`). The destination is set with
 `--url` (the server) and `--broadcast` (the broadcast name), not a path on the URL.
 
 ### Publish a Video File
@@ -141,8 +141,6 @@ Publish (read from stdin unless noted):
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
-- `hls --playlist <url>` - HLS playlist ingest
-- `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
 Subscribe (`--format`):
 

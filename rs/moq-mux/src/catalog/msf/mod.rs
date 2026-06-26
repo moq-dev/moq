@@ -26,6 +26,15 @@ pub enum Error {
 	#[error("MSF track {0:?} has malformed init_data")]
 	MalformedInitData(String),
 
+	#[error("MSF track {0:?} missing role")]
+	MissingRole(String),
+
+	#[error("MSF track {name:?} has unsupported role {role:?}")]
+	UnsupportedRole { name: String, role: String },
+
+	#[error("MSF track {name:?} has unsupported packaging {packaging:?}")]
+	UnsupportedPackaging { name: String, packaging: String },
+
 	#[error("MSF video track {0:?} missing codec")]
 	MissingVideoCodec(String),
 

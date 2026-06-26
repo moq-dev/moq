@@ -35,7 +35,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - AAC (`A_AAC`)
 /// - Opus (`A_OPUS`)
 ///
-/// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
+/// Unsupported codecs are errors.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
@@ -219,9 +219,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn handle_tracks(&mut self, entries: Vec<MatroskaSpec>) -> Result<()> {
 		for entry in entries {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry {
-				if let Err(e) = self.add_track(children) {
-					tracing::warn!(error = ?e, "skipping MKV track");
-				}
+				self.add_track(children)?;
 			}
 		}
 		Ok(())
@@ -256,8 +254,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			1 => (TrackKind::Video, ".mkv-v"),
 			2 => (TrackKind::Audio, ".mkv-a"),
 			other => {
-				tracing::warn!(track_type = other, codec_id, "unsupported MKV track type, skipping");
-				return Ok(());
+				return Err(Error::UnsupportedTrackType {
+					track_type: other,
+					codec_id,
+				}
+				.into());
 			}
 		};
 
