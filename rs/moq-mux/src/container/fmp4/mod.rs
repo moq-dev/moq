@@ -23,9 +23,7 @@ use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
 use mp4_atom::Atom;
 
-use moq_net::Timestamp;
-
-use crate::container::{Container, Frame};
+use crate::container::{Container, Frame, Timestamp};
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -182,7 +180,7 @@ impl Container for Wire {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
-		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
+		let timescale = self.trak.mdia.mdhd.timescale as u64;
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
 	}
@@ -198,12 +196,12 @@ impl Container for Wire {
 			return Poll::Ready(Ok(None));
 		};
 
-		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
+		let timescale = self.trak.mdia.mdhd.timescale as u64;
 		Poll::Ready(Ok(Some(decode(data, timescale)?)))
 	}
 }
 
-pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<Frame>> {
+pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
@@ -247,7 +245,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 			let cts = entry.cts.unwrap_or_default() as i64;
 			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
 			// Preserve the fmp4 track's native scale through the pipeline.
-			let timestamp = Timestamp::new(pts, timescale)?;
+			let timestamp = Timestamp::from_scale(pts, timescale)?;
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
@@ -257,7 +255,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 			// the jitter buffer can use it and an exporter can write it back.
 			let sample_duration = entry.duration.or(default_duration);
 			let duration = sample_duration
-				.map(|d| Timestamp::new(d as u64, timescale))
+				.map(|d| Timestamp::from_scale(d as u64, timescale))
 				.transpose()?;
 
 			frames.push(Frame {
@@ -278,7 +276,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 pub(crate) fn encode(
 	group: &mut moq_net::GroupProducer,
 	frames: &[Frame],
-	timescale: moq_net::Timescale,
+	timescale: u64,
 	track_id: u32,
 ) -> Result<()> {
 	if frames.is_empty() {
@@ -287,7 +285,11 @@ pub(crate) fn encode(
 
 	let sequence_number = group.frame_count() as u32;
 	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
-	let mut writer = group.create_frame(bytes.len())?;
+	// The fragment may carry several samples; the net frame's timestamp is the
+	// fragment's earliest presentation time so a relay can order it.
+	let mut writer = group.create_frame(moq_net::FrameInfo {
+		size: bytes.len() as u64,
+	})?;
 	writer.write(bytes)?;
 	writer.finish()?;
 
@@ -302,12 +304,7 @@ pub(crate) fn encode(
 /// caller-supplied `timescale`.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
-pub(crate) fn encode_fragment(
-	track_id: u32,
-	timescale: moq_net::Timescale,
-	sequence_number: u32,
-	frames: &[Frame],
-) -> Result<Bytes> {
+pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u32, frames: &[Frame]) -> Result<Bytes> {
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {

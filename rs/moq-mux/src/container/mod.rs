@@ -21,7 +21,6 @@ mod source;
 
 pub mod flv;
 pub mod fmp4;
-pub mod hls;
 pub mod legacy;
 pub mod loc;
 pub mod mkv;
@@ -31,8 +30,7 @@ pub use consumer::Consumer;
 pub use producer::Producer;
 pub(crate) use source::ExportSource;
 
-/// Microsecond presentation timestamp, the canonical timebase for media
-/// frames in moq-mux.
+/// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux on `main`.
 pub type Timestamp = moq_net::Timescale<1_000_000>;
 
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
@@ -44,10 +42,23 @@ pub type Timestamp = moq_net::Timescale<1_000_000>;
 pub struct Frame {
 	/// Presentation timestamp.
 	///
-	/// Microsecond precision. Frames within a track must be in *decode*
-	/// order, not display order. B-frames may have non-monotonic
-	/// presentation timestamps.
+	/// Each container picks its own native scale: fmp4 uses the source
+	/// `mdhd.timescale`, mkv uses nanoseconds, legacy is fixed at microseconds.
+	/// LOC defaults to microseconds but a decoded frame keeps whatever per-frame
+	/// timescale the wire carried, so an exporter can re-emit without forcing
+	/// micros. Frames within a track must be in *decode* order, not display
+	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: Timestamp,
+
+	/// How long this frame occupies the presentation timeline, in the frame's
+	/// own scale, when the container reports it.
+	///
+	/// CMAF carries a per-sample duration (trun sample-duration); containers
+	/// that don't (Legacy, LOC) leave this `None`. The [`Consumer`] adds it to
+	/// `timestamp` to learn how far a group has presented, so it can advance to
+	/// a newer group as soon as the gap is covered instead of waiting out the
+	/// latency budget.
+	pub duration: Option<Timestamp>,
 
 	/// Encoded codec payload.
 	pub payload: Bytes,

@@ -16,7 +16,7 @@ mod export_test;
 mod import_test;
 
 /// MKV parsing and emission errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("unsupported EBML DocType: {0}")]
@@ -113,5 +113,13 @@ pub enum Error {
 	MatroskaParse,
 
 	#[error("matroska write error: {0}")]
-	MatroskaWrite(#[from] webm_iterable::errors::TagWriterError),
+	MatroskaWrite(std::sync::Arc<webm_iterable::errors::TagWriterError>),
 }
+
+impl From<webm_iterable::errors::TagWriterError> for Error {
+	fn from(err: webm_iterable::errors::TagWriterError) -> Self {
+		Error::MatroskaWrite(std::sync::Arc::new(err))
+	}
+}
+
+pub type Result<T> = std::result::Result<T, Error>;

@@ -38,19 +38,26 @@ impl VideoTransform {
 		}
 	}
 
-	fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
+	fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
 		match self {
-			VideoTransform::Avc1(t) => t.transform(payload),
-			VideoTransform::Hvc1(t) => t.transform(payload),
+			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
 		}
 	}
+}
+
+/// A subscription that resolves on first poll, then the live consumer.
+enum SourceState {
+	/// The resolved consumer, reading frames. Boxed because it's much larger than
+	/// a lightweight subscription handle.
+	Active(Box<Consumer<HangContainer>>),
 }
 
 /// A per-rendition source that normalizes frame shape (Annex-B →
 /// length-prefixed for H.264/H.265) and exposes the resolved codec config
 /// record alongside the frame stream.
 pub(crate) struct ExportSource {
-	consumer: Consumer<HangContainer>,
+	state: SourceState,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -67,14 +74,13 @@ impl ExportSource {
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
-		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-		let consumer = Consumer::new(track, media).with_latency(latency);
-
 		let transform = build_video_transform(config);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			consumer,
+			state: SourceState::Active(Box::new(
+				Consumer::new(broadcast.subscribe_track(&moq_net::Track::new(name))?, media).with_latency(latency),
+			)),
 			transform,
 			description,
 		})
@@ -91,13 +97,12 @@ impl ExportSource {
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
-		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-		let consumer = Consumer::new(track, media).with_latency(latency);
-
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			consumer,
+			state: SourceState::Active(Box::new(
+				Consumer::new(broadcast.subscribe_track(&moq_net::Track::new(name))?, media).with_latency(latency),
+			)),
 			transform: None,
 			description,
 		})
@@ -112,14 +117,35 @@ impl ExportSource {
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
-		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-		let consumer = Consumer::new(track, media).with_latency(latency);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			consumer,
+			state: SourceState::Active(Box::new(
+				Consumer::new(broadcast.subscribe_track(&moq_net::Track::new(name))?, media).with_latency(latency),
+			)),
 			transform: None,
 			description,
+		})
+	}
+
+	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
+	/// No codec-shape transform and no description: the frames are Legacy-framed
+	/// verbatim bytes the muxer writes back out as PES or private sections.
+	pub fn for_stream(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		latency: Duration,
+	) -> Result<Self, crate::Error> {
+		Ok(Self {
+			state: SourceState::Active(Box::new(
+				Consumer::new(
+					broadcast.subscribe_track(&moq_net::Track::new(name))?,
+					HangContainer::Legacy,
+				)
+				.with_latency(latency),
+			)),
+			transform: None,
+			description: None,
 		})
 	}
 
@@ -139,13 +165,18 @@ impl ExportSource {
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		loop {
-			let frame = match self.consumer.poll_read(waiter) {
-				Poll::Ready(Ok(Some(f))) => f,
-				Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-				Poll::Pending => return Poll::Pending,
+			// Scope the consumer borrow to the poll so `self.transform` /
+			// `self.refresh_description` can borrow `self` afterwards.
+			let frame = {
+				let SourceState::Active(consumer) = &mut self.state;
+				match consumer.poll_read(waiter) {
+					Poll::Ready(Ok(Some(f))) => f,
+					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+					Poll::Pending => return Poll::Pending,
+				}
 			};
 
 			let Some(transform) = self.transform.as_mut() else {
@@ -169,11 +200,13 @@ impl ExportSource {
 	}
 
 	fn refresh_description(&mut self) {
-		if self.description.is_some() {
-			return;
-		}
+		// Track the transform's record even after it is first set: a mid-stream
+		// reconfiguration rebuilds the avcC/hvcC with a new parameter set, and the
+		// muxer re-injects from this on every keyframe, so a stale record would
+		// carry superseded SPS/PPS.
 		if let Some(transform) = self.transform.as_ref()
 			&& let Some(d) = transform.codec_private()
+			&& self.description.as_ref() != Some(d)
 		{
 			self.description = Some(d.clone());
 		}

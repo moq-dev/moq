@@ -1,9 +1,10 @@
 //! MPEG-TS muxer.
 //!
-//! [`Export`] subscribes to a MoQ broadcast and produces a single MPEG-TS byte
-//! stream: PAT/PMT program tables followed by one PES packet per media frame,
-//! packetized into 188-byte TS packets. Video is carried as Annex-B, audio as
-//! ADTS AAC.
+//! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS, yielding one
+//! [`Frame`] per media frame: PAT/PMT program tables followed by one PES packet,
+//! packetized into 188-byte TS packets. Each frame keeps its media timestamp so
+//! the caller can pace delivery on the media clock. Video is carried as Annex-B,
+//! audio as ADTS AAC.
 //!
 //! Video flows through [`ExportSource`], which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
@@ -28,10 +29,10 @@ use mpeg2ts::ts::{
 	TsHeader, TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 };
 
-use crate::catalog::CatalogFormat;
 use crate::catalog::hang::Catalog;
+use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
-use crate::container::{CatalogSource, ExportSource, Frame};
+use crate::container::{ExportSource, Frame, Timestamp};
 
 use super::adts;
 use super::catalog;
@@ -46,14 +47,13 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
 /// Use [`next`](Self::next) to pull one [`Frame`] per media frame: its `payload`
-/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag so
-/// a transport can pace delivery on the media clock. The leading PAT/PMT rides on
-/// the first frame (so it inherits a real timestamp), and is re-emitted at video
-/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
-/// broadcast ends.
+/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag.
+/// The leading PAT/PMT rides on the first frame (so it inherits a real
+/// timestamp), and is re-emitted at video keyframes and periodically for
+/// mid-stream tune-in. Returns `None` when the broadcast ends.
 pub struct Export<E: catalog::Catalog = ()> {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<CatalogSource<E>>,
+	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
 
 	tracks: HashMap<String, Track>,
@@ -65,7 +65,7 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission.
-	last_psi: Option<crate::container::Timestamp>,
+	last_psi: Option<Timestamp>,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -77,7 +77,7 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// sets behind an audio-only preamble, and a live decoder probing the stream gives
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
-	video_start: Option<crate::container::Timestamp>,
+	video_start: Option<Timestamp>,
 }
 
 struct Track {
@@ -138,7 +138,7 @@ struct PesUnit {
 	is_pcr: bool,
 	is_video: bool,
 	keyframe: bool,
-	timestamp: crate::container::Timestamp,
+	timestamp: Timestamp,
 	/// Authored decode timestamp for a reordered (B-frame) video frame, in continuous
 	/// (unwrapped) 90 kHz ticks (wrapped to the wire field in `write_pes`). `Some` only when
 	/// it differs from the PTS; the PES then carries both PTS and DTS.
@@ -149,17 +149,17 @@ struct PesUnit {
 
 impl Export {
 	/// Subscribe to `broadcast`, using the default catalog format.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default())
+	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
 	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
-	pub fn with_catalog_format(
+	pub async fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format)
+		Self::build(broadcast, catalog_format).await
 	}
 }
 
@@ -168,16 +168,19 @@ impl Export<catalog::Ext> {
 	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
 	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
 	/// plain constructors are media-only).
-	pub fn with_ts(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format)
+	pub async fn with_ts(
+		broadcast: moq_net::BroadcastConsumer,
+		catalog_format: CatalogFormat,
+	) -> Result<Self, crate::Error> {
+		Self::build(broadcast, catalog_format).await
 	}
 }
 
 impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
-	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
+	async fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
 		Ok(Self {
 			broadcast,
 			catalog: Some(catalog),
@@ -204,14 +207,11 @@ impl<E: catalog::Catalog> Export<E> {
 	/// transport can pace delivery on the media clock. The leading PAT/PMT rides
 	/// on the first frame (inheriting its timestamp), and is re-emitted at video
 	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
-	/// broadcast ends.
+	/// broadcast ends. `duration` is always `None`: the muxer has no use for it.
 	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Poll for the next muxed frame, driving the underlying sources via `waiter`.
-	/// The `Poll::Ready` counterpart of [`next`](Self::next), for synchronous or
-	/// custom executors.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
@@ -258,7 +258,7 @@ impl<E: catalog::Catalog> Export<E> {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 					Poll::Pending => break,
 				}
 			}
@@ -498,7 +498,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// The smallest timestamp among the video tracks' buffered frames: the first
 	/// video keyframe, since pre-keyframe video frames are dropped before the tables
 	/// are built. `None` when no video track has a buffered frame (audio-only program).
-	fn first_video_pts(&self) -> Option<crate::container::Timestamp> {
+	fn first_video_pts(&self) -> Option<Timestamp> {
 		self.tracks
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
@@ -625,6 +625,7 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
+	/// Name of the track whose pending frame has the smallest timestamp.
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
@@ -633,8 +634,10 @@ impl<E: catalog::Catalog> Export<E> {
 			.map(|(n, _)| n)
 	}
 
-	/// Packetize one media frame into a chunk, re-emitting PAT/PMT before video
-	/// keyframes (and periodically) so receivers can tune in mid-stream.
+	/// Packetize one media frame into an output [`Frame`], re-emitting PAT/PMT
+	/// before video keyframes (and periodically) so receivers can tune in
+	/// mid-stream. The returned frame keeps the source `timestamp` and `keyframe`
+	/// flag so the caller can pace it.
 	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Frame> {
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
@@ -725,6 +728,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		Ok(Frame {
 			timestamp,
+			duration: None,
 			payload: Bytes::from(out),
 			keyframe,
 		})
@@ -899,8 +903,8 @@ const PES_DTS_LEN: usize = 5;
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
 
-fn psi_interval() -> crate::container::Timestamp {
-	crate::container::Timestamp::try_from(PSI_INTERVAL).unwrap_or(crate::container::Timestamp::ZERO)
+fn psi_interval() -> Timestamp {
+	Timestamp::try_from(PSI_INTERVAL).unwrap_or(Timestamp::ZERO)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -915,11 +919,11 @@ const TS_TIMESTAMP_MASK: u64 = (1 << 33) - 1;
 /// Continuous (unwrapped) 90 kHz tick count for a media timestamp. The decode clock runs in
 /// this domain so it never wraps mid-stream (the source timestamps are already unwrapped);
 /// [`to_ts_timestamp`] masks to the 33-bit wire field only at emission.
-fn to_ticks(timestamp: crate::container::Timestamp) -> u64 {
+fn to_ticks(timestamp: Timestamp) -> u64 {
 	(timestamp.as_micros() * 90_000 / 1_000_000) as u64
 }
 
-fn to_ts_timestamp(timestamp: crate::container::Timestamp) -> anyhow::Result<TsTimestamp> {
+fn to_ts_timestamp(timestamp: Timestamp) -> anyhow::Result<TsTimestamp> {
 	// Continuous 90 kHz ticks, wrapped into the 33-bit field.
 	TsTimestamp::new(to_ticks(timestamp) & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg)
 }
@@ -1046,7 +1050,7 @@ fn author_dts(pts: u64, reserve: u64, last: &mut Option<u64>) -> Option<u64> {
 fn dts_reserve(config: &VideoConfig) -> u64 {
 	config
 		.jitter
-		.map(|t| t.as_scale(90_000) as u64)
+		.map(|t| (t.as_micros() * 90_000 / 1_000_000) as u64)
 		.filter(|&ticks| ticks > 0)
 		.unwrap_or(DEFAULT_DTS_RESERVE)
 }

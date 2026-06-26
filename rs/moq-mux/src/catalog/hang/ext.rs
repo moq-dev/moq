@@ -27,17 +27,17 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// The unit type `()` is the no-extension case, so [`Catalog<()>`] is just the base media catalog.
-pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + 'static {}
+pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + Unpin + 'static {}
 
 impl CatalogExt for () {}
 
 /// The untyped catalog extension: arbitrary top-level JSON sections beyond the base
 /// `video`/`audio` media sections, captured and republished verbatim.
 ///
-/// This is the default extension (so a plain [`Catalog`] preserves sections it doesn't
-/// recognize instead of dropping them, matching the permissive JS catalog schema). Reach
-/// for a typed [`CatalogExt`] struct instead when you want compile-time fields; reach for
-/// `()` when you explicitly want unknown sections dropped.
+/// This is the extension a caller reaches for when the section names aren't known at
+/// compile time, e.g. across the FFI/C boundary where a typed [`CatalogExt`] struct can't
+/// cross. Publish/consume a [`Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
+/// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
 /// `video` and `audio` are reserved for the base media sections, so [`set`](Self::set)
 /// rejects them to keep the wire JSON free of duplicate keys.
@@ -85,16 +85,16 @@ impl Extra {
 	}
 }
 
-/// The base media sections plus an application extension `E` (defaulting to [`Extra`], the
-/// untyped JSON passthrough), serialized as a flat union: the `video`/`audio` sections and the
-/// extension's sections share one JSON object on the wire.
+/// The base media sections plus an application extension `E` (defaulting to `()` for none),
+/// serialized as a flat union: the `video`/`audio` sections and the extension's sections share one
+/// JSON object on the wire.
 ///
 /// `video` and `audio` are direct fields (`catalog.video`), and the catalog derefs to the extension
 /// so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
 /// explicitly). A consumer reading a different extension (or none) ignores sections it doesn't know.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
-pub struct Catalog<E: CatalogExt = Extra> {
+pub struct Catalog<E: CatalogExt = ()> {
 	#[serde(default)]
 	pub video: hang::catalog::Video,
 
@@ -166,7 +166,7 @@ mod test {
 
 	#[test]
 	fn extension_roundtrip() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let mut producer =
 			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();
@@ -192,11 +192,11 @@ mod test {
 
 	#[test]
 	fn untyped_extra_roundtrip() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
-		let mut producer = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut producer = crate::catalog::Producer::new_extra(&mut broadcast).unwrap();
 		let mut consumer = producer.consume().unwrap();
 
-		// A media section coexists with an arbitrary, untyped application section.
+		// A media section (flat field) coexists with an arbitrary untyped application section.
 		producer.lock().audio.renditions.insert(
 			"audio0".to_string(),
 			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
@@ -224,21 +224,5 @@ mod test {
 			Some(&serde_json::json!({ "track": "transcript.json" }))
 		);
 		assert_eq!(catalog.sections().count(), 1);
-	}
-
-	#[test]
-	fn untyped_extra_serializes_flat_and_omits_when_empty() {
-		// An empty extension is byte-identical to the no-extension catalog (wire compatibility).
-		let empty = Catalog::<Extra>::default();
-		assert_eq!(
-			serde_json::to_value(&empty).unwrap(),
-			serde_json::to_value(Catalog::<()>::default()).unwrap()
-		);
-
-		// A set section lands as a flat top-level key alongside `video`/`audio`.
-		let mut catalog = Catalog::<Extra>::default();
-		catalog.ext.set("scte35", serde_json::json!({ "spliceId": 7 })).unwrap();
-		let json = serde_json::to_value(&catalog).unwrap();
-		assert_eq!(json["scte35"], serde_json::json!({ "spliceId": 7 }));
 	}
 }

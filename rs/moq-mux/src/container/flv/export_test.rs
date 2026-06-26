@@ -110,8 +110,7 @@ async fn drain_export(mut exporter: Export, mut importer: Import) -> Vec<u8> {
 
 #[tokio::test(start_paused = true)]
 async fn export_roundtrips_through_import() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -119,14 +118,14 @@ async fn export_roundtrips_through_import() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).unwrap();
+	let exporter = Export::new(consumer).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	// The export must be a real FLV stream.
 	assert_eq!(&exported[0..3], b"FLV");
 
 	// Re-import the exported bytes and confirm the catalog rebuilds identically.
-	let mut bcast2 = moq_net::Broadcast::new().produce();
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.clone());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
@@ -148,8 +147,7 @@ async fn export_roundtrips_through_import() {
 
 #[tokio::test(start_paused = true)]
 async fn export_emits_sequence_headers_and_frames() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -157,7 +155,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).unwrap();
+	let exporter = Export::new(consumer).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -185,6 +183,96 @@ async fn export_emits_sequence_headers_and_frames() {
 		.count();
 	assert_eq!(video_frames, 2, "expected two video frames");
 	assert_eq!(audio_frames, 2, "expected two audio frames");
+}
+
+/// A real VP9 key frame (profile 0, 320x240) from the VP9 parser's test vector.
+const VP9_KEYFRAME: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
+
+/// Build an enhanced-RTMP FLV: VP9 video + Opus audio via the FourCC payloads.
+fn synth_enhanced_flv() -> Vec<u8> {
+	let head = crate::codec::opus::Config {
+		sample_rate: 48000,
+		channel_count: 2,
+	}
+	.encode();
+
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x05);
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	// Opus sequence start.
+	let mut aseq = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_SEQUENCE_START];
+	aseq.extend_from_slice(b"Opus");
+	aseq.extend_from_slice(&head);
+	write_tag(&mut out, super::TAG_AUDIO, 0, &aseq);
+
+	// VP9 key frame (enhanced CodedFrames, no composition time).
+	let mut vkey = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES];
+	vkey.extend_from_slice(b"vp09");
+	vkey.extend_from_slice(VP9_KEYFRAME);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &vkey);
+
+	// One Opus frame.
+	let mut a0 = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
+	a0.extend_from_slice(b"Opus");
+	a0.extend_from_slice(&[0xfc, 0xff, 0xfe]);
+	write_tag(&mut out, super::TAG_AUDIO, 20, &a0);
+
+	out
+}
+
+/// Enhanced codecs (VP9 video, Opus audio) survive an import -> export -> import
+/// round trip as enhanced-RTMP FourCC payloads.
+#[tokio::test(start_paused = true)]
+async fn export_roundtrips_enhanced() {
+	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+
+	let mut importer = Import::new(producer, catalog.clone());
+	importer
+		.decode(&bytes::BytesMut::from(synth_enhanced_flv().as_slice()))
+		.unwrap();
+	catalog.finish().unwrap();
+
+	let exporter = Export::new(consumer).await.unwrap();
+	let exported = drain_export(exporter, importer).await;
+
+	let tags = parse_tags(&exported);
+	// The video frame is an enhanced (FourCC) vp09 tag.
+	assert!(
+		tags.iter().any(|t| t.tag_type == super::TAG_VIDEO
+			&& t.body[0] & super::VIDEO_EX_HEADER != 0
+			&& &t.body[1..5] == b"vp09"),
+		"expected an enhanced vp09 video tag"
+	);
+	// The audio carries an enhanced Opus sequence header.
+	assert!(
+		tags.iter().any(|t| t.tag_type == super::TAG_AUDIO
+			&& (t.body[0] >> 4) == super::AUDIO_FORMAT_EX
+			&& &t.body[1..5] == b"Opus"),
+		"expected an enhanced Opus audio tag"
+	);
+
+	// Re-import the exported bytes and confirm the codecs rebuild.
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.clone());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	let snap = cat2.snapshot();
+	assert!(matches!(
+		snap.video.renditions.values().next().unwrap().codec,
+		VideoCodec::VP9(_)
+	));
+	assert!(matches!(
+		snap.audio.renditions.values().next().unwrap().codec,
+		AudioCodec::Opus
+	));
 }
 
 struct ParsedTag {
@@ -219,8 +307,7 @@ fn parse_tags(flv: &[u8]) -> Vec<ParsedTag> {
 /// A frame's tag timestamp must survive the round trip (PTS in milliseconds).
 #[tokio::test(start_paused = true)]
 async fn export_preserves_timestamps() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -228,7 +315,7 @@ async fn export_preserves_timestamps() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).unwrap();
+	let exporter = Export::new(consumer).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -238,96 +325,4 @@ async fn export_preserves_timestamps() {
 		.map(|t| t.timestamp)
 		.collect();
 	assert_eq!(video_ts, vec![0, 33]);
-}
-
-/// A real VP9 key frame (profile 0, 320x240) from the VP9 parser's test vector.
-const VP9_KEYFRAME: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
-
-/// Build an enhanced-RTMP FLV: VP9 video + Opus audio via the FourCC payloads.
-fn synth_enhanced_flv() -> Vec<u8> {
-	let head = crate::codec::opus::Config {
-		sample_rate: 48000,
-		channel_count: 2,
-	}
-	.encode();
-
-	let mut out = Vec::new();
-	out.extend_from_slice(b"FLV");
-	out.push(1);
-	out.push(0x05); // audio | video
-	out.extend_from_slice(&9u32.to_be_bytes());
-	out.extend_from_slice(&0u32.to_be_bytes());
-
-	// Opus sequence start.
-	let mut aseq = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_SEQUENCE_START];
-	aseq.extend_from_slice(b"Opus");
-	aseq.extend_from_slice(&head);
-	write_tag(&mut out, super::TAG_AUDIO, 0, &aseq);
-
-	// VP9 key frame (enhanced CodedFrames, no composition time).
-	let mut vkey = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES];
-	vkey.extend_from_slice(b"vp09");
-	vkey.extend_from_slice(VP9_KEYFRAME);
-	write_tag(&mut out, super::TAG_VIDEO, 0, &vkey);
-
-	// One Opus frame.
-	let mut a0 = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
-	a0.extend_from_slice(b"Opus");
-	a0.extend_from_slice(&[0xfc, 0xff, 0xfe]);
-	write_tag(&mut out, super::TAG_AUDIO, 0, &a0);
-
-	out
-}
-
-/// Enhanced codecs (VP9 video, Opus audio) survive an import -> export -> import
-/// round trip as enhanced-RTMP FourCC payloads.
-#[tokio::test(start_paused = true)]
-async fn export_roundtrips_enhanced() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
-	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-
-	let mut importer = Import::new(producer, catalog.clone());
-	importer
-		.decode(&mut bytes::BytesMut::from(synth_enhanced_flv().as_slice()))
-		.unwrap();
-	catalog.finish().unwrap();
-
-	let exporter = Export::new(consumer).unwrap();
-	let exported = drain_export(exporter, importer).await;
-	let tags = parse_tags(&exported);
-
-	// The video frame is an enhanced (FourCC) vp09 tag.
-	assert!(
-		tags.iter().any(|t| t.tag_type == super::TAG_VIDEO
-			&& t.body[0] & super::VIDEO_EX_HEADER != 0
-			&& &t.body[1..5] == b"vp09"),
-		"expected an enhanced vp09 video tag"
-	);
-	// The audio carries an enhanced Opus sequence header (not a coded-frame tag).
-	assert!(
-		tags.iter().any(|t| t.tag_type == super::TAG_AUDIO
-			&& t.body[0] >> 4 == super::AUDIO_FORMAT_EX
-			&& t.body[0] & 0x0f == super::AUDIO_PACKET_SEQUENCE_START
-			&& &t.body[1..5] == b"Opus"),
-		"expected an enhanced Opus sequence-header tag"
-	);
-
-	// Re-import and confirm the codecs survive.
-	let mut bcast2 = moq_net::Broadcast::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
-	let mut imp2 = Import::new(bcast2, cat2.clone());
-	imp2.decode(&mut bytes::BytesMut::from(exported.as_slice())).unwrap();
-	imp2.finish().unwrap();
-
-	let snap = cat2.snapshot();
-	assert!(matches!(
-		snap.video.renditions.values().next().unwrap().codec,
-		VideoCodec::VP9(_)
-	));
-	assert!(matches!(
-		snap.audio.renditions.values().next().unwrap().codec,
-		AudioCodec::Opus
-	));
 }

@@ -20,7 +20,7 @@ use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 /// A pure-publisher importer for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
@@ -34,7 +34,7 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_sps: Option<Bytes>,
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -46,7 +46,7 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_sps: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -72,6 +72,11 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// The MoQ track name this importer publishes on.
+	pub fn name(&self) -> &str {
+		self.track.name()
+	}
+
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::TrackDemand {
 		self.track.track().demand()
@@ -87,6 +92,16 @@ impl<E: CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
+	}
+
+	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
+	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
+	/// container supplies this since the elementary stream alone carries no decode time.
+	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
+		if let Some(jitter) = self.jitter.observe_reorder(reorder) {
+			self.rendition
+				.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
+		}
 	}
 
 	/// Resolve the config from an inline SPS, updating the rendition in place on a
@@ -126,6 +141,13 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
+		// Seed jitter from whatever has accumulated: a dirty start (or a B-frame
+		// reorder observed via observe_reorder) can feed updates before this
+		// rendition exists, so those would otherwise be lost on (re)publish.
+		if let Some(jitter) = self.jitter.current() {
+			self.rendition
+				.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
+		}
 		self.config = Some(config);
 		Ok(())
 	}
@@ -151,7 +173,8 @@ impl<E: CatalogExt> Import<E> {
 			self.track.write(frame)?;
 
 			if let Some(jitter) = self.jitter.observe(pts) {
-				self.rendition.update(|c| c.jitter = Some(jitter));
+				self.rendition
+					.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
 			}
 		}
 		Ok(())

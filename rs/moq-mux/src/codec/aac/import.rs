@@ -42,6 +42,11 @@ impl<E: CatalogExt> Import<E> {
 		})
 	}
 
+	/// The MoQ track name this importer publishes on.
+	pub fn name(&self) -> &str {
+		self.track.name()
+	}
+
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::TrackDemand {
 		self.track.track().demand()
@@ -68,7 +73,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	pub fn decode(&mut self, frame: &[u8], pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp,

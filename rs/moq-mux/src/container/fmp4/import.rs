@@ -1,11 +1,11 @@
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
-use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 
 use super::Error;
 use crate::Result;
+use crate::container::Timestamp;
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -24,12 +24,12 @@ use crate::Result;
 /// **Audio:**
 /// - AAC (MP4A)
 /// - Opus
-pub struct Import {
+pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::BroadcastProducer,
 
 	/// The catalog being produced
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
@@ -71,11 +71,11 @@ struct Fmp4Track {
 	pending_sequence: Option<u64>,
 }
 
-impl Import {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			catalog,
 			tracks: HashMap::default(),
@@ -160,11 +160,7 @@ impl Import {
 			// emitted at this same scale (see below), so they satisfy the track's
 			// timescale invariant and ride the wire for the relay, redundant with the
 			// timing already inside each CMAF fragment.
-			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
-			let track = self.broadcast.create_track(
-				self.broadcast.unique_name(suffix),
-				moq_net::TrackInfo::default().with_timescale(timescale),
-			)?;
+			let track = self.broadcast.unique_track(suffix)?;
 
 			let kind = match handler.as_ref() {
 				b"vide" => {
@@ -246,8 +242,8 @@ impl Import {
 
 			Ok(Container::Cmaf {
 				init: buf.into(),
-				timescale: Some(trak.mdia.mdhd.timescale),
-				track_id: Some(trak.tkhd.track_id),
+				timescale: None,
+				track_id: None,
 			})
 		}
 	}
@@ -434,7 +430,7 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
+			let timescale = trak.mdia.mdhd.timescale as u64;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
@@ -484,7 +480,7 @@ impl Import {
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
 					// Preserve the fmp4 track's native timescale so a passthrough re-emit
 					// doesn't go through a lossy microsecond detour.
-					let timestamp = moq_net::Timestamp::new(pts, timescale)?;
+					let timestamp = Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						return Err(Error::InvalidDataOffset.into());
@@ -603,7 +599,7 @@ impl Import {
 					prev.finish()?;
 				}
 				match track.pending_sequence.take() {
-					Some(sequence) => track.track.create_group(moq_net::Group { sequence })?,
+					Some(sequence) => track.track.create_group(moq_net::GroupInfo { sequence })?,
 					None => track.track.append_group()?,
 				}
 			} else {
@@ -614,9 +610,9 @@ impl Import {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			let mut frame = g.create_frame(moq_net::Frame {
+			let _ = timestamp;
+			let mut frame = g.create_frame(moq_net::FrameInfo {
 				size: fragment_bytes.len() as u64,
-				timestamp: Some(timestamp),
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;
@@ -638,7 +634,7 @@ impl Import {
 								.renditions
 								.get_mut(track.track.name())
 								.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
-							config.jitter = Some(jitter.into());
+							config.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -646,7 +642,7 @@ impl Import {
 								.renditions
 								.get_mut(track.track.name())
 								.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
-							config.jitter = Some(jitter.into());
+							config.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
 						}
 					}
 				}
@@ -657,7 +653,7 @@ impl Import {
 	}
 }
 
-impl Import {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
@@ -684,7 +680,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 

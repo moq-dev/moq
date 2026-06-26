@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use moq_net::Timestamp;
-
+use crate::container::Timestamp;
 /// Tracks the catalog `jitter` for a video/audio track: the maximum delay before a frame can
 /// be emitted, so a player sizes its buffer to at least this much.
 ///

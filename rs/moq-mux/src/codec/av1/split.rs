@@ -57,7 +57,7 @@ impl Split {
 	pub fn decode(
 		&mut self,
 		data: &[u8],
-		pts: impl Into<Option<moq_net::Timestamp>>,
+		pts: impl Into<Option<crate::container::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
 		let hint = pts.into();
 		self.tail.extend_from_slice(data);
@@ -79,13 +79,16 @@ impl Split {
 	/// Emit the in-flight temporal unit, if any. Call after the last
 	/// [`decode`](Self::decode) when a caller handed over a complete temporal unit
 	/// (or at end of stream) so the final unit isn't left buffered.
-	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
+	pub fn flush(
+		&mut self,
+		pts: impl Into<Option<crate::container::Timestamp>>,
+	) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
 		self.maybe_start_frame(Some(pts))?;
 		Ok(std::mem::take(&mut self.pending))
 	}
 
-	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
+	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
 		if obu_data.is_empty() {
 			return Err(Error::ObuTooShort.into());
 		}
@@ -135,7 +138,7 @@ impl Split {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
 		if !self.current.contains_frame {
 			return Ok(());
 		}
@@ -163,12 +166,14 @@ impl Split {
 		self.current = Au::default();
 	}
 
-	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		Ok(crate::container::Timestamp::from_micros(
+			zero.elapsed().as_micros() as u64
+		)?)
 	}
 }
 

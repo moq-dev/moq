@@ -19,7 +19,7 @@ use super::split::ObuIterator;
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 /// A pure-publisher importer for AV1 with inline sequence headers.
 ///
@@ -32,7 +32,7 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_seq: Option<Bytes>,
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -44,7 +44,7 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_seq: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -230,7 +230,8 @@ impl<E: CatalogExt> Import<E> {
 			self.track.write(frame)?;
 
 			if let Some(jitter) = self.jitter.observe(pts) {
-				self.rendition.update(|c| c.jitter = Some(jitter));
+				self.rendition
+					.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
 			}
 		}
 		Ok(())

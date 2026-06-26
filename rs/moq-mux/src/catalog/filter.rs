@@ -7,10 +7,10 @@
 
 use std::task::Poll;
 
-use hang::Catalog;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 
 use super::Stream;
+use super::hang::{Catalog, CatalogExt};
 
 /// Hard-match criteria for video renditions.
 #[derive(Debug, Default, Clone)]
@@ -30,95 +30,159 @@ pub struct FilterAudio {
 	pub codec: Option<AudioCodecKind>,
 }
 
-/// A [`Stream`] that drops renditions failing a [`FilterVideo`] / [`FilterAudio`].
-pub struct Filter<S: Stream> {
-	inner: S,
+/// Shared state behind a [`Filter`].
+///
+/// `epoch` advances on every setter so [`Filter::poll_next`] can tell whether
+/// the criteria changed since the last emit.
+#[derive(Debug, Default, Clone)]
+struct FilterState {
 	video: Option<FilterVideo>,
 	audio: Option<FilterAudio>,
-	/// Last raw snapshot from `inner`, kept so retargeting via `set_*` can re-emit
-	/// without polling upstream (the foothold for future ABR retargeting).
-	last_input: Option<Catalog>,
-	/// True if `set_*` has been called since the last emit and we still owe a
-	/// re-evaluated snapshot derived from `last_input`.
-	dirty: bool,
+	epoch: u64,
+}
+
+/// A [`Stream`] that drops renditions failing a [`FilterVideo`] / [`FilterAudio`].
+///
+/// Selection criteria live behind a [`kio::Producer`], so calls to
+/// [`set_video`](Self::set_video) / [`set_audio`](Self::set_audio) wake any
+/// pending `poll_next` instead of silently waiting for the next upstream
+/// snapshot.
+pub struct Filter<S: Stream> {
+	inner: S,
+	state: kio::Producer<FilterState>,
+	state_consumer: kio::Consumer<FilterState>,
+	/// Last raw snapshot from `inner`, retained so a setter between snapshots
+	/// can re-apply without polling upstream.
+	last_input: Option<Catalog<S::Ext>>,
+	/// Epoch we already emitted against.
+	last_epoch: u64,
+	/// True once `inner` has handed us a snapshot we haven't emitted yet.
+	fresh_input: bool,
 }
 
 impl<S: Stream> Filter<S> {
 	pub fn new(inner: S) -> Self {
+		let state = kio::Producer::new(FilterState::default());
+		let state_consumer = state.consume();
 		Self {
 			inner,
-			video: None,
-			audio: None,
+			state,
+			state_consumer,
 			last_input: None,
-			dirty: false,
+			last_epoch: 0,
+			fresh_input: false,
 		}
 	}
 
 	/// Set or clear the video filter. Pass `None` to clear.
 	pub fn set_video(&mut self, filter: impl Into<Option<FilterVideo>>) {
-		self.video = filter.into();
-		self.dirty = self.last_input.is_some();
+		self.update(|s| s.video = filter.into());
 	}
 
 	/// Set or clear the audio filter. Pass `None` to clear.
 	pub fn set_audio(&mut self, filter: impl Into<Option<FilterAudio>>) {
-		self.audio = filter.into();
-		self.dirty = self.last_input.is_some();
+		self.update(|s| s.audio = filter.into());
 	}
 
-	fn apply(&self, mut catalog: Catalog) -> Catalog {
-		if let Some(filter) = &self.video {
-			catalog.video.renditions.retain(|name, config| {
-				if let Some(want) = &filter.name
-					&& want != name
-				{
-					return false;
-				}
-				if let Some(want) = filter.codec
-					&& config.codec.kind() != want
-				{
-					return false;
-				}
-				true
-			});
-		}
-		if let Some(filter) = &self.audio {
-			catalog.audio.renditions.retain(|name, config| {
-				if let Some(want) = &filter.name
-					&& want != name
-				{
-					return false;
-				}
-				if let Some(want) = filter.codec
-					&& config.codec.kind() != want
-				{
-					return false;
-				}
-				true
-			});
-		}
-		catalog
+	fn update(&self, f: impl FnOnce(&mut FilterState)) {
+		// `write()` only errors when the producer is closed, which can't happen
+		// while `self` holds the only producer handle.
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		f(&mut state);
+		state.epoch = state.epoch.wrapping_add(1);
+		// Mut::drop wakes the paired consumer waiters here.
 	}
 }
 
 impl<S: Stream> Stream for Filter<S> {
-	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Catalog>>> {
-		if self.dirty {
-			self.dirty = false;
-			if let Some(snapshot) = self.last_input.clone() {
-				return Poll::Ready(Ok(Some(self.apply(snapshot))));
-			}
-		}
+	type Ext = S::Ext;
 
-		match self.inner.poll_next(waiter)? {
-			Poll::Ready(Some(snapshot)) => {
-				self.last_input = Some(snapshot.clone());
-				Poll::Ready(Ok(Some(self.apply(snapshot))))
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
+		let inner_eof = loop {
+			match self.inner.poll_next(waiter)? {
+				Poll::Ready(Some(snapshot)) => {
+					self.last_input = Some(snapshot);
+					self.fresh_input = true;
+				}
+				Poll::Ready(None) => break true,
+				Poll::Pending => break false,
 			}
-			Poll::Ready(None) => Poll::Ready(Ok(None)),
-			Poll::Pending => Poll::Pending,
+		};
+
+		let last_epoch = self.last_epoch;
+		let fresh_input = self.fresh_input;
+		let last_input = self.last_input.clone();
+
+		let polled = self.state_consumer.poll(waiter, |state| {
+			let filter_changed = state.epoch != last_epoch;
+			if !fresh_input && !filter_changed {
+				return Poll::Pending;
+			}
+			let Some(input) = last_input.clone() else {
+				return Poll::Pending;
+			};
+			let emit = apply(input, state.video.as_ref(), state.audio.as_ref());
+			Poll::Ready((emit, state.epoch))
+		});
+
+		match polled {
+			Poll::Ready(Ok((emit, epoch))) => {
+				self.last_epoch = epoch;
+				self.fresh_input = false;
+				Poll::Ready(Ok(Some(emit)))
+			}
+			Poll::Ready(Err(_)) => Poll::Ready(Ok(None)),
+			Poll::Pending => {
+				if inner_eof && self.last_input.is_none() {
+					Poll::Ready(Ok(None))
+				} else {
+					Poll::Pending
+				}
+			}
 		}
 	}
+}
+
+/// Apply the active video / audio filters to a raw snapshot, dropping
+/// renditions that don't match. Axes with no filter pass through unchanged.
+fn apply<E: CatalogExt>(
+	mut catalog: Catalog<E>,
+	video: Option<&FilterVideo>,
+	audio: Option<&FilterAudio>,
+) -> Catalog<E> {
+	if let Some(filter) = video {
+		catalog.video.renditions.retain(|name, config| {
+			if let Some(want) = &filter.name
+				&& want != name
+			{
+				return false;
+			}
+			if let Some(want) = filter.codec
+				&& config.codec.kind() != want
+			{
+				return false;
+			}
+			true
+		});
+	}
+	if let Some(filter) = audio {
+		catalog.audio.renditions.retain(|name, config| {
+			if let Some(want) = &filter.name
+				&& want != name
+			{
+				return false;
+			}
+			if let Some(want) = filter.codec
+				&& config.codec.kind() != want
+			{
+				return false;
+			}
+			true
+		});
+	}
+	catalog
 }
 
 #[cfg(test)]
@@ -132,7 +196,9 @@ mod test {
 	struct Once(Option<Catalog>);
 
 	impl Stream for Once {
-		fn poll_next(&mut self, _: &conducer::Waiter) -> Poll<anyhow::Result<Option<Catalog>>> {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 			Poll::Ready(Ok(self.0.take()))
 		}
 	}
@@ -188,7 +254,7 @@ mod test {
 			..Default::default()
 		});
 
-		let out = match f.poll_next(&conducer::Waiter::noop()) {
+		let out = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("expected snapshot, got {other:?}"),
 		};
@@ -203,7 +269,7 @@ mod test {
 			name: Some("hi".into()),
 			..Default::default()
 		});
-		let out = match f.poll_next(&conducer::Waiter::noop()) {
+		let out = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("got {other:?}"),
 		};
@@ -218,7 +284,7 @@ mod test {
 			name: Some("es".into()),
 			..Default::default()
 		});
-		let out = match f.poll_next(&conducer::Waiter::noop()) {
+		let out = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("got {other:?}"),
 		};
@@ -231,7 +297,7 @@ mod test {
 		let snapshot = catalog_with(vec![h264("lo"), h264("hi")], vec![]);
 		let mut f = Filter::new(Once(Some(snapshot)));
 
-		let first = match f.poll_next(&conducer::Waiter::noop()) {
+		let first = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("got {other:?}"),
 		};
@@ -242,7 +308,7 @@ mod test {
 			..Default::default()
 		});
 
-		let again = match f.poll_next(&conducer::Waiter::noop()) {
+		let again = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("expected re-emit, got {other:?}"),
 		};

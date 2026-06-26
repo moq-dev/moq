@@ -11,7 +11,7 @@ mod consumer;
 pub use consumer::Consumer;
 
 /// MSF catalog decoding errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("MSF catalog frame is not valid UTF-8")]
@@ -68,3 +68,5 @@ pub enum Error {
 	#[error("MSF audio track {0:?} CMAF init has no audio sample entry to derive samplerate/channelConfig from")]
 	MissingAudioSampleEntry(String),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;

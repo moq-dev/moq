@@ -172,13 +172,14 @@ impl KeyFrame {
 	}
 }
 
-/// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) from a VP9 key
-/// frame's uncompressed header, or `None` if `data` is not a key frame.
+/// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) from a VP9 frame,
+/// or `None` if the frame is not a key frame.
 ///
-/// VP9 has no out-of-band config record (the FLV `vp09` shape configures the
-/// decoder in band), so the enhanced-RTMP importer derives the config from each
-/// key frame instead of a sequence-header tag.
-pub(crate) fn config_from_keyframe(data: &[u8]) -> anyhow::Result<Option<hang::catalog::VideoConfig>> {
+/// Used by the enhanced-RTMP / FLV importer. VP9 carries its config in band (the
+/// uncompressed key-frame header), so unlike H.264/H.265/AV1 there is no
+/// out-of-band record to pass through as `description`; the config is read from
+/// the key frame itself.
+pub(crate) fn config_from_keyframe(data: &[u8]) -> Result<Option<hang::catalog::VideoConfig>> {
 	let Some(key) = FrameHeader::parse(data)?.key else {
 		return Ok(None);
 	};

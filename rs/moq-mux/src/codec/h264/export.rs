@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::Catalog;
-use hang::catalog::VideoCodecKind;
+use hang::catalog::{VideoCodecKind, VideoConfig};
 
 use crate::catalog::Stream;
 use crate::codec::annexb;
@@ -33,6 +33,11 @@ pub struct Export<S: Stream> {
 
 struct H264Track {
 	name: String,
+	/// Snapshot of the catalog config we built `source` from. Cached so that
+	/// a catalog update which keeps the same rendition name but changes the
+	/// codec config (e.g. a new avcC) triggers a full rebuild instead of
+	/// silently reusing a stale `convert`.
+	config: VideoConfig,
 	source: ExportSource,
 	/// `Some` for an avc1 source: SPS/PPS prefix prebuilt from the avcC, and
 	/// the avcC length-prefix size. `None` for an avc3 source: Annex-B passes
@@ -68,14 +73,14 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -116,7 +121,7 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	fn update_catalog(&mut self, catalog: &Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let picked = catalog
 			.video
 			.renditions
@@ -137,7 +142,11 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		};
 
-		if self.track.as_ref().is_some_and(|t| t.name == *name) {
+		if self
+			.track
+			.as_ref()
+			.is_some_and(|t| t.name == *name && t.config == *config)
+		{
 			return Ok(());
 		}
 
@@ -146,6 +155,14 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(avcc) => {
 				let params = super::parse_avcc_param_sets(avcc)?;
+				if params.sps.is_empty() || params.pps.is_empty() {
+					return Err(super::Error::MissingParamSets {
+						name: name.clone(),
+						sps: params.sps.len(),
+						pps: params.pps.len(),
+					}
+					.into());
+				}
 				let prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
 				Some(Avc1Convert {
 					length_size: params.length_size,
@@ -156,10 +173,160 @@ impl<S: Stream> Export<S> {
 
 		self.track = Some(H264Track {
 			name: name.clone(),
+			config: config.clone(),
 			source,
 			convert,
 		});
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+	use std::task::Poll;
+
+	use bytes::Bytes;
+	use hang::catalog::{H264, Video, VideoConfig};
+
+	use super::*;
+	use crate::catalog::Stream;
+	use crate::catalog::hang::Catalog;
+
+	/// One-shot Stream that yields a single catalog snapshot then closes.
+	struct Once(Option<Catalog>);
+
+	impl Stream for Once {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
+	/// Build an avc1-shaped catalog snapshot with the supplied avcC bytes.
+	fn avc1_catalog(name: &str, avcc: Bytes) -> Catalog {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.description = Some(avcc);
+		config.container = hang::catalog::Container::Legacy;
+
+		let mut renditions = BTreeMap::new();
+		renditions.insert(name.to_string(), config);
+
+		Catalog {
+			video: Video {
+				renditions,
+				display: None,
+				rotation: None,
+				flip: None,
+			},
+			..Default::default()
+		}
+	}
+
+	/// Build a minimal avcC carrying one SPS + one PPS.
+	fn build_avcc(sps: &[u8], pps: &[u8]) -> Bytes {
+		super::super::build_avcc(&[Bytes::copy_from_slice(sps)], &[Bytes::copy_from_slice(pps)]).unwrap()
+	}
+
+	/// Write a length-prefixed (4-byte) NAL frame onto a moq-net group via
+	/// the Legacy wire codec.
+	fn write_length_prefixed(group: &mut moq_net::GroupProducer, timestamp_us: u64, nals: &[&[u8]]) {
+		let mut payload = bytes::BytesMut::new();
+		for nal in nals {
+			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			payload.extend_from_slice(nal);
+		}
+		let frame = crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+			payload: payload.freeze(),
+			keyframe: false, // Legacy wire format drops this; Consumer reconstructs.
+			duration: None,
+		};
+		<crate::catalog::hang::Container as crate::container::Container>::write(
+			&crate::catalog::hang::Container::Legacy,
+			group,
+			&[frame],
+		)
+		.unwrap();
+	}
+
+	/// Regression: when source is avc1 (length-prefixed + out-of-band avcC),
+	/// the exporter must inject SPS+PPS before every keyframe and convert
+	/// length prefixes to start codes for every frame.
+	#[tokio::test(start_paused = true)]
+	async fn avc1_export_injects_sps_pps_on_keyframes() {
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let p_slice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let avcc = build_avcc(sps, pps);
+		let catalog = avc1_catalog("video.m4s", avcc);
+
+		// Producer side: publish the broadcast with one length-prefixed video track.
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut track = broadcast
+			.create_track(
+				"video.m4s",
+				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			)
+			.unwrap();
+
+		// Group 0 (keyframe-starting group): one IDR frame.
+		let mut g0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		write_length_prefixed(&mut g0, 0, &[idr]);
+		g0.finish().unwrap();
+
+		// Group 1 (next group): one P-slice. Consumer marks the first frame
+		// of every group as keyframe by protocol invariant, so the exporter
+		// MUST treat both group-starts as keyframes and inject SPS+PPS twice.
+		let mut g1 = track.create_group(moq_net::GroupInfo { sequence: 1 }).unwrap();
+		write_length_prefixed(&mut g1, 33_000, &[p_slice]);
+		g1.finish().unwrap();
+		track.finish().unwrap();
+
+		// Consumer side: run the exporter.
+		let consumer = broadcast.consume();
+		let mut export = Export::new(consumer, Once(Some(catalog)));
+
+		let frame0 = export.next().await.unwrap().expect("first frame");
+		let frame1 = export.next().await.unwrap().expect("second frame");
+		assert!(export.next().await.unwrap().is_none(), "track ended");
+
+		// Build the expected SPS+PPS prefix and assert it's prepended to both
+		// frames (group boundaries become keyframes).
+		let prefix =
+			crate::codec::annexb::build_prefix([Bytes::copy_from_slice(sps), Bytes::copy_from_slice(pps)].iter());
+
+		assert!(
+			frame0.starts_with(&prefix),
+			"frame 0 (group 0 start) must begin with SPS+PPS prefix"
+		);
+		assert_eq!(
+			&frame0[prefix.len()..],
+			&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21],
+			"frame 0 IDR must follow the prefix in Annex-B form"
+		);
+		assert!(
+			frame1.starts_with(&prefix),
+			"frame 1 (group 1 start) is the first frame of its group and is treated as a keyframe by Consumer protocol; must begin with SPS+PPS prefix"
+		);
+		assert_eq!(
+			&frame1[prefix.len()..],
+			&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34],
+			"frame 1 P-slice must follow the prefix in Annex-B form"
+		);
 	}
 }

@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 use super::FrameHeader;
 
@@ -24,7 +24,7 @@ pub struct Import<E: CatalogExt = ()> {
 	config: Option<hang::catalog::VideoConfig>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -35,7 +35,7 @@ impl<E: CatalogExt> Import<E> {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -70,7 +70,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Decode a single VP9 frame (or superframe).
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	pub fn decode(&mut self, frame: &[u8], pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		if frame.is_empty() {
 			return Err(super::Error::EmptyFrame.into());
 		}
@@ -90,7 +90,8 @@ impl<E: CatalogExt> Import<E> {
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts) {
-			self.rendition.update(|c| c.jitter = Some(jitter));
+			self.rendition
+				.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
 		}
 
 		Ok(())

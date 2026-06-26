@@ -340,6 +340,19 @@ impl TrackProducer {
 		}
 	}
 
+	/// The track name.
+	pub fn name(&self) -> &str {
+		&self.info.name
+	}
+
+	/// A cloneable watch-only handle to subscriber demand.
+	pub fn demand(&self) -> TrackDemand {
+		TrackDemand {
+			name: self.info.name.clone(),
+			state: self.state.weak(),
+		}
+	}
+
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state
@@ -427,6 +440,45 @@ pub(crate) struct TrackWeak {
 	state: kio::Weak<State>,
 }
 
+/// A cloneable, watch-only handle to a track's subscriber demand.
+#[derive(Clone)]
+pub struct TrackDemand {
+	name: String,
+	state: kio::Weak<State>,
+}
+
+impl TrackDemand {
+	/// The track name this handle is bound to.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// Block until there is at least one active consumer.
+	pub async fn used(&self) -> Result<()> {
+		self.state
+			.used()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Block until there are no active consumers.
+	pub async fn unused(&self) -> Result<()> {
+		self.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Block until the track is closed or aborted, returning the cause.
+	pub async fn closed(&self) -> Error {
+		if let Some(state) = self.state.produce() {
+			state.closed().await;
+		}
+
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+	}
+}
+
 impl TrackWeak {
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
@@ -468,6 +520,9 @@ pub struct TrackConsumer {
 	next_sequence: u64,
 }
 
+/// Backwards-compatible alias for callers that still refer to a subscribed track handle.
+pub type TrackSubscriber = TrackConsumer;
+
 impl std::ops::Deref for TrackConsumer {
 	type Target = Track;
 
@@ -477,6 +532,11 @@ impl std::ops::Deref for TrackConsumer {
 }
 
 impl TrackConsumer {
+	/// The track name this handle is bound to.
+	pub fn name(&self) -> &str {
+		&self.info.name
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where

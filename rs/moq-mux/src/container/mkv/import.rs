@@ -3,7 +3,6 @@ use std::convert::TryFrom;
 use std::io::Cursor;
 
 use crate::Result;
-use crate::container::Timestamp;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use mp4_atom::Atom;
@@ -13,6 +12,7 @@ use webm_iterable::iterator::AllowableErrors;
 use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
 
 use super::Error;
+use crate::container::Timestamp;
 
 /// Default Matroska TimestampScale: 1 ms (in nanoseconds).
 const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
@@ -36,9 +36,9 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - Opus (`A_OPUS`)
 ///
 /// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
-pub struct Import {
+pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
@@ -69,8 +69,8 @@ struct MkvTrack {
 	last_emitted_ticks: Option<i64>,
 }
 
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -261,18 +261,18 @@ impl Import {
 			}
 		};
 
-		let net_track = self.broadcast.unique_track(suffix)?;
+		let track = self.broadcast.unique_track(suffix)?;
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
 
 		match kind {
 			TrackKind::Video => {
 				let config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
-				catalog.video.renditions.insert(net_track.name.clone(), config);
+				catalog.video.renditions.insert(track.name().to_string(), config);
 			}
 			TrackKind::Audio => {
 				let config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
-				catalog.audio.renditions.insert(net_track.name.clone(), config);
+				catalog.audio.renditions.insert(track.name().to_string(), config);
 			}
 		}
 
@@ -282,7 +282,7 @@ impl Import {
 			track_number,
 			MkvTrack {
 				kind,
-				track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
+				track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 				group: None,
 				last_emitted_ticks: None,
 			},
@@ -322,7 +322,8 @@ impl Import {
 			return Ok(());
 		};
 
-		// Compute PTS in nanoseconds, then convert to the Timestamp's microsecond timescale.
+		// Compute PTS in MKV's native nanosecond units and stamp it on the
+		// timestamp at NANO scale so a passthrough re-emit preserves precision.
 		let block_ticks = (self.cluster_timestamp as i64) + (rel_ts as i64);
 		if block_ticks < 0 {
 			return Err(Error::NegativeBlockTimestamp.into());
@@ -348,6 +349,7 @@ impl Import {
 			timestamp,
 			payload: Bytes::copy_from_slice(payload),
 			keyframe,
+			duration: None,
 		};
 
 		// Manage groups: new group on video keyframe; audio always finishes its group immediately.
@@ -373,7 +375,7 @@ impl Import {
 	///
 	/// Broadcast-wide: every track inside this MKV import advances together; per-track
 	/// control is intentionally not exposed.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			track.track.seek(sequence)?;
 		}
@@ -392,16 +394,16 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 		for track in self.tracks.values() {
 			match track.kind {
 				TrackKind::Video => {
-					catalog.video.renditions.remove(&track.track.name);
+					catalog.video.renditions.remove(track.track.name());
 				}
 				TrackKind::Audio => {
-					catalog.audio.renditions.remove(&track.track.name);
+					catalog.audio.renditions.remove(track.track.name());
 				}
 			}
 		}

@@ -24,8 +24,8 @@ use super::{
 	TAG_HEADER_LEN, TAG_VIDEO, VIDEO_CODEC_AVC, VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES,
 	VIDEO_PACKET_SEQUENCE_START,
 };
-use crate::catalog::CatalogFormat;
-use crate::container::{CatalogSource, ExportSource, Frame};
+use crate::catalog::{CatalogFormat, Stream};
+use crate::container::{ExportSource, Frame};
 
 /// Which FLV payload shape a bound track is muxed as: a legacy CodecID
 /// (`Avc`/`Aac`) or an enhanced-RTMP FourCC codec.
@@ -73,7 +73,7 @@ impl Flavor {
 /// supported; CMAF tracks are rejected.
 pub struct Export {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<CatalogSource>,
+	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
 
 	video: Option<FlvTrack>,
@@ -101,17 +101,17 @@ struct FlvTrack {
 impl Export {
 	/// Subscribe to `broadcast` and produce FLV byte chunks, using the default
 	/// catalog format ([`CatalogFormat::Hang`]).
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default())
+	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `broadcast` and produce FLV byte chunks, selecting an explicit
 	/// `catalog_format` for track discovery.
-	pub fn with_catalog_format(
+	pub async fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
+		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
 		Ok(Self {
 			broadcast,
 			catalog: Some(catalog),
@@ -168,7 +168,7 @@ impl Export {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 					Poll::Pending => break,
 				}
 			}

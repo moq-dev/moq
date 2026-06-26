@@ -75,8 +75,7 @@ fn synth_flv() -> Vec<u8> {
 
 #[tokio::test(start_paused = true)]
 async fn import_populates_catalog() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
@@ -101,8 +100,7 @@ async fn import_populates_catalog() {
 
 #[tokio::test(start_paused = true)]
 async fn import_emits_frames() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -115,7 +113,7 @@ async fn import_emits_frames() {
 	let video_name = snap.video.renditions.keys().next().unwrap().clone();
 
 	// Decode the video track back through the Legacy container.
-	let track = consumer.subscribe_track(&moq_net::Track::new(video_name)).unwrap();
+	let track = consumer.track(&video_name).unwrap().subscribe(None).await.unwrap();
 	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
 		.with_latency(std::time::Duration::from_secs(1));
 	let frame = decoder.read().await.unwrap().expect("a video frame");
@@ -132,8 +130,7 @@ async fn import_handles_split_input() {
 	let flv = synth_flv();
 	let (head, tail) = flv.split_at(flv.len() / 2);
 
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
@@ -146,8 +143,9 @@ async fn import_handles_split_input() {
 	assert_eq!(snap.audio.renditions.len(), 1);
 }
 
-/// A real VP9 key frame (profile 0, 320x240) from the VP9 parser's test vector.
-const VP9_KEYFRAME: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
+/// A real VP9 key frame (profile 0, 320x240), borrowed from the VP9 parser's
+/// own test vector. Bytes after the frame size are irrelevant to the header.
+const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 /// Enhanced-RTMP (FourCC) VP9 video configures from the key frame and emits it.
 #[tokio::test(start_paused = true)]
@@ -163,15 +161,13 @@ async fn import_enhanced_vp9() {
 	let first = super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES;
 	let mut body = vec![first];
 	body.extend_from_slice(b"vp09");
-	body.extend_from_slice(VP9_KEYFRAME);
+	body.extend_from_slice(VP9_KEYFRAME_320X240);
 	write_tag(&mut out, super::TAG_VIDEO, 0, &body);
 
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-
 	let mut importer = Import::new(producer, catalog.clone());
-	importer.decode(&mut bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
@@ -211,12 +207,10 @@ async fn import_enhanced_opus() {
 	frame.extend_from_slice(&[0xfc, 0xff, 0xfe]);
 	write_tag(&mut out, super::TAG_AUDIO, 20, &frame);
 
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-
 	let mut importer = Import::new(producer, catalog.clone());
-	importer.decode(&mut bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
@@ -230,8 +224,7 @@ async fn import_enhanced_opus() {
 
 #[tokio::test(start_paused = true)]
 async fn import_rejects_non_flv() {
-	let broadcast = moq_net::Broadcast::new();
-	let mut producer = broadcast.produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog);

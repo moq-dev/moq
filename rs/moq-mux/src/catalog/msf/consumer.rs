@@ -14,7 +14,7 @@ use crate::catalog::msf::Error;
 /// so the rest of the pipeline only deals with hang types.
 pub struct Consumer {
 	/// Access to the underlying track consumer.
-	pub track: moq_net::TrackConsumer,
+	pub track: moq_net::TrackSubscriber,
 	group: Option<moq_net::GroupConsumer>,
 }
 
@@ -22,12 +22,12 @@ impl Consumer {
 	/// Create a new MSF catalog consumer from a MoQ track consumer.
 	///
 	/// The track is expected to carry MSF catalog payloads (track name [`moq_msf::DEFAULT_NAME`]).
-	pub fn new(track: moq_net::TrackConsumer) -> Self {
+	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self { track, group: None }
 	}
 
 	/// Poll for the next catalog update, returned as a [`hang::Catalog`].
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<hang::Catalog>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<hang::Catalog>>> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
 		let track_finished = loop {
@@ -64,12 +64,12 @@ impl Consumer {
 	/// Waits for the next MSF catalog publication and returns it converted to a
 	/// [`hang::Catalog`]. Returns `None` when the track has ended with no further updates.
 	pub async fn next(&mut self) -> Result<Option<hang::Catalog>> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
-impl From<moq_net::TrackConsumer> for Consumer {
-	fn from(inner: moq_net::TrackConsumer) -> Self {
+impl From<moq_net::TrackSubscriber> for Consumer {
+	fn from(inner: moq_net::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
 }
@@ -147,7 +147,6 @@ fn container_from_msf(track: &moq_msf::Track) -> Result<Option<Container>> {
 		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
 		moq_msf::Packaging::Cmaf => {
 			let init = decode_init_data(track)?.ok_or_else(|| Error::MissingCmafInit(track.name.clone()))?;
-			#[allow(deprecated)]
 			Ok(Some(Container::Cmaf {
 				init,
 				timescale: None,
@@ -215,14 +214,7 @@ fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> 
 	config.bitrate = track.bitrate;
 	config.framerate = track.framerate;
 	config.container = container;
-	// Jitter is converted from f64 milliseconds to integer milliseconds.
-	// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
-	// This is acceptable for the jitter use case where sub-ms precision
-	// is not meaningful.
-	config.jitter = track
-		.jitter
-		.filter(|v| v.is_finite() && *v >= 0.0)
-		.and_then(|v| moq_net::Time::from_millis(v as u64).ok());
+	config.jitter = track.jitter.and_then(|j| moq_net::Time::try_from(j).ok());
 	Ok(Some(config))
 }
 
@@ -261,14 +253,7 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> Result<Option<AudioConfig>> 
 	config.bitrate = track.bitrate;
 	config.description = legacy_description(track)?;
 	config.container = container;
-	// Jitter is converted from f64 milliseconds to integer milliseconds.
-	// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
-	// This is acceptable for the jitter use case where sub-ms precision
-	// is not meaningful.
-	config.jitter = track
-		.jitter
-		.filter(|v| v.is_finite() && *v >= 0.0)
-		.and_then(|v| moq_net::Time::from_millis(v as u64).ok());
+	config.jitter = track.jitter.and_then(|j| moq_net::Time::try_from(j).ok());
 	Ok(Some(config))
 }
 

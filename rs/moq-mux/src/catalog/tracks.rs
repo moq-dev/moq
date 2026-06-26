@@ -32,7 +32,7 @@ impl<E: CatalogExt> VideoTrack<E> {
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
-	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
+	pub fn timestamp(&self, hint: Option<crate::container::Timestamp>) -> crate::Result<crate::container::Timestamp> {
 		self.catalog.timestamp(hint)
 	}
 
@@ -86,7 +86,7 @@ impl<E: CatalogExt> AudioTrack<E> {
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
-	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
+	pub fn timestamp(&self, hint: Option<crate::container::Timestamp>) -> crate::Result<crate::container::Timestamp> {
 		self.catalog.timestamp(hint)
 	}
 

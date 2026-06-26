@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 use std::task::Poll;
 
-use hang::Catalog;
 use hang::catalog::{AudioConfig, VideoConfig};
 
 use super::Stream;
+use super::hang::{Catalog, CatalogExt};
 
 /// Soft-match constraints for the video rendition.
 ///
@@ -33,85 +33,165 @@ pub struct TargetAudio {
 	pub bitrate: Option<u64>,
 }
 
-/// A [`Stream`] that picks one rendition per axis from the inner snapshot.
-pub struct Target<S: Stream> {
-	inner: S,
+/// Shared state behind a [`Target`].
+///
+/// `epoch` advances on every setter so [`Target::poll_next`] can tell whether
+/// the criteria changed since the last emit without diffing the structs.
+#[derive(Debug, Default, Clone)]
+struct TargetState {
 	video: Option<TargetVideo>,
 	audio: Option<TargetAudio>,
-	last_input: Option<Catalog>,
-	dirty: bool,
+	epoch: u64,
+}
+
+/// A [`Stream`] that picks one rendition per axis from the inner snapshot.
+///
+/// Selection criteria live behind a [`kio::Producer`], so calls to
+/// [`set_video`](Self::set_video) / [`set_audio`](Self::set_audio) wake any
+/// pending `poll_next` instead of silently waiting for the next upstream
+/// snapshot. That makes the type usable as the foothold for bandwidth-driven
+/// ABR retargeting.
+pub struct Target<S: Stream> {
+	inner: S,
+	state: kio::Producer<TargetState>,
+	state_consumer: kio::Consumer<TargetState>,
+	/// Last raw snapshot from `inner`, retained so a target change between
+	/// snapshots can be re-applied without polling upstream.
+	last_input: Option<Catalog<S::Ext>>,
+	/// Epoch we already emitted against. If `state.epoch` advances past this
+	/// while `last_input` is `Some`, the next poll re-emits.
+	last_epoch: u64,
+	/// True once `inner` has handed us a snapshot we haven't emitted yet.
+	fresh_input: bool,
 }
 
 impl<S: Stream> Target<S> {
 	pub fn new(inner: S) -> Self {
+		let state = kio::Producer::new(TargetState::default());
+		let state_consumer = state.consume();
 		Self {
 			inner,
-			video: None,
-			audio: None,
+			state,
+			state_consumer,
 			last_input: None,
-			dirty: false,
+			last_epoch: 0,
+			fresh_input: false,
 		}
 	}
 
 	/// Set or clear the video target. Pass `None` to keep every rendition.
 	pub fn set_video(&mut self, target: impl Into<Option<TargetVideo>>) {
-		self.video = target.into();
-		self.dirty = self.last_input.is_some();
+		self.update(|s| s.video = target.into());
 	}
 
 	/// Set or clear the audio target. Pass `None` to keep every rendition.
 	pub fn set_audio(&mut self, target: impl Into<Option<TargetAudio>>) {
-		self.audio = target.into();
-		self.dirty = self.last_input.is_some();
+		self.update(|s| s.audio = target.into());
 	}
 
-	fn apply(&self, mut catalog: Catalog) -> Catalog {
-		if let Some(target) = &self.video
-			&& let Some(name) = select_video(&catalog.video.renditions, target)
-		{
+	fn update(&self, f: impl FnOnce(&mut TargetState)) {
+		// `write()` only errors when the producer is closed, which can't happen
+		// while `self` holds the only producer handle.
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		f(&mut state);
+		state.epoch = state.epoch.wrapping_add(1);
+		// Mut::drop wakes the paired consumer waiters here.
+	}
+}
+
+impl<S: Stream> Stream for Target<S> {
+	type Ext = S::Ext;
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
+		// Drain inner: the latest snapshot wins. `poll_next` registers the
+		// waiter on its own Pending branch.
+		let inner_eof = loop {
+			match self.inner.poll_next(waiter)? {
+				Poll::Ready(Some(snapshot)) => {
+					self.last_input = Some(snapshot);
+					self.fresh_input = true;
+				}
+				Poll::Ready(None) => break true,
+				Poll::Pending => break false,
+			}
+		};
+
+		// Snapshot the fields the inner closure needs so it can borrow them
+		// without colliding with the `&self.state_consumer` receiver.
+		let last_epoch = self.last_epoch;
+		let fresh_input = self.fresh_input;
+		let last_input = self.last_input.clone();
+
+		let polled = self.state_consumer.poll(waiter, |state| {
+			let target_changed = state.epoch != last_epoch;
+			if !fresh_input && !target_changed {
+				// Nothing new from inner and nothing new from caller: register
+				// the waiter on this consumer so the next setter wakes us.
+				return Poll::Pending;
+			}
+			let Some(input) = last_input.clone() else {
+				// Caller already retargeted, but no upstream snapshot yet to apply.
+				return Poll::Pending;
+			};
+			let emit = apply(input, state.video.as_ref(), state.audio.as_ref());
+			Poll::Ready((emit, state.epoch))
+		});
+
+		match polled {
+			Poll::Ready(Ok((emit, epoch))) => {
+				self.last_epoch = epoch;
+				self.fresh_input = false;
+				Poll::Ready(Ok(Some(emit)))
+			}
+			Poll::Ready(Err(_)) => {
+				// Producer dropped (impossible while Self holds it); treat as EOF.
+				Poll::Ready(Ok(None))
+			}
+			Poll::Pending => {
+				if inner_eof && self.last_input.is_none() {
+					Poll::Ready(Ok(None))
+				} else {
+					Poll::Pending
+				}
+			}
+		}
+	}
+}
+
+/// Apply the active video / audio targets to a raw snapshot, narrowing each
+/// axis to at most one rendition. Axes with no target pass through unchanged.
+fn apply<E: CatalogExt>(
+	mut catalog: Catalog<E>,
+	video: Option<&TargetVideo>,
+	audio: Option<&TargetAudio>,
+) -> Catalog<E> {
+	if let Some(target) = video {
+		if let Some(name) = select_video(&catalog.video.renditions, target) {
 			let mut kept = BTreeMap::new();
 			if let Some(config) = catalog.video.renditions.remove(&name) {
 				kept.insert(name, config);
 			}
 			catalog.video.renditions = kept;
-		} else if self.video.is_some() {
+		} else {
 			catalog.video.renditions.clear();
 		}
+	}
 
-		if let Some(target) = &self.audio
-			&& let Some(name) = select_audio(&catalog.audio.renditions, target)
-		{
+	if let Some(target) = audio {
+		if let Some(name) = select_audio(&catalog.audio.renditions, target) {
 			let mut kept = BTreeMap::new();
 			if let Some(config) = catalog.audio.renditions.remove(&name) {
 				kept.insert(name, config);
 			}
 			catalog.audio.renditions = kept;
-		} else if self.audio.is_some() {
+		} else {
 			catalog.audio.renditions.clear();
 		}
-
-		catalog
 	}
-}
 
-impl<S: Stream> Stream for Target<S> {
-	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Catalog>>> {
-		if self.dirty {
-			self.dirty = false;
-			if let Some(snapshot) = self.last_input.clone() {
-				return Poll::Ready(Ok(Some(self.apply(snapshot))));
-			}
-		}
-
-		match self.inner.poll_next(waiter)? {
-			Poll::Ready(Some(snapshot)) => {
-				self.last_input = Some(snapshot.clone());
-				Poll::Ready(Ok(Some(self.apply(snapshot))))
-			}
-			Poll::Ready(None) => Poll::Ready(Ok(None)),
-			Poll::Pending => Poll::Pending,
-		}
-	}
+	catalog
 }
 
 /// Run all active video rankings and return the highest-ranked rendition

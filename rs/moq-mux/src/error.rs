@@ -15,6 +15,10 @@ pub enum Error {
 	#[error("hang: {0}")]
 	Hang(#[from] hang::Error),
 
+	/// Error publishing or consuming JSON over a track.
+	#[error("json: {0}")]
+	Json(#[from] moq_json::Error),
+
 	/// Error parsing or building CMAF moof+mdat fragments.
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::fmp4::Error),
@@ -22,10 +26,6 @@ pub enum Error {
 	/// Error parsing or building MKV / WebM streams.
 	#[error("mkv: {0}")]
 	Mkv(#[from] crate::container::mkv::Error),
-
-	/// Error during HLS ingest.
-	#[error("hls: {0}")]
-	Hls(#[from] crate::container::hls::Error),
 
 	/// Error decoding the MSF catalog.
 	#[error("msf: {0}")]
@@ -77,11 +77,11 @@ pub enum Error {
 
 	/// Error decoding or encoding an mp4 atom.
 	#[error("mp4: {0}")]
-	Mp4(#[from] mp4_atom::Error),
+	Mp4(std::sync::Arc<mp4_atom::Error>),
 
 	/// I/O error.
 	#[error("io: {0}")]
-	Io(#[from] std::io::Error),
+	Io(std::sync::Arc<std::io::Error>),
 
 	/// URL parse error.
 	#[error("url: {0}")]
@@ -96,9 +96,33 @@ pub enum Error {
 	#[error("{0}")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
-	/// Multi-track container reported no tracks.
-	#[error("init segment did not initialize the importer")]
-	NotInitialized,
+	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
+	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
+	#[error("{0}")]
+	Other(std::sync::Arc<anyhow::Error>),
+
+	/// Tried to set an application catalog section whose name collides with a
+	/// reserved media section (`video`/`audio`).
+	#[error("reserved catalog section: {0}")]
+	ReservedSection(String),
+}
+
+impl From<anyhow::Error> for Error {
+	fn from(err: anyhow::Error) -> Self {
+		Error::Other(std::sync::Arc::new(err))
+	}
+}
+
+impl From<mp4_atom::Error> for Error {
+	fn from(err: mp4_atom::Error) -> Self {
+		Error::Mp4(std::sync::Arc::new(err))
+	}
+}
+
+impl From<std::io::Error> for Error {
+	fn from(err: std::io::Error) -> Self {
+		Error::Io(std::sync::Arc::new(err))
+	}
 }
 
 /// A Result type alias for moq-mux operations.

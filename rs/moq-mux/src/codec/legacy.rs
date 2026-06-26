@@ -7,10 +7,9 @@
 //! codec contributes only a header parser and a [`Descriptor`]; this module
 //! owns the track lifecycle.
 
-use moq_net::Timestamp;
-
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
+use crate::container::Timestamp;
 
 /// Legacy audio (MP2 / AC-3 / E-AC-3) header parsing errors.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -144,6 +143,11 @@ impl<E: CatalogExt> Import<E> {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 		}
+	}
+
+	/// The MoQ track name.
+	pub fn name(&self) -> &str {
+		self.track.name()
 	}
 
 	/// Finish the track, flushing the current group.
