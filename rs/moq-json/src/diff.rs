@@ -31,28 +31,32 @@ pub struct Diff {
 /// would delete a key it shouldn't (a value genuinely set to null) also forces a snapshot.
 pub fn diff<T: Serialize>(old: &Value, new: &T) -> Diff {
 	let forced = Cell::new(false);
-	let node = new
-		.serialize(Differ {
-			baseline: old,
-			forced: &forced,
-		})
-		.expect("serializing into a merge patch is infallible for JSON-shaped data");
+	let node = new.serialize(Differ {
+		baseline: old,
+		forced: &forced,
+	});
 
 	match node {
 		// No field differed: an empty patch. A null somewhere may still have forced a snapshot.
-		Node::Same => Diff {
+		Ok(Node::Same) => Diff {
 			patch: Value::Object(Map::new()),
 			forced_snapshot: forced.get(),
 		},
 		// A non-object patch (or non-object baseline) can't be a recursive merge patch, so force a
 		// snapshot for non-object roots.
-		Node::Diff(patch) => {
+		Ok(Node::Diff(patch)) => {
 			let non_object_root = !patch.is_object() || !old.is_object();
 			Diff {
 				patch,
 				forced_snapshot: forced.get() || non_object_root,
 			}
 		}
+		// A value that isn't representable as JSON (e.g. a non-string map key) can't be diffed. Fall
+		// back to a snapshot; the caller's own serialization surfaces the real error if there is one.
+		Err(_) => Diff {
+			patch: Value::Object(Map::new()),
+			forced_snapshot: true,
+		},
 	}
 }
 
@@ -137,10 +141,10 @@ impl<'a> Serializer for Differ<'a> {
 	type SerializeSeq = SeqDiff<'a>;
 	type SerializeTuple = SeqDiff<'a>;
 	type SerializeTupleStruct = SeqDiff<'a>;
-	type SerializeTupleVariant = Impossible<Node, Error>;
+	type SerializeTupleVariant = VariantSeq<'a>;
 	type SerializeMap = MapDiff<'a>;
 	type SerializeStruct = MapDiff<'a>;
-	type SerializeStructVariant = Impossible<Node, Error>;
+	type SerializeStructVariant = VariantMap<'a>;
 
 	fn serialize_bool(self, v: bool) -> Result<Node, Error> {
 		self.scalar(Value::Bool(v))
@@ -218,11 +222,13 @@ impl<'a> Serializer for Differ<'a> {
 		self,
 		_name: &'static str,
 		_idx: u32,
-		_variant: &'static str,
+		variant: &'static str,
 		value: &T,
 	) -> Result<Node, Error> {
-		// Externally-tagged enum: replace wholesale, matching how `to_value` shapes it.
-		self.scalar(to_plain(value)?)
+		// An externally-tagged newtype variant serializes as `{ "Variant": value }`. Diff that object
+		// against the baseline like any other object, so the tag is preserved and the payload diffs
+		// minimally (a variant switch deletes the old tag and adds the new one).
+		variant_object(variant, to_plain(value)?).serialize(self)
 	}
 	fn serialize_seq(self, len: Option<usize>) -> Result<SeqDiff<'a>, Error> {
 		Ok(SeqDiff {
@@ -240,13 +246,15 @@ impl<'a> Serializer for Differ<'a> {
 		self,
 		_name: &'static str,
 		_idx: u32,
-		_variant: &'static str,
-		_len: usize,
-	) -> Result<Self::SerializeTupleVariant, Error> {
-		// A tuple variant serializes as `{ "Variant": [..] }`; we don't diff into it, so replace
-		// wholesale via `to_value`. Producing that here would need the values, so callers that use such
-		// enums hit `to_plain` at the parent. This path is unreachable for JSON `Value` inputs.
-		Err(Error("tuple variants are unsupported by the diffing serializer".into()))
+		variant: &'static str,
+		len: usize,
+	) -> Result<VariantSeq<'a>, Error> {
+		// A tuple variant serializes as `{ "Variant": [..] }`, replaced wholesale.
+		Ok(VariantSeq {
+			differ: self,
+			variant,
+			items: Vec::with_capacity(len),
+		})
 	}
 	fn serialize_map(self, _len: Option<usize>) -> Result<MapDiff<'a>, Error> {
 		Ok(MapDiff {
@@ -264,12 +272,60 @@ impl<'a> Serializer for Differ<'a> {
 		self,
 		_name: &'static str,
 		_idx: u32,
-		_variant: &'static str,
+		variant: &'static str,
 		_len: usize,
-	) -> Result<Self::SerializeStructVariant, Error> {
-		Err(Error(
-			"struct variants are unsupported by the diffing serializer".into(),
-		))
+	) -> Result<VariantMap<'a>, Error> {
+		// A struct variant serializes as `{ "Variant": { .. } }`, replaced wholesale.
+		Ok(VariantMap {
+			differ: self,
+			variant,
+			fields: Map::new(),
+		})
+	}
+}
+
+/// Wrap a value as an externally-tagged variant object `{ variant: value }`.
+fn variant_object(variant: &str, value: Value) -> Value {
+	let mut object = Map::new();
+	object.insert(variant.to_owned(), value);
+	Value::Object(object)
+}
+
+/// Collects a tuple variant's fields into `{ variant: [..] }`, then diffs it against the baseline.
+struct VariantSeq<'a> {
+	differ: Differ<'a>,
+	variant: &'static str,
+	items: Vec<Value>,
+}
+
+impl serde::ser::SerializeTupleVariant for VariantSeq<'_> {
+	type Ok = Node;
+	type Error = Error;
+	fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
+		self.items.push(to_plain(value)?);
+		Ok(())
+	}
+	fn end(self) -> Result<Node, Error> {
+		variant_object(self.variant, Value::Array(self.items)).serialize(self.differ)
+	}
+}
+
+/// Collects a struct variant's fields into `{ variant: { .. } }`, then diffs it against the baseline.
+struct VariantMap<'a> {
+	differ: Differ<'a>,
+	variant: &'static str,
+	fields: Map<String, Value>,
+}
+
+impl serde::ser::SerializeStructVariant for VariantMap<'_> {
+	type Ok = Node;
+	type Error = Error;
+	fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, value: &T) -> Result<(), Error> {
+		self.fields.insert(key.to_owned(), to_plain(value)?);
+		Ok(())
+	}
+	fn end(self) -> Result<Node, Error> {
+		variant_object(self.variant, Value::Object(self.fields)).serialize(self.differ)
 	}
 }
 
@@ -893,6 +949,94 @@ mod test {
 		);
 		assert!(!result.forced_snapshot);
 		assert_eq!(result.patch, json!({ "state": "Idle" }));
+	}
+
+	/// Diff a typed value against the Value of a prior value: the patch must match the oracle fed the
+	/// equivalent Values, and roundtrip.
+	fn check_typed<T: Serialize>(old: &Value, new: &T) {
+		let new_value = serde_json::to_value(new).unwrap();
+		let want = reference(old, &new_value);
+		let got = diff(old, new);
+		assert_eq!(got.patch, want.patch, "patch differs from oracle");
+		assert_eq!(got.forced_snapshot, want.forced_snapshot, "forced differs from oracle");
+		if !got.forced_snapshot {
+			let mut applied = old.clone();
+			json_patch::merge(&mut applied, &got.patch);
+			assert_eq!(applied, new_value, "patch did not roundtrip");
+		}
+	}
+
+	#[derive(serde::Serialize)]
+	enum Payload {
+		Newtype(u32),
+		Tuple(u32, String),
+		Struct { x: u32, y: u32 },
+	}
+
+	#[derive(serde::Serialize)]
+	struct Holder {
+		payload: Payload,
+		seq: u32,
+	}
+
+	#[test]
+	fn newtype_variant_keeps_its_tag() {
+		// Regression: a newtype variant must serialize as `{ "Newtype": v }`, not collapse to `v`.
+		let old = serde_json::to_value(Holder {
+			payload: Payload::Newtype(1),
+			seq: 0,
+		})
+		.unwrap();
+		assert_eq!(old, json!({ "payload": { "Newtype": 1 }, "seq": 0 }));
+		let result = diff(
+			&old,
+			&Holder {
+				payload: Payload::Newtype(2),
+				seq: 0,
+			},
+		);
+		assert_eq!(result.patch, json!({ "payload": { "Newtype": 2 } }));
+		check_typed(
+			&old,
+			&Holder {
+				payload: Payload::Newtype(2),
+				seq: 0,
+			},
+		);
+	}
+
+	#[test]
+	fn tuple_variant_keeps_its_tag() {
+		let old = serde_json::to_value(Holder {
+			payload: Payload::Tuple(1, "a".into()),
+			seq: 0,
+		})
+		.unwrap();
+		assert_eq!(old, json!({ "payload": { "Tuple": [1, "a"] }, "seq": 0 }));
+		check_typed(
+			&old,
+			&Holder {
+				payload: Payload::Tuple(2, "a".into()),
+				seq: 0,
+			},
+		);
+	}
+
+	#[test]
+	fn struct_variant_keeps_its_tag() {
+		let old = serde_json::to_value(Holder {
+			payload: Payload::Struct { x: 1, y: 2 },
+			seq: 0,
+		})
+		.unwrap();
+		assert_eq!(old, json!({ "payload": { "Struct": { "x": 1, "y": 2 } }, "seq": 0 }));
+		check_typed(
+			&old,
+			&Holder {
+				payload: Payload::Struct { x: 1, y: 9 },
+				seq: 0,
+			},
+		);
 	}
 
 	#[derive(serde::Deserialize)]
