@@ -148,6 +148,24 @@ impl KeyFrame {
 	}
 }
 
+/// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) from a VP9 key
+/// frame's uncompressed header, or `None` if `data` is not a key frame.
+///
+/// VP9 has no out-of-band config record (the FLV `vp09` shape configures the
+/// decoder in band), so the enhanced-RTMP importer derives the config from each
+/// key frame instead of a sequence-header tag.
+pub(crate) fn config_from_keyframe(data: &[u8]) -> anyhow::Result<Option<hang::catalog::VideoConfig>> {
+	let Some(key) = FrameHeader::parse(data)?.key else {
+		return Ok(None);
+	};
+	let (width, height) = (key.width, key.height);
+	let mut config = hang::catalog::VideoConfig::new(key.to_catalog());
+	config.coded_width = Some(width as u32);
+	config.coded_height = Some(height as u32);
+	config.container = hang::catalog::Container::Legacy;
+	Ok(Some(config))
+}
+
 /// `vpcC` chroma subsampling enum from the VP9 `subsampling_x`/`subsampling_y`
 /// flags. VP9 doesn't signal chroma siting, so 4:2:0 maps to "colocated" (1),
 /// the value encoders conventionally write.

@@ -209,6 +209,9 @@ impl<E: catalog::Catalog> Export<E> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next muxed frame, driving the underlying sources via `waiter`.
+	/// The `Poll::Ready` counterpart of [`next`](Self::next), for synchronous or
+	/// custom executors.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {

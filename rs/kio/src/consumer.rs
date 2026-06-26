@@ -6,7 +6,7 @@ use std::{
 use crate::{
 	Counts, State, Weak,
 	lock::*,
-	producer::{Producer, Ref},
+	producer::{Mut, Producer, Ref},
 	waiter::*,
 };
 
@@ -49,6 +49,21 @@ impl<T> Consumer<T> {
 		waiter.register(&mut state.waiters_value);
 
 		Poll::Pending
+	}
+
+	/// Acquire write access to the shared state from the consumer side.
+	///
+	/// Unlike [`poll`](Self::poll), this never registers a waiter; it simply locks the
+	/// state for mutation. Returns `Err(`[`Ref`]`)` if the channel is already closed.
+	/// Mirrors [`Producer::write`], for the rare case where a consumer also feeds shared
+	/// state back to producers (e.g. a request queue).
+	pub fn write(&self) -> Result<Mut<'_, T>, Ref<'_, T>> {
+		let state = self.state.lock();
+		if state.closed {
+			Err(Ref { state })
+		} else {
+			Ok(Mut::new(state))
+		}
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.

@@ -114,9 +114,10 @@ async fn main() -> anyhow::Result<()> {
 
 /// Run a local QUIC/WebTransport server and ingest SRT directly into it.
 async fn run_serve(config: moq_native::ServerConfig, dir: Option<PathBuf>, srt: moq_srt::Config) -> anyhow::Result<()> {
-	let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
-
 	let server = config.init().context("init moq server")?;
+	// Derive the HTTP sidecar bind from the actual listener, so a port-0 or
+	// hostname-resolved server still serves /certificate.sha256 on the real socket.
+	let web_bind = server.local_addr().context("server local addr")?.to_string();
 	let web_tls = server.tls_info();
 
 	// SRT publishes broadcasts into this origin; the server serves them out.

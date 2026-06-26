@@ -29,6 +29,12 @@ Another tool does the encoding (ex. ffmpeg), making it easy to pipe any media in
 ffmpeg -f avfoundation -i "0" -f mpegts - | moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
+## [moq-rtmp](/bin/rtmp)
+
+An RTMP / enhanced-RTMP -> MoQ ingest gateway. Accepts RTMP from any encoder
+(OBS, ffmpeg) and publishes it into MoQ, supporting H.264/HEVC/AV1/VP9 and
+AAC/Opus/AC-3.
+
 ## [OBS Plugin](/bin/obs)
 
 Real-time latency with the familiar OBS interface.
