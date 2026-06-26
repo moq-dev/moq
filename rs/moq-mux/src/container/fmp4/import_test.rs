@@ -5,7 +5,7 @@ use mp4_atom::{Decode, Encode};
 /// Drain every group currently buffered on the consumer without waiting for new ones.
 /// Used in tests where the producer is still alive after writing.
 #[cfg(test)]
-fn drain_group_sequences(consumer: &mut moq_net::TrackSubscriber) -> Vec<u64> {
+fn drain_group_sequences(consumer: &mut moq_net::TrackConsumer) -> Vec<u64> {
 	let mut sequences = Vec::new();
 	while let Some(group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
 		sequences.push(group.sequence);

@@ -66,8 +66,6 @@ impl From<u16> for Frame {
 	}
 }
 
-/// Backward-compatible alias for newer APIs that name the frame header explicitly.
-pub type FrameInfo = Frame;
 
 /// Single-allocation buffer shared between a [FrameProducer] and many [FrameConsumer]s.
 ///

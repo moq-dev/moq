@@ -154,7 +154,7 @@ impl<S: Stream> Export<S> {
 		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
 			None => None,
 			Some(avcc) => {
-				let params = super::parse_avcc_param_sets(avcc)?;
+				let params = super::Avcc::parse(avcc)?;
 				if params.sps.is_empty() || params.pps.is_empty() {
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),
@@ -285,14 +285,14 @@ mod tests {
 			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.
-		let mut g0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut g0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		write_length_prefixed(&mut g0, 0, &[idr]);
 		g0.finish().unwrap();
 
 		// Group 1 (next group): one P-slice. Consumer marks the first frame
 		// of every group as keyframe by protocol invariant, so the exporter
 		// MUST treat both group-starts as keyframes and inject SPS+PPS twice.
-		let mut g1 = track.create_group(moq_net::GroupInfo { sequence: 1 }).unwrap();
+		let mut g1 = track.create_group(moq_net::Group { sequence: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[p_slice]);
 		g1.finish().unwrap();
 		track.finish().unwrap();

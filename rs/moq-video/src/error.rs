@@ -29,7 +29,11 @@ pub enum Error {
 	#[error("invalid framerate: {0} (must be non-zero)")]
 	InvalidFramerate(u32),
 
-	/// moq-mux codec/transport error (H.264 import, catalog).
+	/// moq-mux codec/container error (H.264 import, catalog).
+	#[error(transparent)]
+	Mux(#[from] moq_mux::Error),
+
+	/// Ad-hoc encode/capture error.
 	#[error(transparent)]
 	Codec(#[from] anyhow::Error),
 

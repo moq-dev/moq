@@ -520,8 +520,6 @@ pub struct TrackConsumer {
 	next_sequence: u64,
 }
 
-/// Backwards-compatible alias for callers that still refer to a subscribed track handle.
-pub type TrackSubscriber = TrackConsumer;
 
 impl std::ops::Deref for TrackConsumer {
 	type Target = Track;

@@ -16,7 +16,7 @@ pub struct Consumer<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber.
-	pub fn new(track: moq_net::TrackSubscriber) -> Self {
+	pub fn new(track: moq_net::TrackConsumer) -> Self {
 		Self {
 			inner: moq_json::Consumer::new(track, moq_json::ConsumerConfig::default()),
 		}
@@ -40,8 +40,8 @@ impl<E: CatalogExt> Consumer<E> {
 	}
 }
 
-impl<E: CatalogExt> From<moq_net::TrackSubscriber> for Consumer<E> {
-	fn from(inner: moq_net::TrackSubscriber) -> Self {
+impl<E: CatalogExt> From<moq_net::TrackConsumer> for Consumer<E> {
+	fn from(inner: moq_net::TrackConsumer) -> Self {
 		Self::new(inner)
 	}
 }

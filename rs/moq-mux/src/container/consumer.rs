@@ -7,7 +7,7 @@ use super::{Container, Frame};
 /// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
 /// presentation order.
 ///
-/// `Consumer` wraps a [`moq_net::TrackSubscriber`] and a [`Container`]
+/// `Consumer` wraps a [`moq_net::TrackConsumer`] and a [`Container`]
 /// format implementation, typically
 /// [`catalog::hang::Container`](crate::catalog::hang::Container). Yields
 /// decoded frames via [`read`](Self::read).
@@ -39,7 +39,7 @@ use super::{Container, Frame};
 /// [`discontinuity`](Self::discontinuity) so downstream consumers can flush their own
 /// buffers. This is always on.
 pub struct Consumer<F: Container> {
-	track: moq_net::TrackSubscriber,
+	track: moq_net::TrackConsumer,
 
 	format: F,
 
@@ -126,7 +126,7 @@ impl Reset {
 
 impl<F: Container> Consumer<F> {
 	/// Create a new Consumer wrapping the given moq-lite consumer.
-	pub fn new(track: moq_net::TrackSubscriber, format: F) -> Self {
+	pub fn new(track: moq_net::TrackConsumer, format: F) -> Self {
 		Self {
 			track,
 			format,
@@ -711,7 +711,7 @@ mod tests {
 
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy format).
 	fn write_group(track: &mut moq_net::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
-		let mut group = track.create_group(moq_net::GroupInfo { sequence }).unwrap();
+		let mut group = track.create_group(moq_net::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
 			let frame = Frame {
 				timestamp,
@@ -817,7 +817,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: 5 frames, NOT finished (blocks consumer)
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
 			Container::Legacy
 				.write(
@@ -863,7 +863,7 @@ mod tests {
 
 		// Group 0 at ts 0 keeps timestamps monotonic with sequence (groups 1-9 follow at
 		// g*50 ms), so the test exercises latency skipping and not rewind detection.
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -903,7 +903,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1108,7 +1108,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1310,7 +1310,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: a frame the consumer reads, positioning it there.
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1408,7 +1408,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
-		let mut group = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group,
@@ -1448,7 +1448,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1539,7 +1539,7 @@ mod tests {
 		// to avoid the latency skip and test B-frame timestamp tracking.
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(110));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
 			Container::Legacy
 				.write(
@@ -1595,7 +1595,7 @@ mod tests {
 		write_group(&mut track, 3, &[ts(0)]);
 		write_group(&mut track, 5, &[ts(150_000)]);
 
-		let mut group7 = track.create_group(moq_net::GroupInfo { sequence: 7 }).unwrap();
+		let mut group7 = track.create_group(moq_net::Group { sequence: 7 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group7,
@@ -1648,7 +1648,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
-		let _group5 = track.create_group(moq_net::GroupInfo { sequence: 5 }).unwrap();
+		let _group5 = track.create_group(moq_net::Group { sequence: 5 }).unwrap();
 		write_group(&mut track, 7, &[ts(210_000)]);
 		track.finish().unwrap();
 
@@ -1691,7 +1691,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(50));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1730,7 +1730,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1772,7 +1772,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: stalled at ts=0, NOT finished
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group0,
@@ -1831,7 +1831,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		group0.abort(moq_net::Error::Cancel).unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -1883,7 +1883,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -1907,7 +1907,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		// Write frames using Container::Legacy encoding
-		let mut group = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		for i in 0..3u64 {
 			let frame = Frame {
 				timestamp: ts(i * 33_333),
@@ -1950,11 +1950,11 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 
 		// Group 0: one frame at ts=0 lasting 33ms, never finished.
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		write_duration_frame(&mut group0, ts(0), ts(33_000));
 
 		// Group 1: finished, starts exactly where group 0's frame ends.
-		let mut group1 = track.create_group(moq_net::GroupInfo { sequence: 1 }).unwrap();
+		let mut group1 = track.create_group(moq_net::Group { sequence: 1 }).unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
 
@@ -1990,11 +1990,11 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 
 		// Group 0: frame at ts=0 lasting only 10ms, far short of group 1 at 33ms.
-		let mut group0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
 		write_duration_frame(&mut group0, ts(0), ts(10_000));
 
 		// Group 1: finished at 33ms.
-		let mut group1 = track.create_group(moq_net::GroupInfo { sequence: 1 }).unwrap();
+		let mut group1 = track.create_group(moq_net::Group { sequence: 1 }).unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
 		track.finish().unwrap();

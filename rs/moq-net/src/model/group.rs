@@ -72,8 +72,6 @@ impl From<u16> for Group {
 	}
 }
 
-/// Backward-compatible alias for newer APIs that name the group header explicitly.
-pub type GroupInfo = Group;
 
 #[derive(Default)]
 struct GroupState {

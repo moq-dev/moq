@@ -599,7 +599,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					prev.finish()?;
 				}
 				match track.pending_sequence.take() {
-					Some(sequence) => track.track.create_group(moq_net::GroupInfo { sequence })?,
+					Some(sequence) => track.track.create_group(moq_net::Group { sequence })?,
 					None => track.track.append_group()?,
 				}
 			} else {
@@ -611,7 +611,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
 			let _ = timestamp;
-			let mut frame = g.create_frame(moq_net::FrameInfo {
+			let mut frame = g.create_frame(moq_net::Frame {
 				size: fragment_bytes.len() as u64,
 			})?;
 			frame.write(fragment_bytes)?;
