@@ -49,7 +49,7 @@ fn telemetry(tick: u64) -> Value {
 			"sats": 9 + (tick % 3),
 		},
 		"sensors": {
-			"temp_c": (4.0 + (t * 0.05).sin() * 1.5 * 100.0).round() / 100.0,
+			"temp_c": ((4.0 + (t * 0.05).sin() * 1.5) * 100.0).round() / 100.0,
 			"humidity": 60 + (tick % 10),
 			"shock_g": (((t * 0.3).sin().abs()) * 100.0).round() / 100.0,
 			"door_open": tick % 30 == 0,
@@ -289,8 +289,8 @@ fn merge_producer_wire(frames: &[Value]) -> usize {
 	drain_wire(consumer)
 }
 
-/// Run the real Producer and capture the raw (compressed) frames for the consumer bench.
-fn merge_producer_frames(frames: &[Value]) -> Vec<Vec<u8>> {
+/// Run the real Producer and capture the raw (compressed) frames, grouped, for the consumer bench.
+fn merge_producer_frames(frames: &[Value]) -> Vec<Vec<Vec<u8>>> {
 	let track = moq_net::Track::new("bench").produce();
 	let consumer = track.consume();
 	let mut producer = Producer::<Value>::new(track, merge_cfg());
@@ -298,11 +298,11 @@ fn merge_producer_frames(frames: &[Value]) -> Vec<Vec<u8>> {
 		producer.update(f).unwrap();
 	}
 	producer.finish().unwrap();
-	collect_frames(consumer)
+	collect_groups(consumer)
 }
 
 /// Decode a captured merge-patch stream the way the real Consumer does.
-fn merge_consume(stream: &[Vec<u8>]) -> Value {
+fn merge_consume(stream: &[Vec<Vec<u8>>]) -> Value {
 	let track = build_track(stream);
 	let mut cc = ConsumerConfig::default();
 	cc.compression = true;
@@ -372,29 +372,37 @@ fn deflate_only_consume(stream: &[Vec<u8>]) -> Value {
 // ---- moq-net plumbing helpers ----
 
 fn drain_wire(consumer: moq_net::TrackConsumer) -> usize {
-	collect_frames(consumer).iter().map(|f| f.len()).sum()
+	collect_groups(consumer).iter().flatten().map(|f| f.len()).sum()
 }
 
-fn collect_frames(consumer: moq_net::TrackConsumer) -> Vec<Vec<u8>> {
+/// Capture the stored frames preserving group boundaries: one inner `Vec` per group. Each group is
+/// its own DEFLATE stream, so the boundaries must survive the round-trip or `build_track` would feed
+/// a later group's frames into an earlier group's window and decode against the wrong dictionary.
+fn collect_groups(consumer: moq_net::TrackConsumer) -> Vec<Vec<Vec<u8>>> {
 	let waiter = kio::Waiter::noop();
 	let mut out = Vec::new();
 	let mut track = consumer;
 	while let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) {
+		let mut frames = Vec::new();
 		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			out.push(frame.to_vec());
+			frames.push(frame.to_vec());
 		}
+		out.push(frames);
 	}
 	out
 }
 
-fn build_track(frames: &[Vec<u8>]) -> moq_net::TrackConsumer {
+/// Replay captured groups onto a fresh track, one moq-net group per captured group.
+fn build_track(groups: &[Vec<Vec<u8>>]) -> moq_net::TrackConsumer {
 	let mut track = moq_net::Track::new("bench").produce();
 	let consumer = track.consume();
-	let mut group = track.append_group().unwrap();
-	for f in frames {
-		group.write_frame(bytes::Bytes::from(f.clone())).unwrap();
+	for frames in groups {
+		let mut group = track.append_group().unwrap();
+		for f in frames {
+			group.write_frame(bytes::Bytes::from(f.clone())).unwrap();
+		}
+		group.finish().unwrap();
 	}
-	group.finish().unwrap();
 	track.finish().unwrap();
 	consumer
 }
