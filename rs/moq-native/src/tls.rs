@@ -77,6 +77,10 @@ pub enum Error {
 	#[error(transparent)]
 	Rustls(#[from] rustls::Error),
 
+	#[cfg(any(feature = "quinn", feature = "noq"))]
+	#[error("failed to build client certificate verifier")]
+	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
+
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	#[error(transparent)]
 	Rcgen(#[from] rcgen::Error),
@@ -500,6 +504,47 @@ impl Server {
 		}
 		Ok(roots)
 	}
+
+	/// Build a [`rustls::ServerConfig`] for a plain-TLS (non-QUIC) server, e.g. an
+	/// RTMPS or HTTPS listener fronting the QUIC endpoint, reusing the QUIC
+	/// backend's certificate handling: on-disk `cert`/`key` pairs, `generate`
+	/// self-signed certs, and optional mTLS `root` client CAs.
+	///
+	/// `alpn` sets the advertised ALPN protocols (e.g.
+	/// `vec![b"h2".to_vec(), b"http/1.1".to_vec()]`); pass an empty list for a
+	/// protocol like RTMPS that doesn't use ALPN.
+	#[cfg(any(feature = "noq", feature = "quinn"))]
+	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+		server_config(self, alpn)
+	}
+}
+
+/// Build a [`rustls::ServerConfig`] from a [`Server`] for a plain-TLS listener.
+#[cfg(any(feature = "noq", feature = "quinn"))]
+fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+	let provider = crypto::provider();
+
+	let certs = ServeCerts::new(provider.clone());
+	certs.load_certs(config)?;
+	let certs = Arc::new(certs);
+
+	// TCP can negotiate TLS 1.2 as well as 1.3, unlike QUIC which is 1.3-only.
+	let builder =
+		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
+
+	let mut tls = if config.root.is_empty() {
+		builder.with_no_client_auth().with_cert_resolver(certs)
+	} else {
+		let roots = config.load_roots()?;
+		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+			.allow_unauthenticated()
+			.build()
+			.map_err(Error::ClientVerifier)?;
+		builder.with_client_cert_verifier(verifier).with_cert_resolver(certs)
+	};
+
+	tls.alpn_protocols = alpn;
+	Ok(Arc::new(tls))
 }
 
 /// A peer's validated client-certificate chain from the mTLS handshake.
