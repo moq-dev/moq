@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::diff::diff;
+use crate::diff::{Diff, diff};
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
 ///
@@ -157,15 +157,7 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// Does nothing if the value is unchanged from the previous publish.
 	pub fn update(&mut self, value: &T) -> Result<()> {
-		let json = serde_json::to_value(value)?;
-		// Serialize the snapshot lazily and directly from `value` (not via `json`): directly so a
-		// snapshot preserves the type's own field order, keeping the wire bytes identical to serializing
-		// `T` straight to a frame; lazily so the delta path (the common case) doesn't pay for a full
-		// snapshot serialization it then discards.
-		self.inner
-			.lock()
-			.unwrap()
-			.update(json, || Ok(serde_json::to_vec(value)?))
+		self.inner.lock().unwrap().update(value)
 	}
 
 	/// Lock the current value for in-place editing, publishing on drop.
@@ -233,13 +225,8 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 			return;
 		}
 
-		let Ok(json) = serde_json::to_value(&self.value) else {
-			return;
-		};
-
-		// We already hold the lock, so publish through the held guard rather than re-locking. The
-		// snapshot is serialized lazily, only if this update rolls a new snapshot group.
-		let _ = self.inner.update(json, || Ok(serde_json::to_vec(&self.value)?));
+		// We already hold the lock, so publish through the held guard rather than re-locking.
+		let _ = self.inner.update(&self.value);
 	}
 }
 
@@ -261,68 +248,67 @@ struct Inner {
 }
 
 impl Inner {
-	fn update(&mut self, json: Value, snapshot: impl FnOnce() -> Result<Vec<u8>>) -> Result<()> {
-		if self.last.as_ref() == Some(&json) {
+	fn update<T: Serialize>(&mut self, value: &T) -> Result<()> {
+		// The first publish (or the first after `finish`) has no baseline to diff against, so it seeds
+		// the stream with a snapshot.
+		let Some(last) = self.last.as_ref() else {
+			return self.snapshot(value);
+		};
+
+		// Diff straight off `T`, without building a full `Value` for the new value first.
+		let Diff { patch, forced_snapshot } = diff(last, value);
+
+		// An empty object patch with no forced null means the value is unchanged: publish nothing.
+		if !forced_snapshot && patch.as_object().is_some_and(serde_json::Map::is_empty) {
 			return Ok(());
 		}
 
-		match self.delta(&json)? {
-			Some(slice) => {
-				let group = self.group.as_mut().expect("delta requires an open group");
-				let len = slice.len() as u64;
-				group.write_frame(slice)?;
-				self.delta_bytes += len;
-				self.group_frames += 1;
-			}
-			// Serialize the full snapshot only now, on the path that actually writes one.
-			None => self.snapshot(snapshot()?)?,
+		// A forced snapshot (a genuine null, or a non-object root) or an exhausted delta budget rolls a
+		// new group; otherwise the change rides as a delta in the open group.
+		if forced_snapshot || !self.delta_allowed() {
+			return self.snapshot(value);
 		}
 
-		self.last = Some(json);
+		// Compress into the per-group window only now, for a frame we are committed to writing.
+		let bytes = serde_json::to_vec(&patch)?;
+		let slice = match self.encoder.as_mut() {
+			Some(encoder) => encoder.frame(&bytes),
+			None => Bytes::from(bytes),
+		};
+		let len = slice.len() as u64;
+		self.group
+			.as_mut()
+			.expect("delta_allowed guarantees an open group")
+			.write_frame(slice)?;
+		self.delta_bytes += len;
+		self.group_frames += 1;
+
+		// Fold the delta into the baseline so the next diff is against the value we just published.
+		json_patch::merge(self.last.as_mut().expect("a snapshot precedes any delta"), &patch);
 		Ok(())
 	}
 
-	/// Build a delta frame for `value`, or `None` to signal that a fresh snapshot should be published.
+	/// Whether the current change may ride as a delta in the open group.
 	///
-	/// The budget gate runs first, against the deltas *already written*, so rolling a new group costs
-	/// no merge-patch or compression work. Because the gate doesn't include the frame about to be
-	/// written, the delta that tips the group past `ratio * snapshot` still lands: a group overshoots
-	/// the budget by at most one delta before rolling.
-	fn delta(&mut self, value: &Value) -> Result<Option<Bytes>> {
+	/// The budget gate measures the deltas *already written* (excluding the frame about to land)
+	/// against the group's snapshot frame. Both are compressed sizes when compressing and raw
+	/// otherwise, so the comparison is like-for-like. Because the pending frame is excluded, the delta
+	/// that tips the group past `ratio * snapshot` still lands: a group overshoots by at most one delta
+	/// before rolling.
+	fn delta_allowed(&self) -> bool {
 		let ratio = self.config.delta_ratio as u64;
-		if ratio == 0 {
-			return Ok(None);
-		}
-		if self.group.is_none() || self.group_frames >= MAX_DELTA_FRAMES {
-			return Ok(None);
-		}
-
-		// Gate on the deltas accumulated so far, measured against the group's snapshot frame. Both are
-		// compressed sizes when compressing and raw otherwise, so the comparison is always like-for-like.
-		// Cheap: no diff, no merge patch, no compression yet.
-		if self.delta_bytes > ratio * self.snapshot_len {
-			return Ok(None);
-		}
-
-		let Some(last) = &self.last else {
-			return Ok(None);
-		};
-		let diff = diff(last, value);
-		if diff.forced_snapshot {
-			return Ok(None);
-		}
-		let patch = serde_json::to_vec(&diff.patch)?;
-
-		// Compress into the per-group window only now, for a frame we are committed to writing.
-		let slice = match self.encoder.as_mut() {
-			Some(encoder) => encoder.frame(&patch),
-			None => Bytes::from(patch),
-		};
-		Ok(Some(slice))
+		ratio != 0
+			&& self.group.is_some()
+			&& self.group_frames < MAX_DELTA_FRAMES
+			&& self.delta_bytes <= ratio * self.snapshot_len
 	}
 
-	/// Start a new group with a full snapshot as its first frame.
-	fn snapshot(&mut self, snapshot: Vec<u8>) -> Result<()> {
+	/// Start a new group with a full snapshot of `value` as its first frame, and reseed the baseline.
+	fn snapshot<T: Serialize>(&mut self, value: &T) -> Result<()> {
+		// Serialize directly from `value` so the snapshot frame preserves the type's own field order,
+		// keeping the wire bytes identical to serializing `T` straight to a frame.
+		let snapshot = serde_json::to_vec(value)?;
+
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
@@ -354,6 +340,8 @@ impl Inner {
 			group.finish()?;
 		}
 
+		// Reseed the baseline with the full new value for the next diff.
+		self.last = Some(serde_json::to_value(value)?);
 		Ok(())
 	}
 
