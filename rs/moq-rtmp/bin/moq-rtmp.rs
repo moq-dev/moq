@@ -85,19 +85,27 @@ struct RtmpArgs {
 	/// addition to plaintext RTMP. Requires a certificate via `--rtmps-tls-cert`
 	/// /`--rtmps-tls-key` or a self-signed `--rtmps-tls-generate`. RTMPS has no
 	/// well-known port; common choices are 443 or a custom one.
+	///
+	/// The bundled RTMPS terminator reuses moq-native's certificate loader, which
+	/// is only built with the `noq` or `quinn` backend; these flags are absent in
+	/// other builds.
+	#[cfg(any(feature = "noq", feature = "quinn"))]
 	#[arg(long = "rtmps-listen", env = "MOQ_RTMPS_LISTEN")]
 	rtmps_listen: Option<SocketAddr>,
 
 	/// PEM certificate chain for RTMPS.
+	#[cfg(any(feature = "noq", feature = "quinn"))]
 	#[arg(long = "rtmps-tls-cert", env = "MOQ_RTMPS_TLS_CERT")]
 	rtmps_cert: Option<PathBuf>,
 
 	/// PEM private key for RTMPS.
+	#[cfg(any(feature = "noq", feature = "quinn"))]
 	#[arg(long = "rtmps-tls-key", env = "MOQ_RTMPS_TLS_KEY")]
 	rtmps_key: Option<PathBuf>,
 
 	/// Or generate a self-signed RTMPS certificate for these hostnames (testing
 	/// only; clients must disable verification or pin the fingerprint).
+	#[cfg(any(feature = "noq", feature = "quinn"))]
 	#[arg(long = "rtmps-tls-generate", env = "MOQ_RTMPS_TLS_GENERATE", value_delimiter = ',')]
 	rtmps_generate: Vec<String>,
 }
@@ -109,8 +117,10 @@ impl RtmpArgs {
 		let mut plain = moq_rtmp::Config::default();
 		plain.listen = Some(self.listen);
 		plain.prefix = self.prefix.clone();
+		#[cfg_attr(not(any(feature = "noq", feature = "quinn")), allow(unused_mut))]
 		let mut configs = vec![plain];
 
+		#[cfg(any(feature = "noq", feature = "quinn"))]
 		if let Some(addr) = self.rtmps_listen {
 			// Reuse moq-native's cert loader (on-disk pair or self-signed). RTMPS
 			// has no ALPN convention, so advertise none.

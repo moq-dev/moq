@@ -84,12 +84,16 @@ Two ways to serve `rtmps://`:
 
 - **Let the gateway terminate TLS.** Set `Config::tls` (or call
   `Server::with_tls`) with a `rustls::ServerConfig`, and the listener speaks
-  RTMPS with no other change. Build the config from a cert/key with
-  `moq_native::tls::Server::server_config(vec![])` (RTMPS has no ALPN), or any
-  `rustls::ServerConfig`. To serve both RTMP and RTMPS, run two listeners
-  (`run` once per config) against a cloned origin.
+  RTMPS with no other change. Build the config from a `moq_native::tls::Server`
+  instance (RTMPS has no ALPN), or supply any `rustls::ServerConfig`. To serve
+  both RTMP and RTMPS, run two listeners (`run` once per config) against a
+  cloned origin.
 
   ```rust
+  let mut tls = moq_native::tls::Server::default();
+  tls.generate = vec!["your-domain.com".to_string()]; // or set tls.cert / tls.key
+  let server_config = tls.server_config(vec![])?; // RTMPS has no ALPN
+
   let mut rtmps = moq_rtmp::Config::default();
   rtmps.listen = Some("0.0.0.0:443".parse()?);
   rtmps.tls = Some(server_config); // Arc<rustls::ServerConfig>

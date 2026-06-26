@@ -236,7 +236,12 @@ impl Import {
 					match crate::codec::vp9::config_from_keyframe(data) {
 						Ok(Some(config)) => self.init_video(config)?,
 						Ok(None) => {}
-						Err(err) => tracing::warn!(%err, "dropping malformed VP9 key frame"),
+						Err(err) => {
+							// The header didn't parse, so the frame is unusable: drop it
+							// rather than forwarding a frame we couldn't validate.
+							tracing::warn!(%err, "dropping malformed VP9 key frame");
+							return Ok(());
+						}
 					}
 				}
 

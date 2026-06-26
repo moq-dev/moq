@@ -311,12 +311,13 @@ async fn export_roundtrips_enhanced() {
 			&& &t.body[1..5] == b"vp09"),
 		"expected an enhanced vp09 video tag"
 	);
-	// The audio carries an enhanced Opus sequence header.
+	// The audio carries an enhanced Opus sequence header (not a coded-frame tag).
 	assert!(
 		tags.iter().any(|t| t.tag_type == super::TAG_AUDIO
 			&& t.body[0] >> 4 == super::AUDIO_FORMAT_EX
+			&& t.body[0] & 0x0f == super::AUDIO_PACKET_SEQUENCE_START
 			&& &t.body[1..5] == b"Opus"),
-		"expected an enhanced Opus audio tag"
+		"expected an enhanced Opus sequence-header tag"
 	);
 
 	// Re-import and confirm the codecs survive.
