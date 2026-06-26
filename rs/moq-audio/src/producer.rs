@@ -19,12 +19,12 @@ use crate::{AudioError, Frame};
 /// The catalog rendition is registered at construction (not on first
 /// write), so a subscriber that opens the catalog before any frames
 /// arrive still sees the track.
-pub struct AudioProducer {
+pub struct AudioProducer<E: moq_mux::catalog::hang::CatalogExt = ()> {
 	encoder: Encoder,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
 	track_name: String,
-	catalog: moq_mux::catalog::Producer,
+	catalog: moq_mux::catalog::Producer<E>,
 	pending: Vec<f32>,
 	/// Samples emitted since the current epoch (reset by [`reset_epoch`](Self::reset_epoch)).
 	frames_produced: u64,
@@ -34,12 +34,12 @@ pub struct AudioProducer {
 	epoch_us: Option<u64>,
 }
 
-impl AudioProducer {
+impl<E: moq_mux::catalog::hang::CatalogExt> AudioProducer<E> {
 	/// Build a producer for `name` on `broadcast`, registering the
 	/// rendition in `catalog` immediately.
 	pub fn new(
 		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
 		name: impl Into<String>,
 		input: EncoderInput,
 		output: EncoderOutput,
@@ -178,7 +178,7 @@ impl AudioProducer {
 	}
 }
 
-impl Drop for AudioProducer {
+impl<E: moq_mux::catalog::hang::CatalogExt> Drop for AudioProducer<E> {
 	fn drop(&mut self) {
 		self.catalog.lock().audio.remove(&self.track_name);
 	}

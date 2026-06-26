@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
 use hang::moq_net;
-use moq_mux::import::{Framed, FramedFormat};
+use moq_mux::import;
 
 use super::session::CAT;
 use super::timeline::{SegmentInfo, classify_segment, frame_micros};
@@ -27,7 +27,7 @@ enum PadState {
 
 /// One sink pad's media producer plus its timeline policy.
 pub struct Pad {
-	framed: Option<Framed>,
+	framed: Option<import::Track>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going.
@@ -87,40 +87,43 @@ impl Pad {
 		let structure = caps.structure(0).context("empty caps")?;
 		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
 		self.finalize()?;
-		let broadcast = broadcast.clone();
+		let mut broadcast = broadcast.clone();
 		let catalog = catalog.clone();
-		// Every codec converges on one Framed; only the caps -> producer construction differs. The pad
-		// template fixes the structural fields (h264/h265 byte-stream/au, AAC mpegversion=4/stream-format=raw),
-		// so negotiation rejects non-conforming caps before they reach here; only fields the template can't
+
+		// Mint a track for a single codec and hand it to the importer. Every codec converges on one
+		// `import::Track`; only the caps -> (format, init) construction differs. The pad template fixes
+		// the structural fields (h264/h265 byte-stream/au, AAC mpegversion=4/stream-format=raw), so
+		// negotiation rejects non-conforming caps before they reach here; only fields the template can't
 		// pin (the AAC codec_data) are checked below.
-		let framed: Framed = match structure.name().as_str() {
-			"video/x-h264" => Framed::new(broadcast, catalog, FramedFormat::Avc3, &mut Bytes::new())?,
-			"video/x-h265" => Framed::new(broadcast, catalog, FramedFormat::Hev1, &mut Bytes::new())?,
-			"video/x-av1" => Framed::new(broadcast, catalog, FramedFormat::Av01, &mut Bytes::new())?,
-			"video/x-vp8" => Framed::new(broadcast, catalog, FramedFormat::Vp8, &mut Bytes::new())?,
-			"video/x-vp9" => Framed::new(broadcast, catalog, FramedFormat::Vp9, &mut Bytes::new())?,
+		let mut make = |format: &str, suffix: &str, init: &[u8]| -> Result<import::Track> {
+			let track = import::unique_track(&mut broadcast, suffix)?;
+			Ok(import::Track::new(track, catalog.clone(), format, init)?)
+		};
+
+		let framed: import::Track = match structure.name().as_str() {
+			"video/x-h264" => make("avc3", ".avc3", &[])?,
+			"video/x-h265" => make("hev1", ".hev1", &[])?,
+			"video/x-av1" => make("av01", ".av01", &[])?,
+			"video/x-vp8" => make("vp8", ".vp8", &[])?,
+			"video/x-vp9" => make("vp9", ".vp9", &[])?,
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
 				let codec_data = structure
 					.get::<gst::Buffer>("codec_data")
 					.context("AAC caps missing codec_data")?;
 				let map = codec_data.map_readable().context("failed to map AAC codec_data")?;
-				let mut data = Bytes::copy_from_slice(map.as_slice());
-				Framed::new(broadcast, catalog, FramedFormat::Aac, &mut data)?
+				make("aac", ".aac", map.as_slice())?
 			}
 			"audio/x-opus" => {
 				// Opus: GStreamer carries channels/rate in caps (not an OpusHead), and valid Opus caps
 				// always include them. Require them rather than guessing a stereo/48k default that could
-				// misadvertise the stream.
+				// misadvertise the stream. Synthesize the OpusHead the importer parses for config.
 				let channels: i32 = structure.get("channels").context("Opus caps missing channels")?;
 				let rate: i32 = structure.get("rate").context("Opus caps missing rate")?;
 				ensure!(channels > 0, "Opus caps has non-positive channel count {channels}");
 				ensure!(rate > 0, "Opus caps has non-positive sample rate {rate}");
-				let config = moq_mux::codec::opus::Config {
-					sample_rate: rate as u32,
-					channel_count: channels as u32,
-				};
-				moq_mux::codec::opus::Import::new(broadcast, catalog, config)?.into()
+				let head = opus_head(channels as u8, rate as u32);
+				make("opus", ".opus", &head)?
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
@@ -218,7 +221,7 @@ impl Pad {
 			Ok(micros) => {
 				let ts = hang::container::Timestamp::from_micros(micros).ok();
 				let framed = self.framed.as_mut().expect("framed present");
-				if let Err(err) = framed.decode_frame(&mut data, ts) {
+				if let Err(err) = framed.decode(&data, ts) {
 					gst::warning!(CAT, "invalidating pad: {err}");
 					self.fail();
 				}
@@ -241,14 +244,25 @@ impl Pad {
 		let Some(mut framed) = self.framed.take() else {
 			return Ok(false);
 		};
-		// A lazy codec (H.265/AV1/VP8/VP9) given CAPS but no frame never created its track, so there is
-		// nothing to flush and finish() would error "not initialized". track() is Ok only once a track
-		// exists; a real finish error on an initialized one still surfaces.
-		if framed.track().is_ok() {
-			framed.finish()?;
-		}
+		// The track is minted up front, so finish() always has a producer to close (it's a no-op for a
+		// codec that received CAPS but never a frame, so its catalog rendition was never registered).
+		framed.finish()?;
 		Ok(true)
 	}
+}
+
+/// Synthesize the 19-byte OpusHead the importer parses for codec config, since GStreamer Opus caps
+/// carry channels/rate as fields rather than an OpusHead blob.
+fn opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
+	let mut head = Vec::with_capacity(19);
+	head.extend_from_slice(b"OpusHead");
+	head.push(1); // version
+	head.push(channels);
+	head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
+	head.extend_from_slice(&sample_rate.to_le_bytes());
+	head.extend_from_slice(&0u16.to_le_bytes()); // output gain
+	head.push(0); // channel mapping family
+	head
 }
 
 /// Media types moqsink can build a producer for. Checked synchronously at the CAPS event so an

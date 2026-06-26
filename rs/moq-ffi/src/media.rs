@@ -81,7 +81,7 @@ pub struct MoqFrame {
 	pub keyframe: bool,
 }
 
-pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog) -> MoqCatalog {
+pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> MoqCatalog {
 	let video = catalog
 		.video
 		.renditions

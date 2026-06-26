@@ -126,7 +126,7 @@ pub struct moq_audio_frame {
 
 #[derive(Default)]
 pub struct Audio {
-	producers: NonZeroSlab<moq_audio::AudioProducer>,
+	producers: NonZeroSlab<moq_audio::AudioProducer<moq_mux::catalog::hang::Extra>>,
 	consumer_tasks: NonZeroSlab<Option<AudioTaskEntry>>,
 	frames: NonZeroSlab<moq_audio::Frame>,
 }
@@ -145,7 +145,7 @@ impl Audio {
 	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
 		name: &str,
 		input: moq_audio::EncoderInput,
 		output: moq_audio::EncoderOutput,

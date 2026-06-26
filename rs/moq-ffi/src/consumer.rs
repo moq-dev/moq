@@ -29,7 +29,7 @@ pub struct MoqCatalogConsumer {
 }
 
 struct Catalog {
-	inner: moq_mux::catalog::hang::Consumer,
+	inner: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
 }
 
 impl Catalog {
@@ -84,7 +84,7 @@ impl MoqBroadcastConsumer {
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
-		let consumer = moq_mux::catalog::hang::Consumer::from(track);
+		let consumer = moq_mux::catalog::hang::Consumer::<moq_mux::catalog::hang::Extra>::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
 		}))
