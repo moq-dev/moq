@@ -10,7 +10,7 @@ use web_async::Lock;
 
 use super::BroadcastConsumer;
 use crate::{
-	AsPath, Broadcast, BroadcastProducer, Path, PathOwned, PathPrefixes,
+	AsPath, Broadcast, BroadcastProducer, Error, Path, PathOwned, PathPrefixes,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
@@ -686,6 +686,11 @@ pub struct OriginProducer {
 
 	// The prefix that is automatically stripped from all paths.
 	root: PathOwned,
+
+	// Fallback request queue, shared with every derived consumer. Separate from
+	// `nodes` because dynamic broadcasts are never announced: they only resolve a
+	// consumer's `request_broadcast` when no live announcement exists.
+	dynamic: kio::Producer<OriginDynamicState>,
 }
 
 impl std::ops::Deref for OriginProducer {
@@ -704,6 +709,7 @@ impl OriginProducer {
 			info,
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
+			dynamic: kio::Producer::default(),
 		}
 	}
 
@@ -764,12 +770,25 @@ impl OriginProducer {
 			info: self.info,
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
+			dynamic: self.dynamic.clone(),
 		})
+	}
+
+	/// Create a dynamic handler that picks up [`OriginConsumer::request_broadcast`]
+	/// calls for paths that are not announced.
+	///
+	/// This is the origin-level analogue of [`BroadcastProducer::dynamic`]: it serves
+	/// broadcasts on demand rather than tracks. Crucially the served broadcasts are
+	/// *not* announced, so [`OriginConsumer::announced`] never sees them; they exist
+	/// only as a fallback for a consumer that asks for an exact path with no live
+	/// announcement. Drop the handler (and every clone) to reject pending requests.
+	pub fn dynamic(&self) -> OriginDynamic {
+		OriginDynamic::new(self.info, self.root.clone(), self.dynamic.clone())
 	}
 
 	/// Subscribe to all announced broadcasts.
 	pub fn consume(&self) -> OriginConsumer {
-		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
+		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.consume())
 	}
 
 	/// Get a broadcast by path if it has *already* been published.
@@ -795,6 +814,7 @@ impl OriginProducer {
 			info: self.info,
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
+			dynamic: self.dynamic.clone(),
 		})
 	}
 
@@ -830,6 +850,10 @@ pub struct OriginConsumer {
 
 	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
+
+	// Shared fallback request queue, fed to any `OriginDynamic` handler on the
+	// producer side. Used only by `request_broadcast`; announced lookups ignore it.
+	dynamic: kio::Consumer<OriginDynamicState>,
 }
 
 impl std::ops::Deref for OriginConsumer {
@@ -841,7 +865,7 @@ impl std::ops::Deref for OriginConsumer {
 }
 
 impl OriginConsumer {
-	fn new(info: Origin, root: PathOwned, nodes: OriginNodes) -> Self {
+	fn new(info: Origin, root: PathOwned, nodes: OriginNodes, dynamic: kio::Consumer<OriginDynamicState>) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -859,6 +883,7 @@ impl OriginConsumer {
 			nodes,
 			state,
 			root,
+			dynamic,
 		}
 	}
 
@@ -963,6 +988,7 @@ impl OriginConsumer {
 			self.info,
 			self.root.clone(),
 			self.nodes.select(&prefixes)?,
+			self.dynamic.clone(),
 		))
 	}
 
@@ -977,7 +1003,57 @@ impl OriginConsumer {
 			self.info,
 			self.root.join(&prefix).to_owned(),
 			self.nodes.root(&prefix)?,
+			self.dynamic.clone(),
 		))
+	}
+
+	/// Get a broadcast by path, falling back to a dynamic request when it is not announced.
+	///
+	/// Returns a [`kio::Pending`] future (resolved synchronously for an announced broadcast,
+	/// otherwise once a handler serves it). The lookup order is: an already-announced broadcast
+	/// resolves immediately; otherwise, if an [`OriginDynamic`] handler is live (see
+	/// [`OriginProducer::dynamic`]), a fallback request is registered and the future resolves
+	/// when the handler [`accept`](BroadcastRequest::accept)s it (or errors if it
+	/// [`reject`](BroadcastRequest::reject)s or every handler drops). Concurrent requests for
+	/// the same unannounced path coalesce onto one handler request.
+	///
+	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
+	/// dynamic handler exists, or [`Error::Dropped`] once the origin is gone. A request that is
+	/// registered while a handler is live but then loses every handler before being served also
+	/// resolves to [`Error::Unroutable`]. Unlike an announced broadcast, a dynamically served one
+	/// is never visible to [`Self::announced`].
+	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<BroadcastRequested> {
+		let path = path.as_path();
+
+		// Prefer a live announcement when one is present; the dynamic queue is only a fallback.
+		if let Some(broadcast) = self.get_broadcast(&path) {
+			return kio::Pending::new(BroadcastRequested::ready(broadcast));
+		}
+
+		// Key requests by absolute path so a scoped/rooted consumer and the handler
+		// (which may have a different root) agree on the same entry.
+		let absolute = self.root.join(&path).to_owned();
+
+		let Ok(mut state) = self.dynamic.write() else {
+			return kio::Pending::new(BroadcastRequested::failed(Error::Dropped));
+		};
+
+		// Coalesce onto a queued request for the same path; otherwise register a new one.
+		let consumer = if let Some(producer) = state.requests.get(&absolute) {
+			producer.consume()
+		} else {
+			if state.dynamic == 0 {
+				return kio::Pending::new(BroadcastRequested::failed(Error::Unroutable));
+			}
+
+			let producer = kio::Producer::<PendingBroadcast>::default();
+			let consumer = producer.consume();
+			state.requests.insert(absolute.clone(), producer);
+			state.request_order.push_back(absolute);
+			consumer
+		};
+
+		kio::Pending::new(BroadcastRequested::pending(consumer))
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -1007,7 +1083,253 @@ impl Drop for OriginConsumer {
 
 impl Clone for OriginConsumer {
 	fn clone(&self) -> Self {
-		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
+		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
+	}
+}
+
+/// Shared fallback request queue for an origin.
+///
+/// Lives off to the side of the announce tree because dynamically served broadcasts
+/// are never announced. Mirrors the `dynamic`/`requests`/`request_order` fields of the
+/// broadcast and track models.
+#[derive(Default)]
+struct OriginDynamicState {
+	// Result channels for queued requests, keyed by absolute path. Concurrent
+	// `request_broadcast` calls for the same path coalesce onto the same channel while
+	// it is queued. The producer is moved out (and the entry removed) when the handler
+	// picks the request up via [`OriginDynamic::requested_broadcast`].
+	requests: HashMap<PathOwned, kio::Producer<PendingBroadcast>>,
+
+	// Requested paths in FIFO order for the handler to drain.
+	request_order: VecDeque<PathOwned>,
+
+	// The number of live `OriginDynamic` handlers. While zero, `request_broadcast`
+	// fails fast with `Unroutable` rather than queueing a request nobody will serve.
+	dynamic: usize,
+}
+
+impl OriginDynamicState {
+	/// Drop every queued request, closing its result channel so awaiting requesters
+	/// resolve to an error. Called when the last handler goes away.
+	fn reject_requests(&mut self) {
+		self.requests.clear();
+		self.request_order.clear();
+	}
+}
+
+/// One-shot result of a dynamic broadcast request.
+///
+/// Stays `None` until a handler [`accept`](BroadcastRequest::accept)s (yielding the served
+/// broadcast) or [`reject`](BroadcastRequest::reject)s (yielding an error). The producer is
+/// dropped right after writing, closing the channel; kio checks the value before the closed
+/// flag, so an awaiting requester still observes the final result.
+#[derive(Default)]
+struct PendingBroadcast {
+	resolved: Option<Result<BroadcastConsumer, Error>>,
+}
+
+/// Picks up [`OriginConsumer::request_broadcast`] calls for paths that are not announced.
+///
+/// The origin-level analogue of [`crate::BroadcastDynamic`]: where that serves tracks on
+/// demand within a broadcast, this serves whole broadcasts on demand within an origin. A
+/// relay uses it as a fallback router, fetching a broadcast from upstream only when a
+/// downstream consumer asks for an exact path that nobody announced.
+///
+/// Served broadcasts are deliberately *not* announced, so they never appear in
+/// [`OriginConsumer::announced`]. Drop this handle (and every clone) to reject the
+/// requests still waiting to be served.
+pub struct OriginDynamic {
+	info: Origin,
+	root: PathOwned,
+	state: kio::Producer<OriginDynamicState>,
+}
+
+impl Clone for OriginDynamic {
+	fn clone(&self) -> Self {
+		// Mirror `new`: bump `dynamic` so each live handle is counted. Without this,
+		// dropping a clone would decrement past `new`'s increment and prematurely flip
+		// `dynamic` to zero, making future `request_broadcast` calls return `Unroutable`.
+		if let Ok(mut state) = self.state.write() {
+			state.dynamic += 1;
+		}
+
+		Self {
+			info: self.info,
+			root: self.root.clone(),
+			state: self.state.clone(),
+		}
+	}
+}
+
+impl OriginDynamic {
+	fn new(info: Origin, root: PathOwned, state: kio::Producer<OriginDynamicState>) -> Self {
+		if let Ok(mut state) = state.write() {
+			state.dynamic += 1;
+		}
+
+		Self { info, root, state }
+	}
+
+	/// The origin this handler belongs to.
+	pub fn info(&self) -> &Origin {
+		&self.info
+	}
+
+	// Gate readiness on a queued request; mutate through the returned `Mut`.
+	fn poll<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, OriginDynamicState>, Error>>
+	where
+		F: FnMut(&kio::Ref<'_, OriginDynamicState>) -> Poll<()>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(state) => Ok(state),
+			Err(_) => Err(Error::Dropped),
+		})
+	}
+
+	/// Poll for the next requested broadcast, without blocking.
+	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<BroadcastRequest, Error>> {
+		let mut state = ready!(self.poll(waiter, |state| {
+			if state.request_order.is_empty() {
+				Poll::Pending
+			} else {
+				Poll::Ready(())
+			}
+		}))?;
+
+		let path = state.request_order.pop_front().expect("predicate guaranteed a request");
+		let producer = state.requests.remove(&path).expect("request_order out of sync");
+		Poll::Ready(Ok(BroadcastRequest { path, producer }))
+	}
+
+	/// Block until a consumer requests an unannounced broadcast, returning a
+	/// [`BroadcastRequest`] to serve.
+	pub async fn requested_broadcast(&mut self) -> Result<BroadcastRequest, Error> {
+		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
+	}
+
+	/// Returns the prefix that is automatically stripped from requested paths.
+	pub fn root(&self) -> &Path<'_> {
+		&self.root
+	}
+}
+
+impl Drop for OriginDynamic {
+	fn drop(&mut self) {
+		if let Ok(mut state) = self.state.write() {
+			// Saturating sub so `OriginProducer::dynamic` can stay infallible.
+			state.dynamic = state.dynamic.saturating_sub(1);
+			if state.dynamic == 0 {
+				// No handlers left to fulfill queued requests; close them.
+				state.reject_requests();
+			}
+		}
+	}
+}
+
+/// A pending request for a broadcast that was not announced.
+///
+/// Yielded by [`OriginDynamic::requested_broadcast`]. The requester is awaiting inside
+/// [`OriginConsumer::request_broadcast`]; [`accept`](Self::accept) resolves it with a live
+/// broadcast (which the handler keeps producing into) and [`reject`](Self::reject) resolves
+/// it with an error. Dropping the request without either rejects it.
+pub struct BroadcastRequest {
+	// Absolute path that was requested.
+	path: PathOwned,
+
+	// Result channel back to the awaiting requester(s). Writing `resolved` and dropping
+	// this wakes them with the outcome.
+	producer: kio::Producer<PendingBroadcast>,
+}
+
+impl BroadcastRequest {
+	/// The absolute path that was requested.
+	pub fn path(&self) -> &Path<'_> {
+		&self.path
+	}
+
+	/// Accept the request, resolving every awaiting requester with `broadcast`.
+	///
+	/// The caller keeps producing into `broadcast` (e.g. a relay proxying tracks from
+	/// upstream); the requesters receive a consumer for it. The broadcast is *not*
+	/// announced.
+	pub fn accept(self, broadcast: BroadcastConsumer) {
+		if let Ok(mut state) = self.producer.write() {
+			state.resolved = Some(Ok(broadcast));
+		}
+		// `self.producer` drops here, closing the channel; the value is still observable.
+	}
+
+	/// Reject the request, resolving every awaiting requester with `err`.
+	pub fn reject(self, err: Error) {
+		if let Ok(mut state) = self.producer.write() {
+			state.resolved = Some(Err(err));
+		}
+	}
+}
+
+/// The pollable result of [`OriginConsumer::request_broadcast`].
+///
+/// Awaited via the [`kio::Pending`] wrapper; resolves to the [`BroadcastConsumer`]
+/// immediately when the broadcast was already announced, or once an [`OriginDynamic`]
+/// handler serves the request. Resolves to an error if the request is rejected or every
+/// handler drops before serving it.
+pub struct BroadcastRequested {
+	inner: Requested,
+}
+
+enum Requested {
+	// Already announced: resolves immediately with a clone of this broadcast.
+	Ready(BroadcastConsumer),
+	// Unroutable at request time, or the origin was already dropped: resolves immediately
+	// with this error. Baked in so `request_broadcast` itself stays infallible.
+	Failed(Error),
+	// Awaiting a handler: resolves when the request's result channel is written.
+	Pending(kio::Consumer<PendingBroadcast>),
+}
+
+impl BroadcastRequested {
+	fn ready(broadcast: BroadcastConsumer) -> Self {
+		Self {
+			inner: Requested::Ready(broadcast),
+		}
+	}
+
+	fn failed(error: Error) -> Self {
+		Self {
+			inner: Requested::Failed(error),
+		}
+	}
+
+	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
+		Self {
+			inner: Requested::Pending(consumer),
+		}
+	}
+
+	/// Poll for the requested broadcast without blocking.
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<BroadcastConsumer, Error>> {
+		match &self.inner {
+			Requested::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
+			Requested::Failed(error) => Poll::Ready(Err(error.clone())),
+			Requested::Pending(consumer) => Poll::Ready(
+				match ready!(consumer.poll(waiter, |state| match &state.resolved {
+					Some(result) => Poll::Ready(result.clone()),
+					None => Poll::Pending,
+				})) {
+					Ok(result) => result,
+					// Every handler dropped without resolving: nobody could route it.
+					Err(_closed) => Err(Error::Unroutable),
+				},
+			),
+		}
+	}
+}
+
+impl kio::Future for BroadcastRequested {
+	type Output = Result<BroadcastConsumer, Error>;
+
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
 
@@ -1055,6 +1377,8 @@ impl OriginConsumer {
 
 #[cfg(test)]
 mod tests {
+	use futures::FutureExt;
+
 	use crate::Broadcast;
 
 	use super::*;
@@ -2212,6 +2536,166 @@ mod tests {
 		assert!(
 			collected.iter().all(|(path, _)| path == &Path::new("test")),
 			"unexpected path in pending updates",
+		);
+	}
+
+	// With no OriginDynamic handler, an unannounced path resolves to Unroutable.
+	#[tokio::test]
+	async fn dynamic_request_unroutable_without_handler() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		assert!(matches!(
+			consumer.request_broadcast("missing").await,
+			Err(Error::Unroutable)
+		));
+	}
+
+	// A dynamically served broadcast resolves the requester, but is never announced.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_served_not_announced() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		// A separate announce cursor must never observe the dynamic broadcast.
+		let mut announced = origin.consume();
+		announced.assert_next_wait();
+
+		// Request a path that nobody announced; the future stays pending until served.
+		// Registration happens up front, so the handler sees the request immediately.
+		let request_fut = consumer.request_broadcast("fallback");
+
+		// The handler serves it with a live broadcast it keeps producing into.
+		let served = Broadcast::new().produce();
+
+		let request = dynamic.requested_broadcast().await.unwrap();
+		assert_eq!(request.path(), &Path::new("fallback"));
+		request.accept(served.consume());
+
+		let broadcast = request_fut.await.unwrap();
+		assert!(broadcast.is_clone(&served.consume()));
+
+		// Still nothing announced.
+		announced.assert_next_wait();
+	}
+
+	// Concurrent requests for the same queued path coalesce onto one handler request.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_coalesces() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		// Both register before the handler drains either.
+		let f1 = consumer.request_broadcast("dup");
+		let f2 = consumer.request_broadcast("dup");
+
+		// Exactly one request reaches the handler.
+		let request = dynamic.requested_broadcast().await.unwrap();
+		assert_eq!(request.path(), &Path::new("dup"));
+		assert!(
+			dynamic.requested_broadcast().now_or_never().is_none(),
+			"a coalesced request must not be served twice"
+		);
+
+		// Accepting resolves both awaiting requesters with the same broadcast.
+		let served = Broadcast::new().produce();
+		request.accept(served.consume());
+		assert!(f1.await.unwrap().is_clone(&served.consume()));
+		assert!(f2.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// Rejecting a request resolves the requester with the error.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_rejected() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let request_fut = consumer.request_broadcast("fallback");
+
+		let request = dynamic.requested_broadcast().await.unwrap();
+		request.reject(Error::Cancel);
+
+		assert!(matches!(request_fut.await, Err(Error::Cancel)));
+	}
+
+	// Dropping the last handler resolves queued requests with an error and reverts to
+	// resolving Unroutable.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_handler_dropped() {
+		let origin = Origin::random().produce();
+		let dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let request_fut = consumer.request_broadcast("fallback");
+		drop(dynamic);
+		assert!(matches!(request_fut.await, Err(Error::Unroutable)));
+
+		// With no handler left, a fresh request resolves Unroutable.
+		assert!(matches!(
+			consumer.request_broadcast("again").await,
+			Err(Error::Unroutable)
+		));
+	}
+
+	// `accept` is decoupled from the dynamic count: once a handler has picked a request up,
+	// it can still serve it even if every handler (including itself) drops first, flipping the
+	// count to zero. The in-flight request must not be rejected as `Unroutable`.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_accept_after_handler_dropped() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let request_fut = consumer.request_broadcast("fallback");
+
+		// The handler picks the request up, then every handler drops (count -> 0).
+		let request = dynamic.requested_broadcast().await.unwrap();
+		drop(dynamic);
+
+		// Accept still resolves the awaiting requester with the served broadcast.
+		let served = Broadcast::new().produce();
+		request.accept(served.consume());
+		assert!(request_fut.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// A live announcement wins over the dynamic fallback; no request is queued.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_prefers_announced() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let broadcast = Broadcast::new().produce();
+		assert!(origin.publish_broadcast("live", broadcast.consume()));
+
+		let got = consumer.request_broadcast("live").await.unwrap();
+		assert!(
+			got.is_clone(&broadcast.consume()),
+			"should return the announced broadcast"
+		);
+		assert!(
+			dynamic.requested_broadcast().now_or_never().is_none(),
+			"an announced path must not queue a fallback request"
+		);
+	}
+
+	// Cloning a handler and dropping the clone must not flip the count to zero.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_clone_keeps_alive() {
+		let origin = Origin::random().produce();
+		let dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		drop(dynamic.clone());
+
+		// The original handle is still live, so the request registers (stays pending)
+		// instead of resolving Unroutable.
+		let request_fut = consumer.request_broadcast("fallback");
+		assert!(
+			request_fut.now_or_never().is_none(),
+			"request should stay pending until served"
 		);
 	}
 }
