@@ -696,14 +696,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		frame: &mut FrameProducer,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
-		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
-		// read_buf writes QUIC stream bytes directly into the frame — no
-		// intermediate Bytes allocations, and quinn's reassembly arena is freed
-		// as we drain it.
 		while bytes::BufMut::has_remaining_mut(frame) {
-			match stream.read_buf(frame).await? {
-				Some(n) if n > 0 => {
-					track_stats.bytes(n as u64);
+			let remaining = bytes::BufMut::remaining_mut(frame);
+			match stream.read_chunk(remaining).await? {
+				Some(chunk) if !chunk.is_empty() => {
+					track_stats.bytes(chunk.len() as u64);
+					frame.write(chunk)?;
 				}
 				_ => return Err(Error::WrongSize),
 			}

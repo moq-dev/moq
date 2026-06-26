@@ -164,12 +164,12 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Publish one whole frame as a hang frame in its own group.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<Timestamp>) -> crate::Result<()> {
+	pub fn decode<B: moq_net::AsBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp,
 			duration: None,
-			payload: bytes::Bytes::copy_from_slice(frame),
+			payload: frame.into_bytes(),
 			keyframe: true,
 		})?;
 		self.track.finish_group()?;

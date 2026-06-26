@@ -1,4 +1,4 @@
-set fallback
+set fallback := true
 
 # Deploy the rpm.moq.dev worker.
 deploy:

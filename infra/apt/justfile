@@ -1,4 +1,4 @@
-set fallback
+set fallback := true
 
 # Deploy the apt.moq.dev worker.
 deploy:

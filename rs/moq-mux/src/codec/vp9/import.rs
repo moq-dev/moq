@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
 use crate::container::jitter::Jitter;
@@ -70,13 +68,12 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Decode a single VP9 frame (or superframe).
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		if frame.is_empty() {
+	pub fn decode<B: moq_net::AsBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		if frame.as_ref().is_empty() {
 			return Err(super::Error::EmptyFrame.into());
 		}
-		let payload = Bytes::copy_from_slice(frame);
 
-		let header = FrameHeader::parse(&payload)?;
+		let header = FrameHeader::parse(frame.as_ref())?;
 		if let Some(key) = header.key {
 			self.init(key.to_catalog(), key.width, key.height)?;
 		}
@@ -84,7 +81,7 @@ impl<E: CatalogExt> Import<E> {
 		let pts = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp: pts,
-			payload,
+			payload: frame.into_bytes(),
 			keyframe: header.keyframe,
 			duration: None,
 		})?;
