@@ -447,12 +447,10 @@ mod test {
 		});
 		video_config.coded_width = Some(1920);
 		video_config.coded_height = Some(1080);
-		video_config.container = Container::Cmaf {
-			init: base64::engine::general_purpose::STANDARD
+		video_config.container = Container::Cmaf { init: base64::engine::general_purpose::STANDARD
 				.decode("AAAYZ2Z0eXA=")
 				.unwrap()
-				.into(),
-		};
+				.into(), timescale: None, track_id: None };
 
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0.m4s".to_string(), video_config);
@@ -485,14 +483,14 @@ mod test {
 		video_config.coded_height = Some(720);
 		video_config.framerate = Some(30.0);
 		video_config.container = Container::Legacy;
-		video_config.jitter = Some(std::time::Duration::from_millis(100));
+		video_config.jitter = Some(moq_net::Time::try_from(std::time::Duration::from_millis(100)).unwrap());
 
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0".to_string(), video_config);
 
 		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		audio_config.container = Container::Legacy;
-		audio_config.jitter = Some(std::time::Duration::from_millis(40));
+		audio_config.jitter = Some(moq_net::Time::try_from(std::time::Duration::from_millis(40)).unwrap());
 
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio0".to_string(), audio_config);

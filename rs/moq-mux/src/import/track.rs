@@ -498,7 +498,7 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
 	fn opus_head() -> Vec<u8> {
 		let mut head = Vec::with_capacity(19);
@@ -525,7 +525,7 @@ mod tests {
 	}
 
 	fn new_broadcast() -> (moq_net::BroadcastProducer, crate::catalog::Producer) {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		(broadcast, catalog)
 	}
@@ -534,7 +534,7 @@ mod tests {
 	async fn existing_track_opus_uses_existing_name() {
 		let (mut broadcast, catalog) = new_broadcast();
 		// The importer accepts the reserved track, setting its (microsecond) timescale.
-		let request = broadcast.reserve_track("requested-audio").unwrap();
+		let request = broadcast.create_track(moq_net::Track::new("requested-audio")).unwrap();
 		let mut import = Track::new(request, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "requested-audio");
@@ -555,7 +555,7 @@ mod tests {
 
 		// A freshly reserved track attaches its catalog rendition on init.
 		let name = broadcast.unique_name(".opus");
-		let request = broadcast.reserve_track(name).unwrap();
+		let request = broadcast.create_track(moq_net::Track::new(name)).unwrap();
 		let mut import = Track::new(request, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "0.opus");
@@ -575,12 +575,9 @@ mod tests {
 	async fn opus_import_delivers_frames() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let track = broadcast
-			.create_track(
-				"audio",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.create_track(moq_net::Track::new("audio"))
 			.unwrap();
-		let subscriber = track.subscribe(None);
+		let subscriber = track.consume();
 
 		let config = crate::codec::opus::Config {
 			sample_rate: 48_000,
@@ -610,7 +607,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn existing_track_h264_uses_existing_name_in_catalog() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let request = broadcast.reserve_track("camera").unwrap();
+		let request = broadcast.create_track(moq_net::Track::new("camera")).unwrap();
 
 		let import = Track::new(request, catalog.clone(), "avc3", &h264_init()).unwrap();
 
@@ -627,7 +624,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn reconfiguration_updates_in_place() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let request = broadcast.reserve_track("video").unwrap();
+		let request = broadcast.create_track(moq_net::Track::new("video")).unwrap();
 		let mut import = Track::new(request, catalog, "vp8", &[]).unwrap();
 
 		import

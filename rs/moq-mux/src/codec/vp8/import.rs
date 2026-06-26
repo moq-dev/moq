@@ -119,16 +119,13 @@ impl<E: CatalogExt> Import<E> {
 mod tests {
 	use bytes::Bytes;
 
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
 	fn setup() -> (moq_net::TrackProducer, crate::catalog::Producer) {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let track = broadcast
-			.create_track(
-				"0.vp8",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.create_track(moq_net::Track::new("0.vp8"))
 			.unwrap();
 		(track, catalog)
 	}

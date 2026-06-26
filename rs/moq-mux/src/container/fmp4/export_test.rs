@@ -17,18 +17,15 @@ use mp4_atom::{DecodeMaybe, Encode};
 #[tokio::test(start_paused = true)]
 async fn avc3_source_to_cmaf_export_roundtrip() {
 	use hang::catalog::{Container, H264, VideoConfig};
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".avc3"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(moq_net::Track::new(producer.unique_name(".avc3")))
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
@@ -121,18 +118,15 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	use bytes::Bytes;
 	use hang::catalog::{AAC, AudioConfig, Container};
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".aac"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(moq_net::Track::new(producer.unique_name(".aac")))
 		.unwrap();
 
 	// AAC-LC (profile 2), 44100 Hz, stereo. The TS importer sets `description`
@@ -216,18 +210,15 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	use bytes::Bytes;
 	use hang::catalog::{Container, VideoCodec, VideoConfig};
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".vp8"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(moq_net::Track::new(producer.unique_name(".vp8")))
 		.unwrap();
 	let mut config = VideoConfig::new(VideoCodec::VP8);
 	config.coded_width = Some(320);
@@ -294,18 +285,15 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	use bytes::Bytes;
 	use hang::catalog::{Container, VP9, VideoConfig};
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".vp9"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(moq_net::Track::new(producer.unique_name(".vp9")))
 		.unwrap();
 	let mut config = VideoConfig::new(VP9 {
 		profile: 0,
@@ -384,18 +372,15 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 async fn av1_source_to_cmaf_export_synthesizes_av01() {
 	use bytes::Bytes;
 	use hang::catalog::{AV1, Container, VideoConfig};
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".av01"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(moq_net::Track::new(producer.unique_name(".av01")))
 		.unwrap();
 	let mut config = VideoConfig::new(AV1 {
 		profile: 0,
@@ -486,7 +471,7 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 async fn cmaf_source_to_cmaf_export_passthrough() {
 	let data = include_bytes!("test_data/bbb.mp4");
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
@@ -540,18 +525,15 @@ async fn next_fragment_reports_segment_metadata() {
 
 	use bytes::BytesMut;
 	use hang::catalog::{Container, H264, VideoConfig};
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".avc3"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(moq_net::Track::new(producer.unique_name(".avc3")))
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,

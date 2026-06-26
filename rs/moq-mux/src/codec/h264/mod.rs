@@ -503,7 +503,7 @@ mod tests {
 		au.extend_from_slice(&(idr.len() as u32).to_be_bytes());
 		au.extend_from_slice(idr);
 
-		let frame = avc1_frame(&au, 4, moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+		let frame = avc1_frame(&au, 4, crate::container::Timestamp::from_micros(0).unwrap()).unwrap();
 		assert!(frame.keyframe);
 		assert_eq!(frame.payload[4..], *idr);
 	}
@@ -516,7 +516,7 @@ mod tests {
 		au.extend_from_slice(&(pslice.len() as u32).to_be_bytes());
 		au.extend_from_slice(pslice);
 
-		let frame = avc1_frame(&au, 4, moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+		let frame = avc1_frame(&au, 4, crate::container::Timestamp::from_micros(0).unwrap()).unwrap();
 		assert!(!frame.keyframe);
 	}
 

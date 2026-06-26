@@ -54,13 +54,10 @@ mod test {
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `TrackProducer::new`).
-	fn track_producer(
-		name: impl Into<std::sync::Arc<str>>,
-		info: impl Into<Option<moq_net::TrackInfo>>,
-	) -> moq_net::TrackProducer {
-		moq_net::BroadcastInfo::new()
+	fn track_producer(name: impl Into<String>) -> moq_net::TrackProducer {
+		moq_net::Broadcast::new()
 			.produce()
-			.create_track(name, info)
+			.create_track(moq_net::Track::new(name))
 			.unwrap()
 	}
 
@@ -84,15 +81,15 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
+		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let (catalog, payload) = catalog_payload("pending");
-		group.write_frame_now(payload).expect("catalog frame should write");
+		group.write_frame(payload).expect("catalog frame should write");
 		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
@@ -100,8 +97,8 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
+		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
 		track.finish().expect("catalog track should finish");
@@ -110,7 +107,7 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let (catalog, payload) = catalog_payload("finished");
-		group.write_frame_now(payload).expect("catalog frame should write");
+		group.write_frame(payload).expect("catalog frame should write");
 		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
@@ -118,8 +115,8 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
+		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -127,13 +124,13 @@ mod test {
 
 		let mut old_group = track.append_group().expect("old catalog group should append");
 		old_group
-			.write_frame_now(old_payload)
+			.write_frame(old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
 		let mut latest_group = track.append_group().expect("latest catalog group should append");
 		latest_group
-			.write_frame_now(latest_payload)
+			.write_frame(latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 		track.finish().expect("catalog track should finish");
@@ -144,8 +141,8 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
+		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -153,7 +150,7 @@ mod test {
 
 		let mut old_group = track.append_group().expect("old catalog group should append");
 		old_group
-			.write_frame_now(old_payload)
+			.write_frame(old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
@@ -162,7 +159,7 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		latest_group
-			.write_frame_now(latest_payload)
+			.write_frame(latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 
@@ -171,8 +168,8 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
+		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -184,7 +181,7 @@ mod test {
 
 		let mut latest_group = track.append_group().expect("latest catalog group should append");
 		latest_group
-			.write_frame_now(latest_payload)
+			.write_frame(latest_payload)
 			.expect("latest catalog frame should write");
 		latest_group.finish().expect("latest catalog group should finish");
 		track.finish().expect("catalog track should finish");
@@ -192,7 +189,7 @@ mod test {
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 
 		old_group
-			.write_frame_now(old_payload)
+			.write_frame(old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
@@ -201,8 +198,8 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
+		let mut consumer: Consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");

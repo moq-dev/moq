@@ -250,13 +250,13 @@ mod tests {
 		buf
 	}
 
-	fn ts() -> moq_net::Timestamp {
-		moq_net::Timestamp::from_micros(0).unwrap()
+	fn ts() -> crate::container::Timestamp {
+		crate::container::Timestamp::from_micros(0).unwrap()
 	}
 
 	/// Decode one complete access unit handed over as a single buffer: `decode`
 	/// buffers it, `flush` emits it.
-	fn decode_one(split: &mut Split, buf: &mut BytesMut, pts: moq_net::Timestamp) -> Vec<crate::container::Frame> {
+	fn decode_one(split: &mut Split, buf: &mut BytesMut, pts: crate::container::Timestamp) -> Vec<crate::container::Frame> {
 		let mut frames = split.decode(buf, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		frames

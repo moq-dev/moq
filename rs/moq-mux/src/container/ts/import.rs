@@ -1398,7 +1398,7 @@ mod test {
 	use mpeg2ts::es::StreamType;
 
 	use super::SectionReassembler;
-	use moq_net::Timestamp;
+	use crate::container::Timestamp;
 
 	// libklvanc public-sample cue: table_id 0xFC, section_length 0x1b (27), 30 bytes total.
 	const CUE: [u8; 30] = [
@@ -1624,7 +1624,7 @@ mod test {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
@@ -1646,7 +1646,7 @@ mod test {
 	// the publishing lock is never taken and the catalog is never republished empty.
 	#[tokio::test(start_paused = true)]
 	async fn base_catalog_routes_cue_pid_to_ignored() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1690,7 +1690,7 @@ mod test {
 		const SECTION_PID: u16 = 0x0021;
 		let pid = mpeg2ts::ts::Pid::new(SECTION_PID).unwrap();
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1725,7 +1725,7 @@ mod test {
 		);
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
-		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
@@ -1773,7 +1773,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const PRIVATE_PID: u16 = 0x0051;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog);
 
@@ -1848,7 +1848,7 @@ mod test {
 		const AAC_PID: u16 = 0x0060;
 		const MP2_PID: u16 = 0x0061;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
@@ -1878,7 +1878,7 @@ mod test {
 			.values()
 			.find(|a| a.codec.to_string().starts_with("mp4a"))
 			.expect("AAC rendition");
-		let jitter = aac_rendition.jitter.expect("AAC publishes a jitter");
+		let jitter = std::time::Duration::from(aac_rendition.jitter.expect("AAC publishes a jitter"));
 		// Anchored on its own PES: one 1024-sample frame at 48 kHz (~21 ms).
 		// Anchored on the MP2 PES it would be ~2 s.
 		assert!(
@@ -1900,7 +1900,7 @@ mod test {
 			.next()
 			.expect("an audio track")
 			.clone();
-		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
@@ -1917,7 +1917,7 @@ mod test {
 	async fn legacy_frame_split_across_pes_reassembles() {
 		const MP2_PID: u16 = 0x0061;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1963,7 +1963,7 @@ mod test {
 	async fn legacy_header_split_keeps_origin_pts() {
 		const MP2_PID: u16 = 0x0061;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -2007,11 +2007,11 @@ mod test {
 		use crate::catalog::hang::{Catalog, Container};
 		use crate::container::Consumer;
 		use crate::container::ts::catalog::Ext;
-		use moq_net::Timestamp;
+		use crate::container::Timestamp;
 
 		const VIDEO_PID: u16 = 0x0050;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -2031,7 +2031,7 @@ mod test {
 		import.finish().unwrap();
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
-		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
@@ -2061,7 +2061,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const SECTION_PID: u16 = 0x0021;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		// catalog::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
@@ -2133,7 +2133,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const DATA_PID: u16 = 0x0052;
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -2162,7 +2162,7 @@ mod test {
 		assert_eq!(verbatim.stream_id, Some(0xC0), "recorded the PES stream_id");
 		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
-		let track = consumer.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
+		let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await

@@ -246,7 +246,7 @@ mod tests {
 			payload.extend_from_slice(nal);
 		}
 		let frame = crate::container::Frame {
-			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+			timestamp: crate::container::Timestamp::from_micros(timestamp_us).unwrap(),
 			payload: payload.freeze(),
 			keyframe: false, // Legacy wire format drops this; Consumer reconstructs.
 			duration: None,
@@ -276,12 +276,9 @@ mod tests {
 		let catalog = avc1_catalog("video.m4s", avcc);
 
 		// Producer side: publish the broadcast with one length-prefixed video track.
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let mut track = broadcast
-			.create_track(
-				"video.m4s",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.create_track(moq_net::Track::new("video.m4s"))
 			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.

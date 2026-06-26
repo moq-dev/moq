@@ -594,7 +594,7 @@ mod tests {
 		// Microsecond timescale so each tick maps 1:1 to the Timestamp's µs.
 		// decode() walks the mdat by sample size and ignores data_offset, so a
 		// hand-built moof+mdat with explicit per-sample durations is enough.
-		let timescale = moq_net::Timescale::MICRO;
+		let timescale = 1_000_000;
 		let moof = mp4_atom::Moof {
 			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
 			traf: vec![mp4_atom::Traf {
@@ -643,7 +643,7 @@ mod tests {
 	#[test]
 	fn duration_round_trips_through_encode() {
 		// A frame with a known duration must survive encode -> decode.
-		let timescale = moq_net::Timescale::MICRO;
+		let timescale = 1_000_000;
 		let input = vec![Frame {
 			timestamp: ts(0),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
@@ -662,7 +662,7 @@ mod tests {
 	fn decode_without_duration_reports_none() {
 		// encode_fragment writes no sample-duration for a duration-less frame,
 		// so decode must report None (and output stays byte-identical to before).
-		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		let timescale = 90_000;
 		let frames = vec![Frame {
 			timestamp: ts(0),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),

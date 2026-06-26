@@ -257,13 +257,10 @@ mod tests {
 	use crate::codec::h264::Split;
 
 	fn setup(name: &str) -> (moq_net::TrackProducer, crate::catalog::Producer) {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let track = broadcast
-			.create_track(
-				name,
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.create_track(moq_net::Track::new(name))
 			.unwrap();
 		(track, catalog)
 	}
@@ -319,7 +316,7 @@ mod tests {
 			"no config before any frame"
 		);
 
-		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let pts = crate::container::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
 		frames.extend(split.flush(pts).expect("flush keyframe"));
 		import.decode(frames).expect("decode keyframe");
@@ -348,7 +345,7 @@ mod tests {
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog);
 
-		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let pts = crate::container::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
 		frames.extend(split.flush(pts).expect("flush keyframe"));
 		let err = import
@@ -371,7 +368,7 @@ mod tests {
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog.clone());
 
-		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let pts = crate::container::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split delta");
 		frames.extend(split.flush(pts).expect("flush delta"));
 		let err = import

@@ -7,7 +7,7 @@ use bytes::BytesMut;
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -190,7 +190,7 @@ fn resyncs_across_chunk_boundaries() {
 	let mut misaligned = vec![0x00, 0x11, 0x22];
 	misaligned.extend_from_slice(data);
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	for chunk in misaligned.chunks(100) {
@@ -216,7 +216,7 @@ async fn import_export_import_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
 
 	// Import the fixture into a broadcast.
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -263,7 +263,7 @@ async fn survives_midstream_join() {
 	buf.extend_from_slice(pkt(8)); // IDR AU: flushes the delta, then anchors the first group
 	buf.extend_from_slice(pkt(9));
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -278,7 +278,7 @@ async fn survives_midstream_join() {
 
 	// The track resumes at the keyframe: the leading delta was dropped, the IDR
 	// anchors the one and only group.
-	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -298,7 +298,7 @@ async fn survives_midstream_join() {
 #[tokio::test(start_paused = true)]
 async fn kyrion_dirtystart_extracts_real_cues() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::with_catalog(
 		&mut broadcast,
@@ -322,7 +322,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
 		.map(|(name, _)| name.clone())
 		.expect("scte35 track");
-	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -340,7 +340,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let distinct: std::collections::HashSet<&Vec<u8>> = cues.iter().map(|(b, _)| b).collect();
 	assert_eq!(distinct.len(), 6, "six distinct cue sections");
 	assert!(
-		cues.iter().all(|(_, ts)| *ts != moq_net::Timestamp::ZERO),
+		cues.iter().all(|(_, ts)| *ts != crate::container::Timestamp::ZERO),
 		"cues stamped with the video PTS, not zero"
 	);
 }
@@ -351,7 +351,7 @@ fn import_handles_unaligned_chunks() {
 	// exercising the partial-packet retention across calls.
 	let data = include_bytes!("test_data/bbb.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 

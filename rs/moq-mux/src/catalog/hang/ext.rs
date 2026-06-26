@@ -166,7 +166,7 @@ mod test {
 
 	#[test]
 	fn extension_roundtrip() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let mut producer =
 			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();
@@ -192,7 +192,7 @@ mod test {
 
 	#[test]
 	fn untyped_extra_roundtrip() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let mut producer = crate::catalog::Producer::new_extra(&mut broadcast).unwrap();
 		let mut consumer = producer.consume().unwrap();
 
