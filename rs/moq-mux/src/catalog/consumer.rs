@@ -22,7 +22,7 @@ pub enum Consumer<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Consumer<E> {
 	/// Subscribe to the catalog track advertised by `format`.
-	pub async fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
+	pub fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(match format {
 			CatalogFormat::Hang => {
 				let track = broadcast.subscribe_track(&moq_net::Track::new(hang::Catalog::DEFAULT_NAME))?;

@@ -180,7 +180,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
+		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format)?;
 		Ok(Self {
 			broadcast,
 			catalog: Some(catalog),

@@ -111,7 +111,7 @@ impl Export {
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
+		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format)?;
 		Ok(Self {
 			broadcast,
 			catalog: Some(catalog),

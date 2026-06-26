@@ -72,8 +72,10 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	fn initialize_avc1(&mut self, avcc_bytes: &[u8]) -> Result<()> {
-		self.avc1 = true;
+		// Only switch to avc1 mode once the avcC actually parses, so a parse failure leaves the
+		// importer in avc3 mode where inline-SPS keyframes still self-initialize.
 		let avcc = super::Avcc::parse(avcc_bytes)?;
+		self.avc1 = true;
 
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			profile: avcc.profile,

@@ -316,6 +316,12 @@ impl<S: Stream> Export<S> {
 			}
 			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
 			let timescale = catalog_timescale_video(config);
+			// A zero / NaN / infinite framerate would make `1.0 / fps` non-finite and panic
+			// `Duration::from_secs_f64`; fall back to the default in that case.
+			let framerate = config
+				.framerate
+				.filter(|fps| fps.is_finite() && *fps > 0.0)
+				.unwrap_or(30.0);
 			self.tracks.insert(
 				name.clone(),
 				Fmp4Track {
@@ -324,7 +330,7 @@ impl<S: Stream> Export<S> {
 					buffer: Vec::new(),
 					buffer_independent: false,
 					is_video: true,
-					default_frame: Duration::from_secs_f64(1.0 / config.framerate.unwrap_or(30.0)),
+					default_frame: Duration::from_secs_f64(1.0 / framerate),
 					finished: false,
 					track_id: next_track_id,
 					timescale,

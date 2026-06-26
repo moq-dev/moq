@@ -164,6 +164,8 @@ impl Split {
 	/// timestamp.
 	pub fn reset(&mut self) {
 		self.current = Au::default();
+		// Drop any buffered partial OBU too, so pre-reset bytes can't leak into the next unit.
+		self.tail.clear();
 	}
 
 	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
