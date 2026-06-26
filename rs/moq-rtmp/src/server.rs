@@ -1085,8 +1085,8 @@ mod tests {
 		let mut importer = FlvImport::new(broadcast.clone(), catalog);
 		assert!(origin.publish_broadcast("live/cam0", broadcast.consume()));
 		importer.decode(&flv::file_header()).unwrap();
-		importer.decode(&mut flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
-		importer.decode(&mut flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
 		importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();

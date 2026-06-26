@@ -106,6 +106,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 		timestamp: moq_mux::container::Timestamp::from_secs(1).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data"),
 		keyframe: true,
+		duration: None,
 	};
 	producer.write(frame)?;
 
@@ -115,6 +116,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 		timestamp: moq_mux::container::Timestamp::from_secs(2).unwrap(),
 		payload: Bytes::from_static(b"delta NAL data"),
 		keyframe: false,
+		duration: None,
 	};
 	producer.write(frame)?;
 
@@ -125,6 +127,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 		timestamp: moq_mux::container::Timestamp::from_secs(3).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data"),
 		keyframe: true,
+		duration: None,
 	};
 	producer.write(frame)?;
 
