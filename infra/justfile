@@ -1,4 +1,4 @@
-set fallback
+set fallback := true
 
 mod apt
 mod rpm

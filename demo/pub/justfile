@@ -1,4 +1,4 @@
-set fallback
+set fallback := true
 
 # --- R2 bucket management (vid.moq.dev) ---
 
@@ -258,6 +258,7 @@ ffmpeg-cmaf input output='-' *args:
 #
 # `-pes_payload_size 0` flushes one PES per audio frame instead of batching ~8
 # (the default 2930-byte minimum), so audio interleaves evenly with video rather
+
 # than arriving in ~185ms bursts. Without it the player must buffer a whole burst.
 [private]
 ffmpeg-ts input output='-' *args:

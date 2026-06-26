@@ -175,7 +175,7 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// Decode one whole frame.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> Result<()> {
+	pub fn decode<B: moq_net::AsBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.kind {
 			TrackKind::Avc3 {
 				ref mut split,
@@ -183,7 +183,7 @@ impl<E: CatalogExt> Track<E> {
 			} => {
 				// One whole access unit per call, so flush to emit it rather than
 				// waiting for the next start code.
-				let mut frames = split.decode(frame, pts)?;
+				let mut frames = split.decode(frame.as_ref(), pts)?;
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
@@ -199,7 +199,7 @@ impl<E: CatalogExt> Track<E> {
 				ref mut split,
 				ref mut import,
 			} => {
-				let mut frames = split.decode(frame, pts)?;
+				let mut frames = split.decode(frame.as_ref(), pts)?;
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
@@ -207,7 +207,7 @@ impl<E: CatalogExt> Track<E> {
 				ref mut split,
 				ref mut import,
 			} => {
-				let mut frames = split.decode(frame, pts)?;
+				let mut frames = split.decode(frame.as_ref(), pts)?;
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}

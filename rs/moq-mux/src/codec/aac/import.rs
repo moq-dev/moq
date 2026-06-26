@@ -73,11 +73,11 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	pub fn decode<B: moq_net::AsBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp,
-			payload: bytes::Bytes::copy_from_slice(frame),
+			payload: frame.into_bytes(),
 			keyframe: true,
 			duration: None,
 		})?;

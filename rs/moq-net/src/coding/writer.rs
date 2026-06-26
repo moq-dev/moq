@@ -39,8 +39,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
-	// Not public to avoid accidental partial writes.
-	async fn write<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<usize, Error> {
+	pub(crate) async fn write<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<usize, Error> {
 		self.stream
 			.as_mut()
 			.unwrap()
@@ -57,6 +56,16 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			self.write(buf).await?;
 		}
 		Ok(())
+	}
+
+	/// Write the entire [`bytes::Bytes`] chunk to the stream.
+	pub async fn write_chunk(&mut self, chunk: bytes::Bytes) -> Result<(), Error> {
+		self.stream
+			.as_mut()
+			.unwrap()
+			.write_chunk(chunk)
+			.await
+			.map_err(Error::from_transport)
 	}
 
 	/// Mark the stream as finished.

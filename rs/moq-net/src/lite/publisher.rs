@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use bytes::Buf;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
@@ -785,19 +786,19 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 		Compression::None => {
 			writer.encode(&frame.size).await?;
 			track_stats.frame();
-			while let Some(mut chunk) = frame.read_chunk().await? {
+			while let Some(chunk) = frame.read_chunk().await? {
 				let n = chunk.len() as u64;
-				writer.write_all(&mut chunk).await?;
+				writer.write_chunk(chunk).await?;
 				track_stats.bytes(n);
 			}
 		}
 		compression => {
 			let payload = frame.read_all().await?;
-			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
+			let chunk = bytes::Bytes::from(compression.compress(&payload));
 			let n = chunk.len() as u64;
 			writer.encode(&n).await?;
 			track_stats.frame();
-			writer.write_all(&mut chunk).await?;
+			writer.write_chunk(chunk).await?;
 			track_stats.bytes(n);
 		}
 	}
@@ -1051,18 +1052,16 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
 		let n = chunk.len() as u64;
-		loop {
-			tokio::select! {
-				biased;
-				result = stream.write_all(&mut chunk) => {
-					result?;
-					break;
-				}
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
-			}
+		while chunk.has_remaining() {
+			self.apply_priority(stream, priority);
+			stream.write(&mut chunk).await?;
 		}
 		self.track_stats.bytes(n);
 		Ok(())
+	}
+
+	fn apply_priority(&mut self, stream: &mut Writer<S::SendStream, Version>, priority: &mut PriorityHandle) {
+		priority.set_track(*self.track_priority.borrow_and_update());
+		stream.set_priority(priority.current());
 	}
 }
