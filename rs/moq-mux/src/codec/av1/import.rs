@@ -60,8 +60,10 @@ impl<E: CatalogExt> Import<E> {
 	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
 		let data = buf;
 
-		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15.
-		if data.len() >= 16 && data[0] == 0x81 {
+		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15. Only the
+		// fixed 4-byte header is read here, so don't gate on a larger size or a short
+		// out-of-band record falls through to raw-OBU scanning and leaves the config unset.
+		if data.len() >= 4 && data[0] == 0x81 {
 			self.init_from_av1c(data)?;
 			return Ok(());
 		}

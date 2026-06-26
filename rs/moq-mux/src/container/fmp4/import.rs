@@ -477,12 +477,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.size
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
-					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
+					// Checked: a negative composition offset must not wrap into a huge u64 PTS.
+					let pts = dts
+						.checked_add_signed(entry.cts.unwrap_or_default() as i64)
+						.ok_or(Error::PtsOverflow)?;
 					// Preserve the fmp4 track's native timescale so a passthrough re-emit
 					// doesn't go through a lossy microsecond detour.
 					let timestamp = Timestamp::from_scale(pts, timescale)?;
 
-					if offset + size > mdat.data.len() {
+					let sample_end = offset.checked_add(size).ok_or(Error::InvalidDataOffset)?;
+					if sample_end > mdat.data.len() {
 						return Err(Error::InvalidDataOffset.into());
 					}
 
@@ -513,8 +517,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 					track.last_timestamp = Some(timestamp);
 
-					dts += duration as u64;
-					offset += size;
+					dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
+					offset = sample_end;
 				}
 			}
 
