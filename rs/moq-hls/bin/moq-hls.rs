@@ -119,15 +119,19 @@ async fn main() -> anyhow::Result<()> {
 				Some(tls.server_config(alpn).context("failed to build TLS config")?)
 			};
 
+			// Bind before signaling readiness so a port conflict surfaces as a startup
+			// failure instead of systemd briefly seeing a dead instance as healthy.
+			let listener = std::net::TcpListener::bind(listen).context("failed to bind HLS listener")?;
+
 			tracing::info!(%relay, %listen, "moq-hls serving HLS");
 
 			#[cfg(unix)]
 			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 			tokio::select! {
-				res = serve(app, listen, tls) => res,
+				res = serve(listener, app, tls) => res,
 				res = reconnect.closed() => res.map_err(Into::into),
-				_ = tokio::signal::ctrl_c() => Ok(()),
+				_ = shutdown_signal() => Ok(()),
 			}
 		}
 		Command::Import { broadcast, playlist } => {
@@ -146,30 +150,63 @@ async fn main() -> anyhow::Result<()> {
 
 			tracing::info!(%relay, %broadcast, "moq-hls importing HLS");
 
-			#[cfg(unix)]
-			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
-
 			tokio::select! {
 				res = async {
+					// Signal readiness only once the source is validated and primed, not
+					// before, so a bad playlist URL fails startup instead of reporting healthy.
 					importer.init().await?;
+
+					#[cfg(unix)]
+					let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+
 					importer.run().await
 				} => res.map_err(Into::into),
 				res = reconnect.closed() => res.map_err(Into::into),
-				_ = tokio::signal::ctrl_c() => Ok(()),
+				_ = shutdown_signal() => Ok(()),
 			}
 		}
 	}
 }
 
-async fn serve(app: Router, bind: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> anyhow::Result<()> {
+/// Resolve when the process is asked to shut down: Ctrl-C, or SIGTERM on Unix
+/// (which is how systemd and most supervisors stop a service).
+async fn shutdown_signal() {
+	#[cfg(unix)]
+	{
+		use tokio::signal::unix::{SignalKind, signal};
+
+		let mut term = match signal(SignalKind::terminate()) {
+			Ok(term) => term,
+			Err(_) => {
+				let _ = tokio::signal::ctrl_c().await;
+				return;
+			}
+		};
+		tokio::select! {
+			_ = tokio::signal::ctrl_c() => {}
+			_ = term.recv() => {}
+		}
+	}
+
+	#[cfg(not(unix))]
+	{
+		let _ = tokio::signal::ctrl_c().await;
+	}
+}
+
+async fn serve(
+	listener: std::net::TcpListener,
+	app: Router,
+	tls: Option<Arc<rustls::ServerConfig>>,
+) -> anyhow::Result<()> {
 	let service = app.into_make_service();
 	match tls {
 		Some(config) => {
 			let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
-			axum_server::bind_rustls(bind, config).serve(service).await?;
+			axum_server::from_tcp_rustls(listener, config)?.serve(service).await?;
 		}
 		None => {
-			axum_server::bind(bind).serve(service).await?;
+			axum_server::from_tcp(listener)?.serve(service).await?;
 		}
 	}
 	Ok(())

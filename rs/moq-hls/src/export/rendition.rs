@@ -15,26 +15,36 @@ use crate::Result;
 const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
 
+/// Whether a rendition carries video or audio (drives the store's segmenting policy).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
+	/// Video: a segment is a GOP, rolling on each independent fragment.
 	Video,
+	/// Audio: segments roll on accumulated duration (no keyframes).
 	Audio,
 }
 
 /// A single HLS rendition: its display metadata for the master playlist plus the
 /// segment/part store fed by a background exporter task.
 pub struct Rendition {
+	/// Rendition name (the catalog track name; also its URL path component).
 	pub name: String,
+	/// Whether this rendition is video or audio.
 	pub kind: Kind,
+	/// Advertised bitrate for the master playlist `BANDWIDTH` attribute.
 	pub bandwidth: u64,
+	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
+	/// Coded height, for the master playlist `RESOLUTION` (video only).
 	pub height: Option<u32>,
 	/// RFC 6381 codec string for the master playlist `CODECS` attribute.
 	pub codec: String,
+	/// The segment/part store fed by this rendition's exporter task.
 	pub store: Arc<SegmentStore>,
 }
 
 impl Rendition {
+	/// Build a video rendition and spawn its exporter pump.
 	pub fn video(
 		name: String,
 		config: &VideoConfig,
@@ -42,12 +52,7 @@ impl Rendition {
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
-		let store = Arc::new(SegmentStore::new(
-			true,
-			cfg.part_target.as_secs_f64(),
-			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window.as_secs_f64(),
-		));
+		let store = Arc::new(SegmentStore::new(Kind::Video, cfg));
 		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
@@ -60,6 +65,7 @@ impl Rendition {
 		}
 	}
 
+	/// Build an audio rendition and spawn its exporter pump.
 	pub fn audio(
 		name: String,
 		config: &AudioConfig,
@@ -67,12 +73,7 @@ impl Rendition {
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
-		let store = Arc::new(SegmentStore::new(
-			false,
-			cfg.part_target.as_secs_f64(),
-			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window.as_secs_f64(),
-		));
+		let store = Arc::new(SegmentStore::new(Kind::Audio, cfg));
 		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
@@ -95,7 +96,7 @@ fn spawn_pump(
 	paused: watch::Receiver<bool>,
 ) {
 	tokio::spawn(async move {
-		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
+		if let Err(err) = run_pump(broadcast, &name, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
@@ -106,7 +107,6 @@ fn spawn_pump(
 async fn run_pump(
 	broadcast: moq_net::BroadcastConsumer,
 	name: &str,
-	kind: Kind,
 	store: &SegmentStore,
 	cfg: &Config,
 	mut paused: watch::Receiver<bool>,
@@ -124,7 +124,6 @@ async fn run_pump(
 		name: Some(name.to_string()),
 		..Default::default()
 	});
-	let _ = kind; // kind only drives the store policy; the exporter is codec-agnostic.
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
 	// below takes its own clone for pulling fragments.

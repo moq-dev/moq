@@ -12,57 +12,50 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
+	/// The playlist argument looked like an HTTP(S) URL but failed to parse.
 	#[error("invalid playlist URL")]
 	InvalidPlaylistUrl,
 
+	/// The playlist argument was a local path that could not be made into a `file://` URL.
 	#[error("invalid file path")]
 	InvalidFilePath,
 
+	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,
 
+	/// The fetched media playlist could not be parsed.
 	#[error("failed to parse media playlist: {0}")]
 	ParsePlaylist(String),
 
+	/// The master playlist contained no variant this gateway can import.
 	#[error("no usable variants found in master playlist")]
 	NoVariants,
 
+	/// A media playlist had no `EXT-X-MAP`, so there is no CMAF init segment.
 	#[error("playlist missing EXT-X-MAP")]
 	MissingMap,
 
+	/// A media segment had an empty URI.
 	#[error("encountered segment with empty URI")]
 	EmptySegmentUri,
 
+	/// A playlist or segment URI could not be resolved against its base.
 	#[error("url parse: {0}")]
 	UrlParse(#[from] url::ParseError),
 
-	#[error("reqwest: {0}")]
-	Reqwest(std::sync::Arc<reqwest::Error>),
+	/// HTTP error while fetching a playlist or segment.
+	#[error(transparent)]
+	Reqwest(#[from] reqwest::Error),
 
-	#[error("io: {0}")]
-	Io(std::sync::Arc<std::io::Error>),
+	/// I/O error while reading a local playlist or segment.
+	#[error(transparent)]
+	Io(#[from] std::io::Error),
 
 	/// Catch-all for gateway logic that reports via `anyhow`.
-	#[error("{0}")]
-	Other(std::sync::Arc<anyhow::Error>),
+	#[error(transparent)]
+	Other(#[from] anyhow::Error),
 }
 
-impl From<reqwest::Error> for Error {
-	fn from(err: reqwest::Error) -> Self {
-		Error::Reqwest(std::sync::Arc::new(err))
-	}
-}
-
-impl From<std::io::Error> for Error {
-	fn from(err: std::io::Error) -> Self {
-		Error::Io(std::sync::Arc::new(err))
-	}
-}
-
-impl From<anyhow::Error> for Error {
-	fn from(err: anyhow::Error) -> Self {
-		Error::Other(std::sync::Arc::new(err))
-	}
-}
-
+/// Convenience alias for results from the HLS gateway.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -22,6 +22,13 @@ use url::Url;
 
 use crate::{Error, Result};
 
+/// Per-request timeout for the default HTTP client (playlist + segment fetches).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Backoff before retrying after a failed import step, so a transient upstream
+/// error (a 5xx, a truncated segment) doesn't tear down the whole import.
+const ERROR_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Configuration for the single-rendition HLS import loop.
 #[derive(Clone)]
 pub struct Config {
@@ -34,6 +41,7 @@ pub struct Config {
 }
 
 impl Config {
+	/// Create an import configuration for `playlist` using the default HTTP client.
 	pub fn new(playlist: String) -> Self {
 		Self { playlist, client: None }
 	}
@@ -117,12 +125,14 @@ impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
-		let client = cfg.client.unwrap_or_else(|| {
-			Client::builder()
+		let client = match cfg.client {
+			Some(client) => client,
+			None => Client::builder()
 				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-				.build()
-				.unwrap()
-		});
+				// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
+				.timeout(REQUEST_TIMEOUT)
+				.build()?,
+		};
 		Ok(Self {
 			broadcast,
 			catalog,
@@ -149,9 +159,19 @@ impl Import {
 	}
 
 	/// Run the import loop until cancelled.
+	///
+	/// A failed step (e.g. a transient playlist fetch error) is logged and
+	/// retried after a short backoff rather than ending the import.
 	pub async fn run(&mut self) -> Result<()> {
 		loop {
-			let outcome = self.step().await?;
+			let outcome = match self.step().await {
+				Ok(outcome) => outcome,
+				Err(err) => {
+					warn!(%err, "HLS import step failed, retrying");
+					tokio::time::sleep(ERROR_BACKOFF).await;
+					continue;
+				}
+			};
 			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
 
 			info!(
@@ -210,31 +230,27 @@ impl Import {
 		let mut wrote = 0usize;
 		let mut target_duration = None;
 
-		// Ingest a step from all active video variants.
+		// Ingest a step from all active video variants. A single variant failing is
+		// logged and skipped (the track is always restored) so one bad rendition or
+		// segment doesn't drop the others or abort the whole step.
 		let video_tracks = std::mem::take(&mut self.video);
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
-			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			// Use the first video's target duration as the base.
-			if target_duration.is_none() {
-				target_duration = Some(playlist.target_duration);
+			match self
+				.ingest(TrackKind::Video(index), &mut track, &mut target_duration)
+				.await
+			{
+				Ok(count) => wrote += count,
+				Err(err) => warn!(index, %err, "video rendition import step failed, will retry"),
 			}
-			let count = self
-				.consume_segments(TrackKind::Video(index), &mut track, &playlist, None)
-				.await?;
-			wrote += count;
 			self.video.push(track);
 		}
 
 		// Ingest from the shared audio track, if present.
 		if let Some(mut track) = self.audio.take() {
-			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			if target_duration.is_none() {
-				target_duration = Some(playlist.target_duration);
+			match self.ingest(TrackKind::Audio, &mut track, &mut target_duration).await {
+				Ok(count) => wrote += count,
+				Err(err) => warn!(%err, "audio rendition import step failed, will retry"),
 			}
-			let count = self
-				.consume_segments(TrackKind::Audio, &mut track, &playlist, None)
-				.await?;
-			wrote += count;
 			self.audio = Some(track);
 		}
 
@@ -242,6 +258,21 @@ impl Import {
 			wrote_segments: wrote,
 			target_duration,
 		})
+	}
+
+	/// Fetch one track's current media playlist and consume any fresh segments,
+	/// recording the playlist's target duration if not already known.
+	async fn ingest(
+		&mut self,
+		kind: TrackKind,
+		track: &mut TrackState,
+		target_duration: &mut Option<u64>,
+	) -> Result<usize> {
+		let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
+		if target_duration.is_none() {
+			*target_duration = Some(playlist.target_duration);
+		}
+		self.consume_segments(kind, track, &playlist, None).await
 	}
 
 	/// Compute the delay before the next import step should run.
@@ -327,22 +358,30 @@ impl Import {
 		let total_segments = playlist.segments.len();
 		let last_playlist_seq = playlist_seq + total_segments as u64;
 
+		// Both out-of-window cases re-anchor to the current playlist (skip 0) and clear
+		// `next_sequence` so the next push re-bases. The warning is suppressed on the
+		// first step (`next_sequence` still None), where starting mid-window is normal.
 		let skip = if next_seq > last_playlist_seq {
-			warn!(
-				?kind,
-				next_sequence = next_seq,
-				playlist_sequence = playlist_seq,
-				last_playlist_sequence = last_playlist_seq,
-				"imported ahead of playlist, waiting for new segments"
-			);
-			total_segments
+			if track.next_sequence.is_some() {
+				warn!(
+					?kind,
+					next_sequence = next_seq,
+					playlist_sequence = playlist_seq,
+					last_playlist_sequence = last_playlist_seq,
+					"imported ahead of playlist (upstream sequence reset?), re-anchoring to current window"
+				);
+			}
+			track.next_sequence = None;
+			0
 		} else if next_seq < playlist_seq {
-			warn!(
-				?kind,
-				next_sequence = next_seq,
-				playlist_sequence = playlist_seq,
-				"next_sequence behind playlist, resetting to start of playlist"
-			);
+			if track.next_sequence.is_some() {
+				warn!(
+					?kind,
+					next_sequence = next_seq,
+					playlist_sequence = playlist_seq,
+					"next_sequence behind playlist, resetting to start of playlist"
+				);
+			}
 			track.next_sequence = None;
 			0
 		} else {
@@ -350,9 +389,10 @@ impl Import {
 		};
 
 		let available = total_segments.saturating_sub(skip);
-		let to_process = match limit {
-			Some(max) => available.min(max),
-			None => available,
+		let to_process = if let Some(max) = limit {
+			available.min(max)
+		} else {
+			available
 		};
 
 		info!(
@@ -421,15 +461,8 @@ impl Import {
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
 		let bytes = self.fetch_bytes(url).await?;
 
-		// Ensure the importer is initialized before processing fragments
-		// Use track.init_ready to avoid borrowing issues
-		if !track.init_ready {
-			// Try to ensure init segment is processed
-			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			self.ensure_init_segment(kind, track, &playlist).await?;
-		}
-
-		// Get importer after ensuring init segment
+		// `consume_segments` always runs `ensure_init_segment` before reaching here, so
+		// the importer is already initialized.
 		let importer = match kind {
 			TrackKind::Video(index) => self.ensure_video_importer_for(index),
 			TrackKind::Audio => self.ensure_audio_importer(),
@@ -510,12 +543,6 @@ fn select_audio<'a>(master: &'a MasterPlaylist, group_id: &str) -> Option<&'a Al
 }
 
 fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
-	// Helper to extract the first video codec token from the CODECS attribute.
-	fn first_video_codec(variant: &VariantStream) -> Option<&str> {
-		let codecs = variant.codecs.as_deref()?;
-		codecs.split(',').map(|s| s.trim()).find(|s| !s.is_empty())
-	}
-
 	// Map codec strings into a coarse "family" so we can prefer H.264 over others.
 	fn codec_family(codec: &str) -> Option<&'static str> {
 		if codec.starts_with("avc1.") || codec.starts_with("avc3.") {
@@ -523,6 +550,16 @@ fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
 		} else {
 			None
 		}
+	}
+
+	// Extract the first *video* codec token from the CODECS attribute. A list like
+	// `mp4a.40.2,avc1.4d401f` (audio first) must still surface the video codec.
+	fn first_video_codec(variant: &VariantStream) -> Option<&str> {
+		let codecs = variant.codecs.as_deref()?;
+		codecs
+			.split(',')
+			.map(|s| s.trim())
+			.find(|codec| codec_family(codec).is_some())
 	}
 
 	// Consider only non-i-frame variants with a URI and a known codec family.
@@ -600,6 +637,15 @@ mod tests {
 		let url = "https://example.com/stream.m3u8".to_string();
 		let cfg = Config::new(url.clone());
 		assert_eq!(cfg.playlist, url);
+	}
+
+	#[test]
+	fn select_variants_handles_audio_first_codecs() {
+		// CODECS lists the audio codec first; the video codec must still be found.
+		let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4a.40.2,avc1.4d401f\"\nvideo.m3u8\n";
+		let (_, master) = m3u8_rs::parse_master_playlist(master).unwrap();
+		let variants = select_variants(&master);
+		assert_eq!(variants.len(), 1);
 	}
 
 	#[test]
