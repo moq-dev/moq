@@ -118,9 +118,6 @@ These announcements are live and can change over time, allowing for dynamic orig
 A broadcast consists of any number of Tracks.
 The contents, relationships, and encoding of tracks are determined by the application.
 
-Each broadcast carries an `Epoch` that orders its instances, larger meaning newer (see [ANNOUNCE_BROADCAST](#announce-broadcast)).
-When a subscriber discovers the same broadcast from more than one publisher — most commonly a reconnecting publisher whose new session overlaps a not-yet-expired prior one — it uses the Epoch to route subscriptions to the newest instance instead of waiting for the stale one to time out.
-
 ## Track
 A Track is a series of Groups identified by a unique name within a Broadcast.
 
@@ -292,7 +289,7 @@ An `active` announcement makes the broadcast available; a subsequent `ended` mak
 A publisher SHOULD advertise only the best path it knows for each broadcast.
 If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send another `active` for that broadcast: the new announcement atomically replaces the prior one (equivalent to UNANNOUNCE+ANNOUNCE_BROADCAST).
 A publisher MUST NOT keep multiple `active` advertisements for the same broadcast on the same stream — each broadcast has at most one current advertisement at a time.
-A subscriber that sees the same broadcast advertised across multiple streams SHOULD resolve the conflict using each advertisement's `Epoch` (newer wins), as described in [ANNOUNCE_BROADCAST](#announce-broadcast).
+A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the advertisement with the shortest total path length (see [ANNOUNCE_BROADCAST](#announce-broadcast)).
 
 The subscriber MUST reset the stream if it receives an `ended` for a broadcast that is not currently `active`, or any ANNOUNCE_BROADCAST before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now `ended`.
@@ -685,7 +682,6 @@ ANNOUNCE_BROADCAST Message {
   Message Length (i)
   Announce Status (i),
   Broadcast Path Suffix (s),
-  Epoch (i),
   Hop Count (i),
   Hop ID (i) ...,
 }
@@ -700,19 +696,6 @@ A flag indicating the announce status.
 **Broadcast Path Suffix**:
 This is combined with the broadcast path prefix to form the full broadcast path.
 
-**Epoch**:
-The time at which the origin publisher created this instance of the broadcast, in seconds since 2020-01-01T00:00:00Z (ignoring leap seconds).
-The reference point is 2020 rather than the Unix epoch so that current timestamps stay within a 4-byte varint instead of needing 8.
-A newer instance of the same broadcast therefore carries a larger value than an older one.
-It is assigned once by the origin publisher, and relays MUST forward it unchanged; unlike the Hop ID list it is not modified along the path.
-
-When the subscriber learns of the same broadcast (same path) from more than one current `active` advertisement — for example a reconnecting publisher whose new session races the not-yet-timed-out session of a prior instance — it SHOULD route subscriptions to the advertisement with the larger Epoch, and use total path length (see Hop Count) only to break ties between equal Epochs.
-This lets a subscriber switch to a freshly reconnected publisher immediately, rather than waiting for the stale session to time out.
-For an `ended` advertisement, the Epoch identifies which instance ended: a subscriber that has already moved to a larger Epoch MAY ignore an `ended` carrying a smaller one.
-A value of 0 means the publisher does not assign an Epoch; such advertisements are resolved by path length alone.
-
-A publisher with a sufficiently accurate clock can derive the Epoch directly; ordering only requires that successive instances of the same broadcast have increasing timestamps, so a publisher whose clock is coarse or skewed MUST ensure a reconnecting instance never reports a smaller value than a prior one.
-
 **Hop Count**:
 The number of Hop ID entries that follow, NOT including the publisher's own `Hop ID` from ANNOUNCE_OK.
 A value of 0 means no Hop ID entries are present, indicating either that the announcement originated locally on the publisher (the publisher itself is the origin) or that the upstream peer does not support hop tracking.
@@ -722,7 +705,7 @@ A receiver MUST close the stream with a PROTOCOL_VIOLATION if the Hop Count does
 A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher.
 The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK as `Hop ID`.
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list (since that ID is no longer implicit downstream) and then send its own `Hop ID` in the ANNOUNCE_OK it sends to the downstream subscriber.
-The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`); this total breaks ties between multiple paths to the same broadcast that carry the same `Epoch` (the larger `Epoch` wins outright).
+The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
 
 
@@ -1034,24 +1017,24 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-05
-- Added an `Epoch` field to ANNOUNCE_BROADCAST (a varint, before the Hop ID list): the time the origin publisher created this instance of the broadcast, in seconds since 2020-01-01T00:00:00Z (the 2020 reference point keeps current timestamps within a 4-byte varint), where larger means newer. It is origin-assigned and forwarded unchanged by relays. Subscribers resolve duplicate advertisements of the same broadcast by largest `Epoch` first (path length only breaks ties), so a reconnecting publisher can take over immediately instead of waiting for the stale session to time out.
-- Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST (the subscriber's request to receive announcements) and ANNOUNCE to ANNOUNCE_BROADCAST (the publisher's per-broadcast advertisement). ANNOUNCE_OK is unchanged. Wire format otherwise unchanged.
-- Added a SETUP message, sent once on a unidirectional Setup Stream (0x1) at the start of the session and FIN'd immediately. It carries a list of Setup Parameters for negotiating optional capabilities and extensions per-hop, replacing the prior stream-probing approach (version is still negotiated via ALPN, not SETUP). Endpoints keep exchanging non-Setup streams without waiting for SETUP, buffering only a stream whose encoding a negotiated extension would change; unknown stream types are still reset as a fallback.
-- Added a SETUP `Probe` parameter advertising the publisher's capability level: `None`, `Report` (measure and report the estimated bitrate), or `Increase` (additionally pad to probe for bandwidth above the current sending rate). The levels are nested since probing without measuring is meaningless. A subscriber must not rely on a level the publisher did not advertise.
-- Added a Track Stream (0x6): a TRACK request that the publisher answers with a single TRACK_INFO message and then FINs. TRACK_INFO carries the Track's immutable publisher properties (`Publisher Priority`, `Publisher Ordered`, `Timescale`). It is fetched once and cached, so the properties are no longer echoed on every response — notably, group-by-group FETCHes reuse one lookup.
-- Removed FETCH_OK and trimmed SUBSCRIBE_OK down to a single resolved start group. Publisher properties moved to TRACK_INFO; a FETCH returns bare FRAME messages. All publisher properties are immutable for the lifetime of the Track — a publisher-side change would otherwise have to fan *out* to every downstream of a relay, whereas subscriber properties fan *in* and may still change via SUBSCRIBE_UPDATE.
-- Split the resolved group range across SUBSCRIBE_OK and a new SUBSCRIBE_END. SUBSCRIBE_OK resolves the absolute start (`>=` the requested start; a larger value implicitly drops the leading range), and SUBSCRIBE_END signals that no group will follow a given sequence (stragglers within the range may still be dropped before FIN). SUBSCRIBE_OK keeps the MoqTransport name and its role as the publisher's positive response.
-- Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
-- Allowed a duplicate `active` ANNOUNCE_BROADCAST to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE_BROADCAST). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
-- Added ANNOUNCE_OK message, sent once at the head of the Announce Stream response. Carries the publisher's `Hop ID` (hoisted out of every ANNOUNCE_BROADCAST's Hop ID list) and an `Active Count` so subscribers can batch the initial set instead of reporting each ANNOUNCE_BROADCAST as it trickles in.
-- Added a mandatory `Timescale` to TRACK_INFO: the units (ticks per second) for every frame timestamp on the Track. It MUST be non-zero — every Track has a media timeline, so the timestamp fields are never conditional on the wire.
-- Added `Timestamp Delta` to FRAME, a zigzag-encoded signed varint delta from the previous frame's timestamp (the first frame's delta is its absolute timestamp).
-- Added `Timestamp` to the QUIC datagram body: the absolute timestamp of the group's single frame.
-- Removed `Publisher Max Latency`. The publisher's retention guarantee is no longer part of the wire format; retention for FETCH and future subscriptions is best-effort and left to the publisher.
-- Timestamp-based expiration replaces wall-clock arrival time; only empty groups (which carry no timestamp) fall back to wall-clock.
-- Added QUIC datagram delivery for groups, sharing Subscribe IDs with existing subscriptions (no separate control stream).
-- Dropped the `Subscriber` prefix from fields that exist on only one side: `Subscriber Max Latency` → `Max Latency`. `Priority` and `Ordered` keep the prefix since both a publisher and a subscriber variant exist and the prose distinguishes them. Wire format unchanged.
-- Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket, for environments where UDP is unavailable. The WebSocket binding uses the WebSocket message framing in place of the Qmux Record `Size` field.
+- Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
+- Added a SETUP message and Setup Stream (0x1).
+- Added a SETUP `Probe` parameter.
+- Added Track Stream (0x6) and TRACK_INFO.
+- Removed FETCH_OK.
+- Trimmed SUBSCRIBE_OK to a single resolved start group.
+- Split end-of-subscription signaling into SUBSCRIBE_END.
+- Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP.
+- Allowed duplicate `active` ANNOUNCE_BROADCAST messages to atomically replace the prior advertisement.
+- Added ANNOUNCE_OK with `Hop ID` and `Active Count`.
+- Added mandatory `Timescale` to TRACK_INFO.
+- Added `Timestamp Delta` to FRAME.
+- Added `Timestamp` to the QUIC datagram body.
+- Removed `Publisher Max Latency`.
+- Replaced wall-clock arrival-time expiration with timestamp-based expiration.
+- Added QUIC datagram delivery for groups.
+- Dropped the `Subscriber` prefix from fields that exist on only one side.
+- Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket.
 
 ## moq-lite-04
 - Renamed ANNOUNCE_PLEASE to ANNOUNCE_REQUEST.
