@@ -143,16 +143,23 @@ struct Differ<'a> {
 }
 
 impl<'a> Differ<'a> {
-	/// The baseline child for `key`, or null when the baseline has no such key.
-	fn child(&self, key: &str) -> Differ<'a> {
-		let baseline = match self.baseline {
-			Value::Object(m) => m.get(key).unwrap_or(&NULL),
-			_ => &NULL,
+	/// The baseline child for `key` and whether the baseline actually had that key (a missing key
+	/// means the field is an addition, which `MapDiff` uses to keep deletion detection cheap).
+	fn child(&self, key: &str) -> (Differ<'a>, bool) {
+		let (baseline, existed) = match self.baseline {
+			Value::Object(m) => match m.get(key) {
+				Some(value) => (value, true),
+				None => (&NULL, false),
+			},
+			_ => (&NULL, false),
 		};
-		Differ {
-			baseline,
-			forced: self.forced,
-		}
+		(
+			Differ {
+				baseline,
+				forced: self.forced,
+			},
+			existed,
+		)
 	}
 
 	/// Compare a freshly built scalar/array against the baseline, flagging emitted nulls as forced.
@@ -325,6 +332,7 @@ impl<'a> Serializer for Differ<'a> {
 			differ: self,
 			patch: Map::new(),
 			seen: Vec::new(),
+			added_key: false,
 			pending_key: None,
 		})
 	}
@@ -389,11 +397,15 @@ struct MapDiff<'a> {
 	differ: Differ<'a>,
 	patch: Map<String, Value>,
 	seen: Vec<String>,
+	// Set when a field's key was absent from the baseline. Lets `finish` skip the deletion scan when
+	// the new keys are exactly the baseline keys (the common, churn-free case).
+	added_key: bool,
 	pending_key: Option<String>,
 }
 
 impl MapDiff<'_> {
-	fn entry(&mut self, key: String, node: Node) {
+	fn entry(&mut self, key: String, existed: bool, node: Node) {
+		self.added_key |= !existed;
 		if let Node::Diff(value) = node {
 			self.patch.insert(key.clone(), value);
 		}
@@ -403,11 +415,17 @@ impl MapDiff<'_> {
 	fn finish(self) -> Result<Node, SerError> {
 		let mut patch = self.patch;
 		if let Value::Object(base) = self.differ.baseline {
-			// A removed key is a clean delete (explicit null), and unlike a value set to null it does
-			// not force a snapshot.
-			for key in base.keys() {
-				if !self.seen.iter().any(|s| s == key) {
-					patch.insert(key.clone(), Value::Null);
+			// A deletion is only possible if some key was added or the counts differ. Otherwise the new
+			// keys are exactly the baseline keys, so there's nothing to delete and we skip the scan. This
+			// keeps the common path O(1) rather than O(n^2), which matters since this runs inside the
+			// benchmarked candidate. A removed key is a clean delete (explicit null), and unlike a value
+			// set to null it does not force a snapshot.
+			if self.added_key || self.seen.len() != base.len() {
+				let seen: std::collections::HashSet<&str> = self.seen.iter().map(String::as_str).collect();
+				for key in base.keys() {
+					if !seen.contains(key.as_str()) {
+						patch.insert(key.clone(), Value::Null);
+					}
 				}
 			}
 		}
@@ -430,8 +448,9 @@ impl SerializeMap for MapDiff<'_> {
 	}
 	fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
 		let key = self.pending_key.take().expect("serialize_key precedes serialize_value");
-		let node = value.serialize(self.differ.child(&key))?;
-		self.entry(key, node);
+		let (child, existed) = self.differ.child(&key);
+		let node = value.serialize(child)?;
+		self.entry(key, existed, node);
 		Ok(())
 	}
 	fn end(self) -> Result<Node, SerError> {
@@ -566,8 +585,9 @@ impl SerializeStruct for MapDiff<'_> {
 	type Ok = Node;
 	type Error = SerError;
 	fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, value: &T) -> Result<(), SerError> {
-		let node = value.serialize(self.differ.child(key))?;
-		self.entry(key.to_owned(), node);
+		let (child, existed) = self.differ.child(key);
+		let node = value.serialize(child)?;
+		self.entry(key.to_owned(), existed, node);
 		Ok(())
 	}
 	fn end(self) -> Result<Node, SerError> {
