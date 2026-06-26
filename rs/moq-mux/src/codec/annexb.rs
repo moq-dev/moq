@@ -1,4 +1,4 @@
-use anyhow::{self};
+use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
@@ -146,6 +146,55 @@ pub fn find_start_code(b: &[u8]) -> Option<(usize, usize)> {
 	} else {
 		Some((core, 3))
 	}
+}
+
+/// Convert a length-prefixed NALU payload (avc1 / hvc1 wire shape) to Annex-B,
+/// optionally prepending `prefix` bytes (typically VPS/SPS/PPS NAL units already
+/// in Annex-B form, for keyframe parameter-set injection).
+pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> anyhow::Result<Bytes> {
+	anyhow::ensure!(
+		(1..=4).contains(&length_size),
+		"invalid avc1/hvc1 length size {length_size}"
+	);
+
+	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
+	if let Some(p) = prefix {
+		out.extend_from_slice(p);
+	}
+
+	let mut pos = 0;
+	while pos < payload.len() {
+		let after_prefix = pos
+			.checked_add(length_size)
+			.context("truncated length-prefixed NAL unit")?;
+		anyhow::ensure!(payload.len() >= after_prefix, "truncated length-prefixed NAL unit");
+		let mut len = 0usize;
+		for byte in &payload[pos..after_prefix] {
+			len = (len << 8) | (*byte as usize);
+		}
+		let after_nal = after_prefix
+			.checked_add(len)
+			.context("truncated length-prefixed NAL unit")?;
+		anyhow::ensure!(payload.len() >= after_nal, "truncated length-prefixed NAL unit");
+		out.extend_from_slice(&START_CODE);
+		out.extend_from_slice(&payload[after_prefix..after_nal]);
+		pos = after_nal;
+	}
+
+	Ok(out.freeze())
+}
+
+/// Concatenate `start_code | nal` for every NAL in `nals` and freeze the result.
+/// Used to build a keyframe parameter-set prefix for an Annex-B elementary stream.
+pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
+	let nals: Vec<&Bytes> = nals.into_iter().collect();
+	let total: usize = nals.iter().map(|n| n.len() + START_CODE.len()).sum();
+	let mut out = BytesMut::with_capacity(total);
+	for nal in nals {
+		out.extend_from_slice(&START_CODE);
+		out.extend_from_slice(nal);
+	}
+	out.freeze()
 }
 
 #[cfg(test)]

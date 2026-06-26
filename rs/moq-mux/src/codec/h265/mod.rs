@@ -282,34 +282,69 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 	Ok(out.freeze())
 }
 
-/// Extract the parameter-set NALs (VPS, SPS, PPS in array order) and the NALU
-/// length size from an HEVCDecoderConfigurationRecord. The inverse of
-/// [`build_hvcc`]; used to re-emit out-of-band hvc1 parameter sets as inline
-/// Annex-B (e.g. for MPEG-TS).
+/// The VPS+SPS+PPS NALs (in that order) and NALU length size, flattened for
+/// callers that re-emit every parameter set as one Annex-B prefix (e.g. MPEG-TS
+/// export).
 pub(crate) fn hvcc_params(hvcc: &[u8]) -> anyhow::Result<(usize, Vec<Bytes>)> {
-	anyhow::ensure!(hvcc.len() >= 23, "HEVCDecoderConfigurationRecord too short");
-	let length_size = (hvcc[21] & 0x03) as usize + 1;
-	let num_arrays = hvcc[22];
+	let hvcc = Hvcc::parse(hvcc)?;
+	let mut params = hvcc.vps;
+	params.extend(hvcc.sps);
+	params.extend(hvcc.pps);
+	Ok((hvcc.length_size, params))
+}
 
-	let mut params = Vec::new();
-	let mut pos = 23;
-	for _ in 0..num_arrays {
-		// Skip the array_completeness | NAL_unit_type byte.
-		anyhow::ensure!(hvcc.len() >= pos + 3, "truncated hvcC NAL array header");
-		pos += 1;
-		let num_nalus = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]);
-		pos += 2;
-		for _ in 0..num_nalus {
-			anyhow::ensure!(hvcc.len() >= pos + 2, "truncated hvcC NAL length");
-			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-			pos += 2;
-			anyhow::ensure!(hvcc.len() >= pos + len, "hvcC NAL exceeds buffer");
-			params.push(Bytes::copy_from_slice(&hvcc[pos..pos + len]));
-			pos += len;
+/// The parameter sets carried out-of-band in an HEVCDecoderConfigurationRecord,
+/// split by NAL type.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Hvcc {
+	/// NALU length size in bytes (typically 4).
+	pub length_size: usize,
+	pub vps: Vec<Bytes>,
+	pub sps: Vec<Bytes>,
+	pub pps: Vec<Bytes>,
+}
+
+impl Hvcc {
+	/// Parse an HEVCDecoderConfigurationRecord, sorting the VPS/SPS/PPS NAL units
+	/// by type. The HEVC analogue of [`super::h264::Avcc::parse`]: used to recover
+	/// the Annex-B parameter sets a length-prefixed (hvc1) stream needs at each
+	/// keyframe for in-band injection (VPS→SPS→PPS order).
+	pub fn parse(hvcc: &[u8]) -> anyhow::Result<Self> {
+		anyhow::ensure!(hvcc.len() >= 23, "HEVCDecoderConfigurationRecord too short");
+		let length_size = (hvcc[21] & 0x03) as usize + 1;
+		let num_arrays = hvcc[22];
+
+		let mut out = Self {
+			length_size,
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
+		};
+		let mut pos = 23;
+		for _ in 0..num_arrays {
+			anyhow::ensure!(hvcc.len() >= pos + 3, "truncated hvcC NAL array header");
+			let nal_type = hvcc[pos] & 0x3f;
+			let num_nalus = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]);
+			pos += 3;
+			for _ in 0..num_nalus {
+				anyhow::ensure!(hvcc.len() >= pos + 2, "truncated hvcC NAL length");
+				let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
+				pos += 2;
+				anyhow::ensure!(hvcc.len() >= pos + len, "hvcC NAL exceeds buffer");
+				let nal = Bytes::copy_from_slice(&hvcc[pos..pos + len]);
+				pos += len;
+				match NALUnitType::from(nal_type) {
+					NALUnitType::VpsNut => out.vps.push(nal),
+					NALUnitType::SpsNut => out.sps.push(nal),
+					NALUnitType::PpsNut => out.pps.push(nal),
+					_ => {}
+				}
+			}
 		}
-	}
 
-	Ok((length_size, params))
+		Ok(out)
+	}
 }
 
 /// Pack the constraint flags from ITU H.265 V10 §7.3.3 Profile, tier and level syntax.
@@ -356,5 +391,12 @@ mod tests {
 		assert_eq!(params[0].as_ref(), vps);
 		assert_eq!(params[1].as_ref(), sps);
 		assert_eq!(params[2].as_ref(), pps);
+
+		// The typed parser keys the same NALs by type.
+		let parsed = Hvcc::parse(&hvcc).unwrap();
+		assert_eq!(parsed.length_size, 4);
+		assert_eq!(parsed.vps, vec![Bytes::copy_from_slice(vps)]);
+		assert_eq!(parsed.sps, vec![Bytes::copy_from_slice(sps)]);
+		assert_eq!(parsed.pps, vec![Bytes::copy_from_slice(pps)]);
 	}
 }
