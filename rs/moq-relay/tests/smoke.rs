@@ -31,10 +31,7 @@ fn newest_lite_version() -> moq_net::Version {
 		.expect("parse newest lite ALPN as a Version")
 }
 
-/// The shared bootstrap: stand up a relay listening on `127.0.0.1:<free-port>`
-/// with fully public auth, and return the port plus an abort handle for the
-/// spawned web server.
-async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
+async fn build_web(port: u16, ws: bool) -> Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -61,19 +58,11 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init().expect("server init");
 
-	// Pick a free port for HTTP, then immediately drop the probe listener
-	// so axum_server can bind it. There's a tiny race window where the
-	// kernel could hand the same port to another process, but on localhost
-	// in a single-test process it's safe in practice.
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-
 	let mut web_config = WebConfig::default();
-	web_config.ws = true;
+	web_config.ws = ws;
 	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
-	let web = Web::new(
+	Web::new(
 		WebState {
 			auth,
 			cluster,
@@ -81,13 +70,21 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 			conn_id: AtomicU64::new(0),
 		},
 		web_config,
-	);
+	)
+}
 
-	let handle = tokio::spawn(async move {
-		// `Web::run` only returns on error; in tests we abort it at teardown.
-		let _ = web.run().await;
-	});
+fn free_tcp_port() -> u16 {
+	// Pick a free port for HTTP, then immediately drop the probe listener
+	// so axum_server can bind it. There's a tiny race window where the
+	// kernel could hand the same port to another process, but on localhost
+	// in a single-test process it's safe in practice.
+	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+	let port = probe.local_addr().expect("local addr").port();
+	drop(probe);
+	port
+}
 
+async fn wait_for_http(port: u16) {
 	// Wait for axum_server to bind. A short poll is more reliable than a
 	// fixed sleep when CI is slow.
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -100,6 +97,21 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 		}
 		tokio::time::sleep(Duration::from_millis(25)).await;
 	}
+}
+
+/// The shared bootstrap: stand up a relay listening on `127.0.0.1:<free-port>`
+/// with fully public auth, and return the port plus an abort handle for the
+/// spawned web server.
+async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
+	let port = free_tcp_port();
+	let web = build_web(port, true).await;
+
+	let handle = tokio::spawn(async move {
+		// `Web::run` only returns on error; in tests we abort it at teardown.
+		let _ = web.run().await;
+	});
+
+	wait_for_http(port).await;
 
 	(port, handle)
 }
@@ -186,6 +198,31 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	drop(pub_session);
 	drop(sub_session);
 	web_handle.abort();
+}
+
+#[tokio::test]
+async fn relay_web_serves_merged_routes() {
+	let port = free_tcp_port();
+	let web = build_web(port, false).await;
+	let app = web
+		.routes()
+		.route("/embedded", axum::routing::get(|| async { "embedded\n" }));
+
+	let handle = tokio::spawn(async move {
+		let _ = web.serve(app).await;
+	});
+
+	wait_for_http(port).await;
+
+	let body = reqwest::get(format!("http://127.0.0.1:{port}/embedded"))
+		.await
+		.expect("fetch embedded route")
+		.text()
+		.await
+		.expect("read embedded response");
+	assert_eq!(body, "embedded\n");
+
+	handle.abort();
 }
 
 /// A client that dials a bare `host:port` with no path must still get a

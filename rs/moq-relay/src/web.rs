@@ -28,7 +28,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Auth, AuthParams, AuthToken, Cluster};
+use crate::{Auth, AuthParams, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -113,17 +113,47 @@ pub struct WebState {
 
 /// Run a HTTP server using Axum
 pub struct Web {
-	state: WebState,
+	state: Arc<WebState>,
 	config: WebConfig,
 }
 
 impl Web {
+	/// Create a web server from shared relay state and listener config.
 	pub fn new(state: WebState, config: WebConfig) -> Self {
-		Self { state, config }
+		Self {
+			state: Arc::new(state),
+			config,
+		}
 	}
 
-	/// Runs the HTTP and/or HTTPS listeners until they shut down.
-	pub async fn run(self) -> anyhow::Result<()> {
+	/// Create a web server from its relay parts.
+	pub fn from_parts(
+		auth: Auth,
+		cluster: Cluster,
+		tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
+		config: WebConfig,
+	) -> Self {
+		Self::new(
+			WebState {
+				auth,
+				cluster,
+				tls_info,
+				conn_id: AtomicU64::new(0),
+			},
+			config,
+		)
+	}
+
+	/// Return the shared state used by the default web routes.
+	pub fn state(&self) -> Arc<WebState> {
+		self.state.clone()
+	}
+
+	/// Build the default relay web router.
+	///
+	/// The returned router already has relay state applied, so embedders can
+	/// merge in their own state-applied routers before calling [`serve`](Self::serve).
+	pub fn routes(&self) -> Router {
 		let app = Router::new()
 			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
@@ -146,11 +176,17 @@ impl Web {
 			false => app,
 		};
 
-		let app = app
-			.fallback(serve_landing)
-			.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
-			.with_state(Arc::new(self.state))
-			.into_make_service();
+		app.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
+			.with_state(self.state.clone())
+	}
+
+	/// Serve `app` on the configured HTTP/HTTPS listeners until they shut down.
+	///
+	/// This owns the listener and TLS machinery, including optional HTTPS mTLS
+	/// extraction. Embedders usually call [`routes`](Self::routes), merge extra
+	/// routes, then pass the result here.
+	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
+		let app = app.fallback(serve_landing).into_make_service();
 
 		let http = if let Some(listen) = self.config.http.listen {
 			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
@@ -193,6 +229,12 @@ impl Web {
 		};
 
 		Ok(())
+	}
+
+	/// Runs the default router on the configured listeners until they shut down.
+	pub async fn run(self) -> anyhow::Result<()> {
+		let app = self.routes();
+		self.serve(app).await
 	}
 }
 
@@ -290,12 +332,13 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 	}
 }
 
-/// Marker inserted as a request extension when rustls verified a client cert
-/// against the configured mTLS CA. We don't carry the cert bytes. "Verified
-/// by our CA" is the entire signal we need (mirrors `peer_identity` on
-/// the QUIC side).
+/// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
+///
+/// Embedded routes can extract `Option<Extension<MtlsPeer>>` to mirror the
+/// built-in relay handlers, then call [`Auth::verify_mtls`] with their route
+/// path when the marker is present.
 #[derive(Clone, Debug)]
-pub(crate) struct MtlsPeer;
+pub struct MtlsPeer;
 
 /// Wraps [`RustlsAcceptor`] so that, after the TLS handshake, we extract the
 /// peer cert presence from rustls's `ServerConnection` and attach it to every
@@ -483,11 +526,7 @@ async fn serve_announced(
 		jwt: query.jwt,
 	};
 	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, internal) = state.auth.resolve_mtls(&params.path).await?;
-		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
-		token.internal = internal;
-		token
+		state.auth.verify_mtls(&params.path).await?
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -527,11 +566,7 @@ async fn serve_fetch(
 		jwt: params.auth.jwt,
 	};
 	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, internal) = state.auth.resolve_mtls(&auth.path).await?;
-		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
-		token.internal = internal;
-		token
+		state.auth.verify_mtls(&auth.path).await?
 	} else {
 		state.auth.verify(&auth).await?
 	};

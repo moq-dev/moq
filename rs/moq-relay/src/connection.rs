@@ -2,7 +2,6 @@ use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
-use moq_net::Path;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -136,9 +135,7 @@ impl Connection {
 			// vanity alias lands on the same tree a JWT would; cluster peers dial
 			// "/", which the API resolves (typically to an unscoped root). The API
 			// also returns the billing tier (defaulting to internal for trusted peers).
-			let (root, internal) = self.auth.resolve_mtls(&params.path).await?;
-			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
-			token.internal = internal;
+			let mut token = self.auth.verify_mtls(&params.path).await?;
 			// Close the session when the client certificate expires, mirroring
 			// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
 			token.expires = identity.expiry();

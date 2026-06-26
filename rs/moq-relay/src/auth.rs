@@ -842,6 +842,19 @@ impl Auth {
 		AuthParams::from_url(url, &self.domains)
 	}
 
+	/// Build a full-access token for a peer already authenticated by mTLS.
+	///
+	/// The HTTPS/QUIC layer verifies the client certificate before calling this.
+	/// This method applies the relay's canonical alias resolution and internal
+	/// tier decision, so embedded HTTP handlers get the same authorization scope
+	/// as the built-in relay routes.
+	pub async fn verify_mtls(&self, path: &str) -> Result<AuthToken, AuthError> {
+		let (root, internal) = self.resolve_mtls(path).await?;
+		let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
+		token.internal = internal;
+		Ok(token)
+	}
+
 	/// Resolve the canonical root and billing tier for an mTLS peer via the
 	/// unified `--auth-api`. mTLS peers are already trusted (the cert is the
 	/// credential), so this only fetches the alias + tier.
@@ -856,7 +869,7 @@ impl Auth {
 	/// canonical root (e.g. `x7k2qp`), producing a zombie session: the publisher
 	/// believes it is connected and never reconnects, but nothing is ever served.
 	/// Failing closed lets the client retry and self-heal once the API recovers.
-	pub(crate) async fn resolve_mtls(&self, path: &str) -> Result<(String, bool), AuthError> {
+	async fn resolve_mtls(&self, path: &str) -> Result<(String, bool), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
 			return Ok((path.to_string(), true));
 		};
