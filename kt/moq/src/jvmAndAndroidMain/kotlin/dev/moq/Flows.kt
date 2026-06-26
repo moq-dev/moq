@@ -17,7 +17,7 @@ import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqTrackConsumer
-import uniffi.moq.MoqTrackRequest
+import uniffi.moq.MoqTrackProducer
 
 /**
  * Stream of catalog updates. Terminates when the underlying track ends.
@@ -79,7 +79,7 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
 }
 
 /** Stream of tracks requested by subscribers. */
-fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {
+fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackProducer> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(requestedTrack())
