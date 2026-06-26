@@ -309,7 +309,7 @@ When the accepted track has already ended with no matching groups there is no st
 A rejection is a stream reset: if the publisher cannot serve the subscription — the track does not exist, or it otherwise refuses — it MUST reset the stream rather than leave it pending, and SHOULD do so promptly (within roughly a round trip) so the subscriber is not left waiting.
 A subscription the publisher accepts but has no groups for yet is not a rejection: for a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start. A subscriber therefore distinguishes "pending" from "refused" by the stream reset, not by a timeout.
 The Subscribe Stream does not carry the track's publisher properties — those are immutable and fetched once via a [Track Stream](#track-stream) (see [TRACK_INFO](#track-info)).
-The subscriber MUST have the track's TRACK_INFO before it can parse the FRAME messages that arrive on Group Streams, since compression determines the frame wire format and the timescale is needed to interpret each timestamp; it MAY open the Track and Subscribe streams concurrently and buffer frames until TRACK_INFO arrives.
+The subscriber MUST have the track's TRACK_INFO before it can fully interpret the FRAME messages that arrive on Group Streams, since the timescale is needed to interpret each timestamp; it MAY open the Track and Subscribe streams concurrently and buffer frames until TRACK_INFO arrives.
 
 The publisher sends SUBSCRIBE_OK once the absolute start group is resolved, and SUBSCRIBE_END once no further groups will be produced (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
 The publisher closes the stream (FIN) only once every group from start to end has been accounted for, either via a GROUP stream (completed or reset) or a SUBSCRIBE_DROP message.
@@ -334,7 +334,7 @@ A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher p
 The subscriber sends a TRACK message containing the broadcast path and track name.
 The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
 The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO and reuse it across every SUBSCRIBE and FETCH for that track rather than requesting it again.
-When the track was discovered via an ANNOUNCE_BROADCAST, the cached value is tied to that advertisement: if the broadcast is re-announced (a new `active` ANNOUNCE_BROADCAST that atomically replaces the prior one), the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale or compression may have changed.
+When the track was discovered via an ANNOUNCE_BROADCAST, the cached value is tied to that advertisement: if the broadcast is re-announced (a new `active` ANNOUNCE_BROADCAST that atomically replaces the prior one), the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale may have changed.
 If FRAME messages cannot be decoded against the cached TRACK_INFO (for example a malformed delta or payload after a missed re-announcement), the subscriber MUST reset the affected stream with a protocol violation and re-request TRACK_INFO.
 A subscriber that reached the track without an advertisement (e.g. a path known out of band) has no such invalidation signal; it MAY re-request TRACK_INFO whenever it needs to confirm freshness (for example on a new session). A stale cache only risks misparsing frames from a changed track, so the subscriber that cannot observe re-announcements SHOULD NOT cache TRACK_INFO beyond a single connection.
 
@@ -515,8 +515,7 @@ Any varint value (including 0) is a valid absolute timestamp.
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
-If the Track's `Compression` is non-zero, the payload is compressed using the negotiated algorithm (see [TRACK_INFO](#track-info)).
-The total datagram body (including all header fields above and the compressed payload if applicable) MUST NOT exceed 1200 bytes.
+The total datagram body (including all header fields above and the payload) MUST NOT exceed 1200 bytes.
 This limit ensures the datagram fits within the minimum QUIC path MTU without IP-layer fragmentation.
 Payloads that would not fit MUST be sent as a Group Stream instead.
 A receiver MUST silently drop any datagram that exceeds this limit.
@@ -824,7 +823,6 @@ TRACK_INFO Message {
   Publisher Priority (8)
   Publisher Ordered (8)
   Timescale (i)
-  Compression (i)
 }
 ~~~
 
@@ -846,24 +844,6 @@ The number of timestamp units per second for frame timestamps on this Track.
 It MUST be non-zero: every Track has a media timeline, so every FRAME carries a `Timestamp Delta` and every datagram body carries a `Timestamp` (see [FRAME](#frame) and [Datagrams](#datagrams)).
 A subscriber that receives a `Timescale` of 0 MUST reset the Subscribe or Fetch stream with a protocol violation.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
-
-**Compression**:
-The compression algorithm applied to every Frame `Payload` on this Track.
-
-- `none` (0): payloads are transmitted verbatim (default).
-- `deflate` (1): payloads are compressed with raw DEFLATE as defined in {{!RFC1951}}, with no zlib or gzip framing.
-
-Compression is applied per-frame: each Frame `Payload` is an independent compressed stream with no shared dictionary or state between frames.
-This keeps frames independently decodable and avoids head-of-line decoding within a group.
-The Frame `Message Length` describes the compressed (on-wire) size.
-An empty payload (size 0) MUST NOT be compressed and remains empty on the wire.
-
-The publisher SHOULD only enable compression for payload types that benefit from it (e.g. JSON, text, uncompressed binary structures).
-Already-compressed media (e.g. H.264, Opus, AV1) gains nothing and SHOULD use `none`.
-A subscriber that does not recognize the value MUST NOT open a Subscribe or Fetch stream for the track; if it already opened one before receiving TRACK_INFO, it MUST reset that stream with a protocol violation. The Track Stream itself needs no reset — the publisher FINs it after TRACK_INFO.
-
-A relay MAY transcode payloads between compression algorithms (including bridging different protocol versions, e.g. a moq-lite-05 publisher to a moq-lite-04 subscriber) provided the decompressed bytes are identical to what the publisher produced.
-A relay SHOULD NOT compress an originally-uncompressed payload unless there is a strong content signal that compression is beneficial (e.g. the track name ends in `.json`), because the relay cannot otherwise predict whether compression will help or hurt.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start group.
@@ -1048,8 +1028,7 @@ The first frame of a group is delta-encoded from `0`, so its `Timestamp Delta` i
 
 **Payload**:
 An application-specific payload.
-If the Track's `Compression` is non-zero, the payload is compressed using the negotiated algorithm (see [TRACK_INFO](#track-info)) and the `Message Length` describes the compressed size.
-A generic library or relay MUST NOT inspect or modify the decompressed contents unless otherwise negotiated; recompression that preserves the decompressed bytes exactly is allowed (see [TRACK_INFO](#track-info)).
+The `Message Length` describes the payload size on the wire.
 
 
 # Appendix A: Changelog
@@ -1059,7 +1038,7 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST (the subscriber's request to receive announcements) and ANNOUNCE to ANNOUNCE_BROADCAST (the publisher's per-broadcast advertisement). ANNOUNCE_OK is unchanged. Wire format otherwise unchanged.
 - Added a SETUP message, sent once on a unidirectional Setup Stream (0x1) at the start of the session and FIN'd immediately. It carries a list of Setup Parameters for negotiating optional capabilities and extensions per-hop, replacing the prior stream-probing approach (version is still negotiated via ALPN, not SETUP). Endpoints keep exchanging non-Setup streams without waiting for SETUP, buffering only a stream whose encoding a negotiated extension would change; unknown stream types are still reset as a fallback.
 - Added a SETUP `Probe` parameter advertising the publisher's capability level: `None`, `Report` (measure and report the estimated bitrate), or `Increase` (additionally pad to probe for bandwidth above the current sending rate). The levels are nested since probing without measuring is meaningless. A subscriber must not rely on a level the publisher did not advertise.
-- Added a Track Stream (0x6): a TRACK request that the publisher answers with a single TRACK_INFO message and then FINs. TRACK_INFO carries the Track's immutable publisher properties (`Publisher Priority`, `Publisher Ordered`, `Timescale`, `Compression`). It is fetched once and cached, so the properties are no longer echoed on every response — notably, group-by-group FETCHes reuse one lookup.
+- Added a Track Stream (0x6): a TRACK request that the publisher answers with a single TRACK_INFO message and then FINs. TRACK_INFO carries the Track's immutable publisher properties (`Publisher Priority`, `Publisher Ordered`, `Timescale`). It is fetched once and cached, so the properties are no longer echoed on every response — notably, group-by-group FETCHes reuse one lookup.
 - Removed FETCH_OK and trimmed SUBSCRIBE_OK down to a single resolved start group. Publisher properties moved to TRACK_INFO; a FETCH returns bare FRAME messages. All publisher properties are immutable for the lifetime of the Track — a publisher-side change would otherwise have to fan *out* to every downstream of a relay, whereas subscriber properties fan *in* and may still change via SUBSCRIBE_UPDATE.
 - Split the resolved group range across SUBSCRIBE_OK and a new SUBSCRIBE_END. SUBSCRIBE_OK resolves the absolute start (`>=` the requested start; a larger value implicitly drops the leading range), and SUBSCRIBE_END signals that no group will follow a given sequence (stragglers within the range may still be dropped before FIN). SUBSCRIBE_OK keeps the MoqTransport name and its role as the publisher's positive response.
 - Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
@@ -1071,8 +1050,7 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Removed `Publisher Max Latency`. The publisher's retention guarantee is no longer part of the wire format; retention for FETCH and future subscriptions is best-effort and left to the publisher.
 - Timestamp-based expiration replaces wall-clock arrival time; only empty groups (which carry no timestamp) fall back to wall-clock.
 - Added QUIC datagram delivery for groups, sharing Subscribe IDs with existing subscriptions (no separate control stream).
-- Added `Compression` to TRACK_INFO for per-frame payload compression (`none` or `deflate`).
-- Dropped the `Publisher`/`Subscriber` prefix from fields that exist on only one side: `Publisher Compression` → `Compression` and `Subscriber Max Latency` → `Max Latency`. `Priority` and `Ordered` keep the prefix since both a publisher and a subscriber variant exist and the prose distinguishes them. Wire format unchanged.
+- Dropped the `Subscriber` prefix from fields that exist on only one side: `Subscriber Max Latency` → `Max Latency`. `Priority` and `Ordered` keep the prefix since both a publisher and a subscriber variant exist and the prose distinguishes them. Wire format unchanged.
 - Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket, for environments where UDP is unavailable. The WebSocket binding uses the WebSocket message framing in place of the Qmux Record `Size` field.
 
 ## moq-lite-04
