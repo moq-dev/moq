@@ -24,3 +24,10 @@ moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "codec"
+harness = false
