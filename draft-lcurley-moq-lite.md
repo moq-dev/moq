@@ -20,6 +20,7 @@ normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
   RFC1951:
+  RFC7692:
   RFC3986:
   RFC6455:
   RFC9002:
@@ -296,6 +297,9 @@ When the stream is closed, the subscriber MUST assume that all broadcasts are no
 
 Path prefix matching and equality is done on a byte-by-byte basis.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + ANNOUNCE_BROADCAST messages.
+The compression context for ANNOUNCE_BROADCAST payloads is retained across messages on the same Announce Stream, so separate messages still benefit from repeated path components and Hop ID lists.
+The publisher flushes the compressor after each ANNOUNCE_BROADCAST, allowing the subscriber to decode each announcement as soon as its message bytes arrive.
+For this reason, batching multiple path changes into one ANNOUNCE_BROADCAST is not needed for compression; `Active Count` provides application-level batching for the initial set while preserving one state change per ANNOUNCE_BROADCAST message.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -680,12 +684,22 @@ An ANNOUNCE_BROADCAST before ANNOUNCE_OK is a protocol violation.
 ~~~
 ANNOUNCE_BROADCAST Message {
   Message Length (i)
+  Compressed Payload (..)
+}
+
+ANNOUNCE_BROADCAST Payload {
   Announce Status (i),
   Broadcast Path Suffix (s),
   Hop Count (i),
   Hop ID (i) ...,
 }
 ~~~
+
+**Message Length**:
+The number of bytes in `Compressed Payload`.
+
+**Compressed Payload**:
+The compressed form of `ANNOUNCE_BROADCAST Payload`, as described in [Compressed ANNOUNCE_BROADCAST Payloads](#compressed-announce-broadcast-payloads).
 
 **Announce Status**:
 A flag indicating the announce status.
@@ -707,6 +721,21 @@ The responding publisher's own Hop ID is NOT included in this list; it is carrie
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list (since that ID is no longer implicit downstream) and then send its own `Hop ID` in the ANNOUNCE_OK it sends to the downstream subscriber.
 The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
+
+### Compressed ANNOUNCE_BROADCAST Payloads {#compressed-announce-broadcast-payloads}
+ANNOUNCE_BROADCAST compresses the entire message payload, excluding only the `Message Length` field.
+The uncompressed input is exactly the `ANNOUNCE_BROADCAST Payload` encoding defined above.
+
+Compression uses the DEFLATE format [RFC1951] with a single compression context per Announce Stream.
+The context is initialized immediately after ANNOUNCE_OK and is retained until the Announce Stream closes.
+For each ANNOUNCE_BROADCAST, the publisher feeds the uncompressed payload bytes into that context and then performs the equivalent of `Z_SYNC_FLUSH`.
+A sync flush produces output ending with the fixed four-byte marker `00 00 ff ff`; the publisher MUST remove this marker before writing the compressed bytes into `Compressed Payload`, matching WebSocket compression [RFC7692].
+
+The subscriber uses a single decompression context per Announce Stream.
+Before inflating each `Compressed Payload`, the subscriber appends the four bytes `00 00 ff ff` to reconstruct the sync-flushed DEFLATE stream.
+After reading `Compressed Payload`, the subscriber inflates it using the retained context and parses the resulting bytes as `ANNOUNCE_BROADCAST Payload`.
+The decompressed payload MUST be a valid `ANNOUNCE_BROADCAST Payload`; otherwise, the subscriber MUST reset the Announce Stream with a PROTOCOL_VIOLATION.
+If decompression fails, the subscriber MUST reset the Announce Stream with a PROTOCOL_VIOLATION.
 
 
 ## SUBSCRIBE
@@ -1035,6 +1064,7 @@ The `Message Length` describes the payload size on the wire.
 - Added QUIC datagram delivery for groups.
 - Dropped the `Subscriber` prefix from fields that exist on only one side.
 - Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket.
+- Added mandatory DEFLATE compression for ANNOUNCE_BROADCAST payloads.
 
 ## moq-lite-04
 - Renamed ANNOUNCE_PLEASE to ANNOUNCE_REQUEST.
