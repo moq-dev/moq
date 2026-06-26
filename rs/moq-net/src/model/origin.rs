@@ -1878,7 +1878,6 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = BroadcastInfo {
 			hops: OriginList::try_from(vec![Origin::from(1u64)]).unwrap(),
-			..Default::default()
 		}
 		.produce();
 		let b = BroadcastInfo::new().produce();
@@ -1900,7 +1899,6 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = BroadcastInfo {
 			hops: OriginList::try_from(vec![Origin::from(1u64)]).unwrap(),
-			..Default::default()
 		}
 		.produce();
 		let b = BroadcastInfo::new().produce();
