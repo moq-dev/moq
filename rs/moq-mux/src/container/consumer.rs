@@ -1370,6 +1370,7 @@ mod tests {
 	/// the group's stream was actually aborted.
 	#[tokio::test]
 	async fn decode_error_propagates() {
+		tokio::time::pause();
 		let mut track = track_producer("test");
 		let consumer_track = track.consume();
 		let mut consumer = Consumer::new(consumer_track, FailingDecode);

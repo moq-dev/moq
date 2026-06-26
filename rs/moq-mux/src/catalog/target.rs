@@ -143,6 +143,12 @@ impl<S: Stream> Stream for Target<S> {
 			Poll::Ready(Ok((emit, epoch))) => {
 				self.last_epoch = epoch;
 				self.fresh_input = false;
+				// End with upstream: if this is the final snapshot (inner already EOF'd),
+				// drop the retained input so a later retarget can't revive the stream after
+				// it has emitted its last value.
+				if inner_eof {
+					self.last_input = None;
+				}
 				Poll::Ready(Ok(Some(emit)))
 			}
 			Poll::Ready(Err(_)) => {
@@ -150,11 +156,11 @@ impl<S: Stream> Stream for Target<S> {
 				Poll::Ready(Ok(None))
 			}
 			Poll::Pending => {
-				// End with upstream: once `inner` is exhausted and there's nothing fresh
-				// to emit, finish. A still-pending snapshot makes the closure return
-				// Ready, so reaching Pending here means the final selected snapshot was
-				// already emitted (or there never was one).
+				// EOF is terminal: once `inner` is exhausted and there's nothing fresh to
+				// emit, finish and drop the retained input so a post-EOF retarget can't make
+				// the closure emit again (a still-pending snapshot returns Ready above).
 				if inner_eof {
+					self.last_input = None;
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -415,6 +421,13 @@ mod test {
 
 		let mut t = Target::new(Once(Some(catalog)));
 		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+
+		// EOF is terminal: a retarget after the end must not revive the stream.
+		t.set_video(TargetVideo {
+			width: Some(320),
+			..Default::default()
+		});
 		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
 	}
 
