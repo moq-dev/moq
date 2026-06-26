@@ -30,18 +30,6 @@ impl Version {
 		}
 	}
 
-	/// Whether ANNOUNCE_BROADCAST carries a per-broadcast Epoch varint (after the
-	/// suffix, before the hop chain). Added in lite-05 so a consumer can tell a newer
-	/// instance of a broadcast from an older one. Older versions omit the field.
-	#[allow(clippy::match_like_matches_macro)]
-	pub fn has_broadcast_epoch(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
-		match self {
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
-			_ => true,
-		}
-	}
-
 	/// Whether the session opens a unidirectional Setup Stream carrying a single SETUP
 	/// message (capabilities + optional Path). Added in lite-05; the older bidirectional
 	/// setup exchange (Lite01/02) and the no-setup drafts (Lite03/04) don't use it.

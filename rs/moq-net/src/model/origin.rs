@@ -247,13 +247,12 @@ struct OriginBroadcast {
 /// Ordering key used to pick the active route among broadcasts at the same path.
 ///
 /// Lower wins. Shorter hop chains sort first (routing prefers the shortest path);
-/// among equal-length chains the newer broadcast instance (larger
-/// [`epoch`](BroadcastInfo::epoch)) wins, and any remaining ties break on a
-/// deterministic hash of the broadcast name and hop chain. Every node in the cluster,
-/// given the same candidate routes, converges on the same winner: the epoch and hops
-/// are forwarded unchanged, and the hash is build-stable. Mixing the name in spreads
-/// equal routes across different upstreams rather than funneling onto one.
-fn route_key(name: &Path, info: &BroadcastInfo) -> (usize, std::cmp::Reverse<u64>, u64) {
+/// remaining ties break on a deterministic hash of the broadcast name and hop
+/// chain. Every node in the cluster, given the same candidate routes, converges
+/// on the same winner: the hops are forwarded unchanged, and the hash is
+/// build-stable. Mixing the name in spreads equal routes across different
+/// upstreams rather than funneling onto one.
+fn route_key(name: &Path, info: &BroadcastInfo) -> (usize, u64) {
 	// FNV-1a, not the std hasher: its output is fixed across Rust versions and
 	// builds, which matters when nodes run mismatched binaries during a rolling
 	// deploy and still need to agree on the same route. SEED is a custom basis
@@ -272,8 +271,7 @@ fn route_key(name: &Path, info: &BroadcastInfo) -> (usize, std::cmp::Reverse<u64
 		}
 	}
 
-	// Reverse the epoch so a larger (newer) instance sorts lower, i.e. wins.
-	(info.hops.len(), std::cmp::Reverse(info.epoch_wire()), hash)
+	(info.hops.len(), hash)
 }
 
 /// One coalesced update queued for an `AnnounceConsumer`.
@@ -1945,15 +1943,9 @@ mod tests {
 	async fn test_deterministic_tiebreak() {
 		tokio::time::pause();
 
-		// Build a broadcast carrying a specific hop chain. All routes share one epoch so
-		// this test isolates the hash tie-break (a differing epoch would decide first).
 		fn route(ids: &[u64]) -> BroadcastProducer {
 			let hops = OriginList::try_from(ids.iter().copied().map(Origin::from).collect::<Vec<_>>()).unwrap();
-			BroadcastInfo {
-				hops,
-				epoch: BroadcastInfo::epoch_from_wire(0),
-			}
-			.produce()
+			BroadcastInfo { hops }.produce()
 		}
 
 		// Resolve the active route for "test" after publishing both routes in the given order.
@@ -2645,7 +2637,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		let broadcast = BroadcastInfo::new().produce();
 
-		// "demo" and "demo/foo" — "demo/foo" is redundant, only "demo" should remain
+		// "demo" and "demo/foo". "demo/foo" is redundant, only "demo" should remain
 		let producer = origin
 			.scope(&["demo".into(), "demo/foo".into()])
 			.expect("should create producer");
@@ -2663,7 +2655,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		let broadcast = BroadcastInfo::new().produce();
 
-		// Both "demo" and "demo/foo" are requested — should only have one node
+		// Both "demo" and "demo/foo" are requested. Should only have one node
 		let producer = origin
 			.scope(&["demo".into(), "demo/foo".into()])
 			.expect("should create producer");
@@ -2741,7 +2733,7 @@ mod tests {
 
 		tokio::task::yield_now().await;
 
-		// Publish an unrelated broadcast first — announced_broadcast should skip it.
+		// Publish an unrelated broadcast first. announced_broadcast should skip it.
 		origin.publish_broadcast_spawn("other", other.consume());
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on unrelated path");
@@ -2768,7 +2760,7 @@ mod tests {
 
 		tokio::task::yield_now().await;
 
-		// "foo/bar" is under the prefix scope, but it's not the exact path — skip it.
+		// "foo/bar" is under the prefix scope, but it's not the exact path. Skip it.
 		origin.publish_broadcast_spawn("foo/bar", nested.consume());
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on a nested path");
@@ -2786,7 +2778,7 @@ mod tests {
 			.scope(&["allowed".into()])
 			.expect("should create limited");
 
-		// Path is outside allowed prefixes — should return None immediately.
+		// Path is outside allowed prefixes. Should return None immediately.
 		assert!(limited.announced_broadcast("notallowed").await.is_none());
 	}
 

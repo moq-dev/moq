@@ -69,9 +69,6 @@ The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to dis
 The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
 This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
 
-Each broadcast also carries an **epoch** identifying its instance.
-When the same broadcast is announced over multiple routes (or republished after going away), the epoch lets everyone converge on the newest instance instead of picking arbitrarily.
-
 ### Subscriptions
 
 All data transfers are initiated by subscriptions.

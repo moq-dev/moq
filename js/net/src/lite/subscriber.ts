@@ -50,7 +50,7 @@ function supportsTrackStream(version: Version): boolean {
 export interface AnnouncedOptions {
 	/**
 	 * If true, skip announcements whose hop chain contains this connection's
-	 * own origin id — useful for meshes that reflect announces back. Defaults
+	 * own origin id. Useful for meshes that reflect announces back. Defaults
 	 * to false for backwards compatibility: existing code (notably hang.live)
 	 * relies on seeing its own publishes as the signal that a namespace
 	 * published successfully.
@@ -202,11 +202,7 @@ export class Subscriber {
 
 				const path = Path.join(prefix, announce.suffix);
 
-				// `announce.epoch` (lite-05+) identifies the broadcast instance. The Rust
-				// origin uses it to prefer the newest of several routes to the same path; the
-				// JS side has no multi-route origin tree (the announced queue is flat), so
-				// there is nothing to tie-break here and the epoch is currently unused.
-				console.debug(`announced: broadcast=${path} active=${announce.active} epoch=${announce.epoch}`);
+				console.debug(`announced: broadcast=${path} active=${announce.active}`);
 				announced.append({ path, active: announce.active });
 			}
 

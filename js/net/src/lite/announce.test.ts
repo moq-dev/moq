@@ -32,33 +32,16 @@ async function roundTrip(msg: AnnounceBroadcast, version: Version): Promise<Anno
 	return AnnounceBroadcast.decode(reader, version);
 }
 
-test("AnnounceBroadcast epoch round-trips on draft-05", async () => {
+test("AnnounceBroadcast round-trips on draft-05", async () => {
 	const hops = [OriginSchema.parse(7n)];
-	// 1_700_000_000_000 is ~ms since 2020 in 2023; the others probe the edges of u53.
-	for (const epoch of [0, 1, 1_700_000_000_000, 2 ** 52]) {
-		const active = new AnnounceBroadcast({ suffix: Path.from("room/cam"), active: true, epoch, hops });
-		const gotActive = await roundTrip(active, Version.DRAFT_05_WIP);
-		expect(gotActive.active).toBe(true);
-		expect(gotActive.epoch).toBe(epoch);
-		expect(gotActive.suffix).toBe(Path.from("room/cam"));
-		expect(gotActive.hops).toEqual(hops);
+	const active = new AnnounceBroadcast({ suffix: Path.from("room/cam"), active: true, hops });
+	const gotActive = await roundTrip(active, Version.DRAFT_05_WIP);
+	expect(gotActive.active).toBe(true);
+	expect(gotActive.suffix).toBe(Path.from("room/cam"));
+	expect(gotActive.hops).toEqual(hops);
 
-		const ended = new AnnounceBroadcast({ suffix: Path.from("room/cam"), active: false, epoch });
-		const gotEnded = await roundTrip(ended, Version.DRAFT_05_WIP);
-		expect(gotEnded.active).toBe(false);
-		expect(gotEnded.epoch).toBe(epoch);
-	}
-});
-
-test("AnnounceBroadcast epoch is omitted before draft-05", async () => {
-	// Pre-lite-05 carries no epoch on the wire, so a nonzero epoch decodes back as 0.
-	const msg = new AnnounceBroadcast({
-		suffix: Path.from("room/cam"),
-		active: true,
-		epoch: 42,
-		hops: [OriginSchema.parse(7n)],
-	});
-	const got = await roundTrip(msg, Version.DRAFT_04);
-	expect(got.epoch).toBe(0);
-	expect(got.suffix).toBe(Path.from("room/cam"));
+	const ended = new AnnounceBroadcast({ suffix: Path.from("room/cam"), active: false });
+	const gotEnded = await roundTrip(ended, Version.DRAFT_05_WIP);
+	expect(gotEnded.active).toBe(false);
+	expect(gotEnded.suffix).toBe(Path.from("room/cam"));
 });

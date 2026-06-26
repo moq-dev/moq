@@ -2,7 +2,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { type Origin, OriginSchema } from "./origin.ts";
-import { hasBroadcastEpoch, Version } from "./version.ts";
+import { Version } from "./version.ts";
 
 // Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
 // hop chains are rejected; this keeps loop-detection bounded and rejects
@@ -10,41 +10,18 @@ import { hasBroadcastEpoch, Version } from "./version.ts";
 export const MAX_HOPS = 32;
 
 /**
- * Seconds between the Unix epoch and 2020-01-01T00:00:00 UTC.
- *
- * Broadcast epochs ride the wire as milliseconds since this base (smaller than a
- * Unix-epoch value, and good past the year 2500 in a varint). See {@link epochNow}.
- */
-export const EPOCH_BASE_SECONDS = 1_577_836_800;
-
-/**
- * The current wall clock as a broadcast epoch: whole milliseconds since
- * 2020-01-01 UTC (the wire value). Saturates to `0` for a clock before the base.
- */
-export function epochNow(): number {
-	return Math.max(0, Math.floor(Date.now() - EPOCH_BASE_SECONDS * 1000));
-}
-
-/**
  * ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast.
  *
- * Carries the broadcast path suffix, its instance {@link epoch} (lite-05+), and the
- * hop chain. Renamed from `Announce` in lite-05.
+ * Carries the broadcast path suffix and the hop chain. Renamed from `Announce` in lite-05.
  */
 export class AnnounceBroadcast {
 	suffix: Path.Valid;
 	active: boolean;
-	/**
-	 * Broadcast instance epoch: milliseconds since 2020-01-01 UTC (see {@link epochNow}).
-	 * Only carried on the wire for lite-05+; `0` on older versions.
-	 */
-	epoch: number;
 	hops: Origin[];
 
-	constructor(props: { suffix: Path.Valid; active: boolean; epoch?: number; hops?: Origin[] }) {
+	constructor(props: { suffix: Path.Valid; active: boolean; hops?: Origin[] }) {
 		this.suffix = props.suffix;
 		this.active = props.active;
-		this.epoch = props.epoch ?? 0;
 		this.hops = props.hops ?? [];
 		if (this.hops.length > MAX_HOPS) {
 			throw new Error(`hop count ${this.hops.length} exceeds maximum ${MAX_HOPS}`);
@@ -54,11 +31,6 @@ export class AnnounceBroadcast {
 	async #encode(w: Writer, version: Version) {
 		await w.bool(this.active);
 		await w.string(this.suffix);
-
-		// Lite05+: the epoch varint sits after the suffix and before the hop chain.
-		if (hasBroadcastEpoch(version)) {
-			await w.u53(this.epoch);
-		}
 
 		switch (version) {
 			case Version.DRAFT_01:
@@ -80,9 +52,6 @@ export class AnnounceBroadcast {
 	static async #decode(r: Reader, version: Version): Promise<AnnounceBroadcast> {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
-
-		// Lite05+ carries the epoch after the suffix; older versions default it to 0.
-		const epoch = hasBroadcastEpoch(version) ? await r.u53() : 0;
 
 		let hops: Origin[] = [];
 		switch (version) {
@@ -110,7 +79,7 @@ export class AnnounceBroadcast {
 			}
 		}
 
-		return new AnnounceBroadcast({ suffix, active, epoch, hops });
+		return new AnnounceBroadcast({ suffix, active, hops });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
