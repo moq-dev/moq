@@ -41,7 +41,7 @@ pub enum Error {
 	EmptySegmentUri,
 
 	/// A playlist or segment URI could not be resolved against its base.
-	#[error("url parse: {0}")]
+	#[error(transparent)]
 	UrlParse(#[from] url::ParseError),
 
 	/// HTTP error while fetching a playlist or segment.
