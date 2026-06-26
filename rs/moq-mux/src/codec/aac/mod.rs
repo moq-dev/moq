@@ -50,72 +50,26 @@ impl Config {
 			return Err(Error::ConfigTooShort);
 		}
 
-		// Read first byte
-		let b0 = buf.get_u8();
-		let mut object_type = b0 >> 3;
-		let freq_index;
+		let data = buf.copy_to_bytes(buf.remaining());
+		let mut bits = BitReader::new(&data);
 
-		let (profile, sample_rate, channel_count) = if object_type == 31 {
-			if buf.remaining() < 2 {
-				return Err(Error::ExtendedConfigTooShort);
-			}
-			// Extended format: next 6 bits are the extended object_type (32-63).
-			// Bits 5-7 of b0 are the first 3 bits of extended object_type.
-			let b_ext = buf.get_u8();
-			// Bits 0-2 of b_ext are the last 3 bits of extended object_type.
-			let audio_object_type_ext = ((b0 & 0x07) << 3) | ((b_ext >> 5) & 0x07);
-			object_type = 32 + audio_object_type_ext;
-			// Bits 3-6 of b_ext are samplingFrequencyIndex (4 bits).
-			freq_index = (b_ext >> 1) & 0x0F;
-			// Bit 0 of b_ext is the first bit of channelConfiguration.
-			let channel_config_high = b_ext & 0x01;
+		let mut object_type = bits.read(5).ok_or(Error::ConfigTooShort)? as u8;
+		if object_type == 31 {
+			let ext = bits.read(6).ok_or(Error::ExtendedConfigTooShort)? as u8;
+			object_type = 32 + ext;
+		}
 
-			// Read next byte for rest of channelConfiguration.
-			if buf.remaining() < 1 {
-				return Err(Error::IncompleteConfig);
-			}
-			let b1 = buf.get_u8();
-			// Bits 5-7 of b1 are the remaining 3 bits of channelConfiguration.
-			let channel_config = (channel_config_high << 3) | ((b1 >> 5) & 0x07);
-
-			let sample_rate = sample_rate_from_index(freq_index, buf)?;
-			let channel_count = channel_count_from_config(channel_config);
-
-			if buf.remaining() > 0 {
-				buf.advance(buf.remaining());
-			}
-
-			(object_type, sample_rate, channel_count)
+		let freq_index = bits.read(4).ok_or(Error::IncompleteConfig)? as u8;
+		let sample_rate = if freq_index == 15 {
+			bits.read(24).ok_or(Error::ExplicitSampleRateTooShort)? as u32
 		} else {
-			// Standard format: bits 5-7 of b0 are first 3 bits of freq_index.
-			let mut freq_index_local = (b0 & 0x07) << 1;
-
-			if buf.remaining() < 1 {
-				return Err(Error::IncompleteConfig);
-			}
-			let b1 = buf.get_u8();
-
-			// Complete frequency index (bit 7 of b1 is bit 0 of freq_index).
-			freq_index_local |= (b1 >> 7) & 0x01;
-			freq_index = freq_index_local;
-
-			let channel_config = (b1 >> 3) & 0x0F;
-
-			let sample_rate = sample_rate_from_index(freq_index, buf)?;
-			let channel_count = channel_count_from_config(channel_config);
-
-			// AudioSpecificConfig can have variable-length extensions (SBR, PS,
-			// etc.). We've already extracted the essential info; consume any
-			// remaining bytes to ensure the buffer is properly advanced.
-			if buf.remaining() > 0 {
-				buf.advance(buf.remaining());
-			}
-
-			(object_type, sample_rate, channel_count)
+			sample_rate_from_index(freq_index)?
 		};
+		let channel_config = bits.read(4).ok_or(Error::IncompleteConfig)? as u8;
+		let channel_count = channel_count_from_config(channel_config);
 
 		Ok(Self {
-			profile,
+			profile: object_type,
 			sample_rate,
 			channel_count,
 		})
@@ -166,18 +120,36 @@ impl Config {
 	}
 }
 
-fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> Result<u32> {
+struct BitReader<'a> {
+	data: &'a [u8],
+	offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+	fn new(data: &'a [u8]) -> Self {
+		Self { data, offset: 0 }
+	}
+
+	fn read(&mut self, count: usize) -> Option<u64> {
+		if self.offset + count > self.data.len() * 8 {
+			return None;
+		}
+
+		let mut value = 0;
+		for _ in 0..count {
+			let byte = self.data[self.offset / 8];
+			let shift = 7 - (self.offset % 8);
+			value = (value << 1) | (((byte >> shift) & 1) as u64);
+			self.offset += 1;
+		}
+		Some(value)
+	}
+}
+
+fn sample_rate_from_index(freq_index: u8) -> Result<u32> {
 	const SAMPLE_RATES: [u32; 13] = [
 		96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
 	];
-
-	if freq_index == 15 {
-		if buf.remaining() < 3 {
-			return Err(Error::ExplicitSampleRateTooShort);
-		}
-		let rate_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8()];
-		return Ok(((rate_bytes[0] as u32) << 16) | ((rate_bytes[1] as u32) << 8) | (rate_bytes[2] as u32));
-	}
 
 	SAMPLE_RATES
 		.get(freq_index as usize)
@@ -233,11 +205,19 @@ mod tests {
 		assert_eq!(cfg.channel_count, 2);
 	}
 
-	// TODO: a round-trip test for the explicit-frequency (freq_index=0xF) form
-	// fails today because the parser reads `channel_config` from byte 1 even
-	// though ISO 14496-3 §1.6.2.1 puts it *after* the 24-bit explicit sample
-	// rate. The encoder follows the spec, the parser doesn't. Fixing requires
-	// a bit-level reader; deferred to a separate PR.
+	#[test]
+	fn round_trip_explicit_sample_rate() {
+		let cfg = Config {
+			profile: 2,
+			sample_rate: 44_123,
+			channel_count: 2,
+		};
+		let encoded = cfg.encode();
+		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
+		assert_eq!(parsed.profile, cfg.profile);
+		assert_eq!(parsed.sample_rate, cfg.sample_rate);
+		assert_eq!(parsed.channel_count, cfg.channel_count);
+	}
 
 	#[test]
 	fn round_trip_5_1_channels() {

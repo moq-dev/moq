@@ -138,6 +138,9 @@ impl Split {
 				self.maybe_start_frame(pts)?;
 			}
 			Some(Avc3NalType::IdrSlice) => {
+				if nal.get(1).ok_or(Error::NalTooShort)? & 0x80 != 0 {
+					self.maybe_start_frame(pts)?;
+				}
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
 				crate::codec::annexb::reconcile_keyframe_params(
@@ -329,6 +332,29 @@ mod tests {
 		let tail = split.flush(ts()).unwrap();
 		assert_eq!(tail.len(), 1);
 		assert!(!tail[0].keyframe);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn bare_keyframe_after_delta_starts_new_frame() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let aud: &[u8] = &[0x09, 0x10];
+
+		let mut split = Split::new();
+		let _ = decode_one(&mut split, &mut annexb(&[sps, pps, idr]), ts());
+
+		let frames = split.decode(&annexb(&[pslice, idr, aud]), ts()).unwrap();
+		assert_eq!(frames.len(), 1);
+		assert!(!frames[0].keyframe);
+		assert!(frames[0].payload.windows(pslice.len()).any(|w| w == pslice));
+		assert!(!frames[0].payload.windows(idr.len()).any(|w| w == idr));
+
+		let tail = split.flush(ts()).unwrap();
+		assert_eq!(tail.len(), 1);
+		assert!(tail[0].keyframe);
+		assert!(tail[0].payload.windows(idr.len()).any(|w| w == idr));
 	}
 
 	/// A source that defines two PPS once, then sends a bare IDR (no inline

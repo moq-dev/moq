@@ -63,6 +63,8 @@ pub struct Target<S: Stream> {
 	last_epoch: u64,
 	/// True once `inner` has handed us a snapshot we haven't emitted yet.
 	fresh_input: bool,
+	/// True once `inner` ended. The final transformed snapshot is emitted once.
+	inner_eof: bool,
 }
 
 impl<S: Stream> Target<S> {
@@ -76,6 +78,7 @@ impl<S: Stream> Target<S> {
 			last_input: None,
 			last_epoch: 0,
 			fresh_input: false,
+			inner_eof: false,
 		}
 	}
 
@@ -105,6 +108,10 @@ impl<S: Stream> Stream for Target<S> {
 	type Ext = S::Ext;
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
+		if self.inner_eof && !self.fresh_input {
+			return Poll::Ready(Ok(None));
+		}
+
 		// Drain inner: the latest snapshot wins. `poll_next` registers the
 		// waiter on its own Pending branch.
 		let inner_eof = loop {
@@ -117,6 +124,7 @@ impl<S: Stream> Stream for Target<S> {
 				Poll::Pending => break false,
 			}
 		};
+		self.inner_eof |= inner_eof;
 
 		// Snapshot the fields the inner closure needs so it can borrow them
 		// without colliding with the `&self.state_consumer` receiver.
@@ -150,7 +158,7 @@ impl<S: Stream> Stream for Target<S> {
 				Poll::Ready(Ok(None))
 			}
 			Poll::Pending => {
-				if inner_eof && self.last_input.is_none() {
+				if self.inner_eof && self.last_input.is_none() {
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -389,6 +397,16 @@ mod test {
 
 	use super::*;
 
+	struct Once(Option<Catalog>);
+
+	impl Stream for Once {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
 	fn vid(name: &str, w: u32, h: u32, bitrate: u64) -> (String, VideoConfig) {
 		let mut config = VideoConfig::new(H264 {
 			profile: 0x42,
@@ -471,5 +489,27 @@ mod test {
 		};
 		// width allows all, bitrate allows only sd.
 		assert_eq!(select_video(&renditions, &target).as_deref(), Some("sd"));
+	}
+
+	#[test]
+	fn eof_after_final_snapshot() {
+		let mut catalog = Catalog::default();
+		catalog.video.renditions = map(vec![vid("sd", 640, 360, 500_000), vid("hd", 1280, 720, 2_500_000)]);
+		let mut target = Target::new(Once(Some(catalog)));
+		target.set_video(TargetVideo {
+			width: Some(640),
+			..Default::default()
+		});
+
+		let first = match target.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected final snapshot, got {other:?}"),
+		};
+		assert_eq!(first.video.renditions.keys().collect::<Vec<_>>(), vec!["sd"]);
+
+		match target.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(None)) => {}
+			other => panic!("expected EOF, got {other:?}"),
+		}
 	}
 }

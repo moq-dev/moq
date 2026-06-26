@@ -151,6 +151,9 @@ impl Split {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
+				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
+					self.maybe_start_frame(pts)?;
+				}
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
 				crate::codec::annexb::reconcile_keyframe_params(
@@ -319,6 +322,26 @@ mod tests {
 		assert!(contains(&frames[0].payload, VPS));
 		assert!(contains(&frames[0].payload, SPS));
 		assert!(contains(&frames[0].payload, PPS));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn bare_keyframe_after_delta_starts_new_frame() {
+		const DELTA: &[u8] = &[0x02, 0x01, 0x80, 0xbb]; // type 1 (TrailR)
+		const AUD: &[u8] = &[0x46, 0x01]; // type 35 (AudNut)
+
+		let mut split = Split::new();
+		let _ = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, IDR]), ts());
+
+		let frames = split.decode(&annexb(&[DELTA, IDR, AUD]), ts()).unwrap();
+		assert_eq!(frames.len(), 1);
+		assert!(!frames[0].keyframe);
+		assert!(contains(&frames[0].payload, DELTA));
+		assert!(!contains(&frames[0].payload, IDR));
+
+		let tail = split.flush(ts()).unwrap();
+		assert_eq!(tail.len(), 1);
+		assert!(tail[0].keyframe);
+		assert!(contains(&tail[0].payload, IDR));
 	}
 
 	/// A source that defines two PPS (and is otherwise normal) once, then sends a

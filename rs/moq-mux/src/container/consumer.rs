@@ -225,7 +225,10 @@ impl<F: Container> Consumer<F> {
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => break,
 					Poll::Ready(Err(e)) => {
-						// The group was dropped/aborted -- typically it aged out of the relay
+						if !is_group_eviction(&e) {
+							return Poll::Ready(Err(e));
+						}
+						// The group was dropped/aborted, typically it aged out of the relay
 						// cache (`Error::Old`) while we weren't reading it. Any sequences
 						// between it and the next buffered group were evicted alongside it, so
 						// jump straight to that group instead of stepping one-by-one and then
@@ -472,6 +475,21 @@ impl<F: Container> Consumer<F> {
 	pub async fn closed(&self) -> Result<(), F::Error> {
 		Ok(self.track.closed().await?)
 	}
+}
+
+fn is_group_eviction(err: &dyn std::error::Error) -> bool {
+	let mut current = Some(err);
+	while let Some(err) = current {
+		let message = err.to_string();
+		if matches!(
+			message.as_str(),
+			"old" | "moq: old" | "cache full" | "moq: cache full" | "remote error: code=2"
+		) {
+			return true;
+		}
+		current = err.source();
+	}
+	false
 }
 
 /// Internal reader for a group of frames.
@@ -772,6 +790,38 @@ mod tests {
 		assert_eq!(frames[2].timestamp, ts(66_000));
 
 		assert!(frames[0].keyframe);
+	}
+
+	#[tokio::test]
+	async fn malformed_current_group_payload_errors() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
+		Container::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+
+		let first = consumer.read().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(0));
+
+		group0.write_frame(Bytes::new()).unwrap();
+		write_group(&mut track, 1, &[ts(33_000)]);
+
+		let err = tokio::time::timeout(Duration::from_secs(1), consumer.read())
+			.await
+			.expect("consumer hung on malformed payload")
+			.expect_err("malformed payload must propagate");
+		assert!(!is_group_eviction(&err));
 	}
 
 	#[tokio::test]

@@ -319,11 +319,17 @@ pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u3
 
 	let entries: Vec<_> = frames
 		.iter()
-		.map(|f| {
+		.enumerate()
+		.map(|(i, f)| {
 			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
 			// Write the sample-duration back at the track's scale when we know it, so
-			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
-			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
+			// fMP4 -> fMP4 round-trips it. For non-last samples, infer the decode
+			// duration from the next timestamp so duration-less multi-sample fragments
+			// still advance DTS.
+			let duration = f
+				.duration
+				.or_else(|| infer_duration(frames, i))
+				.map(|d| d.as_scale(timescale) as u32);
 			mp4_atom::TrunEntry {
 				size: Some(f.payload.len() as u32),
 				flags: Some(flags),
@@ -366,6 +372,15 @@ pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u3
 	mdat.encode(&mut buf)?;
 
 	Ok(Bytes::from(buf))
+}
+
+fn infer_duration(frames: &[Frame], index: usize) -> Option<Timestamp> {
+	if let Some(next) = frames.get(index + 1) {
+		return next.timestamp.checked_sub(frames[index].timestamp).ok();
+	}
+
+	let previous = index.checked_sub(1).and_then(|i| frames.get(i))?;
+	frames[index].timestamp.checked_sub(previous.timestamp).ok()
 }
 
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
@@ -675,5 +690,33 @@ mod tests {
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, None);
+	}
+
+	#[test]
+	fn encode_infers_duration_for_multi_sample_fragment() {
+		let timescale = 1_000_000;
+		let input = vec![
+			Frame {
+				timestamp: ts(0),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: true,
+				duration: None,
+			},
+			Frame {
+				timestamp: ts(33_333),
+				payload: Bytes::from_static(&[0xBE, 0xEF]),
+				keyframe: false,
+				duration: None,
+			},
+		];
+
+		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let frames = decode(fragment, timescale).unwrap();
+
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[0].duration, Some(ts(33_333)));
+		assert_eq!(frames[1].timestamp, ts(33_333));
+		assert_eq!(frames[1].duration, Some(ts(33_333)));
 	}
 }

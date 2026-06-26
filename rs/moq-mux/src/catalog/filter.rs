@@ -58,6 +58,8 @@ pub struct Filter<S: Stream> {
 	last_epoch: u64,
 	/// True once `inner` has handed us a snapshot we haven't emitted yet.
 	fresh_input: bool,
+	/// True once `inner` ended. The final transformed snapshot is emitted once.
+	inner_eof: bool,
 }
 
 impl<S: Stream> Filter<S> {
@@ -71,6 +73,7 @@ impl<S: Stream> Filter<S> {
 			last_input: None,
 			last_epoch: 0,
 			fresh_input: false,
+			inner_eof: false,
 		}
 	}
 
@@ -100,6 +103,10 @@ impl<S: Stream> Stream for Filter<S> {
 	type Ext = S::Ext;
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
+		if self.inner_eof && !self.fresh_input {
+			return Poll::Ready(Ok(None));
+		}
+
 		let inner_eof = loop {
 			match self.inner.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
@@ -110,6 +117,7 @@ impl<S: Stream> Stream for Filter<S> {
 				Poll::Pending => break false,
 			}
 		};
+		self.inner_eof |= inner_eof;
 
 		let last_epoch = self.last_epoch;
 		let fresh_input = self.fresh_input;
@@ -135,7 +143,7 @@ impl<S: Stream> Stream for Filter<S> {
 			}
 			Poll::Ready(Err(_)) => Poll::Ready(Ok(None)),
 			Poll::Pending => {
-				if inner_eof && self.last_input.is_none() {
+				if self.inner_eof && self.last_input.is_none() {
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -200,6 +208,19 @@ mod test {
 
 		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
+	struct OncePending(Option<Catalog>);
+
+	impl Stream for OncePending {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			match self.0.take() {
+				Some(catalog) => Poll::Ready(Ok(Some(catalog))),
+				None => Poll::Pending,
+			}
 		}
 	}
 
@@ -295,7 +316,7 @@ mod test {
 	#[test]
 	fn set_video_after_snapshot_reemits() {
 		let snapshot = catalog_with(vec![h264("lo"), h264("hi")], vec![]);
-		let mut f = Filter::new(Once(Some(snapshot)));
+		let mut f = Filter::new(OncePending(Some(snapshot)));
 
 		let first = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
@@ -313,5 +334,22 @@ mod test {
 			other => panic!("expected re-emit, got {other:?}"),
 		};
 		assert_eq!(again.video.renditions.keys().collect::<Vec<_>>(), vec!["hi"]);
+	}
+
+	#[test]
+	fn eof_after_final_snapshot() {
+		let snapshot = catalog_with(vec![h264("lo"), h264("hi")], vec![]);
+		let mut f = Filter::new(Once(Some(snapshot)));
+
+		let first = match f.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected final snapshot, got {other:?}"),
+		};
+		assert_eq!(first.video.renditions.len(), 2);
+
+		match f.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(None)) => {}
+			other => panic!("expected EOF, got {other:?}"),
+		}
 	}
 }
