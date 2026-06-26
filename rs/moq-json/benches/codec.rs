@@ -1,24 +1,25 @@
-//! CPU benchmarks for `moq-json`.
+//! CPU benchmarks for the raw codec operations behind `moq-json`, with no Producer/Consumer or
+//! moq-net framing in the loop. Each measures one step of the per-delta pipeline:
 //!
-//! Compares the real serializer-backed merge-patch Producer/Consumer against a DEFLATE-only baseline
-//! (full snapshot through one shared window every tick), plus a DEFLATE level sweep. The merge path
-//! runs through the public `Producer`/`Consumer`, so it benchmarks the actual diffing serializer.
+//! 1. `encode_patch`  - generate a merge patch from the old value and the new one ([`diff`]).
+//! 2. `decode_patch`  - apply a merge patch to reconstruct the new value (`json_patch::merge`), with
+//!    a consuming variant (`merge_owned`) for comparison.
+//! 3. `deflate`       - compress a delta into a warm DEFLATE window.
+//! 4. `inflate`       - decompress a delta from a warm DEFLATE window.
+//! 5. `producer`      - the full producer step: encode patch, serialize, deflate.
+//! 6. `consumer`      - the full consumer step: inflate, parse, merge.
 //!
 //! Run with `cargo bench -p moq-json`.
 
 use std::hint::black_box;
-use std::task::Poll;
 
-use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_flate::{Decoder, Encoder};
-use moq_json::{ConsumerConfig, Producer, ProducerConfig};
-use serde_json::{Value, json};
-
-const TICKS: u64 = 60;
+use moq_json::diff;
+use serde_json::{Map, Value, json};
 
 /// One second of telemetry: a big static core plus a few moving numbers. Most fields change a little
-/// each tick, so deltas stay small but the document is mostly fresh.
+/// each tick, so the delta is small but touches much of the document.
 fn telemetry(tick: u64) -> Value {
 	let t = tick as f64;
 	let lat = 37.7749 + (t * 0.0001).sin() * 0.01;
@@ -80,7 +81,7 @@ fn telemetry(tick: u64) -> Value {
 }
 
 /// A large mostly-static document: a big config blob that never changes plus a few counters that
-/// tick. This is the shape where a tiny merge patch most beats re-feeding the whole snapshot.
+/// tick. The delta is tiny relative to the document.
 fn big_static(tick: u64) -> Value {
 	let routes: Vec<Value> = (0..80)
 		.map(|i| {
@@ -107,167 +108,207 @@ fn big_static(tick: u64) -> Value {
 	})
 }
 
-/// Generous ratio + compression: every tick after the first lands as a compressed delta in one group.
-fn merge_cfg() -> ProducerConfig {
-	let mut config = ProducerConfig::default();
-	config.delta_ratio = 1_000_000;
-	config.compression = true;
-	config
-}
-
-/// Total uncompressed JSON bytes across the stream, used as the benchmark throughput.
-fn raw_bytes(frames: &[Value]) -> u64 {
-	frames.iter().map(|f| serde_json::to_vec(f).unwrap().len() as u64).sum()
-}
-
-/// Drive the real merge Producer over the whole stream (serializer + DEFLATE + moq-net framing).
-fn run_merge_producer(frames: &[Value]) -> usize {
-	let track = moq_net::Track::new("bench").produce();
-	let consumer = track.consume();
-	let mut producer = Producer::<Value>::new(track, merge_cfg());
-	for f in frames {
-		producer.update(f).unwrap();
+/// RFC 7396 merge that consumes the patch, moving values into the target instead of cloning them like
+/// `json_patch::merge` (which takes `&Value`). Used to test whether a consuming merge decodes faster.
+fn merge_owned(target: &mut Value, patch: Value) {
+	let Value::Object(patch) = patch else {
+		*target = patch;
+		return;
+	};
+	if !target.is_object() {
+		*target = Value::Object(Map::new());
 	}
-	producer.finish().unwrap();
-	collect_groups(consumer).iter().flatten().map(Vec::len).sum()
-}
-
-/// DEFLATE-only producer: feed the full snapshot through one shared window each tick.
-fn run_deflate_only_producer(frames: &[Value], level: u32) -> usize {
-	let mut enc = Encoder::with_level(level);
-	frames
-		.iter()
-		.map(|f| enc.frame(&serde_json::to_vec(f).unwrap()).len())
-		.sum()
-}
-
-/// Capture the real merge stream (grouped frames) so the consumer bench can replay it repeatedly.
-fn capture_merge(frames: &[Value]) -> Vec<Vec<Vec<u8>>> {
-	let track = moq_net::Track::new("bench").produce();
-	let consumer = track.consume();
-	let mut producer = Producer::<Value>::new(track, merge_cfg());
-	for f in frames {
-		producer.update(f).unwrap();
-	}
-	producer.finish().unwrap();
-	collect_groups(consumer)
-}
-
-/// Decode a captured merge stream through the real Consumer.
-fn run_merge_consumer(stream: &[Vec<Vec<u8>>]) -> Value {
-	let track = build_track(stream);
-	let mut cc = ConsumerConfig::default();
-	cc.compression = true;
-	let mut consumer = moq_json::Consumer::<Value>::new(track, cc);
-	let waiter = kio::Waiter::noop();
-	let mut last = Value::Null;
-	while let Poll::Ready(Ok(Some(v))) = consumer.poll_next(&waiter) {
-		last = v;
-	}
-	last
-}
-
-/// DEFLATE-only consumer: decode each frame and parse the full snapshot.
-fn run_deflate_only_consumer(stream: &[Vec<u8>]) -> Value {
-	let mut dec = Decoder::new();
-	let mut last = Value::Null;
-	for f in stream {
-		last = serde_json::from_slice(&dec.frame(f).unwrap()).unwrap();
-	}
-	last
-}
-
-fn deflate_only_stream(frames: &[Value], level: u32) -> Vec<Vec<u8>> {
-	let mut enc = Encoder::with_level(level);
-	frames
-		.iter()
-		.map(|f| enc.frame(&serde_json::to_vec(f).unwrap()).to_vec())
-		.collect()
-}
-
-/// Capture the stored frames preserving group boundaries (one inner Vec per group): each group is its
-/// own DEFLATE stream, so replaying them into a single group would decode against the wrong window.
-fn collect_groups(consumer: moq_net::TrackConsumer) -> Vec<Vec<Vec<u8>>> {
-	let waiter = kio::Waiter::noop();
-	let mut out = Vec::new();
-	let mut track = consumer;
-	while let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) {
-		let mut frames = Vec::new();
-		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			frames.push(frame.to_vec());
+	let map = target.as_object_mut().unwrap();
+	for (key, value) in patch {
+		if value.is_null() {
+			map.remove(&key);
+		} else {
+			merge_owned(map.entry(key).or_insert(Value::Null), value);
 		}
-		out.push(frames);
 	}
-	out
 }
 
-/// Replay captured groups onto a fresh track, one moq-net group per captured group.
-fn build_track(groups: &[Vec<Vec<u8>>]) -> moq_net::TrackConsumer {
-	let mut track = moq_net::Track::new("bench").produce();
-	let consumer = track.consume();
-	for frames in groups {
-		let mut group = track.append_group().unwrap();
-		for f in frames {
-			group.write_frame(Bytes::from(f.clone())).unwrap();
+/// One workload reduced to a single old -> new transition and the artifacts each op needs: the patch
+/// value, the serialized snapshot and patch, and the compressed snapshot/delta slices (the delta is
+/// compressed against a window already holding the snapshot, matching the real per-group stream).
+struct Fixture {
+	name: &'static str,
+	old: Value,
+	new: Value,
+	patch: Value,
+	snapshot_bytes: Vec<u8>,
+	patch_bytes: Vec<u8>,
+	snapshot_slice: Vec<u8>,
+	delta_slice: Vec<u8>,
+}
+
+impl Fixture {
+	fn new(name: &'static str, make: fn(u64) -> Value) -> Self {
+		let old = make(0);
+		let new = make(1);
+		let patch = diff(&old, &new).patch;
+		let snapshot_bytes = serde_json::to_vec(&old).unwrap();
+		let patch_bytes = serde_json::to_vec(&patch).unwrap();
+
+		let mut enc = Encoder::new();
+		let snapshot_slice = enc.frame(&snapshot_bytes).to_vec();
+		let delta_slice = enc.frame(&patch_bytes).to_vec();
+
+		Self {
+			name,
+			old,
+			new,
+			patch,
+			snapshot_bytes,
+			patch_bytes,
+			snapshot_slice,
+			delta_slice,
 		}
-		group.finish().unwrap();
 	}
-	track.finish().unwrap();
-	consumer
+
+	/// A DEFLATE encoder warmed with the snapshot, ready to compress the delta as the next frame.
+	fn warm_encoder(&self) -> Encoder {
+		let mut enc = Encoder::new();
+		enc.frame(&self.snapshot_bytes);
+		enc
+	}
+
+	/// A DEFLATE decoder warmed with the snapshot, ready to decompress the delta as the next frame.
+	fn warm_decoder(&self) -> Decoder {
+		let mut dec = Decoder::new();
+		dec.frame(&self.snapshot_slice).unwrap();
+		dec
+	}
 }
 
-/// The two workloads, each a full `TICKS`-long stream.
-fn workloads() -> Vec<(&'static str, Vec<Value>)> {
+fn fixtures() -> Vec<Fixture> {
 	vec![
-		("telemetry", (0..TICKS).map(telemetry).collect()),
-		("big_static", (0..TICKS).map(big_static).collect()),
+		Fixture::new("telemetry", telemetry),
+		Fixture::new("big_static", big_static),
 	]
 }
 
-/// Producer CPU: serializer-backed merge + DEFLATE vs a DEFLATE-only baseline.
+/// 1. Generate a merge patch from the old and new values.
+fn encode_patch(c: &mut Criterion) {
+	let mut group = c.benchmark_group("encode_patch");
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+			b.iter(|| black_box(diff(&f.old, &f.new)));
+		});
+	}
+	group.finish();
+}
+
+/// 2. Apply a merge patch to reconstruct the new value, json_patch (borrowing) vs consuming merge.
+fn decode_patch(c: &mut Criterion) {
+	let mut group = c.benchmark_group("decode_patch");
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::new("json_patch", f.name), f, |b, f| {
+			b.iter_batched(
+				|| f.old.clone(),
+				|mut current| {
+					json_patch::merge(&mut current, &f.patch);
+					black_box(current);
+				},
+				BatchSize::SmallInput,
+			);
+		});
+		group.bench_with_input(BenchmarkId::new("merge_owned", f.name), f, |b, f| {
+			b.iter_batched(
+				|| (f.old.clone(), f.patch.clone()),
+				|(mut current, patch)| {
+					merge_owned(&mut current, patch);
+					black_box(current);
+				},
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
+/// 3. Compress a delta into a warm DEFLATE window.
+fn deflate(c: &mut Criterion) {
+	let mut group = c.benchmark_group("deflate");
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.patch_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+			b.iter_batched(
+				|| f.warm_encoder(),
+				|mut enc| black_box(enc.frame(&f.patch_bytes)),
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
+/// 4. Decompress a delta from a warm DEFLATE window.
+fn inflate(c: &mut Criterion) {
+	let mut group = c.benchmark_group("inflate");
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.patch_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+			b.iter_batched(
+				|| f.warm_decoder(),
+				|mut dec| black_box(dec.frame(&f.delta_slice).unwrap()),
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
+/// 5. The full producer step: encode the patch, serialize it, and compress it into the window.
 fn producer(c: &mut Criterion) {
 	let mut group = c.benchmark_group("producer");
-	for (name, frames) in workloads() {
-		group.throughput(Throughput::Bytes(raw_bytes(&frames)));
-		group.bench_with_input(BenchmarkId::new("merge", name), &frames, |b, frames| {
-			b.iter(|| black_box(run_merge_producer(frames)));
-		});
-		group.bench_with_input(BenchmarkId::new("deflate_only", name), &frames, |b, frames| {
-			b.iter(|| black_box(run_deflate_only_producer(frames, 6)));
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+			b.iter_batched(
+				|| f.warm_encoder(),
+				|mut enc| {
+					let patch = diff(&f.old, &f.new).patch;
+					let bytes = serde_json::to_vec(&patch).unwrap();
+					black_box(enc.frame(&bytes));
+				},
+				BatchSize::SmallInput,
+			);
 		});
 	}
 	group.finish();
 }
 
-/// Consumer CPU: reconstructing from merge deltas vs parsing a full snapshot every frame.
+/// 6. The full consumer step: decompress the delta, parse it, and merge it into the current value.
 fn consumer(c: &mut Criterion) {
 	let mut group = c.benchmark_group("consumer");
-	for (name, frames) in workloads() {
-		group.throughput(Throughput::Bytes(raw_bytes(&frames)));
-		let merge = capture_merge(&frames);
-		group.bench_with_input(BenchmarkId::new("merge", name), &merge, |b, merge| {
-			b.iter(|| black_box(run_merge_consumer(merge)));
-		});
-		let deflate = deflate_only_stream(&frames, 6);
-		group.bench_with_input(BenchmarkId::new("deflate_only", name), &deflate, |b, deflate| {
-			b.iter(|| black_box(run_deflate_only_consumer(deflate)));
-		});
-	}
-	group.finish();
-}
-
-/// DEFLATE level sweep: the dominant CPU lever. Compresses the full telemetry snapshot at each level.
-fn deflate_level(c: &mut Criterion) {
-	let frames: Vec<Value> = (0..TICKS).map(telemetry).collect();
-	let mut group = c.benchmark_group("deflate_level");
-	group.throughput(Throughput::Bytes(raw_bytes(&frames)));
-	for level in [1u32, 3, 6, 9] {
-		group.bench_with_input(BenchmarkId::from_parameter(level), &level, |b, &level| {
-			b.iter(|| black_box(run_deflate_only_producer(&frames, level)));
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+			b.iter_batched(
+				|| (f.warm_decoder(), f.old.clone()),
+				|(mut dec, mut current)| {
+					let plain = dec.frame(&f.delta_slice).unwrap();
+					let patch: Value = serde_json::from_slice(&plain).unwrap();
+					json_patch::merge(&mut current, &patch);
+					black_box(current);
+				},
+				BatchSize::SmallInput,
+			);
 		});
 	}
 	group.finish();
 }
 
-criterion_group!(benches, producer, consumer, deflate_level);
+criterion_group!(
+	benches,
+	encode_patch,
+	decode_patch,
+	deflate,
+	inflate,
+	producer,
+	consumer
+);
 criterion_main!(benches);

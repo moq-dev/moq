@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::diff::{Diff, diff};
+pub use crate::diff::{Diff, diff};
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
 ///
