@@ -113,11 +113,11 @@ pub struct Track<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Track<E> {
-	/// Create an importer that publishes a single codec onto a reserved track.
+	/// Create an importer that publishes a single codec onto an existing track.
 	///
-	/// The caller reserves the track (by name) with
-	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
-	/// the importer accepts it here, which is where the track's timescale is set.
+	/// The caller mints the track (by name) with
+	/// [`BroadcastProducer::create_track`](moq_net::BroadcastProducer::create_track) (or
+	/// [`unique_track`](crate::import::unique_track)) and hands it here.
 	/// The catalog rendition is registered once the codec config is resolved.
 	pub fn new(
 		track: moq_net::TrackProducer,
@@ -327,12 +327,12 @@ pub struct TrackStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> TrackStream<E> {
-	/// Create an importer that publishes a single codec onto a reserved track.
+	/// Create an importer that publishes a single codec onto an existing track.
 	///
-	/// The caller reserves the track with
-	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
-	/// the importer accepts it here at the legacy microsecond timescale (where a
-	/// codec-specific timescale would be chosen).
+	/// The caller mints the track with
+	/// [`BroadcastProducer::create_track`](moq_net::BroadcastProducer::create_track) (or
+	/// [`unique_track`](crate::import::unique_track)) and hands it here; frames are stamped at
+	/// the legacy microsecond timescale.
 	pub fn new(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>, format: &str) -> Result<Self> {
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match format {

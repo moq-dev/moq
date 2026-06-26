@@ -119,8 +119,8 @@ pub(crate) struct Import<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track, registering the rendition in `catalog`. Mint the
-	/// track at the descriptor's suffix and the microsecond
-	/// [`hang::container::TIMESCALE`] (e.g. via [`crate::import::unique_track`]).
+	/// track at the descriptor's suffix (e.g. via [`crate::import::unique_track`]); frames are
+	/// stamped at the microsecond timescale.
 	pub fn new(
 		descriptor: &'static Descriptor,
 		track: moq_net::TrackProducer,
