@@ -52,6 +52,7 @@ impl codec::Bridge for Bridge {
 				timestamp: pts,
 				payload: frame.payload,
 				keyframe,
+				duration: None,
 			})
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("vp8 track write failed: {err}")))?;
 		Ok(())
