@@ -140,6 +140,9 @@ struct Fixture {
 	patch_bytes: Vec<u8>,
 	snapshot_slice: Vec<u8>,
 	delta_slice: Vec<u8>,
+	// The full new value compressed against a window already holding the old snapshot: what a
+	// snapshot-only stream (no merge patch) would send each tick, the fair baseline for the delta path.
+	new_slice: Vec<u8>,
 }
 
 impl Fixture {
@@ -149,10 +152,17 @@ impl Fixture {
 		let patch = diff(&old, &new).patch;
 		let snapshot_bytes = serde_json::to_vec(&old).unwrap();
 		let patch_bytes = serde_json::to_vec(&patch).unwrap();
+		let new_bytes = serde_json::to_vec(&new).unwrap();
 
+		// Snapshot then delta (the merge-patch stream).
 		let mut enc = Encoder::new();
 		let snapshot_slice = enc.frame(&snapshot_bytes).to_vec();
 		let delta_slice = enc.frame(&patch_bytes).to_vec();
+
+		// Snapshot then the full new snapshot again (the snapshot-only stream).
+		let mut enc = Encoder::new();
+		enc.frame(&snapshot_bytes);
+		let new_slice = enc.frame(&new_bytes).to_vec();
 
 		Self {
 			name,
@@ -163,6 +173,7 @@ impl Fixture {
 			patch_bytes,
 			snapshot_slice,
 			delta_slice,
+			new_slice,
 		}
 	}
 
@@ -261,12 +272,30 @@ fn inflate(c: &mut Criterion) {
 	group.finish();
 }
 
-/// 5. The full producer step: encode the patch, serialize it, and compress it into the window.
+/// The marshal each path pays per tick: a full `to_vec` of the document (snapshot-only) vs a `to_vec`
+/// of just the patch (delta). The diff already walks the whole document, so this is the extra cost
+/// the snapshot path carries that the delta path avoids.
+fn marshal(c: &mut Criterion) {
+	let mut group = c.benchmark_group("marshal");
+	for f in &fixtures() {
+		group.bench_with_input(BenchmarkId::new("full", f.name), f, |b, f| {
+			b.iter(|| black_box(serde_json::to_vec(&f.new).unwrap()));
+		});
+		group.bench_with_input(BenchmarkId::new("patch", f.name), f, |b, f| {
+			b.iter(|| black_box(serde_json::to_vec(&f.patch).unwrap()));
+		});
+	}
+	group.finish();
+}
+
+/// The full producer step, head to head: the delta path (diff + serialize patch + deflate) vs the
+/// snapshot-only path (serialize the whole document + deflate it), both into a warm window. The
+/// snapshot path is charged for the full marshal it pays every tick.
 fn producer(c: &mut Criterion) {
 	let mut group = c.benchmark_group("producer");
 	for f in &fixtures() {
 		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+		group.bench_with_input(BenchmarkId::new("merge", f.name), f, |b, f| {
 			b.iter_batched(
 				|| f.warm_encoder(),
 				|mut enc| {
@@ -277,16 +306,28 @@ fn producer(c: &mut Criterion) {
 				BatchSize::SmallInput,
 			);
 		});
+		group.bench_with_input(BenchmarkId::new("snapshot", f.name), f, |b, f| {
+			b.iter_batched(
+				|| f.warm_encoder(),
+				|mut enc| {
+					let bytes = serde_json::to_vec(&f.new).unwrap();
+					black_box(enc.frame(&bytes));
+				},
+				BatchSize::SmallInput,
+			);
+		});
 	}
 	group.finish();
 }
 
-/// 6. The full consumer step: decompress the delta, parse it, and merge it into the current value.
+/// The full consumer step, head to head: the delta path (inflate + parse patch + merge) vs the
+/// snapshot-only path (inflate + parse the whole document). The snapshot path re-parses the entire
+/// document every tick; the delta path parses only the patch.
 fn consumer(c: &mut Criterion) {
 	let mut group = c.benchmark_group("consumer");
 	for f in &fixtures() {
 		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(f.name), f, |b, f| {
+		group.bench_with_input(BenchmarkId::new("merge", f.name), f, |b, f| {
 			b.iter_batched(
 				|| (f.warm_decoder(), f.old.clone()),
 				|(mut dec, mut current)| {
@@ -294,6 +335,17 @@ fn consumer(c: &mut Criterion) {
 					let patch: Value = serde_json::from_slice(&plain).unwrap();
 					json_patch::merge(&mut current, &patch);
 					black_box(current);
+				},
+				BatchSize::SmallInput,
+			);
+		});
+		group.bench_with_input(BenchmarkId::new("snapshot", f.name), f, |b, f| {
+			b.iter_batched(
+				|| f.warm_decoder(),
+				|mut dec| {
+					let plain = dec.frame(&f.new_slice).unwrap();
+					let value: Value = serde_json::from_slice(&plain).unwrap();
+					black_box(value);
 				},
 				BatchSize::SmallInput,
 			);
@@ -308,6 +360,7 @@ criterion_group!(
 	decode_patch,
 	deflate,
 	inflate,
+	marshal,
 	producer,
 	consumer
 );
