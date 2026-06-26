@@ -150,7 +150,11 @@ impl<S: Stream> Stream for Target<S> {
 				Poll::Ready(Ok(None))
 			}
 			Poll::Pending => {
-				if inner_eof && self.last_input.is_none() {
+				// End with upstream: once `inner` is exhausted and there's nothing fresh
+				// to emit, finish. A still-pending snapshot makes the closure return
+				// Ready, so reaching Pending here means the final selected snapshot was
+				// already emitted (or there never was one).
+				if inner_eof {
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -385,9 +389,34 @@ fn best_audio(renditions: &BTreeMap<String, AudioConfig>) -> String {
 
 #[cfg(test)]
 mod test {
+	use std::collections::BTreeMap;
+
 	use hang::catalog::{Container, H264, VideoConfig};
 
 	use super::*;
+
+	/// A one-shot stream: yields its snapshot once, then EOF.
+	struct Once(Option<Catalog>);
+
+	impl Stream for Once {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
+	/// Once upstream ends and the final selected snapshot is emitted, the stream ends
+	/// rather than parking forever waiting for a post-EOF retarget.
+	#[test]
+	fn ends_after_upstream_eof() {
+		let mut catalog = Catalog::default();
+		catalog.video.renditions = BTreeMap::from_iter(vec![vid("only", 640, 360, 500_000)]);
+
+		let mut t = Target::new(Once(Some(catalog)));
+		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+	}
 
 	fn vid(name: &str, w: u32, h: u32, bitrate: u64) -> (String, VideoConfig) {
 		let mut config = VideoConfig::new(H264 {

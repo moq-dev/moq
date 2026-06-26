@@ -126,6 +126,9 @@ pub enum Error {
 
 	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
 	MissingAudioDescription(String),
+
+	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
+	MissingSampleDuration,
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -225,9 +228,15 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 	let default_size = traf.tfhd.default_sample_size;
 	let default_duration = traf.tfhd.default_sample_duration;
 
+	// DTS is reconstructed by accumulating each sample's duration. A non-final sample
+	// with no resolvable duration would leave every following sample stuck at the same
+	// DTS, silently collapsing their timestamps, so reject that fragment instead.
+	let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
+
 	let mut frames = Vec::new();
 	let mut offset = 0usize;
 	let mut dts = base_dts;
+	let mut sample_index = 0usize;
 
 	for trun in &traf.trun {
 		for entry in &trun.entries {
@@ -254,6 +263,14 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 			// Carry the sample-duration through at the track's scale when present, so
 			// the jitter buffer can use it and an exporter can write it back.
 			let sample_duration = entry.duration.or(default_duration);
+
+			// The last sample needs no duration (nothing follows it to time), but any
+			// earlier sample without one makes the rest of the fragment's DTS ambiguous.
+			let is_last = sample_index + 1 == total_samples;
+			if sample_duration.is_none() && !is_last {
+				return Err(Error::MissingSampleDuration);
+			}
+
 			let duration = sample_duration
 				.map(|d| Timestamp::from_scale(d as u64, timescale))
 				.transpose()?;
@@ -267,6 +284,7 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 
 			offset = end;
 			dts += sample_duration.unwrap_or(0) as u64;
+			sample_index += 1;
 		}
 	}
 

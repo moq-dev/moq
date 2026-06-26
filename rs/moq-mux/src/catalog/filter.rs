@@ -135,7 +135,11 @@ impl<S: Stream> Stream for Filter<S> {
 			}
 			Poll::Ready(Err(_)) => Poll::Ready(Ok(None)),
 			Poll::Pending => {
-				if inner_eof && self.last_input.is_none() {
+				// End with upstream: once `inner` is exhausted and there's nothing fresh
+				// to emit, finish. A still-pending snapshot makes the closure return
+				// Ready, so reaching Pending here means the final filtered snapshot was
+				// already emitted (or there never was one).
+				if inner_eof {
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -290,6 +294,17 @@ mod test {
 		};
 		assert_eq!(out.video.renditions.keys().collect::<Vec<_>>(), vec!["hi"]);
 		assert_eq!(out.audio.renditions.keys().collect::<Vec<_>>(), vec!["es"]);
+	}
+
+	#[test]
+	fn ends_after_upstream_eof() {
+		let snapshot = catalog_with(vec![h264("lo")], vec![]);
+		let mut f = Filter::new(Once(Some(snapshot)));
+
+		// First poll emits the filtered snapshot.
+		assert!(matches!(f.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))));
+		// Upstream is exhausted, so the stream ends rather than parking forever.
+		assert!(matches!(f.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
 	}
 
 	#[test]
