@@ -330,7 +330,7 @@ impl IngestClock {
 /// ([`Error::SessionClosed`]) is debug, a genuine failure is a warning. Keeps
 /// normal WebRTC churn out of the warning stream. `role` labels the path
 /// (e.g. `"whip server"`).
-pub(crate) fn log_session_end(role: &str, result: Result<()>) {
+pub(crate) fn log_session_end(role: &str, result: &Result<()>) {
 	match result {
 		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),

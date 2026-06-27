@@ -27,7 +27,9 @@ pub fn router(server: Server) -> Router {
 async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, body: Bytes) -> HttpResponse {
 	let (server, path) = (server.0, path.0);
 	match accept_offer(&server, &path, &headers, body).await {
-		Ok(Response { resource_id, answer }) => {
+		Ok(Response {
+			resource_id, answer, ..
+		}) => {
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
 			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
@@ -117,21 +119,33 @@ pub async fn accept(
 	// Register before spawning so a DELETE that races startup still finds the
 	// session; the task unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
+	let session_handle = crate::server::SessionHandle::new();
 	let task_server = server.clone();
 	let task_resource = resource_id.clone();
+	let task_session = session_handle.clone();
 	tokio::spawn(async move {
-		// Hold the mux registration for the session's lifetime (unregisters on exit).
-		let _registration = registration;
-		tokio::select! {
-			res = session.run() => session::log_session_end("whep server", res),
-			_ = cancel => tracing::debug!("whep session terminated by DELETE"),
-		}
+		let result = {
+			// Hold the mux registration for the session's lifetime (unregisters on exit).
+			let _registration = registration;
+			tokio::select! {
+				res = session.run() => {
+					session::log_session_end("whep server", &res);
+					res
+				}
+				_ = cancel => {
+					tracing::debug!("whep session terminated by DELETE");
+					Ok(())
+				}
+			}
+		};
 		task_server.unregister_session(&task_resource);
+		task_session.close(result);
 	});
 
 	Ok(Response {
 		resource_id,
 		answer: sdp::render_answer(&answer),
+		session: session_handle,
 	})
 }
 
