@@ -7,7 +7,7 @@
 use axum::{
 	Router,
 	body::Bytes,
-	extract::{Path, State},
+	extract::{OriginalUri, Path, State},
 	http::{HeaderMap, HeaderValue, StatusCode, header},
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
@@ -28,6 +28,7 @@ pub fn router(server: Server) -> Router {
 async fn handle(
 	State(server): State<Server>,
 	Path(path): Path<String>,
+	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> HttpResponse {
@@ -40,7 +41,7 @@ async fn handle(
 			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
-			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
+			if let Some(loc) = crate::server::session_location(&uri, &resource_id) {
 				response_headers.insert(header::LOCATION, loc);
 			}
 			tokio::spawn(async move {

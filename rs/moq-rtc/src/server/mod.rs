@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, Uri};
 use tokio::sync::{OnceCell, oneshot};
 
 use crate::{Error, Result};
@@ -120,6 +120,16 @@ fn normalize_session_result(result: Result<()>) -> Result<()> {
 		Ok(()) | Err(Error::SessionClosed) => Ok(()),
 		Err(err) => Err(err),
 	}
+}
+
+pub(crate) fn session_location(uri: &Uri, resource_id: &str) -> Option<HeaderValue> {
+	let base = uri.path().trim_end_matches('/');
+	let path = if base.is_empty() {
+		format!("/{resource_id}")
+	} else {
+		format!("{base}/{resource_id}")
+	};
+	HeaderValue::from_str(&path).ok()
 }
 
 /// Configuration shared by both `server publish` and `server subscribe`.
@@ -303,5 +313,12 @@ mod tests {
 	#[test]
 	fn peer_close_is_a_successful_session_result() {
 		assert!(normalize_session_result(Err(Error::SessionClosed)).is_ok());
+	}
+
+	#[test]
+	fn session_location_preserves_mount_path() {
+		let uri: Uri = "/whip/live/cam0?token=secret".parse().unwrap();
+		let location = session_location(&uri, "session-id").expect("header value");
+		assert_eq!(location, "/whip/live/cam0/session-id");
 	}
 }
