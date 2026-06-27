@@ -231,7 +231,7 @@ Client certificate presentation is **optional**: connections without a
 certificate fall through to the normal JWT path unchanged.
 
 ```toml
-[tls]
+[server.tls]
 cert = ["/etc/moq/server.pem"]
 key  = ["/etc/moq/server.key"]
 # One or more PEM files containing the CAs trusted to sign peer certificates.

@@ -70,7 +70,7 @@ Create a `relay.toml` configuration file:
 [server]
 bind = "[::]:4443"  # Listen on all interfaces, port 4443
 
-[tls]
+[server.tls]
 cert = "/path/to/cert.pem"  # TLS certificate
 key = "/path/to/key.pem"    # TLS private key
 
@@ -109,7 +109,7 @@ sudo certbot certonly --standalone -d relay.example.com
 Update `relay.toml`:
 
 ```toml
-[tls]
+[server.tls]
 cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
 key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
 ```

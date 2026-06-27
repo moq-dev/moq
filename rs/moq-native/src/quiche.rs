@@ -329,7 +329,7 @@ impl QuicheServer {
 			.collect();
 
 		let info = Arc::new(RwLock::new(crate::tls::Info {
-			#[cfg(any(feature = "noq", feature = "quinn"))]
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			certs: Vec::new(),
 			fingerprints,
 		}));
