@@ -28,15 +28,18 @@ async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, b
 	let (server, path) = (server.0, path.0);
 	match accept_offer(&server, &path, &headers, body).await {
 		Ok(response) => {
-			let resource_id = response.resource_id.clone();
-			let answer = response.answer.clone();
+			let Response {
+				resource_id,
+				answer,
+				session,
+			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
 			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
 				response_headers.insert(header::LOCATION, loc);
 			}
 			tokio::spawn(async move {
-				let _ = response.run().await;
+				let _ = session.run().await;
 			});
 			(StatusCode::CREATED, response_headers, answer).into_response()
 		}

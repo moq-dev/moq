@@ -85,15 +85,12 @@ struct AcceptedSession {
 
 impl AcceptedSession {
 	async fn run(mut self) -> Result<()> {
-		let Some(session) = self.session.take() else {
-			return Ok(());
-		};
-		let Some(registration) = self.registration.take() else {
-			return Ok(());
-		};
-		let Some(cancel) = self.cancel.take() else {
-			return Ok(());
-		};
+		let session = self.session.take().expect("accepted session missing driver");
+		let registration = self
+			.registration
+			.take()
+			.expect("accepted session missing mux registration");
+		let cancel = self.cancel.take().expect("accepted session missing cancel receiver");
 
 		let result = {
 			let _registration = registration;
