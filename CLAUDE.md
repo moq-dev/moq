@@ -98,7 +98,7 @@ The rename/removal rationale lives in the commit message and PR description, not
 
 ## AI Attribution
 
-LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with `(Written by Claude)` or similar. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.
+LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with the agent model, e.g. `(Written by GPT-5)`. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.
 
 ## Refactor As You Go
 
@@ -205,4 +205,4 @@ Update them with `gh pr edit <num> --title "..." --body "..."` whenever the scop
 - Bullet points in the "Summary" section that describe behavior the latest commits have changed or removed.
 - The test-plan checklist getting out of date as new tests are added.
 
-When you edit a PR description you authored, keep the `(Written by Claude)` marker so reviewers still know the body wasn't human-authored.
+When you edit a PR description you authored, keep the agent model marker so reviewers still know the body wasn't human-authored.
