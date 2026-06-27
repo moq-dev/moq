@@ -27,14 +27,17 @@ pub fn router(server: Server) -> Router {
 async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, body: Bytes) -> HttpResponse {
 	let (server, path) = (server.0, path.0);
 	match accept_offer(&server, &path, &headers, body).await {
-		Ok(Response {
-			resource_id, answer, ..
-		}) => {
+		Ok(response) => {
+			let resource_id = response.resource_id.clone();
+			let answer = response.answer.clone();
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
 			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
 				response_headers.insert(header::LOCATION, loc);
 			}
+			tokio::spawn(async move {
+				let _ = response.run().await;
+			});
 			(StatusCode::CREATED, response_headers, answer).into_response()
 		}
 		Err(err) => {
@@ -65,9 +68,10 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// enforced by moq-net exactly as for a native session; the bundled [`router`]
 /// passes the server's own (unauthenticated) consumer. It parses the offer,
 /// resolves the broadcast on `subscriber`, restricts the answer to the codecs the
-/// catalog actually has, registers a media session on the shared mux, spawns the
-/// MoQ->RTP session, and returns the SDP answer plus an opaque `resource_id` for
-/// the WHEP `Location` header. Mirrors [`whip::accept`](super::whip::accept).
+/// catalog actually has, registers a media session on the shared mux, and
+/// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
+/// header. The caller must run the returned [`Response`] to drive the MoQ->RTP
+/// session. Mirrors [`whip::accept`](super::whip::accept).
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
@@ -116,37 +120,19 @@ pub async fn accept(
 	let resource_id = sdp::new_resource_id();
 	let session = session::Session::egress(rtc, mux.socket(), mux.candidates().to_vec(), inbound, source);
 
-	// Register before spawning so a DELETE that races startup still finds the
-	// session; the task unregisters itself when it ends.
+	// Register before returning so a DELETE that races startup still finds the
+	// session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	let session_handle = crate::server::SessionHandle::new();
-	let task_server = server.clone();
-	let task_resource = resource_id.clone();
-	let task_session = session_handle.clone();
-	tokio::spawn(async move {
-		let result = {
-			// Hold the mux registration for the session's lifetime (unregisters on exit).
-			let _registration = registration;
-			tokio::select! {
-				res = session.run() => {
-					session::log_session_end("whep server", &res);
-					res
-				}
-				_ = cancel => {
-					tracing::debug!("whep session terminated by DELETE");
-					Ok(())
-				}
-			}
-		};
-		task_server.unregister_session(&task_resource);
-		task_session.close(result);
-	});
 
-	Ok(Response {
+	Ok(Response::new(
+		server.clone(),
 		resource_id,
-		answer: sdp::render_answer(&answer),
-		session: session_handle,
-	})
+		sdp::render_answer(&answer),
+		session,
+		registration,
+		cancel,
+		"whep server",
+	))
 }
 
 fn is_sdp(headers: &HeaderMap) -> bool {

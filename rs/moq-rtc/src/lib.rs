@@ -30,7 +30,8 @@
 //! the request path. To own the HTTP route and authorize requests yourself
 //! (resolving the broadcast name from a verified token), skip the routers and
 //! call [`whip::accept`] (ingest) / [`whep::accept`] (egress) from your own
-//! handler.
+//! handler. Return the [`Response::answer`] in your HTTP response, then run
+//! [`Response::run`] to drive the media session for its lifetime.
 //!
 //! ## Bitstream gotcha
 //!

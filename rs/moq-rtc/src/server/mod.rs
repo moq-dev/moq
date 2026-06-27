@@ -18,85 +18,110 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use tokio::sync::{Notify, OnceCell, oneshot};
+use tokio::sync::{OnceCell, oneshot};
 
 use crate::{Error, Result};
 use mux::Mux;
 
 /// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
 /// to return to the client, plus an opaque resource id for the `Location` header
-/// (the RFC 9725 session resource URL), and a handle that resolves when the
-/// media session ends.
-#[derive(Clone, Debug)]
+/// (the RFC 9725 session resource URL).
 pub struct Response {
 	/// Opaque id identifying the negotiated session, for the `Location` header.
 	pub resource_id: String,
 	/// The SDP answer body (`Content-Type: application/sdp`).
 	pub answer: String,
-	/// Completion handle for the negotiated media session.
-	pub session: SessionHandle,
+	session: AcceptedSession,
 }
 
-/// Cloneable handle used to await a negotiated WHIP/WHEP session ending.
-#[derive(Clone, Debug)]
-pub struct SessionHandle {
-	inner: Arc<SessionState>,
-}
-
-#[derive(Debug, Default)]
-struct SessionState {
-	result: Mutex<Option<SessionResult>>,
-	notify: Notify,
-}
-
-/// Terminal result for a negotiated WHIP/WHEP session.
-pub type SessionResult = std::result::Result<(), Arc<Error>>;
-
-impl SessionHandle {
-	/// Returns a new open session handle.
-	pub fn new() -> Self {
+impl Response {
+	/// Build a negotiated session response.
+	pub(crate) fn new(
+		server: Server,
+		resource_id: String,
+		answer: String,
+		session: crate::session::Session,
+		registration: mux::Registration,
+		cancel: oneshot::Receiver<()>,
+		role: &'static str,
+	) -> Self {
 		Self {
-			inner: Arc::new(SessionState::default()),
+			resource_id: resource_id.clone(),
+			answer,
+			session: AcceptedSession {
+				server,
+				resource_id,
+				session: Some(session),
+				registration: Some(registration),
+				cancel: Some(cancel),
+				role,
+			},
 		}
 	}
 
-	/// Wait until the negotiated media session ends.
-	pub async fn closed(&self) -> SessionResult {
-		loop {
-			let notified = self.inner.notify.notified();
-			if let Some(result) = self.result() {
-				return result;
-			}
-			notified.await;
-		}
-	}
-
-	/// Return the terminal result if the session has already ended.
-	pub fn result(&self) -> Option<SessionResult> {
-		self.inner.result.lock().unwrap().clone()
-	}
-
-	/// Returns true once the session has ended.
-	pub fn is_closed(&self) -> bool {
-		self.result().is_some()
-	}
-
-	pub(crate) fn close(&self, result: Result<()>) {
-		let result = match result {
-			Ok(()) | Err(Error::SessionClosed) => Ok(()),
-			Err(err) => Err(Arc::new(err)),
-		};
-		let mut state = self.inner.result.lock().unwrap();
-		if state.is_none() {
-			*state = Some(result);
-			self.inner.notify.notify_waiters();
-		}
+	/// Run the negotiated media session until the peer disconnects, DELETE terminates it, or it errors.
+	pub async fn run(self) -> Result<()> {
+		self.session.run().await
 	}
 }
 
-impl Default for SessionHandle {
-	fn default() -> Self {
-		Self::new()
+impl std::fmt::Debug for Response {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Response")
+			.field("resource_id", &self.resource_id)
+			.field("answer", &self.answer)
+			.finish_non_exhaustive()
+	}
+}
+
+struct AcceptedSession {
+	server: Server,
+	resource_id: String,
+	session: Option<crate::session::Session>,
+	registration: Option<mux::Registration>,
+	cancel: Option<oneshot::Receiver<()>>,
+	role: &'static str,
+}
+
+impl AcceptedSession {
+	async fn run(mut self) -> Result<()> {
+		let Some(session) = self.session.take() else {
+			return Ok(());
+		};
+		let Some(registration) = self.registration.take() else {
+			return Ok(());
+		};
+		let Some(cancel) = self.cancel.take() else {
+			return Ok(());
+		};
+
+		let result = {
+			let _registration = registration;
+			tokio::select! {
+				res = session.run() => {
+					crate::session::log_session_end(self.role, &res);
+					res
+				}
+				_ = cancel => {
+					tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
+					Ok(())
+				}
+			}
+		};
+		normalize_session_result(result)
+	}
+}
+
+impl Drop for AcceptedSession {
+	fn drop(&mut self) {
+		self.server.unregister_session(&self.resource_id);
+	}
+}
+
+fn normalize_session_result(result: Result<()>) -> Result<()> {
+	match result {
+		Ok(()) | Err(Error::SessionClosed) => Ok(()),
+		Err(err) => Err(err),
 	}
 }
 
@@ -205,9 +230,9 @@ impl Server {
 		&self.inner.subscriber
 	}
 
-	/// Register a session under its resource id, returning the cancel receiver
-	/// the session task selects on. Called by [`whip::accept`] / [`whep::accept`]
-	/// before spawning the session.
+	/// Register a session under its resource id, returning the cancel receiver.
+	/// Called by [`whip::accept`] / [`whep::accept`] before returning the
+	/// negotiated session runner.
 	pub(crate) fn register_session(&self, resource_id: String) -> oneshot::Receiver<()> {
 		let (tx, rx) = oneshot::channel();
 		self.inner.sessions.lock().unwrap().insert(resource_id, tx);
@@ -278,25 +303,8 @@ mod tests {
 		assert!(!server.terminate(id), "unregistered session can't be terminated");
 	}
 
-	#[tokio::test]
-	async fn session_handle_reports_terminal_result() {
-		let session = SessionHandle::new();
-		assert!(!session.is_closed());
-		assert!(session.result().is_none());
-
-		let waiter = session.clone();
-		let task = tokio::spawn(async move { waiter.closed().await });
-
-		session.close(Ok(()));
-		assert!(session.is_closed());
-		assert!(session.result().expect("terminal result").is_ok());
-		assert!(task.await.expect("waiter task").is_ok());
-	}
-
 	#[test]
-	fn session_handle_treats_peer_close_as_success() {
-		let session = SessionHandle::new();
-		session.close(Err(Error::SessionClosed));
-		assert!(session.result().expect("terminal result").is_ok());
+	fn peer_close_is_a_successful_session_result() {
+		assert!(normalize_session_result(Err(Error::SessionClosed)).is_ok());
 	}
 }
