@@ -266,6 +266,15 @@ fn build_https_config(
 	key: &[PathBuf],
 	root: &[PathBuf],
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+	anyhow::ensure!(
+		!cert.is_empty(),
+		"web.https.cert must include at least one certificate when web.https.listen is configured"
+	);
+	anyhow::ensure!(
+		cert.len() == key.len(),
+		"web.https.cert and web.https.key must have the same number of entries"
+	);
+
 	let mut tls = moq_native::tls::Server::default();
 	tls.cert = cert.to_vec();
 	tls.key = key.to_vec();
@@ -778,6 +787,21 @@ mod tests {
 		let bogus = dir.path().join("does-not-exist.pem");
 		let res = build_https_config(&[cert_path], &[key_path], &[bogus]);
 		assert!(res.is_err(), "missing CA file should be a hard error");
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_empty_cert_list() {
+		let res = build_https_config(&[], &[], &[]);
+		assert!(res.is_err(), "HTTPS must require at least one cert/key pair");
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_mismatched_cert_key_lists() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_path, cert_path, _key_path) = make_certs(&dir);
+
+		let res = build_https_config(&[cert_path], &[], &[]);
+		assert!(res.is_err(), "HTTPS cert/key lists must be paired");
 	}
 
 	#[tokio::test]
