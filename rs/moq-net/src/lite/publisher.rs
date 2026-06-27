@@ -12,7 +12,7 @@ use crate::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	model::GroupConsumer,
+	model::{Group, GroupConsumer},
 };
 
 use super::Version;
@@ -552,6 +552,55 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Highest group sequence handed to a Group stream, reported in SUBSCRIBE_END (moq-lite-05+).
 		// The consumer was already positioned by `run_subscribe` from the resolved start group.
 		let mut last_sequence: Option<u64> = None;
+
+		// Deep replay: if the subscriber asked to resume from a group older than
+		// anything still in the in-RAM cache, serve the missing range from the
+		// publisher's group source (e.g. disk) before joining the live stream.
+		// The live `start_at` above already filters the cache to `start_group`,
+		// so the cache serves `[cache_floor..]` and this serves `[start..cache_floor)`.
+		if let Some(requested) = subscribe.start_group {
+			if let Some(source) = track.group_source() {
+				let mut next = match source.oldest() {
+					Some(oldest) => requested.max(oldest),
+					None => requested,
+				};
+				// Serve sequentially (one open uni-stream at a time, so the
+				// subscriber's flow control paces us). Re-read the cache floor
+				// each iteration: disk replay outruns the live rate, so `next`
+				// converges on the slowly-advancing eviction boundary, at which
+				// point the live loop below takes over without a gap.
+				while let Some(cache_floor) = track.oldest() {
+					if next >= cache_floor {
+						break;
+					}
+					if let Some(frames) = source.group(next) {
+						let mut producer = Group { sequence: next }.produce();
+						for frame in frames {
+							producer.write_frame(frame)?;
+						}
+						producer.finish()?;
+
+						let msg = lite::Group {
+							subscribe: subscribe.id,
+							sequence: next,
+						};
+						let current_priority = *track_priority.borrow_and_update();
+						let handle = priority.insert(Priority::new(current_priority, next));
+						Self::serve_group(
+							session.clone(),
+							msg,
+							handle,
+							producer.consume(),
+							track_stats.clone(),
+							track_priority.clone(),
+							version,
+						)
+						.await?;
+					}
+					next += 1;
+				}
+			}
+		}
 
 		loop {
 			let group = tokio::select! {

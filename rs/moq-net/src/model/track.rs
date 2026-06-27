@@ -26,6 +26,26 @@ use std::{
 // TODO: Replace with a configurable cache size.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 
+/// A fallback source of historical groups, consulted by the publisher when a
+/// subscriber requests a `start_group` older than anything still in the in-RAM
+/// track cache (see the lite publisher's `run_track`). This lets a publisher
+/// serve a replay window far deeper than memory allows — e.g. disk-backed —
+/// without holding every group in the cache.
+///
+/// Wrapped in an `Arc` and shared with the publisher's async task, so
+/// implementations must be `Send + Sync`. [`Self::group`] may block briefly on
+/// I/O; the publisher only calls it on the backfill path, never in the hot live
+/// loop.
+pub trait GroupSource: Send + Sync {
+	/// Return the frames of the group with this sequence in order, or `None` if
+	/// it is not stored (never produced, or already evicted from the deep store).
+	fn group(&self, sequence: u64) -> Option<Vec<bytes::Bytes>>;
+
+	/// The oldest sequence the source can still serve, or `None` if it is empty.
+	/// Used to clamp a subscriber's requested `start_group` to what's available.
+	fn oldest(&self) -> Option<u64>;
+}
+
 /// A track is a collection of groups, delivered out-of-order until expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -64,6 +84,10 @@ struct State {
 	/// `None` falls back to [`MAX_GROUP_AGE`]. Lets a publisher trade memory for
 	/// a deeper late-join / replay window.
 	max_group_age: Option<std::time::Duration>,
+	/// Optional fallback for groups older than the in-RAM cache. Lets the
+	/// publisher serve a deep (e.g. disk-backed) replay window without holding
+	/// it all in memory. `None` = serve only what's cached.
+	group_source: Option<std::sync::Arc<dyn GroupSource>>,
 }
 
 impl State {
@@ -236,6 +260,15 @@ impl TrackProducer {
 	/// max-sequence (latest) group is always retained regardless.
 	pub fn set_max_group_age(&mut self, age: std::time::Duration) -> Result<()> {
 		self.modify()?.max_group_age = Some(age);
+		Ok(())
+	}
+
+	/// Set a fallback [`GroupSource`] for groups older than the in-RAM cache.
+	/// The publisher consults it when a subscriber resumes from a `start_group`
+	/// that has already been evicted, serving the missing range before the live
+	/// stream — a replay window deeper than memory allows.
+	pub fn set_group_source(&mut self, source: std::sync::Arc<dyn GroupSource>) -> Result<()> {
+		self.modify()?.group_source = Some(source);
 		Ok(())
 	}
 
@@ -692,6 +725,24 @@ impl TrackConsumer {
 	/// Return the latest sequence number in the track.
 	pub fn latest(&self) -> Option<u64> {
 		self.state.read().max_sequence
+	}
+
+	/// Return the oldest sequence still live in the in-RAM cache, or `None` if
+	/// the cache is empty. This is the floor below which a resuming subscriber
+	/// must be served from the [`GroupSource`] instead of the cache.
+	pub fn oldest(&self) -> Option<u64> {
+		self.state
+			.read()
+			.groups
+			.iter()
+			.flatten()
+			.map(|(group, _)| group.sequence)
+			.min()
+	}
+
+	/// The fallback source of historical groups, if the producer set one.
+	pub fn group_source(&self) -> Option<std::sync::Arc<dyn GroupSource>> {
+		self.state.read().group_source.clone()
 	}
 
 	/// Create a weak reference that doesn't prevent auto-close.
@@ -1342,6 +1393,54 @@ mod test {
 				.is_none(),
 			"sequence at-or-after fin should not exist"
 		);
+	}
+
+	#[tokio::test]
+	async fn group_source_plumbing() {
+		// A trivial in-memory source for the plumbing test.
+		struct VecSource {
+			oldest: u64,
+			groups: std::collections::HashMap<u64, Vec<bytes::Bytes>>,
+		}
+		impl GroupSource for VecSource {
+			fn group(&self, sequence: u64) -> Option<Vec<bytes::Bytes>> {
+				self.groups.get(&sequence).cloned()
+			}
+			fn oldest(&self) -> Option<u64> {
+				Some(self.oldest)
+			}
+		}
+
+		let mut producer = Track::new("test").produce();
+		let consumer = producer.consume();
+
+		// No source by default.
+		assert!(consumer.group_source().is_none());
+
+		let mut groups = std::collections::HashMap::new();
+		groups.insert(7u64, vec![bytes::Bytes::from_static(b"seven")]);
+		let source = std::sync::Arc::new(VecSource { oldest: 7, groups });
+		producer.set_group_source(source).unwrap();
+
+		let src = consumer.group_source().expect("source should be set");
+		assert_eq!(src.oldest(), Some(7));
+		assert_eq!(src.group(7).unwrap()[0], bytes::Bytes::from_static(b"seven"));
+		assert!(src.group(8).is_none());
+	}
+
+	#[tokio::test]
+	async fn oldest_returns_min_live_sequence() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+		let consumer = producer.consume();
+		assert_eq!(consumer.oldest(), None, "empty cache has no floor");
+
+		// Out-of-order arrivals: oldest tracks the minimum live sequence.
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(Group { sequence: 4 }).unwrap();
+		assert_eq!(consumer.oldest(), Some(3));
 	}
 
 	#[test]
