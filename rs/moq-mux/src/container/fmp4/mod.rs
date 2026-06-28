@@ -262,7 +262,7 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 
 			// Carry the sample-duration through at the track's scale when present, so
 			// the jitter buffer can use it and an exporter can write it back.
-			let sample_duration = entry.duration.or(default_duration);
+			let sample_duration = entry.duration.or(default_duration).filter(|d| *d != 0);
 
 			// The last sample needs no duration (nothing follows it to time), but any
 			// earlier sample without one makes the rest of the fragment's DTS ambiguous.
@@ -692,6 +692,45 @@ mod tests {
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].duration, None);
+	}
+
+	#[test]
+	fn decode_zero_duration_reports_none() {
+		use mp4_atom::Encode;
+
+		let timescale = 24_000;
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: 1,
+					default_sample_duration: Some(0),
+					default_sample_size: Some(2),
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 2_000,
+				}),
+				trun: vec![mp4_atom::Trun {
+					data_offset: Some(0),
+					entries: vec![mp4_atom::TrunEntry {
+						size: None,
+						duration: None,
+						..Default::default()
+					}],
+				}],
+				..Default::default()
+			}],
+		};
+
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		mp4_atom::Mdat { data: vec![0xDE, 0xAD] }.encode(&mut buf).unwrap();
+
+		let frames = decode(Bytes::from(buf), timescale).unwrap();
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].timestamp.as_micros(), 83_333);
 		assert_eq!(frames[0].duration, None);
 	}
 }

@@ -443,6 +443,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let mut min_timestamp = None;
 			let mut max_timestamp = None;
 			let mut contains_keyframe = false;
+			let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
+			let mut sample_index = 0usize;
 
 			for trun in &traf.trun {
 				let tfhd = &traf.tfhd;
@@ -472,10 +474,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.unwrap_or(tfhd.default_sample_flags.unwrap_or(default_sample_flags));
 					let duration = entry
 						.duration
-						.unwrap_or(tfhd.default_sample_duration.unwrap_or(default_sample_duration));
+						.or(tfhd.default_sample_duration)
+						.or(Some(default_sample_duration))
+						.filter(|duration| *duration != 0);
 					let size = entry
 						.size
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
+
+					if duration.is_none() && sample_index + 1 != total_samples {
+						return Err(Error::MissingSampleDuration.into());
+					}
 
 					// Checked: a negative composition offset must not wrap into a huge u64 PTS.
 					let pts = dts
@@ -517,8 +525,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 					track.last_timestamp = Some(timestamp);
 
-					dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
+					if let Some(duration) = duration {
+						dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
+					}
 					offset = sample_end;
+					sample_index += 1;
 				}
 			}
 
@@ -555,9 +566,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// and ensuring trun.data_offset is Some(...) reserves 4 bytes per trun.
 			for traf_mut in &mut adjusted_moof.traf {
 				traf_mut.tfhd.base_data_offset = None;
+				if traf_mut.tfhd.default_sample_duration == Some(0) {
+					traf_mut.tfhd.default_sample_duration = None;
+				}
 				for trun_mut in &mut traf_mut.trun {
 					// Reserve the data_offset field; the real value is filled in below.
 					trun_mut.data_offset = Some(0);
+					for entry in &mut trun_mut.entries {
+						if entry.duration == Some(0) {
+							entry.duration = None;
+						}
+					}
 				}
 			}
 

@@ -167,47 +167,48 @@
         overlayPkgs = pkgs.extend self.overlays.default;
       in
       {
-        packages = (rec {
-          default = pkgs.symlinkJoin {
-            name = "moq-all";
-            paths = [
+        packages =
+          (rec {
+            default = pkgs.symlinkJoin {
+              name = "moq-all";
+              paths = [
+                moq-relay
+                moq-cli
+                moq-token-cli
+              ];
+            };
+
+            # Inherit packages from the overlay
+            inherit (overlayPkgs)
               moq-relay
               moq-cli
               moq-token-cli
-            ];
-          };
+              moq-boy
+              libmoq
+              moq-gst
+              ;
 
-          # Inherit packages from the overlay
-          inherit (overlayPkgs)
-            moq-relay
-            moq-cli
-            moq-token-cli
-            moq-boy
-            libmoq
-            moq-gst
-            ;
-
-          # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
-          # CI builds this and prepends its bin/ to $PATH so subsequent steps
-          # use the same versions a local `nix develop` user would.
-          packaging = pkgs.symlinkJoin {
-            name = "moq-packaging-tools";
-            paths = packagingDeps ++ publishDeps;
+            # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
+            # CI builds this and prepends its bin/ to $PATH so subsequent steps
+            # use the same versions a local `nix develop` user would.
+            packaging = pkgs.symlinkJoin {
+              name = "moq-packaging-tools";
+              paths = packagingDeps ++ publishDeps;
+            };
+          })
+          # x86_64-darwin release artifacts are cross-compiled from the
+          # aarch64-darwin runner (see nix/overlay.nix). The cross outputs only
+          # evaluate on an aarch64-darwin host, so gate them on the system to
+          # keep `nix flake check` working on Linux and Intel macs.
+          // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+            inherit (overlayPkgs)
+              moq-relay-x86_64-apple-darwin
+              moq-cli-x86_64-apple-darwin
+              moq-token-cli-x86_64-apple-darwin
+              libmoq-x86_64-apple-darwin
+              moq-gst-plugin-x86_64-apple-darwin
+              ;
           };
-        })
-        # x86_64-darwin release artifacts are cross-compiled from the
-        # aarch64-darwin runner (see nix/overlay.nix). The cross outputs only
-        # evaluate on an aarch64-darwin host, so gate them on the system to
-        # keep `nix flake check` working on Linux and Intel macs.
-        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
-          inherit (overlayPkgs)
-            moq-relay-x86_64-apple-darwin
-            moq-cli-x86_64-apple-darwin
-            moq-token-cli-x86_64-apple-darwin
-            libmoq-x86_64-apple-darwin
-            moq-gst-plugin-x86_64-apple-darwin
-            ;
-        };
 
         # Re-export gst_all_1 so users can pair the plugin with a matching
         # gstreamer in one nix invocation:
