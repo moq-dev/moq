@@ -187,7 +187,7 @@ Elementary streams the CLI does not decode (SCTE-35 cues, teletext, DVB
 subtitles, private data, ...) are carried verbatim too, one MoQ track per PID,
 described in the catalog `mpegts` section. They survive `publish ts | relay |
 subscribe --format ts` end-to-end with their original PIDs, PMT descriptors, and
-PES stream\_ids, so a contribution feed keeps its ancillary streams. The relay
+PES stream_ids, so a contribution feed keeps its ancillary streams. The relay
 forwards them transparently and never parses the payload.
 
 ### FLV

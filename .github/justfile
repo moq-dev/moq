@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 # Lint GitHub Actions workflows. Silently skipped if actionlint is not installed.
 check:

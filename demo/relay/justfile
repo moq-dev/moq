@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 # Run a localhost relay server without authentication.
 default:
@@ -7,7 +7,6 @@ default:
 # Run a cluster of relay servers.
 #
 # The relays grant anonymous access (see *.toml), so no JWT is needed locally.
-
 # Cluster peers still authenticate to each other via mTLS (the cert/ca recipes).
 cluster:
     bun install

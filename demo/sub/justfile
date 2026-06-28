@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 # Subscribe to a broadcast using GStreamer and render to the screen.
 gst name url='http://localhost:4443' *args:
