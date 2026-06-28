@@ -70,7 +70,7 @@ The simplest way to watch a stream:
 | `name`    | string                              | required | Broadcast name/path                      |
 | `paused`  | boolean                             | false    | Pause playback                           |
 | `muted`   | boolean                             | false    | Mute audio                               |
-| `visible` | `never` \| distance \| `always`     | `0px`    | When to download video (see below)       |
+| `visible` | never, distance, or always          | `0px`    | When to download video (see below)       |
 | `volume`  | number                              | 0.5      | Audio volume (0-1)                       |
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
