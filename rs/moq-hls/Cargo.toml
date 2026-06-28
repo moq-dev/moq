@@ -53,7 +53,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false, optional = true }
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
+tower-http = { version = "0.7", features = ["cors"], optional = true }
 tracing = "0.1"
 url = "2"
 
