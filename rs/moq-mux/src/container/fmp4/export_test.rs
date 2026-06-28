@@ -470,7 +470,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let consumer = producer.consume();
 
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
+	let mut importer = crate::container::fmp4::Import::new(producer, catalog, Default::default());
 	let buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&buf);
 

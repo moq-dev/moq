@@ -20,7 +20,11 @@ enum ContainerImpl<E: crate::container::ts::catalog::Catalog = ()> {
 
 impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
 	fn fmp4(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
-		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
+		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(
+			broadcast,
+			catalog,
+			Default::default(),
+		)))
 	}
 
 	fn mkv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {

@@ -80,7 +80,7 @@ impl Publish {
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone());
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone(), Default::default());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts => unreachable!("TS is handled above with the mpegts catalog extension"),

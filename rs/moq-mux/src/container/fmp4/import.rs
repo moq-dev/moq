@@ -1,11 +1,42 @@
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::Error;
 use crate::Result;
 use crate::container::Timestamp;
+
+/// Configuration for fMP4/CMAF import.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ImportConfig {
+	/// Which track roles to publish from the source.
+	pub tracks: TrackSelection,
+}
+
+/// Which fMP4 tracks should be imported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrackSelection {
+	/// Import every supported media track.
+	#[default]
+	All,
+	/// Import only video tracks.
+	Video,
+	/// Import only audio tracks.
+	Audio,
+}
+
+impl TrackSelection {
+	fn accepts(self, kind: TrackKind) -> bool {
+		match self {
+			TrackSelection::All => true,
+			TrackSelection::Video => kind == TrackKind::Video,
+			TrackSelection::Audio => kind == TrackKind::Audio,
+		}
+	}
+}
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -25,6 +56,8 @@ use crate::container::Timestamp;
 /// - AAC (MP4A)
 /// - Opus
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
+	config: ImportConfig,
+
 	/// The broadcast being produced
 	broadcast: moq_net::BroadcastProducer,
 
@@ -33,6 +66,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
+	skipped_tracks: HashSet<u32>,
 
 	// The moov atom at the start of the file.
 	moov: Option<Moov>,
@@ -46,7 +80,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	buffer: BytesMut,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum TrackKind {
 	Video,
 	Audio,
@@ -75,10 +109,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(
+		broadcast: moq_net::BroadcastProducer,
+		catalog: crate::catalog::Producer<E>,
+		config: ImportConfig,
+	) -> Self {
 		Self {
+			config,
 			catalog,
 			tracks: HashMap::default(),
+			skipped_tracks: HashSet::default(),
 			moov: None,
 			moof: None,
 			moof_size: 0,
@@ -156,30 +196,46 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
+			let kind = match handler.as_ref() {
+				b"vide" => TrackKind::Video,
+				b"soun" => TrackKind::Audio,
+				b"sbtl" if self.config.tracks == TrackSelection::All => return Err(Error::UnsupportedSubtitle.into()),
+				b"sbtl" => {
+					self.skipped_tracks.insert(track_id);
+					continue;
+				}
+				handler => {
+					if self.config.tracks != TrackSelection::All {
+						self.skipped_tracks.insert(track_id);
+						continue;
+					}
+					let mut buf = [0u8; 4];
+					buf[..handler.len().min(4)].copy_from_slice(&handler[..handler.len().min(4)]);
+					return Err(Error::UnknownTrackHandler(buf).into());
+				}
+			};
+
+			if !self.config.tracks.accepts(kind) {
+				self.skipped_tracks.insert(track_id);
+				continue;
+			}
+
 			// Declare the track at the fMP4's native timescale. Frame timestamps are
 			// emitted at this same scale (see below), so they satisfy the track's
 			// timescale invariant and ride the wire for the relay, redundant with the
 			// timing already inside each CMAF fragment.
 			let track = self.broadcast.unique_track(suffix)?;
 
-			let kind = match handler.as_ref() {
-				b"vide" => {
+			match kind {
+				TrackKind::Video => {
 					let config = self.init_video(trak, &moov)?;
 					catalog.video.renditions.insert(track.name().to_string(), config);
-					TrackKind::Video
 				}
-				b"soun" => {
+				TrackKind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
 					catalog.audio.renditions.insert(track.name().to_string(), config);
-					TrackKind::Audio
 				}
-				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
-				handler => {
-					let mut buf = [0u8; 4];
-					buf[..handler.len().min(4)].copy_from_slice(&handler[..handler.len().min(4)]);
-					return Err(Error::UnknownTrackHandler(buf).into());
-				}
-			};
+			}
 
 			self.tracks.insert(
 				track_id,
@@ -410,7 +466,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
-			let track = self.tracks.get_mut(&track_id).ok_or(Error::UnknownTrack(track_id))?;
+			let Some(track) = self.tracks.get_mut(&track_id) else {
+				if self.skipped_tracks.contains(&track_id) {
+					continue;
+				}
+				return Err(Error::UnknownTrack(track_id).into());
+			};
 
 			// Find the track information in the moov
 			let trak = moov

@@ -14,10 +14,14 @@ fn drain_group_sequences(consumer: &mut moq_net::TrackConsumer) -> Vec<u64> {
 }
 
 fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
+	run_fmp4_with_config(data, Default::default())
+}
+
+fn run_fmp4_with_config(data: &[u8], config: crate::container::fmp4::ImportConfig) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone(), config);
 
 	let buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
@@ -52,6 +56,34 @@ fn test_bbb_catalog() {
 	assert_eq!(audio.sample_rate, 44100);
 	assert_eq!(audio.channel_count, 2);
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
+}
+
+#[test]
+fn test_track_selection_video_only() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let catalog = run_fmp4_with_config(
+		data,
+		crate::container::fmp4::ImportConfig {
+			tracks: crate::container::fmp4::TrackSelection::Video,
+		},
+	);
+
+	assert_eq!(catalog.video.renditions.len(), 1);
+	assert_eq!(catalog.audio.renditions.len(), 0);
+}
+
+#[test]
+fn test_track_selection_audio_only() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let catalog = run_fmp4_with_config(
+		data,
+		crate::container::fmp4::ImportConfig {
+			tracks: crate::container::fmp4::TrackSelection::Audio,
+		},
+	);
+
+	assert_eq!(catalog.video.renditions.len(), 0);
+	assert_eq!(catalog.audio.renditions.len(), 1);
 }
 
 #[test]
@@ -149,7 +181,7 @@ async fn test_seek_sets_initial_sequence() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone(), Default::default());
 
 	let data = include_bytes!("test_data/bbb.mp4");
 
@@ -212,7 +244,7 @@ async fn test_msf_catalog_roundtrip() {
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog);
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog, Default::default());
 
 	let data = include_bytes!("test_data/bbb.mp4");
 	let buf = bytes::BytesMut::from(&data[..]);

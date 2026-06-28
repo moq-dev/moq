@@ -27,6 +27,7 @@ const CATALOG_RETRY: Duration = Duration::from_millis(250);
 
 /// Export tuning shared across renditions.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
 	/// LL-HLS part target duration (also the exporter's fragment cap).
 	pub part_target: Duration,

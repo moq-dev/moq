@@ -464,7 +464,7 @@ impl Import {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone());
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone(), Default::default());
 			self.video_importers.push(importer);
 		}
 
@@ -474,7 +474,7 @@ impl Import {
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone()))
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone(), Default::default()))
 	}
 
 	#[cfg(test)]
