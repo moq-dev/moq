@@ -15,7 +15,7 @@ export type CreateOptions<T extends HTMLElement> = {
 	id?: string;
 	dataset?: Record<string, string>;
 	attributes?: Record<string, string>;
-} & Partial<Omit<T, "style" | "dataset">>;
+} & Partial<Omit<T, "style" | "className" | "classList" | "id" | "dataset" | "attributes">>;
 
 /** Creates an HTML element, applying the given options and appending the given children. */
 export function create<K extends keyof HTMLElementTagNameMap>(

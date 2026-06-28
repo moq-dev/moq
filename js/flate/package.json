@@ -23,6 +23,6 @@
 		"@types/pako": "^2.0.4",
 		"fflate": "^0.8.2",
 		"rimraf": "^6.1.3",
-		"typescript": "^6.0.3"
+		"typescript": "7.0.1-rc"
 	}
 }
