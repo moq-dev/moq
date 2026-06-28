@@ -139,9 +139,9 @@ Publish (read from stdin unless noted):
 
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
+- `hls --playlist <url-or-path>` - HLS playlist ingest
 - `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
-- `hls --playlist <url>` - HLS playlist ingest
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
 Subscribe (`--format`):

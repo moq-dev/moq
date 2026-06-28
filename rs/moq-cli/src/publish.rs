@@ -6,10 +6,21 @@ use moq_mux::container::{flv, fmp4, ts};
 pub enum PublishFormat {
 	Avc3,
 	Fmp4,
+	/// HLS playlist import.
+	Hls {
+		/// Remote HLS playlist URL (http/https) or local file path.
+		#[arg(long)]
+		playlist: String,
+	},
 	/// MPEG-TS (transport stream) read from stdin.
 	Ts,
 	/// FLV (Flash Video / RTMP) read from stdin.
 	Flv,
+}
+
+enum PublishSource {
+	Stdin(PublishDecoder),
+	Hls(Box<moq_hls::import::Import>),
 }
 
 enum PublishDecoder {
@@ -48,7 +59,7 @@ impl PublishDecoder {
 }
 
 pub struct Publish {
-	source: PublishDecoder,
+	source: PublishSource,
 	broadcast: moq_net::BroadcastProducer,
 }
 
@@ -67,7 +78,7 @@ impl Publish {
 			)?;
 			let ts = ts::Import::new(broadcast.clone(), catalog);
 			return Ok(Self {
-				source: PublishDecoder::Ts(Box::new(ts)),
+				source: PublishSource::Stdin(PublishDecoder::Ts(Box::new(ts))),
 				broadcast,
 			});
 		}
@@ -83,6 +94,17 @@ impl Publish {
 				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
+			PublishFormat::Hls { playlist } => {
+				let hls = moq_hls::import::Import::new(
+					broadcast.clone(),
+					catalog.clone(),
+					moq_hls::import::Config::new(playlist.clone()),
+				)?;
+				return Ok(Self {
+					source: PublishSource::Hls(Box::new(hls)),
+					broadcast,
+				});
+			}
 			PublishFormat::Ts => unreachable!("TS is handled above with the mpegts catalog extension"),
 			PublishFormat::Flv => {
 				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
@@ -90,7 +112,10 @@ impl Publish {
 			}
 		};
 
-		Ok(Self { source, broadcast })
+		Ok(Self {
+			source: PublishSource::Stdin(source),
+			broadcast,
+		})
 	}
 
 	pub fn consume(&self) -> moq_net::BroadcastConsumer {
@@ -98,7 +123,15 @@ impl Publish {
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
-		let mut decoder = self.source;
+		let mut decoder = match self.source {
+			PublishSource::Stdin(decoder) => decoder,
+			PublishSource::Hls(mut hls) => {
+				hls.init().await?;
+				hls.run().await?;
+				return Ok(());
+			}
+		};
+
 		let mut stdin = tokio::io::stdin();
 		let mut buffer = bytes::BytesMut::new();
 

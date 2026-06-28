@@ -4101,6 +4101,7 @@ dependencies = [
  "clap",
  "hang",
  "humantime",
+ "moq-hls",
  "moq-mux",
  "moq-native",
  "rustls",

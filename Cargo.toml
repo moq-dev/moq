@@ -62,6 +62,7 @@ hang = { version = "0.19", path = "rs/hang" }
 kio = { version = "0.4", path = "rs/kio" }
 moq-audio = { version = "0.0.5", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.0", path = "rs/moq-flate" }
+moq-hls = { version = "0.0.1", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.1.0", path = "rs/moq-json" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }

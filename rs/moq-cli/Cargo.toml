@@ -27,6 +27,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 humantime = "2.3"
+moq-hls = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

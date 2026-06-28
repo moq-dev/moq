@@ -22,7 +22,7 @@ We most of the implement the [WebCodecs specification](https://www.w3.org/TR/web
 
 ## CMAF Import
 
-For importing fMP4/CMAF/HLS files, see the `moq-mux` crate.
+For importing fMP4/CMAF files, see the `moq-mux` crate. For HLS, see the `moq-hls` crate.
 
 ## Examples
 

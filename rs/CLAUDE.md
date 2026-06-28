@@ -24,7 +24,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 
 **Media bridge / codecs**
 
-- `moq-mux` (lib): the conversion layer. File/stream formats (`container/`: fmp4, flv, hls, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts. `Container` trait + generic `Producer<C>`/`Consumer<C>`. Dual catalog (`catalog::hang`, `catalog::msf`).
+- `moq-mux` (lib): the conversion layer. File/stream formats (`container/`: fmp4, flv, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts. `Container` trait + generic `Producer<C>`/`Consumer<C>`. Dual catalog (`catalog::hang`, `catalog::msf`).
 - `moq-audio` (lib): native PCM <-> Opus (`unsafe-libopus`). `AudioProducer`/`AudioConsumer`, `Encoder`/`Decoder`, `AudioFormat`. Optional `capture` feature (cpal microphone), `resample`.
 - `moq-video` (lib): native webcam capture + H.264 via `ffmpeg-next`. `capture::Config`, `encode::{Encoder, Producer, publish_capture}`. ffmpeg types kept out of the public signature (see `error/`).
 
