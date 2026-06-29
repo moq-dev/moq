@@ -1,7 +1,7 @@
 {
 	"name": "@moq/watch",
 	"type": "module",
-	"version": "0.2.17",
+	"version": "0.2.18",
 	"jsr": false,
 	"description": "Watch Media over QUIC broadcasts",
 	"license": "(MIT OR Apache-2.0)",
