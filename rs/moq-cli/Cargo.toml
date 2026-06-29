@@ -32,7 +32,7 @@ moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
 tracing = "0.1"
 url = "2"
 
