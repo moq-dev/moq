@@ -26,6 +26,18 @@ fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 	catalog.snapshot()
 }
 
+fn run_fmp4_select(data: &[u8], select: crate::select::Broadcast) -> crate::catalog::hang::Catalog {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone()).with_select(select);
+
+	let buf = bytes::BytesMut::from(data);
+	let _ = fmp4.decode(&buf);
+
+	catalog.snapshot()
+}
+
 fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 	let mut cursor = std::io::Cursor::new(init);
 	let ftyp = mp4_atom::Ftyp::decode(&mut cursor).expect("invalid ftyp");
@@ -52,6 +64,38 @@ fn test_bbb_catalog() {
 	assert_eq!(audio.sample_rate, 44100);
 	assert_eq!(audio.channel_count, 2);
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
+}
+
+#[test]
+fn select_video_only() {
+	use crate::select::{Broadcast, Video};
+
+	let data = include_bytes!("test_data/bbb.mp4");
+	let catalog = run_fmp4_select(data, Broadcast::default().video(Video::default()));
+
+	// The muxed audio track is dropped; only video is published.
+	assert_eq!(catalog.video.renditions.len(), 1);
+	assert!(catalog.audio.renditions.is_empty());
+}
+
+#[test]
+fn select_audio_only() {
+	use crate::select::{Audio, Broadcast};
+
+	let data = include_bytes!("test_data/bbb.mp4");
+	let catalog = run_fmp4_select(data, Broadcast::default().audio(Audio::default()));
+
+	assert!(catalog.video.renditions.is_empty());
+	assert_eq!(catalog.audio.renditions.len(), 1);
+}
+
+#[test]
+fn select_nothing_publishes_nothing() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let catalog = run_fmp4_select(data, crate::select::Broadcast::default());
+
+	assert!(catalog.video.renditions.is_empty());
+	assert!(catalog.audio.renditions.is_empty());
 }
 
 #[test]
