@@ -344,7 +344,7 @@ async fn run_hls_export(
 		Some(tls.server_config(alpn)?)
 	};
 
-	let listener = std::net::TcpListener::bind(listen)?;
+	let listener = moq_native::bind::tcp(listen)?;
 
 	tracing::info!(%url, %listen, "serving HLS");
 
