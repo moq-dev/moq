@@ -40,6 +40,15 @@ pub enum Error {
 	#[error("encountered segment with empty URI")]
 	EmptySegmentUri,
 
+	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
+	#[error("HLS {kind} sequence {value} is too large to encode")]
+	SequenceOverflow {
+		/// Which sequence overflowed: `"media"` or `"discontinuity"`.
+		kind: &'static str,
+		/// The offending sequence value.
+		value: u64,
+	},
+
 	/// A playlist or segment URI could not be resolved against its base.
 	#[error(transparent)]
 	UrlParse(#[from] url::ParseError),

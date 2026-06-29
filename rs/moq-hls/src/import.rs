@@ -112,6 +112,7 @@ struct TrackState {
 	// separate audio rendition publishes video only).
 	select: select::Broadcast,
 	next_sequence: Option<u64>,
+	next_discontinuity: Option<u64>,
 	init_ready: bool,
 }
 
@@ -121,6 +122,7 @@ impl TrackState {
 			playlist,
 			select,
 			next_sequence: None,
+			next_discontinuity: None,
 			init_ready: false,
 		}
 	}
@@ -436,8 +438,23 @@ impl Import {
 
 		if to_process > 0 {
 			let base_seq = playlist_seq + skip as u64;
+
+			// Discontinuity sequence names a fresh media timeline; the tag count for the
+			// skipped prefix gets us to the discontinuity sequence of the first segment
+			// we actually push.
+			let mut discontinuity_seq = playlist.discontinuity_sequence;
+			for segment in &playlist.segments[..skip] {
+				if segment.discontinuity {
+					discontinuity_seq += 1;
+				}
+			}
+
 			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
-				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
+				if segment.discontinuity {
+					discontinuity_seq += 1;
+				}
+				self.push_segment(kind, track, segment, base_seq + i as u64, discontinuity_seq)
+					.await?;
 			}
 			info!(?kind, consumed = to_process, "consumed HLS segments");
 		} else {
@@ -482,6 +499,7 @@ impl Import {
 		track: &mut TrackState,
 		segment: &MediaSegment,
 		sequence: u64,
+		discontinuity_sequence: u64,
 	) -> Result<()> {
 		if segment.uri.is_empty() {
 			return Err(Error::EmptySegmentUri);
@@ -497,8 +515,17 @@ impl Import {
 			TrackKind::Audio => self.ensure_audio_importer(&track.select),
 		};
 
+		// HLS media sequence names the live window, while discontinuity sequence names a
+		// new media timeline. Whenever we join, skip ahead, or cross a discontinuity, anchor
+		// the MoQ group sequence to both so consumers do not wait on groups HLS has moved
+		// past. Contiguous segments let the importer auto-increment instead.
+		if track.next_sequence != Some(sequence) || track.next_discontinuity != Some(discontinuity_sequence) {
+			importer.seek(moq_sequence(discontinuity_sequence, sequence)?)?;
+		}
+
 		importer.decode(&bytes)?;
 		track.next_sequence = Some(sequence + 1);
+		track.next_discontinuity = Some(discontinuity_sequence);
 
 		Ok(())
 	}
@@ -660,6 +687,33 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 	base.join(value)
 }
 
+/// Pack HLS discontinuity + media sequence into a single MoQ group sequence.
+///
+/// HLS media sequence alone can rewind after an upstream reset, and discontinuity
+/// sequence alone cannot order segments inside the same epoch. The lower 48 bits hold
+/// the media sequence (ample for realistic playlists) while the upper 16 bits hold the
+/// discontinuity sequence, so a new epoch always sorts after every segment of the last.
+fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64> {
+	const MEDIA_BITS: u32 = 48;
+	const MEDIA_MASK: u64 = (1u64 << MEDIA_BITS) - 1;
+	const DISCONTINUITY_MASK: u64 = u64::MAX >> MEDIA_BITS;
+
+	if media_sequence > MEDIA_MASK {
+		return Err(Error::SequenceOverflow {
+			kind: "media",
+			value: media_sequence,
+		});
+	}
+	if discontinuity_sequence > DISCONTINUITY_MASK {
+		return Err(Error::SequenceOverflow {
+			kind: "discontinuity",
+			value: discontinuity_sequence,
+		});
+	}
+
+	Ok((discontinuity_sequence << MEDIA_BITS) | media_sequence)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -741,5 +795,36 @@ mod tests {
 		assert_eq!(hls.video.len(), 1);
 		assert!(hls.video[0].select.has_video() && hls.video[0].select.has_audio());
 		assert!(hls.audio.is_none());
+	}
+
+	#[test]
+	fn moq_sequence_orders_discontinuities_after_media_sequence() {
+		// A new epoch outranks every segment of the previous one, even a higher media seq.
+		let last_of_epoch_0 = moq_sequence(0, u64::from(u32::MAX)).unwrap();
+		let first_of_epoch_1 = moq_sequence(1, 0).unwrap();
+		assert!(first_of_epoch_1 > last_of_epoch_0);
+	}
+
+	#[test]
+	fn moq_sequence_preserves_media_order_within_epoch() {
+		assert!(moq_sequence(3, 10).unwrap() > moq_sequence(3, 9).unwrap());
+	}
+
+	#[test]
+	fn moq_sequence_rejects_unrepresentable_media_sequence() {
+		let err = moq_sequence(0, 1u64 << 48).unwrap_err();
+		assert!(matches!(err, Error::SequenceOverflow { kind: "media", .. }));
+	}
+
+	#[test]
+	fn moq_sequence_rejects_unrepresentable_discontinuity_sequence() {
+		let err = moq_sequence(1u64 << 16, 0).unwrap_err();
+		assert!(matches!(
+			err,
+			Error::SequenceOverflow {
+				kind: "discontinuity",
+				..
+			}
+		));
 	}
 }
