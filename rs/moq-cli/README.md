@@ -56,4 +56,3 @@ moq-cli accept --broadcast my-stream --format fmp4 | ffplay -
 
 - `avc3` raw H.264 Annex-B from stdin
 - `fmp4` fragmented MP4 from stdin
-- `hls --playlist <url-or-path>` ingest from an HLS playlist
