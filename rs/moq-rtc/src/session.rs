@@ -236,7 +236,7 @@ impl Session {
 						data.mid,
 						codec::Frame {
 							timestamp_us,
-							payload: data.data.into(),
+							payload: bytes::Bytes::from_owner(data.data),
 						},
 					)?;
 				}
