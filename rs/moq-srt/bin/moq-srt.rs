@@ -7,7 +7,7 @@
 //!   straight to this binary (no separate relay needed). Ingested broadcasts are
 //!   also requestable back out over SRT.
 //! - `publish` forwards every ingested broadcast out to a remote relay over
-//!   WebTransport, like `moq-hls import` / `moq-rtc` WHIP. SRT requests are
+//!   WebTransport, like `moq-cli hls import` / `moq-rtc` WHIP. SRT requests are
 //!   served from the local origin (broadcasts ingested by this same process).
 //!
 //! A relay that wants an in-process gateway should instead depend on the

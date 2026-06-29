@@ -8,11 +8,11 @@
 //!   its audio/video messages as FLV tags, demux them with [`moq_mux`], and
 //!   publish the result into a [`moq_net::OriginProducer`] as ordinary MoQ
 //!   broadcasts. This is the contribution-ingest analogue of `moq-srt`,
-//!   `moq-hls`'s import, and `moq-rtc`'s WHIP.
+//!   `moq-cli hls import`, and `moq-rtc`'s WHIP.
 //! - **Play (egress)**: a client (VLC, ffplay, mpv) pulls
 //!   `rtmp://host/<app>/<key>`; we subscribe to that broadcast from a
 //!   [`moq_net::OriginConsumer`], mux it back to FLV with [`moq_mux`], and stream
-//!   the tags down as RTMP. The counterpart to `moq-hls`'s export.
+//!   the tags down as RTMP. The counterpart to `moq-cli hls export`.
 //!
 //! Both legacy RTMP (H.264 + AAC) and enhanced RTMP (E-RTMP: the HEVC, AV1, VP9,
 //! Opus, and AC-3 FourCC payloads) are supported in each direction, because the

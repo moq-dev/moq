@@ -159,6 +159,22 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
 
+### HLS / LL-HLS
+
+Import an HLS master/media playlist into a MoQ broadcast:
+
+```bash
+moq-cli hls --url https://relay.example.com/anon import \
+    --broadcast my-stream.hang \
+    --playlist https://example.com/live/master.m3u8
+```
+
+Serve MoQ broadcasts as HLS / LL-HLS over HTTP:
+
+```bash
+moq-cli hls --url https://relay.example.com/anon export --listen '[::]:8089'
+```
+
 ### MPEG-TS
 
 Ingest an MPEG-TS stream from FFmpeg and play one back out:

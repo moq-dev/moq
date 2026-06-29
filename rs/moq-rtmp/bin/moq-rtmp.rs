@@ -9,7 +9,7 @@
 //!   straight to this binary (no separate relay needed). RTMP players can also
 //!   pull the same broadcasts back out.
 //! - `publish` forwards every ingested broadcast out to a remote relay over
-//!   WebTransport, like `moq-srt publish` / `moq-hls import` / `moq-rtc` WHIP.
+//!   WebTransport, like `moq-srt publish` / `moq-cli hls import` / `moq-rtc` WHIP.
 //!
 //! A relay that wants in-process ingest/egress should instead depend on the
 //! `moq-rtmp` library and call `moq_rtmp::run` against its own origin.
