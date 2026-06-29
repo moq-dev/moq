@@ -32,8 +32,16 @@ fn run_fmp4_select(data: &[u8], select: crate::select::Broadcast) -> crate::cata
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone()).with_select(select);
 
+	// A dropped track's moof fragments must be skipped, not raise `UnknownTrack`.
+	// (The test files end on a malformed fragment, so other decode errors are expected
+	// and ignored; only `UnknownTrack` would mean the skip path regressed.)
 	let buf = bytes::BytesMut::from(data);
-	let _ = fmp4.decode(&buf);
+	if let Err(err) = fmp4.decode(&buf) {
+		assert!(
+			!matches!(err, crate::Error::Cmaf(crate::container::fmp4::Error::UnknownTrack(_))),
+			"a skipped track's fragment raised UnknownTrack: {err:?}"
+		);
+	}
 
 	catalog.snapshot()
 }
