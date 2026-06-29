@@ -29,7 +29,7 @@ use mpeg2ts::ts::{
 	TsHeader, TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 };
 
-use crate::catalog::hang::Catalog;
+use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
 use crate::container::{ExportSource, Frame, Timestamp};
@@ -51,7 +51,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// The leading PAT/PMT rides on the first frame (so it inherits a real
 /// timestamp), and is re-emitted at video keyframes and periodically for
 /// mid-stream tune-in. Returns `None` when the broadcast ends.
-pub struct Export<E: catalog::Catalog = ()> {
+pub struct Export<E: CatalogExt = ()> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
@@ -173,7 +173,7 @@ impl Export<catalog::Ext> {
 	}
 }
 
-impl<E: catalog::Catalog> Export<E> {
+impl<E: CatalogExt> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
@@ -319,10 +319,10 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
-		// The MPEG-TS section lives in the extension. The trait only exposes
-		// `mpegts_mut`, and this snapshot is owned, so clone it out (`()` yields the
+		// The MPEG-TS section lives in the extension, reachable only when `E` is the typed
+		// `Ext`. This snapshot is owned, so clone it out (any other extension yields the
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
-		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
+		let mpegts = catalog::mpegts_mut(&mut catalog).cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 
 		// The desired track set: media renditions plus the verbatim streams.

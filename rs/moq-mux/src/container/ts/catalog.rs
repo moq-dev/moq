@@ -144,38 +144,24 @@ pub struct Ext {
 
 impl CatalogExt for Ext {}
 
-/// An extension that can carry an `mpegts` catalog section.
+/// Typed `&mut` access to the `mpegts` section of a catalog whose extension is
+/// [`Ext`], or `None` for any other extension.
 ///
-/// Implement this for an application extension to compose MPEG-TS carriage with
-/// additional sections.
-pub trait Catalog: CatalogExt {
-	/// The section to record MPEG-TS details into, or `None` for an extension that
-	/// doesn't carry them.
-	///
-	/// Keep this stable per catalog: an importer samples support once at
-	/// construction, so a result that flips between `Some` and `None` mid-stream
-	/// would disable verbatim carriage or fail.
-	fn mpegts_mut(&mut self) -> Option<&mut Mpegts>;
+/// Only [`Ext`] carries the typed section; `()`, the untyped
+/// [`Extra`](crate::catalog::hang::Extra), and other application extensions
+/// return `None`, so the TS importer falls back to no verbatim carriage. This is
+/// a private detail so the public importers stay generic over plain
+/// [`CatalogExt`] rather than a TS-specific trait.
+pub(crate) fn mpegts_mut<E: CatalogExt>(catalog: &mut crate::catalog::hang::Catalog<E>) -> Option<&mut Mpegts> {
+	(&mut catalog.ext as &mut dyn std::any::Any)
+		.downcast_mut::<Ext>()
+		.map(|ext| &mut ext.mpegts)
 }
 
-impl Catalog for () {
-	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
-		None
-	}
-}
-
-// The untyped passthrough carries no typed mpegts section (a TS importer driving an `Extra`
-// catalog records verbatim streams as raw JSON sections, not the typed `Mpegts` view).
-impl Catalog for crate::catalog::hang::Extra {
-	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
-		None
-	}
-}
-
-impl Catalog for Ext {
-	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
-		Some(&mut self.mpegts)
-	}
+/// Whether `E` carries a typed `mpegts` section (i.e. is [`Ext`]). The importer
+/// samples this once at construction.
+pub(crate) fn supports_mpegts<E: CatalogExt>() -> bool {
+	std::any::TypeId::of::<E>() == std::any::TypeId::of::<Ext>()
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
 use super::Timestamp;
-use super::{Container, Frame};
+use super::{Container, Frame, Read};
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
 /// presentation order.
@@ -28,16 +28,13 @@ use super::{Container, Frame};
 /// group's first timestamp has nothing left worth waiting for. Containers without a
 /// duration report zero, which disables this check and falls back to the latency budget.
 ///
-/// Set the latency with [`with_latency`](Self::with_latency) (builder) or
-/// [`set_latency`](Self::set_latency) (mid-stream).
+/// Set the latency with [`with_latency`](Self::with_latency).
 ///
 /// ## Timeline rewinds
 ///
 /// If a newer group's timestamps jump backwards past the live edge, the publisher is
 /// reneging the buffered tail (e.g. a voice agent interrupted mid-utterance). The consumer
-/// drops the reneged groups, resumes at the rewound timeline, and bumps
-/// [`discontinuity`](Self::discontinuity) so downstream consumers can flush their own
-/// buffers. This is always on.
+/// drops the reneged groups and resumes at the rewound timeline. This is always on.
 pub struct Consumer<F: Container> {
 	track: moq_net::TrackConsumer,
 
@@ -145,18 +142,6 @@ impl<F: Container> Consumer<F> {
 	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
 		self.latency = latency;
 		self
-	}
-
-	/// A counter that increments each time the consumer detects a timeline rewind and drops
-	/// the reneged buffer.
-	///
-	/// When a newer group's timestamps jump backwards past the live edge, the publisher is
-	/// reneging everything buffered after that point (e.g. a voice agent interrupted
-	/// mid-utterance). Downstream consumers should compare this across reads and, when it
-	/// changes, flush any media still queued in their decoder or render buffers. The frame
-	/// returned by the read that bumps it is the first of the new timeline.
-	pub fn discontinuity(&self) -> u64 {
-		self.rewind.discontinuity
 	}
 
 	/// Read the next frame from the track.
@@ -472,11 +457,6 @@ impl<F: Container> Consumer<F> {
 		Ok(())
 	}
 
-	/// Set the maximum latency tolerance.
-	pub fn set_latency(&mut self, latency: std::time::Duration) {
-		self.latency = latency;
-	}
-
 	/// Wait until the track is closed.
 	pub async fn closed(&self) -> Result<(), F::Error> {
 		Ok(self.track.closed().await?)
@@ -532,44 +512,51 @@ impl GroupBuffer {
 		}
 	}
 
-	// Add one more frame to the buffer if possible.
+	// Add one (or one fragment's worth) more frames to the buffer if possible.
 	//
 	// Returns false if the group is finished.
 	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
-		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
-			return Poll::Ready(Ok(false));
-		};
-
-		for mut frame in frames {
-			self.min_timestamp = Some(match self.min_timestamp {
-				Some(existing) => existing.min(frame.timestamp),
-				None => frame.timestamp,
-			});
-
-			self.max_timestamp = Some(match self.max_timestamp {
-				Some(existing) => existing.max(frame.timestamp),
-				None => frame.timestamp,
-			});
-
-			// Furthest presentation point, in wall-clock terms so timestamp and
-			// duration can be at different scales without extra conversions. A frame
-			// with no duration contributes only its timestamp.
-			let duration = frame.duration.map(std::time::Duration::from).unwrap_or_default();
-			let end = std::time::Duration::from(frame.timestamp) + duration;
-			self.max_end = Some(match self.max_end {
-				Some(existing) => existing.max(end),
-				None => end,
-			});
-
-			// First frame of a group is always a keyframe by protocol invariant; trust
-			// the container's flag otherwise so CMAF mid-group keyframes survive.
-			frame.keyframe = frame.keyframe || self.index == 0;
-			self.index += 1;
-
-			self.buffered.push_back(frame);
+		match ready!(format.poll_read(&mut self.group, waiter)?) {
+			Read::Done => return Poll::Ready(Ok(false)),
+			Read::Frame(frame) => self.ingest(frame),
+			Read::Fragment(frames) => {
+				for frame in frames {
+					self.ingest(frame);
+				}
+			}
 		}
 
 		Poll::Ready(Ok(true))
+	}
+
+	// Track timestamp bounds, stamp the keyframe flag, and queue one decoded frame.
+	fn ingest(&mut self, mut frame: Frame) {
+		self.min_timestamp = Some(match self.min_timestamp {
+			Some(existing) => existing.min(frame.timestamp),
+			None => frame.timestamp,
+		});
+
+		self.max_timestamp = Some(match self.max_timestamp {
+			Some(existing) => existing.max(frame.timestamp),
+			None => frame.timestamp,
+		});
+
+		// Furthest presentation point, in wall-clock terms so timestamp and
+		// duration can be at different scales without extra conversions. A frame
+		// with no duration contributes only its timestamp.
+		let duration = frame.duration.map(std::time::Duration::from).unwrap_or_default();
+		let end = std::time::Duration::from(frame.timestamp) + duration;
+		self.max_end = Some(match self.max_end {
+			Some(existing) => existing.max(end),
+			None => end,
+		});
+
+		// First frame of a group is always a keyframe by protocol invariant; trust
+		// the container's flag otherwise so CMAF mid-group keyframes survive.
+		frame.keyframe = frame.keyframe || self.index == 0;
+		self.index += 1;
+
+		self.buffered.push_back(frame);
 	}
 
 	fn buffer_one<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
@@ -580,7 +567,7 @@ impl GroupBuffer {
 			if !ready!(self.buffer_once(waiter, format)?) {
 				return Poll::Ready(Ok(false));
 			}
-			// poll_read returned Some(vec![]) — loop and try again
+			// poll_read returned an empty Read::Fragment — loop and try again
 		}
 	}
 
@@ -697,23 +684,23 @@ mod tests {
 			&self,
 			group: &mut moq_net::GroupConsumer,
 			waiter: &kio::Waiter,
-		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		) -> Poll<Result<Read, Self::Error>> {
 			use bytes::Buf;
 
 			let Some(mut data) = ready!(group.poll_read_frame(waiter)?) else {
-				return Poll::Ready(Ok(None));
+				return Poll::Ready(Ok(Read::Done));
 			};
 
 			let timestamp = ts(data.get_u64_le());
 			let duration = ts(data.get_u64_le());
 			let payload = data.copy_to_bytes(data.remaining());
 
-			Poll::Ready(Ok(Some(vec![Frame {
+			Poll::Ready(Ok(Read::Frame(Frame {
 				timestamp,
 				payload,
 				keyframe: false,
 				duration: Some(duration),
-			}])))
+			})))
 		}
 	}
 
@@ -992,7 +979,7 @@ mod tests {
 			micros.contains(&1_000) && micros.contains(&2_000) && micros.contains(&3_000),
 			"out-of-order new-epoch groups kept, got {micros:?}"
 		);
-		assert_eq!(consumer.discontinuity(), 1, "one rewind detected");
+		assert_eq!(consumer.rewind.discontinuity, 1, "one rewind detected");
 		finisher.await.expect("finisher task panicked");
 	}
 
@@ -1020,8 +1007,7 @@ mod tests {
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 
 		assert_eq!(
-			consumer.discontinuity(),
-			1,
+			consumer.rewind.discontinuity, 1,
 			"rewind detected behind a forward newest group"
 		);
 		assert!(micros.contains(&50_000), "resumed at the rewound group, got {micros:?}");
@@ -1056,7 +1042,7 @@ mod tests {
 		// We play forward until the live edge passes the rewind point (through 100 ms), then
 		// the rewind drops the buffered-ahead groups (200/300/400 ms) and resumes at group 5.
 		assert_eq!(timestamps, vec![ts(0), ts(100_000), ts(0), ts(20_000)]);
-		assert_eq!(consumer.discontinuity(), 1);
+		assert_eq!(consumer.rewind.discontinuity, 1);
 	}
 
 	/// Rewind detection is always on: a backwards group timestamp resets the buffer with no
@@ -1076,7 +1062,10 @@ mod tests {
 		let timestamps: Vec<_> = frames.iter().map(|f| f.timestamp).collect();
 
 		assert_eq!(timestamps, vec![ts(0), ts(500_000), ts(0)]);
-		assert_eq!(consumer.discontinuity(), 1, "the backwards group triggered a reset");
+		assert_eq!(
+			consumer.rewind.discontinuity, 1,
+			"the backwards group triggered a reset"
+		);
 	}
 
 	// ---- Group Ordering ----
@@ -1347,21 +1336,21 @@ mod tests {
 			&self,
 			group: &mut moq_net::GroupConsumer,
 			waiter: &kio::Waiter,
-		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		) -> Poll<Result<Read, Self::Error>> {
 			use bytes::Buf;
 
 			let Some(mut data) = ready!(group.poll_read_frame(waiter)?) else {
-				return Poll::Ready(Ok(None));
+				return Poll::Ready(Ok(Read::Done));
 			};
 			if data.as_ref() == b"FAIL" {
 				return Poll::Ready(Err(crate::Error::UnknownFormat("malformed payload".into())));
 			}
-			Poll::Ready(Ok(Some(vec![Frame {
+			Poll::Ready(Ok(Read::Frame(Frame {
 				timestamp: ts(data.get_u64_le()),
 				payload: Bytes::new(),
 				keyframe: false,
 				duration: None,
-			}])))
+			})))
 		}
 	}
 
@@ -1529,7 +1518,7 @@ mod tests {
 		let frame = consumer.read().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(0));
 
-		consumer.set_latency(Duration::from_millis(100));
+		consumer.latency = Duration::from_millis(100);
 
 		assert!(consumer.read().await.unwrap().is_none());
 	}

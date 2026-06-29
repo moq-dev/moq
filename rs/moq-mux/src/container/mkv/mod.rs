@@ -114,6 +114,9 @@ pub enum Error {
 
 	#[error("matroska write error: {0}")]
 	MatroskaWrite(std::sync::Arc<webm_iterable::errors::TagWriterError>),
+
+	#[error("opus: {0}")]
+	Opus(#[from] crate::codec::opus::Error),
 }
 
 impl From<webm_iterable::errors::TagWriterError> for Error {

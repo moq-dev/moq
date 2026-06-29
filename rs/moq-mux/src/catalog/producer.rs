@@ -47,38 +47,13 @@ impl<E: CatalogExt> Clone for Producer<E> {
 }
 
 impl Producer<()> {
-	/// Create a new catalog producer with the default (empty) catalog.
+	/// Create a new media-only catalog producer with the default (empty) catalog.
 	///
-	/// To publish an extended catalog, use [`with_catalog`](Self::with_catalog) with a `Catalog<E>`.
+	/// For an extended catalog, use [`with_catalog`](Self::with_catalog) with a
+	/// `Catalog<E>` (e.g. the untyped [`Extra`] for the by-name / FFI path). Set
+	/// application sections through [`lock`](Self::lock).
 	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, Catalog::default())
-	}
-}
-
-impl Producer<Extra> {
-	/// Create a catalog producer carrying the untyped [`Extra`] extension, so application
-	/// sections can be set later via [`set_section`](Self::set_section). This is the entry
-	/// point for callers that work with sections by name (e.g. the FFI boundary); for a typed
-	/// extension use [`with_catalog`](Self::with_catalog) with a `Catalog<YourExt>`.
-	pub fn new_extra(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
-		Self::with_catalog(broadcast, Catalog::default())
-	}
-
-	/// Set (or replace) a top-level application catalog section, publishing the updated catalog.
-	///
-	/// `value` is any JSON document (object, array, string, ...). Errors if `name` collides with a
-	/// reserved media section (`video`/`audio`). This is the untyped counterpart to mutating a
-	/// typed extension through [`lock`](Self::lock), used where section names aren't known at
-	/// compile time (e.g. across the FFI boundary).
-	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
-		self.lock().set_section(name, value)
-	}
-
-	/// Remove a top-level application catalog section, publishing the updated catalog if it existed.
-	///
-	/// Returns the section's previous value, or `None` if it was absent.
-	pub fn remove_section(&mut self, name: &str) -> Option<serde_json::Value> {
-		self.lock().remove_section(name)
 	}
 }
 
@@ -162,11 +137,6 @@ impl<E: CatalogExt> Producer<E> {
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
 		Ok(Consumer::new(self.hang.consume()))
-	}
-
-	/// Create a consumer for the DEFLATE-compressed (`catalog.json.z`) catalog track.
-	pub fn consume_compressed(&self) -> Result<Consumer<E>, moq_net::Error> {
-		Ok(Consumer::compressed(self.hangz.consume()))
 	}
 
 	/// Finish publishing to this catalog.

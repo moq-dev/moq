@@ -31,7 +31,10 @@ impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		// The untyped `Extra` extension lets catalog sections be set by name across the FFI boundary.
-		let catalog = moq_mux::catalog::Producer::new_extra(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::<Extra>::with_catalog(
+			&mut broadcast,
+			moq_mux::catalog::hang::Catalog::default(),
+		)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)
@@ -148,7 +151,7 @@ impl Publish {
 	/// The catalog is republished automatically.
 	pub fn catalog_section(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		catalog.set_section(name, value)?;
+		catalog.lock().set_section(name, value)?;
 		Ok(())
 	}
 
@@ -157,7 +160,7 @@ impl Publish {
 	/// A no-op if absent. The catalog is republished automatically.
 	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		catalog.remove_section(name);
+		catalog.lock().remove_section(name);
 		Ok(())
 	}
 

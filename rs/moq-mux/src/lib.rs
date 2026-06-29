@@ -24,3 +24,8 @@ pub mod import;
 
 pub use clock::Clock;
 pub use error::*;
+
+/// Re-export of the [`mp4_atom`] crate, whose types appear in the public CMAF
+/// surface ([`container::fmp4`]). A major version bump of `mp4_atom` is a
+/// breaking change for moq-mux.
+pub use mp4_atom;

@@ -583,7 +583,7 @@ fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<Ma
 					sample_rate: config.sample_rate,
 					channel_count: config.channel_count,
 				}
-				.encode()
+				.encode()?
 				.to_vec(),
 			),
 		),

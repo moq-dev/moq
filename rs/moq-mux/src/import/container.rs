@@ -10,7 +10,7 @@ use crate::Result;
 /// The concrete container importers, shared by [`Container`] and
 /// [`ContainerStream`]. Containers parse their own internal framing, so a whole
 /// chunk and a stream chunk decode identically.
-enum ContainerImpl<E: crate::container::ts::catalog::Catalog = ()> {
+enum ContainerImpl<E: crate::catalog::hang::CatalogExt = ()> {
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import<E>>),
 	Mkv(Box<crate::container::mkv::Import<E>>),
@@ -18,7 +18,7 @@ enum ContainerImpl<E: crate::container::ts::catalog::Catalog = ()> {
 	Flv(Box<crate::container::flv::Import<E>>),
 }
 
-impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
+impl<E: crate::catalog::hang::CatalogExt> ContainerImpl<E> {
 	fn fmp4(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
 	}
@@ -67,11 +67,11 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
 ///
 /// Use this when the caller hands over discrete buffers (the typical case for
 /// files and reassembled network input). May publish more than one track.
-pub struct Container<E: crate::container::ts::catalog::Catalog = ()> {
+pub struct Container<E: crate::catalog::hang::CatalogExt = ()> {
 	inner: ContainerImpl<E>,
 }
 
-impl<E: crate::container::ts::catalog::Catalog> Container<E> {
+impl<E: crate::catalog::hang::CatalogExt> Container<E> {
 	/// Create a new container importer, decoding the initial chunk.
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
@@ -110,11 +110,11 @@ impl<E: crate::container::ts::catalog::Catalog> Container<E> {
 ///
 /// Use this when the caller pushes arbitrary byte chunks and the container
 /// recovers its own framing. May publish more than one track.
-pub struct ContainerStream<E: crate::container::ts::catalog::Catalog = ()> {
+pub struct ContainerStream<E: crate::catalog::hang::CatalogExt = ()> {
 	inner: ContainerImpl<E>,
 }
 
-impl<E: crate::container::ts::catalog::Catalog> ContainerStream<E> {
+impl<E: crate::catalog::hang::CatalogExt> ContainerStream<E> {
 	/// Create a new container stream importer.
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,

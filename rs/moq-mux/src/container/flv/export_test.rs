@@ -194,7 +194,8 @@ fn synth_enhanced_flv() -> Vec<u8> {
 		sample_rate: 48000,
 		channel_count: 2,
 	}
-	.encode();
+	.encode()
+	.unwrap();
 
 	let mut out = Vec::new();
 	out.extend_from_slice(b"FLV");

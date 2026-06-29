@@ -8,7 +8,7 @@ use std::task::Poll;
 
 use bytes::Buf;
 
-use crate::container::{Container, Frame};
+use crate::container::{Container, Frame, Read};
 
 /// Hang Legacy wire format. Stateless; one instance serves every track.
 #[derive(Default)]
@@ -28,21 +28,17 @@ impl Container for Wire {
 		Ok(())
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::GroupConsumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+	fn poll_read(&self, group: &mut moq_net::GroupConsumer, waiter: &kio::Waiter) -> Poll<Result<Read, Self::Error>> {
 		use std::task::ready;
 
 		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
-			return Poll::Ready(Ok(None));
+			return Poll::Ready(Ok(Read::Done));
 		};
 
 		let mut hang_frame = hang::container::Frame::decode(data)?;
 		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
 
-		Poll::Ready(Ok(Some(vec![Frame {
+		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp: hang_frame.timestamp,
 			payload,
 			// Legacy doesn't carry the keyframe bit on the wire; the
@@ -50,6 +46,6 @@ impl Container for Wire {
 			keyframe: false,
 			// Legacy carries no per-frame duration.
 			duration: None,
-		}])))
+		})))
 	}
 }

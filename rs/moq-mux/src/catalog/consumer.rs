@@ -13,10 +13,16 @@ use super::{CatalogFormat, Stream};
 ///
 /// Both variants emit [`Catalog<E>`](super::hang::Catalog); the MSF variant is
 /// media-only, so its extension is always the default. Wrap with
-/// [`Filter`](super::Filter) / [`Target`](super::Target) to narrow the
-/// rendition set before handing the stream to an exporter.
+/// [`Filter`](super::Filter) to narrow the rendition set before handing the
+/// stream to an exporter.
+///
+/// The variants are an implementation detail: drive it through the [`Stream`]
+/// trait rather than matching on them. New catalog encodings may be added.
+#[non_exhaustive]
 pub enum Consumer<E: CatalogExt = ()> {
+	#[doc(hidden)]
 	Hang(super::hang::Consumer<E>),
+	#[doc(hidden)]
 	Msf(super::msf::Consumer),
 }
 

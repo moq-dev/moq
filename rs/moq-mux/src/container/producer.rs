@@ -345,7 +345,7 @@ mod tests {
 			&self,
 			_group: &mut moq_net::GroupConsumer,
 			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		) -> std::task::Poll<Result<crate::container::Read, Self::Error>> {
 			unreachable!("Recording is write-only")
 		}
 	}

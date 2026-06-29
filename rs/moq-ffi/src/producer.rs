@@ -158,7 +158,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		// The untyped `Extra` extension lets catalog sections be set by name across the FFI boundary.
-		let catalog = moq_mux::catalog::Producer::new_extra(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::<Extra>::with_catalog(
+			&mut broadcast,
+			moq_mux::catalog::hang::Catalog::default(),
+		)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
@@ -300,7 +303,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let value: serde_json::Value = serde_json::from_str(&value).map_err(|err| MoqError::Json(err.to_string()))?;
 		self.with_state(|state| {
-			state.catalog.set_section(name, value)?;
+			state.catalog.lock().set_section(name, value)?;
 			Ok(())
 		})
 	}
@@ -311,7 +314,7 @@ impl MoqBroadcastProducer {
 	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		self.with_state(|state| {
-			state.catalog.remove_section(&name);
+			state.catalog.lock().remove_section(&name);
 			Ok(())
 		})
 	}

@@ -64,7 +64,7 @@ async fn drain(consumer: moq_net::BroadcastConsumer) -> BytesMut {
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-async fn drain_with<E: tscat::Catalog>(mut exporter: Export<E>) -> BytesMut {
+async fn drain_with<E: crate::catalog::hang::CatalogExt>(mut exporter: Export<E>) -> BytesMut {
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {

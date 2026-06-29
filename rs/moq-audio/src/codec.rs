@@ -290,11 +290,14 @@ impl Encoder {
 
 	/// hang catalog entry describing this encoder's output stream.
 	pub fn catalog(&self) -> hang::catalog::AudioConfig {
+		// `codec_channels` is validated to mono/stereo at encoder construction, so the
+		// OpusHead (channel mapping family 0) always encodes.
 		let head = moq_mux::codec::opus::Config {
 			sample_rate: self.codec_rate,
 			channel_count: self.codec_channels,
 		}
-		.encode();
+		.encode()
+		.expect("opus encoder channels validated to mono/stereo");
 
 		let mut config =
 			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, self.codec_rate, self.codec_channels);

@@ -8,7 +8,7 @@
 use std::task::Poll;
 
 use crate::container::Timestamp;
-use crate::container::{Container, Frame};
+use crate::container::{Container, Frame, Read};
 
 /// LOC's catalog convention: timestamps are in microseconds when no per-frame
 /// 0x08 timescale property is present.
@@ -39,15 +39,11 @@ impl Container for Wire {
 		Ok(())
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::GroupConsumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+	fn poll_read(&self, group: &mut moq_net::GroupConsumer, waiter: &kio::Waiter) -> Poll<Result<Read, Self::Error>> {
 		use std::task::ready;
 
 		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
+			return Poll::Ready(Ok(Read::Done));
 		};
 
 		let loc = moq_loc::decode(data)?;
@@ -57,7 +53,7 @@ impl Container for Wire {
 		let scale = loc.timescale.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::from_scale(loc.timestamp, scale).map_err(hang::Error::from)?;
 
-		Poll::Ready(Ok(Some(vec![Frame {
+		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp,
 			payload: loc.payload,
 			// LOC doesn't carry the keyframe bit on the wire; the
@@ -65,6 +61,6 @@ impl Container for Wire {
 			keyframe: false,
 			// LOC carries no per-frame duration.
 			duration: None,
-		}])))
+		})))
 	}
 }

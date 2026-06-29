@@ -192,15 +192,16 @@ impl Container for Wire {
 		&self,
 		group: &mut moq_net::GroupConsumer,
 		waiter: &kio::Waiter,
-	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
+	) -> Poll<std::result::Result<crate::container::Read, Self::Error>> {
 		use std::task::ready;
 
 		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
+			return Poll::Ready(Ok(crate::container::Read::Done));
 		};
 
 		let timescale = self.trak.mdia.mdhd.timescale as u64;
-		Poll::Ready(Ok(Some(decode(data, timescale)?)))
+		// A CMAF moof+mdat fragment carries every sample for the fragment.
+		Poll::Ready(Ok(crate::container::Read::Fragment(decode(data, timescale)?)))
 	}
 }
 

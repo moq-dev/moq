@@ -97,24 +97,56 @@ pub trait Container {
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;
 
-	/// Poll the next moq-lite frame from `group` and decode it into media
-	/// frames. Returns `Ok(None)` when the group has ended. A single call
-	/// may produce multiple media frames (e.g. all samples in a CMAF
-	/// fragment).
-	fn poll_read(
-		&self,
-		group: &mut moq_net::GroupConsumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
+	/// Poll the next moq-lite frame from `group` and decode it. Returns
+	/// [`Read::Done`] when the group has ended, [`Read::Frame`] for the common
+	/// one-frame-per-moq-frame case (Legacy, LOC), or [`Read::Fragment`] when a
+	/// single moq frame decodes into several media frames (a CMAF moof+mdat).
+	fn poll_read(&self, group: &mut moq_net::GroupConsumer, waiter: &kio::Waiter) -> Poll<Result<Read, Self::Error>>;
 
 	/// Async wrapper around [`Self::poll_read`].
-	fn read(
-		&self,
-		group: &mut moq_net::GroupConsumer,
-	) -> impl std::future::Future<Output = Result<Option<Vec<Frame>>, Self::Error>>
+	fn read(&self, group: &mut moq_net::GroupConsumer) -> impl std::future::Future<Output = Result<Read, Self::Error>>
 	where
 		Self: Sync,
 	{
 		async { kio::wait(|waiter| self.poll_read(group, waiter)).await }
+	}
+}
+
+/// The outcome of one [`Container::poll_read`].
+///
+/// Splitting the single-frame case ([`Frame`](Read::Frame)) from the multi-frame
+/// case ([`Fragment`](Read::Fragment)) lets the common one-frame-per-moq-frame
+/// containers (Legacy, LOC) decode without allocating a `Vec` per frame.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Read {
+	/// The group has ended; there are no more frames.
+	Done,
+	/// A single decoded media frame.
+	Frame(Frame),
+	/// One moq frame decoded into several media frames, e.g. every sample in a
+	/// CMAF moof+mdat fragment.
+	Fragment(Vec<Frame>),
+}
+
+impl Read {
+	/// The decoded frames as a slice, so callers can iterate without matching the
+	/// variant: empty for [`Done`](Read::Done), one element for [`Frame`](Read::Frame),
+	/// or the whole batch for [`Fragment`](Read::Fragment).
+	pub fn frames(&self) -> &[Frame] {
+		match self {
+			Read::Done => &[],
+			Read::Frame(frame) => std::slice::from_ref(frame),
+			Read::Fragment(frames) => frames,
+		}
+	}
+}
+
+impl<'a> IntoIterator for &'a Read {
+	type Item = &'a Frame;
+	type IntoIter = std::slice::Iter<'a, Frame>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.frames().iter()
 	}
 }
