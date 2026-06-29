@@ -13,7 +13,7 @@ use super::{CatalogFormat, Stream};
 ///
 /// Both variants emit [`Catalog<E>`](super::hang::Catalog); the MSF variant is
 /// media-only, so its extension is always the default. Wrap with
-/// [`Filter`](super::Filter) to narrow the rendition set before handing the
+/// [`Select`](super::Select) to narrow the rendition set before handing the
 /// stream to an exporter.
 ///
 /// The variants are an implementation detail: drive it through the [`Stream`]

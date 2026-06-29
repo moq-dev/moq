@@ -2,7 +2,7 @@
 //!
 //! [`Stream`] yields a sequence of [`Catalog<E>`](super::hang::Catalog) snapshots. Both the
 //! raw [`Consumer`](super::Consumer) and the rendition-selecting
-//! [`Filter`](super::Filter) wrapper implement it, so exporters can be written
+//! [`Select`](super::Select) wrapper implement it, so exporters can be written
 //! against the trait and the caller picks the selection policy.
 //!
 //! The yielded catalog carries the application extension `E` (defaulting to
@@ -11,7 +11,7 @@
 
 use std::task::Poll;
 
-use super::Filter;
+use super::Select;
 use super::hang::{Catalog, CatalogExt};
 
 /// A stream of catalog snapshots.
@@ -36,12 +36,12 @@ pub trait Stream: Send + 'static {
 		async move { kio::wait(|waiter| self.poll_next(waiter)).await }
 	}
 
-	/// Wrap this stream in a [`Filter`] that drops renditions which don't
-	/// match a hard-match criterion (name or codec family).
-	fn filter(self) -> Filter<Self>
+	/// Wrap this stream in a [`Select`] that drops every rendition `selection`
+	/// doesn't keep.
+	fn select(self, selection: crate::select::Broadcast) -> Select<Self>
 	where
 		Self: Sized,
 	{
-		Filter::new(self)
+		Select::new(self, selection)
 	}
 }

@@ -32,7 +32,7 @@ use crate::container::{Frame, Timestamp};
 /// a media fragment begins at a sync sample, and its presentation duration. A
 /// segmenting consumer (e.g. an HLS/LL-HLS packager) needs that to map fragments
 /// onto segments and parts; narrow the catalog to a single rendition with
-/// [`catalog::Filter`](crate::catalog::Filter) so the fragments belong to one track.
+/// [`catalog::Select`](crate::catalog::Select) so the fragments belong to one track.
 pub struct Export<S: Stream> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<S>,
@@ -104,7 +104,7 @@ impl<S: Stream> Export<S> {
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or wrapped in
-	/// [`catalog::Filter`](crate::catalog::Filter) to narrow the rendition set.
+	/// [`catalog::Select`](crate::catalog::Select) to narrow the rendition set.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
 		Self {
 			broadcast,

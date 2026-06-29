@@ -54,10 +54,9 @@ impl<S: Stream> Export<S> {
 	/// Subscribe to `broadcast` and emit an Annex-B H.264 byte stream.
 	///
 	/// `catalog` is expected to be narrowed to a single H.264 rendition (e.g.
-	/// `consumer.filter()` with `codec = H264` then `.target()` for ABR
-	/// selection). Renditions of other codecs are ignored; if multiple H.264
-	/// renditions appear in a snapshot, the first by BTreeMap order wins and
-	/// a warning is logged.
+	/// `consumer.select(select::Broadcast::default().video(select::Video::default().codec(H264)))`).
+	/// Renditions of other codecs are ignored; if multiple H.264 renditions appear
+	/// in a snapshot, the first by BTreeMap order wins and a warning is logged.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
 		Self {
 			broadcast,
@@ -133,7 +132,7 @@ impl<S: Stream> Export<S> {
 			tracing::warn!(
 				count = picked.len(),
 				"multiple H.264 renditions in catalog snapshot; using the first by name. \
-				 Narrow with catalog::Filter to pick one explicitly."
+				 Narrow with catalog::Select to pick one explicitly."
 			);
 		}
 

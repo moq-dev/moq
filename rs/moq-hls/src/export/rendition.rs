@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use hang::catalog::{AudioConfig, VideoConfig};
-use moq_mux::catalog::{self, CatalogFormat, Filter, FilterAudio, FilterVideo};
+use moq_mux::catalog::{self, CatalogFormat};
 use moq_mux::container::fmp4::Export;
+use moq_mux::select;
 use tokio::sync::watch;
 
 use super::Config;
@@ -112,24 +113,19 @@ async fn run_pump(
 	mut paused: watch::Receiver<bool>,
 ) -> Result<()> {
 	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang)?;
-	let mut filter = Filter::new(consumer);
 
-	// Narrow *both* axes to this rendition's name so the exporter sees exactly one
+	// Select this rendition's name on *both* axes so the exporter sees exactly one
 	// track: the opposite axis can't hold a rendition with this name, so it empties.
-	filter.set_video(FilterVideo {
-		name: Some(name.to_string()),
-		..Default::default()
-	});
-	filter.set_audio(FilterAudio {
-		name: Some(name.to_string()),
-		..Default::default()
-	});
+	let selection = select::Broadcast::default()
+		.video(select::Video::default().name(name))
+		.audio(select::Audio::default().name(name));
+	let filtered = catalog::Select::new(consumer, selection);
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
 	// below takes its own clone for pulling fragments.
 	let closed = broadcast.clone();
 
-	let mut export = Export::new(broadcast, filter)
+	let mut export = Export::new(broadcast, filtered)
 		.with_fragment_duration(cfg.part_target)
 		.with_latency(cfg.latency);
 

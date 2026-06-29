@@ -157,7 +157,7 @@ impl<S: Stream> Export<S> {
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or wrapped in
-	/// [`catalog::Filter`](crate::catalog::Filter) to narrow the rendition set.
+	/// [`catalog::Select`](crate::catalog::Select) to narrow the rendition set.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
 		Self {
 			broadcast,
