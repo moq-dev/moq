@@ -115,7 +115,8 @@ pub enum Error {
 	#[error("matroska write error: {0}")]
 	MatroskaWrite(std::sync::Arc<webm_iterable::errors::TagWriterError>),
 
-	#[error("opus: {0}")]
+	/// Building the Opus codec-private OpusHead for an audio track failed.
+	#[error(transparent)]
 	Opus(#[from] crate::codec::opus::Error),
 }
 
