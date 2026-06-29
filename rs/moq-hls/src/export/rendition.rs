@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hang::catalog::{AudioConfig, VideoConfig};
-use moq_mux::catalog::{self, CatalogFormat};
+use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::container::fmp4::Export;
 use moq_mux::select;
 use tokio::sync::watch;
@@ -119,7 +119,7 @@ async fn run_pump(
 	let selection = select::Broadcast::default()
 		.video(select::Video::default().name(name))
 		.audio(select::Audio::default().name(name));
-	let filtered = catalog::Select::new(consumer, selection);
+	let filtered = consumer.select(selection);
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
 	// below takes its own clone for pulling fragments.
