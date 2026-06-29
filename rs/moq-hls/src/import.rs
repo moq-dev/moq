@@ -16,6 +16,7 @@ use m3u8_rs::{
 };
 use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
+use moq_mux::select;
 use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -107,18 +108,39 @@ enum TrackKind {
 
 struct TrackState {
 	playlist: Url,
+	// Which roles this playlist's importer publishes (a muxed variant alongside a
+	// separate audio rendition publishes video only).
+	select: select::Broadcast,
 	next_sequence: Option<u64>,
 	init_ready: bool,
 }
 
 impl TrackState {
-	fn new(playlist: Url) -> Self {
+	fn new(playlist: Url, select: select::Broadcast) -> Self {
 		Self {
 			playlist,
+			select,
 			next_sequence: None,
 			init_ready: false,
 		}
 	}
+}
+
+/// Selection for a muxed rendition (the only source): publish every track.
+fn select_muxed() -> select::Broadcast {
+	select::Broadcast::default()
+		.video(select::Video::default())
+		.audio(select::Audio::default())
+}
+
+/// Selection for a video variant that has a separate audio rendition: video only.
+fn select_video_only() -> select::Broadcast {
+	select::Broadcast::default().video(select::Video::default())
+}
+
+/// Selection for a separate audio rendition: audio only.
+fn select_audio_only() -> select::Broadcast {
+	select::Broadcast::default().audio(select::Audio::default())
 }
 
 impl Import {
@@ -309,24 +331,31 @@ impl Import {
 				return Err(Error::NoVariants);
 			}
 
-			// Create a video track state for every usable variant.
-			for variant in &variants {
-				let video_url = resolve_uri(&self.base_url, &variant.uri)?;
-				self.video.push(TrackState::new(video_url));
-			}
-
-			// Choose an audio rendition based on the first variant with an audio group.
+			// Choose an audio rendition first, so the video variants below know whether
+			// they need to drop their muxed audio.
 			if let Some(group_id) = variants.iter().find_map(|v| v.audio.as_deref()) {
 				if let Some(audio_tag) = select_audio(&master, group_id) {
 					if let Some(uri) = &audio_tag.uri {
 						let audio_url = resolve_uri(&self.base_url, uri)?;
-						self.audio = Some(TrackState::new(audio_url));
+						self.audio = Some(TrackState::new(audio_url, select_audio_only()));
 					} else {
 						warn!(%group_id, "audio rendition missing URI");
 					}
 				} else {
 					warn!(%group_id, "audio group not found in master playlist");
 				}
+			}
+
+			// With a separate audio rendition, the variants are muxed but should publish
+			// video only so the audio isn't duplicated; otherwise import every track.
+			let variant_select = if self.audio.is_some() {
+				select_video_only()
+			} else {
+				select_muxed()
+			};
+			for variant in &variants {
+				let video_url = resolve_uri(&self.base_url, &variant.uri)?;
+				self.video.push(TrackState::new(video_url, variant_select.clone()));
 			}
 
 			let audio_url = self.audio.as_ref().map(|a| a.playlist.to_string());
@@ -339,8 +368,8 @@ impl Import {
 			return Ok(());
 		}
 
-		// Fallback: treat the provided URL as a single media playlist.
-		self.video.push(TrackState::new(self.base_url.clone()));
+		// Fallback: treat the provided URL as a single (muxed) media playlist.
+		self.video.push(TrackState::new(self.base_url.clone(), select_muxed()));
 		Ok(())
 	}
 
@@ -433,8 +462,8 @@ impl Import {
 		let url = resolve_uri(&track.playlist, &map.uri)?;
 		let bytes = self.fetch_bytes(url).await?;
 		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index),
-			TrackKind::Audio => self.ensure_audio_importer(),
+			TrackKind::Video(index) => self.ensure_video_importer_for(index, &track.select),
+			TrackKind::Audio => self.ensure_audio_importer(&track.select),
 		};
 
 		// The importer buffers internally, so a fully-parsed init segment leaves it
@@ -464,8 +493,8 @@ impl Import {
 		// `consume_segments` always runs `ensure_init_segment` before reaching here, so
 		// the importer is already initialized.
 		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index),
-			TrackKind::Audio => self.ensure_audio_importer(),
+			TrackKind::Video(index) => self.ensure_video_importer_for(index, &track.select),
+			TrackKind::Audio => self.ensure_audio_importer(&track.select),
 		};
 
 		importer.decode(&bytes)?;
@@ -495,9 +524,9 @@ impl Import {
 	///
 	/// Each video variant gets its own importer so that their tracks remain
 	/// independent while still contributing to the same shared catalog.
-	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
+	fn ensure_video_importer_for(&mut self, index: usize, select: &select::Broadcast) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone());
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone()).with_select(select.clone());
 			self.video_importers.push(importer);
 		}
 
@@ -505,9 +534,12 @@ impl Import {
 	}
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
-	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
+	fn ensure_audio_importer(&mut self, select: &select::Broadcast) -> &mut Fmp4 {
+		let broadcast = self.broadcast.clone();
+		let catalog = self.catalog.clone();
+		let select = select.clone();
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone()))
+			.get_or_insert_with(|| Fmp4::new(broadcast, catalog).with_select(select))
 	}
 
 	#[cfg(test)]
@@ -658,5 +690,56 @@ mod tests {
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());
+	}
+
+	/// Resolve `ensure_tracks` against a master playlist written to a temp file.
+	async fn discover(master_body: &str) -> Import {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+		let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+		let dir = std::env::temp_dir().join(format!("moq-hls-test-{}-{n}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("master.m3u8");
+		std::fs::write(&path, master_body).unwrap();
+
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		// `Config` takes a filesystem path for non-http inputs.
+		let cfg = Config::new(path.to_str().unwrap().to_string());
+		let mut hls = Import::new(broadcast, catalog, cfg).unwrap();
+		hls.ensure_tracks().await.unwrap();
+		hls
+	}
+
+	/// A master with a separate audio rendition: variants publish video only, the
+	/// alternate rendition publishes audio only.
+	#[tokio::test]
+	async fn discover_splits_separate_audio() {
+		let master = "#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"audio.m3u8\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\n\
+			video.m3u8\n";
+		let hls = discover(master).await;
+
+		assert_eq!(hls.video.len(), 1);
+		assert!(hls.video[0].select.has_video() && !hls.video[0].select.has_audio());
+
+		let audio = hls.audio.as_ref().expect("separate audio rendition");
+		assert!(audio.select.has_audio() && !audio.select.has_video());
+	}
+
+	/// A master whose variant carries muxed A/V (no separate audio group) publishes
+	/// every track.
+	#[tokio::test]
+	async fn discover_muxed_variant_keeps_both() {
+		let master = "#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f\"\n\
+			video.m3u8\n";
+		let hls = discover(master).await;
+
+		assert_eq!(hls.video.len(), 1);
+		assert!(hls.video[0].select.has_video() && hls.video[0].select.has_audio());
+		assert!(hls.audio.is_none());
 	}
 }
