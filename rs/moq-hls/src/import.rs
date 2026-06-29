@@ -445,13 +445,13 @@ impl Import {
 			let mut discontinuity_seq = playlist.discontinuity_sequence;
 			for segment in &playlist.segments[..skip] {
 				if segment.discontinuity {
-					discontinuity_seq += 1;
+					discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
 				}
 			}
 
 			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
 				if segment.discontinuity {
-					discontinuity_seq += 1;
+					discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
 				}
 				self.push_segment(kind, track, segment, base_seq + i as u64, discontinuity_seq)
 					.await?;
@@ -518,9 +518,12 @@ impl Import {
 		// HLS media sequence names the live window, while discontinuity sequence names a
 		// new media timeline. Whenever we join, skip ahead, or cross a discontinuity, anchor
 		// the MoQ group sequence to both so consumers do not wait on groups HLS has moved
-		// past. Contiguous segments let the importer auto-increment instead.
+		// past. Contiguous segments let the importer auto-increment instead; we still pack
+		// (and so validate) the sequence on that path so media sequence can't silently
+		// auto-increment into the discontinuity bits.
+		let group_sequence = moq_sequence(discontinuity_sequence, sequence)?;
 		if track.next_sequence != Some(sequence) || track.next_discontinuity != Some(discontinuity_sequence) {
-			importer.seek(moq_sequence(discontinuity_sequence, sequence)?)?;
+			importer.seek(group_sequence)?;
 		}
 
 		importer.decode(&bytes)?;
@@ -685,6 +688,14 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 	}
 
 	base.join(value)
+}
+
+/// Advance the running discontinuity sequence, rejecting a u64 wrap on absurd input.
+fn bump_discontinuity(sequence: u64) -> Result<u64> {
+	sequence.checked_add(1).ok_or(Error::SequenceOverflow {
+		kind: "discontinuity",
+		value: sequence,
+	})
 }
 
 /// Pack HLS discontinuity + media sequence into a single MoQ group sequence.
