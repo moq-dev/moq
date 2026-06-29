@@ -133,7 +133,7 @@ impl<S: Stream> Export<S> {
 			tracing::warn!(
 				count = picked.len(),
 				"multiple H.264 renditions in catalog snapshot; using the first by name. \
-				 Narrow with catalog::Target to pick one explicitly."
+				 Narrow with catalog::Filter to pick one explicitly."
 			);
 		}
 
