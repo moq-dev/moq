@@ -19,7 +19,6 @@ use crate::catalog::hang::{Catalog, CatalogExt};
 /// Defaults to selecting nothing. Opt a role in with [`video`](Self::video) /
 /// [`audio`](Self::audio); an unselected role is dropped entirely.
 #[derive(Clone, Debug, Default)]
-#[non_exhaustive]
 pub struct Broadcast {
 	video: Option<Video>,
 	audio: Option<Audio>,
@@ -69,7 +68,6 @@ impl Broadcast {
 
 /// Video rendition criteria. An empty field matches every rendition.
 #[derive(Clone, Debug, Default)]
-#[non_exhaustive]
 pub struct Video {
 	name: Vec<String>,
 	codec: Vec<VideoCodecKind>,
@@ -96,7 +94,6 @@ impl Video {
 
 /// Audio rendition criteria. An empty field matches every rendition.
 #[derive(Clone, Debug, Default)]
-#[non_exhaustive]
 pub struct Audio {
 	name: Vec<String>,
 	codec: Vec<AudioCodecKind>,
