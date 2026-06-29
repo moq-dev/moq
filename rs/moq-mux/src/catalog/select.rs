@@ -40,7 +40,7 @@ impl<S: Stream> Stream for Select<S> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
 	use std::collections::BTreeMap;
 
 	use hang::catalog::{Container, H264, VideoConfig};

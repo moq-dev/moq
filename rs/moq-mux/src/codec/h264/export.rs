@@ -53,8 +53,8 @@ struct Avc1Convert {
 impl<S: Stream> Export<S> {
 	/// Subscribe to `broadcast` and emit an Annex-B H.264 byte stream.
 	///
-	/// `catalog` is expected to be narrowed to a single H.264 rendition (e.g.
-	/// `consumer.select(select::Broadcast::default().video(select::Video::default().codec(H264)))`).
+	/// `catalog` is expected to be narrowed to a single H.264 rendition by name (e.g.
+	/// `consumer.select(select::Broadcast::default().video(select::Video::default().name("hd")))`).
 	/// Renditions of other codecs are ignored; if multiple H.264 renditions appear
 	/// in a snapshot, the first by BTreeMap order wins and a warning is logged.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {

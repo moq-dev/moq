@@ -2,7 +2,7 @@
 //!
 //! A [`Broadcaster`] watches one broadcast's catalog and, per rendition, runs a
 //! [`moq_mux::container::fmp4::Export`] narrowed to that single track (via
-//! [`moq_mux::catalog::Filter`]) feeding a [`store::SegmentStore`]. The HTTP
+//! [`moq_mux::catalog::Select`]) feeding a [`store::SegmentStore`]. The HTTP
 //! [`server`](crate::server) reads the stores to answer playlist and segment
 //! requests.
 

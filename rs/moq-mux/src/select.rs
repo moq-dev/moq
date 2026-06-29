@@ -47,16 +47,6 @@ impl Broadcast {
 		self.audio.is_some()
 	}
 
-	/// Whether the named video rendition is selected.
-	pub fn selects_video(&self, name: &str, config: &VideoConfig) -> bool {
-		self.video.as_ref().is_some_and(|video| video.matches(name, config))
-	}
-
-	/// Whether the named audio rendition is selected.
-	pub fn selects_audio(&self, name: &str, config: &AudioConfig) -> bool {
-		self.audio.as_ref().is_some_and(|audio| audio.matches(name, config))
-	}
-
 	/// Drop every rendition from `catalog` that isn't selected.
 	pub fn retain<E: CatalogExt>(&self, catalog: &mut Catalog<E>) {
 		match &self.video {
@@ -129,7 +119,7 @@ impl Audio {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
 	use std::collections::BTreeMap;
 
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VP9, VideoConfig};
