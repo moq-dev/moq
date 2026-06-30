@@ -8,8 +8,8 @@
 
 use std::ffi::c_void;
 
-use moq_native::jni::JavaVM;
 use moq_native::jni::sys::{JNI_VERSION_1_6, jint};
+use moq_native::jni::{JNIEnv, JavaVM};
 
 /// Called by the JVM on `System.loadLibrary("moq_ffi")`. The name is fixed by
 /// the JNI spec, so it can't follow Rust's snake_case convention.
@@ -18,22 +18,27 @@ use moq_native::jni::sys::{JNI_VERSION_1_6, jint};
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 	if let Err(err) = init_platform_tls(&vm) {
 		tracing::warn!(%err, "could not auto-initialize the Android platform TLS verifier; using bundled roots");
-
-		// A failed JNI call may have left a Java exception pending. Returning it
-		// to System.loadLibrary would surface as a load failure, so clear it; the
-		// bundled-roots fallback already covers the init failure.
-		if let Ok(env) = vm.attach_current_thread() {
-			let _ = env.exception_clear();
-		}
 	}
 	JNI_VERSION_1_6
 }
 
-/// Discover the application `Context` and hand it to moq-native.
+/// Attach the loader thread, run the init, and clear any pending Java exception
+/// a failed JNI call may have left behind.
 fn init_platform_tls(vm: &JavaVM) -> Result<(), Box<dyn std::error::Error>> {
 	let mut env = vm.attach_current_thread()?;
+	let result = discover_context_and_init(&mut env);
+	if result.is_err() {
+		// Clear here (before JNI_OnLoad logs and returns) so a pending exception
+		// can't surface as a System.loadLibrary failure or abort the next JNI
+		// call; the bundled-roots fallback already covers the init failure.
+		let _ = env.exception_clear();
+	}
+	result
+}
 
-	// The app Context isn't passed to native code, so fetch it reflectively from
+/// Reflectively fetch the application `Context` and hand it to moq-native.
+fn discover_context_and_init(env: &mut JNIEnv) -> Result<(), Box<dyn std::error::Error>> {
+	// The app Context isn't passed to native code, so fetch it from
 	// android.app.ActivityThread.currentApplication() (a long-stable internal API).
 	let app = env
 		.call_static_method(
@@ -48,6 +53,6 @@ fn init_platform_tls(vm: &JavaVM) -> Result<(), Box<dyn std::error::Error>> {
 		return Err("ActivityThread.currentApplication() returned null".into());
 	}
 
-	moq_native::tls::init_android(&mut env, app)?;
+	moq_native::tls::init_android(env, app)?;
 	Ok(())
 }
