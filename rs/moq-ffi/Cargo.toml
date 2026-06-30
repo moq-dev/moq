@@ -36,10 +36,6 @@ tracing = "0.1"
 uniffi = { version = "0.31", features = ["cli"] }
 url = "2"
 
-# Auto-initializes moq-native's Android platform TLS verifier on library load.
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
-
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
 

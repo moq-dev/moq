@@ -8,8 +8,8 @@
 
 use std::ffi::c_void;
 
-use jni::JavaVM;
-use jni::sys::{JNI_VERSION_1_6, jint};
+use moq_native::jni::JavaVM;
+use moq_native::jni::sys::{JNI_VERSION_1_6, jint};
 
 /// Called by the JVM on `System.loadLibrary("moq_ffi")`. The name is fixed by
 /// the JNI spec, so it can't follow Rust's snake_case convention.
@@ -41,10 +41,6 @@ fn init_platform_tls(vm: &JavaVM) -> Result<(), Box<dyn std::error::Error>> {
 		return Err("ActivityThread.currentApplication() returned null".into());
 	}
 
-	// SAFETY: `env` and `app` are valid for the duration of this call; init_android
-	// promotes the Context to a global ref before returning.
-	unsafe {
-		moq_native::tls::init_android(env.get_raw() as *mut c_void, app.as_raw() as *mut c_void)?;
-	}
+	moq_native::tls::init_android(&mut env, app)?;
 	Ok(())
 }
