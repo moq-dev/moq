@@ -15,6 +15,7 @@ pub mod h264;
 pub mod h265;
 pub(crate) mod legacy;
 pub(crate) mod mp2;
+pub mod mp3;
 pub mod opus;
 pub mod vp8;
 pub mod vp9;

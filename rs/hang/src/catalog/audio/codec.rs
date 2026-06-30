@@ -15,6 +15,13 @@ pub enum AudioCodec {
 	#[display("opus")]
 	Opus,
 
+	/// MPEG-1/2 Audio Layer III (MP3). Configuration is carried in band in each
+	/// frame header, so there is no out-of-band description. Browsers decode it
+	/// via WebCodecs (`AudioDecoder` codec string `"mp3"`), so unlike the legacy
+	/// codecs below it gets its own [`AudioCodecKind`].
+	#[display("mp3")]
+	Mp3,
+
 	/// MPEG-1/2 Audio Layer II. Legacy broadcast codec, carried verbatim by the
 	/// MPEG-TS bridge for TS gear. WebCodecs cannot decode it, so browsers should
 	/// skip this rendition. Do not use it for new content.
@@ -45,6 +52,7 @@ pub enum AudioCodec {
 pub enum AudioCodecKind {
 	AAC,
 	Opus,
+	Mp3,
 	Unknown,
 }
 
@@ -54,6 +62,7 @@ impl AudioCodec {
 		match self {
 			Self::AAC(_) => AudioCodecKind::AAC,
 			Self::Opus => AudioCodecKind::Opus,
+			Self::Mp3 => AudioCodecKind::Mp3,
 			// Legacy TS-bridge codecs aren't WebCodecs-decodable, so they share the
 			// coarse Unknown family for tag-only matching.
 			Self::Mp2 | Self::Ac3 | Self::Ec3 => AudioCodecKind::Unknown,
@@ -70,6 +79,8 @@ impl FromStr for AudioCodec {
 			return AAC::from_str(s).map(Into::into);
 		} else if s == "opus" {
 			return Ok(Self::Opus);
+		} else if s == "mp3" {
+			return Ok(Self::Mp3);
 		} else if s == "mp2" {
 			return Ok(Self::Mp2);
 		} else if s == "ac-3" {

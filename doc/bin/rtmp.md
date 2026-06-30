@@ -22,10 +22,11 @@ each message as an FLV tag and feeds it to `moq-mux`'s FLV demuxer; on egress it
 muxes the broadcast back to FLV with `moq-mux` and sends the tags out as RTMP
 messages. It's the sibling of `moq-srt` (SRT/MPEG-TS) and `moq-rtc` (WHIP/WHEP).
 
-Both **legacy RTMP** (H.264 + AAC) and **enhanced RTMP** (E-RTMP: the HEVC, AV1,
-VP9, Opus, and AC-3 FourCC payloads) are supported in each direction, because all
-codec handling lives in the `moq-mux` FLV demuxer/muxer. Legacy players that speak
-only H.264 + AAC will reject the E-RTMP codecs on the play path.
+Both **legacy RTMP** (H.264 + AAC, plus MP3) and **enhanced RTMP** (E-RTMP: the
+HEVC, AV1, VP9, Opus, AC-3, and MP3 FourCC payloads) are supported in each
+direction, because all codec handling lives in the `moq-mux` FLV demuxer/muxer.
+Legacy players that speak only H.264 + AAC will reject the E-RTMP codecs on the
+play path.
 
 ## CLI shape
 
@@ -127,8 +128,9 @@ be pulled back out over RTMP.
   `Server::with_tls`) with a `rustls::ServerConfig`, or accept the connection and
   finish the TLS handshake by hand and hand the stream to `moq_rtmp::accept_stream`
   (which works over any `AsyncRead + AsyncWrite` transport).
-- **Codecs.** FLAC and MP3 enhanced-audio payloads are dropped (no MoQ catalog
-  codec); everything else (H.264/HEVC/AV1/VP9 video, AAC/Opus/AC-3/E-AC-3 audio)
-  is supported.
+- **Codecs.** FLAC enhanced-audio payloads are dropped (no MoQ catalog codec);
+  everything else (H.264/HEVC/AV1/VP9 video, AAC/MP3/Opus/AC-3/E-AC-3 audio) is
+  supported. MP3 is accepted as both the legacy SoundFormat 2 tag and the E-RTMP
+  `.mp3` FourCC, and re-muxed as the legacy tag on export.
 
 (Written by Claude)

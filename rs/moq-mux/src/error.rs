@@ -47,6 +47,10 @@ pub enum Error {
 	#[error("opus: {0}")]
 	Opus(#[from] crate::codec::opus::Error),
 
+	/// Error parsing MP3.
+	#[error("mp3: {0}")]
+	Mp3(#[from] crate::codec::mp3::Error),
+
 	/// Error parsing H.264.
 	#[error("h264: {0}")]
 	H264(#[from] crate::codec::h264::Error),
