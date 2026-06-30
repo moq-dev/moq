@@ -436,7 +436,7 @@ Group age is computed relative to the latest group by sequence number.
 A group is never expired until at least the next group (by sequence number) has been received or queued.
 Once a newer group exists, the group's age is measured two ways, and it is expired once **either** measure exceeds the relevant `Max Latency` (`Subscriber Max Latency` for live delivery, `Publisher Max Latency` for the publisher's cache):
 
-- **Timestamp age**: the difference between this group's first frame timestamp and the latest group's first frame timestamp (see [Frame](#frame)). This measure is consistent across relays and unaffected by buffering or jitter.
+- **Timestamp age**: the difference between this group's first frame timestamp and the first frame timestamp of the latest group that has at least one frame (see [Frame](#frame)). This measure is consistent across relays and unaffected by buffering or jitter.
 - **Wall-clock age**: the difference between when this group's first byte arrived (subscriber) or was queued (publisher) and the same instant for the latest group.
 
 Equivalently, a group's effective lifetime is the *minimum* of the two — whichever clock declares it stale first wins. The two measures backstop each other:
@@ -624,7 +624,7 @@ The remaining bindings convey the path in their own handshake.
 A relay MUST NOT forward the Path Parameter; like other per-hop setup metadata it applies only to this hop (see [Session](#session)).
 
 
-## ANNOUNCE_REQUEST
+## ANNOUNCE_REQUEST {#announce-request}
 A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive an ANNOUNCE_BROADCAST message for any broadcasts with a path that starts with the requested prefix.
 
 ~~~
@@ -646,7 +646,7 @@ The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_BROA
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
-## ANNOUNCE_OK
+## ANNOUNCE_OK {#announce-ok}
 A publisher sends an ANNOUNCE_OK message exactly once, as the first message on the response side of an Announce Stream.
 It carries metadata that is constant for the lifetime of the stream and applies to every ANNOUNCE_BROADCAST that follows.
 
@@ -864,7 +864,8 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
 The absolute sequence number of the first group that will be delivered.
-This MUST be greater than or equal to the requested `Group Start` (see [SUBSCRIBE](#subscribe)).
+This is a plain absolute sequence, **not** the `absolute + 1` form used by `Group Start` in SUBSCRIBE (see [SUBSCRIBE](#subscribe)); decode the requested `Group Start` before comparing.
+Once decoded, this MUST be greater than or equal to the requested start group.
 If it is strictly greater, the groups in between are unavailable and will not be delivered; SUBSCRIBE_OK thus also acts as an implicit drop of that leading range, and no separate SUBSCRIBE_DROP is required for it.
 A subscriber that requested the latest group (`Group Start` = 0) learns the resolved sequence here.
 
@@ -884,6 +885,7 @@ Set to 0x1 to indicate a SUBSCRIBE_END message.
 
 **Group**:
 The absolute sequence number of the last group that may be delivered (inclusive).
+This is a plain absolute sequence, **not** the `absolute + 1` form used by `Group Start`/`Group End` in SUBSCRIBE.
 The subscriber MUST NOT wait for any group after this sequence.
 SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups at or below this sequence that it cannot deliver, and FINs the stream only once every group up to this sequence has been accounted for.
 
@@ -906,9 +908,11 @@ Set to 0x2 to indicate a SUBSCRIBE_DROP message.
 
 **Group Start**:
 The first absolute group sequence in the dropped range.
+Despite the shared field name, this is a plain absolute sequence, **not** the `absolute + 1` form used by `Group Start` in SUBSCRIBE.
 
 **Group End**:
 The last absolute group sequence in the dropped range (inclusive).
+As with `Group Start` above, this is a plain absolute sequence, **not** the `absolute + 1` form used in SUBSCRIBE.
 
 **Error Code**:
 An application-specific error code.
@@ -963,7 +967,7 @@ When sent by the publisher (responder): the current estimated bitrate in bits pe
 A value of 0 means unknown.
 
 **RTT**:
-The smoothed round-trip time in milliseconds, as defined in {{!RFC9002}}.
+The smoothed round-trip time in milliseconds, as defined in [RFC9002].
 A value of 0 means unknown.
 
 > NOTE: RTT is included in the PROBE message because not all QUIC implementations and browser WebTransport APIs expose RTT statistics directly. This field may be deprecated once RTT is universally available via the underlying transport API.
@@ -1037,6 +1041,7 @@ The `Message Length` describes the payload size on the wire.
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
 - Added a SETUP message and Setup Stream (0x1).
 - Added a SETUP `Probe` parameter.
+- Added a SETUP `Path` parameter to convey the request path on bindings that have no request URI (native QUIC and Qmux-over-TCP/TLS).
 - Added Track Stream (0x6) and TRACK_INFO.
 - Removed FETCH_OK.
 - Trimmed SUBSCRIBE_OK to a single resolved start group.
@@ -1053,7 +1058,7 @@ The `Message Length` describes the payload size on the wire.
 - Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket.
 
 ## moq-lite-04
-- Renamed ANNOUNCE_PLEASE to ANNOUNCE_REQUEST.
+- Renamed ANNOUNCE_PLEASE to ANNOUNCE_SUBSCRIBE.
 - ANNOUNCE_BROADCAST `Hops` count replaced with explicit `Hop ID` list for loop detection.
 - Added `Exclude Hop` to ANNOUNCE_REQUEST for relay loop avoidance.
 - Added GOAWAY stream for graceful session shutdown and migration.
@@ -1146,7 +1151,25 @@ Some of these fields occur in multiple messages.
 
 
 # Security Considerations
-TODO Security
+moq-lite inherits the transport security of the underlying connection: QUIC and WebTransport provide confidentiality and integrity via TLS 1.3, and the Qmux bindings run over TLS (TCP) or a `wss://` WebSocket. How that connection is authenticated is out of scope (see [Connection](#connection)). The considerations below are specific to moq-lite.
+
+## Bandwidth Probing
+The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subscriber ask the publisher to pad the connection up to a target bitrate. A publisher MUST NOT treat the target as authorization to send beyond what congestion control allows: padding is bounded by the congestion window, so probing cannot be used to amplify traffic toward the subscriber or a spoofed address. A publisher that only advertised `Report` MUST NOT pad above its current sending rate. Because all data flows on an established, congestion-controlled session to the connecting peer, moq-lite offers no off-path amplification vector.
+
+## Session Redirection
+GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy — scheme, authority, and port — before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
+
+## Routing Metadata and Privacy
+Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_BROADCAST](#announce-broadcast)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier. The `Exclude Hop` filter in ANNOUNCE_REQUEST is a loop-avoidance hint, not an access control; a publisher is not required to honor it, and it MUST NOT be relied upon to hide broadcasts.
+
+## Resource Exhaustion
+A peer can open many streams (subscriptions, announcements, fetches) or request large announce prefixes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control.
+
+## Datagram Injection
+Datagrams are routed to a subscription solely by Subscribe ID and carry no per-group authentication beyond that of the QUIC connection. On an unmodified QUIC/WebTransport connection this is sufficient, since datagrams are protected by the transport. A subscriber MUST silently drop any datagram with an unknown Subscribe ID and MUST deduplicate against groups received on streams (see [Datagrams](#datagrams)).
+
+## Opaque Payloads
+The moq-lite layer treats Frame payloads as opaque and performs no validation of their contents. Confidentiality or integrity of the media itself (e.g. end-to-end encryption transparent to relays) is an application concern and out of scope for this draft.
 
 
 # IANA Considerations
