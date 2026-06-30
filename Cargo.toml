@@ -8,6 +8,7 @@ members = [
     "rs/moq-boy",
     "rs/moq-cli",
     "rs/moq-ffi",
+    "rs/moq-flate",
     "rs/moq-gst",
     "rs/moq-hls",
     "rs/moq-json",
@@ -35,6 +36,7 @@ default-members = [
     "rs/moq-cli",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
+    "rs/moq-flate",
     "rs/moq-hls",
     "rs/moq-json",
     "rs/moq-loc",
@@ -61,8 +63,9 @@ flate2 = "1.1"
 hang = { version = "0.19", path = "rs/hang" }
 kio = { version = "0.4", path = "rs/kio" }
 moq-audio = { version = "0.0.5", path = "rs/moq-audio" }
+moq-flate = { version = "0.1.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.0.1", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.0.4", path = "rs/moq-json" }
+moq-json = { version = "0.1.0", path = "rs/moq-json" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.6", path = "rs/moq-mux" }

@@ -190,7 +190,6 @@ Publish (read from stdin unless noted):
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
-- `hls --playlist <url>` - HLS playlist ingest
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
 Subscribe (`--format`):
@@ -199,6 +198,30 @@ Subscribe (`--format`):
 - `mkv` - Matroska / WebM
 - `ts` - MPEG-TS
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
+
+`subscribe` also takes `--catalog` to pick which catalog track to read for track
+discovery. When omitted, it's auto-detected from the broadcast name suffix
+(`.hang` -> `hang`, `.msf` -> `msf`), falling back to `hang`:
+
+- `hang` - the `catalog.json` JSON catalog (default)
+- `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
+- `msf` - the MSF `catalog` track
+
+### HLS / LL-HLS
+
+Import an HLS master/media playlist into a MoQ broadcast:
+
+```bash
+moq-cli hls --url https://relay.example.com/anon import \
+    --broadcast my-stream.hang \
+    --playlist https://example.com/live/master.m3u8
+```
+
+Serve MoQ broadcasts as HLS / LL-HLS over HTTP:
+
+```bash
+moq-cli hls --url https://relay.example.com/anon export --listen '[::]:8089'
+```
 
 ### MPEG-TS
 
@@ -228,7 +251,7 @@ Elementary streams the CLI does not decode (SCTE-35 cues, teletext, DVB
 subtitles, private data, ...) are carried verbatim too, one MoQ track per PID,
 described in the catalog `mpegts` section. They survive `publish ts | relay |
 subscribe --format ts` end-to-end with their original PIDs, PMT descriptors, and
-PES stream_ids, so a contribution feed keeps its ancillary streams. The relay
+PES stream\_ids, so a contribution feed keeps its ancillary streams. The relay
 forwards them transparently and never parses the payload.
 
 ### FLV

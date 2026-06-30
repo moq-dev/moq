@@ -14,7 +14,9 @@ export type BroadcastProps = {
 };
 
 export class Broadcast {
-	static readonly CATALOG_TRACK = "catalog.json";
+	static readonly CATALOG_TRACK = Catalog.TRACK;
+	/** The DEFLATE-compressed catalog track, served alongside {@link CATALOG_TRACK} with identical content. */
+	static readonly CATALOG_TRACK_COMPRESSED = Catalog.TRACK_COMPRESSED;
 
 	connection: Signal<Moq.Connection.Established | undefined>;
 	enabled: Signal<boolean>;
@@ -100,6 +102,10 @@ export class Broadcast {
 			switch (request.name) {
 				case Broadcast.CATALOG_TRACK:
 					serve = (track, effect) => this.catalog.serve(track, effect);
+					break;
+				case Broadcast.CATALOG_TRACK_COMPRESSED:
+					// Same catalog, DEFLATE-compressed; consumers opt in by subscribing to this track.
+					serve = (track, effect) => this.catalog.serve(track, effect, { compression: true });
 					break;
 				case Audio.Encoder.TRACK:
 					serve = (track, effect) => this.audio.serve(track, effect);

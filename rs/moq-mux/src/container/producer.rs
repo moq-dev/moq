@@ -150,22 +150,30 @@ impl<C: Container> Producer<C> {
 
 	/// Flush any buffered frames into the current group without closing it.
 	///
-	/// `next`, when given, is the timestamp of the frame that rolled the group over
-	/// (the next keyframe). The buffer's last frame is the only sample whose successor
-	/// wasn't visible when it arrived, so we backfill its duration from `next` here.
-	/// This adds no latency: that frame is already in hand. Containers that don't use
-	/// per-frame durations (Legacy, LOC) ignore it.
+	/// Backfills the per-sample duration the source didn't provide. A CMAF fragment
+	/// reconstructs each sample's DTS by accumulating durations, so every non-final
+	/// sample packed into one fragment needs one or the decoder collapses their
+	/// timestamps. Frames are in decode order, so a sample's duration is the gap to the
+	/// next buffered sample; the final sample borrows `next` (the timestamp of the
+	/// keyframe that rolled the group over), which is already in hand so this adds no
+	/// latency. Frames that already carry a duration (e.g. fMP4 passthrough) keep it,
+	/// and a backwards gap (a B-frame whose successor presents earlier) is left unset.
+	/// Containers that don't use per-frame durations (Legacy, LOC) ignore the field.
 	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
 		if self.buffer.is_empty() {
 			return Ok(());
 		}
 
-		if let Some(next) = next
-			&& let Some(last) = self.buffer.last_mut()
-			&& last.duration.is_none()
-			&& let Ok(duration) = next.checked_sub(last.timestamp)
-		{
-			last.duration = Some(duration);
+		for i in 0..self.buffer.len() {
+			if self.buffer[i].duration.is_some() {
+				continue;
+			}
+			let boundary = self.buffer.get(i + 1).map(|f| f.timestamp).or(next);
+			if let Some(boundary) = boundary
+				&& let Ok(duration) = boundary.checked_sub(self.buffer[i].timestamp)
+			{
+				self.buffer[i].duration = Some(duration);
+			}
 		}
 
 		let group = match &mut self.group {
@@ -363,7 +371,7 @@ mod tests {
 	/// The keyframe that rolls a group over backfills the duration of the previous
 	/// group's last frame, without buffering an extra frame.
 	#[tokio::test]
-	async fn keyframe_backfills_last_frame_duration() {
+	async fn keyframe_backfills_batched_durations() {
 		let track = track_producer(
 			"test",
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
@@ -379,9 +387,9 @@ mod tests {
 		let writes = recording.0.borrow();
 		let group0 = &writes[0];
 		assert_eq!(group0.len(), 2);
-		// Last frame's duration backfilled from the next keyframe: 66ms - 33ms.
+		// The first sample's duration is the gap to the next buffered sample: 33ms - 0.
+		assert_eq!(group0[0].duration, Some(Timestamp::from_micros(33_000).unwrap()));
+		// The last sample's duration is backfilled from the next keyframe: 66ms - 33ms.
 		assert_eq!(group0[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
-		// The earlier frame keeps None; only the trailing sample needs the boundary.
-		assert_eq!(group0[0].duration, None);
 	}
 }

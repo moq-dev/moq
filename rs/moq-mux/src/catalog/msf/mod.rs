@@ -50,9 +50,6 @@ pub enum Error {
 	#[error("MSF audio track {0:?} has malformed OpusHead")]
 	MalformedOpus(String),
 
-	#[error("MSF audio track {0:?} AudioSpecificConfig has trailing bytes")]
-	AacTrailingBytes(String),
-
 	#[error("MSF audio track {0:?} OpusHead has trailing bytes")]
 	OpusTrailingBytes(String),
 

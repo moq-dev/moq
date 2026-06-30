@@ -94,7 +94,7 @@ Each frame in `hang` consists of a timestamp and codec bitstream payload. See th
 
 ## CMAF Import
 
-For importing fMP4/CMAF/HLS files, see the [moq-mux](/lib/rs/crate/moq-mux) crate.
+For importing fMP4/CMAF files, see the [moq-mux](/lib/rs/crate/moq-mux) crate. For HLS, see [moq-hls](https://github.com/moq-dev/moq/tree/main/rs/moq-hls).
 
 ## Grouping
 
@@ -153,7 +153,7 @@ Key types:
 - `Catalog` - Track metadata
 - `VideoConfig` / `AudioConfig` - Track configuration
 - `Frame` - Timestamp + codec bitstream
-- [moq-mux](/lib/rs/crate/moq-mux) - CMAF/fMP4/HLS import
+- [moq-mux](/lib/rs/crate/moq-mux) - CMAF/fMP4 import
 
 ## Protocol Specification
 

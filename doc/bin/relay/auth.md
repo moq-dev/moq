@@ -171,6 +171,17 @@ auth_api = "https://api.moq.dev/cluster/auth"
 
 Unlike the standalone flags, the unified call **fails closed**: any network error, non-2xx status, or unparseable response rejects the connection. The verifying key itself comes from this call, so there is no safe fallback; the endpoint's `Cache-Control` softens transient failures. This applies to mTLS peers as well, including root (`/`) connections such as cluster peers: when an auth API is configured it is the source of truth for every connection (so it can alias and tier the root too), and a failed lookup rejects the connection so the peer reconnects and self-heals once the API recovers. The only fail-open case is when **no** auth API is configured, where the client certificate is the sole credential and the path is used unchanged.
 
+### Authenticating the relay to the auth API
+
+The outbound HTTP the relay makes for auth (`--auth-api` requests and JWK fetches) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--client-tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.
+
+```toml
+[client.tls]
+cert = "/etc/moq/relay-client.pem"
+key  = "/etc/moq/relay-client.key"
+root = ["/etc/moq/auth-api-ca.pem"]
+```
+
 ## Supported Algorithms
 
 ### Symmetric (HMAC)
@@ -222,7 +233,7 @@ Client certificate presentation is **optional**: connections without a
 certificate fall through to the normal JWT path unchanged.
 
 ```toml
-[tls]
+[server.tls]
 cert = ["/etc/moq/server.pem"]
 key  = ["/etc/moq/server.key"]
 # One or more PEM files containing the CAs trusted to sign peer certificates.

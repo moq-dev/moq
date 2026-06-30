@@ -24,9 +24,14 @@ export class CatalogProducer {
 		for (const output of this.#outputs) output.update(value);
 	}
 
-	/** Serve a subscription request: seed it with the current catalog, then forward updates. */
-	serve(track: Moq.TrackProducer, effect: Effect): void {
-		const output = new Json.Producer<Catalog.Root>(track);
+	/**
+	 * Serve a subscription request: seed it with the current catalog, then forward updates.
+	 *
+	 * Pass `opts.compression` to DEFLATE-compress this subscriber's frames, so the same catalog can be
+	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).
+	 */
+	serve(track: Moq.TrackProducer, effect: Effect, opts?: { compression?: boolean }): void {
+		const output = new Json.Producer<Catalog.Root>(track, { compression: opts?.compression });
 		output.update(this.#value);
 
 		this.#outputs.add(output);

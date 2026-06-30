@@ -15,7 +15,7 @@ The reference implementation. Used by every server-side tool and by the FFI core
 
 - [`moq-net`](/lib/rs/crate/moq-net) - Real-time pub/sub
 - [`hang`](/lib/rs/crate/hang) - Media catalog and container
-- [`moq-mux`](/lib/rs/crate/moq-mux) - fMP4/CMAF/HLS import
+- [`moq-mux`](/lib/rs/crate/moq-mux) - fMP4/CMAF, MPEG-TS, and FLV import/export
 - [`moq-native`](/lib/rs/crate/moq-native) - QUIC endpoint helpers
 - [...and more](/lib/rs/)
 

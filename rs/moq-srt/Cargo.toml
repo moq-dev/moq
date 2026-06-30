@@ -1,6 +1,6 @@
 [package]
 name = "moq-srt"
-description = "SRT contribution ingest gateway for Media over QUIC"
+description = "Bidirectional SRT gateway for Media over QUIC"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -54,7 +54,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"],
 srt-tokio = "0.4"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "fs"], optional = true }
+tower-http = { version = "0.7", features = ["cors", "fs"], optional = true }
 tracing = "0.1"
 url = { version = "2", optional = true }
 

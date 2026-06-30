@@ -7,22 +7,28 @@ Scopes the `/js` TypeScript/JavaScript workspace. Universal rules (writing style
 Bun workspaces; members listed in the repo-root `package.json` (not in `js/`). Deps hoist to the repo root `node_modules`, not into `js/`. Run recipes via `just js <recipe>` (see `js/justfile`). Packages, grouped by role (each mirrors its `rs/` counterpart where one exists), roughly in dependency order:
 
 **Foundation**
+
 - `@moq/signals` (`signals/`): reactive core. `Signal`, `Computed`, `Effect`, plus framework adapters at subpaths `./solid`, `./react`, `./dom`. No deps on other workspace packages. Everything below uses it.
 
 **Transport / protocol**
+
 - `@moq/net` (`net/`): browser networking. Connect to a relay, then publish/consume broadcasts/tracks/groups/frames over WebTransport (WebSocket fallback). Negotiates `moq-lite` (`lite/`) or IETF `moq-transport` (`ietf/`). Mirror of `rs/moq-net`. Optional `zod` peer dep for `./zod` JSON-frame helpers.
 
 **Container / catalog formats**
+
 - `@moq/loc` (`loc/`): Low Overhead Container frame encoding. Thin layer on `@moq/net`.
-- `@moq/json` (`json/`): snapshot/delta JSON over a track via RFC 7396 merge-patch. Exposes the base `Producer`/`Consumer` that `@moq/hang`'s catalog extends.
+- `@moq/json` (`json/`): snapshot/delta JSON over a track via RFC 7396 merge-patch. Exposes the base `Producer`/`Consumer` that `@moq/hang`'s catalog extends. DEFLATE via `@moq/flate`.
+- `@moq/flate` (`flate/`): group-scoped DEFLATE primitive (only deps on `pako`). `Encoder`/`Decoder` turn a stream of payloads into self-delimited sync-flushed frames sharing one window; wire-interoperable with the Rust `moq-flate` crate. Used by `@moq/json`.
 - `@moq/msf` (`msf/`): MOQT Streaming Format catalog types (zod schemas).
 
 **Media**
+
 - `@moq/hang` (`hang/`): WebCodecs media layer. Subpaths `./catalog`, `./container`, `./util`. Mirror of `rs/hang`. Catalog is a JSON track describing other tracks; container frames are timestamp + codec bitstream (CMAF under `container/cmaf`).
 - `@moq/watch` (`watch/`): subscribe + decode + render, with optional UI. Subpaths `.`, `./element`, `./ui`, `./support`.
 - `@moq/publish` (`publish/`): capture + encode + publish, with optional UI. Same subpath shape as watch.
 
 **Apps / examples**
+
 - `@moq/boy` (`moq-boy/`): MoQ Boy web viewer. The only package using `.tsx`/Solid.
 - `@moq/clock` (`clock/`): private native example (publish/subscribe a clock).
 - `@moq/token` (`token/`): JWT generation/validation (`jose`); also ships a `moq-token` bin. Mirror of `rs/moq-token`.

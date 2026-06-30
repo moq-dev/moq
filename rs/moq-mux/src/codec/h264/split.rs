@@ -135,6 +135,13 @@ impl Split {
 				self.maybe_start_frame(pts)?;
 			}
 			Some(Avc3NalType::IdrSlice) => {
+				// first_mb_in_slice == 0 (ue(v), so the byte-after-header high bit is set)
+				// marks the first slice of a new picture: close any access unit still open.
+				// A bare IDR arriving right after a delta picture in the same chunk would
+				// otherwise fold both into one frame and mis-flag it a keyframe.
+				if nal.get(1).ok_or(Error::NalTooShort)? & 0x80 != 0 {
+					self.maybe_start_frame(pts)?;
+				}
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
 				crate::codec::annexb::reconcile_keyframe_params(
@@ -346,6 +353,39 @@ mod tests {
 			second[0].payload.as_ref(),
 			annexb(&[sps, pps0, pps1, idr]).freeze().as_ref()
 		);
+	}
+
+	/// A bare IDR arriving right after a delta picture in the same decode chunk must
+	/// open its own access unit, not fold into the delta's frame. Without closing the
+	/// open slice on the IDR's first slice, the two AUs merge and the result is
+	/// mis-flagged as a keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn bare_idr_after_delta_splits() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		// P-slice with first_mb_in_slice set (byte 1 high bit), opening a new AU.
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		// A trailing AUD so the bare IDR is a *complete* NAL during decode.
+		let aud: &[u8] = &[0x09, 0x10];
+
+		let mut split = Split::new();
+		// One chunk: keyframe, a delta picture, then a bare IDR (no inline params).
+		let frames = split.decode(&annexb(&[sps, pps, idr, pslice, idr, aud]), ts()).unwrap();
+
+		// The keyframe and the delta both completed; the second IDR's AU is still buffered.
+		assert_eq!(frames.len(), 2);
+		assert!(frames[0].keyframe, "first AU is the keyframe");
+		assert!(!frames[1].keyframe, "the delta picture must not be flagged a keyframe");
+		// The delta frame holds only its own slice, not a merged keyframe.
+		assert_eq!(frames[1].payload.as_ref(), annexb(&[pslice]).freeze().as_ref());
+
+		// Flushing closes the bare IDR as its own self-contained keyframe (params
+		// re-injected). The trailing AUD opens a fresh slice-less AU that is dropped.
+		let tail = split.flush(ts()).unwrap();
+		assert_eq!(tail.len(), 1);
+		assert!(tail[0].keyframe);
+		assert_eq!(tail[0].payload.as_ref(), annexb(&[sps, pps, idr]).freeze().as_ref());
 	}
 
 	/// A keyframe that presents a smaller parameter set than a prior one reinits

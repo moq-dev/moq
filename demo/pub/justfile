@@ -142,8 +142,8 @@ hls name relay="http://localhost:4443":
     }
     trap cleanup SIGINT SIGTERM EXIT
 
-    echo ">>> Running with --passthrough flag"
-    cargo run --bin moq-cli -- publish --url "{{ relay }}" --name "{{ name }}.hang" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+    echo ">>> Importing HLS via moq-cli"
+    cargo run --bin moq-cli -- hls --url "{{ relay }}" import --broadcast "{{ name }}.hang" --playlist "$OUT_DIR/master.m3u8"
     EXIT_CODE=$?
 
     cleanup

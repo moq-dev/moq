@@ -12,7 +12,11 @@ use subscribe::*;
 use web::*;
 
 use clap::{Parser, Subcommand};
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 
 #[derive(Parser, Clone)]
@@ -109,6 +113,51 @@ pub enum Command {
 		#[command(flatten)]
 		args: SubscribeArgs,
 	},
+	/// Import or export HLS / LL-HLS via a MoQ relay.
+	Hls {
+		/// The MoQ client configuration.
+		#[command(flatten)]
+		config: moq_native::ClientConfig,
+
+		/// The URL of the MoQ server.
+		#[arg(long, alias = "relay", env = "MOQ_HLS_RELAY")]
+		url: Url,
+
+		#[command(subcommand)]
+		command: HlsCommand,
+	},
+}
+
+#[derive(Subcommand, Clone)]
+pub enum HlsCommand {
+	/// Serve HLS / LL-HLS over HTTP from MoQ broadcasts.
+	Export {
+		/// HTTP listener for the HLS endpoints.
+		#[arg(long, env = "MOQ_HLS_LISTEN", default_value = "[::]:8089")]
+		listen: SocketAddr,
+
+		/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
+		#[command(flatten)]
+		tls: moq_native::tls::Server,
+
+		/// LL-HLS part target duration.
+		#[arg(long, env = "MOQ_HLS_PART_TARGET", default_value = "500ms", value_parser = humantime::parse_duration)]
+		part_target: Duration,
+
+		/// Minimum duration of media kept in each rendition's sliding window.
+		#[arg(long, env = "MOQ_HLS_WINDOW", default_value = "16s", value_parser = humantime::parse_duration)]
+		window: Duration,
+	},
+	/// Pull a remote HLS master/media playlist and publish it into MoQ.
+	Import {
+		/// Broadcast name to publish on the relay.
+		#[arg(long, alias = "name", env = "MOQ_HLS_BROADCAST")]
+		broadcast: String,
+
+		/// Remote HLS playlist URL (http/https) or local file path.
+		#[arg(long, env = "MOQ_HLS_PLAYLIST")]
+		playlist: String,
+	},
 }
 
 #[tokio::main]
@@ -200,6 +249,22 @@ async fn main() -> anyhow::Result<()> {
 
 			run_subscribe(client, url, broadcast, args).await
 		}
+		Command::Hls { config, url, command } => {
+			let client = config.init()?;
+
+			#[cfg(feature = "iroh")]
+			let client = client.with_iroh(iroh);
+
+			match command {
+				HlsCommand::Export {
+					listen,
+					tls,
+					part_target,
+					window,
+				} => run_hls_export(client, url, listen, tls, part_target, window).await,
+				HlsCommand::Import { broadcast, playlist } => run_hls_import(client, url, broadcast, playlist).await,
+			}
+		}
 	}
 }
 
@@ -248,4 +313,126 @@ async fn run_announced_subscribe(
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
 
 	Subscribe::new(consumer, catalog, args).run().await
+}
+
+async fn run_hls_export(
+	client: moq_native::Client,
+	url: Url,
+	listen: SocketAddr,
+	tls: moq_native::tls::Server,
+	part_target: Duration,
+	window: Duration,
+) -> anyhow::Result<()> {
+	let subscriber = moq_net::Origin::random().produce();
+	let consumer = subscriber.consume();
+	let reconnect = client.with_consume(subscriber).reconnect(url.clone());
+
+	let config = moq_hls::export::Config {
+		part_target,
+		window,
+		..Default::default()
+	};
+	let server = moq_hls::Server::new(consumer, config);
+	let app = server
+		.router()
+		.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+
+	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
+		None
+	} else {
+		let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+		Some(tls.server_config(alpn)?)
+	};
+
+	let listener = moq_native::bind::tcp(listen)?;
+
+	tracing::info!(%url, %listen, "serving HLS");
+
+	#[cfg(unix)]
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+
+	tokio::select! {
+		res = serve_hls(listener, app, tls) => res,
+		res = reconnect.closed() => res.map_err(Into::into),
+		_ = shutdown_signal() => Ok(()),
+	}
+}
+
+async fn run_hls_import(
+	client: moq_native::Client,
+	url: Url,
+	broadcast: String,
+	playlist: String,
+) -> anyhow::Result<()> {
+	warn_if_missing_format(&broadcast);
+
+	let publisher = moq_net::Origin::random().produce();
+	let reconnect = client.with_publish(publisher.consume()).reconnect(url.clone());
+
+	let mut producer = moq_net::Broadcast::new().produce();
+	let consumer = producer.consume();
+	anyhow::ensure!(
+		publisher.publish_broadcast(&broadcast, consumer),
+		"failed to publish broadcast"
+	);
+
+	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
+	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
+
+	tracing::info!(%url, %broadcast, "importing HLS");
+
+	tokio::select! {
+		res = async {
+			importer.init().await?;
+
+			#[cfg(unix)]
+			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+
+			importer.run().await
+		} => res.map_err(Into::into),
+		res = reconnect.closed() => res.map_err(Into::into),
+		_ = shutdown_signal() => Ok(()),
+	}
+}
+
+async fn serve_hls(
+	listener: std::net::TcpListener,
+	app: axum::Router,
+	tls: Option<Arc<rustls::ServerConfig>>,
+) -> anyhow::Result<()> {
+	let service = app.into_make_service();
+	match tls {
+		Some(config) => {
+			let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
+			axum_server::from_tcp_rustls(listener, config)?.serve(service).await?;
+		}
+		None => {
+			axum_server::from_tcp(listener)?.serve(service).await?;
+		}
+	}
+	Ok(())
+}
+
+async fn shutdown_signal() {
+	#[cfg(unix)]
+	{
+		use tokio::signal::unix::{SignalKind, signal};
+
+		let mut term = match signal(SignalKind::terminate()) {
+			Ok(term) => term,
+			Err(_) => {
+				let _ = tokio::signal::ctrl_c().await;
+				return;
+			}
+		};
+		tokio::select! {
+			_ = tokio::signal::ctrl_c() => {}
+			_ = term.recv() => {}
+		}
+	}
+
+	#[cfg(not(unix))]
+	{
+		let _ = tokio::signal::ctrl_c().await;
+	}
 }

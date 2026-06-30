@@ -61,7 +61,7 @@ pub struct HttpConfig {
 	pub listen: Option<net::SocketAddr>,
 }
 
-/// HTTPS listener configuration with TLS certificate and key.
+/// HTTPS listener configuration with TLS certificates and keys.
 #[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -71,13 +71,32 @@ pub struct HttpsConfig {
 	#[arg(long = "web-https-listen", id = "web-https-listen", env = "MOQ_WEB_HTTPS_LISTEN", requires_all = ["web-https-cert", "web-https-key"])]
 	pub listen: Option<net::SocketAddr>,
 
-	/// Load the given certificate from disk.
-	#[arg(long = "web-https-cert", id = "web-https-cert", env = "MOQ_WEB_HTTPS_CERT")]
-	pub cert: Option<PathBuf>,
+	/// Load the given certificate chain files from disk.
+	///
+	/// In config files, accepts either a single string or a TOML array.
+	#[arg(
+		long = "web-https-cert",
+		id = "web-https-cert",
+		value_delimiter = ',',
+		env = "MOQ_WEB_HTTPS_CERT"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub cert: Vec<PathBuf>,
 
-	/// Load the given key from disk.
-	#[arg(long = "web-https-key", id = "web-https-key", env = "MOQ_WEB_HTTPS_KEY")]
-	pub key: Option<PathBuf>,
+	/// Load the given private key files from disk.
+	///
+	/// Each key is paired with the certificate chain at the same index.
+	/// In config files, accepts either a single string or a TOML array.
+	#[arg(
+		long = "web-https-key",
+		id = "web-https-key",
+		value_delimiter = ',',
+		env = "MOQ_WEB_HTTPS_KEY"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub key: Vec<PathBuf>,
 
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
@@ -196,12 +215,12 @@ impl Web {
 		};
 
 		let https = if let Some(listen) = config.https.listen {
-			let cert = config.https.cert.expect("missing https.cert");
-			let key = config.https.key.expect("missing https.key");
+			let cert = config.https.cert.clone();
+			let key = config.https.key.clone();
 			let root = config.https.root.clone();
 
-			let tls = build_https_config(&cert, &key, &root).await?;
-			let rustls_config = RustlsConfig::from_config(Arc::new(tls));
+			let rustls = build_https_config(&cert, &key, &root)?;
+			let rustls_config = RustlsConfig::from_config(rustls);
 
 			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
@@ -239,66 +258,29 @@ impl Web {
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.
 ///
-/// When `root` is non-empty, installs a [`WebPkiClientVerifier`] with
-/// `.allow_unauthenticated()` so JWT-only callers still complete the
-/// handshake without presenting a cert. When empty, falls back to
-/// [`with_no_client_auth`]. ALPN is set to `h2`, `http/1.1` to match
-/// axum-server's defaults.
-///
 /// TLS version is left at the rustls default (1.2 + 1.3) so older clients
 /// can still hit the HTTPS API; the QUIC server separately forces 1.3.
-async fn build_https_config(
-	cert: &std::path::Path,
-	key: &std::path::Path,
+fn build_https_config(
+	cert: &[PathBuf],
+	key: &[PathBuf],
 	root: &[PathBuf],
-) -> anyhow::Result<rustls::ServerConfig> {
-	use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-	use rustls::server::WebPkiClientVerifier;
+) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+	anyhow::ensure!(
+		!cert.is_empty(),
+		"web.https.cert must include at least one certificate when web.https.listen is configured"
+	);
+	anyhow::ensure!(
+		cert.len() == key.len(),
+		"web.https.cert and web.https.key must have the same number of entries"
+	);
 
-	let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-		.context("failed to open https cert")?
-		.collect::<Result<_, _>>()
-		.context("failed to parse https cert")?;
-	let key_der = PrivateKeyDer::from_pem_file(key).context("failed to parse https key")?;
+	let mut tls = moq_native::tls::Server::default();
+	tls.cert = cert.to_vec();
+	tls.key = key.to_vec();
+	tls.root = root.to_vec();
 
-	let provider = rustls::crypto::CryptoProvider::get_default()
-		.cloned()
-		.expect("no default crypto provider installed");
-
-	let builder =
-		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
-
-	let mut config = if root.is_empty() {
-		builder
-			.with_no_client_auth()
-			.with_single_cert(cert_chain, key_der)
-			.context("invalid https cert/key pair")?
-	} else {
-		// Build the CA root store inline; `moq_native::tls::Server` is
-		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
-		let mut root_store = rustls::RootCertStore::empty();
-		for path in root {
-			let mut found = false;
-			for cert in CertificateDer::pem_file_iter(path).context("failed to open mTLS client CA")? {
-				let cert = cert.context("failed to parse mTLS client CA PEM")?;
-				root_store.add(cert).context("failed to add mTLS client CA")?;
-				found = true;
-			}
-			anyhow::ensure!(found, "no certificates found in mTLS client CA: {}", path.display());
-		}
-		let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), provider)
-			.allow_unauthenticated()
-			.build()
-			.context("failed to build https client cert verifier")?;
-
-		builder
-			.with_client_cert_verifier(verifier)
-			.with_single_cert(cert_chain, key_der)
-			.context("invalid https cert/key pair")?
-	};
-
-	config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-	Ok(config)
+	tls.server_config(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+		.context("failed to build https TLS config")
 }
 
 /// Reload the HTTPS cert/key/root whenever they change on disk.
@@ -306,9 +288,11 @@ async fn build_https_config(
 /// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
 /// (silently stripping mTLS when configured), so we always rebuild via the full
 /// [`build_https_config`] path.
-async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
-	let paths: Vec<PathBuf> = std::iter::once(cert.clone())
-		.chain(std::iter::once(key.clone()))
+async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<PathBuf>, root: Vec<PathBuf>) {
+	let paths: Vec<PathBuf> = cert
+		.iter()
+		.cloned()
+		.chain(key.iter().cloned())
 		.chain(root.iter().cloned())
 		.collect();
 
@@ -324,8 +308,8 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 		watcher.changed().await;
 		tracing::info!("reloading web certificate");
 
-		match build_https_config(&cert, &key, &root).await {
-			Ok(new) => config.reload_from_config(Arc::new(new)),
+		match build_https_config(&cert, &key, &root) {
+			Ok(new) => config.reload_from_config(new),
 			Err(err) => tracing::warn!(%err, "failed to reload web certificate"),
 		}
 	}
@@ -730,9 +714,13 @@ mod tests {
 	use std::io::Write;
 	use tempfile::TempDir;
 
+	fn make_certs(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+		make_named_certs(dir, "server", "localhost")
+	}
+
 	/// Generate a CA + server cert/key on disk and return the temp paths.
 	/// Modeled after `auth.rs::mtls_fixture`.
-	fn make_certs(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+	fn make_named_certs(dir: &TempDir, name: &str, hostname: &str) -> (PathBuf, PathBuf, PathBuf) {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 		let ca_kp = KeyPair::generate().unwrap();
@@ -743,15 +731,15 @@ mod tests {
 		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
 		let server_kp = KeyPair::generate().unwrap();
-		let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		let mut server_params = CertificateParams::new(vec![hostname.to_string()]).unwrap();
 		server_params
 			.distinguished_name
-			.push(rcgen::DnType::CommonName, "test-server");
+			.push(rcgen::DnType::CommonName, format!("test-{name}"));
 		let server_cert = server_params.signed_by(&server_kp, &ca_issuer).unwrap();
 
-		let ca_path = dir.path().join("ca.pem");
-		let cert_path = dir.path().join("server.cert.pem");
-		let key_path = dir.path().join("server.key.pem");
+		let ca_path = dir.path().join(format!("{name}.ca.pem"));
+		let cert_path = dir.path().join(format!("{name}.cert.pem"));
+		let key_path = dir.path().join(format!("{name}.key.pem"));
 		std::fs::write(&ca_path, ca_cert.pem()).unwrap();
 		std::fs::write(&cert_path, server_cert.pem()).unwrap();
 		std::fs::write(&key_path, server_kp.serialize_pem()).unwrap();
@@ -764,9 +752,8 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let (ca_path, cert_path, key_path) = make_certs(&dir);
 
-		let config = build_https_config(&cert_path, &key_path, &[ca_path])
-			.await
-			.expect("build_https_config should succeed");
+		let config =
+			build_https_config(&[cert_path], &[key_path], &[ca_path]).expect("build_https_config should succeed");
 
 		// ALPN must include h2 + http/1.1; otherwise reqwest's h2 attempt
 		// would silently downgrade or fail. Mirrors axum_server's default.
@@ -784,11 +771,22 @@ mod tests {
 
 		// Empty root is the JWT-only path; should still produce a valid
 		// config with ALPN set so axum-server's hyper layer can negotiate h2.
-		let config = build_https_config(&cert_path, &key_path, &[])
-			.await
-			.expect("no-CA path should still build a usable config");
+		let config =
+			build_https_config(&[cert_path], &[key_path], &[]).expect("no-CA path should still build a usable config");
 
 		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()],);
+	}
+
+	#[tokio::test]
+	async fn build_https_config_accepts_multiple_cert_pairs() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_a, cert_a, key_a) = make_named_certs(&dir, "cdn", "cdn.moq.dev");
+		let (_ca_b, cert_b, key_b) = make_named_certs(&dir, "pro", "moq.pro");
+
+		let config = build_https_config(&[cert_a, cert_b], &[key_a, key_b], &[])
+			.expect("multiple HTTPS cert/key pairs should build");
+
+		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
 	}
 
 	#[tokio::test]
@@ -797,8 +795,23 @@ mod tests {
 		let (_ca_path, cert_path, key_path) = make_certs(&dir);
 
 		let bogus = dir.path().join("does-not-exist.pem");
-		let res = build_https_config(&cert_path, &key_path, &[bogus]).await;
+		let res = build_https_config(&[cert_path], &[key_path], &[bogus]);
 		assert!(res.is_err(), "missing CA file should be a hard error");
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_empty_cert_list() {
+		let res = build_https_config(&[], &[], &[]);
+		assert!(res.is_err(), "HTTPS must require at least one cert/key pair");
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_mismatched_cert_key_lists() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_path, cert_path, _key_path) = make_certs(&dir);
+
+		let res = build_https_config(&[cert_path], &[], &[]);
+		assert!(res.is_err(), "HTTPS cert/key lists must be paired");
 	}
 
 	#[tokio::test]
@@ -810,7 +823,7 @@ mod tests {
 		let mut f = std::fs::File::create(&empty).unwrap();
 		writeln!(f, "# no certs here").unwrap();
 
-		let res = build_https_config(&cert_path, &key_path, &[empty]).await;
+		let res = build_https_config(&[cert_path], &[key_path], &[empty]);
 		assert!(
 			res.is_err(),
 			"empty PEM must be rejected to avoid a silently disabled verifier"

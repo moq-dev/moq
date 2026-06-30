@@ -15,11 +15,18 @@ const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The OpusHead packet was shorter than the 19-byte minimum (RFC 7845 §5.1).
 	#[error("OpusHead must be at least 19 bytes")]
 	HeadTooShort,
 
+	/// The packet did not start with the `OpusHead` magic signature.
 	#[error("invalid OpusHead signature")]
 	InvalidSignature,
+
+	/// [`Config::encode`] was asked to emit an OpusHead for a channel count other
+	/// than mono or stereo; channel mapping family 0 only covers 1 or 2 channels.
+	#[error("channel mapping family 0 only supports mono/stereo (got {0} channels)")]
+	UnsupportedChannelCount(u32),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -64,15 +71,14 @@ impl Config {
 	/// Encode the minimal OpusHead packet (19 bytes; channel mapping family
 	/// 0, zero pre-skip and gain).
 	///
-	/// Panics if `channel_count > 2` — mapping family 0 is only defined for
-	/// mono/stereo per RFC 7845 §5.1. Multi-channel streams need family 1
-	/// with a channel mapping table, which this helper does not emit.
-	pub fn encode(&self) -> Bytes {
-		assert!(
-			self.channel_count <= 2,
-			"OpusHead mapping family 0 only supports mono/stereo (got channel_count={})",
-			self.channel_count
-		);
+	/// Errors with [`Error::UnsupportedChannelCount`] unless `channel_count` is 1
+	/// or 2 — mapping family 0 is only defined for mono/stereo per RFC 7845 §5.1.
+	/// Multi-channel streams need family 1 with a channel mapping table, which
+	/// this helper does not emit.
+	pub fn encode(&self) -> Result<Bytes> {
+		if !(1..=2).contains(&self.channel_count) {
+			return Err(Error::UnsupportedChannelCount(self.channel_count));
+		}
 		let mut head = Vec::with_capacity(19);
 		head.extend_from_slice(b"OpusHead");
 		head.push(1); // version
@@ -81,7 +87,7 @@ impl Config {
 		head.extend_from_slice(&self.sample_rate.to_le_bytes());
 		head.extend_from_slice(&0i16.to_le_bytes()); // output gain
 		head.push(0); // channel mapping family (0 = mono/stereo)
-		Bytes::from(head)
+		Ok(Bytes::from(head))
 	}
 }
 
@@ -95,7 +101,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_count: 2,
 		};
-		let encoded = cfg.encode();
+		let encoded = cfg.encode().unwrap();
 		assert_eq!(encoded.len(), 19);
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.sample_rate, 48000);
@@ -109,18 +115,20 @@ mod tests {
 			channel_count: 1,
 		}
 		.encode()
+		.unwrap()
 		.to_vec();
 		bytes[0] = b'X';
 		assert!(Config::parse(&mut bytes.as_slice()).is_err());
 	}
 
 	#[test]
-	#[should_panic(expected = "mapping family 0")]
-	fn encode_panics_for_multichannel() {
-		Config {
+	fn encode_rejects_multichannel() {
+		let err = Config {
 			sample_rate: 48000,
 			channel_count: 6,
 		}
-		.encode();
+		.encode()
+		.unwrap_err();
+		assert!(matches!(err, Error::UnsupportedChannelCount(6)));
 	}
 }

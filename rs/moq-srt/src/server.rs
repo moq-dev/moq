@@ -367,7 +367,12 @@ struct Paced {
 /// the receiver owns the jitter buffer (the SRT latency parameter), so the sender
 /// adds no lookahead of its own (a deliberate lead would just be `now + lead` here).
 fn pace(anchor: Instant, base: moq_net::Timestamp, ts: moq_net::Timestamp, now: Instant) -> Paced {
-	let send_at = anchor + Duration::from(ts).saturating_sub(Duration::from(base));
+	let send_at = match ts.checked_sub(base) {
+		Ok(offset) => anchor + Duration::from(offset),
+		// A reordered B-frame can carry a PTS before the anchor: pace it at that earlier
+		// instant instead of collapsing it onto the anchor.
+		Err(_) => anchor.checked_sub(Duration::from(base - ts)).unwrap_or(anchor),
+	};
 	if send_at > now {
 		// Media outran wall-clock: re-anchor so this newest frame is the live edge.
 		Paced {
@@ -464,6 +469,21 @@ mod tests {
 			jittered.anchor, edge.anchor,
 			"no re-anchor when media is behind wall-clock"
 		);
+
+		// A reordered B-frame can carry a PTS before the re-anchored live edge. Keep that
+		// earlier media instant instead of flattening it onto the anchor.
+		let reordered = pace(
+			edge.anchor,
+			edge.base,
+			ms(4_099),
+			edge.anchor + Duration::from_millis(20),
+		);
+		assert_eq!(
+			reordered.send_at,
+			edge.anchor - Duration::from_millis(33),
+			"a reordered frame can pace before the anchor"
+		);
+		assert_eq!(reordered.anchor, edge.anchor, "no re-anchor when media trails the edge");
 	}
 
 	fn sid(s: &str) -> StreamId {

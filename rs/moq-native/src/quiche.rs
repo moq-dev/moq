@@ -21,8 +21,26 @@ pub enum Error {
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
+	/// No longer returned: the `http://` scheme now fetches and pins the
+	/// certificate fingerprint instead of failing.
+	#[deprecated(note = "fingerprint verification over http:// is now supported; this is never returned")]
 	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
 	FingerprintUnsupported,
+
+	#[error("failed to fetch certificate fingerprint")]
+	FetchFingerprint(#[source] reqwest::Error),
+
+	#[error("certificate fingerprint request failed")]
+	FingerprintStatus(#[source] reqwest::Error),
+
+	#[error("failed to read certificate fingerprint")]
+	ReadFingerprint(#[source] reqwest::Error),
+
+	#[error("invalid certificate fingerprint")]
+	InvalidFingerprint(#[source] hex::FromHexError),
+
+	#[error("certificate fingerprint must be 32 bytes (SHA-256), got {0}")]
+	FingerprintLength(usize),
 
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
@@ -86,32 +104,52 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
-	pub disable_verify: bool,
+	/// Resolved server-verification policy, shared with the other backends.
+	pub verification: crate::tls::Verification,
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
+	pub http_bootstrap: bool,
 	pub max_streams: u64,
 	pub versions: moq_net::Versions,
 }
 
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		if !config.tls.root.is_empty() {
-			tracing::warn!("--tls-root is not supported with the quiche backend; system roots will be used");
-		}
-
 		Ok(Self {
 			bind: config.bind,
-			disable_verify: config.tls.disable_verify.unwrap_or_default(),
+			verification: config.tls.verification()?,
+			http_bootstrap: config.tls.allows_http_bootstrap(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 			versions: config.versions(),
 		})
 	}
 
 	pub async fn connect(&self, url: Url) -> Result<web_transport_quiche::Connection> {
+		use crate::tls::Verification;
+
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		if url.scheme() == "http" {
-			return Err(Error::FingerprintUnsupported);
-		}
+		// `http://` fetches the relay's self-signed certificate fingerprint over
+		// an insecure request and pins it for this connection. It is only honored
+		// when no stronger verification is configured: an attacker who controls
+		// the plaintext fetch must not be able to weaken an explicit pin or
+		// re-enable verification we were told to skip.
+		let (url, verification) = if url.scheme() == "http" {
+			let mut https = url.clone();
+			https.set_scheme("https").expect("https is a valid scheme");
+
+			if self.http_bootstrap {
+				let pin = fetch_fingerprint(&url).await?;
+				(https, Verification::Fingerprints(vec![pin]))
+			} else {
+				tracing::warn!(
+					"ignoring insecure http:// fingerprint bootstrap; using the configured TLS verification"
+				);
+				(https, self.verification.clone())
+			}
+		} else {
+			(url, self.verification.clone())
+		};
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
@@ -125,14 +163,25 @@ impl QuicheClient {
 		};
 
 		let mut settings = web_transport_quiche::Settings::default();
-		settings.verify_peer = !self.disable_verify;
+		settings.verify_peer = !matches!(verification, Verification::Disabled);
 		settings.alpn = alpns;
 		settings.initial_max_streams_bidi = self.max_streams;
 		settings.initial_max_streams_uni = self.max_streams;
 
-		let builder = web_transport_quiche::ez::ClientBuilder::default()
+		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
 			.with_bind(self.bind)?;
+
+		match verification {
+			// No hook: tokio-quiche's default config with verify_peer = false.
+			Verification::Disabled => {}
+			Verification::Fingerprints(hashes) => {
+				builder = builder.with_server_certificate_hashes(hashes);
+			}
+			Verification::Roots(roots) => {
+				builder = builder.with_root_certificates(roots);
+			}
+		}
 
 		tracing::debug!(%url, "connecting via quiche");
 
@@ -175,6 +224,28 @@ impl QuicheClient {
 			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
 		}
 	}
+}
+
+/// Fetch a relay's certificate SHA-256 over an insecure `http://` request.
+///
+/// This is the native equivalent of how a browser bootstraps trust for a
+/// self-signed relay: GET `/certificate.sha256` and pin the returned hash.
+async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
+	let mut fp = url.clone();
+	fp.set_path("/certificate.sha256");
+	fp.set_query(None);
+	fp.set_fragment(None);
+
+	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate fingerprint");
+
+	let resp = reqwest::get(fp.as_str())
+		.await
+		.map_err(Error::FetchFingerprint)?
+		.error_for_status()
+		.map_err(Error::FingerprintStatus)?;
+	let text = resp.text().await.map_err(Error::ReadFingerprint)?;
+	let bytes = hex::decode(text.trim()).map_err(Error::InvalidFingerprint)?;
+	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
 }
 
 impl Error {
@@ -258,7 +329,7 @@ impl QuicheServer {
 			.collect();
 
 		let info = Arc::new(RwLock::new(crate::tls::Info {
-			#[cfg(any(feature = "noq", feature = "quinn"))]
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			certs: Vec::new(),
 			fingerprints,
 		}));

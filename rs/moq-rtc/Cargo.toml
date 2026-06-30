@@ -55,7 +55,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false,
 str0m = "0.19"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
+tower-http = { version = "0.7", features = ["cors"], optional = true }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }

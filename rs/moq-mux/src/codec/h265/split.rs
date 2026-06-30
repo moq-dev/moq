@@ -148,6 +148,13 @@ impl Split {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
+				// first_slice_segment_in_pic_flag (bit 7 of the third byte, after the
+				// 2-byte header) marks the first slice of a new picture: close any access
+				// unit still open. A bare IDR arriving right after a delta picture in the
+				// same chunk would otherwise fold both into one frame and mis-flag it a keyframe.
+				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
+					self.maybe_start_frame(pts)?;
+				}
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
 				crate::codec::annexb::reconcile_keyframe_params(
@@ -331,6 +338,37 @@ mod tests {
 		assert_eq!(
 			second[0].payload.as_ref(),
 			annexb(&[VPS, SPS, PPS, PPS1, IDR]).freeze().as_ref()
+		);
+	}
+
+	/// A bare IDR arriving right after a delta picture in the same decode chunk must
+	/// open its own access unit, not fold into the delta's frame. Without closing the
+	/// open slice on the IDR's first slice, the two AUs merge and the result is
+	/// mis-flagged as a keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn bare_idr_after_delta_splits() {
+		// TrailR (type 1) with first_slice_segment_in_pic_flag set (byte 2 high bit).
+		const TRAIL: &[u8] = &[0x02, 0x01, 0x80, 0x33];
+		const AUD: &[u8] = &[0x46, 0x01, 0x50]; // AudNut (type 35)
+
+		let mut split = Split::new();
+		// One chunk: keyframe, a delta picture, then a bare IDR (no inline params).
+		let frames = split
+			.decode(&annexb(&[VPS, SPS, PPS, IDR, TRAIL, IDR, AUD]), ts())
+			.unwrap();
+
+		assert_eq!(frames.len(), 2);
+		assert!(frames[0].keyframe, "first AU is the keyframe");
+		assert!(!frames[1].keyframe, "the delta picture must not be flagged a keyframe");
+		assert_eq!(frames[1].payload.as_ref(), annexb(&[TRAIL]).freeze().as_ref());
+
+		// Flushing closes the bare IDR as its own self-contained keyframe.
+		let tail = split.flush(ts()).unwrap();
+		assert_eq!(tail.len(), 1);
+		assert!(tail[0].keyframe);
+		assert_eq!(
+			tail[0].payload.as_ref(),
+			annexb(&[VPS, SPS, PPS, IDR]).freeze().as_ref()
 		);
 	}
 

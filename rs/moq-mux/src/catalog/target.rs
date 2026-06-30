@@ -143,6 +143,12 @@ impl<S: Stream> Stream for Target<S> {
 			Poll::Ready(Ok((emit, epoch))) => {
 				self.last_epoch = epoch;
 				self.fresh_input = false;
+				// End with upstream: if this is the final snapshot (inner already EOF'd),
+				// drop the retained input so a later retarget can't revive the stream after
+				// it has emitted its last value.
+				if inner_eof {
+					self.last_input = None;
+				}
 				Poll::Ready(Ok(Some(emit)))
 			}
 			Poll::Ready(Err(_)) => {
@@ -150,7 +156,11 @@ impl<S: Stream> Stream for Target<S> {
 				Poll::Ready(Ok(None))
 			}
 			Poll::Pending => {
-				if inner_eof && self.last_input.is_none() {
+				// EOF is terminal: once `inner` is exhausted and there's nothing fresh to
+				// emit, finish and drop the retained input so a post-EOF retarget can't make
+				// the closure emit again (a still-pending snapshot returns Ready above).
+				if inner_eof {
+					self.last_input = None;
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -385,9 +395,41 @@ fn best_audio(renditions: &BTreeMap<String, AudioConfig>) -> String {
 
 #[cfg(test)]
 mod test {
+	use std::collections::BTreeMap;
+
 	use hang::catalog::{Container, H264, VideoConfig};
 
 	use super::*;
+
+	/// A one-shot stream: yields its snapshot once, then EOF.
+	struct Once(Option<Catalog>);
+
+	impl Stream for Once {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
+	/// Once upstream ends and the final selected snapshot is emitted, the stream ends
+	/// rather than parking forever waiting for a post-EOF retarget.
+	#[test]
+	fn ends_after_upstream_eof() {
+		let mut catalog = Catalog::default();
+		catalog.video.renditions = BTreeMap::from_iter(vec![vid("only", 640, 360, 500_000)]);
+
+		let mut t = Target::new(Once(Some(catalog)));
+		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+
+		// EOF is terminal: a retarget after the end must not revive the stream.
+		t.set_video(TargetVideo {
+			width: Some(320),
+			..Default::default()
+		});
+		assert!(matches!(t.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+	}
 
 	fn vid(name: &str, w: u32, h: u32, bitrate: u64) -> (String, VideoConfig) {
 		let mut config = VideoConfig::new(H264 {

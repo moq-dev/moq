@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.4"
+version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
@@ -17,10 +17,17 @@ doctest = false
 
 [dependencies]
 bytes = "1"
-flate2 = { workspace = true }
 json-patch = "4"
 kio = { workspace = true }
+moq-flate = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "codec"
+harness = false

@@ -131,11 +131,21 @@ impl<S: Stream> Stream for Filter<S> {
 			Poll::Ready(Ok((emit, epoch))) => {
 				self.last_epoch = epoch;
 				self.fresh_input = false;
+				// End with upstream: if this is the final snapshot (inner already EOF'd),
+				// drop the retained input so a later filter change can't revive the stream
+				// after it has emitted its last value.
+				if inner_eof {
+					self.last_input = None;
+				}
 				Poll::Ready(Ok(Some(emit)))
 			}
 			Poll::Ready(Err(_)) => Poll::Ready(Ok(None)),
 			Poll::Pending => {
-				if inner_eof && self.last_input.is_none() {
+				// EOF is terminal: once `inner` is exhausted and there's nothing fresh to
+				// emit, finish and drop the retained input so a post-EOF setter can't make
+				// the closure emit again (a still-pending snapshot returns Ready above).
+				if inner_eof {
+					self.last_input = None;
 					Poll::Ready(Ok(None))
 				} else {
 					Poll::Pending
@@ -200,6 +210,22 @@ mod test {
 
 		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
+	/// A still-live stream: yields its snapshot once, then parks (never EOFs). Models a
+	/// real upstream that stays open so post-snapshot retargeting is exercised without
+	/// tripping the end-with-upstream path.
+	struct Live(Option<Catalog>);
+
+	impl Stream for Live {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			match self.0.take() {
+				Some(catalog) => Poll::Ready(Ok(Some(catalog))),
+				None => Poll::Pending,
+			}
 		}
 	}
 
@@ -293,9 +319,28 @@ mod test {
 	}
 
 	#[test]
-	fn set_video_after_snapshot_reemits() {
+	fn ends_after_upstream_eof() {
 		let snapshot = catalog_with(vec![h264("lo"), h264("hi")], vec![]);
 		let mut f = Filter::new(Once(Some(snapshot)));
+
+		// First poll emits the filtered snapshot.
+		assert!(matches!(f.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))));
+		// Upstream is exhausted, so the stream ends rather than parking forever.
+		assert!(matches!(f.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+
+		// EOF is terminal: a filter change after the end must not revive the stream.
+		f.set_video(FilterVideo {
+			name: Some("hi".into()),
+			..Default::default()
+		});
+		assert!(matches!(f.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn set_video_after_snapshot_reemits() {
+		// A live (not-yet-EOF) upstream, so the retarget re-applies to the retained snapshot.
+		let snapshot = catalog_with(vec![h264("lo"), h264("hi")], vec![]);
+		let mut f = Filter::new(Live(Some(snapshot)));
 
 		let first = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,

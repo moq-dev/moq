@@ -443,6 +443,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let mut min_timestamp = None;
 			let mut max_timestamp = None;
 			let mut contains_keyframe = false;
+			let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
+			let mut sample_index = 0usize;
 
 			for trun in &traf.trun {
 				let tfhd = &traf.tfhd;
@@ -472,10 +474,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.unwrap_or(tfhd.default_sample_flags.unwrap_or(default_sample_flags));
 					let duration = entry
 						.duration
-						.unwrap_or(tfhd.default_sample_duration.unwrap_or(default_sample_duration));
+						.or(tfhd.default_sample_duration)
+						.or(Some(default_sample_duration))
+						.filter(|duration| *duration != 0);
 					let size = entry
 						.size
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
+
+					// A non-final sample with no resolvable duration leaves the rest of the
+					// fragment's DTS ambiguous, so reject it rather than collapse timestamps.
+					if duration.is_none() && sample_index + 1 != total_samples {
+						return Err(Error::MissingSampleDuration.into());
+					}
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
 					// Preserve the fmp4 track's native timescale so a passthrough re-emit
@@ -513,8 +523,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 					track.last_timestamp = Some(timestamp);
 
-					dts += duration as u64;
+					if let Some(duration) = duration {
+						dts += duration as u64;
+					}
 					offset += size;
+					sample_index += 1;
 				}
 			}
 
@@ -551,9 +564,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// and ensuring trun.data_offset is Some(...) reserves 4 bytes per trun.
 			for traf_mut in &mut adjusted_moof.traf {
 				traf_mut.tfhd.base_data_offset = None;
+				// A zero default/sample duration is "unknown", not "instantaneous": drop it so
+				// the re-emitted fragment carries no bogus zero that a decoder would honor.
+				if traf_mut.tfhd.default_sample_duration == Some(0) {
+					traf_mut.tfhd.default_sample_duration = None;
+				}
 				for trun_mut in &mut traf_mut.trun {
 					// Reserve the data_offset field; the real value is filled in below.
 					trun_mut.data_offset = Some(0);
+					for entry in &mut trun_mut.entries {
+						if entry.duration == Some(0) {
+							entry.duration = None;
+						}
+					}
 				}
 			}
 

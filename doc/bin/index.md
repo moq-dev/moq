@@ -31,9 +31,9 @@ ffmpeg -f avfoundation -i "0" -f mpegts - | moq-cli publish --url https://relay.
 
 ## [moq-rtc](/bin/rtc)
 
-A WebRTC <-> MoQ gateway. Accepts WHIP from any conformant publisher
-(OBS, browsers) and republishes to a MoQ relay.
-WHEP egress is in progress.
+A WebRTC <-> MoQ gateway. Speaks WHIP (publish) and WHEP (subscribe) in either
+HTTP role, so it can accept incoming peers (OBS, browsers) or dial out to a
+remote WebRTC server. Ingest and egress both work for H.264, VP8, VP9, and Opus.
 
 ## [moq-hls](/bin/hls)
 

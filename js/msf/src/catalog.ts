@@ -127,6 +127,8 @@ export function decode(raw: Uint8Array): Catalog {
 			// Resolve draft-01 initRef into inline initData so callers never see
 			// the indirection. Inline initData (draft-00) is left untouched.
 			if (track.initData === undefined && initRef !== undefined) {
+				// Only inline entries are resolved here. A non-inline (e.g. `url`) initRef
+				// legitimately stays undefined; the consumer fetches that init out-of-band.
 				track.initData = inline.get(initRef);
 			}
 			return track;

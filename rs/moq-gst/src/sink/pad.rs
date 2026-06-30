@@ -115,6 +115,10 @@ impl Pad {
 				let channels: i32 = structure.get("channels").context("Opus caps missing channels")?;
 				let rate: i32 = structure.get("rate").context("Opus caps missing rate")?;
 				ensure!(channels > 0, "Opus caps has non-positive channel count {channels}");
+				ensure!(
+					channels <= 2,
+					"multichannel Opus is not supported yet (channels={channels})"
+				);
 				ensure!(rate > 0, "Opus caps has non-positive sample rate {rate}");
 				let config = moq_mux::codec::opus::Config {
 					sample_rate: rate as u32,

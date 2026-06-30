@@ -157,8 +157,7 @@ impl<S: Stream> Export<S> {
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or wrapped in
-	/// [`catalog::Filter`](crate::catalog::Filter) /
-	/// [`catalog::Target`](crate::catalog::Target) to narrow the rendition set.
+	/// [`catalog::Filter`](crate::catalog::Filter) to narrow the rendition set.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
 		Self {
 			broadcast,
@@ -583,7 +582,7 @@ fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<Ma
 					sample_rate: config.sample_rate,
 					channel_count: config.channel_count,
 				}
-				.encode()
+				.encode()?
 				.to_vec(),
 			),
 		),

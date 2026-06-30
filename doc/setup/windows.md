@@ -62,10 +62,10 @@ REM Grab the relay's certificate fingerprint
 for /f %f in ('curl -s http://localhost:4443/certificate.sha256') do set FP=%f
 
 REM Publish
-cargo run -p moq-native --example clock -- --url https://localhost:4443 --broadcast clock --tls-fingerprint %FP% publish
+cargo run -p moq-native --example clock -- --url https://localhost:4443 --broadcast clock --client-tls-fingerprint %FP% publish
 
 REM Subscribe (separate terminal)
-cargo run -p moq-native --example clock -- --url https://localhost:4443 --broadcast clock --tls-fingerprint %FP% subscribe
+cargo run -p moq-native --example clock -- --url https://localhost:4443 --broadcast clock --client-tls-fingerprint %FP% subscribe
 ```
 
 The subscriber prints the current time once per second, sourced from the

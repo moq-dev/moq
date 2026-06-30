@@ -6,7 +6,7 @@
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4",
-		"typescript": "^6",
+		"typescript": "7.0.1-rc",
 		"wrangler": "^4"
 	}
 }

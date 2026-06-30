@@ -35,9 +35,9 @@
 		"@types/audioworklet": "^0.0.100",
 		"@types/bun": "^1.3.14",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
-		"esbuild": "^0.28.0",
+		"esbuild": "^0.28.1",
 		"rimraf": "^6.1.3",
-		"typescript": "^6.0.3",
+		"typescript": "7.0.1-rc",
 		"vite": "^8.0.16"
 	}
 }

@@ -43,79 +43,45 @@ impl Config {
 	/// Parse an AudioSpecificConfig buffer.
 	///
 	/// Handles basic formats (object_type < 31), extended formats
-	/// (object_type == 31), and explicit sample rates (freq_index == 15).
-	/// Any SBR/PS extension bytes after the core fields are consumed.
+	/// (object_type == 31), and explicit sample rates (freq_index == 15). The
+	/// fields are bit-packed and not byte-aligned, so a bit reader is required:
+	/// with an explicit 24-bit rate the channelConfiguration lands mid-byte after
+	/// it. Any SBR/PS extension bits after the core fields are consumed.
 	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
 		if buf.remaining() < 2 {
 			return Err(Error::ConfigTooShort);
 		}
 
-		// Read first byte
-		let b0 = buf.get_u8();
-		let mut object_type = b0 >> 3;
-		let freq_index;
+		let mut reader = BitReader::new(buf);
 
-		let (profile, sample_rate, channel_count) = if object_type == 31 {
-			if buf.remaining() < 2 {
-				return Err(Error::ExtendedConfigTooShort);
-			}
-			// Extended format: next 6 bits are the extended object_type (32-63).
-			// Bits 5-7 of b0 are the first 3 bits of extended object_type.
-			let b_ext = buf.get_u8();
-			// Bits 0-2 of b_ext are the last 3 bits of extended object_type.
-			let audio_object_type_ext = ((b0 & 0x07) << 3) | ((b_ext >> 5) & 0x07);
-			object_type = 32 + audio_object_type_ext;
-			// Bits 3-6 of b_ext are samplingFrequencyIndex (4 bits).
-			freq_index = (b_ext >> 1) & 0x0F;
-			// Bit 0 of b_ext is the first bit of channelConfiguration.
-			let channel_config_high = b_ext & 0x01;
+		// audioObjectType: 5 bits, escaped to 6 more when it reads 31.
+		let mut object_type = reader.read(5, Error::ConfigTooShort)? as u8;
+		if object_type == 31 {
+			object_type = 32 + reader.read(6, Error::ExtendedConfigTooShort)? as u8;
+		}
 
-			// Read next byte for rest of channelConfiguration.
-			if buf.remaining() < 1 {
-				return Err(Error::IncompleteConfig);
-			}
-			let b1 = buf.get_u8();
-			// Bits 5-7 of b1 are the remaining 3 bits of channelConfiguration.
-			let channel_config = (channel_config_high << 3) | ((b1 >> 5) & 0x07);
-
-			let sample_rate = sample_rate_from_index(freq_index, buf)?;
-			let channel_count = channel_count_from_config(channel_config);
-
-			if buf.remaining() > 0 {
-				buf.advance(buf.remaining());
-			}
-
-			(object_type, sample_rate, channel_count)
+		// samplingFrequencyIndex: 4 bits; index 15 means an explicit 24-bit rate follows.
+		let freq_index = reader.read(4, Error::IncompleteConfig)? as u8;
+		let sample_rate = if freq_index == 15 {
+			reader.read(24, Error::ExplicitSampleRateTooShort)?
 		} else {
-			// Standard format: bits 5-7 of b0 are first 3 bits of freq_index.
-			let mut freq_index_local = (b0 & 0x07) << 1;
-
-			if buf.remaining() < 1 {
-				return Err(Error::IncompleteConfig);
-			}
-			let b1 = buf.get_u8();
-
-			// Complete frequency index (bit 7 of b1 is bit 0 of freq_index).
-			freq_index_local |= (b1 >> 7) & 0x01;
-			freq_index = freq_index_local;
-
-			let channel_config = (b1 >> 3) & 0x0F;
-
-			let sample_rate = sample_rate_from_index(freq_index, buf)?;
-			let channel_count = channel_count_from_config(channel_config);
-
-			// AudioSpecificConfig can have variable-length extensions (SBR, PS,
-			// etc.). We've already extracted the essential info; consume any
-			// remaining bytes to ensure the buffer is properly advanced.
-			if buf.remaining() > 0 {
-				buf.advance(buf.remaining());
-			}
-
-			(object_type, sample_rate, channel_count)
+			*SAMPLE_RATES
+				.get(freq_index as usize)
+				.ok_or(Error::UnsupportedSampleRateIndex(freq_index))?
 		};
 
+		// channelConfiguration: 4 bits, immediately after the (possibly explicit) rate.
+		let channel_config = reader.read(4, Error::IncompleteConfig)? as u8;
+		let channel_count = channel_count_from_config(channel_config);
+
+		// AudioSpecificConfig can carry variable-length extensions (SBR, PS, etc.).
+		// We've extracted the essential fields; drain the rest so the buffer is advanced.
+		if buf.remaining() > 0 {
+			buf.advance(buf.remaining());
+		}
+
 		Ok(Self {
-			profile,
+			profile: object_type,
 			sample_rate,
 			channel_count,
 		})
@@ -166,23 +132,48 @@ impl Config {
 	}
 }
 
-fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> Result<u32> {
-	const SAMPLE_RATES: [u32; 13] = [
-		96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
-	];
+/// The 13 standard AAC sampling frequencies, indexed by samplingFrequencyIndex
+/// (ISO 14496-3 Table 1.18). Index 15 is the escape for an explicit 24-bit rate.
+const SAMPLE_RATES: [u32; 13] = [
+	96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
 
-	if freq_index == 15 {
-		if buf.remaining() < 3 {
-			return Err(Error::ExplicitSampleRateTooShort);
+/// MSB-first bit reader that pulls bytes from a [`Buf`] on demand.
+///
+/// AudioSpecificConfig is bit-packed: an explicit 24-bit sample rate pushes the
+/// following channelConfiguration off byte boundaries, so the fields can't be
+/// read a whole byte at a time.
+struct BitReader<'a, T: Buf> {
+	buf: &'a mut T,
+	current: u8,
+	bits_left: u8,
+}
+
+impl<'a, T: Buf> BitReader<'a, T> {
+	fn new(buf: &'a mut T) -> Self {
+		Self {
+			buf,
+			current: 0,
+			bits_left: 0,
 		}
-		let rate_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8()];
-		return Ok(((rate_bytes[0] as u32) << 16) | ((rate_bytes[1] as u32) << 8) | (rate_bytes[2] as u32));
 	}
 
-	SAMPLE_RATES
-		.get(freq_index as usize)
-		.copied()
-		.ok_or(Error::UnsupportedSampleRateIndex(freq_index))
+	/// Read `n` bits (n <= 32) MSB-first, returning `short` if the buffer runs dry.
+	fn read(&mut self, n: u8, short: Error) -> Result<u32> {
+		let mut value = 0u32;
+		for _ in 0..n {
+			if self.bits_left == 0 {
+				if !self.buf.has_remaining() {
+					return Err(short);
+				}
+				self.current = self.buf.get_u8();
+				self.bits_left = 8;
+			}
+			self.bits_left -= 1;
+			value = (value << 1) | u32::from((self.current >> self.bits_left) & 1);
+		}
+		Ok(value)
+	}
 }
 
 /// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to its real channel count.

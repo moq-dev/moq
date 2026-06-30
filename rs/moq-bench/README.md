@@ -74,7 +74,7 @@ table (`fps = { min = 24, max = 60 }`).
 | `--duration` | | Stop after this long (runs until interrupted otherwise) |
 | `--report` | | How often to log throughput stats |
 
-Client TLS/QUIC flags (`--tls-disable-verify`, `--client-bind`, ...) come from
+Client TLS/QUIC flags (`--client-tls-disable-verify`, `--client-bind`, ...) come from
 `moq-native` and behave the same as in `moq-cli` and `moq-relay`.
 
 ## Presets

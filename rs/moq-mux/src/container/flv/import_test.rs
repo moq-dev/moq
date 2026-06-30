@@ -186,7 +186,8 @@ async fn import_enhanced_opus() {
 		sample_rate: 48000,
 		channel_count: 2,
 	}
-	.encode();
+	.encode()
+	.unwrap();
 
 	let mut out = Vec::new();
 	out.extend_from_slice(b"FLV");

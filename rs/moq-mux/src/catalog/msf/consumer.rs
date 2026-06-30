@@ -288,11 +288,11 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 	let mut buf = init;
 	match codec {
 		AudioCodec::AAC(_) => {
+			// AudioSpecificConfig carries valid variable-length extensions (SBR/PS) after
+			// the core fields, so `parse` consumes the whole buffer; bytes past the core
+			// fields are legitimate config, not trailing junk.
 			let cfg =
 				crate::codec::aac::Config::parse(&mut buf).map_err(|_| Error::MalformedAac(track.name.clone()))?;
-			if buf.has_remaining() {
-				return Err(Error::AacTrailingBytes(track.name.clone()).into());
-			}
 			Ok(DerivedAudio {
 				sample_rate: cfg.sample_rate,
 				channel_count: cfg.channel_count,

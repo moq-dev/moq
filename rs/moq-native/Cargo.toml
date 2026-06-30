@@ -19,7 +19,7 @@ doctest = false
 default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
-quiche = ["dep:web-transport-quiche", "dep:rcgen"]
+quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
 # Filesystem watcher for hot-reloading on-disk TLS certs/keys; the QUIC backends imply it.
 watch = ["dep:notify"]
 # The QUIC backends pull in their crypto provider from these features (default-features

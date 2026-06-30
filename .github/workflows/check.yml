@@ -53,7 +53,7 @@ jobs:
       - if: runner.environment == 'github-hosted'
         uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
       - if: runner.environment == 'github-hosted'
-        uses: DeterminateSystems/flake-checker-action@9ee1c5473f1abdfb299f6c4f0fab813147c97fe3 # main
+        uses: DeterminateSystems/flake-checker-action@a0f068d37b542f3150564fbf1164fec2d958ee11 # main
 
       # GitHub-hosted fallback caches Rust via the Actions cache. The self-hosted
       # box runs the heavy Rust CI (clippy/doc/test) as crane derivations via

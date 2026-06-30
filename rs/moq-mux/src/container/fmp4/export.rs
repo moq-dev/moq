@@ -11,6 +11,7 @@ use crate::catalog::Stream;
 use crate::container::ExportSource;
 use crate::container::Frame;
 use crate::container::fmp4::Error;
+use moq_net::Timestamp;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
@@ -249,7 +250,7 @@ impl<S: Stream> Export<S> {
 			let flush_before = should_flush(track, &frame, frag, has_video_track);
 			if flush_before {
 				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(track, frames)?;
+				let fragment = emit_fragment(track, frames, Some(&frame))?;
 				// The flushed run is done; the incoming frame opens the next buffer.
 				track.buffer_independent = frame.keyframe;
 				track.buffer.push(frame);
@@ -281,7 +282,7 @@ impl<S: Stream> Export<S> {
 		if let Some(name) = flushable {
 			let track = self.tracks.get_mut(&name).unwrap();
 			let frames = std::mem::take(&mut track.buffer);
-			let fragment = emit_fragment(track, frames)?;
+			let fragment = emit_fragment(track, frames, None)?;
 			return Poll::Ready(Ok(Some(fragment)));
 		}
 
@@ -551,10 +552,11 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
-fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Fragment> {
+fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>, successor: Option<&Frame>) -> Result<Fragment> {
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
+	let frames = infer_missing_durations(frames, successor, track.default_frame);
 	let duration = fragment_seconds(&frames, track.default_frame);
 	let data = encode_fragment(track, frames)?;
 	Ok(Fragment {
@@ -575,7 +577,10 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 	if frames.is_empty() {
 		return 0.0;
 	}
-	if frames.iter().all(|f| f.duration.is_some()) {
+	if frames
+		.iter()
+		.all(|f| f.duration.is_some_and(|duration| !duration.is_zero()))
+	{
 		return frames
 			.iter()
 			.map(|f| Duration::from(f.duration.unwrap()))
@@ -590,6 +595,48 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 		max = max.max(pts);
 	}
 	((max - min) + default_frame).as_secs_f64()
+}
+
+fn infer_missing_durations(mut frames: Vec<Frame>, successor: Option<&Frame>, default_frame: Duration) -> Vec<Frame> {
+	let infer_from_pts = pts_monotonic(&frames, successor);
+	// Express the fallback at the frames' own timescale so it matches the durations derived from
+	// their timestamps (a `Timestamp` carries its scale, and `try_from(Duration)` is nanosecond-scale).
+	let fallback = frames.first().map(|f| f.timestamp.scale()).and_then(|scale| {
+		Timestamp::try_from(default_frame)
+			.ok()
+			.and_then(|t| t.convert(scale).ok())
+	});
+
+	for i in 0..frames.len() {
+		if frames[i].duration.is_some_and(|duration| !duration.is_zero()) {
+			continue;
+		}
+
+		frames[i].duration = infer_from_pts
+			.then(|| next_timestamp(&frames, successor, i))
+			.flatten()
+			.and_then(|timestamp| timestamp.checked_sub(frames[i].timestamp).ok())
+			.filter(|duration| !duration.is_zero())
+			.or(fallback);
+	}
+
+	frames
+}
+
+fn pts_monotonic(frames: &[Frame], successor: Option<&Frame>) -> bool {
+	let frames_monotonic = frames.windows(2).all(|pair| pair[1].timestamp >= pair[0].timestamp);
+	let successor_monotonic = match (frames.last(), successor) {
+		(Some(last), Some(successor)) => successor.timestamp >= last.timestamp,
+		_ => true,
+	};
+	frames_monotonic && successor_monotonic
+}
+
+fn next_timestamp(frames: &[Frame], successor: Option<&Frame>, index: usize) -> Option<Timestamp> {
+	frames
+		.get(index + 1)
+		.map(|next| next.timestamp)
+		.or_else(|| successor.map(|next| next.timestamp))
 }
 
 fn catalog_timescale_video(config: &VideoConfig) -> u64 {
@@ -617,4 +664,70 @@ fn parse_timescale_from_init(init: &[u8]) -> Result<u64> {
 		}
 	}
 	Err(Error::NoMoov.into())
+}
+
+#[cfg(test)]
+mod tests {
+	use bytes::Bytes;
+
+	use super::*;
+
+	fn ts(micros: u64) -> Timestamp {
+		Timestamp::from_micros(micros).unwrap()
+	}
+
+	fn frame(timestamp_us: u64, duration_us: Option<u64>) -> Frame {
+		Frame {
+			timestamp: ts(timestamp_us),
+			duration: duration_us.map(ts),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: false,
+		}
+	}
+
+	#[test]
+	fn infer_missing_durations_uses_default_for_trailing_sample() {
+		let frames = infer_missing_durations(
+			vec![frame(0, Some(0)), frame(41_667, None), frame(83_334, None)],
+			None,
+			Duration::from_millis(33),
+		);
+
+		assert_eq!(frames[0].duration, Some(ts(41_667)));
+		assert_eq!(frames[1].duration, Some(ts(41_667)));
+		assert_eq!(frames[2].duration, Some(ts(33_000)));
+		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.116334);
+	}
+
+	#[test]
+	fn infer_missing_duration_uses_default_for_single_frame() {
+		let frames = infer_missing_durations(vec![frame(83_333, Some(0))], None, Duration::from_millis(40));
+
+		assert_eq!(frames[0].duration, Some(ts(40_000)));
+		assert_eq!(fragment_seconds(&frames, Duration::from_millis(40)), 0.04);
+	}
+
+	#[test]
+	fn infer_trailing_duration_from_successor_frame() {
+		let successor = frame(83_334, None);
+		let frames = infer_missing_durations(vec![frame(41_667, None)], Some(&successor), Duration::from_millis(33));
+
+		assert_eq!(frames[0].duration, Some(ts(41_667)));
+		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.041667);
+	}
+
+	#[test]
+	fn infer_missing_durations_avoids_non_monotonic_pts() {
+		let successor = frame(66_000, None);
+		let frames = infer_missing_durations(
+			vec![frame(0, None), frame(99_000, None), frame(33_000, None)],
+			Some(&successor),
+			Duration::from_millis(33),
+		);
+
+		assert_eq!(frames[0].duration, Some(ts(33_000)));
+		assert_eq!(frames[1].duration, Some(ts(33_000)));
+		assert_eq!(frames[2].duration, Some(ts(33_000)));
+		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.099);
+	}
 }

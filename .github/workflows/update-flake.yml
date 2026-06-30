@@ -29,7 +29,7 @@ jobs:
         run: dirname "$(command -v nix)" >> "$GITHUB_PATH"
 
       - name: Update flake.lock
-        uses: DeterminateSystems/update-flake-lock@b83e0671a67dfd774680fb1beaa1497ef7e58bfc # main
+        uses: DeterminateSystems/update-flake-lock@fd9359ac79d0e912f1b4b947a48470b3e2799b56 # main
         with:
           pr-title: "Update flake.lock"
           pr-labels: |

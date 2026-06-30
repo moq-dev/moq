@@ -50,7 +50,7 @@ Media muxers and demuxers for importing existing formats into MoQ.
 **Features:**
 
 - fMP4/CMAF import
-- HLS playlist import
+- MPEG-TS and FLV import/export
 - H.264/H.265 Annex B parsing
 - AAC and Opus codec support
 

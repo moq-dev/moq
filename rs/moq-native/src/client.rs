@@ -511,27 +511,57 @@ mod tests {
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
 		assert_eq!(config.tls.disable_verify, Some(true));
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --tls-disable-verify flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-disable-verify flag).
 		config.update_from(["test"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_flag() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_explicit_false() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=false"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify=false"]);
 		assert_eq!(config.tls.disable_verify, Some(false));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_explicit_true() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify=true"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
+	}
+
+	#[test]
+	fn test_cli_deprecated_tls_flags_fold_into_canonical() {
+		// The bare --tls-* forms are deprecated. They parse into a hidden field and
+		// fold into the canonical values via the effective_* accessors build() uses,
+		// so they keep working without touching the public Client fields.
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true", "--tls-fingerprint", "abcd1234"]);
+		assert_eq!(
+			config.tls.disable_verify, None,
+			"deprecated flag must not set the canonical field"
+		);
+		assert_eq!(config.tls.effective_disable_verify(), Some(true));
+		assert_eq!(config.tls.effective_fingerprint(), vec!["abcd1234"]);
+	}
+
+	#[test]
+	fn test_canonical_tls_flag_wins_over_deprecated() {
+		// Both spellings given: canonical wins for scalar options, vecs concatenate.
+		let config = ClientConfig::parse_from([
+			"test",
+			"--client-tls-disable-verify=false",
+			"--tls-disable-verify=true",
+			"--client-tls-fingerprint",
+			"aaaa",
+			"--tls-fingerprint",
+			"bbbb",
+		]);
+		assert_eq!(config.tls.effective_disable_verify(), Some(false));
+		assert_eq!(config.tls.effective_fingerprint(), vec!["aaaa", "bbbb"]);
 	}
 
 	#[test]
@@ -549,7 +579,7 @@ mod tests {
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --tls-fingerprint flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-fingerprint flag).
 		config.update_from(["test"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 	}
@@ -566,7 +596,7 @@ mod tests {
 
 	#[test]
 	fn test_cli_fingerprint() {
-		let config = ClientConfig::parse_from(["test", "--tls-fingerprint", "abcd1234"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-fingerprint", "abcd1234"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
 	}
 

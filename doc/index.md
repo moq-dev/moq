@@ -99,7 +99,7 @@ There are a bunch of MoQ binaries and plugins.
 Some highlights:
 
 - [moq-relay](/bin/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/bin/relay/cluster).
-- [moq-cli](/bin/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
+- [moq-cli](/bin/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, MPEG-TS, FLV, etc), including via ffmpeg.
 - [obs](/bin/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
 - [gstreamer](/bin/gstreamer) - A gstreamer plugin, split into a source and a sink.
 - [web](/bin/web) - A web component you can slap on your website to watch and publish MoQ broadcasts.
@@ -112,7 +112,7 @@ Integrate MoQ into your application without fear. Focused on [native](/lib/rs/en
 Some highlights:
 
 - [moq-net](/lib/rs/crate/moq-net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
-- [moq-mux](/lib/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
+- [moq-mux](/lib/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, MPEG-TS, and FLV.
 - [libmoq](/lib/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
 - [web-transport](/lib/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
 - [...and more](/lib/rs/)

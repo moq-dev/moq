@@ -365,13 +365,31 @@ impl<S: Stream> Publish<S> {
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
 	pub async fn accept(mut self, origin: &OriginProducer, path: &str) -> Result<()> {
+		// Reserve the broadcast path before telling the client the publish succeeded:
+		// if the origin refuses `path`, reject cleanly instead of accepting and then
+		// dropping the connection a moment later.
+		let mut publisher = match Publisher::new(origin, path) {
+			Ok(publisher) => publisher,
+			Err(err) => {
+				tracing::warn!(peer = %self.peer, %path, %err, "rejecting RTMP publish: broadcast unavailable");
+				let results = self
+					.session
+					.reject_request(self.request_id, "NetStream.Publish.Denied", "broadcast unavailable")
+					.map_err(|e| anyhow::anyhow!("rtmp reject publish: {e:?}"))?;
+				for result in self.work.drain(..).chain(results) {
+					if let ServerSessionResult::OutboundResponse(packet) = result {
+						self.stream.write_all(&packet.bytes).await?;
+					}
+				}
+				return Ok(());
+			}
+		};
+
 		let results = self
 			.session
 			.accept_request(self.request_id)
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
-
-		let mut publisher = Publisher::new(origin, path)?;
 		tracing::info!(peer = %self.peer, %path, "rtmp publish accepted");
 
 		let result = pump(

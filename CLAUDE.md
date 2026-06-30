@@ -86,9 +86,19 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 - Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough. Skip throat-clearing like "This function is responsible for...".
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
 
+## Deprecation
+
+Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `--help`, and doc comments should describe only the current/canonical surface, so a reader is steered to the right thing and never learns the dead one. Keep the deprecated path *working* but invisible:
+
+- A deprecated CLI flag stays a hidden alias (clap `alias = "..."`, or a separate `#[arg(..., hide = true)]` when it needs its own deprecation warning). No `--help` entry, no "deprecated, use X" note in the doc comment.
+- A deprecated public item gets `#[doc(hidden)]` (Rust) / `@internal` or omission (JS) so it drops off the published docs.
+- Remove the example invocations and prose that mention it from `/doc`.
+
+The rename/removal rationale lives in the commit message and PR description, not in docs that users read. A runtime warning when someone *uses* the deprecated path is fine (it fires on use, it isn't documentation); a standing note that advertises the dead name is not.
+
 ## AI Attribution
 
-LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with `(Written by Claude)` or similar. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.
+LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with the agent model, e.g. `(Written by GPT-5)`. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.
 
 ## Refactor As You Go
 
@@ -111,7 +121,8 @@ Favor composable building blocks over one-off functions. A handful of orthogonal
 
 Then future-proof what you do expose so additions don't force a breaking change:
 
-- **Config structs consumers construct**: add `#[non_exhaustive]` and a `Default` or constructor. New optional fields then stay additive (callers build via `default()`/`new()` + field set, not struct literals). Prefer adding a field to an existing `#[non_exhaustive]` config over adding a function parameter.
+- **Config structs consumers construct with `pub` fields**: add `#[non_exhaustive]` and a `Default` or constructor. New optional fields then stay additive (callers build via `default()`/`new()` + field set, not struct literals). Prefer adding a field to an existing `#[non_exhaustive]` config over adding a function parameter. This applies only when the struct exposes `pub` fields, since `#[non_exhaustive]` is what blocks the struct-literal path. A struct with all-private fields built through a builder (`default()` + chained `.with_x()` methods) already prevents struct literals, so `#[non_exhaustive]` is redundant there; don't add it.
+- **Take an options struct/object, not positional parameters, whenever a function or constructor could plausibly gain more knobs later.** A single `Config`/options bag (Rust struct, TS interface) lets you add fields without changing the signature; positional params force a breaking change (or an awkward `(track, undefined, opts)` call) the moment a second option shows up. Reach for it even when there's only one option today: a lone `compression: bool` arg is a future breaking change waiting to happen, whereas `Config { compression }` absorbs the next field for free. This applies in both languages, not just where `#[non_exhaustive]` does.
 - **Public enums that may gain variants**: add `#[non_exhaustive]` so external `match`es keep compiling.
 - **Name by role, not by today's only implementation** (`capture::Config`, `publish_capture`, not `CameraConfig`/`publish_camera`) so a second implementation slots in without a rename. Don't bundle generic options under a specific-case name.
 - **Namespace with modules; keep type names short.** Split a growing crate into role modules (`capture`, `encode`, `decode`) and let each own short, unprefixed names. The module already supplies the prefix, so `encode::Config` beats `EncoderConfig` and `encode::Producer` beats `VideoProducer`. But don't nest a module whose name echoes its main type: `encode::encoder::Encoder` stutters; re-export the type flat so it reads `encode::Encoder`. Re-export the public types at the role-module level (`pub use encoder::{Encoder, Config}`) and keep the file-level module (`mod encoder`) private.
@@ -195,4 +206,4 @@ Update them with `gh pr edit <num> --title "..." --body "..."` whenever the scop
 - Bullet points in the "Summary" section that describe behavior the latest commits have changed or removed.
 - The test-plan checklist getting out of date as new tests are added.
 
-When you edit a PR description you authored, keep the `(Written by Claude)` marker so reviewers still know the body wasn't human-authored.
+When you edit a PR description you authored, keep the agent model marker so reviewers still know the body wasn't human-authored.
