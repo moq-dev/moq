@@ -98,6 +98,7 @@ kotlin {
                 dependsOn(jvmAndAndroidMain)
                 dependencies {
                     implementation("net.java.dev.jna:jna:5.18.1@aar")
+                    implementation("rustls:rustls-platform-verifier:0.1.1")
                 }
             }
             val androidUnitTest by getting {
@@ -132,7 +133,7 @@ if (androidEnabled) {
 
 mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
-    signAllPublications()
+	signAllPublications()
     coordinates("dev.moq", "moq", version.toString())
 
     pom {

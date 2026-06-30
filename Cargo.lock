@@ -4086,11 +4086,13 @@ version = "0.2.25"
 dependencies = [
  "bytes",
  "hang",
+ "jni 0.22.4",
  "moq-audio",
  "moq-mux",
  "moq-native",
  "moq-net",
  "pollster",
+ "rustls-platform-verifier 0.7.0",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -4230,6 +4232,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rustls",
  "rustls-native-certs",
+ "rustls-platform-verifier 0.7.0",
  "rustls-webpki",
  "serde",
  "serde_with",
@@ -4252,6 +4255,7 @@ dependencies = [
  "web-transport-quiche",
  "web-transport-quinn",
  "web-transport-trait",
+ "webpki-roots",
  "x509-parser",
 ]
 

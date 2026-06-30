@@ -118,7 +118,7 @@ build_target() {
     if is_android "$target"; then
         # Android targets use cargo-ndk
         cargo ndk --target "$target" --platform 24 -- \
-            build --release --package moq-ffi --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+            build --release --package moq-ffi --features android-logcat --manifest-path "$WORKSPACE_DIR/Cargo.toml"
     else
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then

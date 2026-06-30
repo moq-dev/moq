@@ -178,8 +178,15 @@ impl QuicheClient {
 			Verification::Fingerprints(hashes) => {
 				builder = builder.with_server_certificate_hashes(hashes);
 			}
-			Verification::Roots(roots) => {
-				builder = builder.with_root_certificates(roots);
+			Verification::Roots { certs, .. } => {
+				if !certs.is_empty() {
+					builder = builder.with_root_certificates(certs);
+				}
+			}
+			Verification::Platform => {
+				return Err(Error::Tls(crate::tls::Error::PlatformVerifierUnsupported(
+					"quiche backend",
+				)));
 			}
 		}
 
