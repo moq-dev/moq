@@ -261,27 +261,7 @@ impl Client {
 		feature = "uds"
 	))]
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
-		let session = self.connect_inner(url, None).await?;
-		tracing::info!(version = %session.version(), "connected");
-		Ok(session)
-	}
-
-	/// Connect, overriding the request path the client advertises in the moq SETUP.
-	///
-	/// Use this when the dial URL can't express the path: a `unix://` URL's path is
-	/// the socket file, not a namespace. For URLs that do carry a path (`tcp://`, raw
-	/// QUIC) plain [`connect`](Self::connect) derives it from the URL.
-	#[cfg(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
-	pub async fn connect_with_path(&self, url: Url, path: impl Into<String>) -> crate::Result<moq_net::Session> {
-		let session = self.connect_inner(url, Some(path.into())).await?;
+		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
 	}
@@ -299,22 +279,15 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	fn connect_client(&self, url: &Url, explicit_path: Option<&str>) -> moq_net::Client {
+	fn connect_client(&self, url: &Url) -> moq_net::Client {
 		if transport_carries_path(url) {
 			return self.moq.clone();
 		}
 
-		let path = match explicit_path {
-			Some(path) => path,
-			// A unix:// URL path is the socket file, not a request path, so default
-			// it (override via connect_with_path) rather than leaking the socket.
-			None if url.scheme() == "unix" => "/",
-			None => match url.path() {
-				"" => "/",
-				path => path,
-			},
-		};
-		self.moq.clone().with_path(path)
+		match request_path(url) {
+			Some(path) => self.moq.clone().with_path(path),
+			None => self.moq.clone(),
+		}
 	}
 
 	#[cfg(any(
@@ -326,10 +299,10 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	async fn connect_inner(&self, url: Url, path: Option<String>) -> crate::Result<moq_net::Session> {
+	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Advertise the request path in the moq SETUP for transports that carry no
 		// request URI of their own; WebTransport and WebSocket already convey it.
-		let moq = self.connect_client(&url, path.as_deref());
+		let moq = self.connect_client(&url);
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
@@ -461,6 +434,31 @@ fn transport_carries_path(url: &Url) -> bool {
 	matches!(url.scheme(), "https" | "http" | "ws" | "wss")
 }
 
+/// The request path to advertise in the moq SETUP, derived from the dial URL.
+///
+/// A `?path=` query overrides everything; it is the only way to set a path on a
+/// `unix://` URL, whose URL path is the socket file rather than a namespace. Other
+/// schemes (`tcp`, raw QUIC, `iroh`) use the URL path component. Returns `None` for a
+/// `unix://` URL with no `?path=`, leaving the namespace at the root.
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn request_path(url: &Url) -> Option<String> {
+	if let Some((_, path)) = url.query_pairs().find(|(key, _)| key == "path") {
+		return Some(path.into_owned());
+	}
+	match url.scheme() {
+		"unix" => None,
+		_ => Some(url.path().to_string()),
+	}
+}
+
 #[cfg(feature = "websocket")]
 #[derive(Debug, PartialEq, Eq)]
 enum TransportRace<Q, W> {
@@ -563,6 +561,38 @@ mod tests {
 				"{url} advertises in SETUP"
 			);
 		}
+	}
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn request_path_from_url() {
+		// Schemes with a free path component use it directly.
+		for url in ["tcp://h:1/anycast", "moqt://h/anycast", "iroh://node/anycast"] {
+			assert_eq!(
+				request_path(&Url::parse(url).unwrap()).as_deref(),
+				Some("/anycast"),
+				"{url}"
+			);
+		}
+		// A unix:// URL path is the socket file, so it has no namespace by default.
+		assert_eq!(request_path(&Url::parse("unix:///run/s.sock").unwrap()), None);
+		// ...but a ?path= query supplies one, leaving the socket path intact.
+		let uds = Url::parse("unix:///run/s.sock?path=/anycast").unwrap();
+		assert_eq!(uds.path(), "/run/s.sock");
+		assert_eq!(request_path(&uds).as_deref(), Some("/anycast"));
+		// ?path= overrides the URL path on any scheme.
+		assert_eq!(
+			request_path(&Url::parse("tcp://h:1/ignored?path=/win").unwrap()).as_deref(),
+			Some("/win")
+		);
 	}
 
 	#[test]
