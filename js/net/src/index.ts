@@ -10,7 +10,6 @@ export * as Signals from "@moq/signals";
 export * from "./announced.ts";
 export * from "./bandwidth.ts";
 export * from "./broadcast.ts";
-export * from "./compression.ts";
 /** Connection helpers: connect to or accept a MoQ session and reconnect on failure. */
 export * as Connection from "./connection/index.ts";
 export * from "./group.ts";

@@ -95,10 +95,6 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A compressed frame payload could not be decompressed.
-	#[error("decompression failed")]
-	Decompress,
-
 	/// A frame's timestamp doesn't match its track's negotiated timescale: it's
 	/// missing on a timed track, present on an untimed track, or carries a
 	/// different scale than the track advertised.
@@ -138,7 +134,6 @@ impl Error {
 			Self::Closed => 25,
 			Self::CacheFull => 26,
 			Self::FrameTooLarge => 27,
-			Self::Decompress => 28,
 			Self::TimestampMismatch => 29,
 			Self::Unroutable => 30,
 			Self::App(app) => *app as u32 + 64,

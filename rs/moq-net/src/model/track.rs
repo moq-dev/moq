@@ -36,11 +36,6 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackInfo {
-	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
-	/// The publisher honors it by negotiating a codec in TRACK_INFO; codec-less
-	/// peers (older drafts) ignore it and send frames verbatim.
-	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
-	pub compress: bool,
 	/// Units per second for per-frame timestamps on this track.
 	///
 	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
@@ -102,7 +97,6 @@ mod cache_millis {
 impl Default for TrackInfo {
 	fn default() -> Self {
 		Self {
-			compress: false,
 			timescale: Timescale::default(),
 			cache: DEFAULT_CACHE,
 			priority: 0,
@@ -112,12 +106,6 @@ impl Default for TrackInfo {
 }
 
 impl TrackInfo {
-	/// Mark this track's frames as worth compressing, returning `self` for chaining.
-	pub fn with_compress(mut self, compress: bool) -> Self {
-		self.compress = compress;
-		self
-	}
-
 	/// Set the per-frame timestamp scale, returning `self` for chaining.
 	///
 	/// Defaults to [`Timescale::MILLI`]. On Lite05+ this scale is reported in TRACK_INFO

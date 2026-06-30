@@ -243,7 +243,7 @@ def test_publish_lifecycle():
 async def test_publish_track_info_and_subscription():
     """Raw track published with explicit TrackInfo, consumed with a Subscription."""
     broadcast = moq.BroadcastProducer()
-    info = moq.TrackInfo(priority=5, compress=True, cache_ms=2_000)
+    info = moq.TrackInfo(priority=5, cache_ms=2_000)
     track = broadcast.publish_track("status", info)
 
     consumer = track.consume(moq.Subscription(priority=3))

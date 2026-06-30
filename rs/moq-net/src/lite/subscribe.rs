@@ -75,7 +75,7 @@ impl Message for Subscribe<'_> {
 /// Publisher's acknowledgement on the Subscribe Stream for drafts 01-04.
 ///
 /// Lite05+ replaced this with implicit acceptance plus
-/// [`SubscribeStart`]/[`SubscribeEnd`]; the immutable codec/timescale/cache moved
+/// [`SubscribeStart`]/[`SubscribeEnd`]; the immutable timescale/cache moved
 /// to [`super::TrackInfo`].
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {

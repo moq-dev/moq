@@ -1,6 +1,5 @@
 import { type Dispose, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast.ts";
-import { Compression, compress } from "../compression.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
@@ -218,7 +217,6 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			let compression: Compression = Compression.None;
 			let timescale: Timescale = Timescale.MILLI;
 
 			if (supportsTrackStream(this.version)) {
@@ -226,13 +224,12 @@ export class Publisher {
 				// properties live in TRACK_INFO), and the resolved range arrives as
 				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
 				//
-				// The frame codec and timescale are immutable properties, so serving
-				// MUST use exactly what TRACK_INFO advertised. Both come from the
-				// producer's accept(), so they always agree. Awaiting info() also
-				// surfaces a rejected track (accept never called, track closed) as an
-				// error here, which resets the stream.
+				// The timescale is an immutable property, so serving MUST use exactly
+				// what TRACK_INFO advertised. It comes from the producer's accept(), so
+				// they always agree. Awaiting info() also surfaces a rejected track
+				// (accept never called, track closed) as an error here, which resets the
+				// stream.
 				const info = await track.info();
-				compression = info.compress ? Compression.Deflate : Compression.None;
 				timescale = info.timescale;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -242,7 +239,7 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, compression, timescale);
+			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale);
 
 			for (;;) {
 				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
@@ -278,14 +275,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runTrack(
-		sub: bigint,
-		broadcast: Path.Valid,
-		track: TrackSubscriber,
-		stream: Writer,
-		compression: Compression,
-		timescale: Timescale,
-	) {
+	async #runTrack(sub: bigint, broadcast: Path.Valid, track: TrackSubscriber, stream: Writer, timescale: Timescale) {
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -307,7 +297,7 @@ export class Publisher {
 				}
 				lastSequence = group.sequence;
 
-				void this.#runGroup(sub, group, compression, timescale);
+				void this.#runGroup(sub, group, timescale);
 			}
 
 			if (emitRange) {
@@ -357,15 +347,15 @@ export class Publisher {
 			if (!published) throw new Error("not found");
 
 			const info = await published.track(track).info();
-			// The wire no longer carries a cache hint (retention is best-effort, not a
-			// guarantee); the local `info.cache` stays a purely local retention window.
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,
+				// Publisher Max Latency: the publisher's retention bound, advertised so
+				// relays re-serve with the same window.
+				cache: info.cache,
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#runGroup` emits each frame converted to it.
 				timescale: info.timescale,
-				compression: info.compress ? Compression.Deflate : Compression.None,
 			});
 		})();
 
@@ -382,7 +372,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: Group, compression: Compression, timescale: Timescale) {
+	async #runGroup(sub: bigint, group: Group, timescale: Timescale) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			const stream = await Writer.open(this.#quic);
@@ -406,11 +396,8 @@ export class Publisher {
 						prevTs = ts;
 					}
 
-					// On a compressed track the wire size is the compressed length;
-					// the subscriber inflates it back from the SUBSCRIBE_OK codec.
-					const payload = await compress(compression, frame.data);
-					await stream.u53(payload.byteLength);
-					await stream.write(payload);
+					await stream.u53(frame.data.byteLength);
+					await stream.write(frame.data);
 				}
 
 				stream.close();

@@ -1,4 +1,3 @@
-import { Compression, compressionFromCode } from "../compression.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -61,47 +60,50 @@ export class TrackInfo {
 	priority: number;
 	ordered: boolean;
 	/**
+	 * Publisher Max Latency: an upper bound (milliseconds) on how long the publisher
+	 * caches a non-latest group past the arrival of a newer one.
+	 */
+	cache: number;
+	/**
 	 * Per-frame timestamp scale (units per second). Mandatory on Lite05: a real
 	 * (non-zero) scale, and every frame on the wire is prefixed with a zigzag-delta
 	 * timestamp at this scale.
 	 */
 	timescale: number;
-	/** Codec applied to every frame payload on this track. */
-	compression: Compression;
 
 	constructor({
 		priority = 0,
 		ordered = true,
+		cache = 0,
 		timescale = 0,
-		compression = Compression.None,
 	}: {
 		priority?: number;
 		ordered?: boolean;
+		cache?: number;
 		timescale?: number;
-		compression?: Compression;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
+		this.cache = cache;
 		this.timescale = timescale;
-		this.compression = compression;
 	}
 
 	async #encode(w: Writer) {
 		await w.u8(this.priority);
 		await w.bool(this.ordered);
+		await w.u53(this.cache);
 		await w.u53(this.timescale);
-		await w.u53(this.compression);
 	}
 
 	static async #decode(r: Reader): Promise<TrackInfo> {
 		const priority = await r.u8();
 		const ordered = await r.bool();
+		const cache = await r.u53();
 		const timescale = await r.u53();
 		// Mandatory on Lite05: a zero scale is invalid (mirrors Rust's Timescale::new rejection),
 		// and would otherwise throw later when wrapped in Timescale().
 		if (timescale === 0) throw new Error("track timescale must be non-zero");
-		const compression = compressionFromCode(await r.u53());
-		return new TrackInfo({ priority, ordered, timescale, compression });
+		return new TrackInfo({ priority, ordered, cache, timescale });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

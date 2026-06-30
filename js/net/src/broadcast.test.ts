@@ -109,11 +109,11 @@ test("a stalled consumer does not pin evicted groups", () => {
 test("createTrack commits info up front", async () => {
 	const broadcast = new Broadcast();
 
-	const producer = broadcast.createTrack("video", { compress: true, priority: 3 });
+	const producer = broadcast.createTrack("video", { cache: 2000, priority: 3 });
 	expect(producer.name).toBe("video");
 
 	const info = await broadcast.track("video").info();
-	expect(info.compress).toBe(true);
+	expect(info.cache).toBe(2000);
 	expect(info.priority).toBe(3);
 });
 

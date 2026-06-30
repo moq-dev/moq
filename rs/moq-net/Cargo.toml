@@ -18,7 +18,6 @@ serde = []
 
 [dependencies]
 bytes = "1"
-flate2 = { workspace = true }
 futures = "0.3"
 kio = { workspace = true }
 num_enum = "0.7"

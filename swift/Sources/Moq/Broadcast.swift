@@ -69,7 +69,7 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
-    /// `info` sets track properties (priority, cache, compression); omit for defaults.
+    /// `info` sets track properties (priority, cache, timescale); omit for defaults.
     public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
         TrackProducer(try ffi.publishTrack(name: name, info: info))
     }

@@ -71,10 +71,9 @@ impl Catalog {
 
 	/// Track properties for creating the catalog track via
 	/// [`create_track`](moq_net::BroadcastProducer::create_track) at
-	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME). The catalog is JSON and re-sent on
-	/// every change, so it pays to compress.
+	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	pub fn default_track_info() -> moq_net::TrackInfo {
-		moq_net::TrackInfo::default().with_compress(true)
+		moq_net::TrackInfo::default()
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so

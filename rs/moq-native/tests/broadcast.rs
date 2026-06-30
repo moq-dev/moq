@@ -237,12 +237,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
-		.create_track(
-			"video",
-			moq_net::TrackInfo::default()
-				.with_timescale(Timescale::MICRO)
-				.with_compress(true),
-		)
+		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
 		.expect("failed to create track");
 
 	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch

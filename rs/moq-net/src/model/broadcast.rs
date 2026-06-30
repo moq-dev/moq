@@ -161,7 +161,7 @@ impl BroadcastProducer {
 	///
 	/// Returns a fresh name like `0{suffix}`, `1{suffix}`, etc. Use this when
 	/// you need to set non-default Track properties (e.g. `with_timescale`,
-	/// `with_compress`) before handing the Track to [`Self::create_track`].
+	/// `with_cache`) before handing the Track to [`Self::create_track`].
 	pub fn unique_name(&self, suffix: &str) -> String {
 		let state = self.state.read();
 		(0u16..)

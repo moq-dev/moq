@@ -13,15 +13,16 @@ export const DEFAULT_CACHE_MS = 5000;
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface TrackInfo {
-	/** Hint that frames are worth compressing (e.g. a JSON catalog). */
-	compress: boolean;
 	/**
 	 * Units per second for this track's frame timestamps (reported in TRACK_INFO on
 	 * Lite05+). Defaults to milliseconds; set it finer (e.g. {@link Timescale.MICRO})
 	 * for media that needs sub-millisecond timing.
 	 */
 	timescale: Timescale;
-	/** How long (milliseconds) old groups stay available before eviction. */
+	/**
+	 * Publisher Max Latency: how long (milliseconds) old groups stay available before
+	 * eviction. Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound.
+	 */
 	cache: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
 	priority: number;
@@ -32,7 +33,6 @@ export interface TrackInfo {
 /** Fill in any unset {@link TrackInfo} fields with their defaults. */
 export function trackInfoDefaults(info: Partial<TrackInfo> = {}): TrackInfo {
 	return {
-		compress: info.compress ?? false,
 		timescale: info.timescale ?? Timescale.MILLI,
 		cache: info.cache ?? DEFAULT_CACHE_MS,
 		priority: info.priority ?? 0,

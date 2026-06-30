@@ -4,8 +4,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, Compression, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
-	TrackSubscriber,
+	AnnounceConsumer, AsPath, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, TrackSubscriber,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -434,23 +433,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.request_broadcast(&request.broadcast).await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
-		// Same negotiation as a subscription, just answered once: codec only when
-		// both the producer asks for it and the draft can carry it; timescale only
-		// when the draft carries per-frame timestamps.
-		let compression = if info.compress {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
-		// track is timed, so the model's timescale goes on the wire verbatim.
+		// track is timed, so the model's timescale and retention bound go on the wire
+		// verbatim.
 		stream
 			.writer
 			.encode(&lite::TrackInfo {
 				priority: info.priority,
 				ordered: info.ordered,
+				cache: info.cache,
 				timescale: info.timescale,
-				compression,
 			})
 			.await?;
 
@@ -533,17 +525,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = broadcast.await?;
 		let track = broadcast.track(&subscribe.track)?.subscribe(subscription).await?;
 
-		// Compress only when the producer marked the track worth it and the
-		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get
-		// None and the frames stream verbatim. On Lite05+ this matches the codec the
-		// subscriber already learned from TRACK_INFO.
-		let supports_compression = version.has_timestamps();
-		let compression = if track.info().compress && supports_compression {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
-
 		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
 		// every frame with a zigzag-delta timestamp at the track's timescale; older
 		// drafts have no wire field, so `None` here means "don't emit the prefix" (the
@@ -587,7 +568,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority,
 			track_priority: track_priority_rx,
 			version,
-			compression,
 			timescale,
 		};
 
@@ -672,17 +652,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			None
 		};
 
-		// Compression is an immutable per-track property (reported in TRACK_INFO), so
-		// fetched frames use the same codec as live ones. The group resolved above, so
-		// the track's info is set and this resolves immediately.
-		let compression = if track.info().await?.compress && version.has_timestamps() {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
-
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
-		// the codec/timescale from TRACK_INFO and the group sequence from its request.
+		// the timescale from TRACK_INFO and the group sequence from its request.
 		track_stats.group();
 
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
@@ -691,15 +662,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
-			write_fetch_frame(
-				&mut stream.writer,
-				&mut frame,
-				compression,
-				timescale,
-				&mut prev_ts,
-				&track_stats,
-			)
-			.await?;
+			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts, &track_stats).await?;
 			index += 1;
 		}
 
@@ -757,32 +720,18 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut FrameConsumer,
-	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
-	match compression {
-		Compression::None => {
-			writer.encode(&frame.size).await?;
-			track_stats.frame();
-			while let Some(mut chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
-				writer.write_all(&mut chunk).await?;
-				track_stats.bytes(n);
-			}
-		}
-		compression => {
-			let payload = frame.read_all().await?;
-			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
-			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
-			writer.write_all(&mut chunk).await?;
-			track_stats.bytes(n);
-		}
+	writer.encode(&frame.size).await?;
+	track_stats.frame();
+	while let Some(mut chunk) = frame.read_chunk().await? {
+		let n = chunk.len() as u64;
+		writer.write_all(&mut chunk).await?;
+		track_stats.bytes(n);
 	}
 
 	Ok(())
@@ -801,9 +750,6 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Codec for this track (reported in TRACK_INFO on lite-05+); every frame on
-	/// this subscription is compressed with it before hitting the wire.
-	compression: Compression,
 	/// Negotiated timestamp scale for this track. `Some(_)` iff
 	/// [`Version::has_timestamps`] is true for `version` (gated in
 	/// `run_subscribe`); used to validate per-frame timestamps before encoding.
@@ -936,10 +882,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
-	/// Send one frame. Uncompressed frames stream chunk-by-chunk so we never
-	/// buffer the whole payload; a compressed frame must buffer to feed the
-	/// codec, and its wire size becomes the compressed length (the subscriber
-	/// inflates it from the track's codec, known from TRACK_INFO on lite-05+).
+	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we
+	/// never buffer the whole thing.
 	async fn serve_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
@@ -949,22 +893,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
-		match self.compression {
-			Compression::None => {
-				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
+		stream.encode(&frame.size).await?;
+		self.track_stats.frame();
 
-				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
-					self.write_chunk(stream, priority, chunk).await?;
-				}
-			}
-			compression => {
-				let payload = self.read_all(stream, priority, &mut frame).await?;
-				let chunk = bytes::Bytes::from(compression.compress(&payload));
-				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
-				self.write_chunk(stream, priority, chunk).await?;
-			}
+		while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
+			self.write_chunk(stream, priority, chunk).await?;
 		}
 
 		Ok(())
@@ -1001,24 +934,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				chunk = frame.read_chunk() => return chunk,
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
-			}
-		}
-	}
-
-	/// Await the full frame payload, applying priority changes meanwhile.
-	async fn read_all(
-		&mut self,
-		stream: &mut Writer<S::SendStream, Version>,
-		priority: &mut PriorityHandle,
-		frame: &mut FrameConsumer,
-	) -> Result<bytes::Bytes, Error> {
-		loop {
-			tokio::select! {
-				biased;
-				_ = stream.closed() => return Err(Error::Cancel),
-				data = frame.read_all() => return data,
 				new_pri = priority.next() => stream.set_priority(new_pri),
 				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
 			}

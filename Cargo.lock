@@ -4143,7 +4143,6 @@ name = "moq-net"
 version = "0.1.12"
 dependencies = [
  "bytes",
- "flate2",
  "futures",
  "kio",
  "num_enum",

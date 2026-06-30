@@ -9,7 +9,7 @@ use crate::ffi::Task;
 /// Publisher-side track properties, mirroring [`moq_net::TrackInfo`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
-/// (priority 0, ordered, uncompressed, default cache, millisecond timescale).
+/// (priority 0, ordered, default cache, millisecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
@@ -18,9 +18,6 @@ pub struct MoqTrackInfo {
 	/// Whether groups are delivered in sequence order.
 	#[uniffi(default = true)]
 	pub ordered: bool,
-	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
-	#[uniffi(default = false)]
-	pub compress: bool,
 	/// How long the relay should cache past groups, in milliseconds. Null uses the default.
 	#[uniffi(default = None)]
 	pub cache_ms: Option<u64>,
@@ -37,8 +34,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::TrackInfo {
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
 		let mut out = moq_net::TrackInfo::default()
 			.with_priority(info.priority)
-			.with_ordered(info.ordered)
-			.with_compress(info.compress);
+			.with_ordered(info.ordered);
 		if let Some(ms) = info.cache_ms {
 			out = out.with_cache(std::time::Duration::from_millis(ms));
 		}
@@ -331,7 +327,7 @@ impl MoqBroadcastProducer {
 	///
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing. `info` sets
-	/// track properties (priority, cache, compression); omit for defaults.
+	/// track properties (priority, cache, timescale); omit for defaults.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
