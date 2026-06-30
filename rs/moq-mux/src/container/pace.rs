@@ -1,23 +1,30 @@
-//! Pace media output at its real-time (media-clock) rate.
+//! Pace media output on a media clock, following the live edge.
 
 use std::time::{Duration, Instant};
 
 use super::Timestamp;
 
-/// Maps frame timestamps onto the wall clock so output drains at the source's
-/// real-time rate, like ffmpeg's `-re`.
+/// Maps media (decode) timestamps onto the wall clock so a caller can emit frames at
+/// the source's real-time rate while bounding how far behind the live edge it falls.
 ///
-/// The first frame seen anchors the media clock to "now"; every later frame is
-/// due at `anchor + (timestamp - base)`. Sleep until [`Pacer::due`] before
-/// emitting each frame and a retained broadcast plays out at its media rate
-/// instead of as fast as it can be read. A live source is unaffected: its frames
-/// already arrive paced, so each maps to roughly now.
+/// The first frame anchors the media clock to "now"; every later frame is due at
+/// `anchor + (timestamp - base)`. Sleeping until [`Pacer::due`] before emitting a frame
+/// drains a retained broadcast at its media rate, like ffmpeg's `-re`, instead of as
+/// fast as it can be read.
 ///
-/// The anchor never moves, so the media rate is held even when frames are read in
-/// a burst. (Contrast the SRT egress stamper, which re-anchors to the live edge
-/// because the receiver owns the jitter buffer.)
+/// To keep a bursty or faster-than-real source from accruing unbounded latency, the
+/// timeline holds at most `lead` of buffer ahead of now: when a frame would be due
+/// further out than that (a tune-in burst delivers a whole GOP at once, or the source
+/// drifts ahead of wall-clock), the anchor jumps forward to the live edge so the buffer
+/// never exceeds `lead`. A frame that merely trails the edge (network jitter, a
+/// reordered B-frame) keeps its earlier instant.
+///
+/// `lead` is the target buffer, typically the subscription's max latency. With `lead`
+/// = 0 the timeline never leads now, which is what an SRT egress wants (it stamps each
+/// payload's TSBPD origin time and the receiver owns the jitter buffer); with `lead` >
+/// 0 the caller sleeps to pace output and holds that much buffer itself.
 #[derive(Default)]
-pub struct Pacer {
+pub(crate) struct Pacer {
 	anchor: Option<Anchor>,
 }
 
@@ -29,30 +36,41 @@ struct Anchor {
 
 impl Pacer {
 	/// A pacer that anchors on the first frame it sees.
-	pub fn new() -> Self {
+	pub(crate) fn new() -> Self {
 		Self::default()
 	}
 
-	/// The wall-clock instant `timestamp` is due.
-	///
-	/// The first call anchors the media clock to the current instant and returns it.
-	/// Later calls return `anchor + (timestamp - base)`: an instant that leads now for
-	/// a faster-than-real source (sleep until it), or trails now for a frame that's
-	/// already late, such as a reordered B-frame whose presentation timestamp dips
-	/// below the anchor (emit it immediately).
-	pub fn due(&mut self, timestamp: Timestamp) -> Instant {
-		// Read the clock only on the first frame; later frames map off the anchor.
-		let anchor = self.anchor.get_or_insert_with(|| Anchor {
-			at: Instant::now(),
+	/// The wall-clock instant `timestamp` is due, holding at most `lead` of buffer
+	/// ahead of now. Reads the clock itself; see [`Self::at`] for the testable core.
+	pub(crate) fn due(&mut self, timestamp: Timestamp, lead: Duration) -> Instant {
+		self.at(timestamp, lead, Instant::now())
+	}
+
+	/// [`Self::due`] with an explicit `now`, so the mapping is deterministic in tests.
+	fn at(&mut self, timestamp: Timestamp, lead: Duration, now: Instant) -> Instant {
+		let anchor = self.anchor.get_or_insert(Anchor {
+			at: now,
 			base: timestamp,
 		});
 
-		match timestamp.checked_sub(anchor.base) {
+		let due = match timestamp.checked_sub(anchor.base) {
 			Ok(ahead) => anchor.at + Duration::from(ahead),
 			Err(_) => anchor
 				.at
 				.checked_sub(Duration::from(anchor.base - timestamp))
 				.unwrap_or(anchor.at),
+		};
+
+		// Never schedule more than `lead` ahead: when the source outruns that, re-anchor
+		// the live edge to `now + lead` so the buffer stays bounded. Re-anchoring only ever
+		// moves forward, so a frame that trails the edge keeps its earlier instant.
+		let cap = now + lead;
+		if due > cap {
+			anchor.at = cap;
+			anchor.base = timestamp;
+			cap
+		} else {
+			due
 		}
 	}
 }
@@ -66,47 +84,79 @@ mod tests {
 	}
 
 	#[test]
-	fn anchors_first_frame_to_now() {
-		let mut pacer = Pacer::new();
-		let before = Instant::now();
-		let due = pacer.due(ms(5_000));
-		let after = Instant::now();
-		assert!(due >= before && due <= after, "the first frame is due immediately");
-	}
-
-	#[test]
 	fn paces_on_the_media_clock() {
-		// The first frame returns the anchor instant (offset zero), so later frames are
-		// deterministic relative to it without stubbing the clock.
+		// Within the lead budget, frames pace on the media clock: a frame 40ms later in
+		// media is due 40ms after the anchor, however quickly it was read. This is the
+		// `-re` case (the caller sleeps in lockstep, so the cap never trips).
 		let mut pacer = Pacer::new();
-		let anchor = pacer.due(ms(1_000));
+		let start = Instant::now();
+		let lead = Duration::from_millis(500);
 
-		// A frame 40ms later in media is due 40ms after the anchor, however quickly it
-		// was read (a retained broadcast hands frames over near-instantly).
 		assert_eq!(
-			pacer.due(ms(1_040)),
-			anchor + Duration::from_millis(40),
+			pacer.at(ms(1_000), lead, start),
+			start,
+			"the first frame anchors to now"
+		);
+		assert_eq!(
+			pacer.at(ms(1_040), lead, start + Duration::from_millis(1)),
+			start + Duration::from_millis(40),
 			"output is paced on the media clock, not arrival time"
 		);
 	}
 
 	#[test]
-	fn reordered_frame_is_already_due() {
+	fn re_anchors_past_the_lead_budget() {
+		// A tune-in burst: a whole GOP is read at once, so the newest frame's media time
+		// runs far past `now`. It re-anchors to `now + lead` rather than scheduling
+		// seconds out, so the buffer never exceeds the target latency.
 		let mut pacer = Pacer::new();
-		let anchor = pacer.due(ms(1_000));
+		let start = Instant::now();
+		let lead = Duration::from_millis(500);
+		pacer.at(ms(1_000), lead, start);
 
-		// A reordered B-frame whose PTS dips 33ms below the anchor maps into the past,
-		// so the caller's sleep is a no-op and it's emitted immediately.
-		assert_eq!(pacer.due(ms(967)), anchor - Duration::from_millis(33));
+		let now = start + Duration::from_millis(2);
+		let edge = pacer.at(ms(4_132), lead, now);
+		assert_eq!(edge, now + lead, "the live edge is held `lead` ahead of now");
+
+		// A later frame paces off the re-anchored edge. The caller slept until the edge
+		// was due, so `now` has advanced to it; the 40ms-newer frame is due 40ms past it.
+		let now = now + lead;
+		assert_eq!(
+			pacer.at(ms(4_172), lead, now),
+			now + Duration::from_millis(40),
+			"subsequent frames pace off the re-anchored edge"
+		);
 	}
 
 	#[test]
-	fn anchor_is_stable() {
-		// Unlike the SRT live-edge stamper, the anchor never moves: pacing a retained
-		// stream must hold the media rate, not collapse later frames onto the edge.
+	fn trailing_frame_keeps_its_instant() {
+		// A reordered B-frame whose timestamp dips below the edge maps into the past, so
+		// the caller's sleep is a no-op and it's emitted immediately. No re-anchor.
 		let mut pacer = Pacer::new();
-		let anchor = pacer.due(ms(0));
-		assert_eq!(pacer.due(ms(10_000)), anchor + Duration::from_secs(10));
-		assert_eq!(pacer.due(ms(20)), anchor + Duration::from_millis(20));
+		let start = Instant::now();
+		let lead = Duration::from_millis(500);
+		pacer.at(ms(1_000), lead, start);
+
+		assert_eq!(
+			pacer.at(ms(967), lead, start + Duration::from_millis(5)),
+			start - Duration::from_millis(33),
+		);
+	}
+
+	#[test]
+	fn zero_lead_never_leads_now() {
+		// `lead` = 0 is the SRT egress policy: the timeline is capped at now, so a burst
+		// re-anchors to now (the newest frame is the live edge) and nothing is stamped
+		// into the future.
+		let mut pacer = Pacer::new();
+		let start = Instant::now();
+		pacer.at(ms(1_000), Duration::ZERO, start);
+
+		let now = start + Duration::from_millis(2);
+		assert_eq!(
+			pacer.at(ms(4_132), Duration::ZERO, now),
+			now,
+			"the live edge paces to now"
+		);
 	}
 }

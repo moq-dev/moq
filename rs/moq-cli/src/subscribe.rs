@@ -164,8 +164,9 @@ impl Subscribe {
 			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
 		while let Some(frame) = ts.next().await? {
-			// `--pace`: hold each frame until it's due (the muxer paces on its decode clock)
-			// so a retained broadcast drains in real time instead of as fast as it's read.
+			// `--pace`: hold each frame until it's due. The muxer paces on its decode clock
+			// and follows the live edge with up to `--max-latency` of buffer, so a retained
+			// broadcast drains in real time while a live source stays near the edge.
 			if pace {
 				tokio::time::sleep_until(frame.pace.into()).await;
 			}

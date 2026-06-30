@@ -147,14 +147,16 @@ pub struct Output {
 	/// Whether this frame is a keyframe.
 	pub keyframe: bool,
 
-	/// Wall-clock instant this frame is due, anchored to when the first frame was
-	/// produced and paced on the decode clock (DTS), so a reordered (B-frame) stream
-	/// paces evenly rather than on its non-monotonic presentation timestamps.
+	/// Wall-clock instant this frame is due, paced on the decode clock (DTS) so a
+	/// reordered (B-frame) stream paces evenly rather than on its non-monotonic
+	/// presentation timestamps.
 	///
-	/// Sleep until it (or stamp a transport send time with it) to emit at the
-	/// source's real-time rate, like ffmpeg's `-re`; ignore it to emit as fast as the
-	/// broadcast can be read. Frames produced faster than real time lead the current
-	/// instant, so a retained broadcast drains at its media rate.
+	/// The muxer follows the live edge: it holds at most the configured latency
+	/// ([`with_latency`](Export::with_latency)) of buffer ahead of now, re-anchoring
+	/// past that so a tune-in burst or a faster-than-real source never accrues more
+	/// latency than the budget. Sleep until it (or stamp a transport send time with
+	/// it) to emit at the source's real-time rate, like ffmpeg's `-re`; ignore it to
+	/// emit as fast as the broadcast can be read.
 	pub pace: Instant,
 }
 
@@ -226,6 +228,9 @@ impl<E: CatalogExt> Export<E> {
 	}
 
 	/// Set the maximum buffering latency for each per-track source.
+	///
+	/// Also the pace buffer: [`Output::pace`] holds at most this far ahead of the live
+	/// edge, so a caller honoring it never falls more than `latency` behind.
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
@@ -728,12 +733,13 @@ impl<E: CatalogExt> Export<E> {
 
 		// Pace on the decode clock: reordered video uses the authored DTS (monotonic), so
 		// a caller honoring `pace` emits B-frames evenly instead of bursting on their
-		// non-monotonic PTS. Audio and non-reordered video have DTS == PTS.
+		// non-monotonic PTS. Audio and non-reordered video have DTS == PTS. The latency
+		// budget doubles as the pace buffer: hold at most that much ahead of the live edge.
 		let decode = match dts {
 			Some(ticks) => from_ticks(ticks).unwrap_or(timestamp),
 			None => timestamp,
 		};
-		let pace = self.pacer.due(decode);
+		let pace = self.pacer.due(decode, self.latency);
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
