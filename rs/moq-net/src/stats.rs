@@ -40,12 +40,13 @@
 //! * `announced` / `announced_closed`: cumulative count of broadcast
 //!   announce/unannounce events on this `(tier, role)`. Bumped on every
 //!   `publisher()` / `subscriber()` guard creation and drop.
-//! * `announced_bytes`: cumulative broadcast-name length summed over every
-//!   announce/unannounce message for this broadcast (the name, not the encoded
-//!   message size, so hop/framing overhead isn't charged). Recorded keyed by
-//!   path via [`BroadcastStats::publisher_announced_bytes`] /
+//! * `announced_bytes`: cumulative broadcast-name length summed over each
+//!   announce and unannounce of this broadcast (the name, not the encoded
+//!   message size, so hop/framing overhead isn't charged, and the count is
+//!   the same across protocol versions). Recorded keyed by path via
+//!   [`BroadcastStats::publisher_announced_bytes`] /
 //!   [`BroadcastStats::subscriber_announced_bytes`], independent of the
-//!   announce lifetime guard, so filtered/reflected/unmatched control messages
+//!   announce lifetime guard, so filtered/reflected/unmatched control flows
 //!   still count. Kept separate from the `bytes` payload counter.
 //! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
 //!   subscription sentinel. The first active subscription a peer session
@@ -152,10 +153,10 @@ use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProd
 pub struct Counters {
 	pub announced: AtomicU64,
 	pub announced_closed: AtomicU64,
-	/// Cumulative broadcast-name length summed over this broadcast's
-	/// announce/unannounce messages. Counts the name, not the encoded message
-	/// size, so it doesn't penalize the broadcast for hop/framing overhead.
-	/// Kept separate from `bytes`, which is media payload.
+	/// Cumulative broadcast-name length summed over each announce and unannounce
+	/// of this broadcast. Counts the name, not the encoded message size, so it
+	/// doesn't penalize the broadcast for hop/framing overhead. Kept separate
+	/// from `bytes`, which is media payload.
 	pub announced_bytes: AtomicU64,
 	pub subscriptions: AtomicU64,
 	pub subscriptions_closed: AtomicU64,

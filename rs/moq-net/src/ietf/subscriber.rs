@@ -517,6 +517,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::InvalidRole);
 		};
 
+		let abs = origin.absolute(&path).to_owned();
+		// Count the unannounce name length, mirroring the announce in start_announce,
+		// so announced_bytes covers both halves of the IETF subscriber flow.
+		self.stats
+			.broadcast(&abs)
+			.subscriber_announced_bytes(abs.as_str().len() as u64);
+
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
