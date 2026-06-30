@@ -303,19 +303,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								}
 								let absolute = origin.absolute(&path).to_owned();
 								let guard = stats.broadcast(&absolute).publisher();
+								let msg = lite::Announce::Active { suffix, hops };
+								let n = stream.writer.encode(&msg).await?;
+								guard.bytes(n as u64);
 								let prev = stats_guards.insert(absolute, guard);
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								let msg = lite::Announce::Active { suffix, hops };
-								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								stats_guards.remove(&origin.absolute(&path).to_owned());
 								// An ended announce doesn't need hops — the receiver matches on path only.
 								let msg = lite::Announce::Ended {
 									suffix,
 									hops: OriginList::new(),
 								};
-								stream.writer.encode(&msg).await?;
+								let n = stream.writer.encode(&msg).await?;
+								// Record the unannounce bytes on the guard before it drops.
+								if let Some(guard) = stats_guards.remove(&origin.absolute(&path).to_owned()) {
+									guard.bytes(n as u64);
+								}
 							}
 						},
 						None => {

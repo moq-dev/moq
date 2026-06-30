@@ -44,6 +44,32 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
+	/// Decode the next message, also returning the number of wire bytes it
+	/// consumed.
+	pub async fn decode_sized<T: Decode<V> + Debug>(&mut self) -> Result<(T, usize), Error>
+	where
+		V: Clone,
+	{
+		loop {
+			let mut cursor = io::Cursor::new(&self.buffer);
+			match T::decode(&mut cursor, self.version.clone()) {
+				Ok(msg) => {
+					let n = cursor.position() as usize;
+					self.buffer.advance(n);
+					return Ok((msg, n));
+				}
+				Err(DecodeError::Short) => {
+					// Try to read more data
+					if !self.read_more().await? {
+						// Stream closed while we still need more data
+						return Err(DecodeError::Short.into());
+					}
+				}
+				Err(e) => return Err(e.into()),
+			}
+		}
+	}
+
 	/// Decode the next message unless the stream is closed.
 	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
@@ -54,6 +80,19 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 
 		Ok(Some(self.decode().await?))
+	}
+
+	/// Decode the next message (and its consumed byte count) unless the stream
+	/// is closed. The sized counterpart to [`Self::decode_maybe`].
+	pub async fn decode_maybe_sized<T: Decode<V> + Debug>(&mut self) -> Result<Option<(T, usize)>, Error>
+	where
+		V: Clone,
+	{
+		if !self.has_more().await? {
+			return Ok(None);
+		}
+
+		Ok(Some(self.decode_sized().await?))
 	}
 
 	/// Decode the next message from the stream without consuming it.

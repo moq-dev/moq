@@ -19,13 +19,15 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		}
 	}
 
-	/// Encode the given message to the stream.
-	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
+	/// Encode the given message to the stream, returning the number of bytes
+	/// written to the wire (including any size prefix).
+	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<usize, Error>
 	where
 		V: Clone,
 	{
 		self.buffer.clear();
 		msg.encode(&mut self.buffer, self.version.clone())?;
+		let n = self.buffer.len();
 
 		while !self.buffer.is_empty() {
 			self.stream
@@ -36,7 +38,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 				.map_err(Error::from_transport)?;
 		}
 
-		Ok(())
+		Ok(n)
 	}
 
 	// Not public to avoid accidental partial writes.
@@ -98,9 +100,11 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 
 impl<S: web_transport_trait::SendStream> Writer<S, ietf::Version> {
 	/// Encode an IETF `Message` to the stream, writing `[type_id][size][body]`.
-	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
-		self.encode(&T::ID).await?;
-		self.encode(msg).await
+	/// Returns the total number of bytes written.
+	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<usize, Error> {
+		let id = self.encode(&T::ID).await?;
+		let body = self.encode(msg).await?;
+		Ok(id + body)
 	}
 }
 

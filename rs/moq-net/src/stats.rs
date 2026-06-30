@@ -40,6 +40,9 @@
 //! * `announced` / `announced_closed`: cumulative count of broadcast
 //!   announce/unannounce events on this `(tier, role)`. Bumped on every
 //!   `publisher()` / `subscriber()` guard creation and drop.
+//! * `announced_bytes`: cumulative wire bytes spent on this broadcast's
+//!   announce/unannounce messages, kept separate from the `bytes` payload
+//!   counter. Recorded via [`PublisherStats::bytes`] / [`SubscriberStats::bytes`].
 //! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
 //!   subscription sentinel. The first active subscription a peer session
 //!   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
@@ -145,6 +148,10 @@ use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProd
 pub struct Counters {
 	pub announced: AtomicU64,
 	pub announced_closed: AtomicU64,
+	/// Cumulative wire bytes spent announcing/unannouncing this broadcast
+	/// (ANNOUNCE/UNANNOUNCE on lite, PUBLISH_NAMESPACE and friends on IETF),
+	/// kept separate from `bytes`, which is media payload.
+	pub announced_bytes: AtomicU64,
 	pub subscriptions: AtomicU64,
 	pub subscriptions_closed: AtomicU64,
 	pub broadcasts: AtomicU64,
@@ -167,6 +174,7 @@ impl Counters {
 		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Acquire);
 		let broadcasts_closed = self.broadcasts_closed.load(Ordering::Acquire);
 		let announced = self.announced.load(Ordering::Relaxed);
+		let announced_bytes = self.announced_bytes.load(Ordering::Relaxed);
 		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
 		let broadcasts = self.broadcasts.load(Ordering::Relaxed);
 		let bytes = self.bytes.load(Ordering::Relaxed);
@@ -175,6 +183,7 @@ impl Counters {
 		RawCounts {
 			announced,
 			announced_closed,
+			announced_bytes,
 			broadcasts,
 			broadcasts_closed,
 			subscriptions,
@@ -211,6 +220,7 @@ impl SessionCounters {
 struct RawCounts {
 	announced: u64,
 	announced_closed: u64,
+	announced_bytes: u64,
 	broadcasts: u64,
 	broadcasts_closed: u64,
 	subscriptions: u64,
@@ -816,6 +826,17 @@ pub struct PublisherStats {
 }
 
 impl PublisherStats {
+	/// Record `n` wire bytes spent announcing/unannouncing this broadcast,
+	/// bumping `announced_bytes`. Distinct from [`PublisherTrack::bytes`], which
+	/// counts media payload.
+	pub fn bytes(&self, n: u64) {
+		if let Some(entry) = &self.entry {
+			entry.publisher[self.tier.idx()]
+				.announced_bytes
+				.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
 	/// Open a track-subscription guard. Bumps `subscriptions` on construction
 	/// and `subscriptions_closed` on drop.
 	pub fn track(&self, name: &str) -> PublisherTrack {
@@ -848,6 +869,16 @@ pub struct SubscriberStats {
 }
 
 impl SubscriberStats {
+	/// Record `n` wire bytes spent announcing/unannouncing this broadcast,
+	/// bumping `announced_bytes`. Mirrors [`PublisherStats::bytes`].
+	pub fn bytes(&self, n: u64) {
+		if let Some(entry) = &self.entry {
+			entry.subscriber[self.tier.idx()]
+				.announced_bytes
+				.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
 	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
 	pub fn track(&self, name: &str) -> SubscriberTrack {
 		BroadcastStats {
@@ -960,6 +991,7 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 	let snap = Snapshot {
 		announced: raw.announced,
 		announced_closed: raw.announced_closed,
+		announced_bytes: raw.announced_bytes,
 		broadcasts: raw.broadcasts,
 		broadcasts_closed: raw.broadcasts_closed,
 		subscriptions: raw.subscriptions,
@@ -1191,6 +1223,7 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 struct Snapshot {
 	announced: u64,
 	announced_closed: u64,
+	announced_bytes: u64,
 	broadcasts: u64,
 	broadcasts_closed: u64,
 	subscriptions: u64,
@@ -1466,6 +1499,51 @@ mod tests {
 		assert_eq!(snap.subscriptions, 1);
 		assert_eq!(snap.bytes, 42);
 		assert_eq!(snap.frames, 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn announced_bytes_recorded_per_side() {
+		// The announce guards' bytes() bumps land in announced_bytes, isolated
+		// per side, and don't touch the payload `bytes` counter.
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let p = bs.publisher();
+		p.bytes(40);
+		p.bytes(2);
+		let s = bs.subscriber();
+		s.bytes(7);
+
+		let entries = stats.shared().entries.lock();
+		let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
+		let pub_ext = entry.publisher[Tier::External.idx()].snapshot();
+		let sub_ext = entry.subscriber[Tier::External.idx()].snapshot();
+		assert_eq!(pub_ext.announced_bytes, 42, "publisher announce bytes accumulate");
+		assert_eq!(pub_ext.bytes, 0, "announce bytes are not payload bytes");
+		assert_eq!(sub_ext.announced_bytes, 7, "subscriber side tracked independently");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn announced_bytes_surfaces_in_frame() {
+		let (stats, origin) = test_stats(Some("sjc"));
+		let mut consumer = origin.consume();
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let guard = bs.publisher();
+		guard.bytes(123);
+
+		tokio::time::advance(Duration::from_millis(1100)).await;
+
+		let (_path, broadcast) = consumer.announced().await.expect("announce");
+		let broadcast = broadcast.expect("active");
+		let track = broadcast
+			.subscribe_track(&Track {
+				name: "publisher.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		let frame = read_frame(track).await;
+		let snap = frame.get("foo/bar").expect("foo/bar entry");
+		assert_eq!(snap.announced, 1);
+		assert_eq!(snap.announced_bytes, 123);
 	}
 
 	#[tokio::test(start_paused = true)]
