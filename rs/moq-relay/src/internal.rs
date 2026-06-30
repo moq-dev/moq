@@ -209,23 +209,24 @@ fn spawn_session<S>(session: S, cluster: Cluster)
 where
 	S: web_transport_trait::Session,
 {
-	// Full access to everything under the empty root, on the internal tier.
-	let token = AuthToken::unrestricted(moq_net::Path::new("").to_owned());
-	let publish = cluster.publisher(&token);
-	let subscribe = cluster.subscriber(&token);
 	let stats = cluster.stats.tier(moq_net::Tier::Internal);
 
 	let serve = async move {
+		// Read the client's SETUP first: a moq-lite-05 worker can request a path
+		// (these transports carry no request URI), which scopes its full internal
+		// access to that subtree. No path means the empty root, as before.
+		let request = moq_net::Server::new().with_stats(stats).accept_request(session).await?;
+
+		let root = moq_net::Path::new(request.path().unwrap_or("")).to_owned();
+		let token = AuthToken::unrestricted(root);
+		let publish = cluster.publisher(&token);
+		let subscribe = cluster.subscriber(&token);
+
 		// subscribe/publish look backwards on purpose: see connection.rs. We publish
 		// the tracks the client may subscribe to, and subscribe to what it may publish.
-		let session = moq_net::Server::new()
-			.with_publish(subscribe)
-			.with_consume(publish)
-			.with_stats(stats)
-			.accept(session)
-			.await?;
+		let session = request.with_publish(subscribe).with_consume(publish).ok().await?;
 
-		tracing::info!(version = %session.version(), "negotiated");
+		tracing::info!(version = %session.version(), root = %token.root, "negotiated");
 		session.closed().await?;
 		anyhow::Ok(())
 	};

@@ -12,6 +12,15 @@ pub enum Version {
 	Lite05Wip,
 }
 
+impl Version {
+	/// Whether this version uses a unidirectional Setup stream (moq-lite-05+).
+	///
+	/// Earlier versions negotiate purely via ALPN and exchange no SETUP message.
+	pub fn has_setup_stream(self) -> bool {
+		matches!(self, Self::Lite05Wip)
+	}
+}
+
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {

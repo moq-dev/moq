@@ -34,6 +34,8 @@ impl Encode<Version> for ControlType {
 #[repr(u64)]
 pub enum DataType {
 	Group = 0,
+	/// Carries a single SETUP message (moq-lite-05+).
+	Setup = 1,
 }
 
 impl Decode<Version> for DataType {

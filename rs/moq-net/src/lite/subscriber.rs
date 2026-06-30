@@ -115,6 +115,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let res = match kind {
 			lite::DataType::Group => self.recv_group(&mut stream).await,
+			lite::DataType::Setup => self.recv_setup(&mut stream).await,
 		};
 
 		if let Err(err) = res {
@@ -455,6 +456,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
 		stream.reader.closed().await?;
+
+		Ok(())
+	}
+
+	async fn recv_setup(&self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
+		// The Setup stream only exists in moq-lite-05+; reject it on older versions.
+		if self.version != Version::Lite05Wip {
+			return Err(Error::UnexpectedStream);
+		}
+
+		let setup: lite::Setup = stream.decode().await?;
+		tracing::debug!(?setup, "received setup");
+
+		// TODO: surface the negotiated capabilities (path, probe) to the session.
 
 		Ok(())
 	}
