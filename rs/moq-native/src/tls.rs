@@ -1,6 +1,8 @@
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+use rustls_platform_verifier::BuilderVerifierExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
@@ -57,6 +59,12 @@ pub enum Error {
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
+	#[error("TLS platform verifier cannot be combined with custom TLS roots")]
+	PlatformVerifierWithCustomRoots,
+
+	#[error("TLS platform verifier is not supported by {0}")]
+	PlatformVerifierUnsupported(&'static str),
+
 	#[error("failed to configure client certificate")]
 	ClientAuth(#[source] rustls::Error),
 
@@ -106,6 +114,37 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 
 // ── Client ──────────────────────────────────────────────────────────
 
+/// Source used for default TLS server-certificate verification.
+#[derive(Clone, Copy, Default, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ClientTlsVerifier {
+	/// Use the recommended verifier for the current platform.
+	///
+	/// Android uses bundled Mozilla/WebPKI roots, Apple platforms use the
+	/// platform verifier, and other platforms use rustls-native-certs.
+	#[default]
+	Default,
+
+	/// Use the platform verifier.
+	///
+	/// On Android this requires rustls-platform-verifier Android initialization
+	/// before connecting.
+	Platform,
+
+	/// Use bundled Mozilla roots from webpki-roots.
+	WebPki,
+
+	/// Load roots with rustls-native-certs.
+	NativeRoots,
+}
+
+impl ClientTlsVerifier {
+	fn is_default(&self) -> bool {
+		matches!(self, Self::Default)
+	}
+}
+
 /// TLS configuration for the client.
 #[serde_with::serde_as]
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
@@ -127,12 +166,13 @@ pub struct Client {
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
-	/// Also trust the platform's native root certificates.
+	/// Also trust the configured system/default root source.
 	///
 	/// Defaults to enabled only when no `--client-tls-root` is given. Set it
-	/// explicitly to trust the system roots alongside any custom roots, or set it
-	/// to false to trust only the custom roots. Trusting neither (no custom root
-	/// and system roots disabled) is rejected, since verification could never pass.
+	/// explicitly to trust the selected verifier's roots alongside any custom
+	/// roots, or set it to false to trust only the custom roots. Trusting neither
+	/// (no custom root and system roots disabled) is rejected, since verification
+	/// could never pass.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-tls-system-roots",
@@ -144,6 +184,21 @@ pub struct Client {
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub system_roots: Option<bool>,
+
+	/// TLS verifier to use when system/default roots are enabled.
+	///
+	/// The default is platform-specific: Android uses bundled Mozilla/WebPKI
+	/// roots, Apple platforms use the platform verifier, and other platforms use
+	/// rustls-native-certs.
+	#[serde(default, skip_serializing_if = "ClientTlsVerifier::is_default")]
+	#[arg(
+		id = "client-tls-verifier",
+		long = "client-tls-verifier",
+		env = "MOQ_CLIENT_TLS_VERIFIER",
+		value_enum,
+		default_value = "default"
+	)]
+	pub verifier: ClientTlsVerifier,
 
 	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
 	///
@@ -251,9 +306,15 @@ pub(crate) enum Verification {
 	/// this is mutually exclusive with any roots.
 	Fingerprints(Vec<[u8; 32]>),
 
-	/// Standard verification against these roots (system and/or custom, already
-	/// resolved). The two sets are additive.
-	Roots(Vec<CertificateDer<'static>>),
+	/// Standard verification against these roots. On Android, `webpki_roots`
+	/// represents Mozilla roots from the `webpki-roots` crate.
+	Roots {
+		certs: Vec<CertificateDer<'static>>,
+		webpki_roots: bool,
+	},
+
+	/// Standard verification delegated to the platform verifier.
+	Platform,
 }
 
 impl Client {
@@ -329,12 +390,33 @@ impl Client {
 		let system_roots = self.effective_system_roots().unwrap_or(root.is_empty());
 
 		let mut roots = Vec::new();
+		let mut webpki_roots = false;
+
 		if system_roots {
-			let native = rustls_native_certs::load_native_certs();
-			for err in native.errors {
-				tracing::warn!(%err, "failed to load root cert");
+			match self.effective_verifier() {
+				ClientTlsVerifier::Default => unreachable!("effective verifier resolves default"),
+				ClientTlsVerifier::Platform => {
+					if !root.is_empty() {
+						return Err(Error::PlatformVerifierWithCustomRoots);
+					}
+					if !Self::platform_verifier_supported() {
+						return Err(Error::PlatformVerifierUnsupported("this target"));
+					}
+					tracing::debug!("using platform TLS certificate verifier for system roots");
+					return Ok(Verification::Platform);
+				}
+				ClientTlsVerifier::WebPki => {
+					tracing::debug!("using WebPKI Mozilla TLS roots for system roots");
+					webpki_roots = true;
+				}
+				ClientTlsVerifier::NativeRoots => {
+					let native = rustls_native_certs::load_native_certs();
+					for err in native.errors {
+						tracing::warn!(%err, "failed to load root cert");
+					}
+					roots.extend(native.certs);
+				}
 			}
-			roots.extend(native.certs);
 		}
 		for root in &root {
 			let certs = read_certs(root)?;
@@ -346,11 +428,39 @@ impl Client {
 
 		// WebPKI needs at least one trusted root to ever succeed, so fail fast
 		// instead of producing confusing handshake errors later.
-		if roots.is_empty() {
+		let has_roots = !roots.is_empty() || webpki_roots;
+		if !has_roots {
 			return Err(Error::NoRoots);
 		}
 
-		Ok(Verification::Roots(roots))
+		Ok(Verification::Roots {
+			certs: roots,
+			webpki_roots,
+		})
+	}
+
+	fn effective_verifier(&self) -> ClientTlsVerifier {
+		match self.verifier {
+			ClientTlsVerifier::Default => {
+				#[cfg(target_os = "android")]
+				{
+					ClientTlsVerifier::WebPki
+				}
+				#[cfg(any(target_os = "ios", target_os = "macos"))]
+				{
+					ClientTlsVerifier::Platform
+				}
+				#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+				{
+					ClientTlsVerifier::NativeRoots
+				}
+			}
+			verifier => verifier,
+		}
+	}
+
+	fn platform_verifier_supported() -> bool {
+		cfg!(any(target_os = "android", target_os = "ios", target_os = "macos"))
 	}
 
 	/// Whether an insecure `http://` certificate-fingerprint bootstrap may be
@@ -384,34 +494,23 @@ impl Client {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
 
-		let mut roots = rustls::RootCertStore::empty();
-		if let Verification::Roots(certs) = &verification {
-			for cert in certs {
-				roots.add(cert.clone()).map_err(Error::AddRoot)?;
-			}
-		}
-
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
 		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-			.with_root_certificates(roots);
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?;
 
-		let mut tls = match (&self.cert, &self.key) {
-			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
-				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-					.collect::<std::result::Result<_, _>>()
-					.map_err(Error::Read)?;
-				if chain.is_empty() {
-					return Err(Error::Empty);
-				}
-				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
-				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
-			}
-			(None, None) => builder.with_no_client_auth(),
-			_ => return Err(Error::IncompleteClientAuth),
+		#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+		let mut tls = if matches!(verification, Verification::Platform) {
+			self.build_client_config(builder.with_platform_verifier()?)?
+		} else {
+			let roots = Self::root_store(&verification)?;
+			self.build_client_config(builder.with_root_certificates(roots))?
+		};
+
+		#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+		let mut tls = {
+			let roots = Self::root_store(&verification)?;
+			self.build_client_config(builder.with_root_certificates(roots))?
 		};
 
 		match verification {
@@ -428,10 +527,48 @@ impl Client {
 				tls.dangerous().set_certificate_verifier(Arc::new(verifier));
 			}
 			// Roots are already in the store above; use the default WebPKI verifier.
-			Verification::Roots(_) => {}
+			Verification::Roots { .. } => {}
+			// Platform verifier was installed by the builder above.
+			Verification::Platform => {}
 		}
 
 		Ok(tls)
+	}
+
+	fn root_store(verification: &Verification) -> Result<rustls::RootCertStore> {
+		let mut roots = rustls::RootCertStore::empty();
+		if let Verification::Roots { certs, .. } = verification {
+			if let Verification::Roots { webpki_roots: true, .. } = verification {
+				roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+			}
+
+			for cert in certs {
+				roots.add(cert.clone()).map_err(Error::AddRoot)?;
+			}
+		}
+		Ok(roots)
+	}
+
+	fn build_client_config(
+		&self,
+		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>,
+	) -> Result<rustls::ClientConfig> {
+		Ok(match (&self.cert, &self.key) {
+			(Some(cert_path), Some(key_path)) => {
+				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
+				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+					.collect::<std::result::Result<_, _>>()
+					.map_err(Error::Read)?;
+				if chain.is_empty() {
+					return Err(Error::Empty);
+				}
+				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
+				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
+			}
+			(None, None) => builder.with_no_client_auth(),
+			_ => return Err(Error::IncompleteClientAuth),
+		})
 	}
 }
 

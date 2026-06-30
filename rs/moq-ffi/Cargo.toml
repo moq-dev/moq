@@ -36,6 +36,10 @@ tracing = "0.1"
 uniffi = { version = "0.31", features = ["cli"] }
 url = "2"
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+rustls-platform-verifier = "0.7"
+
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
 

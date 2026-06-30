@@ -39,6 +39,30 @@ fn map_connect_error(err: moq_native::Error) -> MoqError {
 	}
 }
 
+/// TLS server certificate verifier exposed through the FFI bindings.
+#[derive(uniffi::Enum)]
+pub enum MoqTlsVerifier {
+	/// Use the recommended verifier for the current platform.
+	Default,
+	/// Use the platform verifier. On Android, call PlatformTLS.initialize first.
+	Platform,
+	/// Use bundled Mozilla roots from webpki-roots.
+	WebPki,
+	/// Load roots with rustls-native-certs.
+	NativeRoots,
+}
+
+impl From<MoqTlsVerifier> for moq_native::tls::ClientTlsVerifier {
+	fn from(verifier: MoqTlsVerifier) -> Self {
+		match verifier {
+			MoqTlsVerifier::Default => Self::Default,
+			MoqTlsVerifier::Platform => Self::Platform,
+			MoqTlsVerifier::WebPki => Self::WebPki,
+			MoqTlsVerifier::NativeRoots => Self::NativeRoots,
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -83,10 +107,21 @@ impl MoqClient {
 		}
 	}
 
+	/// Select the TLS server certificate verifier.
+	///
+	/// Default uses the recommended verifier for the platform. Android defaults
+	/// to WebPKI/Mozilla roots; platform verifier mode requires Android
+	/// PlatformTLS initialization before connecting.
+	pub fn set_tls_verifier(&self, verifier: MoqTlsVerifier) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.verifier = verifier.into();
+		}
+	}
+
 	/// Trust these PEM root certificate file(s) instead of the system roots.
 	///
 	/// Pass the paths to PEM-encoded CA certificates. An empty list restores the
-	/// default behavior of using the platform's native root store.
+	/// default behavior of using the configured default verifier roots.
 	pub fn set_tls_roots(&self, paths: Vec<String>) {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.root = paths.into_iter().map(Into::into).collect();
