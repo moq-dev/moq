@@ -74,8 +74,14 @@ mod tests {
 	#[test]
 	fn rejected_mline_with_no_format_gets_placeholder() {
 		// str0m's malformed rejected audio line.
-		assert_eq!(ensure_media_format("m=audio 0 UDP/TLS/RTP/SAVPF "), "m=audio 0 UDP/TLS/RTP/SAVPF 0");
-		assert_eq!(ensure_media_format("m=audio 0 UDP/TLS/RTP/SAVPF"), "m=audio 0 UDP/TLS/RTP/SAVPF 0");
+		assert_eq!(
+			ensure_media_format("m=audio 0 UDP/TLS/RTP/SAVPF "),
+			"m=audio 0 UDP/TLS/RTP/SAVPF 0"
+		);
+		assert_eq!(
+			ensure_media_format("m=audio 0 UDP/TLS/RTP/SAVPF"),
+			"m=audio 0 UDP/TLS/RTP/SAVPF 0"
+		);
 	}
 
 	#[test]
