@@ -13,6 +13,8 @@ pub enum ControlType {
 	Fetch = 3,
 	Probe = 4,
 	Goaway = 5,
+	/// Queries a track's immutable publisher properties via TRACK/TRACK_INFO (moq-lite-05+).
+	Track = 6,
 }
 
 impl Decode<Version> for ControlType {

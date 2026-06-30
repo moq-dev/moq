@@ -467,8 +467,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let abs = self.origin.as_ref().unwrap().absolute(&msg.broadcast);
 		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
-		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
-		stream.reader.closed().await?;
+		// Drain any further responses (SUBSCRIBE_END / SUBSCRIBE_DROP) until the publisher FINs.
+		// We don't act on them yet; groups arrive on their own streams regardless.
+		while stream.reader.decode_maybe::<lite::SubscribeResponse>().await?.is_some() {}
 
 		Ok(())
 	}
@@ -530,7 +531,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut group: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
-		while let Some(size) = stream.decode_maybe::<u64>().await? {
+		loop {
+			let size = if self.version.has_track_stream() {
+				// moq-lite-05+: each frame is prefixed with a zigzag timestamp delta. We
+				// decode it to stay aligned with the wire, but don't surface it yet.
+				let Some(_timestamp_delta) = stream.decode_maybe::<u64>().await? else {
+					break;
+				};
+				stream.decode::<u64>().await?
+			} else {
+				let Some(size) = stream.decode_maybe::<u64>().await? else {
+					break;
+				};
+				size
+			};
+
 			if size > MAX_FRAME_SIZE {
 				return Err(Error::FrameTooLarge);
 			}

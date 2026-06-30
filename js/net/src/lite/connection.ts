@@ -4,7 +4,7 @@ import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
-import { type Reader, Readers, Stream } from "../stream.ts";
+import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
 import { AnnounceInterest } from "./announce.ts";
 import { Goaway } from "./goaway.ts";
@@ -12,10 +12,12 @@ import { Group } from "./group.ts";
 import { type Origin, randomOrigin } from "./origin.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { StreamId } from "./stream.ts";
+import { Setup } from "./setup.ts";
+import { DataId, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
-import { Version, versionName } from "./version.ts";
+import { Track } from "./track.ts";
+import { hasSetupStream, Version, versionName } from "./version.ts";
 
 const SEND_BW_POLL_INTERVAL = 100; // ms
 
@@ -114,6 +116,11 @@ export class Connection implements Established {
 	async #run(): Promise<void> {
 		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
 
+		// moq-lite-05+: each endpoint opens a Setup stream and sends a single SETUP message.
+		if (hasSetupStream(this.#version)) {
+			tasks.push(this.#runSetup());
+		}
+
 		if (this.sendBandwidth) {
 			tasks.push(this.#runSendBandwidth(this.sendBandwidth));
 		}
@@ -184,6 +191,9 @@ export class Connection implements Established {
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
+		} else if (typ === StreamId.Track) {
+			const msg = await Track.decode(stream.reader, this.#version);
+			await this.#publisher.runTrackInfo(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {
@@ -213,11 +223,28 @@ export class Connection implements Established {
 
 	async #runUni(stream: Reader) {
 		const typ = await stream.u8();
-		if (typ === 0) {
+		if (typ === DataId.Group) {
 			const msg = await Group.decode(stream);
 			await this.#subscriber.runGroup(msg, stream);
+		} else if (typ === DataId.Setup) {
+			// moq-lite-05+: read the peer's SETUP and discard it (the path, if any,
+			// is handled at accept time by the server's transport binding).
+			await Setup.decode(stream, this.#version);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
+		}
+	}
+
+	// moq-lite-05+: open a unidirectional Setup stream, send a single SETUP, and FIN.
+	// The browser conveys its path via the WebTransport URL, so the SETUP is empty.
+	async #runSetup(): Promise<void> {
+		const writer = await Writer.open(this.#quic);
+		try {
+			await writer.u8(DataId.Setup);
+			await new Setup().encode(writer, this.#version);
+			writer.close();
+		} catch (err: unknown) {
+			writer.reset(err);
 		}
 	}
 

@@ -19,6 +19,7 @@ mod setup;
 mod stream;
 mod subscribe;
 mod subscriber;
+mod track;
 mod version;
 
 pub use announce::*;
@@ -38,4 +39,6 @@ pub(super) use setup::{accept_setup, send_setup};
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
+#[allow(unused_imports)]
+pub use track::*;
 pub use version::Version;
