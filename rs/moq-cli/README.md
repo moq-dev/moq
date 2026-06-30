@@ -41,7 +41,7 @@ Runs a relay and publishes a single broadcast read from stdin into it. Useful fo
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq-cli serve --broadcast my-stream fmp4
+    moq-cli serve --broadcast my-stream --tls-generate "localhost" fmp4
 ```
 
 ### Self-host: subscribe to an inbound broadcast (`accept`)
@@ -49,7 +49,7 @@ ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
 Runs a relay and writes the first incoming broadcast's media to stdout. The inverse of `serve`.
 
 ```bash
-moq-cli accept --broadcast my-stream --format fmp4 | ffplay -
+moq-cli accept --broadcast my-stream --tls-generate "localhost" --format fmp4 | ffplay -
 ```
 
 ### Input formats (`publish` / `serve`)
