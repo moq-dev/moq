@@ -425,11 +425,15 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	const quic = new Session(url);
 
 	// Race connecting against losing the cancel race or closing before we ever
-	// opened. The `closed` arm matters because some Session versions resolve
-	// `closed` but never reject `ready` on a refused connection; without it a
-	// failed attempt would hang here forever and the caller could never retry.
+	// opened. A rejected `ready` (refused/failed) maps to "closed" so the cleanup
+	// path still runs; the separate `closed` arm covers Session versions that
+	// resolve `closed` but never reject `ready`, which would otherwise hang here
+	// forever and stop the caller from retrying.
 	const result = await Promise.race([
-		quic.ready.then(() => "ready" as const),
+		quic.ready.then(
+			() => "ready" as const,
+			() => "closed" as const,
+		),
 		quic.closed.then(
 			() => "closed" as const,
 			() => "closed" as const,
