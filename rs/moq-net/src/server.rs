@@ -70,10 +70,6 @@ impl Server {
 	/// The path is surfaced for moq-lite-05; it is `None` on versions with no in-band
 	/// request path (lite 01-04, and the IETF drafts in this build).
 	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
-		if self.publish.is_none() && self.consume.is_none() {
-			tracing::warn!("not publishing or consuming anything");
-		}
-
 		// Regimes without an in-band path defer to `ok()` without surfacing one.
 		let deferred = |handshake| Request {
 			server: self.clone(),
@@ -255,6 +251,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 	/// Accept the session, completing the handshake.
 	pub async fn ok(self) -> Result<Session, Error> {
 		let server = self.server;
+
+		// Warn here, not in `accept_request`: callers attach origins on the Request
+		// (after inspecting the path), so checking earlier gives false positives.
+		if server.publish.is_none() && server.consume.is_none() {
+			tracing::warn!("not publishing or consuming anything");
+		}
 
 		let (session, mut stream, version, request_id_max) = match self.handshake {
 			Handshake::IetfModern { session, version } => {

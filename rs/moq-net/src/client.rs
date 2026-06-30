@@ -56,9 +56,17 @@ impl Client {
 	/// Required on transports that carry no request URI (native QUIC, qmux over
 	/// TCP/TLS/UDS) so the server learns which path the client wants. Omit it on
 	/// bindings that already carry a URI (WebTransport). Ignored by versions with no
-	/// Setup stream (moq-lite-01 through 04).
+	/// Setup stream (moq-lite-01 through 04). The value is normalized to an absolute
+	/// path (empty becomes `/`, a leading `/` is prepended).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
-		self.path = Some(path.into());
+		let path = path.into();
+		self.path = Some(if path.is_empty() {
+			"/".to_string()
+		} else if path.starts_with('/') {
+			path
+		} else {
+			format!("/{path}")
+		});
 		self
 	}
 

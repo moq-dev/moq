@@ -261,14 +261,16 @@ impl Client {
 		feature = "uds"
 	))]
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
-		let session = self.connect_inner(url).await?;
+		let session = self.connect_inner(url, None).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
 	}
 
-	/// Build the per-connection moq client, advertising the URL path in the SETUP for
-	/// transports that carry no request URI of their own (raw QUIC, qmux over TCP/UDS,
-	/// iroh). WebTransport and WebSocket already convey the path, so we omit it there.
+	/// Connect, overriding the request path the client advertises in the moq SETUP.
+	///
+	/// Use this when the dial URL can't express the path: a `unix://` URL's path is
+	/// the socket file, not a namespace. For URLs that do carry a path (`tcp://`, raw
+	/// QUIC) plain [`connect`](Self::connect) derives it from the URL.
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -278,15 +280,39 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	fn connect_client(&self, url: &Url) -> moq_net::Client {
+	pub async fn connect_with_path(&self, url: Url, path: impl Into<String>) -> crate::Result<moq_net::Session> {
+		let session = self.connect_inner(url, Some(path.into())).await?;
+		tracing::info!(version = %session.version(), "connected");
+		Ok(session)
+	}
+
+	/// Build the per-connection moq client, advertising the request path in the SETUP
+	/// for transports that carry no request URI of their own (raw QUIC, qmux over
+	/// TCP/UDS, raw iroh). WebTransport and WebSocket already convey the path in their
+	/// own request, so we omit it there to avoid duplicating it.
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	fn connect_client(&self, url: &Url, explicit_path: Option<&str>) -> moq_net::Client {
 		if transport_carries_path(url) {
 			return self.moq.clone();
 		}
 
-		// The SETUP path must be non-empty and begin with `/`; default like HTTP.
-		let path = match url.path() {
-			"" => "/",
-			path => path,
+		let path = match explicit_path {
+			Some(path) => path,
+			// A unix:// URL path is the socket file, not a request path, so default
+			// it (override via connect_with_path) rather than leaking the socket.
+			None if url.scheme() == "unix" => "/",
+			None => match url.path() {
+				"" => "/",
+				path => path,
+			},
 		};
 		self.moq.clone().with_path(path)
 	}
@@ -300,10 +326,10 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
+	async fn connect_inner(&self, url: Url, path: Option<String>) -> crate::Result<moq_net::Session> {
 		// Advertise the request path in the moq SETUP for transports that carry no
 		// request URI of their own; WebTransport and WebSocket already convey it.
-		let moq = self.connect_client(&url);
+		let moq = self.connect_client(&url, path.as_deref());
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
@@ -415,12 +441,13 @@ impl Client {
 	}
 }
 
-/// Whether the transport for this URL conveys the request path itself.
+/// Whether the transport for this URL always conveys the request path itself.
 ///
-/// WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), and iroh (which connects
-/// over HTTP/3 WebTransport) carry the path in their request, so it must not be
-/// duplicated in the moq SETUP. The URL-less schemes (`moqt`/`moql` raw QUIC, qmux
-/// over `tcp`/`unix`) need the path advertised in SETUP instead.
+/// WebTransport (`https`/`http`) and WebSocket (`ws`/`wss`) carry the path in their
+/// request, so it must not be duplicated in the moq SETUP. Everything else advertises
+/// it in the SETUP: `moqt`/`moql` raw QUIC and qmux over `tcp`/`unix` have no request
+/// URI, and `iroh` only carries one in its HTTP/3 mode (a raw iroh session does not),
+/// so iroh always sends it in band to be safe.
 #[cfg(any(
 	feature = "noq",
 	feature = "quinn",
@@ -431,7 +458,7 @@ impl Client {
 	feature = "uds"
 ))]
 fn transport_carries_path(url: &Url) -> bool {
-	matches!(url.scheme(), "https" | "http" | "ws" | "wss" | "iroh")
+	matches!(url.scheme(), "https" | "http" | "ws" | "wss")
 }
 
 #[cfg(feature = "websocket")]
@@ -516,14 +543,25 @@ mod tests {
 	))]
 	#[test]
 	fn classifies_transport_path() {
-		for url in ["https://h/p", "http://h/p", "wss://h/p", "ws://h/p", "iroh://node/p"] {
+		for url in ["https://h/p", "http://h/p", "wss://h/p", "ws://h/p"] {
 			assert!(
 				transport_carries_path(&Url::parse(url).unwrap()),
 				"{url} carries its own path"
 			);
 		}
-		for url in ["tcp://h:1/p", "unix:///run/s.sock", "moqt://h/p", "moql://h/p"] {
-			assert!(!transport_carries_path(&Url::parse(url).unwrap()), "{url} is URL-less");
+		// iroh is URL-less here: its raw mode carries no request URI, so it always
+		// advertises the path in the SETUP.
+		for url in [
+			"tcp://h:1/p",
+			"unix:///run/s.sock",
+			"moqt://h/p",
+			"moql://h/p",
+			"iroh://node/p",
+		] {
+			assert!(
+				!transport_carries_path(&Url::parse(url).unwrap()),
+				"{url} advertises in SETUP"
+			);
 		}
 	}
 
