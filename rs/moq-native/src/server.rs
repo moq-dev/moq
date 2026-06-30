@@ -281,7 +281,7 @@ impl Server {
 
 	/// Returns the next partially established QUIC or WebTransport session.
 	///
-	/// This returns a [Request] instead of a [web_transport_quinn::Session]
+	/// This returns a [Request] instead of an established `web_transport` session
 	/// so the connection can be rejected early on an invalid path or missing auth.
 	///
 	/// The [Request] is either a WebTransport or a raw QUIC request.
