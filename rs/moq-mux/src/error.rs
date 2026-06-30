@@ -51,6 +51,10 @@ pub enum Error {
 	#[error("flac: {0}")]
 	Flac(#[from] crate::codec::flac::Error),
 
+	/// Error parsing MP3.
+	#[error("mp3: {0}")]
+	Mp3(#[from] crate::codec::mp3::Error),
+
 	/// Error parsing H.264.
 	#[error("h264: {0}")]
 	H264(#[from] crate::codec::h264::Error),

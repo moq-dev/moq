@@ -14,11 +14,11 @@
 //!   [`moq_net::OriginConsumer`], mux it back to FLV with [`moq_mux`], and stream
 //!   the tags down as RTMP. The counterpart to `moq-cli hls export`.
 //!
-//! Both legacy RTMP (H.264 + AAC) and enhanced RTMP (E-RTMP: the HEVC, AV1, VP9,
-//! Opus, and AC-3 FourCC payloads) are supported in each direction, because the
-//! codec handling lives entirely in the [`moq_mux`] FLV demuxer/muxer; this crate
-//! only translates the RTMP transport. Legacy players that speak only H.264 + AAC
-//! will of course reject the E-RTMP codecs on the play path.
+//! Both legacy RTMP (H.264 + AAC, plus MP3) and enhanced RTMP (E-RTMP: the HEVC,
+//! AV1, VP9, Opus, AC-3, and MP3 FourCC payloads) are supported in each direction,
+//! because the codec handling lives entirely in the [`moq_mux`] FLV demuxer/muxer;
+//! this crate only translates the RTMP transport. Legacy players that speak only
+//! H.264 + AAC will of course reject the E-RTMP codecs on the play path.
 //!
 //! Two entry points, depending on how much control you need over each request:
 //!
