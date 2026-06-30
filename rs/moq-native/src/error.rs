@@ -3,7 +3,7 @@ use std::sync::Arc;
 /// Errors produced while configuring or establishing native MoQ connections.
 ///
 /// Backend-specific failures live in per-backend error types ([`crate::tls::Error`],
-/// [`crate::quinn::Error`], etc.). They're wrapped in `Arc` here so the aggregate
+/// the per-backend `Error` types, etc.). They're wrapped in `Arc` here so the aggregate
 /// stays `Clone` even though the underlying transport/IO errors are not.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
