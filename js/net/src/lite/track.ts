@@ -74,6 +74,9 @@ export class TrackInfo {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		if (!hasTrackStream(version)) throw new Error("TRACK_INFO requires moq-lite-05+");
+		// Reject a zero timescale on encode too (mirrors the Rust side), so an invalid
+		// TrackInfo fails fast on the sender rather than only at the peer's decoder.
+		if (this.timescale === 0) throw new Error("TRACK_INFO timescale must be non-zero");
 		return Message.encode(w, this.#encode.bind(this));
 	}
 

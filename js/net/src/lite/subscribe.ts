@@ -329,6 +329,7 @@ export class SubscribeEnd {
  */
 export type SubscribeResponse = { ok: SubscribeOk } | { end: SubscribeEnd } | { drop: SubscribeDrop };
 
+/** Encode a subscribe-stream response (OK / END / DROP) for the negotiated moq-lite version. */
 export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
 	switch (version) {
 		case Version.DRAFT_01:
@@ -399,6 +400,7 @@ async function decodeResponse(r: Reader, version: Version): Promise<SubscribeRes
 	}
 }
 
+/** Decode the next subscribe-stream response for the negotiated moq-lite version. */
 export async function decodeSubscribeResponse(r: Reader, version: Version): Promise<SubscribeResponse> {
 	return decodeResponse(r, version);
 }

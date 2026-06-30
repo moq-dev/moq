@@ -462,15 +462,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
+		let mut track = broadcast.subscribe_track(&track)?;
 
 		// Subscription is now active: count this session as a viewer of the
 		// broadcast. Dropping this guard (subscription end) releases it.
 		let _broadcast_sub = broadcasts.subscribe(&absolute);
 
-		// Resolve the absolute start group for SUBSCRIBE_OK: a non-zero request wins,
-		// otherwise the latest group (or 0 for a track with none yet).
-		let resolved_start = subscribe.start_group.or_else(|| track.latest()).unwrap_or(0);
+		// Resolve the absolute start group once: a non-zero request wins, otherwise the
+		// latest group (or 0 for a track with none yet). The same value is advertised in
+		// SUBSCRIBE_OK and used to position the track here, so the acknowledged start can't
+		// diverge from the served one if a new group arrives in between.
+		let resolved_start = subscribe.start_group.or_else(|| track.latest());
+		let start_group = resolved_start.unwrap_or(0);
+		if let Some(start) = resolved_start {
+			track.start_at(start);
+		}
 
 		let info = if version.has_track_stream() {
 			// moq-lite-05+: SUBSCRIBE_OK carries only the resolved start group; the
@@ -479,7 +485,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				priority: 0,
 				ordered: false,
 				max_latency: std::time::Duration::ZERO,
-				start_group: Some(resolved_start),
+				start_group: Some(start_group),
 				end_group: None,
 			}
 		} else {
@@ -511,7 +517,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		if version.has_track_stream()
 			&& let Some(last) = ended
 		{
-			let group = last.unwrap_or(resolved_start);
+			let group = last.unwrap_or(start_group);
 			stream
 				.writer
 				.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
@@ -544,12 +550,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut tasks = FuturesUnordered::new();
 
 		// Highest group sequence handed to a Group stream, reported in SUBSCRIBE_END (moq-lite-05+).
+		// The consumer was already positioned by `run_subscribe` from the resolved start group.
 		let mut last_sequence: Option<u64> = None;
-
-		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
-			track.start_at(start_group);
-		}
 
 		loop {
 			let group = tokio::select! {
