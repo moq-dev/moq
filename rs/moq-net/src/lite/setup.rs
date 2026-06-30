@@ -29,6 +29,11 @@ impl Message for Setup {
 
 		let mut params = Parameters::default();
 		if let Some(path) = &self.path {
+			// The path must be an absolute URI path; reject malformed values rather
+			// than emitting something a peer must close the session over.
+			if !path.starts_with('/') {
+				return Err(EncodeError::InvalidState);
+			}
 			params.set(PARAM_PATH, path.clone().into_bytes());
 		}
 
@@ -45,7 +50,9 @@ impl Message for Setup {
 		let path = match params.get(PARAM_PATH) {
 			Some(bytes) => {
 				let s = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?;
-				if s.is_empty() {
+				// Must be an absolute URI path; URL-carrying transports can never
+				// produce anything else, and the relay scopes auth from it.
+				if !s.starts_with('/') {
 					return Err(DecodeError::InvalidValue);
 				}
 				Some(s.to_string())
@@ -120,6 +127,32 @@ mod tests {
 			path: Some("/live/room".to_string()),
 		};
 		assert_eq!(roundtrip(&setup), setup);
+	}
+
+	#[test]
+	fn rejects_relative_path() {
+		// Encoding a non-absolute path fails rather than emitting bad wire bytes.
+		let mut buf = BytesMut::new();
+		assert!(matches!(
+			Setup {
+				path: Some("foo".into())
+			}
+			.encode(&mut buf, Version::Lite05Wip),
+			Err(EncodeError::InvalidState)
+		));
+
+		// Decoding a hand-rolled relative path is rejected at the wire boundary.
+		let mut params = Parameters::default();
+		params.set(PARAM_PATH, b"foo".to_vec());
+		let mut body = BytesMut::new();
+		params.encode(&mut body, Version::Lite05Wip).unwrap();
+		let mut framed = BytesMut::new();
+		(body.len() as u64).encode(&mut framed, Version::Lite05Wip).unwrap();
+		framed.extend_from_slice(&body);
+		assert!(matches!(
+			Setup::decode(&mut framed, Version::Lite05Wip),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	#[test]

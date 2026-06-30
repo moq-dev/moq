@@ -58,7 +58,10 @@ pub fn start<S: web_transport_trait::Session>(
 		let session = session.clone();
 		web_async::spawn(async move {
 			if let Err(err) = send_setup(&session, version, our_setup).await {
+				// The peer gates serving on our SETUP, so a failure to send it must
+				// tear the session down rather than leave the peer waiting.
 				tracing::warn!(%err, "failed to send setup stream");
+				session.close(err.to_code(), &err.to_string());
 			}
 		});
 	}
