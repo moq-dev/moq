@@ -325,7 +325,7 @@ async fn run_hls_export(
 ) -> anyhow::Result<()> {
 	let subscriber = moq_net::Origin::random().produce();
 	let consumer = subscriber.consume();
-	let reconnect = client.with_consume(subscriber).reconnect(url.clone());
+	let reconnect = client.with_subscriber(subscriber).reconnect(url.clone());
 
 	let config = moq_hls::export::Config {
 		part_target,
@@ -367,14 +367,12 @@ async fn run_hls_import(
 	warn_if_missing_format(&broadcast);
 
 	let publisher = moq_net::Origin::random().produce();
-	let reconnect = client.with_publish(publisher.consume()).reconnect(url.clone());
+	let reconnect = client.with_publisher(publisher.consume()).reconnect(url.clone());
 
-	let mut producer = moq_net::Broadcast::new().produce();
+	let mut producer = moq_net::BroadcastInfo::new().produce();
 	let consumer = producer.consume();
-	anyhow::ensure!(
-		publisher.publish_broadcast(&broadcast, consumer),
-		"failed to publish broadcast"
-	);
+	// Held for the import's lifetime; dropping the guard unannounces the broadcast.
+	let _publish = publisher.publish_broadcast(&broadcast, consumer)?;
 
 	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
