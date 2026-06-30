@@ -16,6 +16,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodec};
 use moq_mux::catalog::hang::Catalog;
+use moq_mux::compat::DroppedTrack;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaTime, Mid, Pt};
 use tokio::sync::mpsc;
@@ -100,6 +101,12 @@ impl EgressSource {
 			pump(mid, pt, clock_rate, track, tx).await;
 		});
 		Ok(())
+	}
+
+	/// Catalog renditions WebRTC can't egress (audio that isn't Opus, or an
+	/// unknown video codec), surfaced so a gateway can report the incompatibility.
+	pub fn dropped(&self) -> Vec<DroppedTrack> {
+		moq_mux::compat::classify(&self.catalog, moq_mux::compat::Protocol::Webrtc)
 	}
 
 	/// Codecs present in the catalog, used by the SDP-offer side

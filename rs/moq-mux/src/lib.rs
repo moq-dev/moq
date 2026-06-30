@@ -20,6 +20,7 @@
 pub mod catalog;
 mod clock;
 pub mod codec;
+pub mod compat;
 pub mod container;
 mod error;
 pub mod import;

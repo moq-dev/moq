@@ -38,6 +38,7 @@ async fn handle(
 				resource_id,
 				answer,
 				session,
+				..
 			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
@@ -140,6 +141,7 @@ pub async fn accept(
 		registration,
 		cancel,
 		"whip server",
+		Vec::new(), // ingest: no egress renditions to drop
 	))
 }
 

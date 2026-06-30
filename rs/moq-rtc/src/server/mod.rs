@@ -31,6 +31,9 @@ pub struct Response {
 	pub resource_id: String,
 	/// The SDP answer body (`Content-Type: application/sdp`).
 	pub answer: String,
+	/// Source renditions this egress couldn't carry (incompatible codec), for
+	/// the caller to report. Always empty for ingest (WHIP).
+	pub dropped: Vec<moq_mux::compat::DroppedTrack>,
 	session: AcceptedSession,
 }
 
@@ -44,10 +47,12 @@ impl Response {
 		registration: mux::Registration,
 		cancel: oneshot::Receiver<()>,
 		role: &'static str,
+		dropped: Vec<moq_mux::compat::DroppedTrack>,
 	) -> Self {
 		Self {
 			resource_id: resource_id.clone(),
 			answer,
+			dropped,
 			session: AcceptedSession {
 				server,
 				resource_id,

@@ -31,6 +31,7 @@ use mpeg2ts::ts::{
 
 use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::catalog::{CatalogFormat, Stream};
+use crate::compat::{self, DroppedTrack};
 use crate::codec::annexb;
 use crate::container::{ExportSource, Frame, Timestamp};
 
@@ -57,6 +58,9 @@ pub struct Export<E: CatalogExt = ()> {
 	latency: Duration,
 
 	tracks: HashMap<String, Track>,
+	/// Renditions whose codec MPEG-TS can't carry, dropped from the program so the
+	/// rest still exports. Surfaced via [`Self::dropped`] for incompatibility reporting.
+	dropped: Vec<DroppedTrack>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
 	counters: HashMap<u16, ContinuityCounter>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
@@ -183,6 +187,7 @@ impl<E: CatalogExt> Export<E> {
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			tracks: HashMap::new(),
+			dropped: Vec::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
 			psi: None,
@@ -195,6 +200,14 @@ impl<E: CatalogExt> Export<E> {
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
+	}
+
+	/// Renditions from the source catalog that MPEG-TS can't carry and were
+	/// dropped from the program. Populated once the catalog is known (after the
+	/// first `poll_next`); a gateway reports these so the dashboard can flag the
+	/// incompatibility.
+	pub fn dropped(&self) -> &[DroppedTrack] {
+		&self.dropped
 	}
 
 	/// Get the next muxed frame.
@@ -324,6 +337,11 @@ impl<E: CatalogExt> Export<E> {
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
 		let mpegts = catalog::mpegts_mut(&mut catalog).cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
+
+		// Drop renditions MPEG-TS can't carry (it does H.264/H.265 video and
+		// AAC/MP2/AC-3/E-AC-3 audio) so the rest still exports instead of the whole
+		// session hard-failing; the dropped set is reported for incompatibility flagging.
+		self.dropped = retain_ts_supported(&mut catalog);
 
 		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: HashMap<String, ()> = HashMap::new();
@@ -923,6 +941,28 @@ fn to_ticks(timestamp: Timestamp) -> u64 {
 fn to_ts_timestamp(timestamp: Timestamp) -> anyhow::Result<TsTimestamp> {
 	// Continuous 90 kHz ticks, wrapped into the 33-bit field.
 	TsTimestamp::new(to_ticks(timestamp) & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg)
+}
+
+/// Remove renditions MPEG-TS can't carry, returning them as [`DroppedTrack`]s.
+/// TS does H.264/H.265 video and AAC/MP2/AC-3/E-AC-3 audio; everything else
+/// (Opus, VP8/VP9/AV1, unknown) is dropped so the supported tracks still export.
+fn retain_ts_supported<E: CatalogExt>(catalog: &mut Catalog<E>) -> Vec<DroppedTrack> {
+	let mut dropped = Vec::new();
+	catalog.video.renditions.retain(|_, c| {
+		let ok = compat::carries_video(compat::Protocol::Ts, &c.codec);
+		if !ok {
+			dropped.push(DroppedTrack::video(&c.codec));
+		}
+		ok
+	});
+	catalog.audio.renditions.retain(|_, c| {
+		let ok = compat::carries_audio(compat::Protocol::Ts, &c.codec);
+		if !ok {
+			dropped.push(DroppedTrack::audio(&c.codec));
+		}
+		ok
+	});
+	dropped
 }
 
 fn video_kind(config: &VideoConfig, name: &str) -> anyhow::Result<Kind> {

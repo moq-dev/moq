@@ -38,6 +38,7 @@ async fn handle(
 				resource_id,
 				answer,
 				session,
+				..
 			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
@@ -127,6 +128,8 @@ pub async fn accept(
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
 	let resource_id = sdp::new_resource_id();
+	// Capture incompatible renditions before the source moves into the session.
+	let dropped = source.dropped();
 	let session = session::Session::egress(rtc, mux.socket(), mux.candidates().to_vec(), inbound, source);
 
 	// Register before returning so a DELETE that races startup still finds the
@@ -141,6 +144,7 @@ pub async fn accept(
 		registration,
 		cancel,
 		"whep server",
+		dropped,
 	))
 }
 

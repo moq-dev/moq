@@ -9,7 +9,8 @@
 //! avcC/hvcC (parsing inline avc3/hev1 parameter sets when needed) and hands the
 //! other codecs through unchanged. FLV carries a single video and a single audio
 //! stream, so only the first rendition of each kind is muxed; extra renditions
-//! and any unsupported codec are rejected.
+//! and any rendition whose codec FLV can't carry (VP8, MP2, ...) are dropped, so
+//! a supported track still exports (see [`Export::dropped`]).
 
 use std::task::Poll;
 use std::time::Duration;
@@ -25,6 +26,7 @@ use super::{
 	VIDEO_PACKET_SEQUENCE_START,
 };
 use crate::catalog::{CatalogFormat, Stream};
+use crate::compat::{self, DroppedTrack};
 use crate::container::{ExportSource, Frame};
 
 /// Which FLV payload shape a bound track is muxed as: a legacy CodecID
@@ -79,6 +81,10 @@ pub struct Export {
 	video: Option<FlvTrack>,
 	audio: Option<FlvTrack>,
 
+	/// Renditions whose codec FLV/RTMP can't carry, dropped so the rest still
+	/// exports. Surfaced via [`Self::dropped`] for incompatibility reporting.
+	dropped: Vec<DroppedTrack>,
+
 	/// True once the file header and sequence headers have been emitted.
 	header_emitted: bool,
 }
@@ -118,6 +124,7 @@ impl Export {
 			latency: Duration::ZERO,
 			video: None,
 			audio: None,
+			dropped: Vec::new(),
 			header_emitted: false,
 		})
 	}
@@ -126,6 +133,13 @@ impl Export {
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
+	}
+
+	/// Renditions from the source catalog that FLV/RTMP can't carry and were
+	/// dropped. Populated once the catalog is known (after the first `next`); a
+	/// gateway reports these so the dashboard can flag the incompatibility.
+	pub fn dropped(&self) -> &[DroppedTrack] {
+		&self.dropped
 	}
 
 	/// Get the next byte chunk.
@@ -223,7 +237,12 @@ impl Export {
 		self.video.is_some() || self.audio.is_some()
 	}
 
-	fn update_catalog(&mut self, catalog: Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
+		// Drop renditions FLV/RTMP can't carry (it does H.264/H.265/AV1/VP9 video and
+		// AAC/Opus/AC-3/E-AC-3 audio) so a supported track still exports instead of the
+		// session hard-failing; the dropped set is reported for incompatibility flagging.
+		self.dropped = retain_flv_supported(&mut catalog);
+
 		// FLV carries one video and one audio stream. Bind to the first rendition of
 		// each kind and ignore the rest; a layout change once bound is rejected.
 		if self.video.is_none()
@@ -430,6 +449,29 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 		Container::Legacy | Container::Loc => Ok(()),
 		Container::Cmaf { .. } => anyhow::bail!("FLV export does not support CMAF {kind} track '{name}'"),
 	}
+}
+
+/// Remove renditions FLV/RTMP can't carry, returning them as [`DroppedTrack`]s.
+/// FLV does H.264/H.265/AV1/VP9 video (enhanced-RTMP FourCCs) and
+/// AAC/Opus/AC-3/E-AC-3 audio; VP8, MP2, and unknown codecs are dropped so the
+/// supported tracks still export.
+fn retain_flv_supported(catalog: &mut Catalog) -> Vec<DroppedTrack> {
+	let mut dropped = Vec::new();
+	catalog.video.renditions.retain(|_, c| {
+		let ok = compat::carries_video(compat::Protocol::Flv, &c.codec);
+		if !ok {
+			dropped.push(DroppedTrack::video(&c.codec));
+		}
+		ok
+	});
+	catalog.audio.renditions.retain(|_, c| {
+		let ok = compat::carries_audio(compat::Protocol::Flv, &c.codec);
+		if !ok {
+			dropped.push(DroppedTrack::audio(&c.codec));
+		}
+		ok
+	});
+	dropped
 }
 
 fn video_flavor(config: &hang::catalog::VideoConfig) -> anyhow::Result<Flavor> {
