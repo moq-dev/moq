@@ -59,6 +59,32 @@ impl AuthParams {
 
 		Self { path, jwt }
 	}
+
+	/// Extract `(path, jwt)` from a moq SETUP request path of the form
+	/// `/broadcast?jwt=<token>`.
+	///
+	/// URL-less transports (a qmux Unix socket, raw QUIC) carry the request path
+	/// in the moq-lite-05 SETUP rather than a real request URI, so there is no
+	/// host and no subdomain->path routing to apply; the caller (a gateway) has
+	/// already prepended any vanity prefix. The path is used verbatim; only the
+	/// `jwt` query parameter is split off and URL-decoded.
+	pub(crate) fn from_path(raw: &str) -> Self {
+		let (path, query) = match raw.split_once('?') {
+			Some((path, query)) => (path, Some(query)),
+			None => (raw, None),
+		};
+
+		let jwt = query.and_then(|query| {
+			url::form_urlencoded::parse(query.as_bytes())
+				.find(|(k, v)| k == "jwt" && !v.is_empty())
+				.map(|(_, v)| v.into_owned())
+		});
+
+		Self {
+			path: path.to_string(),
+			jwt,
+		}
+	}
 }
 
 /// If `host` matches any configured suffix as `<labels>.<suffix>`, returns
@@ -601,6 +627,25 @@ impl AuthToken {
 			expires: None,
 		}
 	}
+
+	/// A token for an unauthenticated (no-JWT) connection on the authenticated
+	/// internal listener, granting subscribe + publish ONLY under `prefix`.
+	///
+	/// Unlike [`unrestricted`](Self::unrestricted), the scope is fixed by the relay
+	/// (the `prefix` is a relay config value, not the client-advertised path), so a
+	/// caller cannot widen it. This is for trusted local helpers that carry no JWT
+	/// but only touch a well-known subtree, e.g. the protocol gateways' stats
+	/// publisher writing under `.stats`. The root stays empty so the helper still
+	/// addresses absolute paths (`.stats/...`); the prefix is what bounds it.
+	pub fn anon(prefix: &str) -> Self {
+		Self {
+			root: Path::new("").to_owned(),
+			subscribe: PathPrefixes::from(vec![Path::new(prefix).to_owned()]),
+			publish: PathPrefixes::from(vec![Path::new(prefix).to_owned()]),
+			internal: true,
+			expires: None,
+		}
+	}
 }
 
 enum KeySource {
@@ -1091,6 +1136,42 @@ mod tests {
 	use super::*;
 	use moq_token::{Algorithm, Key, KeyId};
 	use tempfile::TempDir;
+
+	#[test]
+	fn auth_params_from_path() {
+		// Path + JWT (the gateway media uplink shape).
+		let p = AuthParams::from_path("/customer/foo/bar?jwt=xd");
+		assert_eq!(p.path, "/customer/foo/bar");
+		assert_eq!(p.jwt.as_deref(), Some("xd"));
+
+		// Path only (tokenless public playback).
+		let p = AuthParams::from_path("/customer/foo/bar");
+		assert_eq!(p.path, "/customer/foo/bar");
+		assert_eq!(p.jwt, None);
+
+		// Empty (the stats publisher: no path, no JWT -> anon scope).
+		let p = AuthParams::from_path("");
+		assert_eq!(p.path, "");
+		assert_eq!(p.jwt, None);
+
+		// An empty jwt value counts as absent.
+		let p = AuthParams::from_path("/foo?jwt=");
+		assert_eq!(p.jwt, None);
+
+		// The jwt may sit among other query params and be URL-encoded.
+		let p = AuthParams::from_path("/foo?a=1&jwt=ab%20cd");
+		assert_eq!(p.path, "/foo");
+		assert_eq!(p.jwt.as_deref(), Some("ab cd"));
+	}
+
+	#[test]
+	fn auth_token_anon_scopes_to_prefix() {
+		let token = AuthToken::anon(".stats");
+		assert_eq!(token.root.as_str(), "");
+		assert!(token.internal);
+		assert!(token.publish.iter().any(|p| p.as_str() == ".stats"));
+		assert!(token.subscribe.iter().any(|p| p.as_str() == ".stats"));
+	}
 
 	fn create_test_key_with_kid(kid: &str) -> Key {
 		Key::generate(Algorithm::HS256, Some(moq_token::KeyId::decode(kid).unwrap())).unwrap()

@@ -11,7 +11,7 @@ use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
 
 use moq_native::moq_net::{self, Origin, Track};
 use moq_relay::{
-	AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, WebState, run_internal,
+	Auth, AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, WebState, run_internal,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -386,10 +386,13 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 
 	let mut internal = InternalConfig::default();
 	internal.tcp.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+	// Empty anon prefix => no-JWT connections get the whole root (the legacy
+	// unrestricted behaviour), which is what these transport round-trips exercise.
+	internal.anon = Some(String::new());
 
 	let handle = tokio::spawn(async move {
 		// `run_internal` only returns on error; aborted at teardown.
-		let _ = run_internal(internal, cluster).await;
+		let _ = run_internal(internal, cluster, Auth::default()).await;
 	});
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -489,9 +492,10 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 
 	let mut internal = InternalConfig::default();
 	internal.uds.listen = Some(path.clone());
+	internal.anon = Some(String::new());
 
 	let handle = tokio::spawn(async move {
-		let _ = run_internal(internal, cluster).await;
+		let _ = run_internal(internal, cluster, Auth::default()).await;
 	});
 
 	// Wait for the socket file to appear.

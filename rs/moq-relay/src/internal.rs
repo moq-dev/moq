@@ -5,14 +5,24 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
-use crate::{AuthToken, Cluster};
+use crate::{Auth, AuthParams, AuthToken, Cluster};
 
-/// Configuration for the unauthenticated internal listener(s).
+/// Configuration for the internal listener(s).
 ///
 /// A TCP and a Unix-socket listener can each be enabled independently. Both
-/// grant every accepted connection full internal access (publish and subscribe
-/// to everything, no JWT or client certificate), so only expose them to trusted
-/// clients. This is the local-worker analogue of a cluster peer dialing `/`.
+/// AUTHENTICATE every accepted connection the same way: a JWT carried in the
+/// moq-lite-05 SETUP path (`/broadcast?jwt=<token>`) is verified through the
+/// relay's [`Auth`] and scopes the session, exactly as a native QUIC client would
+/// be. A connection with NO JWT is granted the fixed [`anon`](Self::anon) subtree
+/// if one is configured (e.g. `.stats` for a local telemetry publisher), otherwise
+/// it is rejected. There is no unauthenticated full-access path -- the legacy
+/// "unrestricted internal" behaviour is reproducible only by explicitly setting
+/// `anon` to the empty root.
+///
+/// These listeners are the entry point for trusted local workers, in particular
+/// the out-of-process protocol gateways (RTMP/SRT/WHIP/WHEP): the RELAY, not the
+/// worker, enforces per-user authorization, so a memory-safety bug in a gateway's
+/// parser can reach only what its users' tokens permit.
 #[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -26,6 +36,22 @@ pub struct InternalConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub uds: InternalUds,
+
+	/// Subtree granted to connections that present NO JWT.
+	///
+	/// A trusted local helper (e.g. the gateways' `.stats` telemetry publisher)
+	/// carries no user JWT; such a connection is granted subscribe + publish under
+	/// THIS prefix only. The scope is fixed by the relay, so a caller cannot widen
+	/// it by advertising a different path. The empty string grants the whole root
+	/// (the legacy unrestricted behaviour, now an explicit opt-in); unset (the
+	/// default) REJECTS no-JWT connections. Applies to both listeners.
+	///
+	/// A no-JWT connection that DOES advertise a path is treated as anonymous
+	/// (public) access for that path via [`Auth`], not as this anon scope -- so
+	/// tokenless public playback still works regardless of this setting.
+	#[arg(long = "internal-anon", id = "internal-anon", env = "MOQ_INTERNAL_ANON")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub anon: Option<String>,
 }
 
 /// Plain-TCP internal listener.
@@ -37,7 +63,7 @@ pub struct InternalConfig {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct InternalTcp {
-	/// Bind an unauthenticated plain-TCP (qmux, no TLS) listener on this address.
+	/// Bind a plain-TCP (qmux, no TLS) internal listener on this address.
 	#[arg(long = "internal-listen", id = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub listen: Option<SocketAddr>,
@@ -51,7 +77,7 @@ pub struct InternalTcp {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct InternalUds {
-	/// Bind an unauthenticated Unix-socket (qmux, no TLS) listener at this path.
+	/// Bind a Unix-socket (qmux, no TLS) internal listener at this path.
 	#[arg(
 		long = "internal-uds-listen",
 		id = "internal-uds-listen",
@@ -71,7 +97,8 @@ pub struct InternalUds {
 /// Each populated field constrains the corresponding credential; an empty field
 /// imposes no constraint. A connection is allowed when it satisfies every
 /// populated field (AND across fields, OR within a field). All empty means no
-/// check, so the socket's filesystem permissions are the only gate.
+/// check, so the socket's filesystem permissions are the only gate. It is
+/// defense-in-depth on top of the JWT verification, not a replacement for it.
 #[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -104,13 +131,15 @@ impl InternalAllow {
 /// Run the configured internal listener(s) until one fails; wait forever if none.
 ///
 /// Used directly in the relay's top-level `select!`. The TCP and Unix listeners
-/// run concurrently when both are configured.
-pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::Result<()> {
+/// run concurrently when both are configured; both authenticate via [`Auth`].
+pub async fn run_internal(config: InternalConfig, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
 	let tcp = {
 		let cluster = cluster.clone();
+		let auth = auth.clone();
+		let anon = config.anon.clone();
 		async move {
 			match config.tcp.listen {
-				Some(addr) => run_tcp(addr, cluster).await,
+				Some(addr) => run_tcp(addr, cluster, auth, anon).await,
 				None => std::future::pending().await,
 			}
 		}
@@ -118,7 +147,7 @@ pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::R
 
 	let uds = async move {
 		match config.uds.listen {
-			Some(path) => run_uds(path, config.uds.allow, cluster).await,
+			Some(path) => run_uds(path, config.uds.allow, config.anon, cluster, auth).await,
 			None => std::future::pending().await,
 		}
 	};
@@ -129,21 +158,22 @@ pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::R
 	}
 }
 
-async fn run_tcp(addr: SocketAddr, cluster: Cluster) -> anyhow::Result<()> {
+async fn run_tcp(addr: SocketAddr, cluster: Cluster, auth: Auth, anon: Option<String>) -> anyhow::Result<()> {
 	// No transport security, so a non-loopback bind is worth flagging. We still
-	// allow it (private VPC interfaces are a valid use), just loudly.
+	// allow it (private VPC interfaces are a valid use), just loudly. Connections
+	// are still JWT-authenticated; the network is the unencrypted part.
 	if addr.ip().is_loopback() {
-		tracing::info!(%addr, "internal listener (tcp)");
+		tracing::info!(%addr, anon = ?anon, "internal listener (tcp)");
 	} else {
-		tracing::warn!(%addr, "internal listener bound to a non-loopback address; it is UNAUTHENTICATED, ensure the network is trusted");
+		tracing::warn!(%addr, "internal listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
 	}
 
 	let listener = moq_native::tcp::Listener::bind(addr)
 		.await?
-		.with_protocols(moq_net::ALPNS.iter().copied());
+		.with_protocols(internal_versions().alpns());
 	while let Some(session) = listener.accept().await {
 		match session {
-			Ok(session) => spawn_session(session, cluster.clone()),
+			Ok(session) => spawn_session(session, cluster.clone(), auth.clone(), anon.clone()),
 			Err(err) => tracing::warn!(%err, "internal listener accept failed"),
 		}
 	}
@@ -152,16 +182,22 @@ async fn run_tcp(addr: SocketAddr, cluster: Cluster) -> anyhow::Result<()> {
 }
 
 #[cfg(all(feature = "uds", unix))]
-async fn run_uds(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyhow::Result<()> {
+async fn run_uds(
+	path: PathBuf,
+	allow: InternalAllow,
+	anon: Option<String>,
+	cluster: Cluster,
+	auth: Auth,
+) -> anyhow::Result<()> {
 	if allow.is_empty() {
-		tracing::warn!(path = %path.display(), "internal Unix listener has no allow list; any local user able to reach the socket gets full access");
+		tracing::warn!(path = %path.display(), anon = ?anon, "internal Unix listener has no peer-credential allow list; any local user able to reach the socket can present a JWT");
 	} else {
-		tracing::info!(path = %path.display(), ?allow, "internal listener (unix)");
+		tracing::info!(path = %path.display(), ?allow, anon = ?anon, "internal listener (unix)");
 	}
 
 	let listener = moq_native::unix::Listener::bind(&path)
 		.await?
-		.with_protocols(moq_net::ALPNS.iter().copied());
+		.with_protocols(internal_versions().alpns());
 	// Loose file permissions: the uid/gid/pid allow list is the real gate, and
 	// the worker typically runs as a different user than the relay.
 	listener.set_mode(0o666)?;
@@ -181,18 +217,42 @@ async fn run_uds(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyho
 			continue;
 		}
 
-		spawn_session(session, cluster.clone());
+		spawn_session(session, cluster.clone(), auth.clone(), anon.clone());
 	}
 
 	anyhow::bail!("internal Unix listener stopped accepting connections")
 }
 
 #[cfg(not(all(feature = "uds", unix)))]
-async fn run_uds(path: PathBuf, _allow: InternalAllow, _cluster: Cluster) -> anyhow::Result<()> {
+async fn run_uds(
+	path: PathBuf,
+	_allow: InternalAllow,
+	_anon: Option<String>,
+	_cluster: Cluster,
+	_auth: Auth,
+) -> anyhow::Result<()> {
 	anyhow::bail!(
 		"internal.uds.listen requests a Unix socket ({}) but this relay was built without the `uds` feature",
 		path.display()
 	)
+}
+
+/// The version set the internal listeners offer.
+///
+/// A per-connection JWT rides the moq-lite-05 SETUP path (the only version that
+/// expresses a request path on a URL-less transport). lite-05 is work-in-progress
+/// so it is excluded from the default ALPN set; opt into it here on TOP of the
+/// defaults. Offering the older versions too keeps no-JWT/anon clients (which need
+/// no path) working on any version; a client that wants to present a JWT must
+/// negotiate lite-05 (the gateways pin it).
+fn internal_versions() -> moq_net::Versions {
+	let mut versions: Vec<moq_net::Version> = moq_net::Versions::all().iter().copied().collect();
+	versions.push(
+		"moq-lite-05-wip"
+			.parse()
+			.expect("moq-lite-05-wip is a known version"),
+	);
+	moq_net::Versions::from(versions)
 }
 
 #[cfg(all(feature = "uds", unix))]
@@ -204,30 +264,95 @@ fn cred_allowed(allow: &InternalAllow, cred: &moq_native::unix::PeerCred) -> boo
 	uid_ok && gid_ok && pid_ok
 }
 
-/// Spawn a task that serves one accepted session with full internal access.
-fn spawn_session<S>(session: S, cluster: Cluster)
+/// Spawn a task that authenticates one accepted internal connection via its
+/// SETUP-advertised JWT, then serves it scoped to the resulting token.
+///
+/// Mirrors the native [`Connection`](crate::Connection) auth path, but sources the
+/// path + JWT from the moq-lite-05 SETUP (URL-less transport) instead of a request
+/// URL, and never inspects an mTLS peer cert (the socket is local):
+///
+/// - a JWT is verified + scoped through [`Auth`];
+/// - a no-JWT connection with NO path gets the fixed `anon` subtree if configured
+///   (a trusted local helper, e.g. the stats publisher), else it is rejected;
+/// - a no-JWT connection WITH a path resolves anonymous/public access for that path
+///   through [`Auth`] (tokenless public playback).
+fn spawn_session<S>(session: S, cluster: Cluster, auth: Auth, anon: Option<String>)
 where
 	S: web_transport_trait::Session,
 {
-	let stats = cluster.stats.tier(moq_net::Tier::Internal);
-
 	let serve = async move {
-		// Read the client's SETUP first: a moq-lite-05 worker can request a path
-		// (these transports carry no request URI), which scopes its full internal
-		// access to that subtree. No path means the empty root, as before.
-		let request = moq_net::Server::new().with_stats(stats).accept_request(session).await?;
+		// Read the SETUP first so we can authorize before granting anything. Offer
+		// lite-05 (see internal_versions) so the SETUP can carry the request path;
+		// accept_request then surfaces it for `from_path`.
+		let request = moq_net::Server::new()
+			.with_versions(internal_versions())
+			.accept_request(session)
+			.await?;
+		let params = AuthParams::from_path(request.path().unwrap_or(""));
 
-		let root = moq_net::Path::new(request.path().unwrap_or("")).to_owned();
-		let token = AuthToken::unrestricted(root);
+		// No JWT + no path is a trusted local helper (e.g. the stats publisher):
+		// grant the fixed anon subtree. Everything else -- a JWT (verify + scope) or
+		// no JWT but a real path (tokenless public playback) -- goes through Auth.
+		let resolved = if params.jwt.is_none() && params.path.trim_matches('/').is_empty() {
+			anon.as_deref()
+				.map(AuthToken::anon)
+				.ok_or_else(|| anyhow::anyhow!("internal connection requires a JWT"))
+		} else {
+			auth.verify(&params).await.map_err(anyhow::Error::from)
+		};
+
+		let token = match resolved {
+			Ok(token) => token,
+			Err(err) => {
+				// Signal an auth rejection on the wire (the gateway maps it to 401)
+				// instead of a bare transport drop, mirroring Connection::run.
+				request.close(moq_net::Error::Unauthorized);
+				return Err(err);
+			}
+		};
+
+		// Workers carry end-user traffic, so bill on the tier the token resolved to
+		// (the auth API can still promote a first-party token to internal).
+		let tier = match token.internal {
+			true => moq_net::Tier::Internal,
+			false => moq_net::Tier::External,
+		};
+		let stats = cluster.stats.tier(tier);
+		let _session_stats = stats.session(&token.root);
+
 		let publish = cluster.publisher(&token);
 		let subscribe = cluster.subscriber(&token);
+		if publish.is_none() && subscribe.is_none() {
+			request.close(moq_net::Error::Unauthorized);
+			anyhow::bail!("token grants no publish or subscribe paths");
+		}
 
 		// subscribe/publish look backwards on purpose: see connection.rs. We publish
 		// the tracks the client may subscribe to, and subscribe to what it may publish.
-		let session = request.with_publish(subscribe).with_consume(publish).ok().await?;
+		let mut session = request
+			.with_publish(subscribe)
+			.with_consume(publish)
+			.with_stats(stats)
+			.ok()
+			.await?;
 
-		tracing::info!(version = %session.version(), root = %token.root, "negotiated");
-		session.closed().await?;
+		tracing::info!(version = %session.version(), internal = token.internal, root = %token.root, "internal connection authenticated");
+
+		// Close once the credential expires, mirroring Connection::run; otherwise
+		// hold the session open until it closes on its own.
+		match token.expires {
+			None => session.closed().await?,
+			Some(expires) => {
+				let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+				match tokio::time::timeout(remaining, session.closed()).await {
+					Ok(res) => res?,
+					Err(_) => {
+						tracing::info!("credential expired, closing session");
+						session.close(moq_net::Error::Unauthorized);
+					}
+				}
+			}
+		}
 		anyhow::Ok(())
 	};
 
