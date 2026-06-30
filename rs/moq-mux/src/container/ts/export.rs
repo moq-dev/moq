@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -32,7 +32,7 @@ use mpeg2ts::ts::{
 use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
-use crate::container::{ExportSource, Frame, Timestamp};
+use crate::container::{ExportSource, Frame, Pacer, Timestamp};
 
 use super::adts;
 use super::catalog;
@@ -46,8 +46,9 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
-/// Use [`next`](Self::next) to pull one [`Frame`] per media frame: its `payload`
-/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag.
+/// Use [`next`](Self::next) to pull one [`Output`] per media frame: its `payload`
+/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag,
+/// plus a [`pace`](Output::pace) instant on the decode clock for real-time output.
 /// The leading PAT/PMT rides on the first frame (so it inherits a real
 /// timestamp), and is re-emitted at video keyframes and periodically for
 /// mid-stream tune-in. Returns `None` when the broadcast ends.
@@ -55,6 +56,10 @@ pub struct Export<E: CatalogExt = ()> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
+
+	/// Maps each frame's decode timestamp to the wall-clock instant it's due, so the
+	/// caller can pace output at the source's real-time rate (see [`Output::pace`]).
+	pacer: Pacer,
 
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
@@ -129,6 +134,30 @@ enum Kind {
 	},
 }
 
+/// One muxed MPEG-TS frame produced by [`Export::next`].
+///
+/// `payload` is the TS packets (188-byte aligned) for a single media frame.
+pub struct Output {
+	/// The TS packets for one media frame.
+	pub payload: Bytes,
+
+	/// Source presentation timestamp.
+	pub timestamp: Timestamp,
+
+	/// Whether this frame is a keyframe.
+	pub keyframe: bool,
+
+	/// Wall-clock instant this frame is due, anchored to when the first frame was
+	/// produced and paced on the decode clock (DTS), so a reordered (B-frame) stream
+	/// paces evenly rather than on its non-monotonic presentation timestamps.
+	///
+	/// Sleep until it (or stamp a transport send time with it) to emit at the
+	/// source's real-time rate, like ffmpeg's `-re`; ignore it to emit as fast as the
+	/// broadcast can be read. Frames produced faster than real time lead the current
+	/// instant, so a retained broadcast drains at its media rate.
+	pub pace: Instant,
+}
+
 /// The program tables plus the resolved PID layout.
 struct Psi {
 	pat: Pat,
@@ -186,6 +215,7 @@ impl<E: CatalogExt> Export<E> {
 			broadcast,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
+			pacer: Pacer::new(),
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
@@ -203,17 +233,17 @@ impl<E: CatalogExt> Export<E> {
 
 	/// Get the next muxed frame.
 	///
-	/// Each [`Frame`] carries the TS packets for one media frame in `payload`,
-	/// stamped with that frame's media `timestamp` and `keyframe` flag so a
-	/// transport can pace delivery on the media clock. The leading PAT/PMT rides
-	/// on the first frame (inheriting its timestamp), and is re-emitted at video
-	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
-	/// broadcast ends. `duration` is always `None`: the muxer has no use for it.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
+	/// Each [`Output`] carries the TS packets for one media frame in `payload`,
+	/// stamped with that frame's media `timestamp` and `keyframe` flag, plus a
+	/// [`pace`](Output::pace) instant so a transport can emit on the media clock.
+	/// The leading PAT/PMT rides on the first frame (inheriting its timestamp), and
+	/// is re-emitted at video keyframes and periodically for mid-stream tune-in.
+	/// Returns `None` when the broadcast ends.
+	pub async fn next(&mut self) -> anyhow::Result<Option<Output>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Output>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -642,11 +672,11 @@ impl<E: CatalogExt> Export<E> {
 			.map(|(n, _)| n)
 	}
 
-	/// Packetize one media frame into an output [`Frame`], re-emitting PAT/PMT
-	/// before video keyframes (and periodically) so receivers can tune in
-	/// mid-stream. The returned frame keeps the source `timestamp` and `keyframe`
-	/// flag so the caller can pace it.
-	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Frame> {
+	/// Packetize one media frame into an [`Output`], re-emitting PAT/PMT before video
+	/// keyframes (and periodically) so receivers can tune in mid-stream. The output
+	/// keeps the source `timestamp` and `keyframe` flag, plus a decode-clock `pace`
+	/// instant for real-time delivery.
+	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Output> {
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
@@ -696,6 +726,15 @@ impl<E: CatalogExt> Export<E> {
 			None
 		};
 
+		// Pace on the decode clock: reordered video uses the authored DTS (monotonic), so
+		// a caller honoring `pace` emits B-frames evenly instead of bursting on their
+		// non-monotonic PTS. Audio and non-reordered video have DTS == PTS.
+		let decode = match dts {
+			Some(ticks) => from_ticks(ticks).unwrap_or(timestamp),
+			None => timestamp,
+		};
+		let pace = self.pacer.due(decode);
+
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
 		// Refresh PSI at keyframes or after the interval lapses.
@@ -738,11 +777,11 @@ impl<E: CatalogExt> Export<E> {
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		Ok(Frame {
-			timestamp,
-			duration: None,
+		Ok(Output {
 			payload: Bytes::from(out),
+			timestamp,
 			keyframe,
+			pace,
 		})
 	}
 
@@ -933,6 +972,14 @@ const TS_TIMESTAMP_MASK: u64 = (1 << 33) - 1;
 /// [`to_ts_timestamp`] masks to the 33-bit wire field only at emission.
 fn to_ticks(timestamp: Timestamp) -> u64 {
 	(timestamp.as_micros() * 90_000 / 1_000_000) as u64
+}
+
+/// Inverse of [`to_ticks`]: continuous 90 kHz decode-clock ticks back to the microsecond
+/// timebase, for pacing on the decode clock. Returns [`moq_net::TimeOverflow`] only for
+/// absurdly large tick counts (tens of thousands of years).
+fn from_ticks(ticks: u64) -> Result<Timestamp, moq_net::TimeOverflow> {
+	// 1_000_000 / 90_000 reduces to 100 / 9; multiply first to keep sub-tick precision.
+	Timestamp::from_micros(ticks.saturating_mul(100) / 9)
 }
 
 fn to_ts_timestamp(timestamp: Timestamp) -> anyhow::Result<TsTimestamp> {

@@ -49,7 +49,10 @@ impl Pacer {
 
 		match timestamp.checked_sub(anchor.base) {
 			Ok(ahead) => anchor.at + Duration::from(ahead),
-			Err(_) => anchor.at.checked_sub(Duration::from(anchor.base - timestamp)).unwrap_or(anchor.at),
+			Err(_) => anchor
+				.at
+				.checked_sub(Duration::from(anchor.base - timestamp))
+				.unwrap_or(anchor.at),
 		}
 	}
 }

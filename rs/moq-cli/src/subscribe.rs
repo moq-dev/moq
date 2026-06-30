@@ -163,13 +163,11 @@ impl Subscribe {
 		let mut ts =
 			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
-		// When `--pace` is set, hold each frame until its media timestamp is due so a
-		// retained broadcast drains in real time instead of as fast as it's read.
-		let mut pacer = moq_mux::container::Pacer::new();
-
 		while let Some(frame) = ts.next().await? {
+			// `--pace`: hold each frame until it's due (the muxer paces on its decode clock)
+			// so a retained broadcast drains in real time instead of as fast as it's read.
 			if pace {
-				tokio::time::sleep_until(pacer.due(frame.timestamp).into()).await;
+				tokio::time::sleep_until(frame.pace.into()).await;
 			}
 
 			stdout.write_all(&frame.payload).await?;
