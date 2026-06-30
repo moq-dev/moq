@@ -14,6 +14,9 @@ pub enum Error {
 	#[error("session closed")]
 	SessionClosed,
 
+	#[error("ICE did not connect before the establishment deadline")]
+	IceTimeout,
+
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
 
