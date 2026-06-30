@@ -437,22 +437,34 @@ impl Client {
 		custom: &[CertificateDer<'static>],
 		provider: &crypto::Provider,
 	) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
+		// Android's platform verifier needs JNI init (see `init_android`) and,
+		// unlike the other platforms, can't be extended with custom roots. So use
+		// it only once initialized and with no custom roots; otherwise trust the
+		// bundled Mozilla roots (plus any custom roots) so verification still works.
 		#[cfg(target_os = "android")]
-		if !ANDROID_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
+		{
+			if ANDROID_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) && custom.is_empty() {
+				let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
+				return Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)));
+			}
+
 			let mut roots = rustls::RootCertStore::empty();
 			roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 			for cert in custom {
 				roots.add(cert.clone()).map_err(Error::AddRoot)?;
 			}
-			return Ok(builder.with_root_certificates(roots));
+			Ok(builder.with_root_certificates(roots))
 		}
 
-		let verifier = if custom.is_empty() {
-			rustls_platform_verifier::Verifier::new(provider.clone())?
-		} else {
-			rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
-		};
-		Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
+		#[cfg(not(target_os = "android"))]
+		{
+			let verifier = if custom.is_empty() {
+				rustls_platform_verifier::Verifier::new(provider.clone())?
+			} else {
+				rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
+			};
+			Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
+		}
 	}
 
 	/// Attach the optional mTLS client identity, finishing the rustls builder.

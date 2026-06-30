@@ -22,7 +22,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 		// A failed JNI call may have left a Java exception pending. Returning it
 		// to System.loadLibrary would surface as a load failure, so clear it; the
 		// bundled-roots fallback already covers the init failure.
-		if let Ok(mut env) = vm.attach_current_thread() {
+		if let Ok(env) = vm.attach_current_thread() {
 			let _ = env.exception_clear();
 		}
 	}
