@@ -47,7 +47,8 @@ async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.Catalog:
     # The catalog is a live track. A lazy publisher (e.g. the browser, which only
     # encodes on demand) may announce video in a *later* update, not the first
     # snapshot, so wait for a catalog that actually has a video track.
-    async for catalog in consumer.subscribe_catalog():
+    catalog_consumer = await consumer.subscribe_catalog()
+    async for catalog in catalog_consumer:
         if catalog.video:
             return catalog
     raise RuntimeError("catalog stream ended without a video track")
