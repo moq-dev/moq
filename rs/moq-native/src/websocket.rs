@@ -39,6 +39,7 @@ pub enum Error {
 	#[error("WebSocket accept failed")]
 	Accept(#[source] qmux::Error),
 
+	/// TLS resolution failed for a secure (`wss://`) connection, e.g. no roots were configured.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
 }

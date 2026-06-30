@@ -240,7 +240,13 @@ async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
 
 	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate fingerprint");
 
-	let resp = reqwest::get(fp.as_str())
+	// Bound the fetch so a stalled response can't block connect indefinitely.
+	let resp = reqwest::Client::builder()
+		.timeout(crate::FINGERPRINT_FETCH_TIMEOUT)
+		.build()
+		.map_err(Error::FetchFingerprint)?
+		.get(fp.as_str())
+		.send()
 		.await
 		.map_err(Error::FetchFingerprint)?
 		.error_for_status()

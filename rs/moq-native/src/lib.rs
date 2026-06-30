@@ -13,6 +13,11 @@
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
+/// Overall timeout for the insecure `http://` certificate-fingerprint fetch, so a
+/// stalled `/certificate.sha256` response can't block connect indefinitely.
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+pub(crate) const FINGERPRINT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub mod bind;
 mod client;
 mod connect;

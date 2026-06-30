@@ -50,6 +50,7 @@ pub enum Error {
 	#[error("invalid fingerprint")]
 	InvalidFingerprint(#[from] hex::FromHexError),
 
+	/// The fetched `http://` certificate fingerprint didn't decode to a 32-byte SHA-256 digest.
 	#[error("certificate fingerprint must be 32 bytes (SHA-256), got {0}")]
 	FingerprintLength(usize),
 
@@ -159,6 +160,13 @@ impl NoqClient {
 		})
 	}
 
+	/// Connect to `url`, resolving TLS now that the scheme is known.
+	///
+	/// `base` is the prebuilt config for the resolved verification policy, or
+	/// `None` when no roots resolved. An eligible `http://` URL fetches
+	/// `/certificate.sha256`, pins it (rebuilding from `tls_config`, no roots
+	/// needed), and upgrades to `https://`; any other scheme reuses `base` and
+	/// surfaces [`crate::tls::Error::NoRoots`] when it is `None`.
 	pub async fn connect(
 		&self,
 		base: Option<&rustls::ClientConfig>,
@@ -186,9 +194,11 @@ impl NoqClient {
 		// needed); anything else reuses the resolved policy, surfacing the
 		// deferred `NoRoots` when none was configured.
 		let mut config = if url.scheme() == "http" && self.http_bootstrap {
-			// Insecure per-connection bootstrap: only honored when no stronger
-			// verification is configured, so an attacker controlling the plaintext
-			// fetch can't weaken an explicit pin or re-enable disabled verification.
+			// Insecure per-connection bootstrap: an `http://` URL is a deliberate
+			// opt-in to replace CA validation with a freshly fetched pin for this
+			// connection. It's refused for an explicit `--client-tls-fingerprint`
+			// or disabled verification, so an attacker controlling the plaintext
+			// fetch can't weaken a stronger choice the user already made.
 			let pin = fetch_fingerprint(&url).await?;
 			tls_config.build_with(crate::tls::Verification::Fingerprints(vec![pin]))?
 		} else {
@@ -267,7 +277,13 @@ async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
 
 	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate");
 
-	let resp = reqwest::get(fp.as_str())
+	// Bound the fetch so a stalled response can't block connect indefinitely.
+	let resp = reqwest::Client::builder()
+		.timeout(crate::FINGERPRINT_FETCH_TIMEOUT)
+		.build()
+		.map_err(Error::FetchFingerprint)?
+		.get(fp.as_str())
+		.send()
 		.await
 		.map_err(Error::FetchFingerprint)?
 		.error_for_status()

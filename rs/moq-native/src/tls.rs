@@ -386,9 +386,9 @@ impl Client {
 	///
 	/// Resolves the verification policy, optionally attaches a client identity
 	/// for mTLS, and installs the matching verifier. Errors with [`Error::NoRoots`]
-	/// when standard verification is selected but no roots resolved; use
-	/// [`Self::verification`] + [`Self::build_with`] to defer that decision per
-	/// connection instead.
+	/// when standard verification is selected but no roots resolved (the native
+	/// client defers that decision per connection so an `http://` bootstrap can
+	/// still pin a cert).
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let verification = self.verification()?.ok_or(Error::NoRoots)?;
 		self.build_with(verification)
