@@ -225,6 +225,7 @@ The first pad of each kind is always `video_0` / `audio_0` regardless of catalog
 | Video | VP8   | `video/x-vp8`         |
 | Video | VP9   | `video/x-vp9`         |
 | Audio | AAC   | `audio/mpeg` (v4)     |
+| Audio | MP3   | `audio/mpeg` (v1/v2, layer 3) |
 | Audio | Opus  | `audio/x-opus`        |
 
 ### moqsrc (subscribe)

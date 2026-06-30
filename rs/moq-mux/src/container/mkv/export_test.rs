@@ -138,6 +138,87 @@ async fn export_header_roundtrip_vp9_opus() {
 	assert_eq!(a.sample_rate, 48000);
 }
 
+/// MP3 (config in band, no codec private) survives an import -> export -> re-import
+/// round trip as the `A_MPEG/L3` track entry.
+#[tokio::test(start_paused = true)]
+async fn export_header_roundtrip_mp3() {
+	let import_bytes = synth_matroska_mp3();
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
+	importer
+		.decode(&bytes::BytesMut::from(import_bytes.as_slice()))
+		.unwrap();
+	importer.finish().unwrap();
+
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
+
+	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected header bytes");
+
+	// Re-import the exported header and confirm the codec rebuilds.
+	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let mut importer2 = crate::container::mkv::Import::new(broadcast2, catalog2.clone());
+	importer2.decode(&bytes::BytesMut::from(header.as_ref())).unwrap();
+
+	let snap = catalog2.snapshot();
+	assert_eq!(snap.audio.renditions.len(), 1);
+	let a = snap.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Mp3));
+	assert_eq!(a.sample_rate, 44100);
+	assert_eq!(a.channel_count, 2);
+}
+
+/// Build a small Matroska with a single MP3 audio track (no codec private).
+fn synth_matroska_mp3() -> Vec<u8> {
+	use webm_iterable::WebmWriter;
+
+	let tags: Vec<MatroskaSpec> = vec![
+		MatroskaSpec::Ebml(Master::Full(vec![
+			MatroskaSpec::DocType("matroska".to_string()),
+			MatroskaSpec::DocTypeVersion(2),
+			MatroskaSpec::DocTypeReadVersion(2),
+		])),
+		MatroskaSpec::Segment(Master::Start),
+		MatroskaSpec::Info(Master::Full(vec![MatroskaSpec::TimestampScale(1_000_000)])),
+		MatroskaSpec::Tracks(Master::Full(vec![MatroskaSpec::TrackEntry(Master::Full(vec![
+			MatroskaSpec::TrackNumber(1),
+			MatroskaSpec::TrackUID(1),
+			MatroskaSpec::TrackType(2),
+			MatroskaSpec::CodecID("A_MPEG/L3".to_string()),
+			MatroskaSpec::Audio(Master::Full(vec![
+				MatroskaSpec::SamplingFrequency(44100.0),
+				MatroskaSpec::Channels(2),
+			])),
+		]))])),
+		MatroskaSpec::Cluster(Master::Start),
+		MatroskaSpec::Timestamp(0),
+		SimpleBlock::new_uncheked(b"mp3-frame", 1, 0, false, None, false, true).into(),
+		MatroskaSpec::Cluster(Master::End),
+		MatroskaSpec::Segment(Master::End),
+	];
+
+	let mut dest = Cursor::new(Vec::new());
+	{
+		let mut writer = WebmWriter::new(&mut dest);
+		for tag in &tags {
+			writer.write(tag).unwrap();
+		}
+		writer.flush().unwrap();
+	}
+	dest.into_inner()
+}
+
 /// A mid-stream subscriber may poll the exporter before the catalog track has
 /// arrived. With `tracks` empty, `header_ready()` must not be vacuously true and
 /// drive `build_header` into a "no catalog snapshot" error; it should stay

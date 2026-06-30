@@ -34,8 +34,9 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// **Audio:**
 /// - AAC (`A_AAC`)
 /// - Opus (`A_OPUS`)
+/// - MP3 (`A_MPEG/L3`)
 ///
-/// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
+/// Unsupported codecs (e.g. Vorbis, AC3, subtitles) are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
@@ -529,6 +530,13 @@ fn build_audio_config(
 				},
 			);
 			config.description = Some(priv_data.clone());
+			config.container = Container::Legacy;
+			Ok(config)
+		}
+		"A_MPEG/L3" => {
+			// MP3 carries its config in band, so there's no codec private; the track
+			// header's SamplingFrequency/Channels are the only config source.
+			let mut config = AudioConfig::new(AudioCodec::Mp3, sample_rate, channels);
 			config.container = Container::Legacy;
 			Ok(config)
 		}

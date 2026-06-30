@@ -121,6 +121,20 @@ fn track_entry_audio_opus(number: u64, sample_rate: f64, channels: u64) -> Matro
 	]))
 }
 
+fn track_entry_audio_mp3(number: u64, sample_rate: f64, channels: u64) -> MatroskaSpec {
+	// MP3 has no codec private; config comes from the track header.
+	MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(number),
+		MatroskaSpec::TrackUID(number),
+		MatroskaSpec::TrackType(2),
+		MatroskaSpec::CodecID("A_MPEG/L3".to_string()),
+		MatroskaSpec::Audio(Master::Full(vec![
+			MatroskaSpec::SamplingFrequency(sample_rate),
+			MatroskaSpec::Channels(channels),
+		])),
+	]))
+}
+
 fn track_entry_video_vp9(number: u64, width: u64, height: u64) -> MatroskaSpec {
 	MatroskaSpec::TrackEntry(Master::Full(vec![
 		MatroskaSpec::TrackNumber(number),
@@ -198,6 +212,26 @@ fn test_vp9_opus_catalog() {
 	assert!(matches!(a.codec, AudioCodec::Opus));
 	assert_eq!(a.sample_rate, 48000);
 	assert_eq!(a.channel_count, 2);
+}
+
+#[test]
+fn test_mp3_catalog() {
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_mp3(1, 44100.0, 2)])
+		.cluster(0, || vec![simple_block(1, 0, true, b"mp3-frame")])
+		.segment_end()
+		.build();
+
+	let catalog = run(&data);
+	assert_eq!(catalog.audio.renditions.len(), 1);
+	let a = catalog.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Mp3));
+	assert_eq!(a.sample_rate, 44100);
+	assert_eq!(a.channel_count, 2);
+	assert!(a.description.is_none(), "MP3 config is in band");
 }
 
 #[test]
