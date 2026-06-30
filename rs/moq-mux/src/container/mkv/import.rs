@@ -34,6 +34,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// **Audio:**
 /// - AAC (`A_AAC`)
 /// - Opus (`A_OPUS`)
+/// - FLAC (`A_FLAC`)
 ///
 /// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
@@ -517,6 +518,35 @@ fn build_audio_config(
 
 			let mut config = AudioConfig::new(
 				AAC { profile: cfg.profile },
+				if cfg.sample_rate > 0 {
+					cfg.sample_rate
+				} else {
+					sample_rate
+				},
+				if cfg.channel_count > 0 {
+					cfg.channel_count
+				} else {
+					channels
+				},
+			);
+			config.description = Some(priv_data.clone());
+			config.container = Container::Legacy;
+			Ok(config)
+		}
+		"A_FLAC" => {
+			// Matroska A_FLAC CodecPrivate is the FLAC header: the `fLaC` marker
+			// followed by the metadata blocks (STREAMINFO first). That is exactly the
+			// WebCodecs FLAC description, so it passes straight through, and STREAMINFO
+			// is authoritative for rate/channels.
+			let priv_data = codec_private.ok_or(Error::MissingCodecPrivate {
+				codec_id: "A_FLAC",
+				purpose: "FLAC STREAMINFO",
+			})?;
+			let mut cursor = priv_data.clone();
+			let cfg = crate::codec::flac::Config::parse(&mut cursor)?;
+
+			let mut config = AudioConfig::new(
+				AudioCodec::Flac,
 				if cfg.sample_rate > 0 {
 					cfg.sample_rate
 				} else {

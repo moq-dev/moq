@@ -573,7 +573,7 @@ fn build_video_track_entry(
 	Ok(MatroskaSpec::TrackEntry(Master::Full(entry)))
 }
 
-fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<MatroskaSpec> {
+pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<MatroskaSpec> {
 	let (codec_id, codec_private) = match &config.codec {
 		AudioCodec::Opus => (
 			"A_OPUS",
@@ -593,6 +593,18 @@ fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<Ma
 					.description
 					.as_ref()
 					.ok_or(Error::MissingAacDescription)?
+					.to_vec(),
+			),
+		),
+		AudioCodec::Flac => (
+			"A_FLAC",
+			// A_FLAC CodecPrivate is the FLAC header (the `fLaC` marker plus metadata
+			// blocks), which is exactly the catalog description.
+			Some(
+				config
+					.description
+					.as_ref()
+					.ok_or(Error::MissingFlacDescription)?
 					.to_vec(),
 			),
 		),

@@ -24,6 +24,7 @@ use crate::container::Timestamp;
 /// **Audio:**
 /// - AAC (MP4A)
 /// - Opus
+/// - FLAC
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::BroadcastProducer,
@@ -431,6 +432,46 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					opus.audio.sample_rate.integer() as _,
 					opus.audio.channel_count as _,
 				);
+				config.container = container;
+				config
+			}
+			mp4_atom::Codec::Flac(flac) => {
+				// Rate/channels come from STREAMINFO, not the sample entry's `Audio`
+				// box: the latter's sample rate is 16.16 fixed point and can't carry
+				// FLAC's high rates (96k/192k). STREAMINFO is also where the decoder
+				// description comes from.
+				let info = flac
+					.dfla
+					.blocks
+					.iter()
+					.find_map(|block| match block {
+						mp4_atom::FlacMetadataBlock::StreamInfo {
+							minimum_block_size,
+							maximum_block_size,
+							minimum_frame_size,
+							maximum_frame_size,
+							sample_rate,
+							num_channels_minus_one,
+							bits_per_sample_minus_one,
+							number_of_interchannel_samples,
+							md5_checksum,
+						} => Some(crate::codec::flac::Config {
+							min_block_size: *minimum_block_size,
+							max_block_size: *maximum_block_size,
+							min_frame_size: u32::from(*minimum_frame_size),
+							max_frame_size: u32::from(*maximum_frame_size),
+							sample_rate: *sample_rate,
+							channel_count: *num_channels_minus_one as u32 + 1,
+							bits_per_sample: *bits_per_sample_minus_one as u32 + 1,
+							total_samples: *number_of_interchannel_samples,
+							md5: md5_checksum.as_slice().try_into().unwrap_or([0; 16]),
+						}),
+						_ => None,
+					})
+					.ok_or(crate::codec::flac::Error::MissingStreamInfo)?;
+
+				let mut config = AudioConfig::new(AudioCodec::Flac, info.sample_rate, info.channel_count);
+				config.description = Some(info.description());
 				config.container = container;
 				config
 			}

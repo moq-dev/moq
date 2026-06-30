@@ -341,3 +341,74 @@ fn decode_multisample_with_durations_roundtrips() {
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 	assert_eq!(out[1].timestamp.as_micros(), 33_000);
 }
+
+/// A FLAC track (fLaC sample entry + dfLa STREAMINFO) imports into the catalog with
+/// rate/channels taken from STREAMINFO (not the 16.16 audio box) and the WebCodecs
+/// description carried out of band.
+#[test]
+fn test_flac_catalog() {
+	// 96 kHz can't be represented in the sample entry's 16.16 `Audio` rate field, so
+	// this also proves STREAMINFO is the source of truth.
+	let stream_info = mp4_atom::FlacMetadataBlock::StreamInfo {
+		minimum_block_size: 4096,
+		maximum_block_size: 4096,
+		minimum_frame_size: 0u32.try_into().unwrap(),
+		maximum_frame_size: 0u32.try_into().unwrap(),
+		sample_rate: 96_000,
+		num_channels_minus_one: 1,
+		bits_per_sample_minus_one: 23,
+		number_of_interchannel_samples: 0,
+		md5_checksum: vec![0; 16],
+	};
+	let flac = mp4_atom::Flac {
+		audio: mp4_atom::Audio {
+			data_reference_index: 1,
+			channel_count: 2,
+			sample_size: 24,
+			sample_rate: mp4_atom::FixedPoint::from(0u16),
+		},
+		dfla: mp4_atom::Dfla {
+			blocks: vec![stream_info],
+		},
+	};
+
+	let trak = super::build_audio_trak(1, 96_000, mp4_atom::Codec::from(flac));
+	let moov = mp4_atom::Moov {
+		mvhd: mp4_atom::Mvhd {
+			timescale: 1000,
+			..Default::default()
+		},
+		trak: vec![trak],
+		mvex: Some(mp4_atom::Mvex {
+			mehd: None,
+			trex: vec![mp4_atom::Trex {
+				track_id: 1,
+				default_sample_description_index: 1,
+				..Default::default()
+			}],
+		}),
+		..Default::default()
+	};
+	let ftyp = mp4_atom::Ftyp {
+		major_brand: b"isom".into(),
+		minor_version: 0x200,
+		compatible_brands: vec![b"isom".into(), b"iso6".into()],
+	};
+
+	let mut data = Vec::new();
+	ftyp.encode(&mut data).unwrap();
+	moov.encode(&mut data).unwrap();
+
+	let catalog = run_fmp4(&data);
+	assert_eq!(catalog.audio.renditions.len(), 1);
+
+	let a = catalog.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, hang::catalog::AudioCodec::Flac));
+	assert_eq!(a.sample_rate, 96_000);
+	assert_eq!(a.channel_count, 2);
+	// fmp4 import is CMAF passthrough.
+	assert!(matches!(a.container, Container::Cmaf { .. }));
+	// The WebCodecs FLAC description: `fLaC` marker + STREAMINFO.
+	let desc = a.description.as_ref().expect("flac description");
+	assert_eq!(&desc[..4], b"fLaC");
+}

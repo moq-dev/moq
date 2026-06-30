@@ -200,6 +200,7 @@ impl_importer_direct!(crate::codec::vp8::Import<E>);
 impl_importer_direct!(crate::codec::vp9::Import<E>);
 impl_importer_direct!(crate::codec::aac::Import<E>);
 impl_importer_direct!(crate::codec::opus::Import<E>);
+impl_importer_direct!(crate::codec::flac::Import<E>);
 
 /// An av1C config record (ISO/IEC 14496-15) starts with a 0x81 marker and is at
 /// least 16 bytes; raw OBUs never look like this.
@@ -333,6 +334,12 @@ impl<E: CatalogExt> Track<E> {
 				let mut data = init;
 				let config = crate::codec::opus::Config::parse(&mut data)?;
 				Box::new(crate::codec::opus::Import::new(track, catalog, config)?)
+			}
+			"flac" => {
+				// `init` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
+				let mut data = init;
+				let config = crate::codec::flac::Config::parse(&mut data)?;
+				Box::new(crate::codec::flac::Import::new(track, catalog, config)?)
 			}
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};

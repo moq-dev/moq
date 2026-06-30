@@ -82,6 +82,9 @@ pub enum Error {
 	#[error("AAC track missing AudioSpecificConfig (description)")]
 	MissingAacDescription,
 
+	#[error("FLAC track missing STREAMINFO (description)")]
+	MissingFlacDescription,
+
 	#[error("H.264 track missing AVCDecoderConfigurationRecord")]
 	MissingH264Avcc,
 

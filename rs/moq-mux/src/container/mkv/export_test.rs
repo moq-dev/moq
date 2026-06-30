@@ -138,6 +138,58 @@ async fn export_header_roundtrip_vp9_opus() {
 	assert_eq!(a.sample_rate, 48000);
 }
 
+/// A FLAC rendition exports as an `A_FLAC` track whose CodecPrivate is the catalog
+/// description (the `fLaC` header), which round-trips back through the importer.
+#[test]
+fn build_flac_audio_track_entry() {
+	let description = crate::codec::flac::Config {
+		min_block_size: 4096,
+		max_block_size: 4096,
+		min_frame_size: 0,
+		max_frame_size: 0,
+		sample_rate: 48_000,
+		channel_count: 2,
+		bits_per_sample: 16,
+		total_samples: 0,
+		md5: [0; 16],
+	}
+	.description();
+
+	let mut config = hang::catalog::AudioConfig::new(AudioCodec::Flac, 48_000, 2);
+	config.description = Some(description.clone());
+
+	let entry = super::export::build_audio_track_entry(2, &config).expect("build A_FLAC entry");
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = entry else {
+		panic!("expected a TrackEntry");
+	};
+
+	let codec_id = children
+		.iter()
+		.find_map(|c| {
+			if let MatroskaSpec::CodecID(s) = c {
+				Some(s.clone())
+			} else {
+				None
+			}
+		})
+		.expect("codec id");
+	assert_eq!(codec_id, "A_FLAC");
+
+	let private = children
+		.iter()
+		.find_map(|c| {
+			if let MatroskaSpec::CodecPrivate(p) = c {
+				Some(p.clone())
+			} else {
+				None
+			}
+		})
+		.expect("codec private");
+	// CodecPrivate is the FLAC header verbatim, ready for the importer to parse.
+	assert_eq!(private, description.to_vec());
+	crate::codec::flac::Config::parse(&mut private.as_slice()).expect("valid FLAC header");
+}
+
 /// A mid-stream subscriber may poll the exporter before the catalog track has
 /// arrived. With `tracks` empty, `header_ready()` must not be vacuously true and
 /// drive `build_header` into a "no catalog snapshot" error; it should stay
