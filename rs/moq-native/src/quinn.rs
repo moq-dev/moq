@@ -1,6 +1,6 @@
 use crate::client::ClientConfig;
 use crate::server::{ServerConfig, ServerId};
-use crate::tls::{FingerprintVerifier, ServeCerts};
+use crate::tls::ServeCerts;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{net, time};
@@ -47,6 +47,9 @@ pub enum Error {
 
 	#[error("invalid fingerprint")]
 	InvalidFingerprint(#[from] hex::FromHexError),
+
+	#[error("certificate fingerprint must be 32 bytes (SHA-256), got {0}")]
+	FingerprintLength(usize),
 
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
@@ -154,9 +157,13 @@ impl QuinnClient {
 		})
 	}
 
-	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> Result<web_transport_quinn::Session> {
+	pub async fn connect(
+		&self,
+		base: Option<&rustls::ClientConfig>,
+		tls_config: &crate::tls::Client,
+		url: Url,
+	) -> Result<web_transport_quinn::Session> {
 		let mut url = url;
-		let mut config = tls.clone();
 
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
@@ -172,36 +179,26 @@ impl QuinnClient {
 			.map_err(Error::DnsLookup)?;
 		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
 
-		if url.scheme() == "http" {
+		// Resolve the per-connection rustls config now that the scheme is known.
+		// An `http://` bootstrap pins a freshly fetched fingerprint (no roots
+		// needed); anything else reuses the resolved policy, surfacing the
+		// deferred `NoRoots` when none was configured.
+		let mut config = if url.scheme() == "http" && self.http_bootstrap {
 			// Insecure per-connection bootstrap: only honored when no stronger
 			// verification is configured, so an attacker controlling the plaintext
 			// fetch can't weaken an explicit pin or re-enable disabled verification.
-			if self.http_bootstrap {
-				// Perform a HTTP request to fetch the certificate fingerprint.
-				let mut fingerprint = url.clone();
-				fingerprint.set_path("/certificate.sha256");
-				fingerprint.set_query(None);
-				fingerprint.set_fragment(None);
-
-				tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
-
-				let resp = reqwest::get(fingerprint.as_str())
-					.await
-					.map_err(Error::FetchFingerprint)?
-					.error_for_status()
-					.map_err(Error::FingerprintStatus)?;
-
-				let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
-				let fingerprint = hex::decode(fingerprint.trim())?;
-
-				let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
-				config.dangerous().set_certificate_verifier(Arc::new(verifier));
-			} else {
+			let pin = fetch_fingerprint(&url).await?;
+			tls_config.build_with(crate::tls::Verification::Fingerprints(vec![pin]))?
+		} else {
+			if url.scheme() == "http" {
 				tracing::warn!(
 					"ignoring insecure http:// fingerprint bootstrap; using the configured TLS verification"
 				);
 			}
+			base.cloned().ok_or(crate::tls::Error::NoRoots)?
+		};
 
+		if url.scheme() == "http" {
 			url.set_scheme("https").expect("failed to set scheme");
 		}
 
@@ -255,6 +252,27 @@ impl QuinnClient {
 
 		Ok(session)
 	}
+}
+
+/// Fetch a relay's certificate SHA-256 over an insecure `http://` request and
+/// return it as a pin. Mirrors the browser's self-signed bootstrap: GET
+/// `/certificate.sha256` and pin the returned hash.
+async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
+	let mut fp = url.clone();
+	fp.set_path("/certificate.sha256");
+	fp.set_query(None);
+	fp.set_fragment(None);
+
+	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate");
+
+	let resp = reqwest::get(fp.as_str())
+		.await
+		.map_err(Error::FetchFingerprint)?
+		.error_for_status()
+		.map_err(Error::FingerprintStatus)?;
+	let text = resp.text().await.map_err(Error::ReadFingerprint)?;
+	let bytes = hex::decode(text.trim())?;
+	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
 }
 
 impl Error {

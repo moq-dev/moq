@@ -238,10 +238,11 @@ struct Deprecated {
 
 /// The resolved server-certificate verification policy.
 ///
-/// Computed once by [Client::verification] and shared by every backend (the
-/// rustls-based quinn/noq via [Client::build], and quiche directly) so they
+/// Resolved once by [Client::verification] and reused by every backend (the
+/// rustls-based quinn/noq via [Client::build_with], and quiche directly) so they
 /// agree on precedence, the system-roots default, and which flag combinations
-/// are valid.
+/// are valid. A per-connection `http://` bootstrap substitutes its own
+/// [`Verification::Fingerprints`] without touching the resolved policy.
 #[derive(Clone)]
 pub(crate) enum Verification {
 	/// No verification at all. Insecure; only via `--client-tls-disable-verify`.
@@ -308,11 +309,16 @@ impl Client {
 	/// - Otherwise, verify against the system roots (default) plus any custom
 	///   roots. The system roots are dropped once a custom root is given unless
 	///   `--client-tls-system-roots` re-enables them.
-	pub(crate) fn verification(&self) -> Result<Verification> {
+	///
+	/// Returns `Ok(None)` when standard root verification is selected but no roots
+	/// resolved: WebPKI needs at least one trusted root, but the caller may still
+	/// connect if a per-connection `http://` fingerprint bootstrap replaces
+	/// verification. Callers that can't bootstrap map `None` to [`Error::NoRoots`].
+	pub(crate) fn verification(&self) -> Result<Option<Verification>> {
 		self.warn_deprecated();
 
 		if self.effective_disable_verify().unwrap_or_default() {
-			return Ok(Verification::Disabled);
+			return Ok(Some(Verification::Disabled));
 		}
 
 		let fingerprints = self.fingerprints()?;
@@ -320,7 +326,7 @@ impl Client {
 			if !self.effective_root().is_empty() || self.effective_system_roots() == Some(true) {
 				return Err(Error::FingerprintWithRoots);
 			}
-			return Ok(Verification::Fingerprints(fingerprints));
+			return Ok(Some(Verification::Fingerprints(fingerprints)));
 		}
 
 		let root = self.effective_root();
@@ -344,13 +350,13 @@ impl Client {
 			roots.extend(certs);
 		}
 
-		// WebPKI needs at least one trusted root to ever succeed, so fail fast
-		// instead of producing confusing handshake errors later.
+		// No roots resolved: defer to the caller, which may still bootstrap a pin
+		// over `http://` for a single connection.
 		if roots.is_empty() {
-			return Err(Error::NoRoots);
+			return Ok(None);
 		}
 
-		Ok(Verification::Roots(roots))
+		Ok(Some(Verification::Roots(roots)))
 	}
 
 	/// Whether an insecure `http://` certificate-fingerprint bootstrap may be
@@ -379,10 +385,24 @@ impl Client {
 	/// Build a [`rustls::ClientConfig`] from this configuration.
 	///
 	/// Resolves the verification policy, optionally attaches a client identity
-	/// for mTLS, and installs the matching verifier.
+	/// for mTLS, and installs the matching verifier. Errors with [`Error::NoRoots`]
+	/// when standard verification is selected but no roots resolved; use
+	/// [`Self::verification`] + [`Self::build_with`] to defer that decision per
+	/// connection instead.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
+		let verification = self.verification()?.ok_or(Error::NoRoots)?;
+		self.build_with(verification)
+	}
+
+	/// Build a [`rustls::ClientConfig`] for an already-resolved verification policy.
+	///
+	/// Lets the native client resolve [`Self::verification`] once, then build a
+	/// config per connection: an `http://` URL can swap in a freshly fetched pin
+	/// without any configured roots, while other connections reuse the resolved
+	/// policy. Optionally attaches a client identity for mTLS and installs the
+	/// matching verifier.
+	pub(crate) fn build_with(&self, verification: Verification) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
-		let verification = self.verification()?;
 
 		let mut roots = rustls::RootCertStore::empty();
 		if let Verification::Roots(certs) = &verification {
@@ -797,6 +817,18 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(config.build(), Err(Error::NoRoots)));
+	}
+
+	#[test]
+	fn verification_defers_no_roots() {
+		// Same roots-less config: resolution defers (Ok(None)) instead of erroring
+		// so a per-connection http:// bootstrap can still pin a fetched cert. The
+		// eager build() above is what maps that None to NoRoots.
+		let config = Client {
+			system_roots: Some(false),
+			..Default::default()
+		};
+		assert!(matches!(config.verification(), Ok(None)));
 	}
 
 	#[test]

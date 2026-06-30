@@ -97,7 +97,17 @@ pub struct Client {
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
-	tls: rustls::ClientConfig,
+	/// Prebuilt rustls config for the resolved verification policy, or `None` when
+	/// no CA roots resolved. Left unresolved so a per-connection `http://`
+	/// fingerprint bootstrap can still connect without roots; any other connection
+	/// then surfaces [`crate::tls::Error::NoRoots`] at connect time.
+	tls: Option<rustls::ClientConfig>,
+	/// The TLS config itself, kept to build a freshly pinned rustls config per
+	/// connection when bootstrapping a self-signed relay over `http://`. Only the
+	/// rustls-based quinn/noq backends rebuild from it; quiche carries its own
+	/// resolved policy.
+	#[cfg(any(feature = "quinn", feature = "noq"))]
+	tls_config: crate::tls::Client,
 	#[cfg(feature = "noq")]
 	noq: Option<crate::noq::NoqClient>,
 	#[cfg(feature = "quinn")]
@@ -153,7 +163,14 @@ impl Client {
 			panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 		});
 
-		let tls = config.tls.build()?;
+		// Resolve the verification policy once. Building the rustls config is
+		// deferred to `None` when no roots resolved, so construction doesn't fail
+		// before a per-connection `http://` bootstrap gets a chance to pin a cert.
+		let tls = config
+			.tls
+			.verification()?
+			.map(|v| config.tls.build_with(v))
+			.transpose()?;
 
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
@@ -183,6 +200,8 @@ impl Client {
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
+			#[cfg(any(feature = "quinn", feature = "noq"))]
+			tls_config: config.tls,
 			#[cfg(feature = "noq")]
 			noq,
 			#[cfg(feature = "quinn")]
@@ -302,9 +321,12 @@ impl Client {
 
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
-			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { noq.connect(&tls, quic_url).await.map_err(Error::from) };
+			let quic_handle = async {
+				noq.connect(self.tls.as_ref(), &self.tls_config, quic_url)
+					.await
+					.map_err(Error::from)
+			};
 
 			#[cfg(feature = "websocket")]
 			{
@@ -320,9 +342,13 @@ impl Client {
 
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
-			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { quinn.connect(&tls, quic_url).await.map_err(Error::from) };
+			let quic_handle = async {
+				quinn
+					.connect(self.tls.as_ref(), &self.tls_config, quic_url)
+					.await
+					.map_err(Error::from)
+			};
 
 			#[cfg(feature = "websocket")]
 			{
@@ -356,7 +382,7 @@ impl Client {
 		#[cfg(feature = "websocket")]
 		{
 			let alpns = self.versions.alpns();
-			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
+			let session = crate::websocket::connect(&self.websocket, self.tls.as_ref(), url, &alpns).await?;
 			return Ok(self.moq.connect(session).await?);
 		}
 
@@ -374,7 +400,7 @@ impl Client {
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
 		let websocket = async move {
-			crate::websocket::race_handle(&ws_config, &ws_tls, url, &alpns)
+			crate::websocket::race_handle(&ws_config, ws_tls.as_ref(), url, &alpns)
 				.await
 				.map(|res| res.map_err(Error::from))
 		};
@@ -523,6 +549,22 @@ mod tests {
 	fn test_cli_no_disable_verify() {
 		let config = ClientConfig::parse_from(["test"]);
 		assert_eq!(config.tls.disable_verify, None);
+	}
+
+	#[cfg(feature = "quinn")]
+	#[tokio::test]
+	async fn init_defers_no_roots() {
+		// Regression: a roots-less config (system roots off, no custom root, no
+		// fingerprint) used to fail construction with NoRoots before any URL scheme
+		// was known. It now builds, so a per-connection http:// fingerprint
+		// bootstrap can still connect; other schemes surface NoRoots at connect time.
+		let mut tls = crate::tls::Client::default();
+		tls.system_roots = Some(false);
+		let config = ClientConfig {
+			tls,
+			..Default::default()
+		};
+		assert!(config.init().is_ok());
 	}
 
 	#[test]

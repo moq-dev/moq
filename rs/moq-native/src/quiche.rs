@@ -105,7 +105,9 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	/// Resolved server-verification policy, shared with the other backends.
-	pub verification: crate::tls::Verification,
+	/// `None` when no CA roots resolved: deferred so an `http://` bootstrap can
+	/// still pin a fetched fingerprint, while other schemes surface `NoRoots`.
+	pub verification: Option<crate::tls::Verification>,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	pub max_streams: u64,
@@ -145,10 +147,10 @@ impl QuicheClient {
 				tracing::warn!(
 					"ignoring insecure http:// fingerprint bootstrap; using the configured TLS verification"
 				);
-				(https, self.verification.clone())
+				(https, self.verification.clone().ok_or(crate::tls::Error::NoRoots)?)
 			}
 		} else {
-			(url, self.verification.clone())
+			(url, self.verification.clone().ok_or(crate::tls::Error::NoRoots)?)
 		};
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {

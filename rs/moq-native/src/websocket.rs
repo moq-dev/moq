@@ -38,6 +38,9 @@ pub enum Error {
 
 	#[error("WebSocket accept failed")]
 	Accept(#[source] qmux::Error),
+
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -85,7 +88,7 @@ impl Default for Client {
 
 pub(crate) async fn race_handle(
 	config: &Client,
-	tls: &rustls::ClientConfig,
+	tls: Option<&rustls::ClientConfig>,
 	url: Url,
 	alpns: &[&str],
 ) -> Option<Result<qmux::Session>> {
@@ -109,7 +112,7 @@ pub(crate) async fn race_handle(
 
 pub(crate) async fn connect(
 	config: &Client,
-	tls: &rustls::ClientConfig,
+	tls: Option<&rustls::ClientConfig>,
 	mut url: Url,
 	alpns: &[&str],
 ) -> Result<qmux::Session> {
@@ -154,8 +157,11 @@ pub(crate) async fn connect(
 
 	tracing::debug!(%url, "connecting via WebSocket");
 
-	// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
+	// Use the existing TLS config (which respects tls-disable-verify) for secure
+	// connections. Plaintext `ws://` needs no roots, so only a secure scheme
+	// surfaces the deferred [`crate::tls::Error::NoRoots`] when none resolved.
 	let connector = if needs_tls {
+		let tls = tls.ok_or(crate::tls::Error::NoRoots)?;
 		tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
 	} else {
 		tokio_tungstenite::Connector::Plain
