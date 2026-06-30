@@ -252,6 +252,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
+
+				// AnnounceInit batches the initial active set into one message; attribute
+				// it per broadcast by name length so Lite01/02 isn't undercounted.
+				for absolute in stats_guards.keys() {
+					stats
+						.broadcast(absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
+				}
 			}
 			_ => {
 				// Lite03+: no more announce init.
@@ -302,21 +310,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									continue;
 								}
 								let absolute = origin.absolute(&path).to_owned();
-								let guard = stats.broadcast(&absolute).publisher();
+								let bs = stats.broadcast(&absolute);
 								// Count the broadcast name length, not the encoded message size, so
 								// stats don't penalize the broadcast for hop/framing overhead.
-								guard.bytes(absolute.as_str().len() as u64);
-								let prev = stats_guards.insert(absolute, guard);
+								bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+								let prev = stats_guards.insert(absolute, bs.publisher());
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								let absolute = origin.absolute(&path).to_owned();
 								tracing::debug!(broadcast = %absolute, "unannounce");
-								// Record the unannounce name length on the guard before it drops.
-								if let Some(guard) = stats_guards.remove(&absolute) {
-									guard.bytes(absolute.as_str().len() as u64);
-								}
+								// Count the name length whether or not a guard is held: the Ended
+								// message is sent even for announces we filtered out above.
+								stats
+									.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
+								stats_guards.remove(&absolute);
 								// An ended announce doesn't need hops — the receiver matches on path only.
 								let msg = lite::Announce::Ended {
 									suffix,

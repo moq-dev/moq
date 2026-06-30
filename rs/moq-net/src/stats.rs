@@ -40,11 +40,13 @@
 //! * `announced` / `announced_closed`: cumulative count of broadcast
 //!   announce/unannounce events on this `(tier, role)`. Bumped on every
 //!   `publisher()` / `subscriber()` guard creation and drop.
-//! * `announced_bytes`: cumulative broadcast-name length summed over this
-//!   broadcast's announce/unannounce messages (the name, not the encoded
-//!   message size, so hop/framing overhead isn't charged). Kept separate from
-//!   the `bytes` payload counter. Recorded via [`PublisherStats::bytes`] /
-//!   [`SubscriberStats::bytes`].
+//! * `announced_bytes`: cumulative broadcast-name length summed over every
+//!   announce/unannounce message for this broadcast (the name, not the encoded
+//!   message size, so hop/framing overhead isn't charged). Recorded keyed by
+//!   path via [`BroadcastStats::publisher_announced_bytes`] /
+//!   [`BroadcastStats::subscriber_announced_bytes`], independent of the
+//!   announce lifetime guard, so filtered/reflected/unmatched control messages
+//!   still count. Kept separate from the `bytes` payload counter.
 //! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
 //!   subscription sentinel. The first active subscription a peer session
 //!   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
@@ -658,6 +660,29 @@ impl BroadcastStats {
 		}
 	}
 
+	/// Record `n` announce-control bytes (the broadcast name length) for one
+	/// publisher-side announce/unannounce, independent of any lifetime guard.
+	/// Recording is keyed by broadcast path, so it still captures messages
+	/// whose matching guard was skipped, reflected, or already dropped (e.g.
+	/// an unannounce whose announce was filtered out). Bumps `announced_bytes`;
+	/// distinct from [`PublisherTrack::bytes`], which counts media payload.
+	pub fn publisher_announced_bytes(&self, n: u64) {
+		if let Some(entry) = &self.entry {
+			entry.publisher[self.tier.idx()]
+				.announced_bytes
+				.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Subscriber-side counterpart to [`Self::publisher_announced_bytes`].
+	pub fn subscriber_announced_bytes(&self, n: u64) {
+		if let Some(entry) = &self.entry {
+			entry.subscriber[self.tier.idx()]
+				.announced_bytes
+				.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
 	/// Subscriber-side counterpart to [`Self::publisher_track`].
 	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
 		if let Some(entry) = &self.entry {
@@ -829,18 +854,6 @@ pub struct PublisherStats {
 }
 
 impl PublisherStats {
-	/// Add `n` to `announced_bytes` for one announce/unannounce of this
-	/// broadcast. Callers pass the broadcast name length (not the encoded
-	/// message size). Distinct from [`PublisherTrack::bytes`], which counts
-	/// media payload.
-	pub fn bytes(&self, n: u64) {
-		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()]
-				.announced_bytes
-				.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
 	/// Open a track-subscription guard. Bumps `subscriptions` on construction
 	/// and `subscriptions_closed` on drop.
 	pub fn track(&self, name: &str) -> PublisherTrack {
@@ -873,16 +886,6 @@ pub struct SubscriberStats {
 }
 
 impl SubscriberStats {
-	/// Add `n` to `announced_bytes` for one announce/unannounce of this
-	/// broadcast (the broadcast name length). Mirrors [`PublisherStats::bytes`].
-	pub fn bytes(&self, n: u64) {
-		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()]
-				.announced_bytes
-				.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
 	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
 	pub fn track(&self, name: &str) -> SubscriberTrack {
 		BroadcastStats {
@@ -1507,15 +1510,14 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn announced_bytes_recorded_per_side() {
-		// The announce guards' bytes() bumps land in announced_bytes, isolated
-		// per side, and don't touch the payload `bytes` counter.
+		// Path-keyed announce-byte recording is isolated per side, accumulates,
+		// works without holding a lifetime guard, and doesn't touch the payload
+		// `bytes` counter.
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let p = bs.publisher();
-		p.bytes(40);
-		p.bytes(2);
-		let s = bs.subscriber();
-		s.bytes(7);
+		bs.publisher_announced_bytes(40);
+		bs.publisher_announced_bytes(2);
+		bs.subscriber_announced_bytes(7);
 
 		let entries = stats.shared().entries.lock();
 		let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
@@ -1531,8 +1533,8 @@ mod tests {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let guard = bs.publisher();
-		guard.bytes(123);
+		let _guard = bs.publisher();
+		bs.publisher_announced_bytes(123);
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 

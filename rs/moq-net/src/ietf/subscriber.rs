@@ -43,10 +43,9 @@ struct BroadcastState {
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
 
-	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`,
-	/// and `announced_bytes` via [`SubscriberStats::bytes`]), held for as long
-	/// as the broadcast is announced into our origin.
-	stats: SubscriberStats,
+	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
+	/// held for as long as the broadcast is announced into our origin.
+	_stats: SubscriberStats,
 }
 
 #[derive(Clone)]
@@ -459,15 +458,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		let abs = origin.absolute(&path).to_owned();
-		// Count the broadcast name length per announce, not the encoded message
-		// size, so stats don't penalize the broadcast for framing overhead.
-		let announce_bytes = abs.as_str().len() as u64;
+		// Count the broadcast name length per announce (not the encoded message
+		// size, so framing overhead isn't charged), keyed by path so it's
+		// independent of the lifetime guard below.
+		self.stats
+			.broadcast(&abs)
+			.subscriber_announced_bytes(abs.as_str().len() as u64);
 
 		let mut state = self.state.lock();
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count += 1;
-				entry.get().stats.bytes(announce_bytes);
 				Ok(entry.get().producer.clone())
 			}
 			Entry::Vacant(entry) => {
@@ -487,12 +488,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let dynamic = broadcast.dynamic();
 
 				origin.publish_broadcast(path.clone(), broadcast.consume());
-				let stats = self.stats.broadcast(&abs).subscriber();
-				stats.bytes(announce_bytes);
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
-					stats,
+					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
 
 				tracing::debug!(broadcast = %origin.absolute(&path), "announce");

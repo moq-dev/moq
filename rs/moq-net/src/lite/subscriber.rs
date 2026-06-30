@@ -174,6 +174,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					// Count every received name, even ones start_announce drops as loops.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
 					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
@@ -190,27 +194,30 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					// Count the broadcast name length (not the encoded message size) for
+					// every received announce, even ones start_announce drops as loops.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					if self.start_announce(path.clone(), hops, &mut producers)? {
-						let guard = self.stats.broadcast(&abs).subscriber();
-						// Count the broadcast name length, not the encoded message size.
-						guard.bytes(abs.as_str().len() as u64);
-						stats_guards.insert(abs.clone(), guard);
+						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
+					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					// Count the unannounce name length whether or not a matching guard exists.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `producers` has no entry; that's expected, not an error.
 					if let Some(mut producer) = producers.remove(&path) {
 						producer.abort(Error::Cancel).ok();
-						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
-						// Record the unannounce name length on the guard before it drops.
-						if let Some(guard) = stats_guards.remove(&abs) {
-							guard.bytes(abs.as_str().len() as u64);
-						}
+						stats_guards.remove(&abs);
 					}
 				}
 			}

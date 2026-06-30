@@ -544,9 +544,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
 						let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
 						tracing::debug!(message = ?msg, "publish namespace ok");
-						let guard = self.stats.broadcast(&absolute).publisher();
-						guard.bytes(announce_bytes);
-						namespace_streams.insert(suffix, (request_id, stream, guard));
+						let bs = self.stats.broadcast(&absolute);
+						bs.publisher_announced_bytes(announce_bytes);
+						namespace_streams.insert(suffix, (request_id, stream, bs.publisher()));
 					}
 					(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 						let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
@@ -556,9 +556,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					(_, ietf::RequestOk::ID) => {
 						let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 						tracing::debug!(message = ?msg, "publish namespace ok");
-						let guard = self.stats.broadcast(&absolute).publisher();
-						guard.bytes(announce_bytes);
-						namespace_streams.insert(suffix, (request_id, stream, guard));
+						let bs = self.stats.broadcast(&absolute);
+						bs.publisher_announced_bytes(announce_bytes);
+						namespace_streams.insert(suffix, (request_id, stream, bs.publisher()));
 					}
 					(_, ietf::RequestError::ID) => {
 						let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
@@ -569,7 +569,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			} else {
 				let absolute = self.origin.absolute(&path).to_owned();
 				tracing::debug!(broadcast = %absolute, "unannounce");
-				if let Some((request_id, mut stream, stats)) = namespace_streams.remove(&suffix) {
+				if let Some((request_id, mut stream, _stats)) = namespace_streams.remove(&suffix) {
 					// v14-16 sends PublishNamespaceDone (which carries the name); v17+ just
 					// closes the stream, so only the former contributes announce bytes.
 					match self.version {
@@ -581,7 +581,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									request_id,
 								})
 								.await;
-							stats.bytes(absolute.as_str().len() as u64);
+							self.stats
+								.broadcast(&absolute)
+								.publisher_announced_bytes(absolute.as_str().len() as u64);
 						}
 						_ => {}
 					}
@@ -591,7 +593,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 
 		// Clean up remaining streams
-		for (suffix, (request_id, mut stream, stats)) in namespace_streams {
+		for (suffix, (request_id, mut stream, _stats)) in namespace_streams {
 			match self.version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 					let _ = stream
@@ -601,7 +603,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							request_id,
 						})
 						.await;
-					stats.bytes(self.origin.absolute(&suffix).as_str().len() as u64);
+					let absolute = self.origin.absolute(&suffix).to_owned();
+					self.stats
+						.broadcast(&absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
 				}
 				_ => {}
 			}
