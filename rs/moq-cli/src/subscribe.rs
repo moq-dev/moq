@@ -197,3 +197,26 @@ impl Subscribe {
 		Ok(())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn args(format: SubscribeFormat, pace: bool) -> SubscribeArgs {
+		SubscribeArgs {
+			format,
+			max_latency: Duration::from_millis(500),
+			pace,
+			fragment_duration: None,
+			catalog: None,
+		}
+	}
+
+	#[test]
+	fn pace_requires_ts_format() {
+		assert!(args(SubscribeFormat::Ts, true).validate().is_ok());
+		assert!(args(SubscribeFormat::Fmp4, true).validate().is_err());
+		// Without --pace, any format is fine.
+		assert!(args(SubscribeFormat::Fmp4, false).validate().is_ok());
+	}
+}
