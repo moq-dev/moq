@@ -43,6 +43,15 @@ pub struct SubscribeArgs {
 	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
 	pub max_latency: Duration,
 
+	/// Pace output at the media's real-time rate, like ffmpeg's `-re`.
+	///
+	/// Without this, a retained broadcast is written out as fast as it can be read.
+	/// With it, frames are emitted on the media clock (anchored to the first frame),
+	/// which is what a downstream player or re-publish expects. Only `--format ts`
+	/// supports pacing today.
+	#[arg(long)]
+	pub pace: bool,
+
 	/// Cap the output fragment duration (e.g. `2s`, `500ms`).
 	///
 	/// By default a fragment covers one GOP (rolled over on video keyframes).
@@ -61,6 +70,15 @@ pub struct SubscribeArgs {
 }
 
 impl SubscribeArgs {
+	/// Reject flag combinations that don't apply to the chosen format, before we
+	/// bother connecting to the relay.
+	pub fn validate(&self) -> anyhow::Result<()> {
+		if self.pace && !matches!(self.format, SubscribeFormat::Ts) {
+			anyhow::bail!("--pace is only supported with --format ts");
+		}
+		Ok(())
+	}
+
 	/// Resolve the catalog format, falling back to detection from the broadcast
 	/// name suffix and then to the default.
 	pub fn catalog_format(&self, broadcast: &str) -> CatalogFormat {
@@ -135,6 +153,7 @@ impl Subscribe {
 
 	async fn run_ts(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
+		let pace = self.args.pace;
 
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
@@ -144,7 +163,16 @@ impl Subscribe {
 		let mut ts =
 			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
+		// When `--pace` is set, hold each frame until its media timestamp is due so a
+		// retained broadcast drains in real time instead of as fast as it's read.
+		let mut pacer = moq_mux::container::Pacer::new();
+
 		while let Some(frame) = ts.next().await? {
+			if pace {
+				let due = pacer.due(frame.timestamp, std::time::Instant::now());
+				tokio::time::sleep_until(due.into()).await;
+			}
+
 			stdout.write_all(&frame.payload).await?;
 			stdout.flush().await?;
 		}

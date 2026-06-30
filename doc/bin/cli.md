@@ -187,6 +187,15 @@ ffmpeg -i input.mp4 -c copy -f mpegts - | \
 moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format ts | ffplay -
 ```
 
+By default a retained broadcast is written out as fast as it can be read. Add
+`--pace` to emit the TS stream at its real-time (media-clock) rate instead, like
+ffmpeg's `-re`, which is what a downstream player or re-publish expects:
+
+```bash
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format ts --pace \
+    | ffmpeg -i - -c copy -f mpegts udp://239.0.0.1:1234
+```
+
 TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
