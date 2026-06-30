@@ -1248,14 +1248,22 @@ fn registration_format(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<[u8; 4
 		.and_then(|s| s.try_into().ok())
 }
 
-/// The Opus channel count from the DVB extension descriptor (tag 0x7f, ext tag 0x80),
-/// mapping `channel_config_code` 0 to stereo as the demuxer does.
+/// The Opus channel count from the DVB extension descriptor (tag 0x7f, ext tag 0x80).
+///
+/// `channel_config_code` follows the Opus-in-TS mapping (and ffmpeg's demuxer): 0 is dual
+/// mono (decoded as stereo), 1..=8 is the channel count directly. Higher codes (0x81
+/// explicitly-coded layouts, reserved values) aren't supported, so they fall back to the
+/// caller's default rather than being read as a raw 129..=255 count.
 fn opus_channel_count(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<u32> {
 	descriptors
 		.iter()
 		.find(|d| d.tag == 0x7f && d.data.first() == Some(&0x80))
 		.and_then(|d| d.data.get(1))
-		.map(|&cc| if cc == 0 { 2 } else { cc as u32 })
+		.and_then(|&cc| match cc {
+			0 => Some(2),
+			1..=8 => Some(cc as u32),
+			_ => None,
+		})
 }
 
 /// Parse one Opus-in-TS access-unit control header, returning `(header_len, payload_size)`.
