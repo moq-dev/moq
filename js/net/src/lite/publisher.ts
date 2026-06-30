@@ -9,8 +9,10 @@ import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
-import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
-import { Version } from "./version.ts";
+import { encodeSubscribeResponse, type Subscribe, SubscribeEnd, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import type { Track as TrackMessage } from "./track.ts";
+import { TrackInfo } from "./track.ts";
+import { hasTrackStream, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -170,7 +172,11 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			const info = new SubscribeOk({ priority: msg.priority });
+			// moq-lite-05+ trims SUBSCRIBE_OK to the resolved start group; the publisher
+			// properties move to TRACK_INFO. Earlier versions echo the priority inline.
+			const info = hasTrackStream(this.version)
+				? new SubscribeOk({ startGroup: msg.startGroup ?? 0 })
+				: new SubscribeOk({ priority: msg.priority });
 			await encodeSubscribeResponse(stream.writer, { ok: info }, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
@@ -203,6 +209,23 @@ export class Publisher {
 	}
 
 	/**
+	 * Serves a Track stream (moq-lite-05+): replies with the track's immutable TRACK_INFO.
+	 *
+	 * @internal
+	 */
+	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		const broadcast = this.#broadcasts.peek()?.get(msg.broadcast);
+		if (!broadcast) {
+			throw new Error("not found");
+		}
+
+		// The publisher properties aren't tracked in the browser model yet; report
+		// defaults with a millisecond timescale matching the wall-clock frame timestamps.
+		const info = new TrackInfo({ timescale: 1000 });
+		await info.encode(stream.writer, this.version);
+	}
+
+	/**
 	 * Runs a track and sends its data to the stream.
 	 * @param sub - The subscription ID
 	 * @param broadcast - The broadcast name
@@ -213,15 +236,32 @@ export class Publisher {
 	 */
 	async #runTrack(sub: bigint, broadcast: Path.Valid, track: Track, stream: Writer) {
 		try {
+			let lastSequence: number | undefined;
+			let trackEnded = false;
+
 			for (;;) {
 				const next = track.recvGroup();
-				const group = await Promise.race([next, stream.closed]);
-				if (!group) {
+				const res = await Promise.race([
+					next.then((group) => ({ group })),
+					stream.closed.then(() => "closed" as const),
+				]);
+				if (res === "closed") {
 					next.then((group) => group?.close()).catch(() => {});
 					break;
 				}
+				if (!res.group) {
+					trackEnded = true;
+					break;
+				}
 
-				void this.#runGroup(sub, group);
+				lastSequence = res.group.sequence;
+				void this.#runGroup(sub, res.group);
+			}
+
+			// moq-lite-05+: signal end-of-track before the subscribe stream FINs.
+			if (trackEnded && hasTrackStream(this.version)) {
+				const end = new SubscribeEnd({ group: lastSequence ?? 0 });
+				await encodeSubscribeResponse(stream, { end }, this.version);
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
@@ -250,9 +290,20 @@ export class Publisher {
 			await msg.encode(stream);
 
 			try {
+				// moq-lite-05+ stamps each frame with a wall-clock millisecond timestamp, sent
+				// as a zigzag delta from the previous frame (the first frame is a delta from 0).
+				let prevTimestamp = 0n;
+
 				for (;;) {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
+
+					if (hasTrackStream(this.version)) {
+						const now = BigInt(Date.now());
+						const delta = now - prevTimestamp;
+						prevTimestamp = now;
+						await stream.u62((delta << 1n) ^ (delta >> 63n));
+					}
 
 					await stream.u53(frame.byteLength);
 					await stream.write(frame);

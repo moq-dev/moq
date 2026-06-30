@@ -13,8 +13,8 @@ import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { Version } from "./version.ts";
+import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { hasTrackStream, Version } from "./version.ts";
 
 /**
  * Options accepted by {@link Subscriber.announced}.
@@ -195,7 +195,9 @@ export class Subscriber {
 			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
-			const waits: Promise<unknown>[] = [stream.reader.closed, request.track.closed];
+			// Draining responses also consumes any SUBSCRIBE_END / SUBSCRIBE_DROP and
+			// resolves when the publisher FINs.
+			const waits: Promise<unknown>[] = [this.#drainResponses(stream), request.track.closed];
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02:
@@ -219,6 +221,20 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
+		}
+	}
+
+	/**
+	 * Drain responses on the subscribe stream until the publisher FINs.
+	 *
+	 * The first SUBSCRIBE_OK is consumed by the caller; this reads any further
+	 * SUBSCRIBE_END / SUBSCRIBE_DROP. They aren't acted on yet (groups arrive on
+	 * their own streams regardless), but consuming them keeps the stream aligned.
+	 */
+	async #drainResponses(stream: Stream): Promise<void> {
+		for (;;) {
+			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
+			if (!resp) break;
 		}
 	}
 
@@ -291,6 +307,12 @@ export class Subscriber {
 			for (;;) {
 				const done = await Promise.race([stream.done(), subscribe.closed, producer.closed]);
 				if (done !== false) break;
+
+				if (hasTrackStream(this.version)) {
+					// moq-lite-05+ prefixes each frame with a zigzag timestamp delta. Decode it
+					// to stay aligned with the wire, but don't surface it yet.
+					await stream.u62();
+				}
 
 				const size = await stream.u53();
 				const payload = await stream.read(size);

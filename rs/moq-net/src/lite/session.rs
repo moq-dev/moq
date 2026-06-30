@@ -3,7 +3,7 @@ use crate::{
 	lite::SessionInfo,
 };
 
-use super::{Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
+use super::{Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version, send_setup};
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
@@ -17,6 +17,9 @@ pub fn start<S: web_transport_trait::Session>(
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
+	// The SETUP message to advertise on the Setup stream (moq-lite-05+). Ignored on
+	// earlier versions, which have no Setup stream.
+	our_setup: Setup,
 ) -> Result<Option<BandwidthConsumer>, Error> {
 	let recv_bw = BandwidthProducer::new();
 
@@ -48,6 +51,20 @@ pub fn start<S: web_transport_trait::Session>(
 		stats,
 		version,
 	});
+
+	// moq-lite-05 reintroduced a Setup stream: each endpoint opens one and sends a
+	// single SETUP message advertising its optional capabilities.
+	if version.has_setup_stream() {
+		let session = session.clone();
+		web_async::spawn(async move {
+			if let Err(err) = send_setup(&session, version, our_setup).await {
+				// The peer gates serving on our SETUP, so a failure to send it must
+				// tear the session down rather than leave the peer waiting.
+				tracing::warn!(%err, "failed to send setup stream");
+				session.close(err.to_code(), &err.to_string());
+			}
+		});
+	}
 
 	web_async::spawn(async move {
 		let res = tokio::select! {

@@ -266,6 +266,30 @@ impl Client {
 		Ok(session)
 	}
 
+	/// Build the per-connection moq client, advertising the request path in the SETUP
+	/// for transports that carry no request URI of their own (raw QUIC, qmux over
+	/// TCP/UDS, raw iroh). WebTransport and WebSocket already convey the path in their
+	/// own request, so we omit it there to avoid duplicating it.
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	fn connect_client(&self, url: &Url) -> moq_net::Client {
+		if transport_carries_path(url) {
+			return self.moq.clone();
+		}
+
+		match request_path(url) {
+			Some(path) => self.moq.clone().with_path(path),
+			None => self.moq.clone(),
+		}
+	}
+
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -276,12 +300,16 @@ impl Client {
 		feature = "uds"
 	))]
 	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
+		// Advertise the request path in the moq SETUP for transports that carry no
+		// request URI of their own; WebTransport and WebSocket already convey it.
+		let moq = self.connect_client(&url);
+
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
 			let session = crate::tcp::connect(url, &self.versions.alpns()).await?;
-			return Ok(self.moq.connect(session).await?);
+			return Ok(moq.connect(session).await?);
 		}
 
 		// Unix domain socket (qmux, no TLS). Same-host only; the server can
@@ -289,14 +317,14 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			return Ok(self.moq.connect(session).await?);
+			return Ok(moq.connect(session).await?);
 		}
 
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
-			let session = self.moq.connect(session).await?;
+			let session = moq.connect(session).await?;
 			return Ok(session);
 		}
 
@@ -308,13 +336,13 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(url, quic_handle).await;
+				return self.race_moq_connect(&moq, url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				return Ok(self.moq.connect(session).await?);
+				return Ok(moq.connect(session).await?);
 			}
 		}
 
@@ -326,13 +354,13 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(url, quic_handle).await;
+				return self.race_moq_connect(&moq, url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				return Ok(self.moq.connect(session).await?);
+				return Ok(moq.connect(session).await?);
 			}
 		}
 
@@ -343,13 +371,13 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(url, quic_handle).await;
+				return self.race_moq_connect(&moq, url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				return Ok(self.moq.connect(session).await?);
+				return Ok(moq.connect(session).await?);
 			}
 		}
 
@@ -357,7 +385,7 @@ impl Client {
 		{
 			let alpns = self.versions.alpns();
 			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
-			return Ok(self.moq.connect(session).await?);
+			return Ok(moq.connect(session).await?);
 		}
 
 		#[cfg(not(feature = "websocket"))]
@@ -365,7 +393,7 @@ impl Client {
 	}
 
 	#[cfg(feature = "websocket")]
-	async fn race_moq_connect<Q, S>(&self, url: Url, quic: Q) -> crate::Result<moq_net::Session>
+	async fn race_moq_connect<Q, S>(&self, moq: &moq_net::Client, url: Url, quic: Q) -> crate::Result<moq_net::Session>
 	where
 		Q: Future<Output = crate::Result<S>>,
 		S: web_transport_trait::Session,
@@ -380,9 +408,54 @@ impl Client {
 		};
 
 		match race_transport_connect(quic, websocket).await? {
-			TransportRace::Quic(quic) => Ok(self.moq.connect(quic).await?),
-			TransportRace::WebSocket(websocket) => Ok(self.moq.connect(websocket).await?),
+			TransportRace::Quic(quic) => Ok(moq.connect(quic).await?),
+			TransportRace::WebSocket(websocket) => Ok(moq.connect(websocket).await?),
 		}
+	}
+}
+
+/// Whether the transport for this URL always conveys the request path itself.
+///
+/// WebTransport (`https`/`http`) and WebSocket (`ws`/`wss`) carry the path in their
+/// request, so it must not be duplicated in the moq SETUP. Everything else advertises
+/// it in the SETUP: `moqt`/`moql` raw QUIC and qmux over `tcp`/`unix` have no request
+/// URI, and `iroh` only carries one in its HTTP/3 mode (a raw iroh session does not),
+/// so iroh always sends it in band to be safe.
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn transport_carries_path(url: &Url) -> bool {
+	matches!(url.scheme(), "https" | "http" | "ws" | "wss")
+}
+
+/// The request path to advertise in the moq SETUP, derived from the dial URL.
+///
+/// A `?path=` query overrides everything; it is the only way to set a path on a
+/// `unix://` URL, whose URL path is the socket file rather than a namespace. Other
+/// schemes (`tcp`, raw QUIC, `iroh`) use the URL path component. Returns `None` for a
+/// `unix://` URL with no `?path=`, leaving the namespace at the root.
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn request_path(url: &Url) -> Option<String> {
+	if let Some((_, path)) = url.query_pairs().find(|(key, _)| key == "path") {
+		return Some(path.into_owned());
+	}
+	match url.scheme() {
+		"unix" => None,
+		_ => Some(url.path().to_string()),
 	}
 }
 
@@ -456,6 +529,71 @@ where
 mod tests {
 	use super::*;
 	use clap::Parser;
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn classifies_transport_path() {
+		for url in ["https://h/p", "http://h/p", "wss://h/p", "ws://h/p"] {
+			assert!(
+				transport_carries_path(&Url::parse(url).unwrap()),
+				"{url} carries its own path"
+			);
+		}
+		// iroh is URL-less here: its raw mode carries no request URI, so it always
+		// advertises the path in the SETUP.
+		for url in [
+			"tcp://h:1/p",
+			"unix:///run/s.sock",
+			"moqt://h/p",
+			"moql://h/p",
+			"iroh://node/p",
+		] {
+			assert!(
+				!transport_carries_path(&Url::parse(url).unwrap()),
+				"{url} advertises in SETUP"
+			);
+		}
+	}
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn request_path_from_url() {
+		// Schemes with a free path component use it directly.
+		for url in ["tcp://h:1/anycast", "moqt://h/anycast", "iroh://node/anycast"] {
+			assert_eq!(
+				request_path(&Url::parse(url).unwrap()).as_deref(),
+				Some("/anycast"),
+				"{url}"
+			);
+		}
+		// A unix:// URL path is the socket file, so it has no namespace by default.
+		assert_eq!(request_path(&Url::parse("unix:///run/s.sock").unwrap()), None);
+		// ...but a ?path= query supplies one, leaving the socket path intact.
+		let uds = Url::parse("unix:///run/s.sock?path=/anycast").unwrap();
+		assert_eq!(uds.path(), "/run/s.sock");
+		assert_eq!(request_path(&uds).as_deref(), Some("/anycast"));
+		// ?path= overrides the URL path on any scheme.
+		assert_eq!(
+			request_path(&Url::parse("tcp://h:1/ignored?path=/win").unwrap()).as_deref(),
+			Some("/win")
+		);
+	}
 
 	#[test]
 	fn test_toml_disable_verify_survives_update_from() {

@@ -12,6 +12,7 @@ pub struct Client {
 	consume: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
+	path: Option<String>,
 }
 
 impl Client {
@@ -47,6 +48,25 @@ impl Client {
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Set the request path to advertise in the SETUP (moq-lite-05).
+	///
+	/// Required on transports that carry no request URI (native QUIC, qmux over
+	/// TCP/TLS/UDS) so the server learns which path the client wants. Omit it on
+	/// bindings that already carry a URI (WebTransport). Ignored by versions with no
+	/// Setup stream (moq-lite-01 through 04). The value is normalized to an absolute
+	/// path (empty becomes `/`, a leading `/` is prepended).
+	pub fn with_path(mut self, path: impl Into<String>) -> Self {
+		let path = path.into();
+		self.path = Some(if path.is_empty() {
+			"/".to_string()
+		} else if path.starts_with('/') {
+			path
+		} else {
+			format!("/{path}")
+		});
 		self
 	}
 
@@ -127,6 +147,9 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
+				let setup = lite::Setup {
+					path: self.path.clone(),
+				};
 				let recv_bw = lite::start(
 					session.clone(),
 					None,
@@ -134,6 +157,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
+					setup,
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
@@ -150,6 +174,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite04,
+					lite::Setup::default(),
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
@@ -167,6 +192,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite03,
+					lite::Setup::default(),
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
@@ -206,6 +232,7 @@ impl Client {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
+				// This path only negotiates lite-01/02, which have no Setup stream.
 				lite::start(
 					session.clone(),
 					Some(stream),
@@ -213,6 +240,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					v,
+					lite::Setup::default(),
 				)?
 			}
 			Version::Ietf(v) => {

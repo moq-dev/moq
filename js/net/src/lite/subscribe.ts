@@ -198,6 +198,10 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				await w.u8(this.priority ?? 0);
 				break;
+			case Version.DRAFT_05_WIP:
+				// moq-lite-05+: just the resolved absolute start group (raw, 0 is valid).
+				await w.u53(this.startGroup ?? 0);
+				break;
 			default:
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
@@ -222,6 +226,9 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				priority = await r.u8();
 				break;
+			case Version.DRAFT_05_WIP:
+				// moq-lite-05+: just the resolved absolute start group (raw).
+				return new SubscribeOk({ startGroup: await r.u53() });
 			default:
 				priority = await r.u8();
 				ordered = await r.bool();
@@ -283,16 +290,46 @@ export class SubscribeDrop {
 }
 
 /**
+ * Signals that no group after a given sequence will be produced.
+ *
+ * moq-lite-05+ only.
+ */
+export class SubscribeEnd {
+	group: number;
+
+	constructor(props: { group: number }) {
+		this.group = props.group;
+	}
+
+	async #encode(w: Writer) {
+		await w.u53(this.group);
+	}
+
+	static async #decode(r: Reader): Promise<SubscribeEnd> {
+		return new SubscribeEnd({ group: await r.u53() });
+	}
+
+	async encode(w: Writer): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader): Promise<SubscribeEnd> {
+		return Message.decode(r, SubscribeEnd.#decode);
+	}
+}
+
+/**
  * A response message on the subscribe stream.
  *
- * In Draft03+, each response is prefixed with a type discriminator:
- * - 0x0 for SUBSCRIBE_OK
- * - 0x1 for SUBSCRIBE_DROP
+ * In Draft03/04 each response is prefixed with a type discriminator: 0x0 SUBSCRIBE_OK,
+ * 0x1 SUBSCRIBE_DROP. In Draft05 end-of-subscription splits out, so the discriminators
+ * become 0x0 SUBSCRIBE_OK, 0x1 SUBSCRIBE_END, 0x2 SUBSCRIBE_DROP.
  *
- * SUBSCRIBE_OK must be the first message on the response stream.
+ * SUBSCRIBE_OK is normally the first message on the response stream.
  */
-export type SubscribeResponse = { ok: SubscribeOk } | { drop: SubscribeDrop };
+export type SubscribeResponse = { ok: SubscribeOk } | { end: SubscribeEnd } | { drop: SubscribeDrop };
 
+/** Encode a subscribe-stream response (OK / END / DROP) for the negotiated moq-lite version. */
 export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
 	switch (version) {
 		case Version.DRAFT_01:
@@ -300,26 +337,55 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 			if ("ok" in resp) {
 				await resp.ok.encode(w, version);
 			} else {
-				throw new Error("subscribe drop not supported for this version");
+				throw new Error("only SUBSCRIBE_OK is supported for this version");
 			}
 			break;
-		default:
+		case Version.DRAFT_05_WIP:
+			// moq-lite-05+: 0x0 OK, 0x1 END, 0x2 DROP.
 			if ("ok" in resp) {
 				await w.u53(0x0);
 				await resp.ok.encode(w, version);
+			} else if ("end" in resp) {
+				await w.u53(0x1);
+				await resp.end.encode(w);
 			} else {
+				await w.u53(0x2);
+				await resp.drop.encode(w);
+			}
+			break;
+		default:
+			// Draft03/04: 0x0 OK, 0x1 DROP; no SUBSCRIBE_END.
+			if ("ok" in resp) {
+				await w.u53(0x0);
+				await resp.ok.encode(w, version);
+			} else if ("drop" in resp) {
 				await w.u53(0x1);
 				await resp.drop.encode(w);
+			} else {
+				throw new Error("SUBSCRIBE_END is not supported for this version");
 			}
 			break;
 	}
 }
 
-export async function decodeSubscribeResponse(r: Reader, version: Version): Promise<SubscribeResponse> {
+async function decodeResponse(r: Reader, version: Version): Promise<SubscribeResponse> {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
 			return { ok: await SubscribeOk.decode(r, version) };
+		case Version.DRAFT_05_WIP: {
+			const typ = await r.u53();
+			switch (typ) {
+				case 0x0:
+					return { ok: await SubscribeOk.decode(r, version) };
+				case 0x1:
+					return { end: await SubscribeEnd.decode(r) };
+				case 0x2:
+					return { drop: await SubscribeDrop.decode(r) };
+				default:
+					throw new Error(`unknown subscribe response type: ${typ}`);
+			}
+		}
 		default: {
 			const typ = await r.u53();
 			switch (typ) {
@@ -332,4 +398,18 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 			}
 		}
 	}
+}
+
+/** Decode the next subscribe-stream response for the negotiated moq-lite version. */
+export async function decodeSubscribeResponse(r: Reader, version: Version): Promise<SubscribeResponse> {
+	return decodeResponse(r, version);
+}
+
+/** Like {@link decodeSubscribeResponse} but returns `undefined` at a clean stream end (FIN). */
+export async function decodeSubscribeResponseMaybe(
+	r: Reader,
+	version: Version,
+): Promise<SubscribeResponse | undefined> {
+	if (await r.done()) return undefined;
+	return decodeResponse(r, version);
 }

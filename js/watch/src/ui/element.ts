@@ -83,12 +83,71 @@ export default class MoqWatchUi extends HTMLElement {
 		player.append(scrimTop, center, chrome, panel);
 		DOM.render(effect, this.#root, player);
 
-		this.#wireChrome(effect, watch, state, player);
+		this.#fitMedia(effect, watch, player);
+		this.#wireChrome(effect, watch, state, player, chrome, panel);
+	}
+
+	#fullscreen(player: HTMLElement): boolean {
+		const doc = document as Document & { webkitFullscreenElement?: Element | null };
+		// Firefox reports shadow fullscreen on the shadow root.
+		const root = this.#root as ShadowRoot & { fullscreenElement?: Element | null };
+		return (
+			root.fullscreenElement === player ||
+			document.fullscreenElement === player ||
+			doc.webkitFullscreenElement === player ||
+			player.classList.contains("player--pseudo-fullscreen")
+		);
+	}
+
+	#fitMedia(effect: Effect, watch: MoqWatch, player: HTMLElement) {
+		const apply = () => {
+			const media = watch.querySelector("canvas, video") as HTMLElement | null;
+			if (!media) return;
+			const fullscreen = this.#fullscreen(player);
+
+			watch.style.width = "100%";
+			watch.style.height = fullscreen ? "100%" : "";
+
+			media.style.width = "100%";
+			media.style.height = fullscreen ? "100%" : "auto";
+			media.style.maxWidth = "100%";
+			media.style.maxHeight = "100%";
+			media.style.objectFit = "contain";
+		};
+
+		const observer = new MutationObserver(apply);
+		observer.observe(watch, { childList: true, subtree: true });
+
+		const playerObserver = new MutationObserver(apply);
+		playerObserver.observe(player, { attributes: true, attributeFilter: ["class"] });
+
+		effect.cleanup(() => observer.disconnect());
+		effect.cleanup(() => playerObserver.disconnect());
+
+		effect.event(document, "fullscreenchange", apply);
+		effect.event(document, "webkitfullscreenchange", apply);
+		effect.event(this.#root, "fullscreenchange", apply);
+		apply();
 	}
 
 	// Show the chrome on activity, auto-hide while playing once the pointer
 	// settles. Stays pinned while paused or when the settings panel is open.
-	#wireChrome(effect: Effect, watch: MoqWatch, state: UiState, player: HTMLElement) {
+	#wireChrome(
+		effect: Effect,
+		watch: MoqWatch,
+		state: UiState,
+		player: HTMLElement,
+		chrome: HTMLElement,
+		panel: HTMLElement,
+	) {
+		// Mobile devices don't support hover, so the controls remain visible in non-fullscreen mode.
+		// In fullscreen mode, tap the video to toggle the controls.
+		const touchUi = window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(hover: none)").matches;
+		if (touchUi) {
+			this.#wireTouchChrome(effect, state, player, chrome, panel);
+			return;
+		}
+
 		// Bump on any pointer/focus activity to re-arm the auto-hide.
 		const activity = new Signal(0);
 		const bump = () => activity.update((n) => n + 1);
@@ -113,6 +172,31 @@ export default class MoqWatchUi extends HTMLElement {
 			if (pinned()) return;
 			state.chrome.set(false);
 		});
+
+		effect.run((e) => {
+			player.classList.toggle("player--chrome", e.get(state.chrome));
+		});
+	}
+
+	#wireTouchChrome(effect: Effect, state: UiState, player: HTMLElement, chrome: HTMLElement, panel: HTMLElement) {
+		state.chrome.set(true);
+
+		const interactive = (event: Event) =>
+			event.composedPath().some((target) => target === chrome || target === panel);
+
+		effect.event(player, "pointerdown", (event) => {
+			if (interactive(event)) return;
+			if (this.#fullscreen(player)) {
+				state.chrome.update((shown) => !shown);
+			} else {
+				state.chrome.set(true);
+			}
+		});
+
+		const showChrome = () => state.chrome.set(true);
+		effect.event(document, "fullscreenchange", showChrome);
+		effect.event(document, "webkitfullscreenchange", showChrome);
+		effect.event(this.#root, "fullscreenchange", showChrome);
 
 		effect.run((e) => {
 			player.classList.toggle("player--chrome", e.get(state.chrome));

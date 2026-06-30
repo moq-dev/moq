@@ -35,3 +35,15 @@ const VERSION_NAMES: Record<number, string> = {
 export function versionName(v: Version): string {
 	return VERSION_NAMES[v] ?? `unknown(0x${v.toString(16)})`;
 }
+
+/// Whether this version uses a unidirectional Setup stream (moq-lite-05+).
+export function hasSetupStream(v: Version): boolean {
+	return v === Version.DRAFT_05_WIP;
+}
+
+/// Whether this version uses the moq-lite-05 framing bundle: the Track stream
+/// (TRACK/TRACK_INFO), a SUBSCRIBE_OK trimmed to the resolved start group plus a
+/// distinct SUBSCRIBE_END, and a per-frame timestamp delta.
+export function hasTrackStream(v: Version): boolean {
+	return v === Version.DRAFT_05_WIP;
+}

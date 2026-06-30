@@ -393,7 +393,7 @@ impl Server {
 						Ok(session) => {
 							return Some(Request {
 								server,
-								kind: RequestKind::WebSocket(session),
+								kind: RequestKind::WebSocket(Box::new(session)),
 							});
 						}
 						Err(err) => tracing::debug!(%err, "failed to accept WebSocket session"),
@@ -479,7 +479,7 @@ pub(crate) enum RequestKind {
 	#[cfg(feature = "iroh")]
 	Iroh(crate::iroh::Request),
 	#[cfg(feature = "websocket")]
-	WebSocket(qmux::Session),
+	WebSocket(Box<qmux::Session>),
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
@@ -573,7 +573,7 @@ impl Request {
 				.accept(request.ok().await.map_err(crate::iroh::Error::Server)?)
 				.await?),
 			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(session) => Ok(self.server.accept(session).await?),
+			RequestKind::WebSocket(session) => Ok(self.server.accept(*session).await?),
 		}
 	}
 

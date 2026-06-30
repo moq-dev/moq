@@ -15,9 +15,11 @@ mod priority;
 mod probe;
 mod publisher;
 mod session;
+mod setup;
 mod stream;
 mod subscribe;
 mod subscriber;
+mod track;
 mod version;
 
 pub use announce::*;
@@ -32,7 +34,11 @@ pub use parameters::*;
 pub use probe::*;
 use publisher::*;
 pub(super) use session::*;
+pub use setup::Setup;
+pub(super) use setup::{accept_setup, send_setup};
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
+#[allow(unused_imports)]
+pub use track::*;
 pub use version::Version;

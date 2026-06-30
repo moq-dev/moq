@@ -9,6 +9,18 @@ const MAX_PARAMS: u64 = 64;
 #[derive(Default, Debug, Clone)]
 pub struct Parameters(HashMap<u64, Vec<u8>>);
 
+impl Parameters {
+	/// Look up a raw parameter value by ID.
+	pub fn get(&self, id: u64) -> Option<&[u8]> {
+		self.0.get(&id).map(Vec::as_slice)
+	}
+
+	/// Set a raw parameter value by ID, replacing any existing one.
+	pub fn set(&mut self, id: u64, value: Vec<u8>) {
+		self.0.insert(id, value);
+	}
+}
+
 impl Decode<Version> for Parameters {
 	fn decode<R: bytes::Buf>(mut r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let mut map = HashMap::new();
