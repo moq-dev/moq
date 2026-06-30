@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.3](https://github.com/moq-dev/moq/compare/hang-v0.19.2...hang-v0.19.3) - 2026-06-30
+
+### Added
+
+- *(hang)* compressed catalog track (catalog.json.z) ([#1904](https://github.com/moq-dev/moq/pull/1904))
+
+### Other
+
+- [codex] Route HLS CLI import through moq-hls ([#1939](https://github.com/moq-dev/moq/pull/1939))
+- Backport moq-mux to main (adapted to main's moq-net, no wire/API breaks) ([#1918](https://github.com/moq-dev/moq/pull/1918))
+
 ## [0.19.2](https://github.com/moq-dev/moq/compare/hang-v0.19.1...hang-v0.19.2) - 2026-06-19
 
 ### Fixed
