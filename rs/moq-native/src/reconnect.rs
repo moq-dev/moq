@@ -81,6 +81,25 @@ struct State {
 	status: Option<Status>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Error>,
+	/// The currently-connected session, or `None` while reconnecting. Read by
+	/// [`ConnectionStatsReader`] to snapshot live connection stats.
+	session: Option<moq_net::Session>,
+}
+
+/// A cloneable read handle for the live connection stats of a [`Reconnect`] loop.
+///
+/// Obtained via [`Reconnect::stats`]. [`stats`](Self::stats) returns `None` while the loop is
+/// between connections (reconnecting), and `Some` snapshot while a session is established.
+#[derive(Clone)]
+pub struct ConnectionStatsReader {
+	state: kio::Consumer<State>,
+}
+
+impl ConnectionStatsReader {
+	/// Snapshot the current connection's stats, or `None` if not currently connected.
+	pub fn stats(&self) -> Option<moq_net::ConnectionStats> {
+		self.state.read().session.as_ref().map(moq_net::Session::stats)
+	}
 }
 
 /// Handle to a background reconnect loop.
@@ -137,12 +156,14 @@ impl Reconnect {
 					tracing::info!(%url, "connected");
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Connected);
+						state.session = Some(session.clone());
 					}
 
 					let connected = tokio::time::Instant::now();
 					let closed = session.closed().await;
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Disconnected);
+						state.session = None;
 					}
 
 					if connected.elapsed() >= backoff.initial {
@@ -222,6 +243,15 @@ impl Reconnect {
 	/// Wait until the reconnect loop stops.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// A cloneable handle for reading the current connection's stats.
+	///
+	/// The handle keeps working across reconnects, reporting `None` between connections.
+	pub fn stats(&self) -> ConnectionStatsReader {
+		ConnectionStatsReader {
+			state: self.state.clone(),
+		}
 	}
 }
 

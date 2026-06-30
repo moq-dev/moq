@@ -50,6 +50,10 @@ client.setConsume(origin)
 
 val session = client.connect("https://relay.example.com")
 
+// Poll connection stats (RTT, bandwidth estimates, byte/packet counters).
+// Each field is null when the transport backend doesn't report that metric.
+session.stats().rttUs?.let { println("rtt: $it us") }
+
 origin.use {
     val consumer = origin.consume()
     val announced = consumer.announced("demos/")

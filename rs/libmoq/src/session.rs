@@ -14,6 +14,8 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 struct TaskEntry {
 	close: Option<oneshot::Sender<()>>,
 	callback: ffi::OnStatus,
+	/// Reads live connection stats, reporting `None` while reconnecting.
+	stats: moq_native::ConnectionStatsReader,
 }
 
 #[derive(Default)]
@@ -30,11 +32,20 @@ impl Session {
 		consume: Option<moq_net::OriginProducer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
-		let closed = oneshot::channel();
+		// Build the reconnect loop up front so we can grab a stats reader for it
+		// before moving it into the spawned task.
+		let reconnect = moq_native::ClientConfig::default()
+			.init()?
+			.with_publish(publish)
+			.with_consume(consume)
+			.reconnect(url);
+		let stats = reconnect.stats();
 
+		let closed = oneshot::channel();
 		let entry = TaskEntry {
 			close: Some(closed.0),
 			callback,
+			stats,
 		};
 		let id = self.task.insert(Some(entry))?;
 
@@ -42,7 +53,7 @@ impl Session {
 			let res = tokio::select! {
 				// close() requested: a clean shutdown delivers a terminal 0.
 				_ = closed.1 => Ok(()),
-				res = Self::connect_run(callback, url, publish, consume) => res,
+				res = Self::report(callback, reconnect) => res,
 			};
 
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
@@ -57,24 +68,18 @@ impl Session {
 		Ok(id)
 	}
 
-	/// Connect and stay connected, reconnecting with exponential backoff if the session drops.
+	/// Snapshot the current connection's stats.
 	///
-	/// Reports a positive connection epoch through the status callback on every (re)connect, and a
-	/// negative code only when reconnection permanently gives up (the backoff timeout is exceeded),
-	/// which is terminal.
-	async fn connect_run(
-		callback: ffi::OnStatus,
-		url: Url,
-		publish: Option<moq_net::OriginConsumer>,
-		consume: Option<moq_net::OriginProducer>,
-	) -> Result<(), Error> {
-		let reconnect = moq_native::ClientConfig::default()
-			.init()?
-			.with_publish(publish)
-			.with_consume(consume)
-			.reconnect(url);
-
-		Self::report(callback, reconnect).await
+	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
+	/// if the session is currently between connections (reconnecting).
+	pub fn stats(&self, id: Id) -> Result<moq_net::ConnectionStats, Error> {
+		self.task
+			.get(id)
+			.and_then(|entry| entry.as_ref())
+			.ok_or(Error::SessionNotFound)?
+			.stats
+			.stats()
+			.ok_or(Error::Offline)
 	}
 
 	/// Forward connection epochs to the status callback until the reconnect loop stops.

@@ -58,6 +58,12 @@ client.setConsume(origin: origin)
 
 let session = try await client.connect(url: "https://relay.example.com")
 
+// Poll connection stats (RTT, bandwidth estimates, byte/packet counters).
+// Each field is nil when the transport backend doesn't report that metric.
+if let rtt = session.stats().rttUs {
+    print("rtt: \(rtt) us")
+}
+
 let consumer = origin.consume()
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
