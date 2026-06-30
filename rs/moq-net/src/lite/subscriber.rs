@@ -185,15 +185,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		while let Some((announce, n)) = stream.reader.decode_maybe_sized::<lite::Announce>().await? {
-			let n = n as u64;
+		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
 					if self.start_announce(path.clone(), hops, &mut producers)? {
 						let guard = self.stats.broadcast(&abs).subscriber();
-						guard.bytes(n);
+						// Count the broadcast name length, not the encoded message size.
+						guard.bytes(abs.as_str().len() as u64);
 						stats_guards.insert(abs.clone(), guard);
 					}
 				}
@@ -207,9 +207,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					if let Some(mut producer) = producers.remove(&path) {
 						producer.abort(Error::Cancel).ok();
 						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
-						// Record the unannounce bytes on the guard before it drops.
+						// Record the unannounce name length on the guard before it drops.
 						if let Some(guard) = stats_guards.remove(&abs) {
-							guard.bytes(n);
+							guard.bytes(abs.as_str().len() as u64);
 						}
 					}
 				}

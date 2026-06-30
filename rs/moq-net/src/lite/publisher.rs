@@ -303,23 +303,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								}
 								let absolute = origin.absolute(&path).to_owned();
 								let guard = stats.broadcast(&absolute).publisher();
-								let msg = lite::Announce::Active { suffix, hops };
-								let n = stream.writer.encode(&msg).await?;
-								guard.bytes(n as u64);
+								// Count the broadcast name length, not the encoded message size, so
+								// stats don't penalize the broadcast for hop/framing overhead.
+								guard.bytes(absolute.as_str().len() as u64);
 								let prev = stats_guards.insert(absolute, guard);
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
+								let msg = lite::Announce::Active { suffix, hops };
+								stream.writer.encode(&msg).await?;
 							} else {
-								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+								let absolute = origin.absolute(&path).to_owned();
+								tracing::debug!(broadcast = %absolute, "unannounce");
+								// Record the unannounce name length on the guard before it drops.
+								if let Some(guard) = stats_guards.remove(&absolute) {
+									guard.bytes(absolute.as_str().len() as u64);
+								}
 								// An ended announce doesn't need hops — the receiver matches on path only.
 								let msg = lite::Announce::Ended {
 									suffix,
 									hops: OriginList::new(),
 								};
-								let n = stream.writer.encode(&msg).await?;
-								// Record the unannounce bytes on the guard before it drops.
-								if let Some(guard) = stats_guards.remove(&origin.absolute(&path).to_owned()) {
-									guard.bytes(n as u64);
-								}
+								stream.writer.encode(&msg).await?;
 							}
 						},
 						None => {

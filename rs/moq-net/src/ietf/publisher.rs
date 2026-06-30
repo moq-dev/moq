@@ -520,16 +520,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let request_id = self.control.next_request_id().await?;
 				let mut stream = Stream::open(&self.session, self.version).await?;
 
+				// Count the broadcast name length, not the encoded message size, so
+				// stats don't penalize the broadcast for framing overhead.
+				let announce_bytes = absolute.as_str().len() as u64;
+
 				// Write the PublishNamespace message
-				let mut announce_bytes = stream.writer.encode(&ietf::PublishNamespace::ID).await?;
-				announce_bytes += stream
+				stream.writer.encode(&ietf::PublishNamespace::ID).await?;
+				stream
 					.writer
 					.encode(&ietf::PublishNamespace {
 						request_id,
 						track_namespace: suffix.as_path(),
 					})
 					.await?;
-				let announce_bytes = announce_bytes as u64;
 
 				// Read response from stream.reader
 				let type_id: u64 = stream.reader.decode().await?;
@@ -564,21 +567,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					_ => return Err(Error::UnexpectedMessage),
 				}
 			} else {
-				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
+				let absolute = self.origin.absolute(&path).to_owned();
+				tracing::debug!(broadcast = %absolute, "unannounce");
 				if let Some((request_id, mut stream, stats)) = namespace_streams.remove(&suffix) {
-					// v14-16 sends PublishNamespaceDone; v17+ just closes the stream.
+					// v14-16 sends PublishNamespaceDone (which carries the name); v17+ just
+					// closes the stream, so only the former contributes announce bytes.
 					match self.version {
 						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-							if let Ok(n) = stream
+							let _ = stream
 								.writer
 								.encode_message(&ietf::PublishNamespaceDone {
 									track_namespace: suffix.as_path(),
 									request_id,
 								})
-								.await
-							{
-								stats.bytes(n as u64);
-							}
+								.await;
+							stats.bytes(absolute.as_str().len() as u64);
 						}
 						_ => {}
 					}
@@ -591,16 +594,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		for (suffix, (request_id, mut stream, stats)) in namespace_streams {
 			match self.version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-					if let Ok(n) = stream
+					let _ = stream
 						.writer
 						.encode_message(&ietf::PublishNamespaceDone {
 							track_namespace: suffix.as_path(),
 							request_id,
 						})
-						.await
-					{
-						stats.bytes(n as u64);
-					}
+						.await;
+					stats.bytes(self.origin.absolute(&suffix).as_str().len() as u64);
 				}
 				_ => {}
 			}

@@ -40,9 +40,11 @@
 //! * `announced` / `announced_closed`: cumulative count of broadcast
 //!   announce/unannounce events on this `(tier, role)`. Bumped on every
 //!   `publisher()` / `subscriber()` guard creation and drop.
-//! * `announced_bytes`: cumulative wire bytes spent on this broadcast's
-//!   announce/unannounce messages, kept separate from the `bytes` payload
-//!   counter. Recorded via [`PublisherStats::bytes`] / [`SubscriberStats::bytes`].
+//! * `announced_bytes`: cumulative broadcast-name length summed over this
+//!   broadcast's announce/unannounce messages (the name, not the encoded
+//!   message size, so hop/framing overhead isn't charged). Kept separate from
+//!   the `bytes` payload counter. Recorded via [`PublisherStats::bytes`] /
+//!   [`SubscriberStats::bytes`].
 //! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
 //!   subscription sentinel. The first active subscription a peer session
 //!   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
@@ -148,9 +150,10 @@ use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProd
 pub struct Counters {
 	pub announced: AtomicU64,
 	pub announced_closed: AtomicU64,
-	/// Cumulative wire bytes spent announcing/unannouncing this broadcast
-	/// (ANNOUNCE/UNANNOUNCE on lite, PUBLISH_NAMESPACE and friends on IETF),
-	/// kept separate from `bytes`, which is media payload.
+	/// Cumulative broadcast-name length summed over this broadcast's
+	/// announce/unannounce messages. Counts the name, not the encoded message
+	/// size, so it doesn't penalize the broadcast for hop/framing overhead.
+	/// Kept separate from `bytes`, which is media payload.
 	pub announced_bytes: AtomicU64,
 	pub subscriptions: AtomicU64,
 	pub subscriptions_closed: AtomicU64,
@@ -826,9 +829,10 @@ pub struct PublisherStats {
 }
 
 impl PublisherStats {
-	/// Record `n` wire bytes spent announcing/unannouncing this broadcast,
-	/// bumping `announced_bytes`. Distinct from [`PublisherTrack::bytes`], which
-	/// counts media payload.
+	/// Add `n` to `announced_bytes` for one announce/unannounce of this
+	/// broadcast. Callers pass the broadcast name length (not the encoded
+	/// message size). Distinct from [`PublisherTrack::bytes`], which counts
+	/// media payload.
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
 			entry.publisher[self.tier.idx()]
@@ -869,8 +873,8 @@ pub struct SubscriberStats {
 }
 
 impl SubscriberStats {
-	/// Record `n` wire bytes spent announcing/unannouncing this broadcast,
-	/// bumping `announced_bytes`. Mirrors [`PublisherStats::bytes`].
+	/// Add `n` to `announced_bytes` for one announce/unannounce of this
+	/// broadcast (the broadcast name length). Mirrors [`PublisherStats::bytes`].
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
 			entry.subscriber[self.tier.idx()]

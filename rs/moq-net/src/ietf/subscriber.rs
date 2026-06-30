@@ -169,7 +169,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let msg = ietf::Namespace::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace");
-					self.start_announce(path, size as u64)?;
+					self.start_announce(path)?;
 				}
 				ietf::NamespaceDone::ID => {
 					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
@@ -190,10 +190,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Handle an incoming bidi stream dispatched by the session.
 	pub fn handle_stream(&mut self, id: u64, mut data: bytes::Bytes, stream: Stream<S, Version>) -> Result<(), Error> {
 		let mut this = self.clone();
-		// `data` is the message body the session dispatcher already split off, so
-		// its length is the announce payload size (the type-id and size prefix are
-		// not included). Capture it before `decode_msg` drains the buffer.
-		let announce_bytes = data.len() as u64;
 		match id {
 			ietf::Publish::ID => {
 				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
@@ -202,7 +198,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				tracing::debug!(message = ?msg, "received publish");
 				web_async::spawn(async move {
-					if let Err(err) = this.run_publish_stream(stream, msg, announce_bytes).await {
+					if let Err(err) = this.run_publish_stream(stream, msg).await {
 						tracing::debug!(%err, "publish stream error");
 					}
 				});
@@ -214,7 +210,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
 				web_async::spawn(async move {
-					if let Err(err) = this.run_publish_namespace_stream(stream, msg, announce_bytes).await {
+					if let Err(err) = this.run_publish_namespace_stream(stream, msg).await {
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
 				});
@@ -232,12 +228,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::PublishNamespace<'_>,
-		announce_bytes: u64,
 	) -> Result<(), Error> {
 		let request_id = msg.request_id;
 		let path = msg.track_namespace.to_owned();
 
-		match self.start_announce(path.clone(), announce_bytes) {
+		match self.start_announce(path.clone()) {
 			Ok(_) => {
 				if let Err(err) = self.write_ok(&mut stream, request_id).await {
 					let _ = self.stop_announce(path);
@@ -266,11 +261,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::Publish<'_>,
-		announce_bytes: u64,
 	) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		if let Err(err) = self.start_publish(&msg, announce_bytes) {
+		if let Err(err) = self.start_publish(&msg) {
 			self.write_publish_error(&mut stream, request_id, 400, &err.to_string())
 				.await?;
 			return Ok(());
@@ -459,14 +453,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	/// `announce_bytes` is the wire size of the announce message (PUBLISH_NAMESPACE,
-	/// NAMESPACE, or PUBLISH) that drove this call, recorded into `announced_bytes`.
-	fn start_announce(&mut self, path: PathOwned, announce_bytes: u64) -> Result<BroadcastProducer, Error> {
+	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
 		let Some(origin) = &self.origin else {
 			return Err(Error::InvalidRole);
 		};
 
 		let abs = origin.absolute(&path).to_owned();
+		// Count the broadcast name length per announce, not the encoded message
+		// size, so stats don't penalize the broadcast for framing overhead.
+		let announce_bytes = abs.as_str().len() as u64;
 
 		let mut state = self.state.lock();
 		match state.broadcasts.entry(path.clone()) {
@@ -539,7 +534,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	fn start_publish(&mut self, msg: &ietf::Publish<'_>, announce_bytes: u64) -> Result<(), Error> {
+	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
 		let track = Track {
@@ -578,7 +573,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
 		drop(state);
 
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned(), announce_bytes)?;
+		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 		broadcast.insert_track(track.consume())?;
 
 		Ok(())
