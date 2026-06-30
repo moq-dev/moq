@@ -42,8 +42,8 @@ clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 humantime = "2.3"
 moq-audio = { workspace = true, optional = true }
-# Ingest only (no HTTP egress server); the lib provides the relocated HLS importer.
-moq-hls = { workspace = true }
+# `server` enables the HTTP egress server for `moq hls export`; the importer is always available.
+moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-video = { workspace = true, optional = true }
