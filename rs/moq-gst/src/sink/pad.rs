@@ -92,8 +92,9 @@ impl Pad {
 
 		// MP3 is handled before the shared `make` closure borrows `broadcast`. Unlike the other
 		// codecs it has no config blob to parse (the config lives in each frame header), so it builds
-		// its importer straight from the caps rate/channels. The pad template pins layer=3.
-		if structure.name() == "audio/mpeg" && structure.get::<i32>("mpegversion").ok() != Some(4) {
+		// its importer straight from the caps rate/channels. Keyed on `layer == 3`, which positively
+		// identifies Layer III: AAC (`audio/mpeg`, no layer field) and MP2 (`layer=2`) both fall through.
+		if structure.name() == "audio/mpeg" && structure.get::<i32>("layer").ok() == Some(3) {
 			let rate: i32 = structure.get("rate").context("MP3 caps missing rate")?;
 			let channels: i32 = structure.get("channels").context("MP3 caps missing channels")?;
 			ensure!(rate > 0, "MP3 caps has non-positive sample rate {rate}");
