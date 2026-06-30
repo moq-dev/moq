@@ -248,6 +248,7 @@ impl<E: CatalogExt> Export<E> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll variant of [`next`](Self::next), drivable from any executor.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Output>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
