@@ -48,7 +48,7 @@ qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
 rand = "0.10.1"
 rcgen = { version = "0.14", default-features = false, optional = true }
-reqwest = { version = "0.12", default-features = false, optional = true }
+reqwest = { version = "0.13", default-features = false, optional = true }
 rustls = "0.23"
 rustls-native-certs = "0.8"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
