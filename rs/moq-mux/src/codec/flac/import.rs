@@ -2,15 +2,17 @@ use super::Config;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
 
-/// Opus importer.
+/// FLAC importer.
 ///
-/// Publishes raw Opus frames (no Ogg framing) to a single moq track. Build it with
+/// Publishes raw FLAC frames to a single moq track. Build it with
 /// [`new`](Self::new), passing the track producer and the
 /// [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
 ///
-/// Each packet handed to [`decode`](Self::decode) is published in its own group so
-/// the relay can forward it immediately without waiting for a group boundary; Opus'
-/// packet loss concealment handles drops.
+/// The STREAMINFO ([`Config`]) is required up front: it becomes the catalog
+/// `description` (the `fLaC` marker plus STREAMINFO) so a decoder can initialize
+/// from the catalog alone. Each FLAC frame is independently decodable, so every
+/// frame handed to [`decode`](Self::decode) is published in its own group and
+/// flagged as a keyframe.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
@@ -24,11 +26,12 @@ impl<E: CatalogExt> Import<E> {
 		config: Config,
 	) -> crate::Result<Self> {
 		let mut audio = hang::catalog::AudioConfig::new(
-			hang::catalog::AudioCodec::Opus,
+			hang::catalog::AudioCodec::Flac,
 			config.sample_rate,
 			config.channel_count,
 		);
 		audio.container = hang::catalog::Container::Legacy;
+		audio.description = Some(config.description());
 
 		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
 
@@ -39,11 +42,6 @@ impl<E: CatalogExt> Import<E> {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 		})
-	}
-
-	/// The MoQ track name this importer publishes on.
-	pub fn name(&self) -> &str {
-		self.track.name()
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
@@ -63,7 +61,7 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Publish one Opus packet as its own group, stamping `pts` or a wall clock when absent.
+	/// Publish one FLAC frame as its own group, stamping `pts` or a wall clock when absent.
 	pub fn decode(&mut self, frame: &[u8], pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {

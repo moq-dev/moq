@@ -346,7 +346,7 @@ impl Server {
 							let noq = super::noq::NoqRequest::accept(_conn, alpns).await?;
 							Ok(Request {
 								server,
-								kind: RequestKind::Noq(noq),
+								kind: RequestKind::Noq(Box::new(noq)),
 							})
 						}.boxed());
 					}
@@ -372,7 +372,7 @@ impl Server {
 							let quiche = super::quiche::QuicheRequest::accept(_conn, alpns).await?;
 							Ok(Request {
 								server,
-								kind: RequestKind::Quiche(quiche),
+								kind: RequestKind::Quiche(Box::new(quiche)),
 							})
 						}.boxed());
 					}
@@ -383,7 +383,7 @@ impl Server {
 						let iroh = super::iroh::Request::accept(_conn).await?;
 						Ok(Request {
 							server,
-							kind: RequestKind::Iroh(iroh),
+							kind: RequestKind::Iroh(Box::new(iroh)),
 						})
 					}.boxed());
 				}
@@ -471,13 +471,13 @@ impl Server {
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
-	Noq(crate::noq::NoqRequest),
+	Noq(Box<crate::noq::NoqRequest>),
 	#[cfg(feature = "quinn")]
 	Quinn(Box<crate::quinn::QuinnRequest>),
 	#[cfg(feature = "quiche")]
-	Quiche(crate::quiche::QuicheRequest),
+	Quiche(Box<crate::quiche::QuicheRequest>),
 	#[cfg(feature = "iroh")]
-	Iroh(crate::iroh::Request),
+	Iroh(Box<crate::iroh::Request>),
 	#[cfg(feature = "websocket")]
 	WebSocket(Box<qmux::Session>),
 }

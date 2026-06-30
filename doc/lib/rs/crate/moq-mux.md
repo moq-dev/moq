@@ -52,6 +52,7 @@ See the [moq-cli source](https://github.com/moq-dev/moq/tree/main/rs/moq-cli) fo
 
 - AAC
 - Opus
+- MP3
 - MP2 (MPEG-TS only, carried verbatim)
 - AC-3 (MPEG-TS only, carried verbatim)
 - E-AC-3 (MPEG-TS only, carried verbatim)

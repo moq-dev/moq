@@ -90,6 +90,26 @@ impl Pad {
 		let mut broadcast = broadcast.clone();
 		let catalog = catalog.clone();
 
+		// MP3 is handled before the shared `make` closure borrows `broadcast`. Unlike the other
+		// codecs it has no config blob to parse (the config lives in each frame header), so it builds
+		// its importer straight from the caps rate/channels. Keyed on `layer == 3`, which positively
+		// identifies Layer III: AAC (`audio/mpeg`, no layer field) and MP2 (`layer=2`) both fall through.
+		if structure.name() == "audio/mpeg" && structure.get::<i32>("layer").ok() == Some(3) {
+			let rate: i32 = structure.get("rate").context("MP3 caps missing rate")?;
+			let channels: i32 = structure.get("channels").context("MP3 caps missing channels")?;
+			ensure!(rate > 0, "MP3 caps has non-positive sample rate {rate}");
+			ensure!(channels > 0, "MP3 caps has non-positive channel count {channels}");
+			let config = moq_mux::codec::mp3::Config {
+				sample_rate: rate as u32,
+				channel_count: channels as u32,
+			};
+			let track = import::unique_track(&mut broadcast, ".mp3")?;
+			let import = moq_mux::codec::mp3::Import::new(track, catalog, config)?;
+			self.framed = Some(import.into());
+			self.caps = Some(caps.clone());
+			return Ok(());
+		}
+
 		// Mint a track for a single codec and hand it to the importer. Every codec converges on one
 		// `import::Track`; only the caps -> (format, init) construction differs. The pad template fixes
 		// the structural fields (h264/h265 byte-stream/au, AAC mpegversion=4/stream-format=raw), so
