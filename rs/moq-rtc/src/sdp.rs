@@ -18,7 +18,7 @@ pub fn parse_offer(body: &str) -> Result<str0m::change::SdpOffer> {
 ///
 /// str0m can emit a *rejected* media line (port 0) with an EMPTY format list,
 /// e.g. `m=audio 0 UDP/TLS/RTP/SAVPF `. This happens when we restrict the
-/// `CodecConfig` (see [`session::rtc_config_with_codecs`]) and the peer's offer
+/// `CodecConfig` (see [`crate::session::rtc_config_with_codecs`]) and the peer's offer
 /// carries a codec the broadcast can't egress -- the classic case being AAC
 /// audio over WHEP, which we can't carry, so the audio m-line comes back
 /// rejected with no payload. An m-line with no `<fmt>` violates RFC 4566, and a
