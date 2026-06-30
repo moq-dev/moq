@@ -19,8 +19,6 @@ author:
 normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
-  RFC1951:
-  RFC7692:
   RFC3986:
   RFC6455:
   RFC9002:
@@ -132,7 +130,7 @@ A subscription starts at a configurable Group (defaulting to the latest) and con
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
 - `Ordered` indicates if the Groups within a Track should be transmitted in order.
-- `Max Latency` (subscriber) indicates the maximum age before a non-latest Group is dropped from live delivery.
+- `Subscriber Max Latency` indicates the maximum age before a non-latest Group is dropped from live delivery; `Publisher Max Latency` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 
@@ -158,7 +156,7 @@ The contents are opaque to the moq-lite layer.
 
 Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (units per second, part of the [TRACK_INFO](#track-info)).
 Every Track has a media timeline — the `Timescale` is always non-zero and every frame is timestamped.
-The timestamp is the source-of-truth for media time and is used by the moq-lite layer for [expiration](#expiration) decisions instead of wall-clock arrival time.
+The timestamp is the source-of-truth for media time and is one of the two inputs to the moq-lite layer's [expiration](#expiration) decisions, alongside wall-clock arrival time.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -297,9 +295,6 @@ When the stream is closed, the subscriber MUST assume that all broadcasts are no
 
 Path prefix matching and equality is done on a byte-by-byte basis.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + ANNOUNCE_BROADCAST messages.
-The compression context for ANNOUNCE_BROADCAST payloads is retained across messages on the same Announce Stream, so separate messages still benefit from repeated path components and Hop ID lists.
-The publisher flushes the compressor after each ANNOUNCE_BROADCAST, allowing the subscriber to decode each announcement as soon as its message bytes arrive.
-For this reason, batching multiple path changes into one ANNOUNCE_BROADCAST is not needed for compression; `Active Count` provides application-level batching for the initial set while preserving one state change per ANNOUNCE_BROADCAST message.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -420,31 +415,36 @@ An application SHOULD use `ordered` when it wants to provide a VOD-like experien
 An application SHOULD NOT use `ordered` when it wants to provide a live experience, preferring to skip old groups rather than buffer them.
 
 Note that [expiration](#expiration) is not affected by `ordered`.
-An old group may still be cancelled/skipped if it exceeds the `Max Latency`.
+An old group may still be cancelled/skipped if it exceeds the `Subscriber Max Latency`.
 An application MUST support gaps and out-of-order delivery even when `ordered` is true.
 
 
 ## Expiration
 Expiration governs when an older group is dropped from a live subscription's Group Stream(s).
-It is a delivery-time concern only; whether older groups remain available for FETCH or future subscriptions is left to the publisher and is best-effort.
+It is primarily a delivery-time concern, governed by `Subscriber Max Latency`.
+Whether older groups remain available for FETCH or future subscriptions is governed by `Publisher Max Latency`, an upper bound on how long the publisher caches a non-latest group; beyond that the publisher MAY drop it.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization).
 However, a lower priority group will still consume RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds the `Max Latency` value in SUBSCRIBE/SUBSCRIBE_UPDATE.
+The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds the `Subscriber Max Latency` value in SUBSCRIBE/SUBSCRIBE_UPDATE.
 The subscriber MAY also locally drop such groups for its own resource accounting.
-Expiration only removes the group from the live subscription's stream; the publisher MAY still retain it for FETCH or new subscriptions.
+Expiration only removes the group from the live subscription's stream; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Latency` (see [TRACK_INFO](#track-info)).
 
 Group age is computed relative to the latest group by sequence number.
 A group is never expired until at least the next group (by sequence number) has been received or queued.
-Once a newer group exists, a group is considered expired if the time between its first frame and the latest group's first frame exceeds `Max Latency`.
+Once a newer group exists, the group's age is measured two ways, and it is expired once **either** measure exceeds the relevant `Max Latency` (`Subscriber Max Latency` for live delivery, `Publisher Max Latency` for the publisher's cache):
 
-The time delta is computed from per-frame timestamps (see [Frame](#frame)).
-Timestamp-based expiration remains consistent across relays and is unaffected by buffering or jitter, unlike wall-clock arrival time.
+- **Timestamp age**: the difference between this group's first frame timestamp and the latest group's first frame timestamp (see [Frame](#frame)). This measure is consistent across relays and unaffected by buffering or jitter.
+- **Wall-clock age**: the difference between when this group's first byte arrived (subscriber) or was queued (publisher) and the same instant for the latest group.
 
-A group that contains zero frames has no timestamp.
-For expiration purposes its effective time is the wall-clock arrival/queue time of the group itself: the first byte of the group received (subscriber) or queued (publisher).
+Equivalently, a group's effective lifetime is the *minimum* of the two — whichever clock declares it stale first wins. The two measures backstop each other:
+
+- A publisher cannot keep stale groups alive by reporting timestamps that look fresh; the wall-clock age expires them anyway.
+- A burst of groups delivered close together (e.g. catching up at the start of a subscription) does not reset their age; the timestamp age still expires the media-old ones even though they all just arrived.
+
+A group that contains zero frames has no timestamp, so only the wall-clock age applies.
 This avoids stalling expiration on tracks that intentionally emit empty groups as keep-alives or gap markers.
 
 An expired group SHOULD be reset at the QUIC level to avoid consuming flow control.
@@ -684,22 +684,12 @@ An ANNOUNCE_BROADCAST before ANNOUNCE_OK is a protocol violation.
 ~~~
 ANNOUNCE_BROADCAST Message {
   Message Length (i)
-  Compressed Payload (..)
-}
-
-ANNOUNCE_BROADCAST Payload {
   Announce Status (i),
   Broadcast Path Suffix (s),
   Hop Count (i),
   Hop ID (i) ...,
 }
 ~~~
-
-**Message Length**:
-The number of bytes in `Compressed Payload`.
-
-**Compressed Payload**:
-The compressed form of `ANNOUNCE_BROADCAST Payload`, as described in [Compressed ANNOUNCE_BROADCAST Payloads](#compressed-announce-broadcast-payloads).
 
 **Announce Status**:
 A flag indicating the announce status.
@@ -722,21 +712,6 @@ When forwarding an announcement received from an upstream peer, a relay MUST app
 The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
 
-### Compressed ANNOUNCE_BROADCAST Payloads {#compressed-announce-broadcast-payloads}
-ANNOUNCE_BROADCAST compresses the entire message payload, excluding only the `Message Length` field.
-The uncompressed input is exactly the `ANNOUNCE_BROADCAST Payload` encoding defined above.
-
-Compression uses the DEFLATE format [RFC1951] with a single compression context per Announce Stream.
-The context is initialized immediately after ANNOUNCE_OK and is retained until the Announce Stream closes.
-For each ANNOUNCE_BROADCAST, the publisher feeds the uncompressed payload bytes into that context and then performs the equivalent of `Z_SYNC_FLUSH`.
-A sync flush produces output ending with the fixed four-byte marker `00 00 ff ff`; the publisher MUST remove this marker before writing the compressed bytes into `Compressed Payload`, matching WebSocket compression [RFC7692].
-
-The subscriber uses a single decompression context per Announce Stream.
-Before inflating each `Compressed Payload`, the subscriber appends the four bytes `00 00 ff ff` to reconstruct the sync-flushed DEFLATE stream.
-After reading `Compressed Payload`, the subscriber inflates it using the retained context and parses the resulting bytes as `ANNOUNCE_BROADCAST Payload`.
-The decompressed payload MUST be a valid `ANNOUNCE_BROADCAST Payload`; otherwise, the subscriber MUST reset the Announce Stream with a PROTOCOL_VIOLATION.
-If decompression fails, the subscriber MUST reset the Announce Stream with a PROTOCOL_VIOLATION.
-
 
 ## SUBSCRIBE
 SUBSCRIBE is sent by a subscriber to start a subscription.
@@ -749,7 +724,7 @@ SUBSCRIBE Message {
   Track Name (s)
   Subscriber Priority (8)
   Subscriber Ordered (8)
-  Max Latency (i)
+  Subscriber Max Latency (i)
   Group Start (i)
   Group End (i)
 }
@@ -769,12 +744,12 @@ A single byte representing whether groups are transmitted in ascending (0x1) or 
 The publisher SHOULD transmit *older* groups first during congestion if true.
 See the [Prioritization](#prioritization) section for more information.
 
-**Max Latency**:
+**Subscriber Max Latency**:
 The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
 The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age relative to the latest group exceeds this duration.
 Applies only to non-latest groups; the latest group is never dropped on staleness grounds.
 A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
-This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions.
+This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Latency` in [TRACK_INFO](#track-info)).
 See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
@@ -798,7 +773,7 @@ SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
   Subscriber Ordered (8)
-  Max Latency (i)
+  Subscriber Max Latency (i)
   Group Start (i)
   Group End (i)
 }
@@ -834,6 +809,7 @@ TRACK_INFO Message {
   Message Length (i)
   Publisher Priority (8)
   Publisher Ordered (8)
+  Publisher Max Latency (i)
   Timescale (i)
 }
 ~~~
@@ -850,6 +826,18 @@ See the [Prioritization](#prioritization) section for more information.
 **Publisher Ordered**:
 The publisher's group ordering preference (ascending `0x1` or descending `0x0`), used only to resolve ties.
 See the [Prioritization](#prioritization) section for more information.
+
+**Publisher Max Latency**:
+The maximum age, in milliseconds, that the publisher caches a non-latest group past the arrival of a newer group.
+Applies only to non-latest groups; the latest group is always retained.
+It is an upper bound on retention, the inverse of an HTTP `Cache-Control: max-age` guarantee:
+
+- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start`, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Latency`.
+- The publisher MAY drop groups sooner than `Publisher Max Latency` under resource pressure; subscribers MUST NOT assume older groups within the bound are still available.
+
+A value of `0` means the publisher caches only the latest group (older groups MAY be dropped as soon as a newer group arrives).
+The unit is milliseconds, matching `Subscriber Max Latency`.
+See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
 The number of timestamp units per second for frame timestamps on this Track.
@@ -1059,12 +1047,10 @@ The `Message Length` describes the payload size on the wire.
 - Added mandatory `Timescale` to TRACK_INFO.
 - Added `Timestamp Delta` to FRAME.
 - Added `Timestamp` to the QUIC datagram body.
-- Removed `Publisher Max Latency`.
-- Replaced wall-clock arrival-time expiration with timestamp-based expiration.
+- Moved `Publisher Max Latency` to TRACK_INFO and redefined it as a maximum retention bound: the longest the publisher caches a non-latest group (the inverse of an HTTP `Cache-Control: max-age` guarantee). `Subscriber Max Latency` keeps its name and remains the subscriber's delivery-time expiration preference.
+- Expire a group once **either** its timestamp age or its wall-clock arrival age exceeds Max Latency (the shorter lifetime wins), bounding both manipulated timestamps and delivery bursts.
 - Added QUIC datagram delivery for groups.
-- Dropped the `Subscriber` prefix from fields that exist on only one side.
 - Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket.
-- Added mandatory DEFLATE compression for ANNOUNCE_BROADCAST payloads.
 
 ## moq-lite-04
 - Renamed ANNOUNCE_PLEASE to ANNOUNCE_REQUEST.
