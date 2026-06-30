@@ -4086,6 +4086,7 @@ version = "0.2.25"
 dependencies = [
  "bytes",
  "hang",
+ "jni 0.21.1",
  "moq-audio",
  "moq-mux",
  "moq-native",
@@ -4220,6 +4221,7 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
+ "jni 0.21.1",
  "moq-net",
  "notify",
  "parking_lot",

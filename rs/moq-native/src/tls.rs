@@ -57,6 +57,10 @@ pub enum Error {
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
+	#[cfg(target_os = "android")]
+	#[error("failed to initialize the Android platform verifier")]
+	AndroidInit(#[source] jni::errors::Error),
+
 	#[error("failed to configure client certificate")]
 	ClientAuth(#[source] rustls::Error),
 
@@ -424,34 +428,31 @@ impl Client {
 	/// Build the verifier for system/default trust on the rustls backends.
 	///
 	/// Uses the OS-native platform verifier (Keychain/SecTrust, Windows
-	/// CryptoAPI, or the native store on Linux) everywhere it works without
-	/// app-side setup, optionally extended with `custom` PEM roots. Android's
-	/// platform verifier needs JNI initialization, so there we trust the bundled
-	/// Mozilla roots instead so verification works out of the box.
+	/// CryptoAPI, or the native store on Linux) everywhere it works, optionally
+	/// extended with `custom` PEM roots. Android's platform verifier needs JNI
+	/// setup (see [`init_android`]); until that has run we trust the bundled
+	/// Mozilla roots so verification still works out of the box.
 	fn system_verifier(
 		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
 		custom: &[CertificateDer<'static>],
 		provider: &crypto::Provider,
 	) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
-		#[cfg(not(target_os = "android"))]
-		{
-			let verifier = if custom.is_empty() {
-				rustls_platform_verifier::Verifier::new(provider.clone())?
-			} else {
-				rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
-			};
-			Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
-		}
 		#[cfg(target_os = "android")]
-		{
-			let _ = provider;
+		if !ANDROID_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
 			let mut roots = rustls::RootCertStore::empty();
 			roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 			for cert in custom {
 				roots.add(cert.clone()).map_err(Error::AddRoot)?;
 			}
-			Ok(builder.with_root_certificates(roots))
+			return Ok(builder.with_root_certificates(roots));
 		}
+
+		let verifier = if custom.is_empty() {
+			rustls_platform_verifier::Verifier::new(provider.clone())?
+		} else {
+			rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
+		};
+		Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
 	}
 
 	/// Attach the optional mTLS client identity, finishing the rustls builder.
@@ -485,6 +486,36 @@ fn root_store(custom: &[CertificateDer<'static>]) -> Result<rustls::RootCertStor
 		roots.add(cert.clone()).map_err(Error::AddRoot)?;
 	}
 	Ok(roots)
+}
+
+/// Whether [`init_android`] has successfully wired up the platform verifier.
+#[cfg(target_os = "android")]
+static ANDROID_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Initialize Android platform certificate verification.
+///
+/// On Android the OS trust store is only reachable through the JVM, so the
+/// platform verifier needs a JNI handle to the application `Context` before it
+/// can be used. Call this once at startup with the raw `JNIEnv` and `Context`
+/// pointers, e.g. from `JNI_OnLoad`. The `moq-ffi` bindings call it
+/// automatically, so most consumers never touch this directly.
+///
+/// Until it succeeds, clients fall back to the bundled Mozilla roots, so a
+/// missing or failed init degrades to webpki verification rather than failing.
+///
+/// # Safety
+///
+/// `raw_env` must be a valid `*mut JNIEnv` for the calling thread and
+/// `raw_context` a valid reference to an `android.content.Context`.
+#[cfg(target_os = "android")]
+pub unsafe fn init_android(raw_env: *mut std::ffi::c_void, raw_context: *mut std::ffi::c_void) -> Result<()> {
+	use std::sync::atomic::Ordering;
+
+	let mut env = unsafe { jni::JNIEnv::from_raw(raw_env as *mut jni::sys::JNIEnv) }.map_err(Error::AndroidInit)?;
+	let context = unsafe { jni::objects::JObject::from_raw(raw_context as jni::sys::jobject) };
+	rustls_platform_verifier::android::init_with_env(&mut env, context).map_err(Error::AndroidInit)?;
+	ANDROID_INITIALIZED.store(true, Ordering::Release);
+	Ok(())
 }
 
 // ── Server ──────────────────────────────────────────────────────────
