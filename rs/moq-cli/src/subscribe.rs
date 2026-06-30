@@ -169,8 +169,7 @@ impl Subscribe {
 
 		while let Some(frame) = ts.next().await? {
 			if pace {
-				let due = pacer.due(frame.timestamp, std::time::Instant::now());
-				tokio::time::sleep_until(due.into()).await;
+				tokio::time::sleep_until(pacer.due(frame.timestamp).into()).await;
 			}
 
 			stdout.write_all(&frame.payload).await?;
