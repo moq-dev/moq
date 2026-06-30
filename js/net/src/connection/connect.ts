@@ -424,30 +424,14 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 
 	const quic = new Session(url);
 
-	// Race connecting against losing the cancel race or closing before we ever
-	// opened. A rejected `ready` (refused/failed) maps to "closed" so the cleanup
-	// path still runs; the separate `closed` arm covers Session versions that
-	// resolve `closed` but never reject `ready`, which would otherwise hang here
-	// forever and stop the caller from retrying.
-	const result = await Promise.race([
-		quic.ready.then(
-			() => "ready" as const,
-			() => "closed" as const,
-		),
-		quic.closed.then(
-			() => "closed" as const,
-			() => "closed" as const,
-		),
-		cancel.then(() => "cancel" as const),
-	]);
-	if (result === "ready") return quic;
+	// Wait for the WebSocket to connect, or for the cancel promise to resolve.
+	// `ready` rejects on a refused/failed connection, so a throw here is the caller's
+	// cue to retry; a lost cancel race instead resolves and we close the loser.
+	const loaded = await Promise.race([quic.ready.then(() => true), cancel]);
+	if (!loaded) {
+		quic.close();
+		return undefined;
+	}
 
-	quic.close();
-
-	// Lost the race to another transport: return undefined so the winner proceeds.
-	if (result === "cancel") return undefined;
-
-	// Genuine failure: throw so `Promise.any` ignores us and waits on (or fails
-	// alongside) the other transport, letting the reconnect loop retry.
-	throw new Error("WebSocket closed before connecting");
+	return quic;
 }
