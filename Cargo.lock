@@ -4230,6 +4230,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rustls",
  "rustls-native-certs",
+ "rustls-platform-verifier 0.6.2",
  "rustls-webpki",
  "serde",
  "serde_with",
@@ -4252,6 +4253,7 @@ dependencies = [
  "web-transport-quiche",
  "web-transport-quinn",
  "web-transport-trait",
+ "webpki-roots",
  "x509-parser",
 ]
 

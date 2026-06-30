@@ -178,8 +178,23 @@ impl QuicheClient {
 			Verification::Fingerprints(hashes) => {
 				builder = builder.with_server_certificate_hashes(hashes);
 			}
-			Verification::Roots(roots) => {
-				builder = builder.with_root_certificates(roots);
+			Verification::Roots { custom, system } => {
+				// quiche/boringssl takes a concrete root list rather than a rustls
+				// verifier, so the platform verifier the other backends use isn't
+				// available here. Trust the native store for system roots; on
+				// platforms without one (iOS/Android) this yields nothing and the
+				// handshake fails closed.
+				let mut roots = custom;
+				if system {
+					let native = rustls_native_certs::load_native_certs();
+					for err in native.errors {
+						tracing::warn!(%err, "failed to load native root cert");
+					}
+					roots.extend(native.certs);
+				}
+				if !roots.is_empty() {
+					builder = builder.with_root_certificates(roots);
+				}
 			}
 		}
 
