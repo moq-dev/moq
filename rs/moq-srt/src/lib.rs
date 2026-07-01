@@ -24,8 +24,8 @@
 //!   JWT and scoping the origin per token) plugs its policy in. It mirrors
 //!   `moq-native`'s `Server` / `Request`.
 //!
-//! The bundled `moq-srt` binary serves the origin locally or forwards it to a
-//! remote relay (those paths need the `server` feature).
+//! A command-line interface is provided by the `moq-cli` binary, on top of this
+//! library.
 //!
 //! Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg
 //! dependency.

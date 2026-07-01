@@ -34,8 +34,8 @@
 //!   a JWT and scoping the origin per token) plugs its policy in, with no
 //!   callback. It mirrors `moq-native`'s `Server` / `Request`.
 //!
-//! The bundled `moq-rtmp` binary serves the origin locally or forwards it to a
-//! remote relay (those paths need the `server` feature).
+//! A command-line interface is provided by the `moq-cli` binary, on top of this
+//! library.
 //!
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
@@ -62,6 +62,6 @@ pub use server::{Conn, Play, Publish, Request, Server, Stream, accept_stream};
 
 /// Re-export of the `rustls` version this crate builds [`Config::tls`] against,
 /// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`
-/// bump is a breaking change). Only available with the `server` feature.
-#[cfg(feature = "server")]
+/// bump is a breaking change). Only available with the `tls` feature.
+#[cfg(feature = "tls")]
 pub use rustls;

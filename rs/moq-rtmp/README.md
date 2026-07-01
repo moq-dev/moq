@@ -15,8 +15,8 @@ or ffmpeg dependency.
 
 ## Library
 
-Depend on it with `default-features = false` to skip the binary's relay
-client/server and CLI dependencies:
+RTMPS (`Config::tls` / `Server::with_tls`) is the only optional piece; drop it
+with `default-features = false` for a plaintext-only build:
 
 ```toml
 moq-rtmp = { version = "0.0.1", default-features = false }
@@ -111,41 +111,12 @@ Two ways to serve `rtmps://`:
   }
   ```
 
-## Binary
+## CLI
 
-The `moq-rtmp` binary (needs the default `server` feature) has two modes.
+A command-line interface is provided by the [`moq-cli`](../moq-cli) binary, on
+top of this library.
 
-`serve` runs RTMP directly as a local relay, so MoQ subscribers (native or
-browser) connect straight to this binary; RTMP players can also pull the same
-broadcasts back out. It also exposes the `/certificate.sha256` endpoint browsers
-need for self-signed `http://` origins, and can serve a static player directory
-with `--dir`:
-
-```bash
-moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
-  --rtmp-listen 0.0.0.0:1935 --rtmp-prefix live/
-```
-
-`publish` instead forwards every ingested broadcast out to a remote relay over
-WebTransport (like `moq-srt publish` / `moq-cli hls import`):
-
-```bash
-moq-rtmp publish --relay https://relay.example.com \
-  --rtmp-listen 0.0.0.0:1935 --rtmp-prefix live/
-```
-
-Either mode also accepts RTMPS alongside plaintext RTMP. Add `--rtmps-listen`
-with a cert (`--rtmps-tls-cert` / `--rtmps-tls-key`, or `--rtmps-tls-generate`
-for a throwaway self-signed cert), and OBS/ffmpeg can publish to `rtmps://`:
-
-```bash
-moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
-  --rtmp-listen 0.0.0.0:1935 \
-  --rtmps-listen 0.0.0.0:1936 --rtmps-tls-cert cert.pem --rtmps-tls-key key.pem \
-  --rtmp-prefix live/
-```
-
-Feed either mode with any RTMP source. OBS: set the server to
+Point any RTMP source at the gateway. OBS: set the server to
 `rtmp://127.0.0.1:1935/live` and the stream key to `cam0`. ffmpeg:
 
 ```bash
@@ -175,8 +146,8 @@ the broadcast to be announced.
 
 ## Auth
 
-The `run` entry point and the `moq-rtmp` binary are unauthenticated: anyone who
-can reach the TCP port can publish or play, so gate them with a host firewall or a
+The `run` entry point (and the `moq-cli` CLI built on it) is unauthenticated:
+anyone who can reach the TCP port can publish or play, so gate them with a host firewall or a
 private network. To authenticate, use the `Server` / `Request` API above and
 verify each request in your accept loop (e.g. the stream key as a moq-token JWT,
 the app as the broadcast path) before accepting it. That is the intended

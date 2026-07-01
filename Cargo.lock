@@ -4314,20 +4314,14 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
- "axum-server",
  "bytes",
- "clap",
  "hang",
  "moq-mux",
- "moq-native",
  "moq-net",
  "reqwest",
- "rustls",
- "sd-notify",
  "str0m",
  "thiserror 2.0.18",
  "tokio",
- "tower-http 0.7.0",
  "tracing",
  "url",
  "uuid",
@@ -4338,24 +4332,18 @@ name = "moq-rtmp"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum",
- "axum-server",
  "bytes",
- "clap",
  "futures",
  "moq-mux",
  "moq-native",
  "moq-net",
  "rml_rtmp",
  "rustls",
- "sd-notify",
  "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tower-http 0.7.0",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -4363,23 +4351,14 @@ name = "moq-srt"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum",
- "axum-server",
  "bytes",
- "clap",
  "futures",
- "humantime",
  "moq-mux",
- "moq-native",
  "moq-net",
- "rustls",
- "sd-notify",
  "srt-tokio",
  "thiserror 2.0.18",
  "tokio",
- "tower-http 0.7.0",
  "tracing",
- "url",
 ]
 
 [[package]]
