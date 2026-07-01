@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.35"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
