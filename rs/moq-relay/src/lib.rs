@@ -12,7 +12,6 @@ mod cluster;
 mod config;
 mod connection;
 mod http_client;
-mod internal;
 mod stats;
 mod web;
 #[cfg(feature = "websocket")]
@@ -26,6 +25,5 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
-pub use internal::*;
 pub use stats::*;
 pub use web::*;

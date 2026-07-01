@@ -375,8 +375,11 @@ impl NoqServer {
 		// There's a bit more boilerplate to make a generic endpoint.
 		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
 
-		let listen =
-			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
+		let listen = crate::util::resolve(
+			config.quic_bind().ok().flatten().as_deref(),
+			crate::server::DEFAULT_BIND,
+		)
+		.map_err(Error::ResolveBind)?;
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = noq::EndpointConfig::default();

@@ -247,72 +247,79 @@ peers to discover and dial.
 The `quinn` and `noq` QUIC backends support mTLS; configuring `tls.root` with a
 backend that does not (e.g. `quiche`) is a startup error.
 
-## Internal Listener
+## Stream Listeners
 
-For trusted local workers that don't want the overhead of TLS or UDP, the relay
-can bind a second listener that speaks the qmux wire format directly over a plain
-stream. It performs **no token/certificate authentication**: every accepted
-connection is granted full, unrestricted publish and subscribe access on the
-internal tier, exactly like a cluster peer dialing `/`.
+For trusted local workers that don't want the overhead of TLS or UDP, a
+`--server-bind` entry can speak the qmux wire format directly over a plain
+stream (`tcp://` or `unix://`) instead of QUIC. These listeners authenticate
+**through the same path as QUIC**: a JWT (carried in the moq-lite-05 SETUP
+path as `/broadcast?jwt=<token>`) is verified and scopes the session, so a
+memory-safety bug in an out-of-process gateway can reach only what its users'
+tokens permit.
 
-A TCP and a Unix-socket listener can each be enabled independently, under
-`[internal.tcp]` and `[internal.uds]`.
+A connection with no JWT is granted a relay-fixed anonymous subtree if the
+listener configured one (`anon=<prefix>`), otherwise it is rejected. A no-JWT
+connection that does carry a path resolves anonymous/public access for that
+path, exactly like tokenless playback over QUIC.
+
+Per-listener policy rides the bind URL's query string.
 
 ### TCP
 
 ```toml
-[internal.tcp]
-# Plain-TCP qmux listener. No TLS, no UDP, no auth: anyone who can reach this
-# socket gets full access. Bind it only to a trusted interface.
-listen = "127.0.0.1:4444"
+[server]
+bind = [
+  "udp://[::]:443",
+  # Plain-TCP qmux. No TLS, no UDP. `anon=` (empty) grants no-JWT
+  # connections the whole root; drop it to require a JWT.
+  "tcp://127.0.0.1:4444?anon=",
+]
 ```
 
-TCP carries no peer identity, so **any local process of any user** can connect.
+TCP carries no peer identity, so it cannot enforce a credential allowlist.
 Loopback is the safest bind; a private VPC interface is also valid. The relay
-logs a warning when `listen` is not a loopback address but does not refuse to
-start, so firewalling the port is your responsibility.
+logs a warning when the address is not loopback but does not refuse to start,
+so firewalling the port is your responsibility.
 
 ```bash
-moq publish tcp://127.0.0.1:4444/my-broadcast < video.mp4
+moq publish "tcp://127.0.0.1:4444/my-broadcast?jwt=$TOKEN" < video.mp4
 ```
 
 ### Unix socket (with a uid/gid/pid allowlist)
 
-A Unix socket lets the relay authenticate the connecting process by its kernel
-credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`), so you can restrict access to a
-specific worker user rather than any local process. Requires the relay to be
-built with the `uds` feature.
+A Unix socket lets the relay additionally gate the connecting process by its
+kernel credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`), so you can restrict
+access to a specific worker user. Requires the relay to be built with the `uds`
+feature.
 
 ```toml
-[internal.uds]
-listen = "/run/moq/internal.sock"
-
-# Only accept connections from these credentials. Each list is matched
-# independently (AND across fields, OR within a field); an empty/omitted list
-# imposes no constraint on that field.
-[internal.uds.allow]
-uid = [1001]   # only the worker's user
-# gid = [2000]
-# pid = [12345]
+[server]
+bind = [
+  "udp://[::]:443",
+  # `anon=.stats` lets a no-JWT helper publish/subscribe only under `.stats`.
+  # allow-uid/gid/pid are comma-separated; each is matched independently
+  # (AND across fields, OR within a field), and an omitted field is no
+  # constraint on that field.
+  "unix:///run/moq/internal.sock?anon=.stats&allow-uid=1001",
+]
 ```
 
-A connection whose credentials fail the allowlist is closed immediately with no
-access granted. A `pid` requirement rejects peers whose PID the platform doesn't
-report (e.g. some macOS versions). With no `allow` list configured the socket is
-unauthenticated (the relay logs a warning), so the socket's filesystem
-permissions become the only gate.
+A connection whose credentials fail the allowlist is closed with no access
+granted. A `allow-pid` requirement rejects peers whose PID the platform doesn't
+report (e.g. some macOS versions). The credential allowlist is defense-in-depth
+on top of the JWT, not a replacement for it.
 
 ```bash
-moq publish unix:///run/moq/internal.sock --broadcast my-broadcast < video.mp4
+moq publish "unix:///run/moq/internal.sock/my-broadcast?jwt=$TOKEN" < video.mp4
 ```
 
 ### Notes
 
-Both transports are native-only: browsers can't open raw TCP or Unix sockets, so
-the JS client doesn't support them. The plain-stream path has no TLS ALPN, so the
-MoQ version is negotiated in-band via qmux (a transport parameter on the first
-frame) and the exact version is agreed up front. Neither transport reads a path
-from the URL for routing; the grant is always the empty root (everything).
+Stream transports are native-only: browsers can't open raw TCP or Unix sockets,
+so the JS client doesn't support them. The plain-stream path has no TLS ALPN, so
+the MoQ version is negotiated in-band via qmux and the exact version is agreed up
+front (the listener offers moq-lite-05, the only version that carries a request
+path in-band, so a JWT/path can ride the SETUP).
 
 ## Example Configurations
 

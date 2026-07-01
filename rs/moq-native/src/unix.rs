@@ -42,19 +42,8 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// Credentials of a connected Unix-socket peer.
-///
-/// `pid` is `None` on platforms that don't report it (e.g. some macOS versions);
-/// `uid`/`gid` are always available.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PeerCred {
-	/// The peer process's effective user ID.
-	pub uid: u32,
-	/// The peer process's effective group ID.
-	pub gid: u32,
-	/// The peer process's PID, if the platform reports it.
-	pub pid: Option<i32>,
-}
+/// Credentials of a connected Unix-socket peer. See [`crate::PeerCred`].
+pub use crate::PeerCred;
 
 /// Dial a `unix://<path>` URL, advertising `protocols` for in-band ALPN
 /// negotiation. Returns a qmux session over the socket.

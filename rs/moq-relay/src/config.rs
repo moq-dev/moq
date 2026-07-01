@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -39,11 +39,6 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub web: WebConfig,
-
-	/// Optionally run an unauthenticated plain-TCP listener for trusted clients.
-	#[command(flatten)]
-	#[serde(default)]
-	pub internal: InternalConfig,
 
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[command(flatten)]
@@ -372,52 +367,42 @@ id = 12345
 		);
 	}
 
-	/// Same clap+TOML clobber guard for the internal listeners. Both
-	/// `internal.tcp.listen` (`Option<SocketAddr>`) and `internal.uds.listen`
-	/// (`Option<PathBuf>`) must survive the `update_from` re-parse when their
-	/// CLI flags are absent, or a TOML-configured listener gets silently
-	/// disabled.
-	static INTERNAL_LISTEN_ENV_LOCK: Mutex<()> = Mutex::new(());
+	/// Same clap+TOML clobber guard for the multi-transport `server.bind` list.
+	/// A `Vec<String>` of `--server-bind` entries (QUIC + stream listeners) set
+	/// via TOML must survive the `update_from` re-parse when the CLI flag is
+	/// absent, or every configured listener gets silently dropped.
+	static SERVER_BIND_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 	#[test]
-	fn cli_does_not_clobber_toml_internal_listen() {
-		let _guard = INTERNAL_LISTEN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: INTERNAL_LISTEN_ENV_LOCK serializes this with any sibling test
-		// touching the same env vars.
-		unsafe {
-			std::env::remove_var("MOQ_INTERNAL_LISTEN");
-			std::env::remove_var("MOQ_INTERNAL_UDS_LISTEN");
-		}
+	fn cli_does_not_clobber_toml_server_bind() {
+		let _guard = SERVER_BIND_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: SERVER_BIND_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_SERVER_BIND") };
 
 		let toml = r#"
-[internal.tcp]
-listen = "127.0.0.1:4444"
-
-[internal.uds]
-listen = "/run/moq/internal.sock"
-
-[internal.uds.allow]
-uid = [1001]
+[server]
+bind = [
+  "udp://[::]:443",
+  "unix:///run/moq/internal.sock?anon=.stats&allow-uid=1001",
+]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("internal-listen-toml-wins.toml");
+		let path = dir.join("server-bind-toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(
-			config.internal.tcp.listen,
-			Some("127.0.0.1:4444".parse().unwrap()),
-			"TOML's internal.tcp.listen must not be clobbered by the CLI re-parse"
+			config.server.bind,
+			vec![
+				"udp://[::]:443".to_string(),
+				"unix:///run/moq/internal.sock?anon=.stats&allow-uid=1001".to_string(),
+			],
+			"TOML's server.bind list must not be clobbered by the CLI re-parse"
 		);
-		assert_eq!(
-			config.internal.uds.listen.as_deref(),
-			Some(std::path::Path::new("/run/moq/internal.sock")),
-			"TOML's internal.uds.listen must not be clobbered by the CLI re-parse"
-		);
-		assert_eq!(config.internal.uds.allow.uid, vec![1001]);
 	}
 
 	#[test]

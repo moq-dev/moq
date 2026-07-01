@@ -602,6 +602,17 @@ pub struct Info {
 	pub fingerprints: Vec<String>,
 }
 
+impl Info {
+	/// An empty certificate set, used when no TLS-bearing backend is configured.
+	pub(crate) fn empty() -> Self {
+		Self {
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+			certs: Vec::new(),
+			fingerprints: Vec::new(),
+		}
+	}
+}
+
 // ── NoCertificateVerification ───────────────────────────────────────
 
 #[derive(Debug)]

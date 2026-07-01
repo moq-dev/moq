@@ -10,9 +10,7 @@
 use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
 
 use moq_native::moq_net::{self, Origin, Track};
-use moq_relay::{
-	Auth, AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, WebState, run_internal,
-};
+use moq_relay::{Auth, AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig, WebState};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -54,7 +52,7 @@ async fn build_web(port: u16, ws: bool) -> Web {
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
 	// unused UDP port that we ignore.
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = vec!["[::]:0".to_string()];
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init().expect("server init");
 
@@ -372,28 +370,47 @@ async fn two_publish_only_clients_coexist() {
 	web_handle.abort();
 }
 
-/// Stand up just the unauthenticated internal listener (plain-TCP qmux, no
-/// auth stack) on a free loopback port. Returns the port and an abort handle.
-async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
+/// Run the relay's accept loop over a stream-only `--server-bind` (no QUIC), the
+/// same path `main.rs` uses, authenticating every connection through [`Auth`].
+fn spawn_stream_relay(bind: String) -> tokio::task::JoinHandle<()> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let mut config = moq_native::ServerConfig::default();
+	config.bind = vec![bind];
+	let mut server = config.init().expect("server init");
 
+	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let auth = Auth::default();
+
+	tokio::spawn(async move {
+		let mut id = 0;
+		while let Some(request) = server.accept().await {
+			let conn = Connection {
+				id,
+				request,
+				cluster: cluster.clone(),
+				auth: auth.clone(),
+			};
+			id += 1;
+			tokio::spawn(async move {
+				let _ = conn.run().await;
+			});
+		}
+	})
+}
+
+/// Stand up the relay listening only on a plain-TCP qmux `--server-bind` on a
+/// free loopback port, with an empty anon scope (no-JWT => whole root). Returns
+/// the port and an abort handle.
+async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	// Pick a free TCP port, then drop the probe so the listener can bind it.
 	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let mut internal = InternalConfig::default();
-	internal.tcp.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
-	// Empty anon prefix => no-JWT connections get the whole root (the legacy
-	// unrestricted behaviour), which is what these transport round-trips exercise.
-	internal.anon = Some(String::new());
-
-	let handle = tokio::spawn(async move {
-		// `run_internal` only returns on error; aborted at teardown.
-		let _ = run_internal(internal, cluster, Auth::default()).await;
-	});
+	// `anon=` (empty value) grants no-JWT connections the whole root, which is
+	// what these transport round-trips exercise.
+	let handle = spawn_stream_relay(format!("tcp://127.0.0.1:{port}?anon="));
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {
@@ -482,21 +499,11 @@ async fn internal_tcp_round_trip() {
 /// plus an abort handle.
 #[cfg(unix)]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
-
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux.
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}.sock", std::process::id()));
 
-	let mut internal = InternalConfig::default();
-	internal.uds.listen = Some(path.clone());
-	internal.anon = Some(String::new());
-
-	let handle = tokio::spawn(async move {
-		let _ = run_internal(internal, cluster, Auth::default()).await;
-	});
+	let handle = spawn_stream_relay(format!("unix://{}?anon=", path.display()));
 
 	// Wait for the socket file to appear.
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);

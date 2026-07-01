@@ -84,7 +84,7 @@ impl MoqServer {
 			}
 		}
 		if let Some(mut state) = self.task.lock() {
-			state.config.bind = Some(addr);
+			state.config.bind = vec![addr];
 		}
 		Ok(())
 	}
