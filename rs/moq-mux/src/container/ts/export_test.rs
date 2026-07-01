@@ -523,11 +523,9 @@ async fn import_export_roundtrip_carries_expected_tracks_hint() {
 
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::with_catalog(
-		&mut broadcast,
-		crate::catalog::hang::Catalog::<tscat::Ext>::default(),
-	)
-	.unwrap();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
 
 	// Import the TS stream. The importer parses the PMT and sets expected_tracks.
 	let mut importer = crate::container::ts::Import::new(broadcast.clone(), catalog.clone());
@@ -541,7 +539,10 @@ async fn import_export_roundtrip_carries_expected_tracks_hint() {
 	drop(catalog_guard);
 
 	if let Some(count) = expected {
-		assert!(count >= 1, "expected_tracks should be at least 1 for this file with audio+video");
+		assert!(
+			count >= 1,
+			"expected_tracks should be at least 1 for this file with audio+video"
+		);
 	}
 
 	// Export the imported broadcast: it should use the expected_tracks hint to gate PSI.
