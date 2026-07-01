@@ -168,7 +168,7 @@ impl Subscribe {
 			// and follows the live edge with up to `--max-latency` of buffer, so a retained
 			// broadcast drains in real time while a live source stays near the edge.
 			if pace {
-				tokio::time::sleep_until(frame.pace.into()).await;
+				tokio::time::sleep_until(frame.pace).await;
 			}
 
 			stdout.write_all(&frame.payload).await?;

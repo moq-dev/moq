@@ -3,7 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use super::Timestamp;
 
@@ -31,24 +33,23 @@ impl Timer {
 	/// arms (or re-arms) against `waiter` and returns `Pending`. Re-arms only when `after`
 	/// changes, so repeated polls for one deadline reuse a single timer registration.
 	///
-	/// Reads the clock through `tokio::time` (not `std`), so a `tokio::time::pause()` test
-	/// advances the deadline check and the sleep together.
+	/// Reads the clock through `tokio::time`, so a `tokio::time::pause()` test advances the
+	/// deadline check and the sleep together.
 	pub(crate) fn poll(&mut self, after: Instant, waiter: &kio::Waiter) -> Poll<Instant> {
-		let deadline = tokio::time::Instant::from_std(after);
-		let now = tokio::time::Instant::now();
-		if now >= deadline {
+		let now = Instant::now();
+		if now >= after {
 			self.disarm();
-			return Poll::Ready(now.into_std());
+			return Poll::Ready(now);
 		}
 		if self.until != Some(after) {
 			self.until = Some(after);
-			self.sleep = Some(Box::pin(tokio::time::sleep_until(deadline)));
+			self.sleep = Some(Box::pin(tokio::time::sleep_until(after)));
 		}
 		let mut cx = Context::from_waker(waiter.waker());
 		match self.sleep.as_mut().unwrap().as_mut().poll(&mut cx) {
 			Poll::Ready(()) => {
 				self.disarm();
-				Poll::Ready(tokio::time::Instant::now().into_std())
+				Poll::Ready(Instant::now())
 			}
 			Poll::Pending => Poll::Pending,
 		}
@@ -143,9 +144,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn timer_fires_at_its_deadline() {
-		// Snapshot the (paused) tokio clock as a std instant; the Timer reads tokio time,
-		// so `start` and the deadline live on the same clock the test advances.
-		let start = tokio::time::Instant::now().into_std();
+		let start = Instant::now();
 		let deadline = start + Duration::from_millis(50);
 		let mut timer = Timer::default();
 		// `kio::wait` drives the poll; under paused time tokio auto-advances to the armed
