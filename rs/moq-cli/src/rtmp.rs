@@ -19,37 +19,26 @@ pub struct Args {
 	#[arg(id = "rtmp-connect", long = "connect", value_name = "URL")]
 	pub connect: Option<Url>,
 
-	/// Bind an RTMP listener. Broadcasts are named from the RTMP app/key.
+	/// Bind an RTMP listener, bridging the single `--broadcast` (the RTMP app/key
+	/// is accepted but not used for routing).
 	#[arg(id = "rtmp-listen", long = "listen", value_name = "ADDR")]
 	pub listen: Option<SocketAddr>,
-
-	/// Prefix prepended to the app/key when naming broadcasts (listen only).
-	#[arg(long, conflicts_with = "rtmp-connect")]
-	pub prefix: Option<String>,
 }
 
-/// Accept incoming RTMP publishes into the Origin; reject plays (import).
-pub async fn listen_import(
-	origin: moq_net::OriginProducer,
-	addr: SocketAddr,
-	prefix: Option<String>,
-) -> anyhow::Result<()> {
+/// Accept incoming RTMP publishes into the Origin as `name`; reject plays (import).
+pub async fn listen_import(origin: moq_net::OriginProducer, addr: SocketAddr, name: String) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
-	tracing::info!(%addr, "RTMP listening (import)");
+	tracing::info!(%addr, %name, "RTMP listening (import)");
 	notify_ready();
 
-	let prefix = prefix.unwrap_or_default();
 	while let Some(request) = server.accept().await {
 		match request {
 			Request::Publish(publish) => {
-				let Some(path) = resolve_path(&prefix, publish.app(), publish.stream_key()) else {
-					let _ = publish.reject("empty broadcast path").await;
-					continue;
-				};
 				let origin = origin.clone();
+				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.accept(&origin, &path).await {
-						tracing::warn!(%path, %err, "RTMP ingest ended with error");
+					if let Err(err) = publish.accept(&origin, &name).await {
+						tracing::warn!(%name, %err, "RTMP ingest ended with error");
 					}
 				});
 			}
@@ -65,28 +54,20 @@ pub async fn listen_import(
 	Ok(())
 }
 
-/// Serve RTMP plays from the Origin; reject publishes (export).
-pub async fn listen_export(
-	origin: moq_net::OriginConsumer,
-	addr: SocketAddr,
-	prefix: Option<String>,
-) -> anyhow::Result<()> {
+/// Serve RTMP plays of `name` from the Origin; reject publishes (export).
+pub async fn listen_export(origin: moq_net::OriginConsumer, addr: SocketAddr, name: String) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
-	tracing::info!(%addr, "RTMP listening (export)");
+	tracing::info!(%addr, %name, "RTMP listening (export)");
 	notify_ready();
 
-	let prefix = prefix.unwrap_or_default();
 	while let Some(request) = server.accept().await {
 		match request {
 			Request::Play(play) => {
-				let Some(path) = resolve_path(&prefix, play.app(), play.stream_key()) else {
-					let _ = play.reject("empty broadcast path").await;
-					continue;
-				};
 				let origin = origin.clone();
+				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = play.accept(&origin, &path).await {
-						tracing::warn!(%path, %err, "RTMP play ended with error");
+					if let Err(err) = play.accept(&origin, &name).await {
+						tracing::warn!(%name, %err, "RTMP play ended with error");
 					}
 				});
 			}
@@ -151,17 +132,4 @@ async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String, String)> {
 	);
 
 	Ok((addr, app, key))
-}
-
-/// Join a prefix and the RTMP app/key into a broadcast path (empty -> None).
-fn resolve_path(prefix: &str, app: &str, key: &str) -> Option<String> {
-	let app = app.trim_matches('/');
-	let key = key.trim_matches('/');
-	let base = match (app.is_empty(), key.is_empty()) {
-		(true, true) => return None,
-		(false, true) => app.to_string(),
-		(true, false) => key.to_string(),
-		(false, false) => format!("{app}/{key}"),
-	};
-	Some(format!("{prefix}{base}"))
 }

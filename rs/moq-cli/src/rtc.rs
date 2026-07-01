@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 
 use hang::moq_net;
+use hang::moq_net::AsPath;
 use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 
@@ -19,7 +20,8 @@ pub struct Args {
 	#[arg(id = "rtc-connect", long = "connect", value_name = "URL")]
 	pub connect: Option<Url>,
 
-	/// Bind an HTTP listener for WHIP/WHEP.
+	/// Bind an HTTP listener for WHIP/WHEP, scoped to the single `--broadcast`
+	/// (peers reach it at `http://host:port/<broadcast>`).
 	#[arg(id = "rtc-listen", long = "listen", value_name = "ADDR")]
 	pub listen: Option<SocketAddr>,
 
@@ -32,29 +34,42 @@ pub struct Args {
 	pub public_addr: Vec<SocketAddr>,
 }
 
-/// WHIP server: accept incoming WebRTC publishes into the Origin (import).
+/// WHIP server: accept incoming WebRTC publishes into the Origin as `name` (import).
 pub async fn listen_import(
 	origin: moq_net::OriginProducer,
 	listen: SocketAddr,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
+	name: String,
 ) -> anyhow::Result<()> {
-	let server = server(origin.clone(), origin.consume(), udp_bind, public_addr);
+	let publisher = scope_producer(&origin, &name)?;
+	let server = server(publisher, origin.consume(), udp_bind, public_addr);
 	serve(server.publish_router(), listen, "WHIP").await
 }
 
-/// WHEP server: serve WebRTC plays from the Origin (export).
+/// WHEP server: serve WebRTC plays of `name` from the Origin (export).
 pub async fn listen_export(
 	origin: moq_net::OriginConsumer,
 	listen: SocketAddr,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
+	name: String,
 ) -> anyhow::Result<()> {
+	let subscriber = origin
+		.scope(&[name.as_path()])
+		.ok_or_else(|| anyhow::anyhow!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
 	let publisher = moq_net::Origin::random().produce();
-	let server = server(publisher, origin, udp_bind, public_addr);
+	let server = server(publisher, subscriber, udp_bind, public_addr);
 	serve(server.subscribe_router(), listen, "WHEP").await
+}
+
+/// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.
+fn scope_producer(origin: &moq_net::OriginProducer, name: &str) -> anyhow::Result<moq_net::OriginProducer> {
+	origin
+		.scope(&[name.as_path()])
+		.ok_or_else(|| anyhow::anyhow!("failed to scope origin to broadcast `{name}`"))
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `name` (import).

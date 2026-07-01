@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use hang::moq_net;
+use hang::moq_net::AsPath;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::moq::notify_ready;
@@ -47,14 +48,19 @@ pub async fn import(origin: &moq_net::OriginProducer, name: String, playlist: St
 	Ok(importer.run().await?)
 }
 
-/// Serve HLS/LL-HLS over HTTP from the Origin's broadcasts.
-pub async fn export(origin: moq_net::OriginConsumer, args: Args) -> anyhow::Result<()> {
+/// Serve HLS/LL-HLS over HTTP for the single broadcast `name` (reached at
+/// `/<name>/master.m3u8`); other broadcasts in the Origin are not served.
+pub async fn export(origin: moq_net::OriginConsumer, args: Args, name: String) -> anyhow::Result<()> {
+	let scoped = origin
+		.scope(&[name.as_path()])
+		.ok_or_else(|| anyhow::anyhow!("failed to scope origin to broadcast `{name}`"))?;
+
 	let config = moq_hls::export::Config {
 		part_target: args.part_target,
 		window: args.window,
 		..Default::default()
 	};
-	let server = moq_hls::Server::new(origin, config);
+	let server = moq_hls::Server::new(scoped, config);
 	let app = server
 		.router()
 		.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));

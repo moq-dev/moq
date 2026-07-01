@@ -206,10 +206,12 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
     import hls https://example.com/live/master.m3u8
 ```
 
-Serve MoQ broadcasts as HLS / LL-HLS over HTTP:
+Serve one MoQ broadcast as HLS / LL-HLS over HTTP (reached at
+`http://host:8089/<broadcast>/master.m3u8`):
 
 ```bash
-moq --client-connect https://relay.example.com/anon export hls --listen '[::]:8089'
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+    export hls --listen '[::]:8089'
 ```
 
 ## Network Gateways (RTMP / SRT / WebRTC)
@@ -225,13 +227,18 @@ A listener is directional: an import listener rejects plays, and an export
 listener rejects publishes. The operator declares the direction; the connecting
 peer can't choose.
 
+Every gateway is scoped to the single `--broadcast` (required for a `--listen`):
+a listener bridges only that broadcast, ignoring the RTMP app/key and SRT stream
+id. (Multi-broadcast routing by app/key belongs behind a relay, via the gateway
+libraries' auth-aware API.)
+
 ### RTMP ingest to a relay
 
-Accept OBS / FFmpeg RTMP pushes and forward them to a relay (broadcasts named
-from the RTMP app/key):
+Accept OBS / FFmpeg RTMP pushes and forward one broadcast to a relay:
 
 ```bash
-moq --client-connect https://relay.example.com/anon import rtmp --listen '[::]:1935'
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+    import rtmp --listen '[::]:1935'
 ```
 
 ### Restream MoQ to Twitch (RTMP)
@@ -246,24 +253,25 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 ### SRT
 
 ```bash
-# Accept incoming SRT publishes and forward to a relay
-moq --client-connect https://relay.example.com/anon import srt --listen '[::]:9000'
+# Accept incoming SRT publishes as one broadcast and forward to a relay
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import srt --listen '[::]:9000'
 
 # Serve a broadcast to SRT players
-moq --client-connect https://relay.example.com/anon export srt --listen '[::]:9000'
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export srt --listen '[::]:9000'
 ```
 
 ### WebRTC (WHIP / WHEP)
 
 Direction picks the HTTP role: import `--listen` is a WHIP server, export
-`--listen` is a WHEP server.
+`--listen` is a WHEP server. Peers reach the broadcast at
+`http://host:8080/<broadcast>`.
 
 ```bash
-# WHIP ingest: browsers publish to us, we forward to a relay
-moq --client-connect https://relay.example.com/anon import rtc --listen '[::]:8080'
+# WHIP ingest: browsers publish one broadcast to us, we forward to a relay
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import rtc --listen '[::]:8080'
 
 # WHEP playback: serve a broadcast to browsers
-moq --client-connect https://relay.example.com/anon export rtc --listen '[::]:8080'
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export rtc --listen '[::]:8080'
 ```
 
 ## Authentication

@@ -108,21 +108,30 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
-					tasks.spawn(rtmp::listen_import(origin.clone(), addr, rtmp.prefix));
+					let name = require_broadcast(name, "import rtmp --listen")?;
+					tasks.spawn(rtmp::listen_import(origin.clone(), addr, name));
 				} else if let Some(url) = rtmp.connect {
 					tasks.spawn(rtmp::connect_import(origin.clone(), url, name));
 				}
 			}
 			ImportSource::Srt(srt) => {
 				if let Some(addr) = srt.listen {
-					tasks.spawn(srt::listen_import(origin.clone(), addr, srt.prefix, srt.latency));
+					let name = require_broadcast(name, "import srt --listen")?;
+					tasks.spawn(srt::listen_import(origin.clone(), addr, name, srt.latency));
 				} else if let Some(url) = srt.connect {
 					tasks.spawn(srt::connect_import(origin.clone(), url, name, srt.latency));
 				}
 			}
 			ImportSource::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {
-					tasks.spawn(rtc::listen_import(origin.clone(), addr, rtc.udp_bind, rtc.public_addr));
+					let name = require_broadcast(name, "import rtc --listen")?;
+					tasks.spawn(rtc::listen_import(
+						origin.clone(),
+						addr,
+						rtc.udp_bind,
+						rtc.public_addr,
+						name,
+					));
 				} else if let Some(url) = rtc.connect {
 					tasks.spawn(rtc::connect_import(origin.clone(), url, name));
 				}
@@ -169,29 +178,34 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	} else {
 		match export.sink {
 			ExportSink::Hls(args) => {
-				tasks.spawn(hls::export(origin.consume(), args));
+				let name = require_broadcast(name, "export hls")?;
+				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
-					tasks.spawn(rtmp::listen_export(origin.consume(), addr, rtmp.prefix));
+					let name = require_broadcast(name, "export rtmp --listen")?;
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name));
 				} else if let Some(url) = rtmp.connect {
 					tasks.spawn(rtmp::connect_export(origin.consume(), url, name));
 				}
 			}
 			ExportSink::Srt(srt) => {
 				if let Some(addr) = srt.listen {
-					tasks.spawn(srt::listen_export(origin.consume(), addr, srt.prefix, srt.latency));
+					let name = require_broadcast(name, "export srt --listen")?;
+					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency));
 				} else if let Some(url) = srt.connect {
 					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency));
 				}
 			}
 			ExportSink::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {
+					let name = require_broadcast(name, "export rtc --listen")?;
 					tasks.spawn(rtc::listen_export(
 						origin.consume(),
 						addr,
 						rtc.udp_bind,
 						rtc.public_addr,
+						name,
 					));
 				} else if let Some(url) = rtc.connect {
 					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
@@ -233,6 +247,16 @@ async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
 	}
 
 	Ok(())
+}
+
+/// The listener / HTTP-serving endpoints bridge one named broadcast, so an
+/// empty `--broadcast` is rejected rather than silently defaulting to the root.
+fn require_broadcast(name: String, endpoint: &str) -> anyhow::Result<String> {
+	anyhow::ensure!(
+		!name.is_empty(),
+		"`{endpoint}` requires a broadcast: pass --broadcast <name>"
+	);
+	Ok(name)
 }
 
 fn warn_if_missing_format(name: &str) {
