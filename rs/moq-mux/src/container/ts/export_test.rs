@@ -558,7 +558,7 @@ async fn import_export_roundtrip_carries_expected_tracks_hint() {
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
 		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
 			assert!(
-				pmt.es_info.len() >= 1,
+				!pmt.es_info.is_empty(),
 				"re-exported PMT should list at least one stream"
 			);
 			pmt_checked = true;
