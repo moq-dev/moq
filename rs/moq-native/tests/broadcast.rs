@@ -35,7 +35,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = vec!["[::]:0".to_string()];
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = server_version {
 		server_config.version = vec![v];
@@ -445,7 +445,7 @@ async fn broadcast_websocket() {
 
 	// Server with both QUIC (required) and WebSocket listeners.
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = vec!["[::]:0".to_string()];
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
@@ -549,7 +549,7 @@ async fn broadcast_websocket_fallback() {
 
 	// QUIC binds on its own port; WebSocket on a different port.
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = vec!["[::]:0".to_string()];
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
@@ -656,7 +656,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = vec!["[::]:0".to_string()];
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
@@ -732,7 +732,7 @@ async fn broadcast_race_quic_wins() {
 	let port = ws_listener.local_addr().expect("failed to get ws addr").port();
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = vec![format!("[::]:{port}")];
+	server_config.bind = Some(format!("[::]:{port}"));
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let mut server = server_config
@@ -1030,7 +1030,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 /// A test server bound to a free port with a generated localhost certificate.
 fn test_server() -> (moq_native::Server, std::net::SocketAddr) {
 	let mut config = moq_native::ServerConfig::default();
-	config.bind = vec!["[::]:0".to_string()];
+	config.bind = Some("[::]:0".to_string());
 	config.tls.generate = vec!["localhost".into()];
 	let server = config.init().expect("failed to init server");
 	let addr = server.local_addr().expect("failed to get local addr");

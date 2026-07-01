@@ -249,11 +249,11 @@ backend that does not (e.g. `quiche`) is a startup error.
 
 ## Stream Listeners
 
-For trusted local workers that don't want the overhead of TLS or UDP, a
-`--server-bind` entry can speak the qmux wire format directly over a plain
-stream (`tcp://` or `unix://`) instead of QUIC. These listeners authenticate
-**through the same path as QUIC**: a JWT (carried in the moq-lite-05 SETUP path
-as `/broadcast?jwt=<token>`) is verified and scopes the session, so a
+For trusted local workers that don't want the overhead of TLS or UDP, the relay
+can also listen for the qmux wire format directly over a plain stream: TCP
+(`--server-tcp-bind`) or a Unix socket (`--server-unix-bind`). These listeners
+authenticate **through the same path as QUIC**: a JWT (carried in the moq-lite-05
+SETUP path as `/broadcast?jwt=<token>`) is verified and scopes the session, so a
 memory-safety bug in an out-of-process gateway can reach only what its users'
 tokens permit.
 
@@ -266,11 +266,10 @@ grant it publicly, e.g. `--auth-public-publish .stats` for a stats publisher.
 
 ```toml
 [server]
-bind = [
-  "udp://[::]:443",
-  # Plain-TCP qmux. No TLS, no UDP.
-  "tcp://127.0.0.1:4444",
-]
+bind = "[::]:443"      # QUIC; omit to run stream-only
+
+[server.tcp]
+bind = "127.0.0.1:4444"
 ```
 
 TCP carries no peer identity, so it cannot be gated by peer credentials.
@@ -287,21 +286,17 @@ moq publish "tcp://127.0.0.1:4444/my-broadcast?jwt=$TOKEN" < video.mp4
 A Unix socket lets the relay additionally gate the connecting process by its
 kernel credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`), so you can restrict
 access to a specific worker user. Requires the relay to be built with the `uds`
-feature. The allowlist is a server-level setting (`--server-unix-allow-uid`,
-`--server-unix-allow-gid`, `--server-unix-allow-pid`) that applies to every
-`unix://` listener.
+feature. The allowlist (`--server-unix-allow-uid` / `-gid` / `-pid`) applies to
+the `unix://` listener.
 
 ```toml
-[server]
-bind = [
-  "udp://[::]:443",
-  "unix:///run/moq/internal.sock",
-]
+[server.unix]
+bind = "/run/moq/internal.sock"
 # Each list is matched independently (AND across fields, OR within a field);
 # an omitted field imposes no constraint. Empty = any local process.
-unix_allow_uid = [1001]
-# unix_allow_gid = [2000]
-# unix_allow_pid = [12345]
+allow_uid = [1001]
+# allow_gid = [2000]
+# allow_pid = [12345]
 ```
 
 A connection whose credentials fail the allowlist is dropped before its SETUP is

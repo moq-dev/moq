@@ -304,11 +304,8 @@ impl QuicheServer {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
-		let listen = crate::util::resolve(
-			config.quic_bind().ok().flatten().as_deref(),
-			crate::server::DEFAULT_BIND,
-		)
-		.map_err(Error::ResolveBind)?;
+		let listen =
+			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?

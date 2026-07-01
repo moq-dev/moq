@@ -46,15 +46,6 @@ pub enum Error {
 	#[error("invalid status code")]
 	InvalidStatusCode,
 
-	#[error("invalid --server-bind entry: {0}")]
-	InvalidBind(String),
-
-	#[error("more than one QUIC (udp://) --server-bind entry; Quinn binds a single address")]
-	MultipleQuicBinds,
-
-	#[error("--server-bind {0} requested a transport whose feature is not compiled in")]
-	UnsupportedBind(String),
-
 	#[error("{0}")]
 	Reconnect(String),
 

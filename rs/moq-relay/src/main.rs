@@ -25,8 +25,12 @@ async fn main() -> anyhow::Result<()> {
 	let mut server = config.server.init()?;
 	let client = config.client.clone().init()?;
 
-	// `None` when `--server-bind` lists only stream (tcp/unix) transports.
-	let addr = server.local_addr().ok();
+	// `None` for a stream-only server (no QUIC); any other error is real.
+	let addr = match server.local_addr() {
+		Ok(addr) => Some(addr),
+		Err(moq_native::Error::NoBackend(_)) => None,
+		Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
+	};
 
 	#[cfg(feature = "iroh")]
 	let (server, client) = {

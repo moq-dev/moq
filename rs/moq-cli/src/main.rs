@@ -183,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
 		} => {
 			warn_if_missing_format(&broadcast);
 			let publish = Publish::new(&format)?;
-			let web_bind = config.quic_bind()?.unwrap_or_else(|| "[::]:443".to_string());
+			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
 			let server = config.init()?;
 			#[cfg(feature = "iroh")]
@@ -203,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
 			dir,
 			args,
 		} => {
-			let web_bind = config.quic_bind()?.unwrap_or_else(|| "[::]:443".to_string());
+			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
 			let server = config.init()?;
 			#[cfg(feature = "iroh")]

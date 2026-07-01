@@ -15,63 +15,34 @@ use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 
 /// Configuration for the MoQ server.
-#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct ServerConfig {
-	/// Addresses to listen on, one per entry. Defaults to `udp://[::]:443`.
+	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
 	///
-	/// Each entry selects a transport by URL scheme:
-	/// - `udp://host:port` (or a bare `host:port` / `[::]:port` for back-compat):
-	///   QUIC. At most one QUIC entry is allowed; a DNS `host:port` is resolved at
-	///   bind time and only the first resolved address is used (Quinn cannot bind
-	///   multiple addresses).
-	/// - `tcp://host:port`: plaintext qmux over TCP (no TLS; requires the `tcp`
-	///   feature). Trusted networks only.
-	/// - `unix:///path`: plaintext qmux over a Unix socket (peer-credential aware;
-	///   requires the `uds` feature, unix-only). Use a triple slash for an absolute
-	///   path.
-	///
-	/// Stream transports (`tcp`/`unix`) are URL-less; their request path (and any
-	/// JWT) rides the SETUP in-band and is surfaced on [`Request::path`].
+	/// Accepts standard socket address syntax (e.g. `[::]:443`) or a DNS
+	/// `host:port` pair (e.g. `fly-global-services:443`), resolved at bind time
+	/// (first address only; Quinn cannot bind multiple). Leave unset while a
+	/// `tcp`/`unix` listener is configured to run a stream-only server with no
+	/// QUIC.
+	#[serde(alias = "listen")]
 	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
-	#[serde(alias = "listen", default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub bind: Vec<String>,
+	pub bind: Option<String>,
 
-	/// Peer-credential allowlist for `unix://` listeners (unix-only).
-	///
-	/// Restricts which local processes may connect to any `unix://` entry in
-	/// [`bind`](Self::bind), by the peer's kernel-reported user ID. Empty means no
-	/// uid constraint. A connection that fails the allowlist is dropped before its
-	/// SETUP is read. Ignored by TCP/QUIC, which carry no peer credentials.
-	#[arg(
-		long = "server-unix-allow-uid",
-		env = "MOQ_SERVER_UNIX_ALLOW_UID",
-		value_delimiter = ','
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub unix_allow_uid: Vec<u32>,
+	/// Plaintext qmux TCP listener (`--server-tcp-bind`, no TLS). Requires the
+	/// `tcp` feature.
+	#[cfg(feature = "tcp")]
+	#[command(flatten)]
+	#[serde(default)]
+	pub tcp: TcpConfig,
 
-	/// Group-ID allowlist for `unix://` listeners. See [`unix_allow_uid`](Self::unix_allow_uid).
-	#[arg(
-		long = "server-unix-allow-gid",
-		env = "MOQ_SERVER_UNIX_ALLOW_GID",
-		value_delimiter = ','
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub unix_allow_gid: Vec<u32>,
-
-	/// PID allowlist for `unix://` listeners. See [`unix_allow_uid`](Self::unix_allow_uid).
-	/// A populated list rejects peers whose PID the platform doesn't report.
-	#[arg(
-		long = "server-unix-allow-pid",
-		env = "MOQ_SERVER_UNIX_ALLOW_PID",
-		value_delimiter = ','
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub unix_allow_pid: Vec<i32>,
+	/// Plaintext qmux Unix-socket listener (`--server-unix-bind`) with an optional
+	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
+	#[cfg(all(feature = "uds", unix))]
+	#[command(flatten)]
+	#[serde(default)]
+	pub unix: UnixConfig,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
@@ -146,6 +117,68 @@ pub struct ServerConfig {
 	pub tls: crate::tls::Server,
 }
 
+/// Plaintext-TCP qmux listener settings (no TLS, no UDP).
+///
+/// TCP carries no peer identity, so it must only be reachable from trusted
+/// clients. Bind it to loopback or a private interface; a non-loopback bind
+/// logs a warning but is allowed.
+#[cfg(feature = "tcp")]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct TcpConfig {
+	/// Bind a plaintext qmux TCP listener on this address.
+	#[arg(long = "server-tcp-bind", id = "server-tcp-bind", env = "MOQ_SERVER_TCP_BIND")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<net::SocketAddr>,
+}
+
+/// Plaintext Unix-socket qmux listener settings, with an optional
+/// peer-credential allowlist.
+///
+/// The kernel reports the connecting process's credentials, so the `allow_*`
+/// lists can restrict callers to a specific worker user. Each populated list
+/// constrains the corresponding credential (AND across the three, OR within
+/// each); all empty means the socket's filesystem permissions are the only gate.
+#[cfg(all(feature = "uds", unix))]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct UnixConfig {
+	/// Bind a plaintext qmux Unix-socket listener at this path.
+	#[arg(long = "server-unix-bind", id = "server-unix-bind", env = "MOQ_SERVER_UNIX_BIND")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<PathBuf>,
+
+	/// Allowed peer user IDs. Empty means any uid.
+	#[arg(
+		long = "server-unix-allow-uid",
+		env = "MOQ_SERVER_UNIX_ALLOW_UID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub allow_uid: Vec<u32>,
+
+	/// Allowed peer group IDs. Empty means any gid.
+	#[arg(
+		long = "server-unix-allow-gid",
+		env = "MOQ_SERVER_UNIX_ALLOW_GID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub allow_gid: Vec<u32>,
+
+	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
+	/// whose PID the platform doesn't report.
+	#[arg(
+		long = "server-unix-allow-pid",
+		env = "MOQ_SERVER_UNIX_ALLOW_PID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub allow_pid: Vec<i32>,
+}
+
 impl ServerConfig {
 	pub fn init(self) -> crate::Result<Server> {
 		Server::new(self)
@@ -160,100 +193,22 @@ impl ServerConfig {
 		}
 	}
 
-	/// The single QUIC bind address (scheme stripped), if one is configured.
+	/// Whether a `tcp`/`unix` stream listener is configured.
 	///
-	/// Returns the first `udp://` or schemeless entry in [`bind`](Self::bind), or
-	/// `Some("[::]:443")` when `bind` is empty (the default). Returns `None` when
-	/// `bind` is non-empty but lists only stream transports, so a stream-only
-	/// server does not also open QUIC on the default port. Errors if the list has
-	/// more than one QUIC entry or an entry with an unsupported/invalid scheme.
-	pub fn quic_bind(&self) -> crate::Result<Option<String>> {
-		if self.bind.is_empty() {
-			return Ok(Some(DEFAULT_BIND.to_string()));
+	/// When true and [`bind`](Self::bind) is unset, the server runs stream-only
+	/// (no default QUIC listener).
+	#[allow(unused_mut)]
+	fn has_stream_listener(&self) -> bool {
+		let mut has = false;
+		#[cfg(feature = "tcp")]
+		{
+			has |= self.tcp.bind.is_some();
 		}
-
-		let mut quic = None;
-		for entry in &self.bind {
-			#[allow(unreachable_patterns)]
-			match BindScheme::parse(entry)? {
-				BindScheme::Quic(addr) => {
-					if quic.replace(addr).is_some() {
-						return Err(Error::MultipleQuicBinds);
-					}
-				}
-				#[cfg(not(all(feature = "tcp", feature = "uds", unix)))]
-				BindScheme::Unsupported(entry) => return Err(Error::UnsupportedBind(entry)),
-				_ => {}
-			}
+		#[cfg(all(feature = "uds", unix))]
+		{
+			has |= self.unix.bind.is_some();
 		}
-		Ok(quic)
-	}
-}
-
-/// A `--server-bind` entry classified by transport.
-enum BindScheme {
-	/// QUIC over UDP. Carries the address with any `udp://` scheme stripped.
-	Quic(String),
-	/// Plaintext qmux over TCP. Carries the resolved address.
-	#[cfg(feature = "tcp")]
-	Tcp(net::SocketAddr),
-	/// Plaintext qmux over a Unix socket. Carries the socket path.
-	#[cfg(all(feature = "uds", unix))]
-	Unix(PathBuf),
-	/// A `tcp://`/`unix://` entry whose transport feature is not compiled in.
-	#[cfg(not(all(feature = "tcp", feature = "uds", unix)))]
-	Unsupported(String),
-}
-
-impl BindScheme {
-	/// Classify a single `--server-bind` entry by its URL scheme.
-	///
-	/// A schemeless `host:port` (or `[::]:port`) is treated as QUIC for
-	/// back-compat. `udp://` is QUIC with the scheme stripped. `tcp://` and
-	/// `unix://` select the stream transports.
-	fn parse(entry: &str) -> crate::Result<Self> {
-		let Some((scheme, rest)) = entry.split_once("://") else {
-			// No scheme: a bare address is QUIC, as before.
-			return Ok(BindScheme::Quic(entry.to_string()));
-		};
-
-		match scheme {
-			"udp" | "quic" => Ok(BindScheme::Quic(rest.to_string())),
-			"tcp" => {
-				#[cfg(feature = "tcp")]
-				{
-					use std::net::ToSocketAddrs;
-					let url = Url::parse(entry).map_err(|_| Error::InvalidBind(entry.to_string()))?;
-					let host = url.host_str().ok_or_else(|| Error::InvalidBind(entry.to_string()))?;
-					let port = url.port().ok_or_else(|| Error::InvalidBind(entry.to_string()))?;
-					let addr = (host, port)
-						.to_socket_addrs()
-						.map_err(|_| Error::InvalidBind(entry.to_string()))?
-						.next()
-						.ok_or_else(|| Error::InvalidBind(entry.to_string()))?;
-					Ok(BindScheme::Tcp(addr))
-				}
-				#[cfg(not(feature = "tcp"))]
-				{
-					Ok(BindScheme::Unsupported(entry.to_string()))
-				}
-			}
-			"unix" => {
-				#[cfg(all(feature = "uds", unix))]
-				{
-					let url = Url::parse(entry).map_err(|_| Error::InvalidBind(entry.to_string()))?;
-					if url.path().is_empty() {
-						return Err(Error::InvalidBind(entry.to_string()));
-					}
-					Ok(BindScheme::Unix(PathBuf::from(url.path())))
-				}
-				#[cfg(not(all(feature = "uds", unix)))]
-				{
-					Ok(BindScheme::Unsupported(entry.to_string()))
-				}
-			}
-			_ => Err(Error::InvalidBind(entry.to_string())),
-		}
+		has
 	}
 }
 
@@ -262,8 +217,8 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
 /// Server for accepting MoQ connections.
 ///
-/// Accepts QUIC (and optionally WebSocket), plus plaintext qmux over TCP/Unix
-/// sockets when those `--server-bind` schemes are configured. Create via
+/// Accepts QUIC (and optionally WebSocket), plus plaintext qmux over TCP
+/// (`--server-tcp-bind`) and Unix sockets (`--server-unix-bind`). Create via
 /// [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	moq: moq_net::Server,
@@ -304,11 +259,10 @@ impl Server {
 
 		let versions = config.versions();
 
-		// Classify the bind list: at most one QUIC address, plus any stream
-		// (tcp/unix) listeners. A QUIC backend is built only when a QUIC bind is
-		// present, so a stream-only `--server-bind` doesn't also open UDP/443.
-		let quic_bind = config.quic_bind()?;
-		let build_quic = quic_bind.is_some();
+		// Build a QUIC backend when `--server-bind` is set, or when nothing else
+		// is (the default). A stream-only server (`--server-unix-bind` with no
+		// `--server-bind`) doesn't also open UDP/443.
+		let build_quic = config.bind.is_some() || !config.has_stream_listener();
 
 		if build_quic && !config.tls.root.is_empty() {
 			let mtls_supported = match backend {
@@ -344,15 +298,26 @@ impl Server {
 			_ => None,
 		};
 
+		// Collect the configured stream listeners (at most one TCP, one Unix).
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		let mut stream_binds = Vec::new();
+		#[cfg(feature = "tcp")]
+		if let Some(addr) = config.tcp.bind {
+			stream_binds.push(StreamBind::Tcp(addr));
+		}
+		#[cfg(all(feature = "uds", unix))]
+		if let Some(path) = config.unix.bind.clone() {
+			stream_binds.push(StreamBind::Unix(path));
+		}
 		#[cfg(all(feature = "uds", unix))]
 		let unix_allow = UnixAllow {
-			uid: config.unix_allow_uid.clone(),
-			gid: config.unix_allow_gid.clone(),
-			pid: config.unix_allow_pid.clone(),
+			uid: config.unix.allow_uid.clone(),
+			gid: config.unix.allow_gid.clone(),
+			pid: config.unix.allow_pid.clone(),
 		};
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let streams = StreamListeners::new(
-			parse_stream_binds(&config.bind)?,
+			stream_binds,
 			stream_versions(&versions),
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
@@ -684,7 +649,7 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 	moq_net::Versions::from(versions)
 }
 
-/// A configured stream listener, parsed from a `--server-bind` entry.
+/// A configured stream listener (`--server-tcp-bind` / `--server-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum StreamBind {
 	#[cfg(feature = "tcp")]
@@ -693,27 +658,8 @@ enum StreamBind {
 	Unix(PathBuf),
 }
 
-/// Extract the stream (tcp/unix) listeners from a `--server-bind` list.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-fn parse_stream_binds(entries: &[String]) -> crate::Result<Vec<StreamBind>> {
-	let mut binds = Vec::new();
-	for entry in entries {
-		#[allow(unreachable_patterns)]
-		match BindScheme::parse(entry)? {
-			BindScheme::Quic(_) => {}
-			#[cfg(feature = "tcp")]
-			BindScheme::Tcp(addr) => binds.push(StreamBind::Tcp(addr)),
-			#[cfg(all(feature = "uds", unix))]
-			BindScheme::Unix(path) => binds.push(StreamBind::Unix(path)),
-			#[cfg(not(all(feature = "tcp", feature = "uds", unix)))]
-			BindScheme::Unsupported(entry) => return Err(Error::UnsupportedBind(entry)),
-		}
-	}
-	Ok(binds)
-}
-
-/// Peer-credential allowlist for `unix://` listeners, built from
-/// [`ServerConfig::unix_allow_uid`] and friends.
+/// Peer-credential allowlist for the `unix://` listener, built from
+/// [`UnixConfig::allow_uid`] and friends.
 #[cfg(all(feature = "uds", unix))]
 #[derive(Clone, Default)]
 struct UnixAllow {
@@ -739,11 +685,12 @@ impl UnixAllow {
 	}
 }
 
-/// The stream (`tcp://`/`unix://`) listeners owned by a [`Server`].
+/// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
 ///
 /// Bound lazily on the first [`Server::accept`] (they need a runtime), after
 /// which each runs an accept loop in its own task and feeds completed [`Request`]s
-/// back over a channel.
+/// back over a channel. The tasks own their listeners and are aborted when the
+/// `Server` (and thus this) is dropped, so bound sockets don't linger.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
@@ -751,6 +698,7 @@ struct StreamListeners {
 	#[cfg(all(feature = "uds", unix))]
 	unix_allow: UnixAllow,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
+	tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -766,6 +714,7 @@ impl StreamListeners {
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
 			rx: None,
+			tasks: Vec::new(),
 		}
 	}
 
@@ -786,7 +735,7 @@ impl StreamListeners {
 					}
 					let listener = crate::tcp::Listener::bind(addr).await?.with_protocols(versions.alpns());
 					tracing::info!(%addr, "listening (tcp)");
-					spawn_tcp_loop(listener, versions, tx.clone());
+					self.tasks.push(spawn_tcp_loop(listener, versions, tx.clone()));
 				}
 				#[cfg(all(feature = "uds", unix))]
 				StreamBind::Unix(path) => {
@@ -797,7 +746,8 @@ impl StreamListeners {
 					// and the worker usually runs as a different user than the server.
 					listener.set_mode(0o666)?;
 					tracing::info!(path = %path.display(), allow_uid = ?self.unix_allow.uid, "listening (unix)");
-					spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone());
+					self.tasks
+						.push(spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone()));
 				}
 			}
 		}
@@ -815,8 +765,22 @@ impl StreamListeners {
 	}
 }
 
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+impl Drop for StreamListeners {
+	fn drop(&mut self) {
+		// Stop the accept loops so their listeners (and bound sockets) are freed.
+		for task in &self.tasks {
+			task.abort();
+		}
+	}
+}
+
 #[cfg(feature = "tcp")]
-fn spawn_tcp_loop(listener: crate::tcp::Listener, versions: moq_net::Versions, tx: tokio::sync::mpsc::Sender<Request>) {
+fn spawn_tcp_loop(
+	listener: crate::tcp::Listener,
+	versions: moq_net::Versions,
+	tx: tokio::sync::mpsc::Sender<Request>,
+) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
@@ -825,7 +789,7 @@ fn spawn_tcp_loop(listener: crate::tcp::Listener, versions: moq_net::Versions, t
 				None => break,
 			}
 		}
-	});
+	})
 }
 
 #[cfg(all(feature = "uds", unix))]
@@ -834,7 +798,7 @@ fn spawn_unix_loop(
 	versions: moq_net::Versions,
 	allow: UnixAllow,
 	tx: tokio::sync::mpsc::Sender<Request>,
-) {
+) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
@@ -850,7 +814,7 @@ fn spawn_unix_loop(
 				None => break,
 			}
 		}
-	});
+	})
 }
 
 /// Read the SETUP from an accepted stream session (concurrently, so one slow or
@@ -1214,72 +1178,44 @@ mod tests {
 	}
 
 	#[test]
-	fn server_bind_string_or_array() {
-		// A single string still works (back-compat with the old `Option<String>`).
-		let single: ServerConfig = toml::from_str(r#"bind = "[::]:443""#).unwrap();
-		assert_eq!(single.bind, vec!["[::]:443".to_string()]);
+	fn bind_string_or_listen_alias() {
+		// The QUIC bind is a plain address; the `listen` alias still works.
+		let bind: ServerConfig = toml::from_str(r#"bind = "[::]:443""#).unwrap();
+		assert_eq!(bind.bind.as_deref(), Some("[::]:443"));
 
-		// The `listen` alias also works as a single string.
 		let alias: ServerConfig = toml::from_str(r#"listen = "0.0.0.0:4443""#).unwrap();
-		assert_eq!(alias.bind, vec!["0.0.0.0:4443".to_string()]);
-
-		// An array of mixed transports round-trips verbatim.
-		let array: ServerConfig = toml::from_str(r#"bind = ["udp://[::]:443", "unix:///run/moq.sock?anon="]"#).unwrap();
-		assert_eq!(
-			array.bind,
-			vec!["udp://[::]:443".to_string(), "unix:///run/moq.sock?anon=".to_string()]
-		);
+		assert_eq!(alias.bind.as_deref(), Some("0.0.0.0:4443"));
 	}
 
+	#[cfg(all(feature = "uds", unix))]
 	#[test]
-	fn quic_bind_defaults_and_strips_scheme() {
-		// Empty defaults to the QUIC default address.
-		let empty = ServerConfig::default();
-		assert_eq!(empty.quic_bind().unwrap().as_deref(), Some(DEFAULT_BIND));
+	fn stream_listener_config_parses() {
+		let config: ServerConfig = toml::from_str(
+			r#"
+bind = "[::]:443"
 
-		// A bare address is QUIC (back-compat).
-		let bare = ServerConfig {
-			bind: vec!["127.0.0.1:443".to_string()],
-			..Default::default()
-		};
-		assert_eq!(bare.quic_bind().unwrap().as_deref(), Some("127.0.0.1:443"));
-
-		// `udp://` is QUIC with the scheme stripped.
-		let udp = ServerConfig {
-			bind: vec!["udp://[::]:443".to_string()],
-			..Default::default()
-		};
-		assert_eq!(udp.quic_bind().unwrap().as_deref(), Some("[::]:443"));
-
-		// Two QUIC binds is an error (Quinn binds a single address).
-		let two = ServerConfig {
-			bind: vec!["udp://[::]:443".to_string(), "127.0.0.1:444".to_string()],
-			..Default::default()
-		};
-		assert!(matches!(two.quic_bind(), Err(Error::MultipleQuicBinds)));
+[unix]
+bind = "/run/moq.sock"
+allow_uid = [1001, 1002]
+"#,
+		)
+		.unwrap();
+		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
+		assert_eq!(config.unix.allow_uid, vec![1001, 1002]);
+		assert!(config.has_stream_listener());
 	}
 
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+	#[cfg(all(feature = "uds", unix))]
 	#[test]
-	fn stream_only_bind_has_no_quic() {
-		let config = ServerConfig {
-			bind: vec!["tcp://127.0.0.1:4444".to_string()],
-			..Default::default()
-		};
-		// A stream-only bind list must not fall back to the default QUIC address.
-		assert_eq!(config.quic_bind().unwrap(), None);
-		assert_eq!(parse_stream_binds(&config.bind).unwrap().len(), 1);
-	}
+	fn stream_only_config_has_no_quic() {
+		// A unix listener with no `--server-bind` is stream-only.
+		let mut config = ServerConfig::default();
+		config.unix.bind = Some(PathBuf::from("/run/moq.sock"));
+		assert!(config.has_stream_listener());
+		assert!(config.bind.is_none());
 
-	#[cfg(feature = "tcp")]
-	#[test]
-	fn tcp_bind_parses_addr() {
-		let binds = parse_stream_binds(&["tcp://127.0.0.1:4444".to_string()]).unwrap();
-		assert_eq!(binds.len(), 1);
-		match &binds[0] {
-			StreamBind::Tcp(addr) => assert_eq!(addr, &"127.0.0.1:4444".parse::<net::SocketAddr>().unwrap()),
-			#[allow(unreachable_patterns)]
-			_ => panic!("expected tcp"),
-		}
+		// The default (nothing configured) still runs QUIC.
+		assert!(!ServerConfig::default().has_stream_listener());
 	}
 }

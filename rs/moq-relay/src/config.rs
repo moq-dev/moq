@@ -367,50 +367,50 @@ id = 12345
 		);
 	}
 
-	/// Same clap+TOML clobber guard for the multi-transport `server.bind` list
-	/// and the `unix://` peer-credential allowlist. Both must survive the
-	/// `update_from` re-parse when their CLI flags are absent, or every
-	/// configured listener (and its allowlist) gets silently dropped.
-	static SERVER_BIND_ENV_LOCK: Mutex<()> = Mutex::new(());
+	/// Same clap+TOML clobber guard for the stream listeners. The `[server.unix]`
+	/// bind (`Option<PathBuf>`) and its peer-credential allowlist must survive the
+	/// `update_from` re-parse when their CLI flags are absent, or a TOML-configured
+	/// Unix listener (and its allowlist) gets silently dropped.
+	#[cfg(all(feature = "uds", unix))]
+	static SERVER_UNIX_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+	#[cfg(all(feature = "uds", unix))]
 	#[test]
-	fn cli_does_not_clobber_toml_server_bind() {
-		let _guard = SERVER_BIND_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: SERVER_BIND_ENV_LOCK serializes this with any sibling test
+	fn cli_does_not_clobber_toml_server_unix() {
+		let _guard = SERVER_UNIX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: SERVER_UNIX_ENV_LOCK serializes this with any sibling test
 		// touching the same env vars.
 		unsafe {
-			std::env::remove_var("MOQ_SERVER_BIND");
+			std::env::remove_var("MOQ_SERVER_UNIX_BIND");
 			std::env::remove_var("MOQ_SERVER_UNIX_ALLOW_UID");
 		}
 
 		let toml = r#"
 [server]
-bind = [
-  "udp://[::]:443",
-  "unix:///run/moq/internal.sock",
-]
-unix_allow_uid = [1001]
+bind = "[::]:443"
+
+[server.unix]
+bind = "/run/moq/internal.sock"
+allow_uid = [1001]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("server-bind-toml-wins.toml");
+		let path = dir.join("server-unix-toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
+		assert_eq!(config.server.bind.as_deref(), Some("[::]:443"));
 		assert_eq!(
-			config.server.bind,
-			vec![
-				"udp://[::]:443".to_string(),
-				"unix:///run/moq/internal.sock".to_string()
-			],
-			"TOML's server.bind list must not be clobbered by the CLI re-parse"
+			config.server.unix.bind.as_deref(),
+			Some(std::path::Path::new("/run/moq/internal.sock")),
+			"TOML's server.unix.bind must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
-			config.server.unix_allow_uid,
+			config.server.unix.allow_uid,
 			vec![1001],
-			"TOML's server.unix_allow_uid must not be clobbered by the CLI re-parse"
+			"TOML's server.unix.allow_uid must not be clobbered by the CLI re-parse"
 		);
 	}
 

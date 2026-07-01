@@ -181,7 +181,7 @@ async fn run_serve(
 	dir: Option<PathBuf>,
 	rtmp: Vec<moq_rtmp::Config>,
 ) -> anyhow::Result<()> {
-	let web_bind = config.quic_bind()?.unwrap_or_else(|| "[::]:443".to_string());
+	let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
 	let server = config.init().context("init moq server")?;
 	let web_tls = server.tls_info();

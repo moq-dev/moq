@@ -52,7 +52,7 @@ async fn build_web(port: u16, ws: bool) -> Web {
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
 	// unused UDP port that we ignore.
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = vec!["[::]:0".to_string()];
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init().expect("server init");
 
@@ -370,14 +370,12 @@ async fn two_publish_only_clients_coexist() {
 	web_handle.abort();
 }
 
-/// Run the relay's accept loop over a stream-only `--server-bind` (no QUIC), the
-/// same path `main.rs` uses. Authenticates through the shared [`Auth`], here with
-/// fully public access (`--auth-public ""`) so no-JWT stream clients get the root.
-async fn spawn_stream_relay(bind: String) -> tokio::task::JoinHandle<()> {
+/// Run the relay's accept loop over a stream-only server (no QUIC), the same path
+/// `main.rs` uses. Authenticates through the shared [`Auth`], here with fully
+/// public access (`--auth-public ""`) so no-JWT stream clients get the root.
+async fn spawn_stream_relay(config: moq_native::ServerConfig) -> tokio::task::JoinHandle<()> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let mut config = moq_native::ServerConfig::default();
-	config.bind = vec![bind];
 	let mut server = config.init().expect("server init");
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
@@ -418,7 +416,10 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let handle = spawn_stream_relay(format!("tcp://127.0.0.1:{port}")).await;
+	// Stream-only: a TCP listener with no `--server-bind`, so no QUIC.
+	let mut config = moq_native::ServerConfig::default();
+	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+	let handle = spawn_stream_relay(config).await;
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {
@@ -511,7 +512,10 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	// system temp dir is long. /tmp is fine on macOS and Linux.
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}.sock", std::process::id()));
 
-	let handle = spawn_stream_relay(format!("unix://{}", path.display())).await;
+	// Stream-only: a Unix listener with no `--server-bind`, so no QUIC.
+	let mut config = moq_native::ServerConfig::default();
+	config.unix.bind = Some(path.clone());
+	let handle = spawn_stream_relay(config).await;
 
 	// Wait for the socket file to appear.
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);

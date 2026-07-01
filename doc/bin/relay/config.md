@@ -37,39 +37,35 @@ level = "info"
 
 ### \[server]
 
-Listeners. Each `bind` entry selects a transport by URL scheme; the relay
-authenticates every accepted connection the same way (JWT, mTLS, or public
-access) regardless of transport.
+QUIC/WebTransport server settings. Optionally add plaintext qmux stream
+listeners for trusted local workers; the relay authenticates every accepted
+connection the same way (JWT, mTLS, or public access) regardless of transport.
 
 ```toml
 [server]
-bind = [
-  # QUIC/WebTransport over UDP. This is the default when `bind` is omitted.
-  # A bare "host:port" (no scheme) is also accepted as QUIC. At most one
-  # QUIC entry is allowed.
-  "udp://[::]:443",
+# QUIC (UDP) bind. Omit to run stream-only (no QUIC) when a tcp/unix listener
+# is configured below.
+bind = "[::]:443"
 
-  # Plaintext qmux over a Unix socket, for trusted local workers (e.g. the
-  # protocol gateways or a stats publisher). No TLS, no UDP. Requires the
-  # `uds` build feature.
-  "unix:///run/moq/internal.sock",
+# Plaintext qmux over TCP (no TLS, carries no peer identity). Trusted networks
+# only; a non-loopback bind logs a warning. Requires the `tcp` build feature.
+[server.tcp]
+bind = "127.0.0.1:4444"
 
-  # Plaintext qmux over TCP (no TLS, carries no peer identity). Trusted
-  # networks only; a non-loopback bind logs a warning.
-  # "tcp://127.0.0.1:4444",
-]
-
-# Restrict which local processes may connect to any unix:// listener, by peer
-# credentials (unix-only). Empty/omitted imposes no constraint on that field.
-unix_allow_uid = [1001]
-# unix_allow_gid = [2000]
-# unix_allow_pid = [12345]
+# Plaintext qmux over a Unix socket, for local workers (e.g. the protocol
+# gateways or a stats publisher). Requires the `uds` build feature. Restrict
+# callers by peer credentials (each list AND across, OR within; empty = no
+# constraint).
+[server.unix]
+bind = "/run/moq/internal.sock"
+allow_uid = [1001]
+# allow_gid = [2000]
+# allow_pid = [12345]
 ```
 
-A single string is also accepted (`bind = "[::]:443"`). No-JWT connections on
-the stream transports resolve through the same public-access rules as tokenless
-QUIC clients (see [`[auth]`](#auth) `public`). See
-[Stream Listeners](/bin/relay/auth#stream-listeners) for details.
+No-JWT connections on the stream transports resolve through the same
+public-access rules as tokenless QUIC clients (see [`[auth]`](#auth) `public`).
+See [Stream Listeners](/bin/relay/auth#stream-listeners) for details.
 
 ### \[server.tls]
 
