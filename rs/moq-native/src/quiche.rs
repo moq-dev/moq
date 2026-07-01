@@ -108,6 +108,8 @@ pub(crate) struct QuicheClient {
 	pub verification: crate::tls::Verification,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
+	/// Optional TLS SNI / verification hostname override (from config).
+	pub server_name: Option<String>,
 	pub max_streams: u64,
 }
 
@@ -117,6 +119,7 @@ impl QuicheClient {
 			bind: config.bind,
 			verification: config.tls.verification()?,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
+			server_name: config.tls.server_name.clone(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 		})
 	}
@@ -191,6 +194,25 @@ impl QuicheClient {
 			}
 		}
 
+		// The server_name override affects ONLY the TLS SNI / cert-verification
+		// name, never the dial target. The dial target is always resolved from the
+		// URL host (consistent with the quinn and noq backends).
+		//
+		// NOTE: web-transport-quiche's ClientBuilder::connect(host, port) uses its
+		// `host` parameter for BOTH DNS resolution (dial target) AND TLS SNI — the
+		// API does not allow separating them. We therefore pass the URL host to
+		// ensure the correct dial target, matching quinn/noq behavior. When a
+		// server_name override is configured, it cannot be applied to the quiche
+		// backend without upstream API changes to ClientBuilder.
+		if let Some(ref override_name) = self.server_name {
+			tracing::warn!(
+				server_name = %override_name,
+				host = %host,
+				"client tls server_name override is not supported on the quiche backend; using URL host for SNI"
+			);
+		}
+		let dial_host = &host;
+
 		tracing::debug!(%url, "connecting via quiche");
 
 		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
@@ -202,7 +224,7 @@ impl QuicheClient {
 			"https" => {
 				// WebTransport over HTTP/3
 				let conn = builder
-					.connect(&host, port)
+					.connect(dial_host, port)
 					.await
 					.map_err(Error::Connect)?
 					.established()
@@ -216,7 +238,7 @@ impl QuicheClient {
 			"moqt" | "moql" => {
 				// Raw QUIC mode
 				let conn = builder
-					.connect(&host, port)
+					.connect(dial_host, port)
 					.await
 					.map_err(Error::Connect)?
 					.established()
