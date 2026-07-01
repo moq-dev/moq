@@ -29,11 +29,6 @@ pub struct Cli {
 	#[command(flatten)]
 	pub log: moq_native::Log,
 
-	/// Iroh configuration.
-	#[cfg(feature = "iroh")]
-	#[command(flatten)]
-	pub iroh: moq_native::iroh::EndpointConfig,
-
 	/// The MoQ attachment, shared by both directions.
 	#[command(flatten)]
 	pub moq: MoqSide,
@@ -76,6 +71,11 @@ pub struct MoqSide {
 	/// MoQ server transport config (`--server-bind`, `--server-tls-*`, `--tls-*`).
 	#[command(flatten)]
 	pub server: moq_native::ServerConfig,
+
+	/// Iroh transport config (`--iroh-*`), used by both the client and server.
+	#[cfg(feature = "iroh")]
+	#[command(flatten)]
+	pub iroh: moq_native::iroh::EndpointConfig,
 }
 
 /// The data direction: the pivot between the MoQ side and the endpoint.

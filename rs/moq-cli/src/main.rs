@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let net = Net {
 		#[cfg(feature = "iroh")]
-		iroh: cli.iroh.bind().await?,
+		iroh: cli.moq.iroh.clone().bind().await?,
 	};
 
 	match cli.direction {
