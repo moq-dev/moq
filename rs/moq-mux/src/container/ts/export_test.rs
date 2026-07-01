@@ -1408,3 +1408,75 @@ async fn opus_export_import_roundtrip() {
 		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");
 	}
 }
+
+/// The exporter re-stamps PCR as a dense, uniform ramp rather than one sparse sample per
+/// frame: a hardware IRD rebuilds its clock from PCR with a PLL, which needs frequent
+/// (<= 40 ms) monotonic, evenly-spaced values. Frames are 40 ms apart with a payload big
+/// enough to span many TS packets, so the 20 ms cadence must emit multiple PCRs per frame.
+#[tokio::test(start_paused = true)]
+async fn pcr_restamped_at_uniform_cadence() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let vtrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")))
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+
+	// A keyframe every 40 ms, each ~4 KB so it spans ~20 TS packets. With a 20 ms PCR
+	// cadence the exporter must interpolate two PCRs across each frame.
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xABu8, 4000));
+	let payload = annexb(&[SPS, PPS, &idr]);
+	for i in 0..6u64 {
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 40_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			})
+			.unwrap();
+		video.finish_group().unwrap();
+	}
+	video.finish().unwrap();
+
+	let ts = drain(consumer).await;
+
+	// PCR values (27 MHz) in transport order.
+	let mut pcrs = Vec::new();
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(pcr) = packet.adaptation_field.and_then(|af| af.pcr) {
+			pcrs.push(pcr.as_u64());
+		}
+	}
+
+	// Dense: roughly one PCR per 20 ms across ~200 ms, so well more than the 6 frames.
+	assert!(pcrs.len() >= 8, "PCR is too sparse: {} samples", pcrs.len());
+	assert!(
+		pcrs.windows(2).all(|w| w[1] > w[0]),
+		"PCR must increase monotonically: {pcrs:?}"
+	);
+	// Evenly spaced at ~20 ms (540000 in 27 MHz units), within a generous tolerance for
+	// byte-position quantization (a PCR lands on the first packet past each due tick).
+	let interval = 20_000 * 27;
+	for w in pcrs.windows(2) {
+		let delta = w[1] - w[0];
+		assert!(
+			delta.abs_diff(interval) <= interval / 3,
+			"PCR spacing {delta} is not ~{interval} (±33%)"
+		);
+	}
+}
