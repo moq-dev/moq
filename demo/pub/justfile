@@ -52,24 +52,24 @@ tos url='http://localhost:4443' *args:
 
 # Publish a video using ffmpeg (CMAF / fMP4) to a relay server.
 cmaf name url='http://localhost:4443' *args:
-    cargo build --bin moq-cli
+    cargo build --bin moq
     just ffmpeg-cmaf "media/{{ name }}.mp4" |\
-    cargo run --bin moq-cli -- \
+    cargo run --bin moq -- \
     	{{ args }} import --client-connect "{{ url }}" --broadcast "{{ name }}.hang" stdin fmp4
 
 # Publish a video using ffmpeg (MPEG-TS) to a relay server.
 ts name url='http://localhost:4443' *args:
-    cargo build --bin moq-cli
+    cargo build --bin moq
     just ffmpeg-ts "media/{{ name }}.mp4" |\
-    cargo run --bin moq-cli -- \
+    cargo run --bin moq -- \
     	{{ args }} import --client-connect "{{ url }}" --broadcast "{{ name }}.hang" stdin ts
 
 # Publish a video via iroh.
 iroh name url prefix="":
     just download "{{ name }}"
-    cargo build --bin moq-cli
+    cargo build --bin moq
     just ffmpeg-cmaf "media/{{ name }}.mp4" |\
-    cargo run --bin moq-cli -- \
+    cargo run --bin moq -- \
     	--iroh-enabled import --client-connect "{{ url }}" --broadcast "{{ prefix }}{{ name }}.hang" stdin fmp4
 
 # Generate and ingest an HLS stream from a video file.
@@ -142,7 +142,7 @@ hls name relay="http://localhost:4443":
     trap cleanup SIGINT SIGTERM EXIT
 
     echo ">>> Importing HLS via moq-cli"
-    cargo run --bin moq-cli -- import --client-connect "{{ relay }}" --broadcast "{{ name }}.hang" hls "$OUT_DIR/master.m3u8"
+    cargo run --bin moq -- import --client-connect "{{ relay }}" --broadcast "{{ name }}.hang" hls "$OUT_DIR/master.m3u8"
     EXIT_CODE=$?
 
     cleanup
@@ -151,7 +151,7 @@ hls name relay="http://localhost:4443":
 # Publish a video using H.264 Annex B format.
 h264 name url="http://localhost:4443" *args:
     just download "{{ name }}"
-    cargo build --bin moq-cli
+    cargo build --bin moq
 
     ffmpeg -hide_banner -v quiet \
     	-stream_loop -1 -re \
@@ -159,14 +159,14 @@ h264 name url="http://localhost:4443" *args:
     	-c:v copy -an \
     	-bsf:v h264_mp4toannexb \
     	-f h264 \
-    	- | cargo run --bin moq-cli -- {{ args }} import --client-connect "{{ url }}" --broadcast "{{ name }}.hang" stdin avc3
+    	- | cargo run --bin moq -- {{ args }} import --client-connect "{{ url }}" --broadcast "{{ name }}.hang" stdin avc3
 
 # Publish a video using ffmpeg directly from moq to the localhost.
 serve name *args:
     just download "{{ name }}"
-    cargo build --bin moq-cli
+    cargo build --bin moq
     just ffmpeg-cmaf "media/{{ name }}.mp4" |\
-    cargo run --bin moq-cli -- \
+    cargo run --bin moq -- \
     	{{ args }} import --server-bind "[::]:4443" --tls-generate "localhost" \
     	--broadcast "{{ name }}.hang" stdin fmp4
 

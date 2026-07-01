@@ -107,14 +107,16 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 			if let Some(addr) = rtmp.listen {
 				tasks.spawn(rtmp::listen_import(origin.clone(), addr, rtmp.prefix));
 			} else if let Some(url) = rtmp.connect {
-				tasks.spawn(rtmp::connect_import(origin.clone(), url));
+				let name = require_name(name)?;
+				tasks.spawn(rtmp::connect_import(origin.clone(), url, name));
 			}
 		}
 		ImportSource::Srt(srt) => {
 			if let Some(addr) = srt.listen {
 				tasks.spawn(srt::listen_import(origin.clone(), addr, srt.prefix, srt.latency));
 			} else if let Some(url) = srt.connect {
-				tasks.spawn(srt::connect_import(origin.clone(), url));
+				let name = require_name(name)?;
+				tasks.spawn(srt::connect_import(origin.clone(), url, name, srt.latency));
 			}
 		}
 		ImportSource::Rtc(rtc) => {
@@ -192,7 +194,7 @@ async fn run_export(export: Export, net: Net) -> anyhow::Result<()> {
 				tasks.spawn(srt::listen_export(origin.consume(), addr, srt.prefix, srt.latency));
 			} else if let Some(url) = srt.connect {
 				let name = require_name(name)?;
-				tasks.spawn(srt::connect_export(origin.consume(), url, name));
+				tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency));
 			}
 		}
 		ExportSink::Rtc(rtc) => {

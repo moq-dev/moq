@@ -5,7 +5,8 @@
 use std::net::SocketAddr;
 
 use hang::moq_net;
-use moq_rtmp::{Request, Server};
+use moq_rtmp::{Client, Request, Server};
+use url::Url;
 
 use crate::moq::notify_ready;
 
@@ -85,14 +86,48 @@ pub async fn listen_export(
 	Ok(())
 }
 
-/// Dial a remote RTMP server. Pending the dial-out (`Client`) library (#1982).
-pub async fn connect_import(_origin: moq_net::OriginProducer, _url: url::Url) -> anyhow::Result<()> {
-	anyhow::bail!("`import rtmp --connect` (RTMP dial-out) is not implemented yet; see moq-dev/moq#1982");
+/// Dial a remote RTMP server and pull its play into the Origin under `name` (import).
+pub async fn connect_import(origin: moq_net::OriginProducer, url: Url, name: String) -> anyhow::Result<()> {
+	let (addr, app, key) = parse_url(&url).await?;
+	tracing::info!(%url, %name, "RTMP client pulling");
+	notify_ready();
+
+	let client = Client::connect(addr, &app).await?;
+	Ok(client.pull(&key, &origin, &name).await?)
 }
 
-/// Push a broadcast to a remote RTMP server. Pending the dial-out library (#1982).
-pub async fn connect_export(_origin: moq_net::OriginConsumer, _url: url::Url, _name: String) -> anyhow::Result<()> {
-	anyhow::bail!("`export rtmp --connect` (RTMP dial-out) is not implemented yet; see moq-dev/moq#1982");
+/// Push a broadcast from the Origin to a remote RTMP server (export).
+pub async fn connect_export(origin: moq_net::OriginConsumer, url: Url, name: String) -> anyhow::Result<()> {
+	let (addr, app, key) = parse_url(&url).await?;
+	let broadcast = origin
+		.announced_broadcast(&name)
+		.await
+		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+
+	tracing::info!(%url, %name, "RTMP client pushing");
+	notify_ready();
+
+	let client = Client::connect(addr, &app).await?;
+	Ok(client.publish(&key, broadcast).await?)
+}
+
+/// Parse `rtmp://host[:1935]/<app>/<key>` into a resolved address, app, and stream key.
+async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String, String)> {
+	let host = url
+		.host_str()
+		.ok_or_else(|| anyhow::anyhow!("rtmp url missing host: {url}"))?;
+	let port = url.port().unwrap_or(1935);
+	let addr = tokio::net::lookup_host((host, port))
+		.await?
+		.next()
+		.ok_or_else(|| anyhow::anyhow!("could not resolve {host}:{port}"))?;
+
+	let mut segments = url.path().trim_matches('/').splitn(2, '/');
+	let app = segments.next().unwrap_or_default().to_string();
+	let key = segments.next().unwrap_or_default().to_string();
+	anyhow::ensure!(!app.is_empty(), "rtmp url must include an app: rtmp://host/<app>/<key>");
+
+	Ok((addr, app, key))
 }
 
 /// Join a prefix and the RTMP app/key into a broadcast path (empty -> None).

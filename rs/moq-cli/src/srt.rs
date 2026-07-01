@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use hang::moq_net;
 use moq_srt::{Request, Server};
+use url::Url;
 
 use crate::moq::notify_ready;
 
@@ -79,12 +80,54 @@ pub async fn listen_export(
 	Ok(())
 }
 
-/// Dial a remote SRT server. Pending the dial-out (`dial`) library (#1982).
-pub async fn connect_import(_origin: moq_net::OriginProducer, _url: url::Url) -> anyhow::Result<()> {
-	anyhow::bail!("`import srt --connect` (SRT dial-out) is not implemented yet; see moq-dev/moq#1982");
+/// Dial a remote SRT server and pull its stream into the Origin under `name` (import).
+pub async fn connect_import(
+	origin: moq_net::OriginProducer,
+	url: Url,
+	name: String,
+	latency: Duration,
+) -> anyhow::Result<()> {
+	let (addr, resource) = parse_url(&url).await?;
+	tracing::info!(%url, %name, "SRT client pulling");
+	notify_ready();
+
+	Ok(moq_srt::dial::pull(addr, &resource, latency, &origin, &name).await?)
 }
 
-/// Push a broadcast to a remote SRT server. Pending the dial-out library (#1982).
-pub async fn connect_export(_origin: moq_net::OriginConsumer, _url: url::Url, _name: String) -> anyhow::Result<()> {
-	anyhow::bail!("`export srt --connect` (SRT dial-out) is not implemented yet; see moq-dev/moq#1982");
+/// Push a broadcast from the Origin to a remote SRT server (export).
+pub async fn connect_export(
+	origin: moq_net::OriginConsumer,
+	url: Url,
+	name: String,
+	latency: Duration,
+) -> anyhow::Result<()> {
+	let (addr, resource) = parse_url(&url).await?;
+	tracing::info!(%url, %name, "SRT client pushing");
+	notify_ready();
+
+	Ok(moq_srt::dial::publish(addr, &resource, latency, &origin, &name).await?)
+}
+
+/// Parse `srt://host:port?streamid=<resource>` into a resolved address and resource.
+/// The resource falls back to the URL path when `streamid` is absent.
+async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String)> {
+	let host = url
+		.host_str()
+		.ok_or_else(|| anyhow::anyhow!("srt url missing host: {url}"))?;
+	let port = url
+		.port()
+		.ok_or_else(|| anyhow::anyhow!("srt url must include a port: srt://host:port"))?;
+	let addr = tokio::net::lookup_host((host, port))
+		.await?
+		.next()
+		.ok_or_else(|| anyhow::anyhow!("could not resolve {host}:{port}"))?;
+
+	let resource = url
+		.query_pairs()
+		.find(|(key, _)| key == "streamid")
+		.map(|(_, value)| value.into_owned())
+		.unwrap_or_else(|| url.path().trim_matches('/').to_string());
+	anyhow::ensure!(!resource.is_empty(), "srt url must include a streamid or path");
+
+	Ok((addr, resource))
 }

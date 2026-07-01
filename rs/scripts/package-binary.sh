@@ -2,7 +2,10 @@
 set -euo pipefail
 
 # Build and package a workspace binary for release.
-# Usage: ./package-binary.sh --crate CRATE [--target TARGET] [--version VERSION] [--output DIR]
+# Usage: ./package-binary.sh --crate CRATE [--bin NAME] [--target TARGET] [--version VERSION] [--output DIR]
+#
+# --bin overrides the binary/command name when it differs from the crate (e.g.
+# the `moq-cli` crate ships its binary as `moq`); it defaults to the crate name.
 #
 # Builds via `nix build .#<crate>` against the flake-pinned toolchain so
 # artifacts are reproducible across hosts. The resulting tarball matches
@@ -14,19 +17,21 @@ RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
 CRATE=""
+BIN=""
 TARGET=""
 VERSION=""
 OUTPUT_DIR="dist"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --crate | --target | --version | --output)
+        --crate | --bin | --target | --version | --output)
             if [[ $# -lt 2 ]]; then
                 echo "Error: $1 requires a value" >&2
                 exit 1
             fi
             case $1 in
                 --crate) CRATE="$2" ;;
+                --bin) BIN="$2" ;;
                 --target) TARGET="$2" ;;
                 --version) VERSION="$2" ;;
                 --output) OUTPUT_DIR="$2" ;;
@@ -34,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h | --help)
-            echo "Usage: $0 --crate CRATE [--target TARGET] [--version VERSION] [--output DIR]"
+            echo "Usage: $0 --crate CRATE [--bin NAME] [--target TARGET] [--version VERSION] [--output DIR]"
             exit 0
             ;;
         *)
@@ -48,6 +53,9 @@ if [[ -z "$CRATE" ]]; then
     echo "Error: --crate is required" >&2
     exit 1
 fi
+
+# The binary/command name defaults to the crate name.
+BIN="${BIN:-$CRATE}"
 
 CRATE_DIR="$RS_DIR/$CRATE"
 if [[ ! -f "$CRATE_DIR/Cargo.toml" ]]; then
@@ -90,9 +98,9 @@ trap 'rm -rf "$BUILD_TMP"' EXIT
 RESULT_LINK="$BUILD_TMP/result"
 nix build "$WORKSPACE_DIR#$NIX_ATTR" --out-link "$RESULT_LINK"
 
-# Locate the built binary. Crane installs to result/bin/<binary>.
-# By convention each of our binaries shares its crate name.
-BIN_FILE="$RESULT_LINK/bin/$CRATE"
+# Locate the built binary. Crane installs to result/bin/<binary>. The binary
+# name is usually the crate name; the `moq-cli` crate ships as `moq`.
+BIN_FILE="$RESULT_LINK/bin/$BIN"
 if [[ ! -f "$BIN_FILE" ]]; then
     echo "Error: no binary found at $BIN_FILE" >&2
     echo "Contents of $RESULT_LINK/bin:" >&2
@@ -109,8 +117,8 @@ mkdir -p "$PACKAGE_DIR/bin"
 
 # Dereference the nix-store symlink and drop perms so the file is writable
 # enough to archive cleanly.
-cp -L "$BIN_FILE" "$PACKAGE_DIR/bin/$CRATE"
-chmod 0755 "$PACKAGE_DIR/bin/$CRATE"
+cp -L "$BIN_FILE" "$PACKAGE_DIR/bin/$BIN"
+chmod 0755 "$PACKAGE_DIR/bin/$BIN"
 
 # On macOS the nix toolchain links the nix-store copy of libiconv, whose
 # absolute path doesn't exist on a user's Mac, so dyld aborts at startup
@@ -119,7 +127,7 @@ chmod 0755 "$PACKAGE_DIR/bin/$CRATE"
 # /usr/lib), like a plain `cargo build` does. scrub-macho.sh also asserts no
 # /nix path survives, so this can't silently ship again.
 if [[ "$(uname)" == "Darwin" ]]; then
-    bin="$PACKAGE_DIR/bin/$CRATE"
+    bin="$PACKAGE_DIR/bin/$BIN"
     "$SCRIPT_DIR/scrub-macho.sh" "$bin"
 
     # Prove dyld actually loads the scrubbed binary. --help triggers dyld's

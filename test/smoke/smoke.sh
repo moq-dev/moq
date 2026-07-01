@@ -175,9 +175,8 @@ build_relay_cli() {
         exit 1
     }
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
-    # `cargo build -p moq-cli` names the binary after the crate (moq-cli); the
-    # apt/rpm packages rename it to `moq`, but from source it's moq-cli.
-    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq-cli"
+    # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
+    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
 }
 
 # Editable-install the workspace Python build (maturin builds rs/moq-ffi, then
