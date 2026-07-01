@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "moq",
@@ -178,7 +179,7 @@
       "name": "@moq/net",
       "version": "0.1.5",
       "dependencies": {
-        "@moq/qmux": "^0.0.6",
+        "@moq/qmux": "^0.1.3",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
       },
@@ -577,7 +578,7 @@
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
-    "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
+    "@moq/qmux": ["@moq/qmux@0.1.3", "", { "dependencies": { "@moq/web-socket-stream": "^0.1.0" } }, "sha512-naGmMMOxCSMeLyEATrLiY9RGyeZENC4dHFVVNWNcA17LXE9NwM3aQrQY218xXypWahYIgIkl/ZCutIP2xHibgA=="],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
@@ -588,6 +589,8 @@
     "@moq/token": ["@moq/token@workspace:js/token"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
+
+    "@moq/web-socket-stream": ["@moq/web-socket-stream@0.1.0", "", {}, "sha512-VxPaJZvZ8qgFmTjG9XhTH0bQoQE9pExvlS/R0fH1aNcpqCnZdbYS2kvB2ypO5SyFTf6oH+4eWvgElDzW6yiqFQ=="],
 
     "@moq/web-transport": ["@moq/web-transport@0.1.3", "", { "optionalDependencies": { "@moq/web-transport-darwin-arm64": "0.1.3", "@moq/web-transport-darwin-x64": "0.1.3", "@moq/web-transport-linux-arm64-gnu": "0.1.3", "@moq/web-transport-linux-x64-gnu": "0.1.3", "@moq/web-transport-win32-x64-msvc": "0.1.3" } }, "sha512-hg3mKWUJaEwtJDGf8Ck62XP8ya+7wyMV/9ycV1A+M3iVly3xBOTPHpT8BrpOLomsBIB9iXQY6Z85MjknhUJW8w=="],
 

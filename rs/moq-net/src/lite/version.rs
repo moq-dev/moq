@@ -12,6 +12,23 @@ pub enum Version {
 	Lite05Wip,
 }
 
+impl Version {
+	/// Whether this version uses a unidirectional Setup stream (moq-lite-05+).
+	///
+	/// Earlier versions negotiate purely via ALPN and exchange no SETUP message.
+	pub fn has_setup_stream(self) -> bool {
+		matches!(self, Self::Lite05Wip)
+	}
+
+	/// Whether this version uses the moq-lite-05 framing bundle: the Track stream
+	/// (TRACK/TRACK_INFO), a SUBSCRIBE_OK trimmed to the resolved start group plus a
+	/// distinct SUBSCRIBE_END, and a per-frame timestamp delta. Earlier versions carry
+	/// publisher properties inline in SUBSCRIBE_OK and frames without a timestamp.
+	pub fn has_track_stream(self) -> bool {
+		matches!(self, Self::Lite05Wip)
+	}
+}
+
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {

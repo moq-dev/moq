@@ -573,7 +573,7 @@ fn build_video_track_entry(
 	Ok(MatroskaSpec::TrackEntry(Master::Full(entry)))
 }
 
-fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<MatroskaSpec> {
+pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<MatroskaSpec> {
 	let (codec_id, codec_private) = match &config.codec {
 		AudioCodec::Opus => (
 			"A_OPUS",
@@ -596,20 +596,36 @@ fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<Ma
 					.to_vec(),
 			),
 		),
+		AudioCodec::Flac => (
+			"A_FLAC",
+			// A_FLAC CodecPrivate is the FLAC header (the `fLaC` marker plus metadata
+			// blocks), which is exactly the catalog description.
+			Some(
+				config
+					.description
+					.as_ref()
+					.ok_or(Error::MissingFlacDescription)?
+					.to_vec(),
+			),
+		),
+		// MP3 carries its config in band, so there's no codec private.
+		AudioCodec::Mp3 => ("A_MPEG/L3", None),
 		other => return Err(Error::UnsupportedAudioExport(format!("{:?}", other)).into()),
 	};
 
-	let entry = vec![
+	let mut entry = vec![
 		MatroskaSpec::TrackNumber(track_number),
 		MatroskaSpec::TrackUID(track_number),
 		MatroskaSpec::TrackType(2),
 		MatroskaSpec::CodecID(codec_id.to_string()),
-		MatroskaSpec::CodecPrivate(codec_private.unwrap()),
-		MatroskaSpec::Audio(Master::Full(vec![
-			MatroskaSpec::SamplingFrequency(config.sample_rate as f64),
-			MatroskaSpec::Channels(config.channel_count as u64),
-		])),
 	];
+	if let Some(cp) = codec_private {
+		entry.push(MatroskaSpec::CodecPrivate(cp));
+	}
+	entry.push(MatroskaSpec::Audio(Master::Full(vec![
+		MatroskaSpec::SamplingFrequency(config.sample_rate as f64),
+		MatroskaSpec::Channels(config.channel_count as u64),
+	])));
 
 	Ok(MatroskaSpec::TrackEntry(Master::Full(entry)))
 }

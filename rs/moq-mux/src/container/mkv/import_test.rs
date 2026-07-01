@@ -121,6 +121,50 @@ fn track_entry_audio_opus(number: u64, sample_rate: f64, channels: u64) -> Matro
 	]))
 }
 
+fn track_entry_audio_flac(number: u64, sample_rate: u32, channels: u32) -> MatroskaSpec {
+	// A_FLAC CodecPrivate is the FLAC header: the `fLaC` marker plus the STREAMINFO
+	// metadata block. Reuse the codec helper so the bytes match what the importer parses.
+	let private = crate::codec::flac::Config {
+		min_block_size: 4096,
+		max_block_size: 4096,
+		min_frame_size: 0,
+		max_frame_size: 0,
+		sample_rate,
+		channel_count: channels,
+		bits_per_sample: 16,
+		total_samples: 0,
+		md5: [0; 16],
+	}
+	.description()
+	.to_vec();
+
+	MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(number),
+		MatroskaSpec::TrackUID(number),
+		MatroskaSpec::TrackType(2),
+		MatroskaSpec::CodecID("A_FLAC".to_string()),
+		MatroskaSpec::CodecPrivate(private),
+		MatroskaSpec::Audio(Master::Full(vec![
+			MatroskaSpec::SamplingFrequency(sample_rate as f64),
+			MatroskaSpec::Channels(channels as u64),
+		])),
+	]))
+}
+
+fn track_entry_audio_mp3(number: u64, sample_rate: f64, channels: u64) -> MatroskaSpec {
+	// MP3 has no codec private; config comes from the track header.
+	MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(number),
+		MatroskaSpec::TrackUID(number),
+		MatroskaSpec::TrackType(2),
+		MatroskaSpec::CodecID("A_MPEG/L3".to_string()),
+		MatroskaSpec::Audio(Master::Full(vec![
+			MatroskaSpec::SamplingFrequency(sample_rate),
+			MatroskaSpec::Channels(channels),
+		])),
+	]))
+}
+
 fn track_entry_video_vp9(number: u64, width: u64, height: u64) -> MatroskaSpec {
 	MatroskaSpec::TrackEntry(Master::Full(vec![
 		MatroskaSpec::TrackNumber(number),
@@ -142,6 +186,30 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	mkv.decode(&buf).expect("decode");
 	mkv.finish().expect("finish");
 	catalog.snapshot()
+}
+
+#[test]
+fn test_flac_catalog() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_flac(1, 48000, 2)])
+		.cluster(0, || vec![simple_block(1, 0, true, b"flac-frame-0")])
+		.segment_end()
+		.build();
+
+	let catalog = run(&data);
+	assert_eq!(catalog.audio.renditions.len(), 1);
+
+	let a = catalog.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Flac));
+	assert_eq!(a.sample_rate, 48000);
+	assert_eq!(a.channel_count, 2);
+	assert!(matches!(a.container, Container::Legacy));
+	// The description is the WebCodecs FLAC config: the `fLaC` marker + STREAMINFO.
+	let desc = a.description.as_ref().expect("flac description");
+	assert_eq!(&desc[..4], b"fLaC");
 }
 
 #[test]
@@ -198,6 +266,26 @@ fn test_vp9_opus_catalog() {
 	assert!(matches!(a.codec, AudioCodec::Opus));
 	assert_eq!(a.sample_rate, 48000);
 	assert_eq!(a.channel_count, 2);
+}
+
+#[test]
+fn test_mp3_catalog() {
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_mp3(1, 44100.0, 2)])
+		.cluster(0, || vec![simple_block(1, 0, true, b"mp3-frame")])
+		.segment_end()
+		.build();
+
+	let catalog = run(&data);
+	assert_eq!(catalog.audio.renditions.len(), 1);
+	let a = catalog.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Mp3));
+	assert_eq!(a.sample_rate, 44100);
+	assert_eq!(a.channel_count, 2);
+	assert!(a.description.is_none(), "MP3 config is in band");
 }
 
 #[test]

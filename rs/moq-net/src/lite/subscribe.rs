@@ -72,6 +72,12 @@ impl Message for Subscribe<'_> {
 	}
 }
 
+/// The publisher's positive response to a SUBSCRIBE.
+///
+/// In moq-lite-05 this is trimmed to the resolved absolute start group; the publisher's
+/// per-track properties moved to [`TrackInfo`](super::TrackInfo). The resolved group lives
+/// in `start_group` as a raw absolute sequence (not the `+1`-encoded form used in the
+/// SUBSCRIBE request). Earlier versions carry the publisher properties inline.
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
 	pub priority: u8,
@@ -88,12 +94,16 @@ impl Message for SubscribeOk {
 				self.priority.encode(w, version)?;
 			}
 			Version::Lite02 => {}
-			_ => {
+			Version::Lite03 | Version::Lite04 => {
 				self.priority.encode(w, version)?;
 				(self.ordered as u8).encode(w, version)?;
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
+			}
+			// moq-lite-05+: just the resolved absolute start group (raw, 0 is valid).
+			_ => {
+				self.start_group.unwrap_or(0).encode(w, version)?;
 			}
 		}
 
@@ -116,7 +126,7 @@ impl Message for SubscribeOk {
 				start_group: None,
 				end_group: None,
 			}),
-			_ => {
+			Version::Lite03 | Version::Lite04 => {
 				let priority = u8::decode(r, version)?;
 				let ordered = u8::decode(r, version)? != 0;
 				let max_latency = std::time::Duration::decode(r, version)?;
@@ -131,7 +141,46 @@ impl Message for SubscribeOk {
 					end_group,
 				})
 			}
+			// moq-lite-05+: just the resolved absolute start group.
+			_ => Ok(Self {
+				priority: 0,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: Some(u64::decode(r, version)?),
+				end_group: None,
+			}),
 		}
+	}
+}
+
+/// Sent by the publisher to signal that no group after a given sequence will be produced.
+///
+/// moq-lite-05+ only. Bounds the subscription range; the stream still FINs only once every
+/// group up to this sequence has been accounted for.
+#[derive(Clone, Debug)]
+pub struct SubscribeEnd {
+	/// The absolute sequence of the last group that may be delivered (inclusive).
+	pub group: u64,
+}
+
+impl Message for SubscribeEnd {
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_track_stream() {
+			return Err(DecodeError::Version);
+		}
+
+		Ok(Self {
+			group: u64::decode(r, version)?,
+		})
+	}
+
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		if !version.has_track_stream() {
+			return Err(EncodeError::Version);
+		}
+
+		self.group.encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -263,46 +312,59 @@ impl Message for SubscribeDrop {
 
 /// A response message on the subscribe stream.
 ///
-/// In Draft03, each response is prefixed with a type discriminator:
-/// - 0x0 for SUBSCRIBE_OK
-/// - 0x1 for SUBSCRIBE_DROP
+/// In Lite03/04 each response is prefixed with a type discriminator: 0x0 SUBSCRIBE_OK,
+/// 0x1 SUBSCRIBE_DROP. In Lite05 end-of-subscription splits out, so the discriminators
+/// become 0x0 SUBSCRIBE_OK, 0x1 SUBSCRIBE_END, 0x2 SUBSCRIBE_DROP.
 ///
-/// SUBSCRIBE_OK must be the first message on the response stream.
+/// SUBSCRIBE_OK is normally the first message on the response stream.
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),
+	End(SubscribeEnd),
 	Drop(SubscribeDrop),
+}
+
+/// Encode a size-prefixed message body (no type discriminator).
+fn encode_body<W: bytes::BufMut, M: Message>(msg: &M, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	let mut sizer = Sizer::default();
+	Message::encode_msg(msg, &mut sizer, version)?;
+	sizer.size.encode(w, version)?;
+	Message::encode_msg(msg, w, version)
 }
 
 impl Encode<Version> for SubscribeResponse {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
+			// No type discriminator; only SUBSCRIBE_OK exists.
 			Version::Lite01 | Version::Lite02 => match self {
-				Self::Ok(ok) => {
-					let mut sizer = Sizer::default();
-					Message::encode_msg(ok, &mut sizer, version)?;
-					sizer.size.encode(w, version)?;
-					Message::encode_msg(ok, w, version)?;
-				}
-				Self::Drop(_) => {
-					return Err(EncodeError::Version);
-				}
+				Self::Ok(ok) => encode_body(ok, w, version)?,
+				Self::End(_) | Self::Drop(_) => return Err(EncodeError::Version),
 			},
-			_ => match self {
+			// 0x0 OK, 0x1 DROP; no SUBSCRIBE_END.
+			Version::Lite03 | Version::Lite04 => match self {
 				Self::Ok(ok) => {
 					0u64.encode(w, version)?;
-					// Write size-prefixed body using Message trait
-					let mut sizer = Sizer::default();
-					Message::encode_msg(ok, &mut sizer, version)?;
-					sizer.size.encode(w, version)?;
-					Message::encode_msg(ok, w, version)?;
+					encode_body(ok, w, version)?;
 				}
 				Self::Drop(drop) => {
 					1u64.encode(w, version)?;
-					let mut sizer = Sizer::default();
-					Message::encode_msg(drop, &mut sizer, version)?;
-					sizer.size.encode(w, version)?;
-					Message::encode_msg(drop, w, version)?;
+					encode_body(drop, w, version)?;
+				}
+				Self::End(_) => return Err(EncodeError::Version),
+			},
+			// moq-lite-05+: 0x0 OK, 0x1 END, 0x2 DROP.
+			_ => match self {
+				Self::Ok(ok) => {
+					0u64.encode(w, version)?;
+					encode_body(ok, w, version)?;
+				}
+				Self::End(end) => {
+					1u64.encode(w, version)?;
+					encode_body(end, w, version)?;
+				}
+				Self::Drop(drop) => {
+					2u64.encode(w, version)?;
+					encode_body(drop, w, version)?;
 				}
 			},
 		}
@@ -315,7 +377,7 @@ impl Decode<Version> for SubscribeResponse {
 	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
-			_ => {
+			Version::Lite03 | Version::Lite04 => {
 				let typ = u64::decode(buf, version)?;
 				match typ {
 					0 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
@@ -323,6 +385,94 @@ impl Decode<Version> for SubscribeResponse {
 					_ => Err(DecodeError::InvalidMessage(typ)),
 				}
 			}
+			_ => {
+				let typ = u64::decode(buf, version)?;
+				match typ {
+					0 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
+					1 => Ok(Self::End(SubscribeEnd::decode(buf, version)?)),
+					2 => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
+					_ => Err(DecodeError::InvalidMessage(typ)),
+				}
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn response_roundtrip(resp: &SubscribeResponse, version: Version) -> SubscribeResponse {
+		let mut buf = BytesMut::new();
+		resp.encode(&mut buf, version).unwrap();
+		let mut slice = &buf[..];
+		let decoded = SubscribeResponse::decode(&mut slice, version).unwrap();
+		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
+		decoded
+	}
+
+	#[test]
+	fn lite05_subscribe_ok_resolved_group() {
+		let resp = SubscribeResponse::Ok(SubscribeOk {
+			priority: 0,
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
+			start_group: Some(42),
+			end_group: None,
+		});
+		match response_roundtrip(&resp, Version::Lite05Wip) {
+			SubscribeResponse::Ok(ok) => assert_eq!(ok.start_group, Some(42)),
+			other => panic!("expected Ok, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn lite05_subscribe_end() {
+		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
+		match response_roundtrip(&resp, Version::Lite05Wip) {
+			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
+			other => panic!("expected End, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn lite05_subscribe_drop() {
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			start: 1,
+			end: 3,
+			error: 0,
+		});
+		match response_roundtrip(&resp, Version::Lite05Wip) {
+			SubscribeResponse::Drop(d) => {
+				assert_eq!(d.start, 1);
+				assert_eq!(d.end, 3);
+			}
+			other => panic!("expected Drop, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn lite04_has_no_subscribe_end() {
+		let resp = SubscribeResponse::End(SubscribeEnd { group: 5 });
+		let mut buf = BytesMut::new();
+		assert!(matches!(
+			resp.encode(&mut buf, Version::Lite04),
+			Err(EncodeError::Version)
+		));
+	}
+
+	#[test]
+	fn lite04_drop_uses_type_1() {
+		// In lite-04 DROP is discriminator 1; lite-05 reassigns 1 to END.
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			start: 2,
+			end: 2,
+			error: 9,
+		});
+		match response_roundtrip(&resp, Version::Lite04) {
+			SubscribeResponse::Drop(d) => assert_eq!(d.error, 9),
+			other => panic!("expected Drop, got {other:?}"),
 		}
 	}
 }

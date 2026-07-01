@@ -72,6 +72,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if let Err(err) = match kind {
 				lite::ControlType::Announce => self.recv_announce(stream).await,
 				lite::ControlType::Subscribe => self.recv_subscribe(stream).await,
+				lite::ControlType::Track => self.recv_track(stream).await,
 				lite::ControlType::Probe => {
 					self.recv_probe(stream);
 					Ok(())
@@ -398,6 +399,50 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	/// Serve a Track stream (moq-lite-05+): reply with the track's immutable TRACK_INFO.
+	pub async fn recv_track(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let msg = stream.reader.decode::<lite::Track>().await?;
+
+		let absolute = self.origin.absolute(&msg.broadcast).to_owned();
+		let name = msg.track.to_string();
+		tracing::debug!(broadcast = %absolute, track = %name, "track info requested");
+
+		let broadcast = self.origin.get_broadcast(&msg.broadcast);
+
+		web_async::spawn(async move {
+			if let Err(err) = Self::run_track_info(&mut stream, broadcast, name).await {
+				tracing::debug!(broadcast = %absolute, %err, "track info error");
+				stream.writer.abort(&err);
+			}
+		});
+
+		Ok(())
+	}
+
+	async fn run_track_info(
+		stream: &mut Stream<S, Version>,
+		consumer: Option<BroadcastConsumer>,
+		name: String,
+	) -> Result<(), Error> {
+		let broadcast = consumer.ok_or(Error::NotFound)?;
+		// Resolve the track to read its publisher properties. The query carries no
+		// priority; a reused producer reports its own authored value.
+		let track = broadcast.subscribe_track(&Track { name, priority: 0 })?;
+
+		// ordered/max_latency aren't tracked in the model yet; the timescale is
+		// milliseconds to match the wall-clock frame timestamps we stamp on the wire.
+		let info = lite::TrackInfo {
+			priority: track.priority,
+			ordered: false,
+			max_latency: Duration::ZERO,
+			timescale: 1000,
+		};
+
+		stream.writer.encode(&info).await?;
+		stream.writer.finish()?;
+		stream.writer.closed().await
+	}
+
 	async fn run_subscribe(
 		session: S,
 		stream: &mut Stream<S, Version>,
@@ -417,20 +462,40 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
+		let mut track = broadcast.subscribe_track(&track)?;
 
 		// Subscription is now active: count this session as a viewer of the
 		// broadcast. Dropping this guard (subscription end) releases it.
 		let _broadcast_sub = broadcasts.subscribe(&absolute);
 
-		// TODO wait until track.info() to get the *real* priority
+		// Resolve the absolute start group once: a non-zero request wins, otherwise the
+		// latest group (or 0 for a track with none yet). The same value is advertised in
+		// SUBSCRIBE_OK and used to position the track here, so the acknowledged start can't
+		// diverge from the served one if a new group arrives in between.
+		let resolved_start = subscribe.start_group.or_else(|| track.latest());
+		let start_group = resolved_start.unwrap_or(0);
+		if let Some(start) = resolved_start {
+			track.start_at(start);
+		}
 
-		let info = lite::SubscribeOk {
-			priority: track.priority,
-			ordered: false,
-			max_latency: std::time::Duration::ZERO,
-			start_group: None,
-			end_group: None,
+		let info = if version.has_track_stream() {
+			// moq-lite-05+: SUBSCRIBE_OK carries only the resolved start group; the
+			// publisher properties live in TRACK_INFO on the Track stream.
+			lite::SubscribeOk {
+				priority: 0,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: Some(start_group),
+				end_group: None,
+			}
+		} else {
+			lite::SubscribeOk {
+				priority: track.priority,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: None,
+				end_group: None,
+			}
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -441,9 +506,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
 		let track_stats = std::sync::Arc::new(track_stats);
 
-		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, track_stats, track_priority_rx, version) => res?,
-			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx) => res?,
+		// `Some(last_group)` means the track ended (and we owe a SUBSCRIBE_END); `None`
+		// means the subscriber tore down the stream first, so no end signal is owed.
+		let ended = tokio::select! {
+			res = Self::run_track(session, track, subscribe, priority, track_stats, track_priority_rx, version) => Some(res?),
+			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx) => { res?; None }
+		};
+
+		// moq-lite-05+: signal end-of-track before FIN once no further groups will be produced.
+		if version.has_track_stream()
+			&& let Some(last) = ended
+		{
+			let group = last.unwrap_or(start_group);
+			stream
+				.writer
+				.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
+				.await?;
 		}
 
 		stream.writer.finish()?;
@@ -468,13 +546,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		mut track_priority: tokio::sync::watch::Receiver<u8>,
 		version: Version,
-	) -> Result<(), Error> {
+	) -> Result<Option<u64>, Error> {
 		let mut tasks = FuturesUnordered::new();
 
-		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
-			track.start_at(start_group);
-		}
+		// Highest group sequence handed to a Group stream, reported in SUBSCRIBE_END (moq-lite-05+).
+		// The consumer was already positioned by `run_subscribe` from the resolved start group.
+		let mut last_sequence: Option<u64> = None;
 
 		loop {
 			let group = tokio::select! {
@@ -484,10 +561,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					false
 				} => unreachable!(),
 				Some(group) = track.recv_group().transpose() => group,
-				else => return Ok(()),
+				else => return Ok(last_sequence),
 			}?;
 
 			let sequence = group.sequence;
+			last_sequence = last_sequence.max(Some(sequence));
 			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
 
 			let msg = lite::Group {
@@ -530,6 +608,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&msg).await?;
 		track_stats.group();
 
+		// moq-lite-05+ stamps each frame with a wall-clock millisecond timestamp, sent as a
+		// zigzag delta from the previous frame (the first frame is a delta from 0).
+		let mut prev_timestamp: i64 = 0;
+
 		loop {
 			let frame = tokio::select! {
 				biased;
@@ -549,6 +631,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				Some(frame) => frame,
 				None => break,
 			};
+
+			if version.has_track_stream() {
+				let now = i64::try_from(crate::Time::now().as_millis()).unwrap_or(i64::MAX);
+				let delta = now - prev_timestamp;
+				prev_timestamp = now;
+				let zigzag = ((delta << 1) ^ (delta >> 63)) as u64;
+				stream.encode(&zigzag).await?;
+			}
 
 			stream.encode(&frame.size).await?;
 			track_stats.frame();

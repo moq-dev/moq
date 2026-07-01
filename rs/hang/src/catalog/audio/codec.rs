@@ -15,6 +15,23 @@ pub enum AudioCodec {
 	#[display("opus")]
 	Opus,
 
+	/// FLAC, the Free Lossless Audio Codec (RFC 9639). The decoder
+	/// initialization data (the `fLaC` stream marker plus the STREAMINFO
+	/// metadata block) travels out of band in [`AudioConfig::description`]. Both
+	/// the codec string and the description match the WebCodecs FLAC
+	/// registration, so browsers decode it directly.
+	///
+	/// [`AudioConfig::description`]: super::AudioConfig::description
+	#[display("flac")]
+	Flac,
+
+	/// MPEG-1/2 Audio Layer III (MP3). Configuration is carried in band in each
+	/// frame header, so there is no out-of-band description. Browsers decode it
+	/// via WebCodecs (`AudioDecoder` codec string `"mp3"`), so unlike the legacy
+	/// codecs below it gets its own [`AudioCodecKind`].
+	#[display("mp3")]
+	Mp3,
+
 	/// MPEG-1/2 Audio Layer II. Legacy broadcast codec, carried verbatim by the
 	/// MPEG-TS bridge for TS gear. WebCodecs cannot decode it, so browsers should
 	/// skip this rendition. Do not use it for new content.
@@ -45,6 +62,8 @@ pub enum AudioCodec {
 pub enum AudioCodecKind {
 	AAC,
 	Opus,
+	Flac,
+	Mp3,
 	Unknown,
 }
 
@@ -54,6 +73,8 @@ impl AudioCodec {
 		match self {
 			Self::AAC(_) => AudioCodecKind::AAC,
 			Self::Opus => AudioCodecKind::Opus,
+			Self::Flac => AudioCodecKind::Flac,
+			Self::Mp3 => AudioCodecKind::Mp3,
 			// Legacy TS-bridge codecs aren't WebCodecs-decodable, so they share the
 			// coarse Unknown family for tag-only matching.
 			Self::Mp2 | Self::Ac3 | Self::Ec3 => AudioCodecKind::Unknown,
@@ -70,6 +91,10 @@ impl FromStr for AudioCodec {
 			return AAC::from_str(s).map(Into::into);
 		} else if s == "opus" {
 			return Ok(Self::Opus);
+		} else if s == "flac" {
+			return Ok(Self::Flac);
+		} else if s == "mp3" {
+			return Ok(Self::Mp3);
 		} else if s == "mp2" {
 			return Ok(Self::Mp2);
 		} else if s == "ac-3" {
@@ -79,5 +104,18 @@ impl FromStr for AudioCodec {
 		}
 
 		Ok(Self::Unknown(s.to_string()))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn flac_roundtrip() {
+		let codec = AudioCodec::from_str("flac").unwrap();
+		assert_eq!(codec, AudioCodec::Flac);
+		assert_eq!(codec.to_string(), "flac");
+		assert_eq!(codec.kind(), AudioCodecKind::Flac);
 	}
 }

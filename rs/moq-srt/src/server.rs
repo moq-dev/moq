@@ -265,7 +265,7 @@ async fn reject_log(request: ConnectionRequest, reason: ServerRejectReason, peer
 }
 
 /// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
-async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket) -> Result<()> {
+pub(crate) async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket) -> Result<()> {
 	use futures::TryStreamExt;
 
 	let mut publisher = crate::ts::Publisher::new(origin, path)?;
@@ -282,7 +282,7 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// Waits for the broadcast to be announced (so a caller may connect before the
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket) -> Result<()> {
+pub(crate) async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket) -> Result<()> {
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
