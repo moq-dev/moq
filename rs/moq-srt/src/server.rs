@@ -58,7 +58,9 @@ impl Server {
 	/// Bind an SRT listener on `addr` (SRT has no well-known port; 9000 is common).
 	///
 	/// `latency` is the SRT receive latency, negotiated at handshake time; pass
-	/// `None` for a sensible default (200ms).
+	/// `None` for a sensible default (200ms). A subscribe (egress) connection also
+	/// reuses it as the muxer's read/skip budget, so a track tolerates the same jitter
+	/// the receiver's TSBPD does.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 		let (listener, incoming) = SrtListener::builder().latency(latency).bind(addr).await?;
