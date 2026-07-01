@@ -195,7 +195,10 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
           cur="obs-moq-v${VERSION}"
-          prev=$(git tag --list 'obs-moq-v*' --sort=-v:refname | grep -vx "$cur" | head -n1)
+          # awk (not grep -vx | head) so an empty result is exit 0, not 1:
+          # under `set -eo pipefail` the inaugural release has no prior tag and
+          # grep's exit 1 would fail the step. Empty tag is fine downstream.
+          prev=$(git tag --list 'obs-moq-v*' --sort=-v:refname | awk -v cur="$cur" '$0 != cur { print; exit }')
           echo "tag=${prev}" >>"$GITHUB_OUTPUT"
 
       # Cut a parallel obs-moq-v<version> release at this commit (gh creates
