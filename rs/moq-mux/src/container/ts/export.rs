@@ -61,6 +61,10 @@ pub struct Export<E: CatalogExt = ()> {
 	counters: HashMap<u16, ContinuityCounter>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
+	/// How many tracks the source PMT declared, from the `mpegts` catalog section's
+	/// `expected_tracks` hint. `None` for a non-TS source (nothing to wait for beyond
+	/// what has already resolved). See [`Self::layout_complete`].
+	expected_tracks: Option<u16>,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -189,6 +193,7 @@ impl<E: CatalogExt> Export<E> {
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
+			expected_tracks: None,
 			psi: None,
 			last_psi: None,
 			video_start: None,
@@ -277,11 +282,13 @@ impl<E: CatalogExt> Export<E> {
 				}
 				return Poll::Pending;
 			}
-			if !self.header_ready() || !self.video_ready() {
-				// Hold all output (tables and audio alike) until codec configs resolve
-				// and, when the program has a video rendition, its first keyframe is
-				// buffered: the stream must begin on that keyframe so the in-band
-				// parameter sets lead it. An audio-only program has nothing to wait for.
+			if !self.layout_complete() || !self.header_ready() || !self.video_ready() {
+				// Hold all output (tables and audio alike) until the declared track count
+				// is reached (so PSI doesn't lock on a subset, e.g. audio alone, while a
+				// video track is still waiting on its SPS), codec configs resolve, and,
+				// when the program has a video rendition, its first keyframe is buffered:
+				// the stream must begin on that keyframe so the in-band parameter sets
+				// lead it. An audio-only program has nothing to wait for beyond that.
 				// If every track finished without producing a config, it can't be muxed.
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					return Poll::Ready(Ok(None));
@@ -328,6 +335,7 @@ impl<E: CatalogExt> Export<E> {
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
 		let mpegts = catalog::mpegts_mut(&mut catalog).cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
+		self.expected_tracks = mpegts.expected_tracks;
 
 		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: HashMap<String, ()> = HashMap::new();
@@ -477,6 +485,14 @@ impl<E: CatalogExt> Export<E> {
 				dts_reserve,
 			},
 		);
+	}
+
+	/// Whether every track the source PMT declared has resolved into `self.tracks`.
+	/// Without an `expected_tracks` hint (a non-TS source) this trusts whatever has
+	/// resolved so far, matching the pre-hint behavior.
+	fn layout_complete(&self) -> bool {
+		self.expected_tracks
+			.is_none_or(|expected| self.tracks.len() >= expected as usize)
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its

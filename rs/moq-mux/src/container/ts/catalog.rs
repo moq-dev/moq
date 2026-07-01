@@ -34,12 +34,21 @@ pub struct Mpegts {
 	/// re-emits these; the SCTE-35 'CUEI' registration is derived when absent.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub program_descriptors: Vec<Descriptor>,
+
+	/// How many elementary streams the most recently parsed PMT declares that will
+	/// resolve into a published MoQ track (media or verbatim). Known immediately from
+	/// the PMT, before any of those tracks' own catalog renditions resolve, so export
+	/// can tell an in-progress layout (fewer tracks than this) from a genuinely
+	/// complete one instead of locking PSI on whichever subset has resolved first.
+	/// `None` when the catalog wasn't produced from an MPEG-TS source.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub expected_tracks: Option<u16>,
 }
 
 impl Mpegts {
 	/// True when the section carries nothing, so it's omitted from the catalog.
 	pub fn is_empty(&self) -> bool {
-		self.tracks.is_empty() && self.program_descriptors.is_empty()
+		self.tracks.is_empty() && self.program_descriptors.is_empty() && self.expected_tracks.unwrap_or(0) == 0
 	}
 }
 

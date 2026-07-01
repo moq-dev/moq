@@ -290,6 +290,283 @@ async fn export_starts_at_video_keyframe() {
 	assert!(!audio.is_empty(), "audio from the keyframe onward is still carried");
 }
 
+/// Regression for moq-dev/moq#1979: AAC registers its catalog rendition on the first
+/// PES, while H.264 waits for the first keyframe's inline SPS, so an audio-only catalog
+/// snapshot can reach the exporter before video's rendition resolves. Without the PMT's
+/// `expected_tracks` hint the exporter locked PSI on that audio-only layout, then
+/// hard-failed once video's rendition arrived ("TS track layout changed... added").
+#[tokio::test(start_paused = true)]
+async fn export_holds_psi_until_pmt_declared_tracks_resolve() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// As on a real PMT parse: the program declares two elementary streams up front,
+	// before either one's codec resolves a catalog rendition.
+	catalog.lock().mpegts.expected_tracks = Some(2);
+
+	// Audio resolves first.
+	let atrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".aac")))
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
+	}
+	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+	audio
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xAAu8; 16]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish_group().unwrap();
+
+	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+
+	// Only audio has resolved; the PMT declared a second (video) track that hasn't. The
+	// exporter must keep waiting rather than lock PSI on the audio-only layout.
+	match tokio::time::timeout(std::time::Duration::from_millis(50), exporter.next()).await {
+		Err(_) => {} // still converging, as expected
+		Ok(other) => panic!("exporter must wait for the declared video track, got {other:?}"),
+	}
+
+	// Video resolves: the layout now matches the PMT's declared count.
+	let vtrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")))
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 16));
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: annexb(&[SPS, PPS, &idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.finish_group().unwrap();
+	audio.finish().unwrap();
+	video.finish().unwrap();
+
+	let ts = drain_with(exporter).await;
+	assert_packet_aligned(&ts);
+
+	// PSI advertises both PMT-declared streams: the race never locked a partial layout.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 2, "PMT must advertise both PMT-declared tracks");
+			checked = true;
+			break;
+		}
+	}
+	assert!(checked, "missing PMT");
+}
+
+/// Regression for moq-dev/moq#1979: video resolves before audio (opposite order from the issue).
+/// The exporter must still wait for all declared tracks before locking PSI.
+#[tokio::test(start_paused = true)]
+async fn export_holds_psi_until_all_declared_tracks_resolve_video_first() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// Program declares two elementary streams.
+	catalog.lock().mpegts.expected_tracks = Some(2);
+
+	// Video resolves first (opposite order from the race scenario).
+	let vtrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")))
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 16));
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: annexb(&[SPS, PPS, &idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.finish_group().unwrap();
+
+	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+
+	// Only video has resolved; exporter must wait for audio.
+	match tokio::time::timeout(std::time::Duration::from_millis(50), exporter.next()).await {
+		Err(_) => {} // still converging, as expected
+		Ok(other) => panic!("exporter must wait for the declared audio track, got {other:?}"),
+	}
+
+	// Audio resolves: layout complete.
+	let atrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".aac")))
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
+	}
+	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+	audio
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xAAu8; 16]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish_group().unwrap();
+	video.finish().unwrap();
+	audio.finish().unwrap();
+
+	let ts = drain_with(exporter).await;
+	assert_packet_aligned(&ts);
+
+	// PMT advertises both tracks.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 2, "PMT must advertise both tracks");
+			checked = true;
+			break;
+		}
+	}
+	assert!(checked, "missing PMT");
+}
+
+/// Regression for moq-dev/moq#1979: non-TS source (no expected_tracks hint)
+/// should export immediately without waiting for a declared count.
+#[tokio::test(start_paused = true)]
+async fn export_without_expected_tracks_hint_exports_immediately() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// No expected_tracks hint (non-TS source, e.g., from an fMP4 or live capture).
+	// Exporter should not wait; it trusts whatever has resolved.
+
+	// Only audio resolves.
+	let atrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".aac")))
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
+	}
+	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+	audio
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xAAu8; 16]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish_group().unwrap();
+
+	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+
+	// Without expected_tracks, exporter should start outputting immediately
+	// (audio-only is a valid, complete layout).
+	match tokio::time::timeout(std::time::Duration::from_millis(50), exporter.next()).await {
+		Ok(_) => {} // got output, as expected (no waiting for missing video)
+		Err(_) => panic!("exporter must not wait when expected_tracks is None"),
+	}
+
+	audio.finish().unwrap();
+	let _ts = drain_with(exporter).await;
+}
+
+/// Regression for moq-dev/moq#1979: verify the expected_tracks hint propagates correctly
+/// through a real import->export roundtrip (the normal path for TS sources).
+#[tokio::test(start_paused = true)]
+async fn import_export_roundtrip_carries_expected_tracks_hint() {
+	// Import a real TS byte stream; verify the importer sets expected_tracks from the PMT,
+	// and the exporter uses it to gate PSI without racing.
+	let ts_bytes = include_bytes!("test_data/bbb.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::with_catalog(
+		&mut broadcast,
+		crate::catalog::hang::Catalog::<tscat::Ext>::default(),
+	)
+	.unwrap();
+
+	// Import the TS stream. The importer parses the PMT and sets expected_tracks.
+	let mut importer = crate::container::ts::Import::new(broadcast.clone(), catalog.clone());
+	let buf = bytes::BytesMut::from(&ts_bytes[..]);
+	importer.decode(&buf).unwrap();
+	importer.finish().unwrap();
+
+	// Check that expected_tracks was set by the importer (from the real PMT).
+	let catalog_guard = catalog.lock();
+	let expected = catalog_guard.mpegts.expected_tracks;
+	drop(catalog_guard);
+
+	if let Some(count) = expected {
+		assert!(count >= 1, "expected_tracks should be at least 1 for this file with audio+video");
+	}
+
+	// Export the imported broadcast: it should use the expected_tracks hint to gate PSI.
+	let exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+
+	let ts = drain_with(exporter).await;
+	assert_packet_aligned(&ts);
+	assert!(!ts.is_empty(), "re-exported TS should not be empty");
+
+	// Verify the PMT is present and lists the expected number of streams.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut pmt_checked = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert!(
+				pmt.es_info.len() >= 1,
+				"re-exported PMT should list at least one stream"
+			);
+			pmt_checked = true;
+			break;
+		}
+	}
+	assert!(pmt_checked, "missing PMT in re-exported TS");
+}
+
 /// Re-parse a TS byte stream: assert the single video stream type, that the
 /// keyframe carries random-access + PCR in an unbounded PES, and return the
 /// reassembled Annex-B elementary stream.

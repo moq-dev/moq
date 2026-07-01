@@ -260,6 +260,27 @@ impl<E: CatalogExt> Import<E> {
 						self.ensure_stream(es.elementary_pid, es.stream_type, &es.descriptors)?;
 					}
 				}
+
+				// Publish how many of this PMT's streams will eventually become a track,
+				// even though most of them (H.264 pending its SPS, AAC pending its first
+				// ADTS header, ...) haven't resolved a catalog rendition yet. Export uses
+				// this to hold PSI until every declared track has resolved, rather than
+				// locking on whichever subset (e.g. audio alone) happens to resolve first.
+				if self.supports_mpegts {
+					let expected = pmt
+						.es_info
+						.iter()
+						.filter(|es| {
+							let pid = es.elementary_pid.as_u16();
+							self.sections.contains_key(&pid)
+								|| matches!(self.streams.get(&es.elementary_pid), Some(s) if !matches!(s, Stream::Ignored | Stream::Clock))
+						})
+						.count();
+					let mut guard = self.catalog.lock();
+					if let Some(mpegts) = catalog::mpegts_mut(&mut guard) {
+						mpegts.expected_tracks = Some(expected as u16);
+					}
+				}
 			}
 			Some(TsPayload::PesStart(pes)) => self.handle_pes_start(pid, pes)?,
 			Some(TsPayload::PesContinuation(bytes)) => self.handle_pes_continuation(pid, &bytes)?,
