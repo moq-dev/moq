@@ -68,6 +68,12 @@ pub async fn pull(
 /// `mode` is the *remote's* role, the inverse of the local direction (the remote
 /// receives on `m=publish`, sends on `m=request`).
 async fn call(addr: SocketAddr, resource: &str, mode: Mode, latency: impl Into<Option<Duration>>) -> Result<SrtSocket> {
+	// `,` and `=` delimit the `#!::r=<resource>,m=<mode>` stream id, so a resource
+	// carrying either would corrupt it and misroute at the listener. Reject rather
+	// than silently produce a broken id (MoQ paths never contain these).
+	if resource.contains([',', '=']) {
+		return Err(anyhow::anyhow!("srt resource must not contain ',' or '=': {resource:?}").into());
+	}
 	let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 	let stream_id = format!("#!::r={resource},m={}", mode.as_str());
 	let socket = SrtSocket::builder()

@@ -75,7 +75,9 @@ impl Client<TcpStream> {
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
 		let stream = TcpStream::connect(addr).await?;
 		stream.set_nodelay(true).ok();
-		Self::with_stream(stream, app).await
+		// Advertise a tcUrl derived from the dial target: several ingest servers
+		// (YouTube, Twitch, some nginx-rtmp configs) reject a connect without one.
+		Self::with_stream_config(stream, app, Some(format!("rtmp://{addr}/{app}"))).await
 	}
 }
 
@@ -85,12 +87,26 @@ impl<S: Stream> Client<S> {
 	///
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
-	pub async fn with_stream(mut stream: S, app: &str) -> Result<Self> {
-		client_handshake(&mut stream).await?;
+	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
+		Self::with_stream_config(stream, app, None).await
+	}
 
+	async fn with_stream_config(mut stream: S, app: &str, tc_url: Option<String>) -> Result<Self> {
+		let remaining = client_handshake(&mut stream).await?;
+
+		let mut config = ClientSessionConfig::new();
+		config.tc_url = tc_url;
 		let (mut session, initial) =
-			ClientSession::new(ClientSessionConfig::new()).map_err(|e| anyhow::anyhow!("rtmp client init: {e:?}"))?;
+			ClientSession::new(config).map_err(|e| anyhow::anyhow!("rtmp client init: {e:?}"))?;
 		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
+		// Bytes the handshake read past its end are the first RTMP chunks; feed them
+		// so the session stays byte-aligned.
+		if !remaining.is_empty() {
+			let results = session
+				.handle_input(&remaining)
+				.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
+			work.extend(results);
+		}
 		work.push_back(
 			session
 				.request_connection(app.to_string())
@@ -276,6 +292,13 @@ impl<S: Stream> Client<S> {
 					ClientSessionResult::RaisedEvent(event) => match (direction, event) {
 						(Direction::Publish, ClientSessionEvent::PublishRequestAccepted)
 						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => return Ok(()),
+						// A refused publish/play arrives as an onStatus *failure* code, not a
+						// Rejected event; surface it instead of hanging until the peer closes.
+						// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
+						// .Start) come through here too, so only fail on error codes.
+						(_, ClientSessionEvent::UnhandleableOnStatusCode { code }) if is_status_failure(&code) => {
+							return Err(anyhow::anyhow!("rtmp {direction} rejected by remote: {code}").into());
+						}
 						_ => {}
 					},
 					ClientSessionResult::UnhandleableMessageReceived(_) => {}
@@ -322,7 +345,20 @@ impl std::fmt::Display for Direction {
 
 /// Perform the RTMP client handshake, returning once it completes. Any bytes that
 /// trail the final handshake packet are fed back into the session by the caller.
-async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<()> {
+/// Whether an RTMP `onStatus` code denotes a failure (a refused publish/play),
+/// as opposed to a benign progress status like `NetStream.Play.Reset`. The RTMP
+/// error codes reliably carry one of these words; the info codes (`.Start`,
+/// `.Reset`, `.Notify`, `.Stop`, ...) do not.
+fn is_status_failure(code: &str) -> bool {
+	["Failed", "NotFound", "BadName", "Denied", "Rejected", "Unauthorized"]
+		.iter()
+		.any(|needle| code.contains(needle))
+}
+
+/// Run the client handshake and return any bytes read past its end. The final
+/// handshake read can also carry the first RTMP chunks, so those `remaining_bytes`
+/// must be fed to the session or chunk parsing desyncs.
+async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
 	let mut handshake = Handshake::new(PeerType::Client);
 	let p0_p1 = handshake
 		.generate_outbound_p0_and_p1()
@@ -342,11 +378,14 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<()> {
 					stream.write_all(&response_bytes).await?;
 				}
 			}
-			HandshakeProcessResult::Completed { response_bytes, .. } => {
+			HandshakeProcessResult::Completed {
+				response_bytes,
+				remaining_bytes,
+			} => {
 				if !response_bytes.is_empty() {
 					stream.write_all(&response_bytes).await?;
 				}
-				return Ok(());
+				return Ok(remaining_bytes);
 			}
 		}
 	}
