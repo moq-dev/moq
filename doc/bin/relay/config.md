@@ -37,13 +37,38 @@ level = "info"
 
 ### \[server]
 
-QUIC/WebTransport server settings.
+QUIC/WebTransport server settings. Optionally add plaintext qmux stream
+listeners for trusted local workers. Every connection authenticates through the
+same JWT / public-access path; QUIC additionally accepts an mTLS client
+certificate, and Unix sockets add optional peer-credential gating.
 
 ```toml
 [server]
-# Listen address for QUIC (UDP)
-listen = "0.0.0.0:4443"
+# QUIC (UDP) bind. Omit to run stream-only (no QUIC) when a tcp/unix listener
+# is configured below.
+bind = "[::]:443"
+
+# Plaintext qmux over TCP (no TLS, carries no peer identity). Trusted networks
+# only; a non-loopback bind logs a warning. Requires the `tcp` build feature.
+[server.tcp]
+bind = "127.0.0.1:4444"
+
+# Plaintext qmux over a Unix socket, for local workers (e.g. the protocol
+# gateways or a stats publisher). Requires the `uds` build feature. Restrict
+# callers by peer credentials (each list AND across, OR within; empty = no
+# constraint).
+[server.unix]
+bind = "/run/moq/internal.sock"
+
+[server.unix.allow]
+uid = [1001]
+# gid = [2000]
+# pid = [12345]
 ```
+
+No-JWT connections on the stream transports resolve through the same
+public-access rules as tokenless QUIC clients (see [`[auth]`](#auth) `public`).
+See [Stream Listeners](/bin/relay/auth#stream-listeners) for details.
 
 ### \[server.tls]
 
@@ -93,31 +118,6 @@ listen = "0.0.0.0:443"
 cert = "cert.pem"
 key = "key.pem"
 ```
-
-### \[internal]
-
-Unauthenticated qmux listeners (no TLS) for trusted local workers. Every
-connection is granted full, unrestricted access. A TCP and a Unix-socket
-listener can each be enabled independently; both default to disabled.
-
-```toml
-# Plain-TCP listener (tcp:// scheme).
-[internal.tcp]
-listen = "127.0.0.1:4444"
-
-# Unix-socket listener (unix:// scheme), requires the `uds` build feature.
-[internal.uds]
-listen = "/run/moq/internal.sock"
-
-# Restrict the Unix-socket callers by peer credentials. Empty/omitted = no check.
-[internal.uds.allow]
-uid = [1001]
-# gid = [2000]
-# pid = [12345]
-```
-
-A non-loopback TCP bind logs a warning but is allowed. See
-[Internal Listener](/bin/relay/auth#internal-listener) for details.
 
 ### \[auth]
 

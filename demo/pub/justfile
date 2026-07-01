@@ -167,7 +167,7 @@ serve name *args:
     cargo build --bin moq-cli
     just ffmpeg-cmaf "media/{{ name }}.mp4" |\
     cargo run --bin moq-cli -- \
-    	{{ args }} serve --server-listen "[::]:4443" --tls-generate "localhost" \
+    	{{ args }} serve --listen "[::]:4443" --tls-generate "localhost" \
     	--name "{{ name }}.hang" fmp4
 
 # Generate and serve an HLS stream from a video for testing.

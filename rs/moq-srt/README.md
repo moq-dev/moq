@@ -20,12 +20,7 @@ Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg dependency.
 Two entry points. `Config` + `run` is the unauthenticated convenience: a relay
 embeds ingest by calling `run` against its own origin, so the ingested media is
 published locally with no extra hop. For auth, drive `Server` / `Request`
-directly (see [Auth](#auth) below). Depend on it with `default-features = false`
-to skip the binary's relay client/server and CLI dependencies:
-
-```toml
-moq-srt = { version = "0.0.1", default-features = false }
-```
+directly (see [Auth](#auth) below).
 
 ```rust
 let mut srt = moq_srt::Config::default();
@@ -39,29 +34,12 @@ tokio::select! {
 }
 ```
 
-## Binary
+## CLI
 
-The `moq-srt` binary (needs the default `server` feature) has two modes.
+A command-line interface is provided by the [`moq-cli`](../moq-cli) binary, on
+top of this library.
 
-`serve` ingests SRT and serves it directly as a local relay, so MoQ subscribers
-(native or browser) connect straight to this binary. It also exposes the
-`/certificate.sha256` endpoint browsers need for self-signed `http://` origins,
-and can serve a static player directory with `--dir`:
-
-```bash
-moq-srt serve --server-bind [::]:443 --tls-generate localhost \
-  --listen 0.0.0.0:9000 --prefix live/
-```
-
-`publish` instead forwards every ingested broadcast out to a remote relay over
-WebTransport (like `moq-cli hls import`):
-
-```bash
-moq-srt publish --relay https://relay.example.com \
-  --listen 0.0.0.0:9000 --prefix live/
-```
-
-Feed either mode with any SRT source:
+Feed any SRT source:
 
 ```bash
 # Publish: lands at broadcast `live/cam0`.
@@ -84,7 +62,7 @@ Each connection's broadcast path and direction come from its SRT stream id:
   selecting egress and anything else (including absent) selecting ingest.
 - Otherwise the raw stream id (e.g. OBS-style `app/key`), always ingest.
 
-`--prefix` is prepended to namespace a listener's streams. First publisher on
+`--srt-prefix` is prepended to namespace a listener's streams. First publisher on
 a path wins; a second publish of the same path is rejected. Requests don't claim
 a path, so any number of players can pull the same broadcast.
 

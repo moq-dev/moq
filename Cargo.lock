@@ -4217,6 +4217,7 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
+ "jni 0.21.1",
  "moq-net",
  "notify",
  "parking_lot",
@@ -4227,6 +4228,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-native-certs",
+ "rustls-platform-verifier 0.6.2",
  "rustls-webpki",
  "serde",
  "serde_with",
@@ -4249,6 +4251,7 @@ dependencies = [
  "web-transport-quiche",
  "web-transport-quinn",
  "web-transport-trait",
+ "webpki-roots",
  "x509-parser",
 ]
 
@@ -4272,7 +4275,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4314,20 +4317,14 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
- "axum-server",
  "bytes",
- "clap",
  "hang",
  "moq-mux",
- "moq-native",
  "moq-net",
  "reqwest",
- "rustls",
- "sd-notify",
  "str0m",
  "thiserror 2.0.18",
  "tokio",
- "tower-http 0.7.0",
  "tracing",
  "url",
  "uuid",
@@ -4338,24 +4335,18 @@ name = "moq-rtmp"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum",
- "axum-server",
  "bytes",
- "clap",
  "futures",
  "moq-mux",
  "moq-native",
  "moq-net",
  "rml_rtmp",
  "rustls",
- "sd-notify",
  "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tower-http 0.7.0",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -4363,23 +4354,14 @@ name = "moq-srt"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum",
- "axum-server",
  "bytes",
- "clap",
  "futures",
- "humantime",
  "moq-mux",
- "moq-native",
  "moq-net",
- "rustls",
- "sd-notify",
  "srt-tokio",
  "thiserror 2.0.18",
  "tokio",
- "tower-http 0.7.0",
  "tracing",
- "url",
 ]
 
 [[package]]

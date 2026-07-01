@@ -25,7 +25,12 @@ async fn main() -> anyhow::Result<()> {
 	let mut server = config.server.init()?;
 	let client = config.client.clone().init()?;
 
-	let addr = server.local_addr()?;
+	// `None` for a stream-only server (no QUIC); any other error is real.
+	let addr = match server.local_addr() {
+		Ok(addr) => Some(addr),
+		Err(moq_native::Error::NoBackend(_)) => None,
+		Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
+	};
 
 	#[cfg(feature = "iroh")]
 	let (server, client) = {
@@ -66,7 +71,10 @@ async fn main() -> anyhow::Result<()> {
 		config.web,
 	);
 
-	tracing::info!(%addr, "listening");
+	match addr {
+		Some(addr) => tracing::info!(%addr, "listening"),
+		None => tracing::info!("listening (stream transports only)"),
+	}
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
@@ -80,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
-		Err(err) = run_internal(config.internal, cluster.clone()) => return Err(err).context("internal server failed"),
 		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
 		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
 		else => Ok(()),
