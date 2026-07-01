@@ -16,9 +16,6 @@ use super::Timestamp;
 /// stored tokio sleep against the poll's [`kio::Waiter`], so the poll re-fires when the
 /// deadline passes. moq-mux already depends on tokio, so this keeps the wait local
 /// instead of pushing a runtime dependency into kio.
-// Wired into the windowed TS exporter's `poll_next`; until that lands only the unit test
-// constructs it, so allow the transitional dead code.
-#[allow(dead_code)]
 #[derive(Default)]
 pub(crate) struct Timer {
 	/// The armed sleep, kept alive across polls so its timer registration persists.
@@ -27,7 +24,6 @@ pub(crate) struct Timer {
 	until: Option<Instant>,
 }
 
-#[allow(dead_code)]
 impl Timer {
 	/// Poll until `after`. Returns `Ready(now)` once the clock reaches `after`; otherwise
 	/// arms (or re-arms) against `waiter` and returns `Pending`. Re-arms only when `after`

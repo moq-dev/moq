@@ -28,7 +28,7 @@ pub mod mkv;
 pub mod ts;
 
 pub use consumer::Consumer;
-pub(crate) use pace::Pacer;
+pub(crate) use pace::{Pacer, Timer};
 pub use producer::Producer;
 pub(crate) use source::ExportSource;
 
