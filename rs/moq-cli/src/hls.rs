@@ -4,15 +4,23 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use anyhow::Context;
 use hang::moq_net;
 use hang::moq_net::AsPath;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::moq::notify_ready;
 
-/// HLS export (serve) args. Import is just a playlist URL, so it has no struct.
+/// HLS import (pull a remote playlist) args.
 #[derive(clap::Args, Clone)]
-pub struct Args {
+pub struct ImportArgs {
+	/// Playlist URL (http/https) or local file path.
+	pub playlist: String,
+}
+
+/// HLS export (serve over HTTP) args.
+#[derive(clap::Args, Clone)]
+pub struct ExportArgs {
 	/// HTTP listener for the HLS endpoints.
 	#[arg(long, default_value = "[::]:8089")]
 	pub listen: SocketAddr,
@@ -50,10 +58,10 @@ pub async fn import(origin: &moq_net::OriginProducer, name: String, playlist: St
 
 /// Serve HLS/LL-HLS over HTTP for the single broadcast `name` (reached at
 /// `/<name>/master.m3u8`); other broadcasts in the Origin are not served.
-pub async fn export(origin: moq_net::OriginConsumer, args: Args, name: String) -> anyhow::Result<()> {
+pub async fn export(origin: moq_net::OriginConsumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
 	let scoped = origin
 		.scope(&[name.as_path()])
-		.ok_or_else(|| anyhow::anyhow!("failed to scope origin to broadcast `{name}`"))?;
+		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let config = moq_hls::export::Config {
 		part_target: args.part_target,

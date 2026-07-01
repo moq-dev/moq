@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 
+use anyhow::Context;
 use hang::moq_net;
 use moq_rtmp::{Client, Request, Server};
 use url::Url;
@@ -101,7 +102,7 @@ pub async fn connect_export(origin: moq_net::OriginConsumer, url: Url, name: Str
 	let broadcast = origin
 		.announced_broadcast(&name)
 		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 
 	tracing::info!(%url, %name, "RTMP client pushing");
 	notify_ready();
@@ -116,12 +117,12 @@ async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String, String)> {
 
 	let host = url
 		.host_str()
-		.ok_or_else(|| anyhow::anyhow!("rtmp url missing host: {url}"))?;
+		.with_context(|| format!("rtmp url missing host: {url}"))?;
 	let port = url.port().unwrap_or(1935);
 	let addr = tokio::net::lookup_host((host, port))
 		.await?
 		.next()
-		.ok_or_else(|| anyhow::anyhow!("could not resolve {host}:{port}"))?;
+		.with_context(|| format!("could not resolve {host}:{port}"))?;
 
 	let mut segments = url.path().trim_matches('/').splitn(2, '/');
 	let app = segments.next().unwrap_or_default().to_string();

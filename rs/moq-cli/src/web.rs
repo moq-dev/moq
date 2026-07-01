@@ -3,10 +3,8 @@ use axum::handler::HandlerWithoutStateExt;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Router, http::Method, routing::get};
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 
 /// Serve an axum router over TCP, optionally terminating TLS. Used by the HLS
 /// and WebRTC (WHIP/WHEP) HTTP endpoints.
@@ -28,12 +26,9 @@ pub async fn serve(
 	Ok(())
 }
 
-// Initialize the HTTP server (but don't serve yet).
-pub async fn run_web(
-	bind: &str,
-	tls_info: Arc<RwLock<moq_native::tls::Info>>,
-	public: Option<PathBuf>,
-) -> anyhow::Result<()> {
+/// Serve the `/certificate.sha256` self-signed fingerprint over HTTP, so an
+/// `http://` client can pin a `--server-bind` server's generated cert.
+pub async fn run_web(bind: &str, tls_info: Arc<RwLock<moq_native::tls::Info>>) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)
 		.await
 		.context("invalid listen address")?
@@ -56,20 +51,10 @@ pub async fn run_web(
 			.clone()
 	};
 
-	let mut app = Router::new()
+	let app = Router::new()
 		.route("/certificate.sha256", get(fingerprint_handler))
-		.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]));
-
-	// If a public directory is provided, serve it.
-	// We use this for local development to serve the index.html file and friends.
-	if let Some(public) = public.as_ref() {
-		tracing::info!(public = %public.display(), "serving directory");
-
-		let public = ServeDir::new(public).not_found_service(handle_404.into_service());
-		app = app.fallback_service(public);
-	} else {
-		app = app.fallback_service(handle_404.into_service());
-	}
+		.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
+		.fallback_service(handle_404.into_service());
 
 	// Dual-stack so the cert endpoint answers over IPv4 too, even on Windows
 	// where `[::]` is IPv6-only by default.

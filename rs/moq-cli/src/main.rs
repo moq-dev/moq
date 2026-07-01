@@ -85,9 +85,8 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
 		let tls_info = server.tls_info();
-		let dir = moq.dir.clone();
 		tasks.spawn(moq::server_import(server, origin.clone()));
-		tasks.spawn(async move { web::run_web(&web_bind, tls_info, dir).await });
+		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
 	}
 
 	// Foreign side: the single source.
@@ -101,10 +100,10 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		tasks.spawn(async move { publish.run().await });
 	} else {
 		match import.source {
-			ImportSource::Hls { playlist } => {
+			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
 				let origin = origin.clone();
-				tasks.spawn(async move { hls::import(&origin, name, playlist).await });
+				tasks.spawn(async move { hls::import(&origin, name, hls.playlist).await });
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -160,16 +159,15 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
 		let tls_info = server.tls_info();
-		let dir = moq.dir.clone();
 		tasks.spawn(moq::server_export(server, origin.clone()));
-		tasks.spawn(async move { web::run_web(&web_bind, tls_info, dir).await });
+		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
 	}
 
 	// Foreign side: the single sink.
 	if let Some((format, fragment_duration)) = export.sink.stdout() {
 		let args = SubscribeArgs {
 			format,
-			max_latency: export.max_latency,
+			max_latency: export.latency_max,
 			fragment_duration,
 			catalog: export.catalog_format,
 		};

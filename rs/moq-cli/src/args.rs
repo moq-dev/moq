@@ -13,7 +13,6 @@
 //!   `rtmp`, `srt`, `rtc`). Exactly one per invocation, so "which endpoint" is
 //!   unambiguous and there's no silently-ignored flag.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -63,18 +62,12 @@ pub struct MoqSide {
 	)]
 	pub client_connect: Option<Url>,
 
-	/// The broadcast name for a single-broadcast endpoint (stdin/stdout, HLS, and
-	/// the foreign `--connect` dials). Optional: MoQ names each broadcast by the
-	/// connection path plus this name, so leaving it unset uses the root broadcast
-	/// at the connection path. Ignored by the dynamic (`--listen`) endpoints,
-	/// which name broadcasts from the protocol (RTMP app/key, SRT stream id).
+	/// The broadcast name. Optional for the point endpoints (stdin/stdout, HLS
+	/// import, and the `--connect` dials), which default to the root broadcast at
+	/// the connection path; required by the `--listen` endpoints and `hls export`,
+	/// which bridge one named broadcast.
 	#[arg(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
-
-	/// When hosting (`--server-bind`), also serve static files and the
-	/// `/certificate.sha256` fingerprint over HTTP from this directory.
-	#[arg(long, requires = "server-bind", help_heading = "MoQ")]
-	pub dir: Option<PathBuf>,
 
 	/// MoQ client transport config (`--client-bind`, `--client-tls-*`, ...).
 	#[command(flatten)]
@@ -117,10 +110,7 @@ pub enum ImportSource {
 	/// FLV / RTMP container from stdin.
 	Flv,
 	/// Pull a remote HLS / LL-HLS playlist (http/https URL or local file) into MoQ.
-	Hls {
-		/// Playlist URL or local file path.
-		playlist: String,
-	},
+	Hls(crate::hls::ImportArgs),
 	/// RTMP: pull a remote play (`--connect`) or accept incoming publishes (`--listen`).
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
@@ -150,8 +140,8 @@ pub struct Export {
 	/// Maximum latency before skipping groups (e.g. `500ms`, `1s`), for the stdout
 	/// container formats. The gateways (`hls`, `srt`, ...) have their own latency
 	/// controls.
-	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub max_latency: Duration,
+	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
+	pub latency_max: Duration,
 
 	/// Catalog format to read for track discovery (default: detect from the broadcast suffix).
 	#[arg(long = "catalog-format")]
@@ -175,7 +165,7 @@ pub enum ExportSink {
 	/// FLV / RTMP container to stdout.
 	Flv,
 	/// Serve HLS / LL-HLS over HTTP.
-	Hls(crate::hls::Args),
+	Hls(crate::hls::ExportArgs),
 	/// RTMP: push to a remote (`--connect`) or serve plays (`--listen`).
 	Rtmp(crate::rtmp::Args),
 	/// SRT: push to a remote (`--connect`) or serve requests (`--listen`).

@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 
+use anyhow::Context;
 use hang::moq_net;
 use hang::moq_net::AsPath;
 use tower_http::cors::{Any, CorsLayer};
@@ -57,7 +58,7 @@ pub async fn listen_export(
 ) -> anyhow::Result<()> {
 	let subscriber = origin
 		.scope(&[name.as_path()])
-		.ok_or_else(|| anyhow::anyhow!("failed to scope origin to broadcast `{name}`"))?;
+		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
 	let publisher = moq_net::Origin::random().produce();
@@ -69,7 +70,7 @@ pub async fn listen_export(
 fn scope_producer(origin: &moq_net::OriginProducer, name: &str) -> anyhow::Result<moq_net::OriginProducer> {
 	origin
 		.scope(&[name.as_path()])
-		.ok_or_else(|| anyhow::anyhow!("failed to scope origin to broadcast `{name}`"))
+		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `name` (import).
@@ -92,7 +93,7 @@ pub async fn connect_export(origin: moq_net::OriginConsumer, url: Url, name: Str
 	let broadcast = origin
 		.announced_broadcast(&name)
 		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 
 	tracing::info!(%url, %name, "WHIP client pushing");
 	notify_ready();

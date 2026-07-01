@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use anyhow::Context;
 use hang::moq_net;
 use moq_srt::{Request, Server};
 use url::Url;
@@ -129,16 +130,12 @@ pub async fn connect_export(
 async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String)> {
 	anyhow::ensure!(url.scheme() == "srt", "srt url must use the srt scheme: {url}");
 
-	let host = url
-		.host_str()
-		.ok_or_else(|| anyhow::anyhow!("srt url missing host: {url}"))?;
-	let port = url
-		.port()
-		.ok_or_else(|| anyhow::anyhow!("srt url must include a port: srt://host:port"))?;
+	let host = url.host_str().with_context(|| format!("srt url missing host: {url}"))?;
+	let port = url.port().context("srt url must include a port: srt://host:port")?;
 	let addr = tokio::net::lookup_host((host, port))
 		.await?
 		.next()
-		.ok_or_else(|| anyhow::anyhow!("could not resolve {host}:{port}"))?;
+		.with_context(|| format!("could not resolve {host}:{port}"))?;
 
 	let resource = url
 		.query_pairs()
