@@ -75,6 +75,12 @@ pub struct Export<E: CatalogExt = ()> {
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission.
 	last_psi: Option<Timestamp>,
+	/// Decode timestamp of the previous PCR-track frame, so the PCR re-stamp interpolates
+	/// across each frame's on-wire span between real decode times (see [`Self::write_pes`]).
+	last_pcr_decode: Option<Timestamp>,
+	/// Continuous 90 kHz tick of the next PCR due on the PCR track. Carried across frames so
+	/// the re-stamp keeps a uniform PCR cadence independent of the frame rate.
+	next_pcr: Option<u64>,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -183,6 +189,12 @@ struct PesUnit {
 	/// (unwrapped) 90 kHz ticks (wrapped to the wire field in `write_pes`). `Some` only when
 	/// it differs from the PTS; the PES then carries both PTS and DTS.
 	dts: Option<u64>,
+	/// This frame's decode time (the pace/PCR clock): the authored DTS for reordered video,
+	/// else the PTS. The PCR re-stamp interpolates from `last_decode` up to here.
+	decode: Timestamp,
+	/// The previous PCR-track frame's decode time, or `None` for the first frame (and for
+	/// non-PCR tracks). Anchors the lower end of the PCR interpolation span.
+	last_decode: Option<Timestamp>,
 	/// Explicit PES stream_id (verbatim PES); `None` derives it from `is_video`.
 	stream_id: Option<u8>,
 }
@@ -229,6 +241,8 @@ impl<E: CatalogExt> Export<E> {
 			program_descriptors: Vec::new(),
 			psi: None,
 			last_psi: None,
+			last_pcr_decode: None,
+			next_pcr: None,
 			video_start: None,
 		})
 	}
@@ -799,9 +813,15 @@ impl<E: CatalogExt> Export<E> {
 					keyframe: frame.keyframe,
 					timestamp: frame.timestamp,
 					dts,
+					decode,
+					// Only the PCR track interpolates; other tracks carry no PCR.
+					last_decode: if is_pcr { self.last_pcr_decode } else { None },
 					stream_id,
 				};
 				self.write_pes(&mut out, &unit, &es_payload)?;
+				if is_pcr {
+					self.last_pcr_decode = Some(decode);
+				}
 			}
 		}
 		Ok(Output {
@@ -849,18 +869,42 @@ impl<E: CatalogExt> Export<E> {
 			u16::try_from(optional_len + payload.len()).unwrap_or(0)
 		};
 
-		// PCR follows the decode clock, so a B-frame stream advertises DTS (not PTS) here.
-		let pcr = dts.unwrap_or(pts);
+		// PCR re-stamp. On the PCR track, interpolate the reference clock across this frame's
+		// on-wire span, from the previous frame's decode time up to this one, and drop a PCR
+		// whenever `PCR_INTERVAL_TICKS` of media time has elapsed. Anchoring on real decode
+		// times keeps the ramp monotonic, gap-free, and <= the frame's DTS; the fixed cadence
+		// keeps repetition under the 40 ms TR 101 290 limit whatever the frame rate. A bare
+		// per-frame DTS PCR is too sparse and uneven for a hardware IRD's clock-recovery PLL.
+		let end = to_ticks(unit.decode);
+		let start = unit.last_decode.map(to_ticks);
+		let total = payload.len();
 
 		let mut offset = 0;
 		let mut first = true;
 		loop {
-			let adaptation = if first && (unit.is_pcr || unit.keyframe) {
+			// Continuous 90 kHz clock at this packet's byte position, interpolated across the
+			// frame. Pins to the decode time for the first frame (no `start`) or an empty payload.
+			let clock = match start {
+				Some(start) if total > 0 => start + (end - start) * offset as u64 / total as u64,
+				_ => end,
+			};
+			let pcr = if unit.is_pcr && self.next_pcr.is_none_or(|next| clock >= next) {
+				self.next_pcr = Some(clock + PCR_INTERVAL_TICKS);
+				Some(
+					TsTimestamp::new(clock & TS_TIMESTAMP_MASK)
+						.map_err(anyhow::Error::msg)?
+						.into(),
+				)
+			} else {
+				None
+			};
+
+			let adaptation = if pcr.is_some() || (first && unit.keyframe) {
 				Some(AdaptationField {
 					discontinuity_indicator: false,
-					random_access_indicator: unit.keyframe,
+					random_access_indicator: first && unit.keyframe,
 					es_priority_indicator: false,
-					pcr: if unit.is_pcr { Some(pcr.into()) } else { None },
+					pcr,
 					opcr: None,
 					splice_countdown: None,
 					transport_private_data: Vec::new(),
@@ -980,6 +1024,11 @@ const PES_DTS_LEN: usize = 5;
 /// import), the track uses that instead, which is large enough to keep `DTS <= PTS`. See
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
+
+/// Insert a PCR at least this often on the PCR track: 20 ms (90 kHz * 20) matches ffmpeg's
+/// default `pcr_period` and stays under the 40 ms DVB TR 101 290 repetition limit, so a
+/// hardware decoder's clock-recovery PLL sees a dense, uniform clock.
+const PCR_INTERVAL_TICKS: u64 = 20 * 90;
 
 fn psi_interval() -> Timestamp {
 	Timestamp::try_from(PSI_INTERVAL).unwrap_or(Timestamp::ZERO)
