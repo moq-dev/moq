@@ -60,6 +60,10 @@ pub struct Export<E: CatalogExt = ()> {
 	/// Maps each frame's decode timestamp to the wall-clock instant it's due, so the
 	/// caller can pace output at the source's real-time rate (see [`Output::pace`]).
 	pacer: Pacer,
+	/// Output pace buffer: how far ahead of the live edge [`Output::pace`] may schedule.
+	/// `None` follows `latency`; a transport that buffers downstream (e.g. an SRT
+	/// receiver's TSBPD) sets it to zero so the pace adds no latency of its own.
+	pace_lead: Option<Duration>,
 
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
@@ -218,6 +222,7 @@ impl<E: CatalogExt> Export<E> {
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			pacer: Pacer::new(),
+			pace_lead: None,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
@@ -227,12 +232,25 @@ impl<E: CatalogExt> Export<E> {
 		})
 	}
 
-	/// Set the maximum buffering latency for each per-track source.
+	/// Set the maximum buffering latency for each per-track source (the read/skip
+	/// budget: how far behind the live edge a track may fall before skipping groups).
 	///
-	/// Also the pace buffer: [`Output::pace`] holds at most this far ahead of the live
-	/// edge, so a caller honoring it never falls more than `latency` behind.
+	/// Unless overridden by [`with_pace_lead`](Self::with_pace_lead), this is also the
+	/// pace buffer: [`Output::pace`] holds at most this far ahead of the live edge, so
+	/// a caller honoring it never falls more than `latency` behind.
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
+		self
+	}
+
+	/// Override the [`Output::pace`] buffer independently of the read latency.
+	///
+	/// By default the pace holds up to [`with_latency`](Self::with_latency) ahead of
+	/// the live edge. Set this to zero when a downstream transport supplies its own
+	/// jitter buffer (e.g. an SRT receiver's TSBPD), so the pace stamps each frame at
+	/// the live edge and the transport, not the muxer, owns the buffering.
+	pub fn with_pace_lead(mut self, lead: Duration) -> Self {
+		self.pace_lead = Some(lead);
 		self
 	}
 
@@ -734,13 +752,14 @@ impl<E: CatalogExt> Export<E> {
 
 		// Pace on the decode clock: reordered video uses the authored DTS (monotonic), so
 		// a caller honoring `pace` emits B-frames evenly instead of bursting on their
-		// non-monotonic PTS. Audio and non-reordered video have DTS == PTS. The latency
-		// budget doubles as the pace buffer: hold at most that much ahead of the live edge.
+		// non-monotonic PTS. Audio and non-reordered video have DTS == PTS. The pace buffer
+		// follows the read latency unless overridden (an SRT egress pins it to zero).
 		let decode = match dts {
 			Some(ticks) => from_ticks(ticks).unwrap_or(timestamp),
 			None => timestamp,
 		};
-		let pace = self.pacer.due(decode, self.latency);
+		let lead = self.pace_lead.unwrap_or(self.latency);
+		let pace = self.pacer.due(decode, lead);
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 

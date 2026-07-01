@@ -7,6 +7,8 @@
 //! mirror image for egress: it consumes a broadcast from the origin and re-muxes
 //! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use moq_mux::container::ts;
 use moq_net::{Broadcast, OriginConsumer, OriginProducer};
@@ -73,15 +75,22 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
+	/// `latency` is the SRT receive buffer negotiated for this connection: the muxer
+	/// matches it as the read/skip budget so a track tolerates the same jitter the SRT
+	/// receiver does. The pace lead stays zero, since the receiver's TSBPD owns the
+	/// output buffer (adding a muxer lead would just double the latency).
+	///
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
 	/// to be announced, so a caller may connect before the publisher does.
-	pub async fn new(origin: &OriginConsumer, path: &str) -> Result<Option<Self>> {
+	pub async fn new(origin: &OriginConsumer, path: &str, latency: Duration) -> Result<Option<Self>> {
 		let Some(broadcast) = origin.announced_broadcast(path).await else {
 			return Ok(None);
 		};
 
-		let export = ts::Export::new(broadcast)?;
+		let export = ts::Export::new(broadcast)?
+			.with_latency(latency)
+			.with_pace_lead(Duration::ZERO);
 		Ok(Some(Self { export }))
 	}
 

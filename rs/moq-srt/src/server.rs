@@ -287,13 +287,18 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
+	// Match the muxer's read/skip budget to the connection's negotiated SRT latency (the
+	// max of our floor and the caller's requested `?latency`), so the track tolerates the
+	// same jitter the receiver's TSBPD does. The muxer's pace lead stays zero: the TSBPD
+	// owns the output buffer.
+	let latency = socket.settings().send_tsbpd_latency;
 	let subscriber = tokio::select! {
 		biased;
 		_ = wait_closed(&mut socket) => {
 			tracing::debug!(%path, "SRT subscribe closed before its broadcast was available");
 			return Ok(());
 		}
-		subscriber = crate::ts::Subscriber::new(origin, path) => subscriber?,
+		subscriber = crate::ts::Subscriber::new(origin, path, latency) => subscriber?,
 	};
 
 	let Some(mut subscriber) = subscriber else {
@@ -306,10 +311,10 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	//
 	// The Instant handed to `send` is the payload's TSBPD origin time, from which the
 	// receiver reconstructs inter-frame spacing. The muxer paces each frame on its
-	// decode clock; with the export's latency budget at zero (the SRT receiver owns the
-	// jitter buffer) it re-anchors any tune-in burst to the live edge, so nothing is
-	// stamped seconds into the future where SRT would hold it past the TSBPD window and
-	// stall after ~one packet.
+	// decode clock; with the pace lead at zero (the SRT receiver owns the jitter buffer)
+	// it re-anchors any tune-in burst to the live edge, so nothing is stamped seconds
+	// into the future where SRT would hold it past the TSBPD window and stall after
+	// ~one packet.
 	let mut send_at = Instant::now();
 	let mut buffer = bytes::BytesMut::new();
 	while let Some(frame) = subscriber.next().await? {
