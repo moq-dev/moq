@@ -167,17 +167,9 @@ pub struct Export {
 #[derive(Subcommand, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
-	Fmp4 {
-		/// Cap the output fragment duration (e.g. `2s`). Default: one GOP.
-		#[arg(long, value_parser = humantime::parse_duration)]
-		fragment_duration: Option<Duration>,
-	},
+	Fmp4(Fragmented),
 	/// Matroska / WebM to stdout.
-	Mkv {
-		/// Cap the output cluster duration (e.g. `2s`). Default: one GOP.
-		#[arg(long, value_parser = humantime::parse_duration)]
-		fragment_duration: Option<Duration>,
-	},
+	Mkv(Fragmented),
 	/// MPEG-TS to stdout.
 	Ts,
 	/// FLV / RTMP container to stdout.
@@ -197,11 +189,19 @@ impl ExportSink {
 	/// stdout (the container formats). The fragment cap is fmp4/mkv-only.
 	pub fn stdout(&self) -> Option<(SubscribeFormat, Option<Duration>)> {
 		Some(match self {
-			Self::Fmp4 { fragment_duration } => (SubscribeFormat::Fmp4, *fragment_duration),
-			Self::Mkv { fragment_duration } => (SubscribeFormat::Mkv, *fragment_duration),
+			Self::Fmp4(args) => (SubscribeFormat::Fmp4, args.fragment_duration),
+			Self::Mkv(args) => (SubscribeFormat::Mkv, args.fragment_duration),
 			Self::Ts => (SubscribeFormat::Ts, None),
 			Self::Flv => (SubscribeFormat::Flv, None),
 			_ => return None,
 		})
 	}
+}
+
+/// Fragmenting option shared by the fmp4 / mkv stdout containers.
+#[derive(Args, Clone)]
+pub struct Fragmented {
+	/// Cap the output fragment/cluster duration (e.g. `2s`). Default: one GOP.
+	#[arg(long, value_parser = humantime::parse_duration)]
+	pub fragment_duration: Option<Duration>,
 }
