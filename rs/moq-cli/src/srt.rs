@@ -23,7 +23,7 @@ pub struct Args {
 	#[arg(id = "srt-listen", long = "listen", value_name = "ADDR")]
 	pub listen: Option<SocketAddr>,
 
-	/// SRT receive latency: the negotiated buffer trading delay for loss recovery.
+	/// SRT receive latency: the buffering delay traded for loss-recovery headroom.
 	#[arg(long, default_value = "200ms", value_parser = humantime::parse_duration)]
 	pub latency: Duration,
 }
@@ -148,4 +148,38 @@ async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String)> {
 	anyhow::ensure!(!resource.is_empty(), "srt url must include a streamid or path");
 
 	Ok((addr, resource))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// Numeric hosts resolve without touching DNS, so these stay offline.
+	async fn parse(url: &str) -> anyhow::Result<(SocketAddr, String)> {
+		parse_url(&Url::parse(url).unwrap()).await
+	}
+
+	#[tokio::test]
+	async fn resource_from_streamid() {
+		let (addr, resource) = parse("srt://127.0.0.1:9000?streamid=live/cam").await.unwrap();
+		assert_eq!(addr.port(), 9000);
+		assert_eq!(resource, "live/cam");
+	}
+
+	#[tokio::test]
+	async fn resource_from_path() {
+		let (_, resource) = parse("srt://127.0.0.1:9000/live/cam").await.unwrap();
+		assert_eq!(resource, "live/cam");
+	}
+
+	#[tokio::test]
+	async fn rejects_non_srt_scheme() {
+		assert!(parse("udp://127.0.0.1:9000").await.is_err());
+	}
+
+	#[tokio::test]
+	async fn requires_port_and_resource() {
+		assert!(parse("srt://127.0.0.1").await.is_err());
+		assert!(parse("srt://127.0.0.1:9000").await.is_err());
+	}
 }

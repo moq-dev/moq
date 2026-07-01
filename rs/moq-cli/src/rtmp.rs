@@ -133,3 +133,37 @@ async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String, String)> {
 
 	Ok((addr, app, key))
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// Numeric hosts resolve without touching DNS, so these stay offline.
+	async fn parse(url: &str) -> anyhow::Result<(SocketAddr, String, String)> {
+		parse_url(&Url::parse(url).unwrap()).await
+	}
+
+	#[tokio::test]
+	async fn ok_default_port() {
+		let (addr, app, key) = parse("rtmp://127.0.0.1/live/cam0").await.unwrap();
+		assert_eq!(addr.port(), 1935);
+		assert_eq!((app.as_str(), key.as_str()), ("live", "cam0"));
+	}
+
+	#[tokio::test]
+	async fn ok_explicit_port() {
+		let (addr, _, _) = parse("rtmp://127.0.0.1:1936/live/cam0").await.unwrap();
+		assert_eq!(addr.port(), 1936);
+	}
+
+	#[tokio::test]
+	async fn rejects_non_rtmp_scheme() {
+		assert!(parse("http://127.0.0.1/live/cam0").await.is_err());
+	}
+
+	#[tokio::test]
+	async fn requires_app_and_key() {
+		assert!(parse("rtmp://127.0.0.1/live").await.is_err());
+		assert!(parse("rtmp://127.0.0.1/").await.is_err());
+	}
+}
