@@ -26,6 +26,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 #[derive(Parser, Clone)]
 #[command(name = "moq", version = env!("VERSION"))]
 pub struct Cli {
+	/// Logging configuration.
 	#[command(flatten)]
 	pub log: moq_native::Log,
 
@@ -38,6 +39,7 @@ pub struct Cli {
 	#[command(flatten)]
 	pub moq: MoqSide,
 
+	/// The routing direction and endpoint.
 	#[command(subcommand)]
 	pub direction: Direction,
 }
@@ -97,6 +99,7 @@ pub enum Direction {
 /// import = one source -> MoQ.
 #[derive(Args, Clone)]
 pub struct Import {
+	/// The single source feeding the Origin.
 	#[command(subcommand)]
 	pub source: ImportSource,
 }
@@ -158,6 +161,7 @@ pub struct Export {
 	#[arg(long)]
 	pub catalog: Option<CatalogFormatArg>,
 
+	/// The single sink draining the Origin.
 	#[command(subcommand)]
 	pub sink: ExportSink,
 }
