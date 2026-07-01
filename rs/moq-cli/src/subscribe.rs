@@ -5,6 +5,10 @@ use hang::moq_net;
 use moq_mux::catalog::CatalogFormat;
 use tokio::io::AsyncWriteExt;
 
+/// Chunk size for `--pace`: 7 TS packets (7 x 188), one MTU-sized write, so a frame
+/// trickles out at roughly millisecond granularity instead of one burst.
+const PACE_CHUNK: usize = 7 * 188;
+
 #[derive(ValueEnum, Clone, Copy)]
 pub enum SubscribeFormat {
 	Fmp4,
@@ -163,16 +167,28 @@ impl Subscribe {
 		let mut ts =
 			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
+		// `--pace` spreads each frame's TS packets across its on-wire duration instead of
+		// writing the whole frame at its due instant. A per-frame burst overruns a
+		// downstream TS decoder's constant-rate buffer model (glitches and PCR errors
+		// unless the caller pads the mux to CBR); trickling the bytes keeps arrival near
+		// the media rate. We estimate the duration from the previous frame's pace gap,
+		// which tracks a steady frame rate and collapses to an immediate burst on a
+		// tune-in re-anchor.
+		let mut prev = None;
 		while let Some(frame) = ts.next().await? {
-			// `--pace`: hold each frame until it's due. The muxer paces on its decode clock
-			// and follows the live edge with up to `--max-latency` of buffer, so a retained
-			// broadcast drains in real time while a live source stays near the edge.
-			if pace {
-				tokio::time::sleep_until(frame.pace.into()).await;
+			if !pace {
+				stdout.write_all(&frame.payload).await?;
+				stdout.flush().await?;
+				continue;
 			}
 
-			stdout.write_all(&frame.payload).await?;
-			stdout.flush().await?;
+			let span = prev.map_or(Duration::ZERO, |p| frame.pace.saturating_duration_since(p));
+			prev = Some(frame.pace);
+			for (at, chunk) in frame.spread(span, PACE_CHUNK) {
+				tokio::time::sleep_until(at.into()).await;
+				stdout.write_all(&chunk).await?;
+				stdout.flush().await?;
+			}
 		}
 
 		Ok(())
