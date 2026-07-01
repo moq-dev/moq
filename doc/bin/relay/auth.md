@@ -292,11 +292,13 @@ the `unix://` listener.
 ```toml
 [server.unix]
 bind = "/run/moq/internal.sock"
+
 # Each list is matched independently (AND across fields, OR within a field);
 # an omitted field imposes no constraint. Empty = any local process.
-allow_uid = [1001]
-# allow_gid = [2000]
-# allow_pid = [12345]
+[server.unix.allow]
+uid = [1001]
+# gid = [2000]
+# pid = [12345]
 ```
 
 A connection whose credentials fail the allowlist is dropped before its SETUP is

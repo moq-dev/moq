@@ -391,7 +391,9 @@ bind = "[::]:443"
 
 [server.unix]
 bind = "/run/moq/internal.sock"
-allow_uid = [1001]
+
+[server.unix.allow]
+uid = [1001]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -408,9 +410,9 @@ allow_uid = [1001]
 			"TOML's server.unix.bind must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
-			config.server.unix.allow_uid,
+			config.server.unix.allow.uid,
 			vec![1001],
-			"TOML's server.unix.allow_uid must not be clobbered by the CLI re-parse"
+			"TOML's server.unix.allow.uid must not be clobbered by the CLI re-parse"
 		);
 	}
 

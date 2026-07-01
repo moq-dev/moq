@@ -58,9 +58,11 @@ bind = "127.0.0.1:4444"
 # constraint).
 [server.unix]
 bind = "/run/moq/internal.sock"
-allow_uid = [1001]
-# allow_gid = [2000]
-# allow_pid = [12345]
+
+[server.unix.allow]
+uid = [1001]
+# gid = [2000]
+# pid = [12345]
 ```
 
 No-JWT connections on the stream transports resolve through the same

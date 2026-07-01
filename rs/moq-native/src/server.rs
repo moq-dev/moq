@@ -135,11 +135,6 @@ pub struct TcpConfig {
 
 /// Plaintext Unix-socket qmux listener settings, with an optional
 /// peer-credential allowlist.
-///
-/// The kernel reports the connecting process's credentials, so the `allow_*`
-/// lists can restrict callers to a specific worker user. Each populated list
-/// constrains the corresponding credential (AND across the three, OR within
-/// each); all empty means the socket's filesystem permissions are the only gate.
 #[cfg(all(feature = "uds", unix))]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -150,6 +145,23 @@ pub struct UnixConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
+	/// Peer-credential allowlist. All-empty (the default) enforces nothing, so
+	/// the socket's filesystem permissions are the only gate.
+	#[command(flatten)]
+	#[serde(default)]
+	pub allow: UnixAllow,
+}
+
+/// Peer-credential allowlist for a `unix://` listener.
+///
+/// The kernel reports the connecting process's credentials. Each populated list
+/// constrains the corresponding credential (AND across the three, OR within
+/// each); all empty means no check.
+#[cfg(all(feature = "uds", unix))]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct UnixAllow {
 	/// Allowed peer user IDs. Empty means any uid.
 	#[arg(
 		long = "server-unix-allow-uid",
@@ -157,7 +169,7 @@ pub struct UnixConfig {
 		value_delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub allow_uid: Vec<u32>,
+	pub uid: Vec<u32>,
 
 	/// Allowed peer group IDs. Empty means any gid.
 	#[arg(
@@ -166,7 +178,7 @@ pub struct UnixConfig {
 		value_delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub allow_gid: Vec<u32>,
+	pub gid: Vec<u32>,
 
 	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
 	/// whose PID the platform doesn't report.
@@ -176,7 +188,25 @@ pub struct UnixConfig {
 		value_delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub allow_pid: Vec<i32>,
+	pub pid: Vec<i32>,
+}
+
+#[cfg(all(feature = "uds", unix))]
+impl UnixAllow {
+	/// Whether any field is populated (i.e. the allowlist enforces something).
+	fn is_empty(&self) -> bool {
+		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
+	}
+
+	/// Whether `cred` satisfies every populated field (AND across fields, OR
+	/// within a field). A required pid is unsatisfiable when the platform
+	/// reports none.
+	fn permits(&self, cred: &crate::unix::PeerCred) -> bool {
+		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
+		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
+		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
+		uid_ok && gid_ok && pid_ok
+	}
 }
 
 impl ServerConfig {
@@ -309,12 +339,9 @@ impl Server {
 		if let Some(path) = config.unix.bind.clone() {
 			stream_binds.push(StreamBind::Unix(path));
 		}
+		// `None` when nothing is configured, so the listener enforces nothing.
 		#[cfg(all(feature = "uds", unix))]
-		let unix_allow = UnixAllow {
-			uid: config.unix.allow_uid.clone(),
-			gid: config.unix.allow_gid.clone(),
-			pid: config.unix.allow_pid.clone(),
-		};
+		let unix_allow = (!config.unix.allow.is_empty()).then(|| config.unix.allow.clone());
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let streams = StreamListeners::new(
 			stream_binds,
@@ -658,33 +685,6 @@ enum StreamBind {
 	Unix(PathBuf),
 }
 
-/// Peer-credential allowlist for the `unix://` listener, built from
-/// [`UnixConfig::allow_uid`] and friends.
-#[cfg(all(feature = "uds", unix))]
-#[derive(Clone, Default)]
-struct UnixAllow {
-	uid: Vec<u32>,
-	gid: Vec<u32>,
-	pid: Vec<i32>,
-}
-
-#[cfg(all(feature = "uds", unix))]
-impl UnixAllow {
-	fn is_empty(&self) -> bool {
-		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
-	}
-
-	/// Whether `cred` satisfies every populated field (AND across fields, OR
-	/// within a field). A required pid is unsatisfiable when the platform
-	/// reports none.
-	fn permits(&self, cred: &crate::unix::PeerCred) -> bool {
-		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
-		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
-		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
-		uid_ok && gid_ok && pid_ok
-	}
-}
-
 /// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
 ///
 /// Bound lazily on the first [`Server::accept`] (they need a runtime), after
@@ -696,7 +696,7 @@ struct StreamListeners {
 	binds: Vec<StreamBind>,
 	versions: moq_net::Versions,
 	#[cfg(all(feature = "uds", unix))]
-	unix_allow: UnixAllow,
+	unix_allow: Option<UnixAllow>,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
 	tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -706,7 +706,7 @@ impl StreamListeners {
 	fn new(
 		binds: Vec<StreamBind>,
 		versions: moq_net::Versions,
-		#[cfg(all(feature = "uds", unix))] unix_allow: UnixAllow,
+		#[cfg(all(feature = "uds", unix))] unix_allow: Option<UnixAllow>,
 	) -> Self {
 		Self {
 			binds,
@@ -745,7 +745,7 @@ impl StreamListeners {
 					// Loose file perms: the uid/gid/pid allow list is the real gate,
 					// and the worker usually runs as a different user than the server.
 					listener.set_mode(0o666)?;
-					tracing::info!(path = %path.display(), allow_uid = ?self.unix_allow.uid, "listening (unix)");
+					tracing::info!(path = %path.display(), allow = ?self.unix_allow, "listening (unix)");
 					self.tasks
 						.push(spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone()));
 				}
@@ -796,15 +796,17 @@ fn spawn_tcp_loop(
 fn spawn_unix_loop(
 	listener: crate::unix::Listener,
 	versions: moq_net::Versions,
-	allow: UnixAllow,
+	allow: Option<UnixAllow>,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
 				Some(Ok((session, cred))) => {
-					// Enforce the allowlist before reading any SETUP bytes from the peer.
-					if !allow.is_empty() && !allow.permits(&cred) {
+					// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
+					if let Some(allow) = &allow
+						&& !allow.permits(&cred)
+					{
 						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
 						continue;
 					}
@@ -1196,13 +1198,15 @@ bind = "[::]:443"
 
 [unix]
 bind = "/run/moq.sock"
-allow_uid = [1001, 1002]
+
+[unix.allow]
+uid = [1001, 1002]
 "#,
 		)
 		.unwrap();
 		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
 		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
-		assert_eq!(config.unix.allow_uid, vec![1001, 1002]);
+		assert_eq!(config.unix.allow.uid, vec![1001, 1002]);
 		assert!(config.has_stream_listener());
 	}
 
