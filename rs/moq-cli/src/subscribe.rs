@@ -43,6 +43,15 @@ pub struct SubscribeArgs {
 	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
 	pub max_latency: Duration,
 
+	/// Pace output at the media's real-time rate, like ffmpeg's `-re`.
+	///
+	/// Without this, a retained broadcast is written out as fast as it can be read.
+	/// With it, frames are emitted on the media clock (anchored to the first frame),
+	/// which is what a downstream player or re-publish expects. Only `--format ts`
+	/// supports pacing today.
+	#[arg(long)]
+	pub pace: bool,
+
 	/// Cap the output fragment duration (e.g. `2s`, `500ms`).
 	///
 	/// By default a fragment covers one GOP (rolled over on video keyframes).
@@ -61,6 +70,15 @@ pub struct SubscribeArgs {
 }
 
 impl SubscribeArgs {
+	/// Reject flag combinations that don't apply to the chosen format, before we
+	/// bother connecting to the relay.
+	pub fn validate(&self) -> anyhow::Result<()> {
+		if self.pace && !matches!(self.format, SubscribeFormat::Ts) {
+			anyhow::bail!("--pace is only supported with --format ts");
+		}
+		Ok(())
+	}
+
 	/// Resolve the catalog format, falling back to detection from the broadcast
 	/// name suffix and then to the default.
 	pub fn catalog_format(&self, broadcast: &str) -> CatalogFormat {
@@ -135,6 +153,7 @@ impl Subscribe {
 
 	async fn run_ts(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
+		let pace = self.args.pace;
 
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
@@ -145,6 +164,13 @@ impl Subscribe {
 			moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)?.with_latency(self.args.max_latency);
 
 		while let Some(frame) = ts.next().await? {
+			// `--pace`: hold each frame until it's due. The muxer paces on its decode clock
+			// and follows the live edge with up to `--max-latency` of buffer, so a retained
+			// broadcast drains in real time while a live source stays near the edge.
+			if pace {
+				tokio::time::sleep_until(frame.pace.into()).await;
+			}
+
 			stdout.write_all(&frame.payload).await?;
 			stdout.flush().await?;
 		}
@@ -168,5 +194,28 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn args(format: SubscribeFormat, pace: bool) -> SubscribeArgs {
+		SubscribeArgs {
+			format,
+			max_latency: Duration::from_millis(500),
+			pace,
+			fragment_duration: None,
+			catalog: None,
+		}
+	}
+
+	#[test]
+	fn pace_requires_ts_format() {
+		assert!(args(SubscribeFormat::Ts, true).validate().is_ok());
+		assert!(args(SubscribeFormat::Fmp4, true).validate().is_err());
+		// Without --pace, any format is fine.
+		assert!(args(SubscribeFormat::Fmp4, false).validate().is_ok());
 	}
 }

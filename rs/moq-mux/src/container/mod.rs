@@ -16,6 +16,7 @@ use bytes::Bytes;
 
 mod consumer;
 pub(crate) mod jitter;
+mod pace;
 mod producer;
 mod source;
 
@@ -27,6 +28,7 @@ pub mod mkv;
 pub mod ts;
 
 pub use consumer::Consumer;
+pub(crate) use pace::Pacer;
 pub use producer::Producer;
 pub(crate) use source::ExportSource;
 

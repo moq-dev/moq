@@ -50,19 +50,24 @@ pub struct Server {
 	/// Held to keep the listener (and its UDP socket) alive for the server's lifetime.
 	_listener: SrtListener,
 	incoming: SrtIncoming,
+	/// The configured SRT latency, reused as the egress muxer's read/skip budget.
+	latency: Duration,
 }
 
 impl Server {
 	/// Bind an SRT listener on `addr` (SRT has no well-known port; 9000 is common).
 	///
 	/// `latency` is the SRT receive latency, negotiated at handshake time; pass
-	/// `None` for a sensible default (200ms).
+	/// `None` for a sensible default (200ms). A subscribe (egress) connection also
+	/// reuses it as the muxer's read/skip budget, so a track tolerates the same jitter
+	/// the receiver's TSBPD does.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 		let (listener, incoming) = SrtListener::builder().latency(latency).bind(addr).await?;
 		Ok(Self {
 			_listener: listener,
 			incoming,
+			latency,
 		})
 	}
 
@@ -87,6 +92,7 @@ impl Server {
 				resource,
 				stream_id,
 				peer,
+				latency: self.latency,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -111,6 +117,8 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
+	/// The server's configured SRT latency, applied as the egress read/skip budget.
+	latency: Duration,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -243,7 +251,7 @@ impl Subscribe {
 	pub async fn accept(self, origin: &OriginConsumer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
-		serve_subscribe(origin, path, socket).await
+		serve_subscribe(origin, path, socket, self.0.latency).await
 	}
 
 	/// Reject the subscribe, sending the client a `Forbidden` rejection.
@@ -282,18 +290,21 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// Waits for the broadcast to be announced (so a caller may connect before the
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket) -> Result<()> {
+async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket, latency: Duration) -> Result<()> {
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
+	// The muxer's read/skip budget matches the server's configured SRT latency, so a track
+	// tolerates the same jitter the receiver's TSBPD does. The pace lead stays zero: the
+	// TSBPD owns the output buffer.
 	let subscriber = tokio::select! {
 		biased;
 		_ = wait_closed(&mut socket) => {
 			tracing::debug!(%path, "SRT subscribe closed before its broadcast was available");
 			return Ok(());
 		}
-		subscriber = crate::ts::Subscriber::new(origin, path) => subscriber?,
+		subscriber = crate::ts::Subscriber::new(origin, path, latency) => subscriber?,
 	};
 
 	let Some(mut subscriber) = subscriber else {
@@ -304,26 +315,16 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	// MPEG-TS is a continuous byte stream, so we coalesce the muxer's per-frame
 	// output and slice it on a fixed boundary rather than preserving frames.
 	//
-	// Pace each payload on the media clock: the Instant handed to `send` is the
-	// payload's origin time feeding the receiver's TSBPD, which reconstructs the
-	// inter-frame spacing from it. We don't know the live playhead when a subscriber
-	// attaches, so `pace` anchors it for us -- the newest frame is "now" and earlier
-	// frames map to proportionally earlier instants, re-anchoring whenever the media
-	// outruns wall-clock (a tune-in burst, a catch-up, or producer drift). `anchor`
-	// and `base` are that media-clock anchor (`base`'s media time maps to `anchor`),
-	// carried across frames and moved forward by `pace`.
-	let mut anchor = Instant::now();
-	let mut base = None;
-	let mut send_at = anchor;
+	// The Instant handed to `send` is the payload's TSBPD origin time, from which the
+	// receiver reconstructs inter-frame spacing. The muxer paces each frame on its
+	// decode clock; with the pace lead at zero (the SRT receiver owns the jitter buffer)
+	// it re-anchors any tune-in burst to the live edge, so nothing is stamped seconds
+	// into the future where SRT would hold it past the TSBPD window and stall after
+	// ~one packet.
+	let mut send_at = Instant::now();
 	let mut buffer = bytes::BytesMut::new();
 	while let Some(frame) = subscriber.next().await? {
-		// The media zero-point the rest pace against; `pace` re-anchors it forward to
-		// the live edge whenever the media outruns wall-clock.
-		let zero = *base.get_or_insert(frame.timestamp);
-		let paced = pace(anchor, zero, frame.timestamp, Instant::now());
-		send_at = paced.send_at;
-		anchor = paced.anchor;
-		base = Some(paced.base);
+		send_at = frame.pace;
 
 		buffer.extend_from_slice(&frame.payload);
 		while buffer.len() >= SRT_PAYLOAD {
@@ -337,55 +338,6 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	socket.close().await?;
 
 	Ok(())
-}
-
-/// One frame's SRT send time plus the media-clock anchor to carry into the next
-/// frame. `base`'s media time maps to `anchor` on the wall clock.
-struct Paced {
-	/// The Instant to stamp this payload with: its TSBPD origin time.
-	send_at: Instant,
-	anchor: Instant,
-	base: moq_mux::container::Timestamp,
-}
-
-/// Pace one SRT payload on the media clock, re-anchored to the live edge.
-///
-/// `send_at = anchor + (ts - base)` stamps the payload at its media time, so the
-/// receiver's TSBPD reconstructs inter-frame spacing from it. But when that runs
-/// ahead of `now` -- the media clock has outrun wall-clock: a subscriber tuning in
-/// bursts the current GOP plus any catch-up backlog (frames whose media timestamps
-/// span seconds, produced within milliseconds), or the producer drifts faster than
-/// real time -- re-anchor the live edge to `now` (this frame becomes the playhead).
-/// Otherwise the payload is stamped seconds into the future, where SRT holds it in
-/// the sender past the receiver's TSBPD latency window and playback stalls after
-/// ~one packet.
-///
-/// Re-anchoring only ever moves the anchor *forward*, so a frame that merely arrives
-/// late -- network/CPU jitter, or a reordered B-frame whose PTS trails the edge --
-/// keeps its earlier media instant instead of collapsing to its arrival instant, and
-/// TSBPD still smooths the jitter into even playout. The cap is "never lead `now`":
-/// the receiver owns the jitter buffer (the SRT latency parameter), so the sender
-/// adds no lookahead of its own (a deliberate lead would just be `now + lead` here).
-fn pace(
-	anchor: Instant,
-	base: moq_mux::container::Timestamp,
-	ts: moq_mux::container::Timestamp,
-	now: Instant,
-) -> Paced {
-	let send_at = match ts.checked_sub(base) {
-		Ok(offset) => anchor + Duration::from(offset),
-		Err(_) => anchor.checked_sub(Duration::from(base - ts)).unwrap_or(anchor),
-	};
-	if send_at > now {
-		// Media outran wall-clock: re-anchor so this newest frame is the live edge.
-		Paced {
-			send_at: now,
-			anchor: now,
-			base: ts,
-		}
-	} else {
-		Paced { send_at, anchor, base }
-	}
 }
 
 /// Resolve once the SRT caller hangs up (a clean close or an error), draining and
@@ -432,62 +384,6 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn pace_re_anchors_to_live_edge() {
-		use moq_mux::container::Timestamp;
-		use std::time::{Duration, Instant};
-		let ms = |m: u64| Timestamp::from_micros(m * 1_000).unwrap();
-
-		// Tune-in burst: the live edge (4132ms of media) is produced ~8ms after the
-		// first frame (1400ms). It must re-anchor to `now` rather than stamp ~2.7s
-		// into the future, which would stall the receiver's TSBPD after ~one payload.
-		let start = Instant::now();
-		let now = start + Duration::from_millis(8);
-		let edge = pace(start, ms(1_400), ms(4_132), now);
-		assert_eq!(edge.send_at, now, "live edge should pace to now");
-		assert_eq!(edge.anchor, now);
-		assert_eq!(
-			edge.base.as_micros(),
-			ms(4_132).as_micros(),
-			"anchor moves up to the live edge"
-		);
-
-		// Part 1 moved the anchor to the live edge (now / 4132ms). A frame 33ms newer in
-		// MEDIA that arrives 80ms later in WALL-clock (jitter) paces from that carried-
-		// forward anchor -- its media instant (+33ms off the edge), not its 80ms arrival
-		// instant -- so TSBPD still reconstructs smooth spacing.
-		let jittered = pace(
-			edge.anchor,
-			edge.base,
-			ms(4_165),
-			edge.anchor + Duration::from_millis(80),
-		);
-		assert_eq!(
-			jittered.send_at,
-			edge.anchor + Duration::from_millis(33),
-			"a late frame keeps its media instant, not its arrival instant"
-		);
-		assert_eq!(
-			jittered.anchor, edge.anchor,
-			"no re-anchor when media is behind wall-clock"
-		);
-
-		// A reordered B-frame can carry a PTS before the re-anchored live edge. Keep
-		// that earlier media instant instead of flattening it onto the anchor.
-		let reordered = pace(
-			edge.anchor,
-			edge.base,
-			ms(4_099),
-			edge.anchor + Duration::from_millis(20),
-		);
-		assert_eq!(
-			reordered.send_at,
-			edge.anchor - Duration::from_millis(33),
-			"a reordered frame can pace before the anchor"
-		);
-		assert_eq!(reordered.anchor, edge.anchor, "no re-anchor when media trails the edge");
-	}
 
 	fn sid(s: &str) -> StreamId {
 		StreamId::try_from(s.as_bytes().to_vec()).unwrap()

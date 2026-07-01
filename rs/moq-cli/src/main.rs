@@ -283,6 +283,8 @@ async fn run_subscribe(
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {
+	args.validate()?;
+
 	let origin = moq_net::Origin::random().produce();
 	let consumer = origin.consume();
 
