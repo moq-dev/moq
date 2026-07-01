@@ -50,7 +50,7 @@ and can serve a static player directory with `--dir`:
 
 ```bash
 moq-srt serve --server-bind [::]:443 --tls-generate localhost \
-  --srt-listen 0.0.0.0:9000 --srt-prefix live/
+  --listen 0.0.0.0:9000 --prefix live/
 ```
 
 `publish` instead forwards every ingested broadcast out to a remote relay over
@@ -58,7 +58,7 @@ WebTransport (like `moq-cli hls import`):
 
 ```bash
 moq-srt publish --relay https://relay.example.com \
-  --srt-listen 0.0.0.0:9000 --srt-prefix live/
+  --listen 0.0.0.0:9000 --prefix live/
 ```
 
 Feed either mode with any SRT source:
@@ -84,7 +84,7 @@ Each connection's broadcast path and direction come from its SRT stream id:
   selecting egress and anything else (including absent) selecting ingest.
 - Otherwise the raw stream id (e.g. OBS-style `app/key`), always ingest.
 
-`--srt-prefix` is prepended to namespace a listener's streams. First publisher on
+`--prefix` is prepended to namespace a listener's streams. First publisher on
 a path wins; a second publish of the same path is rejected. Requests don't claim
 a path, so any number of players can pull the same broadcast.
 

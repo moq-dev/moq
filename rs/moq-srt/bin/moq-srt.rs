@@ -73,14 +73,11 @@ enum Command {
 #[derive(Args, Clone)]
 struct SrtArgs {
 	/// Address to listen on for SRT ingest (e.g. `0.0.0.0:9000`).
-	///
-	/// Prefixed to avoid clashing with the flattened `moq-native` server/client flags
-	/// (`--server-bind` even aliases `--listen`).
-	#[arg(long = "srt-listen", env = "MOQ_SRT_LISTEN")]
+	#[arg(long = "listen", alias = "srt-listen", env = "MOQ_SRT_LISTEN")]
 	listen: SocketAddr,
 
 	/// Prefix prepended to every ingested broadcast path (e.g. `live/`).
-	#[arg(long = "srt-prefix", env = "MOQ_SRT_PREFIX", default_value = "")]
+	#[arg(long = "prefix", alias = "srt-prefix", env = "MOQ_SRT_PREFIX", default_value = "")]
 	prefix: String,
 
 	/// SRT receive latency: the buffer that trades delay for loss recovery. Also the

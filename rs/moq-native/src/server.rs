@@ -27,7 +27,12 @@ pub struct ServerConfig {
 	/// at bind time. Only the first resolved address is used; Quinn does not
 	/// support binding to multiple addresses.
 	#[serde(alias = "listen")]
-	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
+	#[arg(
+		id = "server-bind",
+		long = "server-bind",
+		alias = "server-listen",
+		env = "MOQ_SERVER_BIND"
+	)]
 	pub bind: Option<String>,
 
 	/// The QUIC backend to use.
