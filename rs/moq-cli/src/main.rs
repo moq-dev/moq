@@ -151,11 +151,11 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 
 	// Foreign side: the single sink.
-	if let Some(format) = export.sink.stdout_format() {
+	if let Some((format, fragment_duration)) = export.sink.stdout() {
 		let args = SubscribeArgs {
 			format,
 			max_latency: export.max_latency,
-			fragment_duration: export.fragment_duration,
+			fragment_duration,
 			catalog: export.catalog,
 		};
 		let consumer = origin.consume();

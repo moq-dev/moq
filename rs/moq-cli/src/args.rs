@@ -147,15 +147,11 @@ impl ImportSource {
 /// export = MoQ -> one sink.
 #[derive(Args, Clone)]
 pub struct Export {
-	/// Maximum latency before skipping groups (e.g. `500ms`, `1s`). Applies to the
-	/// container formats written to stdout.
+	/// Maximum latency before skipping groups (e.g. `500ms`, `1s`), for the stdout
+	/// container formats. The gateways (`hls`, `srt`, ...) have their own latency
+	/// controls.
 	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
 	pub max_latency: Duration,
-
-	/// Cap the output fragment duration (e.g. `2s`). Default: one GOP. Applies to
-	/// the fmp4 / mkv stdout formats.
-	#[arg(long, value_parser = humantime::parse_duration)]
-	pub fragment_duration: Option<Duration>,
 
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	#[arg(long)]
@@ -171,9 +167,17 @@ pub struct Export {
 #[derive(Subcommand, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
-	Fmp4,
+	Fmp4 {
+		/// Cap the output fragment duration (e.g. `2s`). Default: one GOP.
+		#[arg(long, value_parser = humantime::parse_duration)]
+		fragment_duration: Option<Duration>,
+	},
 	/// Matroska / WebM to stdout.
-	Mkv,
+	Mkv {
+		/// Cap the output cluster duration (e.g. `2s`). Default: one GOP.
+		#[arg(long, value_parser = humantime::parse_duration)]
+		fragment_duration: Option<Duration>,
+	},
 	/// MPEG-TS to stdout.
 	Ts,
 	/// FLV / RTMP container to stdout.
@@ -189,13 +193,14 @@ pub enum ExportSink {
 }
 
 impl ExportSink {
-	/// The stdout container format, when this sink is one of the container formats.
-	pub fn stdout_format(&self) -> Option<SubscribeFormat> {
+	/// The stdout container format and its fragment cap, when this sink writes to
+	/// stdout (the container formats). The fragment cap is fmp4/mkv-only.
+	pub fn stdout(&self) -> Option<(SubscribeFormat, Option<Duration>)> {
 		Some(match self {
-			Self::Fmp4 => SubscribeFormat::Fmp4,
-			Self::Mkv => SubscribeFormat::Mkv,
-			Self::Ts => SubscribeFormat::Ts,
-			Self::Flv => SubscribeFormat::Flv,
+			Self::Fmp4 { fragment_duration } => (SubscribeFormat::Fmp4, *fragment_duration),
+			Self::Mkv { fragment_duration } => (SubscribeFormat::Mkv, *fragment_duration),
+			Self::Ts => (SubscribeFormat::Ts, None),
+			Self::Flv => (SubscribeFormat::Flv, None),
 			_ => return None,
 		})
 	}
