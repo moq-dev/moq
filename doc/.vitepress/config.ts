@@ -42,7 +42,7 @@ export default defineConfig({
 		nav: [
 			{ text: "Setup", link: "/setup/" },
 			{ text: "Concepts", link: "/concept/" },
-			{ text: "Apps", link: "/bin/" },
+			{ text: "Applications", link: "/bin/" },
 			{
 				text: "Libraries",
 				link: "/lib/",
@@ -56,6 +56,7 @@ export default defineConfig({
 					{ text: "Go", link: "/lib/go/" },
 				],
 			},
+			{ text: "Demos", link: "/demo/" },
 		],
 
 		sidebar: {
@@ -71,7 +72,7 @@ export default defineConfig({
 					],
 				},
 				{
-					text: "Demos",
+					text: "Demo Setup",
 					items: [
 						{ text: "Web", link: "/setup/demo/web" },
 						{ text: "MoQ Boy", link: "/setup/demo/boy" },
@@ -88,9 +89,9 @@ export default defineConfig({
 							text: "Layers",
 							link: "/concept/layer/",
 							items: [
-								{ text: "quic", link: "/concept/layer/quic" },
-								{ text: "web-transport", link: "/concept/layer/web-transport" },
-								{ text: "web-socket", link: "/concept/layer/web-socket" },
+								{ text: "QUIC", link: "/concept/layer/quic" },
+								{ text: "WebTransport", link: "/concept/layer/web-transport" },
+								{ text: "WebSocket", link: "/concept/layer/web-socket" },
 								{ text: "moq-lite", link: "/concept/layer/moq-lite" },
 								{ text: "hang", link: "/concept/layer/hang" },
 							],
@@ -102,6 +103,7 @@ export default defineConfig({
 								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
 								{ text: "MSF", link: "/concept/standard/msf" },
 								{ text: "LOC", link: "/concept/standard/loc" },
+								{ text: "CMAF", link: "/concept/standard/cmaf" },
 								{ text: "Interop", link: "/concept/standard/interop" },
 							],
 						},
@@ -171,7 +173,9 @@ export default defineConfig({
 										{ text: "moq-native", link: "/lib/rs/crate/moq-native" },
 										{ text: "moq-token", link: "/lib/rs/crate/moq-token" },
 										{ text: "hang", link: "/lib/rs/crate/hang" },
+										{ text: "moq-mux", link: "/lib/rs/crate/moq-mux" },
 										{ text: "web-transport", link: "/lib/rs/crate/web-transport" },
+										{ text: "moq-boy", link: "/lib/rs/crate/moq-boy" },
 										{ text: "libmoq", link: "/lib/rs/crate/libmoq" },
 									],
 								},
@@ -199,6 +203,8 @@ export default defineConfig({
 										{ text: "@moq/publish", link: "/lib/js/@moq/publish" },
 										{ text: "@moq/token", link: "/lib/js/@moq/token" },
 										{ text: "@moq/signals", link: "/lib/js/@moq/signals" },
+										{ text: "@moq/demo", link: "/lib/js/@moq/demo" },
+										{ text: "@moq/boy", link: "/lib/js/@moq/boy" },
 									],
 								},
 							],
@@ -206,7 +212,7 @@ export default defineConfig({
 						{
 							text: "C",
 							link: "/lib/c/",
-							items: [{ text: "libmoq", link: "/lib/rs/crate/libmoq" }],
+							items: [{ text: "libmoq", link: "/lib/c/#libmoq" }],
 						},
 						{
 							text: "Python",
@@ -229,6 +235,14 @@ export default defineConfig({
 							items: [{ text: "moq", link: "/lib/go/moq" }],
 						},
 					],
+				},
+			],
+
+			"/demo/": [
+				{
+					text: "Demos",
+					link: "/demo/",
+					items: [{ text: "MoQ Boy", link: "/demo/moq-boy" }],
 				},
 			],
 		},

@@ -10,14 +10,14 @@ hero:
       text: Concepts
       link: /concept/
     - theme: alt
-      text: Apps
+      text: Applications
       link: /bin/
     - theme: alt
       text: Libraries
       link: /lib/
     - theme: alt
-      text: Demo
-      link: https://moq.dev/
+      text: Demos
+      link: /demo/
 
 features:
   - icon:
