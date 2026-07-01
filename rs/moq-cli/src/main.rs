@@ -67,7 +67,9 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 	let Import { moq, source } = import;
 
 	let origin = moq_net::Origin::random().produce();
-	let name = moq.broadcast_name();
+	// The broadcast defaults to "": MoQ names each broadcast by the connection
+	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
+	let name = moq.broadcast_name().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
 	// MoQ side: publish the Origin outward.
@@ -88,7 +90,6 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 	// Foreign side: the single source.
 	match source {
 		ImportSource::Stdin { format } => {
-			let name = require_name(name)?;
 			warn_if_missing_format(&name);
 			let publish = Publish::new(&format)?;
 			anyhow::ensure!(
@@ -98,7 +99,6 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 			tasks.spawn(async move { publish.run().await });
 		}
 		ImportSource::Hls { connect } => {
-			let name = require_name(name)?;
 			warn_if_missing_format(&name);
 			let origin = origin.clone();
 			tasks.spawn(async move { hls::import(&origin, name, connect).await });
@@ -107,7 +107,6 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 			if let Some(addr) = rtmp.listen {
 				tasks.spawn(rtmp::listen_import(origin.clone(), addr, rtmp.prefix));
 			} else if let Some(url) = rtmp.connect {
-				let name = require_name(name)?;
 				tasks.spawn(rtmp::connect_import(origin.clone(), url, name));
 			}
 		}
@@ -115,7 +114,6 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 			if let Some(addr) = srt.listen {
 				tasks.spawn(srt::listen_import(origin.clone(), addr, srt.prefix, srt.latency));
 			} else if let Some(url) = srt.connect {
-				let name = require_name(name)?;
 				tasks.spawn(srt::connect_import(origin.clone(), url, name, srt.latency));
 			}
 		}
@@ -123,7 +121,6 @@ async fn run_import(import: Import, net: Net) -> anyhow::Result<()> {
 			if let Some(addr) = rtc.listen {
 				tasks.spawn(rtc::listen_import(origin.clone(), addr, rtc.udp_bind, rtc.public_addr));
 			} else if let Some(url) = rtc.connect {
-				let name = require_name(name)?;
 				tasks.spawn(rtc::connect_import(origin.clone(), url, name));
 			}
 		}
@@ -137,7 +134,9 @@ async fn run_export(export: Export, net: Net) -> anyhow::Result<()> {
 	let Export { moq, sink } = export;
 
 	let origin = moq_net::Origin::random().produce();
-	let name = moq.broadcast_name();
+	// The broadcast defaults to "": MoQ names each broadcast by the connection
+	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
+	let name = moq.broadcast_name().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
 	// MoQ side: fill the Origin.
@@ -163,7 +162,6 @@ async fn run_export(export: Export, net: Net) -> anyhow::Result<()> {
 			fragment_duration,
 			catalog,
 		} => {
-			let name = require_name(name)?;
 			let args = SubscribeArgs {
 				format,
 				max_latency,
@@ -185,7 +183,6 @@ async fn run_export(export: Export, net: Net) -> anyhow::Result<()> {
 			if let Some(addr) = rtmp.listen {
 				tasks.spawn(rtmp::listen_export(origin.consume(), addr, rtmp.prefix));
 			} else if let Some(url) = rtmp.connect {
-				let name = require_name(name)?;
 				tasks.spawn(rtmp::connect_export(origin.consume(), url, name));
 			}
 		}
@@ -193,7 +190,6 @@ async fn run_export(export: Export, net: Net) -> anyhow::Result<()> {
 			if let Some(addr) = srt.listen {
 				tasks.spawn(srt::listen_export(origin.consume(), addr, srt.prefix, srt.latency));
 			} else if let Some(url) = srt.connect {
-				let name = require_name(name)?;
 				tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency));
 			}
 		}
@@ -206,7 +202,6 @@ async fn run_export(export: Export, net: Net) -> anyhow::Result<()> {
 					rtc.public_addr,
 				));
 			} else if let Some(url) = rtc.connect {
-				let name = require_name(name)?;
 				tasks.spawn(rtc::connect_export(origin.consume(), url, name));
 			}
 		}
@@ -246,16 +241,9 @@ async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
 	Ok(())
 }
 
-fn require_name(name: Option<String>) -> anyhow::Result<String> {
-	name.ok_or_else(|| {
-		anyhow::anyhow!(
-			"this endpoint needs a broadcast name: pass --broadcast, or put it in the --client-connect URL path"
-		)
-	})
-}
-
 fn warn_if_missing_format(name: &str) {
-	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
+	// The empty (root) broadcast has no name to suffix, so there's nothing to warn about.
+	if !name.is_empty() && moq_mux::catalog::CatalogFormat::detect(name).is_none() {
 		tracing::warn!(
 			name,
 			"You should append .hang to your broadcast name to make the catalog format explicit."

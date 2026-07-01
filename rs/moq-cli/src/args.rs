@@ -66,9 +66,10 @@ pub struct MoqSide {
 	pub client_connect: Option<Url>,
 
 	/// The broadcast name for a single-broadcast endpoint (stdin/stdout, HLS, and
-	/// the foreign `--connect` dials). Ignored by the dynamic (`--listen`)
-	/// endpoints, which name broadcasts from the protocol (RTMP app/key, SRT
-	/// stream id).
+	/// the foreign `--connect` dials). Optional: MoQ names each broadcast by the
+	/// connection path plus this name, so leaving it unset uses the root broadcast
+	/// at the connection path. Ignored by the dynamic (`--listen`) endpoints,
+	/// which name broadcasts from the protocol (RTMP app/key, SRT stream id).
 	#[arg(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
