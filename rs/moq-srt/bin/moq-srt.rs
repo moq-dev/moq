@@ -73,6 +73,9 @@ enum Command {
 #[derive(Args, Clone)]
 struct SrtArgs {
 	/// Address to listen on for SRT ingest (e.g. `0.0.0.0:9000`).
+	///
+	/// Prefixed to avoid clashing with the flattened `moq-native` server/client flags
+	/// (`--server-bind` even aliases `--listen`).
 	#[arg(long = "srt-listen", env = "MOQ_SRT_LISTEN")]
 	listen: SocketAddr,
 
