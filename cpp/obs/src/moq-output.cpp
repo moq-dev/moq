@@ -135,6 +135,10 @@ bool MoQOutput::Start()
 	auto result = moq_origin_publish(origin, path.data(), path.size(), broadcast);
 	if (result < 0) {
 		LOG_ERROR("Failed to publish broadcast to session: %d", result);
+		// The session connected above; close it so a retry on this same output
+		// doesn't reuse the stale handle. Its terminal callback releases the
+		// outstanding-session reference the destructor waits on.
+		Stop(false);
 		return false;
 	}
 
