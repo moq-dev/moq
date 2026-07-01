@@ -145,11 +145,11 @@ pub struct UnixConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
-	/// Peer-credential allowlist. All-empty (the default) enforces nothing, so
-	/// the socket's filesystem permissions are the only gate.
+	/// Peer-credential allowlist. `None` (the default) enforces nothing, so the
+	/// socket's filesystem permissions are the only gate.
 	#[command(flatten)]
-	#[serde(default)]
-	pub allow: UnixAllow,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub allow: Option<UnixAllow>,
 }
 
 /// Peer-credential allowlist for a `unix://` listener.
@@ -339,9 +339,9 @@ impl Server {
 		if let Some(path) = config.unix.bind.clone() {
 			stream_binds.push(StreamBind::Unix(path));
 		}
-		// `None` when nothing is configured, so the listener enforces nothing.
+		// `None` (or an all-empty allowlist) means the listener enforces nothing.
 		#[cfg(all(feature = "uds", unix))]
-		let unix_allow = (!config.unix.allow.is_empty()).then(|| config.unix.allow.clone());
+		let unix_allow = config.unix.allow.clone().filter(|allow| !allow.is_empty());
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let streams = StreamListeners::new(
 			stream_binds,
@@ -1206,7 +1206,7 @@ uid = [1001, 1002]
 		.unwrap();
 		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
 		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
-		assert_eq!(config.unix.allow.uid, vec![1001, 1002]);
+		assert_eq!(config.unix.allow.as_ref().expect("allow").uid, vec![1001, 1002]);
 		assert!(config.has_stream_listener());
 	}
 

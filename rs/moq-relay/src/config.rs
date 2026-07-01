@@ -410,9 +410,9 @@ uid = [1001]
 			"TOML's server.unix.bind must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
-			config.server.unix.allow.uid,
+			config.server.unix.allow.expect("allow present").uid,
 			vec![1001],
-			"TOML's server.unix.allow.uid must not be clobbered by the CLI re-parse"
+			"TOML's server.unix.allow must not be clobbered by the CLI re-parse"
 		);
 	}
 
