@@ -149,7 +149,7 @@ Export formats:
 - `ts` - MPEG-TS
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
 
-`export` also takes `--catalog` to pick which catalog track to read for track
+`export` also takes `--catalog-format` to pick which catalog track to read for track
 discovery. When omitted, it's auto-detected from the broadcast name suffix
 (`.hang` -> `hang`, `.msf` -> `msf`), falling back to `hang`:
 

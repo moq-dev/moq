@@ -153,9 +153,9 @@ pub struct Export {
 	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
 	pub max_latency: Duration,
 
-	/// Catalog format for track discovery (default: detect from the broadcast suffix).
-	#[arg(long)]
-	pub catalog: Option<CatalogFormatArg>,
+	/// Catalog format to read for track discovery (default: detect from the broadcast suffix).
+	#[arg(long = "catalog-format")]
+	pub catalog_format: Option<CatalogFormatArg>,
 
 	/// The single sink draining the Origin.
 	#[command(subcommand)]

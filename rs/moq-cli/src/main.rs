@@ -156,7 +156,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 			format,
 			max_latency: export.max_latency,
 			fragment_duration,
-			catalog: export.catalog,
+			catalog: export.catalog_format,
 		};
 		let consumer = origin.consume();
 		tasks.spawn(async move { run_stdout(consumer, name, args).await });
