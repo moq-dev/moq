@@ -627,25 +627,6 @@ impl AuthToken {
 			expires: None,
 		}
 	}
-
-	/// A token for an unauthenticated (no-JWT) connection on the authenticated
-	/// internal listener, granting subscribe + publish ONLY under `prefix`.
-	///
-	/// Unlike [`unrestricted`](Self::unrestricted), the scope is fixed by the relay
-	/// (the `prefix` is a relay config value, not the client-advertised path), so a
-	/// caller cannot widen it. This is for trusted local helpers that carry no JWT
-	/// but only touch a well-known subtree, e.g. the protocol gateways' stats
-	/// publisher writing under `.stats`. The root stays empty so the helper still
-	/// addresses absolute paths (`.stats/...`); the prefix is what bounds it.
-	pub fn anon(prefix: &str) -> Self {
-		Self {
-			root: Path::new("").to_owned(),
-			subscribe: PathPrefixes::from(vec![Path::new(prefix).to_owned()]),
-			publish: PathPrefixes::from(vec![Path::new(prefix).to_owned()]),
-			internal: true,
-			expires: None,
-		}
-	}
 }
 
 enum KeySource {
@@ -1149,7 +1130,7 @@ mod tests {
 		assert_eq!(p.path, "/customer/foo/bar");
 		assert_eq!(p.jwt, None);
 
-		// Empty (the stats publisher: no path, no JWT -> anon scope).
+		// Empty (a no-path, no-JWT stream connection: resolved via public auth).
 		let p = AuthParams::from_path("");
 		assert_eq!(p.path, "");
 		assert_eq!(p.jwt, None);
@@ -1162,15 +1143,6 @@ mod tests {
 		let p = AuthParams::from_path("/foo?a=1&jwt=ab%20cd");
 		assert_eq!(p.path, "/foo");
 		assert_eq!(p.jwt.as_deref(), Some("ab cd"));
-	}
-
-	#[test]
-	fn auth_token_anon_scopes_to_prefix() {
-		let token = AuthToken::anon(".stats");
-		assert_eq!(token.root.as_str(), "");
-		assert!(token.internal);
-		assert!(token.publish.iter().any(|p| p.as_str() == ".stats"));
-		assert!(token.subscribe.iter().any(|p| p.as_str() == ".stats"));
 	}
 
 	fn create_test_key_with_kid(kid: &str) -> Key {

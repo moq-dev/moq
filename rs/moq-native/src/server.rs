@@ -33,13 +33,45 @@ pub struct ServerConfig {
 	///   requires the `uds` feature, unix-only). Use a triple slash for an absolute
 	///   path.
 	///
-	/// Stream transports (`tcp`/`unix`) carry the request path in-band via the
-	/// SETUP, so a per-listener query string is preserved and surfaced on each
-	/// accepted [`Request::listen_query`] for the application to interpret.
+	/// Stream transports (`tcp`/`unix`) are URL-less; their request path (and any
+	/// JWT) rides the SETUP in-band and is surfaced on [`Request::path`].
 	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
 	#[serde(alias = "listen", default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub bind: Vec<String>,
+
+	/// Peer-credential allowlist for `unix://` listeners (unix-only).
+	///
+	/// Restricts which local processes may connect to any `unix://` entry in
+	/// [`bind`](Self::bind), by the peer's kernel-reported user ID. Empty means no
+	/// uid constraint. A connection that fails the allowlist is dropped before its
+	/// SETUP is read. Ignored by TCP/QUIC, which carry no peer credentials.
+	#[arg(
+		long = "server-unix-allow-uid",
+		env = "MOQ_SERVER_UNIX_ALLOW_UID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub unix_allow_uid: Vec<u32>,
+
+	/// Group-ID allowlist for `unix://` listeners. See [`unix_allow_uid`](Self::unix_allow_uid).
+	#[arg(
+		long = "server-unix-allow-gid",
+		env = "MOQ_SERVER_UNIX_ALLOW_GID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub unix_allow_gid: Vec<u32>,
+
+	/// PID allowlist for `unix://` listeners. See [`unix_allow_uid`](Self::unix_allow_uid).
+	/// A populated list rejects peers whose PID the platform doesn't report.
+	#[arg(
+		long = "server-unix-allow-pid",
+		env = "MOQ_SERVER_UNIX_ALLOW_PID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub unix_allow_pid: Vec<i32>,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
@@ -162,15 +194,12 @@ impl ServerConfig {
 enum BindScheme {
 	/// QUIC over UDP. Carries the address with any `udp://` scheme stripped.
 	Quic(String),
-	/// Plaintext qmux over TCP. Carries the resolved address and the URL query.
+	/// Plaintext qmux over TCP. Carries the resolved address.
 	#[cfg(feature = "tcp")]
-	Tcp {
-		addr: net::SocketAddr,
-		query: Option<String>,
-	},
-	/// Plaintext qmux over a Unix socket. Carries the path and the URL query.
+	Tcp(net::SocketAddr),
+	/// Plaintext qmux over a Unix socket. Carries the socket path.
 	#[cfg(all(feature = "uds", unix))]
-	Unix { path: PathBuf, query: Option<String> },
+	Unix(PathBuf),
 	/// A `tcp://`/`unix://` entry whose transport feature is not compiled in.
 	#[cfg(not(all(feature = "tcp", feature = "uds", unix)))]
 	Unsupported(String),
@@ -202,10 +231,7 @@ impl BindScheme {
 						.map_err(|_| Error::InvalidBind(entry.to_string()))?
 						.next()
 						.ok_or_else(|| Error::InvalidBind(entry.to_string()))?;
-					Ok(BindScheme::Tcp {
-						addr,
-						query: url.query().map(str::to_string),
-					})
+					Ok(BindScheme::Tcp(addr))
 				}
 				#[cfg(not(feature = "tcp"))]
 				{
@@ -219,10 +245,7 @@ impl BindScheme {
 					if url.path().is_empty() {
 						return Err(Error::InvalidBind(entry.to_string()));
 					}
-					Ok(BindScheme::Unix {
-						path: PathBuf::from(url.path()),
-						query: url.query().map(str::to_string),
-					})
+					Ok(BindScheme::Unix(PathBuf::from(url.path())))
 				}
 				#[cfg(not(all(feature = "uds", unix)))]
 				{
@@ -321,8 +344,19 @@ impl Server {
 			_ => None,
 		};
 
+		#[cfg(all(feature = "uds", unix))]
+		let unix_allow = UnixAllow {
+			uid: config.unix_allow_uid.clone(),
+			gid: config.unix_allow_gid.clone(),
+			pid: config.unix_allow_pid.clone(),
+		};
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		let streams = StreamListeners::new(parse_stream_binds(&config.bind)?, stream_versions(&versions));
+		let streams = StreamListeners::new(
+			parse_stream_binds(&config.bind)?,
+			stream_versions(&versions),
+			#[cfg(all(feature = "uds", unix))]
+			unix_allow,
+		);
 
 		Ok(Server {
 			accept: Default::default(),
@@ -633,20 +667,6 @@ impl Server {
 	}
 }
 
-/// Credentials of a connected stream peer.
-///
-/// Populated only for `unix://` listeners (via `SO_PEERCRED` / `LOCAL_PEERCRED`);
-/// `None` for TCP. `pid` is `None` on platforms that don't report it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PeerCred {
-	/// The peer process's effective user ID.
-	pub uid: u32,
-	/// The peer process's effective group ID.
-	pub gid: u32,
-	/// The peer process's PID, if the platform reports it.
-	pub pid: Option<i32>,
-}
-
 /// The version set offered on stream (`tcp://`/`unix://`) listeners.
 ///
 /// A URL-less transport carries the request path in the moq-lite-05 SETUP, the
@@ -666,14 +686,7 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 
 /// A configured stream listener, parsed from a `--server-bind` entry.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-struct StreamBind {
-	transport: StreamTransport,
-	/// The URL query string, surfaced verbatim on each [`Request::listen_query`].
-	query: Option<String>,
-}
-
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-enum StreamTransport {
+enum StreamBind {
 	#[cfg(feature = "tcp")]
 	Tcp(net::SocketAddr),
 	#[cfg(all(feature = "uds", unix))]
@@ -689,20 +702,41 @@ fn parse_stream_binds(entries: &[String]) -> crate::Result<Vec<StreamBind>> {
 		match BindScheme::parse(entry)? {
 			BindScheme::Quic(_) => {}
 			#[cfg(feature = "tcp")]
-			BindScheme::Tcp { addr, query } => binds.push(StreamBind {
-				transport: StreamTransport::Tcp(addr),
-				query,
-			}),
+			BindScheme::Tcp(addr) => binds.push(StreamBind::Tcp(addr)),
 			#[cfg(all(feature = "uds", unix))]
-			BindScheme::Unix { path, query } => binds.push(StreamBind {
-				transport: StreamTransport::Unix(path),
-				query,
-			}),
+			BindScheme::Unix(path) => binds.push(StreamBind::Unix(path)),
 			#[cfg(not(all(feature = "tcp", feature = "uds", unix)))]
 			BindScheme::Unsupported(entry) => return Err(Error::UnsupportedBind(entry)),
 		}
 	}
 	Ok(binds)
+}
+
+/// Peer-credential allowlist for `unix://` listeners, built from
+/// [`ServerConfig::unix_allow_uid`] and friends.
+#[cfg(all(feature = "uds", unix))]
+#[derive(Clone, Default)]
+struct UnixAllow {
+	uid: Vec<u32>,
+	gid: Vec<u32>,
+	pid: Vec<i32>,
+}
+
+#[cfg(all(feature = "uds", unix))]
+impl UnixAllow {
+	fn is_empty(&self) -> bool {
+		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
+	}
+
+	/// Whether `cred` satisfies every populated field (AND across fields, OR
+	/// within a field). A required pid is unsatisfiable when the platform
+	/// reports none.
+	fn permits(&self, cred: &crate::unix::PeerCred) -> bool {
+		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
+		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
+		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
+		uid_ok && gid_ok && pid_ok
+	}
 }
 
 /// The stream (`tcp://`/`unix://`) listeners owned by a [`Server`].
@@ -714,15 +748,23 @@ fn parse_stream_binds(entries: &[String]) -> crate::Result<Vec<StreamBind>> {
 struct StreamListeners {
 	binds: Vec<StreamBind>,
 	versions: moq_net::Versions,
+	#[cfg(all(feature = "uds", unix))]
+	unix_allow: UnixAllow,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
 }
 
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 impl StreamListeners {
-	fn new(binds: Vec<StreamBind>, versions: moq_net::Versions) -> Self {
+	fn new(
+		binds: Vec<StreamBind>,
+		versions: moq_net::Versions,
+		#[cfg(all(feature = "uds", unix))] unix_allow: UnixAllow,
+	) -> Self {
 		Self {
 			binds,
 			versions,
+			#[cfg(all(feature = "uds", unix))]
+			unix_allow,
 			rx: None,
 		}
 	}
@@ -736,26 +778,26 @@ impl StreamListeners {
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
 		for bind in self.binds.drain(..) {
 			let versions = self.versions.clone();
-			match bind.transport {
+			match bind {
 				#[cfg(feature = "tcp")]
-				StreamTransport::Tcp(addr) => {
+				StreamBind::Tcp(addr) => {
 					if !addr.ip().is_loopback() {
 						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
 					}
 					let listener = crate::tcp::Listener::bind(addr).await?.with_protocols(versions.alpns());
 					tracing::info!(%addr, "listening (tcp)");
-					spawn_tcp_loop(listener, versions, bind.query, tx.clone());
+					spawn_tcp_loop(listener, versions, tx.clone());
 				}
 				#[cfg(all(feature = "uds", unix))]
-				StreamTransport::Unix(path) => {
+				StreamBind::Unix(path) => {
 					let listener = crate::unix::Listener::bind(&path)
 						.await?
 						.with_protocols(versions.alpns());
-					// Loose file perms: callers gate via peer credentials, and the
-					// worker usually runs as a different user than the server.
+					// Loose file perms: the uid/gid/pid allow list is the real gate,
+					// and the worker usually runs as a different user than the server.
 					listener.set_mode(0o666)?;
-					tracing::info!(path = %path.display(), "listening (unix)");
-					spawn_unix_loop(listener, versions, bind.query, tx.clone());
+					tracing::info!(path = %path.display(), allow_uid = ?self.unix_allow.uid, "listening (unix)");
+					spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone());
 				}
 			}
 		}
@@ -774,18 +816,11 @@ impl StreamListeners {
 }
 
 #[cfg(feature = "tcp")]
-fn spawn_tcp_loop(
-	listener: crate::tcp::Listener,
-	versions: moq_net::Versions,
-	query: Option<String>,
-	tx: tokio::sync::mpsc::Sender<Request>,
-) {
+fn spawn_tcp_loop(listener: crate::tcp::Listener, versions: moq_net::Versions, tx: tokio::sync::mpsc::Sender<Request>) {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
-				Some(Ok(session)) => {
-					spawn_stream_request(session, None, "tcp", query.clone(), versions.clone(), tx.clone())
-				}
+				Some(Ok(session)) => spawn_stream_request(session, "tcp", versions.clone(), tx.clone()),
 				Some(Err(err)) => tracing::warn!(%err, "tcp listener accept failed"),
 				None => break,
 			}
@@ -797,14 +832,19 @@ fn spawn_tcp_loop(
 fn spawn_unix_loop(
 	listener: crate::unix::Listener,
 	versions: moq_net::Versions,
-	query: Option<String>,
+	allow: UnixAllow,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
 				Some(Ok((session, cred))) => {
-					spawn_stream_request(session, Some(cred), "unix", query.clone(), versions.clone(), tx.clone())
+					// Enforce the allowlist before reading any SETUP bytes from the peer.
+					if !allow.is_empty() && !allow.permits(&cred) {
+						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
+						continue;
+					}
+					spawn_stream_request(session, "unix", versions.clone(), tx.clone());
 				}
 				Some(Err(err)) => tracing::warn!(%err, "unix listener accept failed"),
 				None => break,
@@ -818,9 +858,7 @@ fn spawn_unix_loop(
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 fn spawn_stream_request(
 	session: qmux::Session,
-	peer_cred: Option<PeerCred>,
 	transport: &'static str,
-	query: Option<String>,
 	versions: moq_net::Versions,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
@@ -830,12 +868,7 @@ fn spawn_stream_request(
 			Ok(request) => {
 				let request = Request {
 					server: moq_net::Server::new(),
-					kind: RequestKind::Stream(Box::new(StreamRequest {
-						request,
-						transport,
-						peer_cred,
-						query,
-					})),
+					kind: RequestKind::Stream(Box::new(StreamRequest { request, transport })),
 				};
 				let _ = tx.send(request).await;
 			}
@@ -850,8 +883,6 @@ fn spawn_stream_request(
 pub(crate) struct StreamRequest {
 	request: moq_net::Request<qmux::Session>,
 	transport: &'static str,
-	peer_cred: Option<PeerCred>,
-	query: Option<String>,
 }
 
 /// An incoming connection that can be accepted or rejected.
@@ -936,19 +967,12 @@ impl Request {
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			RequestKind::Stream(stream) => {
-				let StreamRequest {
-					request,
-					transport,
-					peer_cred,
-					query,
-				} = *stream;
+				let StreamRequest { request, transport } = *stream;
 				Request {
 					server,
 					kind: RequestKind::Stream(Box::new(StreamRequest {
 						request: request.with_publish(publish),
 						transport,
-						peer_cred,
-						query,
 					})),
 				}
 			}
@@ -965,19 +989,12 @@ impl Request {
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			RequestKind::Stream(stream) => {
-				let StreamRequest {
-					request,
-					transport,
-					peer_cred,
-					query,
-				} = *stream;
+				let StreamRequest { request, transport } = *stream;
 				Request {
 					server,
 					kind: RequestKind::Stream(Box::new(StreamRequest {
 						request: request.with_consume(consume),
 						transport,
-						peer_cred,
-						query,
 					})),
 				}
 			}
@@ -994,19 +1011,12 @@ impl Request {
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			RequestKind::Stream(stream) => {
-				let StreamRequest {
-					request,
-					transport,
-					peer_cred,
-					query,
-				} = *stream;
+				let StreamRequest { request, transport } = *stream;
 				Request {
 					server,
 					kind: RequestKind::Stream(Box::new(StreamRequest {
 						request: request.with_stats(stats),
 						transport,
-						peer_cred,
-						query,
 					})),
 				}
 			}
@@ -1103,30 +1113,6 @@ impl Request {
 		match self.kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			RequestKind::Stream(ref stream) => stream.request.path(),
-			#[allow(unreachable_patterns)]
-			_ => None,
-		}
-	}
-
-	/// The peer credentials for a `unix://` connection, or `None` otherwise.
-	pub fn peer_cred(&self) -> Option<PeerCred> {
-		match self.kind {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(ref stream) => stream.peer_cred,
-			#[allow(unreachable_patterns)]
-			_ => None,
-		}
-	}
-
-	/// The query string from the `--server-bind` URL this connection arrived on.
-	///
-	/// Surfaced verbatim for stream listeners so the application can attach
-	/// per-listener policy (e.g. an anonymous scope or peer-credential allowlist)
-	/// to a bind. `None` for URL-bearing transports and for binds with no query.
-	pub fn listen_query(&self) -> Option<&str> {
-		match self.kind {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(ref stream) => stream.query.as_deref(),
 			#[allow(unreachable_patterns)]
 			_ => None,
 		}
@@ -1287,14 +1273,13 @@ mod tests {
 
 	#[cfg(feature = "tcp")]
 	#[test]
-	fn tcp_bind_parses_addr_and_query() {
-		let binds = parse_stream_binds(&["tcp://127.0.0.1:4444?anon=.stats&allow-uid=1001".to_string()]).unwrap();
+	fn tcp_bind_parses_addr() {
+		let binds = parse_stream_binds(&["tcp://127.0.0.1:4444".to_string()]).unwrap();
 		assert_eq!(binds.len(), 1);
-		match &binds[0].transport {
-			StreamTransport::Tcp(addr) => assert_eq!(addr, &"127.0.0.1:4444".parse::<net::SocketAddr>().unwrap()),
+		match &binds[0] {
+			StreamBind::Tcp(addr) => assert_eq!(addr, &"127.0.0.1:4444".parse::<net::SocketAddr>().unwrap()),
 			#[allow(unreachable_patterns)]
 			_ => panic!("expected tcp"),
 		}
-		assert_eq!(binds[0].query.as_deref(), Some("anon=.stats&allow-uid=1001"));
 	}
 }

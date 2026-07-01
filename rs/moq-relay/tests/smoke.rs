@@ -10,7 +10,7 @@
 use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
 
 use moq_native::moq_net::{self, Origin, Track};
-use moq_relay::{Auth, AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig, WebState};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig, WebState};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -371,16 +371,26 @@ async fn two_publish_only_clients_coexist() {
 }
 
 /// Run the relay's accept loop over a stream-only `--server-bind` (no QUIC), the
-/// same path `main.rs` uses, authenticating every connection through [`Auth`].
-fn spawn_stream_relay(bind: String) -> tokio::task::JoinHandle<()> {
+/// same path `main.rs` uses. Authenticates through the shared [`Auth`], here with
+/// fully public access (`--auth-public ""`) so no-JWT stream clients get the root.
+async fn spawn_stream_relay(bind: String) -> tokio::task::JoinHandle<()> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut config = moq_native::ServerConfig::default();
 	config.bind = vec![bind];
 	let mut server = config.init().expect("server init");
 
+	// Public Simple([""]) lets any no-JWT stream client through at the root.
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec![String::new()]);
+	let mut auth_config = AuthConfig::default();
+	auth_config.public = Some(public);
+	let auth = auth_config
+		.init(&moq_native::tls::Client::default())
+		.await
+		.expect("auth init");
+
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
-	let auth = Auth::default();
 
 	tokio::spawn(async move {
 		let mut id = 0;
@@ -400,7 +410,7 @@ fn spawn_stream_relay(bind: String) -> tokio::task::JoinHandle<()> {
 }
 
 /// Stand up the relay listening only on a plain-TCP qmux `--server-bind` on a
-/// free loopback port, with an empty anon scope (no-JWT => whole root). Returns
+/// free loopback port, with fully public auth (no-JWT => whole root). Returns
 /// the port and an abort handle.
 async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	// Pick a free TCP port, then drop the probe so the listener can bind it.
@@ -408,9 +418,7 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	// `anon=` (empty value) grants no-JWT connections the whole root, which is
-	// what these transport round-trips exercise.
-	let handle = spawn_stream_relay(format!("tcp://127.0.0.1:{port}?anon="));
+	let handle = spawn_stream_relay(format!("tcp://127.0.0.1:{port}")).await;
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {
@@ -426,9 +434,9 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	(port, handle)
 }
 
-/// Connect a publisher and subscriber to the unauthenticated internal listener
-/// over `tcp://` (plain TCP, no TLS, no JWT) and confirm a frame round-trips.
-/// Exercises the qmux-over-TCP transport and the unrestricted internal grant.
+/// Connect a publisher and subscriber to a stream `--server-bind` over `tcp://`
+/// (plain TCP, no TLS, no JWT) and confirm a frame round-trips. Exercises the
+/// qmux-over-TCP transport and no-JWT resolution through public auth.
 #[tokio::test]
 async fn internal_tcp_round_trip() {
 	let (port, handle) = spawn_internal_relay().await;
@@ -495,7 +503,7 @@ async fn internal_tcp_round_trip() {
 	handle.abort();
 }
 
-/// Stand up the internal listener on a Unix socket and return the socket path
+/// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
 #[cfg(unix)]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
@@ -503,7 +511,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	// system temp dir is long. /tmp is fine on macOS and Linux.
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}.sock", std::process::id()));
 
-	let handle = spawn_stream_relay(format!("unix://{}?anon=", path.display()));
+	let handle = spawn_stream_relay(format!("unix://{}", path.display())).await;
 
 	// Wait for the socket file to appear.
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);

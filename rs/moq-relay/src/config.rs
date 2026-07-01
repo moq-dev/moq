@@ -367,25 +367,29 @@ id = 12345
 		);
 	}
 
-	/// Same clap+TOML clobber guard for the multi-transport `server.bind` list.
-	/// A `Vec<String>` of `--server-bind` entries (QUIC + stream listeners) set
-	/// via TOML must survive the `update_from` re-parse when the CLI flag is
-	/// absent, or every configured listener gets silently dropped.
+	/// Same clap+TOML clobber guard for the multi-transport `server.bind` list
+	/// and the `unix://` peer-credential allowlist. Both must survive the
+	/// `update_from` re-parse when their CLI flags are absent, or every
+	/// configured listener (and its allowlist) gets silently dropped.
 	static SERVER_BIND_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 	#[test]
 	fn cli_does_not_clobber_toml_server_bind() {
 		let _guard = SERVER_BIND_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		// SAFETY: SERVER_BIND_ENV_LOCK serializes this with any sibling test
-		// touching the same env var.
-		unsafe { std::env::remove_var("MOQ_SERVER_BIND") };
+		// touching the same env vars.
+		unsafe {
+			std::env::remove_var("MOQ_SERVER_BIND");
+			std::env::remove_var("MOQ_SERVER_UNIX_ALLOW_UID");
+		}
 
 		let toml = r#"
 [server]
 bind = [
   "udp://[::]:443",
-  "unix:///run/moq/internal.sock?anon=.stats&allow-uid=1001",
+  "unix:///run/moq/internal.sock",
 ]
+unix_allow_uid = [1001]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -399,9 +403,14 @@ bind = [
 			config.server.bind,
 			vec![
 				"udp://[::]:443".to_string(),
-				"unix:///run/moq/internal.sock?anon=.stats&allow-uid=1001".to_string(),
+				"unix:///run/moq/internal.sock".to_string()
 			],
 			"TOML's server.bind list must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.server.unix_allow_uid,
+			vec![1001],
+			"TOML's server.unix_allow_uid must not be clobbered by the CLI re-parse"
 		);
 	}
 
