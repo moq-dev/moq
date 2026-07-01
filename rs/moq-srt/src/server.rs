@@ -20,7 +20,7 @@
 //! everything and routes by prefix, use [`crate::run`].
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use moq_net::{OriginConsumer, OriginProducer};
@@ -288,8 +288,9 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// (`m=request`).
 ///
 /// Waits for the broadcast to be announced (so a caller may connect before the
-/// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
-/// messages. Returns once the broadcast ends or the caller disconnects.
+/// publisher), then slices the muxer's output into [`SRT_PAYLOAD`]-sized messages,
+/// stamped with pacing instants spread across each frame's duration. Returns once
+/// the broadcast ends or the caller disconnects.
 async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket, latency: Duration) -> Result<()> {
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
@@ -312,28 +313,23 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 		return Ok(());
 	};
 
-	// MPEG-TS is a continuous byte stream, so we coalesce the muxer's per-frame
-	// output and slice it on a fixed boundary rather than preserving frames.
+	// The Instant handed to `send` is each payload's TSBPD origin time, which the
+	// receiver clocks delivery off. The muxer paces each frame on its decode clock; with
+	// the pace lead at zero (the SRT receiver owns the jitter buffer) it re-anchors any
+	// tune-in burst to the live edge, so nothing is stamped seconds into the future where
+	// SRT would hold it past the TSBPD window and stall after ~one packet.
 	//
-	// The Instant handed to `send` is the payload's TSBPD origin time, from which the
-	// receiver reconstructs inter-frame spacing. The muxer paces each frame on its
-	// decode clock; with the pace lead at zero (the SRT receiver owns the jitter buffer)
-	// it re-anchors any tune-in burst to the live edge, so nothing is stamped seconds
-	// into the future where SRT would hold it past the TSBPD window and stall after
-	// ~one packet.
-	let mut send_at = Instant::now();
-	let mut buffer = bytes::BytesMut::new();
+	// Spread each frame's TS packets across its on-wire duration rather than stamping the
+	// whole frame at one instant: a per-frame burst overruns the receiver's constant-rate
+	// TS buffer model. We estimate the duration from the previous frame's pace gap (a
+	// steady frame rate holds it; a re-anchored burst collapses it to an immediate send).
+	let mut prev = None;
 	while let Some(frame) = subscriber.next().await? {
-		send_at = frame.pace;
-
-		buffer.extend_from_slice(&frame.payload);
-		while buffer.len() >= SRT_PAYLOAD {
-			socket.send((send_at, buffer.split_to(SRT_PAYLOAD).freeze())).await?;
+		let span = prev.map_or(Duration::ZERO, |p| frame.pace.saturating_duration_since(p));
+		prev = Some(frame.pace);
+		for (send_at, chunk) in frame.spread(span, SRT_PAYLOAD) {
+			socket.send((send_at, chunk)).await?;
 		}
-	}
-
-	if !buffer.is_empty() {
-		socket.send((send_at, buffer.freeze())).await?;
 	}
 	socket.close().await?;
 

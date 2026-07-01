@@ -165,6 +165,32 @@ pub struct Output {
 	pub pace: Instant,
 }
 
+impl Output {
+	/// Split this frame into `chunk`-byte pieces, each paired with the wall-clock
+	/// instant it's due, spread evenly across `span` starting at [`pace`](Self::pace).
+	///
+	/// Emitting each piece at its instant (sleeping, or stamping a transport send time)
+	/// trickles the frame onto the wire at the source's real-time rate instead of
+	/// firing a whole frame at its [`pace`](Self::pace) boundary. A per-frame burst
+	/// overruns a TS decoder's constant-rate buffer model unless the mux is padded to
+	/// CBR; spreading keeps PCR-to-arrival roughly linear without that padding. `span`
+	/// is the frame's on-wire duration, typically the gap to the next frame's `pace`; a
+	/// zero span (the first frame, or a tune-in burst re-anchored to the live edge)
+	/// yields every piece at `pace`. `chunk` is clamped to at least one byte; keep it a
+	/// multiple of 188 to preserve TS-packet alignment.
+	pub fn spread(&self, span: Duration, chunk: usize) -> impl Iterator<Item = (Instant, Bytes)> {
+		let payload = self.payload.clone();
+		let pace = self.pace;
+		let chunk = chunk.max(1);
+		let count = payload.len().div_ceil(chunk);
+		(0..count).map(move |i| {
+			let at = pace + span.mul_f64(i as f64 / count as f64);
+			let end = ((i + 1) * chunk).min(payload.len());
+			(at, payload.slice(i * chunk..end))
+		})
+	}
+}
+
 /// The program tables plus the resolved PID layout.
 struct Psi {
 	pat: Pat,
@@ -1187,7 +1213,58 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 
 #[cfg(test)]
 mod tests {
-	use super::{DEFAULT_DTS_RESERVE, author_dts, is_complete_section};
+	use super::{DEFAULT_DTS_RESERVE, Output, author_dts, is_complete_section};
+	use bytes::Bytes;
+	use std::time::{Duration, Instant};
+
+	use crate::container::Timestamp;
+
+	fn output(len: usize, pace: Instant) -> Output {
+		Output {
+			payload: Bytes::from(vec![0u8; len]),
+			timestamp: Timestamp::from_micros(0).unwrap(),
+			keyframe: true,
+			pace,
+		}
+	}
+
+	#[test]
+	fn spread_trickles_chunks_across_the_span() {
+		// 1000 bytes in 250-byte chunks -> 4 pieces, due at even quarters of the 40ms
+		// window (0, 10, 20, 30 ms) so the last piece leaves before the next frame's pace.
+		let start = Instant::now();
+		let pieces: Vec<_> = output(1000, start).spread(Duration::from_millis(40), 250).collect();
+		assert_eq!(pieces.len(), 4);
+		for (i, expected) in [0, 10, 20, 30].into_iter().enumerate() {
+			assert_eq!(pieces[i].0, start + Duration::from_millis(expected));
+			assert_eq!(pieces[i].1.len(), 250);
+		}
+		// The pieces reassemble to the whole frame with nothing dropped or duplicated.
+		let total: usize = pieces.iter().map(|(_, b)| b.len()).sum();
+		assert_eq!(total, 1000);
+	}
+
+	#[test]
+	fn spread_keeps_a_short_final_chunk() {
+		let start = Instant::now();
+		let pieces: Vec<_> = output(900, start).spread(Duration::from_millis(30), 400).collect();
+		assert_eq!(pieces.len(), 3);
+		assert_eq!(
+			pieces[2].1.len(),
+			100,
+			"the trailing partial chunk keeps its real length"
+		);
+	}
+
+	#[test]
+	fn spread_zero_span_bursts_at_pace() {
+		// A collapsed window (first frame, or a re-anchored tune-in burst) sends everything
+		// at once rather than dividing by zero.
+		let start = Instant::now();
+		let pieces: Vec<_> = output(500, start).spread(Duration::ZERO, 100).collect();
+		assert_eq!(pieces.len(), 5);
+		assert!(pieces.iter().all(|(at, _)| *at == start));
+	}
 
 	/// Push a decode-order PTS stream (90 kHz) through the decode clock with a given reserve and
 	/// return the effective DTS per frame (the authored DTS, or the PTS when none is authored).
