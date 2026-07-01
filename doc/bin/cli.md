@@ -59,7 +59,7 @@ The binary will be in `target/release/moq-cli`.
 ## The grammar
 
 ```
-moq-cli <MoQ side>  <import|export>  <endpoint> [endpoint options]
+moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
 ```
 
 - **MoQ side** attaches the Origin to the network, and comes before the verb. At
@@ -79,13 +79,13 @@ moq-cli <MoQ side>  <import|export>  <endpoint> [endpoint options]
   gateways, `--connect` dials out and `--listen` binds a socket; the parent verb
   decides whether that pushes or pulls.
 
-Run `moq-cli import --help` / `moq-cli export --help` to see the endpoints, and
-`moq-cli import rtmp --help` for a specific one.
+Run `moq import --help` / `moq export --help` to see the endpoints, and
+`moq import rtmp --help` for a specific one.
 
 ## Basic Usage
 
-`moq-cli <MoQ side> import <format>` reads a container from stdin;
-`moq-cli <MoQ side> export <format>` writes one to stdout.
+`moq <MoQ side> import <format>` reads a container from stdin;
+`moq <MoQ side> export <format>` writes one to stdout.
 
 ### Publish a Video File
 
@@ -93,7 +93,7 @@ Remux a file to MPEG-TS and pipe it in (`-c copy` avoids re-encoding):
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ### Capture a Webcam
@@ -103,11 +103,11 @@ Pipe an external FFmpeg process as MPEG-TS:
 ```bash
 # macOS
 ffmpeg -f avfoundation -i "0:0" -f mpegts - | \
-    moq-cli --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
+    moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
 
 # Linux
 ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | \
-    moq-cli --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
+    moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
 ```
 
 ### Play a Broadcast
@@ -115,7 +115,7 @@ ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | \
 Pull a broadcast back out and play it:
 
 ```bash
-moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
 ```
 
 ## Encoding Options
@@ -127,7 +127,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -g 30 -keyint_min 30 \
     -c:a aac \
-    -f mpegts - | moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    -f mpegts - | moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ## Container Formats
@@ -164,10 +164,10 @@ Ingest an MPEG-TS stream from FFmpeg and play one back out:
 ```bash
 # Import: remux a file to MPEG-TS and pipe it in
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq-cli --client-connect https://relay.example.com --broadcast my-stream.hang import ts
+    moq --client-connect https://relay.example.com --broadcast my-stream.hang import ts
 
 # Export: pull MPEG-TS back out and play it
-moq-cli --client-connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
+moq --client-connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
 ```
 
 TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
@@ -187,10 +187,10 @@ PID, described in the catalog `mpegts` section, and survive `import ts` /
 ```bash
 # Import: remux a file to FLV and pipe it in
 ffmpeg -i input.mp4 -c copy -f flv - | \
-    moq-cli --client-connect https://relay.example.com --broadcast my-stream.hang import flv
+    moq --client-connect https://relay.example.com --broadcast my-stream.hang import flv
 
 # Export: pull FLV back out and play it
-moq-cli --client-connect https://relay.example.com --broadcast my-stream.hang export flv | ffplay -
+moq --client-connect https://relay.example.com --broadcast my-stream.hang export flv | ffplay -
 ```
 
 FLV is the classic RTMP container: H.264 video and AAC audio, each with an
@@ -202,14 +202,14 @@ older codecs (VP6, MP3) are not supported on the stdin/stdout container path.
 Import a remote HLS master/media playlist into a MoQ broadcast:
 
 ```bash
-moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
     import hls https://example.com/live/master.m3u8
 ```
 
 Serve MoQ broadcasts as HLS / LL-HLS over HTTP:
 
 ```bash
-moq-cli --client-connect https://relay.example.com/anon export hls --listen '[::]:8089'
+moq --client-connect https://relay.example.com/anon export hls --listen '[::]:8089'
 ```
 
 ## Network Gateways (RTMP / SRT / WebRTC)
@@ -231,7 +231,7 @@ Accept OBS / FFmpeg RTMP pushes and forward them to a relay (broadcasts named
 from the RTMP app/key):
 
 ```bash
-moq-cli --client-connect https://relay.example.com/anon import rtmp --listen '[::]:1935'
+moq --client-connect https://relay.example.com/anon import rtmp --listen '[::]:1935'
 ```
 
 ### Restream MoQ to Twitch (RTMP)
@@ -239,7 +239,7 @@ moq-cli --client-connect https://relay.example.com/anon import rtmp --listen '[:
 Pull a broadcast from a relay and push it to a remote RTMP server:
 
 ```bash
-moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
     export rtmp --connect 'rtmp://live.twitch.tv/app/<stream-key>'
 ```
 
@@ -247,10 +247,10 @@ moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.ha
 
 ```bash
 # Accept incoming SRT publishes and forward to a relay
-moq-cli --client-connect https://relay.example.com/anon import srt --listen '[::]:9000'
+moq --client-connect https://relay.example.com/anon import srt --listen '[::]:9000'
 
 # Serve a broadcast to SRT players
-moq-cli --client-connect https://relay.example.com/anon export srt --listen '[::]:9000'
+moq --client-connect https://relay.example.com/anon export srt --listen '[::]:9000'
 ```
 
 ### WebRTC (WHIP / WHEP)
@@ -260,10 +260,10 @@ Direction picks the HTTP role: import `--listen` is a WHIP server, export
 
 ```bash
 # WHIP ingest: browsers publish to us, we forward to a relay
-moq-cli --client-connect https://relay.example.com/anon import rtc --listen '[::]:8080'
+moq --client-connect https://relay.example.com/anon import rtc --listen '[::]:8080'
 
 # WHEP playback: serve a broadcast to browsers
-moq-cli --client-connect https://relay.example.com/anon export rtc --listen '[::]:8080'
+moq --client-connect https://relay.example.com/anon export rtc --listen '[::]:8080'
 ```
 
 ## Authentication
@@ -272,7 +272,7 @@ Pass a JWT token via the URL's `?jwt=` query parameter:
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq-cli --client-connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
+    moq --client-connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
 ```
 
 See [Authentication](/bin/relay/auth) for token generation.
@@ -295,7 +295,7 @@ just pub tos https://relay.example.com/anon
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    RUST_LOG=debug moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    RUST_LOG=debug moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ### Check Connection

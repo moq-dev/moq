@@ -71,7 +71,7 @@ pub struct MoqSide {
 
 	/// When hosting (`--server-bind`), also serve static files and the
 	/// `/certificate.sha256` fingerprint over HTTP from this directory.
-	#[arg(long, help_heading = "MoQ")]
+	#[arg(long, requires = "server-bind", help_heading = "MoQ")]
 	pub dir: Option<PathBuf>,
 
 	/// MoQ client transport config (`--client-bind`, `--client-tls-*`, ...).

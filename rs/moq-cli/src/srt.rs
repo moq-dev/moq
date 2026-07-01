@@ -22,8 +22,8 @@ pub struct Args {
 	#[arg(id = "srt-listen", long = "listen", value_name = "ADDR")]
 	pub listen: Option<SocketAddr>,
 
-	/// Prefix prepended to the stream id when naming broadcasts.
-	#[arg(long)]
+	/// Prefix prepended to the stream id when naming broadcasts (listen only).
+	#[arg(long, conflicts_with = "srt-connect")]
 	pub prefix: Option<String>,
 
 	/// SRT receive latency: the negotiated buffer trading delay for loss recovery.
@@ -132,6 +132,8 @@ pub async fn connect_export(
 /// Parse `srt://host:port?streamid=<resource>` into a resolved address and resource.
 /// The resource falls back to the URL path when `streamid` is absent.
 async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String)> {
+	anyhow::ensure!(url.scheme() == "srt", "srt url must use the srt scheme: {url}");
+
 	let host = url
 		.host_str()
 		.ok_or_else(|| anyhow::anyhow!("srt url missing host: {url}"))?;

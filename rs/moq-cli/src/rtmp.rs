@@ -23,8 +23,8 @@ pub struct Args {
 	#[arg(id = "rtmp-listen", long = "listen", value_name = "ADDR")]
 	pub listen: Option<SocketAddr>,
 
-	/// Prefix prepended to the app/key when naming broadcasts.
-	#[arg(long, requires = "rtmp-listen")]
+	/// Prefix prepended to the app/key when naming broadcasts (listen only).
+	#[arg(long, conflicts_with = "rtmp-connect")]
 	pub prefix: Option<String>,
 }
 
@@ -131,6 +131,8 @@ pub async fn connect_export(origin: moq_net::OriginConsumer, url: Url, name: Str
 
 /// Parse `rtmp://host[:1935]/<app>/<key>` into a resolved address, app, and stream key.
 async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String, String)> {
+	anyhow::ensure!(url.scheme() == "rtmp", "rtmp url must use the rtmp scheme: {url}");
+
 	let host = url
 		.host_str()
 		.ok_or_else(|| anyhow::anyhow!("rtmp url missing host: {url}"))?;
@@ -143,7 +145,10 @@ async fn parse_url(url: &Url) -> anyhow::Result<(SocketAddr, String, String)> {
 	let mut segments = url.path().trim_matches('/').splitn(2, '/');
 	let app = segments.next().unwrap_or_default().to_string();
 	let key = segments.next().unwrap_or_default().to_string();
-	anyhow::ensure!(!app.is_empty(), "rtmp url must include an app: rtmp://host/<app>/<key>");
+	anyhow::ensure!(
+		!app.is_empty() && !key.is_empty(),
+		"rtmp url must include an app and stream key: rtmp://host/<app>/<key>"
+	);
 
 	Ok((addr, app, key))
 }
