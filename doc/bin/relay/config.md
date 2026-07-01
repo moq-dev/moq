@@ -38,8 +38,9 @@ level = "info"
 ### \[server]
 
 QUIC/WebTransport server settings. Optionally add plaintext qmux stream
-listeners for trusted local workers; the relay authenticates every accepted
-connection the same way (JWT, mTLS, or public access) regardless of transport.
+listeners for trusted local workers. Every connection authenticates through the
+same JWT / public-access path; QUIC additionally accepts an mTLS client
+certificate, and Unix sockets add optional peer-credential gating.
 
 ```toml
 [server]
