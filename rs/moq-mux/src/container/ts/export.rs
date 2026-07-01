@@ -43,6 +43,12 @@ const PMT_PID: u16 = 0x1000;
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
 const PSI_INTERVAL: Duration = Duration::from_millis(500);
+/// How long [`next`](Export::next) waits, in real time, for the catalog's track set to
+/// fill in before it freezes the program tables (PSI). The importer publishes renditions
+/// as each codec resolves (H.264 after its first keyframe's SPS, AAC after the first ADTS
+/// header), so a program's tracks appear a beat apart. Building PSI on the first snapshot
+/// would lock a partial layout (e.g. audio only). This settle window lets the rest arrive.
+const DEFAULT_CATALOG_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
@@ -78,6 +84,20 @@ pub struct Export<E: CatalogExt = ()> {
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
+
+	/// How long to wait for the catalog's track set to fill in before freezing PSI. See
+	/// [`DEFAULT_CATALOG_TIMEOUT`].
+	catalog_timeout: Duration,
+	/// Real-time deadline for the catalog settle, armed on the first [`next`](Self::next)
+	/// pull. Until it passes, PSI is held even if the tracks seen so far are ready, so a
+	/// late-resolving track (e.g. video's SPS) can still join the program.
+	settle_deadline: Option<tokio::time::Instant>,
+	/// Set once [`catalog_timeout`](Self::catalog_timeout) elapses: PSI is then built from
+	/// whatever resolved, dropping (with a warning) any track whose config never arrived.
+	settle_expired: bool,
+	/// Tracks dropped at settle because their config never resolved. Kept so a later catalog
+	/// snapshot doesn't re-add them (which, after PSI is frozen, is a fatal layout change).
+	excluded: std::collections::HashSet<String>,
 }
 
 struct Track {
@@ -192,12 +212,24 @@ impl<E: CatalogExt> Export<E> {
 			psi: None,
 			last_psi: None,
 			video_start: None,
+			catalog_timeout: DEFAULT_CATALOG_TIMEOUT,
+			settle_deadline: None,
+			settle_expired: false,
+			excluded: std::collections::HashSet::new(),
 		})
 	}
 
 	/// Set the maximum buffering latency for each per-track source.
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
+		self
+	}
+
+	/// Set how long to wait for the catalog's track set to fill in before freezing the
+	/// program tables (PSI). Defaults to 500ms. A zero timeout builds PSI as soon as the
+	/// first snapshot's tracks are ready (no settle).
+	pub fn with_catalog_timeout(mut self, timeout: Duration) -> Self {
+		self.catalog_timeout = timeout;
 		self
 	}
 
@@ -210,9 +242,35 @@ impl<E: CatalogExt> Export<E> {
 	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
 	/// broadcast ends. `duration` is always `None`: the muxer has no use for it.
 	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
+		// Arm the catalog settle window on the first pull. Until it elapses, `poll_next` holds
+		// PSI so a late-resolving track (video's SPS lagging audio) can still join the program.
+		if self.settle_deadline.is_none() {
+			self.settle_deadline = Some(tokio::time::Instant::now() + self.catalog_timeout);
+		}
+
+		loop {
+			// While still settling, race making progress against the deadline. `poll_next`
+			// yields nothing before PSI, so the winner is either end-of-stream/error or the
+			// timer. A zero timeout leaves the deadline already past, so PSI builds at once.
+			if self.psi.is_none() && !self.settle_expired {
+				let deadline = self.settle_deadline.expect("settle deadline armed above");
+				tokio::select! {
+					biased;
+					result = kio::wait(|waiter| self.poll_next(waiter)) => return result,
+					_ = tokio::time::sleep_until(deadline) => {
+						self.settle_expired = true;
+						continue; // re-poll: PSI now freezes from whatever resolved
+					}
+				}
+			}
+
+			return kio::wait(|waiter| self.poll_next(waiter)).await;
+		}
 	}
 
+	/// Poll for the next muxed frame. Prefer [`next`](Self::next), which also drives the
+	/// catalog settle timer; a direct poller holds PSI until [`next`](Self::next) marks the
+	/// settle window elapsed (or must advance it itself).
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
@@ -277,12 +335,26 @@ impl<E: CatalogExt> Export<E> {
 				}
 				return Poll::Pending;
 			}
+			// Hold PSI until the catalog settle window elapses (see `settle_deadline`) so a
+			// track that resolves a beat later (video's SPS lagging audio) still joins the
+			// program instead of being locked out of a frozen PMT. `next` wakes us at the
+			// deadline; a zero timeout skips the wait.
+			if !self.settle_expired {
+				return Poll::Pending;
+			}
+			// Window elapsed: give up on any track whose codec config never resolved, dropping
+			// it with a warning so it neither blocks the program nor changes the layout later.
+			self.drop_unready_tracks();
+			if self.tracks.is_empty() {
+				if self.catalog.is_none() {
+					return Poll::Ready(Ok(None));
+				}
+				return Poll::Pending;
+			}
 			if !self.header_ready() || !self.video_ready() {
-				// Hold all output (tables and audio alike) until codec configs resolve
-				// and, when the program has a video rendition, its first keyframe is
-				// buffered: the stream must begin on that keyframe so the in-band
-				// parameter sets lead it. An audio-only program has nothing to wait for.
-				// If every track finished without producing a config, it can't be muxed.
+				// Every remaining track has its config; wait only for a video track to buffer
+				// its first keyframe, so the stream begins on it and the in-band parameter sets
+				// lead. An audio-only program has nothing to wait for.
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					return Poll::Ready(Ok(None));
 				}
@@ -342,6 +414,10 @@ impl<E: CatalogExt> Export<E> {
 				active.insert(name.clone(), ());
 			}
 		}
+
+		// Never resurrect a track dropped at settle: re-adding it after PSI is frozen would be
+		// a fatal layout change, and it already timed out once.
+		active.retain(|name, _| !self.excluded.contains(name));
 
 		// The program tables are written once; reject layout changes afterwards.
 		if self.psi.is_some() {
@@ -477,6 +553,24 @@ impl<E: CatalogExt> Export<E> {
 				dts_reserve,
 			},
 		);
+	}
+
+	/// Drop tracks whose codec config never resolved within the settle window. Their config
+	/// can't be muxed and, once PSI is frozen, can't join the program, so exclude them (with a
+	/// warning) rather than block the whole output on a stuck track. Recorded in `excluded` so
+	/// a later catalog snapshot doesn't re-add them.
+	fn drop_unready_tracks(&mut self) {
+		let unready: Vec<String> = self
+			.tracks
+			.iter()
+			.filter(|(_, track)| !track.source.header_ready())
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in unready {
+			tracing::warn!(track = %name, "codec config not resolved within the catalog timeout; dropping from the TS program");
+			self.tracks.remove(&name);
+			self.excluded.insert(name);
+		}
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its

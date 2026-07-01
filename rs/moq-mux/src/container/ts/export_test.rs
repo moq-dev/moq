@@ -85,6 +85,158 @@ fn assert_packet_aligned(ts: &[u8]) {
 	);
 }
 
+/// Regression for moq-dev/moq#1979: the exporter must not freeze its PSI on the first
+/// (partial) catalog snapshot. AAC registers its rendition on the first PES while H.264 waits
+/// for the first keyframe's SPS, so an audio-only catalog can reach the exporter first. The
+/// settle window holds the program tables open until the late video rendition joins.
+#[tokio::test(start_paused = true)]
+async fn export_settles_before_freezing_psi() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// Audio resolves first.
+	let atrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".aac")))
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
+	}
+	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+	audio
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xAAu8; 16]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish_group().unwrap();
+
+	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+
+	// Only audio has resolved and the settle window is still open: the exporter must hold PSI
+	// rather than freeze an audio-only program.
+	match tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await {
+		Err(_) => {} // still settling, as expected
+		Ok(other) => panic!("exporter must hold PSI during the settle window, got {other:?}"),
+	}
+
+	// Video resolves before the window closes.
+	let vtrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")))
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 16));
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: annexb(&[SPS, PPS, &idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.finish_group().unwrap();
+	audio.finish().unwrap();
+	video.finish().unwrap();
+
+	let ts = drain_with(exporter).await;
+	assert_packet_aligned(&ts);
+
+	// PSI advertises both streams: the settle window absorbed the late video rendition.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 2, "PMT must advertise both tracks");
+			checked = true;
+			break;
+		}
+	}
+	assert!(checked, "missing PMT");
+}
+
+/// When a declared track's config never resolves within the settle window, the exporter drops
+/// it (with a warning) and freezes PSI on the tracks that did resolve, rather than stalling on
+/// a track that never arrives.
+#[tokio::test(start_paused = true)]
+async fn export_drops_track_that_never_resolves() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// Audio resolves.
+	let atrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".aac")))
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
+	}
+	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+	audio
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xAAu8; 16]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish_group().unwrap();
+
+	// A video rendition is declared, but its track never delivers a keyframe (no SPS), so its
+	// avc3 config never resolves.
+	let vtrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")))
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+	video.finish().unwrap();
+	audio.finish().unwrap();
+
+	let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
+	assert_packet_aligned(&ts);
+
+	// PSI advertises only the audio stream: the stuck video track was dropped after the window.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 1, "PMT must advertise only the resolved audio track");
+			checked = true;
+			break;
+		}
+	}
+	assert!(checked, "missing PMT");
+}
+
 #[tokio::test(start_paused = true)]
 async fn export_aac_roundtrip() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
