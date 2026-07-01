@@ -34,6 +34,13 @@
 //!   a JWT and scoping the origin per token) plugs its policy in, with no
 //!   callback. It mirrors `moq-native`'s `Server` / `Request`.
 //!
+//! Beyond the listener, [`Client`] is the *dial-out* (client) role: connect to a
+//! remote RTMP server and either [`publish`](Client::publish) a MoQ broadcast to
+//! it (restream MoQ out to Twitch / YouTube / another relay) or
+//! [`pull`](Client::pull) a remote stream into an origin (ingest a remote RTMP
+//! source). It reuses the same FLV <-> moq-mux plumbing; only the RTMP client
+//! transport is new.
+//!
 //! A command-line interface is provided by the `moq-cli` binary, on top of this
 //! library.
 //!
@@ -51,11 +58,13 @@
 //! Pure Rust: the RTMP handshake, chunk codec, and session state machine come
 //! from [`rml_rtmp`], with no librtmp or ffmpeg dependency.
 
+mod dial;
 mod error;
 mod flv;
 mod listen;
 mod server;
 
+pub use dial::Client;
 pub use error::{Error, Result};
 pub use listen::{Config, run};
 pub use server::{Conn, Play, Publish, Request, Server, Stream, accept_stream};
