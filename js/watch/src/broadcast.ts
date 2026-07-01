@@ -24,7 +24,8 @@ export function parseCatalogFormat(value: string | null): CatalogFormat | undefi
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
-	// All actively announced broadcast paths from the connection.
+	// All actively announced broadcast paths from the connection. If omitted, reload skips the
+	// announcement gate and subscribes immediately.
 	announced?: Getter<Set<Moq.Path.Valid>>;
 
 	// Whether to start downloading the broadcast.
@@ -35,7 +36,7 @@ export interface BroadcastProps {
 	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 
 	// Whether to reload the broadcast when it goes offline.
-	// Defaults to false; pass true to wait for an announcement before subscribing.
+	// Defaults to true; pass false to subscribe immediately without waiting for an announcement.
 	reload?: boolean | Signal<boolean>;
 
 	// Which catalog format to use. When `undefined` (the default), the format is
@@ -73,7 +74,7 @@ export class Broadcast {
 	catalog: Signal<Catalog.Root | undefined>;
 
 	// All actively announced broadcast paths from the connection.
-	#announced: Getter<Set<Moq.Path.Valid>>;
+	#announced?: Getter<Set<Moq.Path.Valid>>;
 
 	// Whether `name` is currently in the announced set (or skipping the check).
 	// Derived in its own effect so that flaps for unrelated broadcasts don't
@@ -86,11 +87,11 @@ export class Broadcast {
 		this.connection = Signal.from(props?.connection);
 		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.reload = Signal.from(props?.reload ?? false);
+		this.reload = Signal.from(props?.reload ?? true);
 		this.catalogFormat = Signal.from<CatalogFormat | undefined>(props?.catalogFormat);
 		this.catalog = Signal.from(props?.catalog);
 
-		this.#announced = props?.announced ?? new Signal(new Set());
+		this.#announced = props?.announced;
 
 		this.signals.run(this.#runAnnouncedNow.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
@@ -104,12 +105,15 @@ export class Broadcast {
 			return;
 		}
 
+		if (!this.#announced) {
+			this.#announcedNow.set(true);
+			return;
+		}
+
 		// Cloudflare's relay does not yet support announcement subscriptions,
-		// so an announcement will never arrive. Fall back to subscribing
-		// immediately (reload=false behaviour) instead of waiting forever.
+		// so default to subscribing immediately instead of waiting forever.
 		const conn = effect.get(this.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
-			console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
 			this.#announcedNow.set(true);
 			return;
 		}
