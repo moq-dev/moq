@@ -1,10 +1,12 @@
 //! MPEG-TS muxer.
 //!
-//! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS, yielding one
-//! [`Frame`] per media frame: PAT/PMT program tables followed by one PES packet,
-//! packetized into 188-byte TS packets. Each frame keeps its media timestamp so
-//! the caller can pace delivery on the media clock. Video is carried as Annex-B,
-//! audio as ADTS AAC.
+//! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS in fixed ~20 ms
+//! [`Output`] windows on the media clock, each led by a PCR so the reference clock
+//! stays dense and uniform for a hardware decoder's PLL, regardless of frame rate.
+//! PAT/PMT ride the windows at keyframes and periodically; a window with no media is
+//! just its PCR, bridging a low-frame-rate gap without CBR padding. Each window carries
+//! the wall-clock instant it's due so the caller can pace delivery. Video is carried as
+//! Annex-B, audio as ADTS AAC.
 //!
 //! Video flows through [`ExportSource`], which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
@@ -15,7 +17,9 @@
 
 use std::collections::HashMap;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -32,7 +36,7 @@ use mpeg2ts::ts::{
 use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
-use crate::container::{ExportSource, Frame, Pacer, Timestamp};
+use crate::container::{ExportSource, Frame, Pacer, Timer, Timestamp};
 
 use super::adts;
 use super::catalog;
@@ -43,15 +47,17 @@ const PMT_PID: u16 = 0x1000;
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
 const PSI_INTERVAL: Duration = Duration::from_millis(500);
+/// Output-window cadence: emit a window (carrying at least a PCR) this often on the media
+/// clock. 20 ms matches ffmpeg's default `pcr_period` and stays under the 40 ms DVB
+/// TR 101 290 repetition limit, so a hardware decoder's clock-recovery PLL stays locked.
+const WINDOW: Duration = Duration::from_millis(20);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
-/// Use [`next`](Self::next) to pull one [`Output`] per media frame: its `payload`
-/// is the TS packets, stamped with the source `timestamp` and `keyframe` flag,
-/// plus a [`pace`](Output::pace) instant on the decode clock for real-time output.
-/// The leading PAT/PMT rides on the first frame (so it inherits a real
-/// timestamp), and is re-emitted at video keyframes and periodically for
-/// mid-stream tune-in. Returns `None` when the broadcast ends.
+/// Use [`next`](Self::next) to pull one [`Output`] per ~20 ms window: its `payload` is the
+/// window's TS packets (a leading PCR, then any media), plus a [`pace`](Output::pace)
+/// instant on the decode clock for real-time output. PAT/PMT ride the windows at video
+/// keyframes and periodically for mid-stream tune-in. Returns `None` when the broadcast ends.
 pub struct Export<E: CatalogExt = ()> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<crate::catalog::Consumer<E>>,
@@ -87,11 +93,17 @@ pub struct Export<E: CatalogExt = ()> {
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
+
+	/// The in-progress output window, or `None` before the first frame is placed.
+	window: Option<Window>,
+	/// Wall-clock timer for the live-edge case: when a track blocks mid-window, wait for
+	/// its media or for the window's deadline (then flush a filler), rather than stalling.
+	timer: Timer,
 }
 
 struct Track {
 	source: ExportSource,
-	pending: Option<Frame>,
+	pending: Option<PendingFrame>,
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -105,6 +117,18 @@ struct Track {
 	/// from the catalog `jitter` (the reorder depth) so it is large enough for `DTS <= PTS`,
 	/// or [`DEFAULT_DTS_RESERVE`] when the catalog declares none. Only video uses it.
 	dts_reserve: u64,
+}
+
+/// A pulled frame with its decode clock resolved, so windowing keys on the monotonic
+/// decode time while the PES still carries the original PTS.
+struct PendingFrame {
+	frame: Frame,
+	/// Decode-clock time: the authored DTS for reordered video, else the PTS. Its window
+	/// (`[start, end)`) and the ordering across tracks key on this, not the PTS.
+	decode: Timestamp,
+	/// Authored DTS in continuous 90 kHz ticks when it differs from the PTS (B-frame video),
+	/// so the PES carries both. `None` when DTS == PTS.
+	dts: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -138,31 +162,43 @@ enum Kind {
 	},
 }
 
-/// One muxed MPEG-TS frame produced by [`Export::next`].
+/// One ~20 ms window of MPEG-TS produced by [`Export::next`].
 ///
-/// `payload` is the TS packets (188-byte aligned) for a single media frame.
+/// The exporter emits fixed windows on the media clock rather than one output per
+/// media frame. Each window carries the TS packets (188-byte aligned) for whatever
+/// media falls in it, led by a PCR so the reference clock stays dense and uniform
+/// (under the 40 ms TR 101 290 limit) regardless of frame rate. A window with no
+/// media is just that PCR packet, bridging a low-frame-rate gap without CBR padding.
 #[non_exhaustive]
 pub struct Output {
-	/// The TS packets for one media frame.
+	/// The TS packets for this window: a leading PCR packet, then any media.
 	pub payload: Bytes,
 
-	/// Source presentation timestamp.
-	pub timestamp: Timestamp,
-
-	/// Whether this frame is a keyframe.
-	pub keyframe: bool,
-
-	/// Wall-clock instant this frame is due, paced on the decode clock (DTS) so a
-	/// reordered (B-frame) stream paces evenly rather than on its non-monotonic
-	/// presentation timestamps.
+	/// Wall-clock instant this window is due, paced on the decode clock so a reordered
+	/// (B-frame) stream paces evenly rather than on its non-monotonic presentation
+	/// timestamps.
 	///
 	/// The muxer follows the live edge: it holds at most the configured latency
 	/// ([`with_latency`](Export::with_latency)) of buffer ahead of now, re-anchoring
 	/// past that so a tune-in burst or a faster-than-real source never accrues more
-	/// latency than the budget. Sleep until it (or stamp a transport send time with
-	/// it) to emit at the source's real-time rate, like ffmpeg's `-re`; ignore it to
-	/// emit as fast as the broadcast can be read.
+	/// latency than the budget. Sleep until it (or stamp a transport send time with it)
+	/// to emit at the source's real-time rate, like ffmpeg's `-re`; ignore it to emit as
+	/// fast as the broadcast can be read.
 	pub pace: Instant,
+}
+
+/// The in-progress output window: its media-clock span, accumulated bytes, and the
+/// wall-clock instant it's due. Bundled so the window state advances as a unit.
+struct Window {
+	/// Window end on the media (decode) clock: media with a decode time below this belongs
+	/// here. The start (its PCR value and pace anchor) is consumed when the window opens.
+	end: Timestamp,
+	/// TS bytes so far: a leading PCR packet, then any media frames.
+	buf: Vec<u8>,
+	/// Whether a media frame has landed in this window (an empty window is a filler).
+	has_media: bool,
+	/// The instant this window is due, `due(start)`, stamped onto the [`Output`].
+	pace: Instant,
 }
 
 /// The program tables plus the resolved PID layout.
@@ -175,7 +211,6 @@ struct Psi {
 /// Per-frame PES descriptor (everything but the payload bytes).
 struct PesUnit {
 	pid: u16,
-	is_pcr: bool,
 	is_video: bool,
 	keyframe: bool,
 	timestamp: Timestamp,
@@ -230,6 +265,8 @@ impl<E: CatalogExt> Export<E> {
 			psi: None,
 			last_psi: None,
 			video_start: None,
+			window: None,
+			timer: Timer::default(),
 		})
 	}
 
@@ -255,14 +292,12 @@ impl<E: CatalogExt> Export<E> {
 		self
 	}
 
-	/// Get the next muxed frame.
+	/// Get the next output window.
 	///
-	/// Each [`Output`] carries the TS packets for one media frame in `payload`,
-	/// stamped with that frame's media `timestamp` and `keyframe` flag, plus a
-	/// [`pace`](Output::pace) instant so a transport can emit on the media clock.
-	/// The leading PAT/PMT rides on the first frame (inheriting its timestamp), and
-	/// is re-emitted at video keyframes and periodically for mid-stream tune-in.
-	/// Returns `None` when the broadcast ends.
+	/// Each [`Output`] carries one ~20 ms window's TS packets in `payload` (a leading PCR,
+	/// then any media), plus a [`pace`](Output::pace) instant so a transport can emit on the
+	/// media clock. PAT/PMT ride the windows at video keyframes and periodically for
+	/// mid-stream tune-in. Returns `None` when the broadcast ends.
 	pub async fn next(&mut self) -> anyhow::Result<Option<Output>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
@@ -281,49 +316,15 @@ impl<E: CatalogExt> Export<E> {
 			}
 		}
 
-		// 2. Pull a frame into every idle track. ExportSource has already
-		// transformed Annex-B avc3/hev1 into length-prefixed form and resolved
-		// the avcC/hvcC. Before the program tables are written, drop slices that
-		// arrive before their codec config resolves: a receiver joining mid-GOP
-		// can't use them, and parking them would stop us polling for the keyframe
-		// that carries the parameter sets.
-		let waiting_for_header = self.psi.is_none();
-		let video_start = self.video_start;
-		for track in self.tracks.values_mut() {
-			if track.pending.is_some() || track.finished {
-				continue;
-			}
-			let is_video = matches!(track.kind, Kind::Video(_));
-			loop {
-				match track.source.poll_read(waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
-						if waiting_for_header && !track.source.header_ready() {
-							continue;
-						}
-						// Tune-in alignment: drop non-video frames before the first video
-						// keyframe (see `video_start`) so the in-band SPS/PPS leads the stream.
-						if let Some(start) = video_start
-							&& !is_video && frame.timestamp < start
-						{
-							continue;
-						}
-						track.pending = Some(frame);
-						break;
-					}
-					Poll::Ready(Ok(None)) => {
-						track.finished = true;
-						break;
-					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-					Poll::Pending => break,
-				}
-			}
+		// 2. Pull a frame into every idle track (resolving its decode clock).
+		if let Err(e) = self.pull_idle(waiter) {
+			return Poll::Ready(Err(e));
 		}
 
 		// 3. Build the program tables once the layout is resolved and every
 		// track's codec config is ready. The tables aren't emitted here: PSI has
-		// no media time of its own, so `write_frame` prepends them to the first
-		// frame instead, letting the leading PAT/PMT inherit a real timestamp.
+		// no media time of its own, so `mux_into_window` writes them alongside the
+		// first frame, letting the leading PAT/PMT inherit a real timestamp.
 		if self.psi.is_none() {
 			if self.tracks.is_empty() {
 				// No tracks yet. If the catalog is also done, the broadcast is empty.
@@ -350,7 +351,7 @@ impl<E: CatalogExt> Export<E> {
 			if let Some(start) = self.video_start {
 				for track in self.tracks.values_mut() {
 					if !matches!(track.kind, Kind::Video(_))
-						&& track.pending.as_ref().is_some_and(|f| f.timestamp < start)
+						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
 					}
@@ -358,23 +359,186 @@ impl<E: CatalogExt> Export<E> {
 			}
 		}
 
-		// 4. Emit the smallest-timestamp pending frame as a PES packet (the first
-		// one carries the buffered PAT/PMT).
-		if let Some(name) = self.pick_next_track() {
-			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
-			let out = self.write_frame(&name, frame)?;
-			return Poll::Ready(Ok(Some(out)));
+		// 4. Fill the current window: mux every pending frame whose decode time falls before
+		// the window end, refilling tracks as they drain. A frame that lands in a later
+		// window ends the current one (once nothing is still blocking).
+		loop {
+			if let Err(e) = self.pull_idle(waiter) {
+				return Poll::Ready(Err(e));
+			}
+			let Some(name) = self.pick_next_track() else {
+				break; // no pending frame: every track is finished or blocking
+			};
+			let decode = self.tracks[&name].pending.as_ref().unwrap().decode;
+			if self.window.is_none() {
+				self.open_window(decode)?;
+			}
+			if decode < self.window.as_ref().unwrap().end {
+				let pending = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
+				self.mux_into_window(&name, pending)?;
+				continue;
+			}
+			// The next frame belongs to a later window, so this one has all its media, unless
+			// another track is still blocking (it may yet produce a frame for this window).
+			if self.any_blocking() {
+				break;
+			}
+			return Poll::Ready(Ok(Some(self.flush_window()?)));
 		}
 
-		// 5. End of stream once every track has drained and the catalog is closed.
-		if self.catalog.is_none() && !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished) {
-			return Poll::Ready(Ok(None));
+		// 5. No frame is immediately available.
+		if self.psi.is_some() && self.tracks.values().all(|t| t.finished) {
+			// End of stream: flush the trailing window (if it holds media), then finish.
+			return Poll::Ready(Ok(self.flush_final()));
 		}
 		if self.catalog.is_none() && self.tracks.is_empty() {
 			return Poll::Ready(Ok(None));
 		}
 
+		// A track is blocking at the live edge. Wait for its media or, once the window's
+		// wall-clock deadline passes, flush what we have (a filler PCR if it's empty).
+		if let Some(deadline) = self.window_deadline() {
+			match self.timer.poll(deadline, waiter) {
+				Poll::Ready(_) => return Poll::Ready(Ok(Some(self.flush_window()?))),
+				Poll::Pending => return Poll::Pending,
+			}
+		}
+
 		Poll::Pending
+	}
+
+	/// Pull one frame into every idle, unfinished track, resolving each kept frame's decode
+	/// clock. Frames that arrive before the codec config resolves, or before the tune-in
+	/// keyframe, are dropped here so `author_dts` only advances for frames that get muxed.
+	fn pull_idle(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
+		let waiting_for_header = self.psi.is_none();
+		let video_start = self.video_start;
+		for track in self.tracks.values_mut() {
+			if track.pending.is_some() || track.finished {
+				continue;
+			}
+			let is_video = matches!(track.kind, Kind::Video(_));
+			loop {
+				match track.source.poll_read(waiter) {
+					Poll::Ready(Ok(Some(frame))) => {
+						if waiting_for_header && !track.source.header_ready() {
+							continue;
+						}
+						// Tune-in alignment: drop non-video frames before the first video
+						// keyframe (see `video_start`) so the in-band SPS/PPS leads the stream.
+						if let Some(start) = video_start
+							&& !is_video && frame.timestamp < start
+						{
+							continue;
+						}
+						// Resolve the decode clock now, in per-track decode order: reordered
+						// video authors a monotonic DTS, everything else decodes at its PTS.
+						let (decode, dts) = if is_video {
+							let pts = to_ticks(frame.timestamp);
+							let dts = author_dts(pts, track.dts_reserve, &mut track.last_dts);
+							let decode = match dts {
+								Some(ticks) => from_ticks(ticks).unwrap_or(frame.timestamp),
+								None => frame.timestamp,
+							};
+							(decode, dts)
+						} else {
+							(frame.timestamp, None)
+						};
+						track.pending = Some(PendingFrame { frame, decode, dts });
+						break;
+					}
+					Poll::Ready(Ok(None)) => {
+						track.finished = true;
+						break;
+					}
+					Poll::Ready(Err(e)) => return Err(e.into()),
+					Poll::Pending => break,
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// Open a window at media time `start`: stamp its pace instant and write the leading PCR
+	/// packet, so every window carries a dense, uniform reference clock.
+	fn open_window(&mut self, start: Timestamp) -> anyhow::Result<()> {
+		let end = start + window_len();
+		let lead = self.pace_lead.unwrap_or(self.latency);
+		let pace = self.pacer.due(start, lead);
+		let mut buf = Vec::new();
+		self.write_pcr_packet(&mut buf, start)?;
+		self.window = Some(Window {
+			end,
+			buf,
+			has_media: false,
+			pace,
+		});
+		Ok(())
+	}
+
+	/// Emit the current window and open the next one on the continuous grid.
+	fn flush_window(&mut self) -> anyhow::Result<Output> {
+		let window = self.window.take().context("no window to flush")?;
+		let output = Output {
+			payload: Bytes::from(window.buf),
+			pace: window.pace,
+		};
+		self.open_window(window.end)?;
+		Ok(output)
+	}
+
+	/// Emit the trailing window at end of stream, or `None` when it holds only its PCR: with
+	/// nothing left to bridge to, an empty window is not worth a filler.
+	fn flush_final(&mut self) -> Option<Output> {
+		let window = self.window.take()?;
+		window.has_media.then(|| Output {
+			payload: Bytes::from(window.buf),
+			pace: window.pace,
+		})
+	}
+
+	/// Write a PCR-only TS packet (adaptation field only, stuffed to 188 bytes) on the PCR
+	/// PID. It carries no payload, so it must not advance the continuity counter.
+	fn write_pcr_packet(&mut self, out: &mut Vec<u8>, pcr: Timestamp) -> anyhow::Result<()> {
+		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
+		let clock = TsTimestamp::new(to_ticks(pcr) & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg)?;
+		let counter = *self.counters.entry(pcr_pid).or_default();
+		let packet = TsPacket {
+			header: TsHeader {
+				transport_error_indicator: false,
+				transport_priority: false,
+				pid: Pid::new(pcr_pid)?,
+				transport_scrambling_control: TransportScramblingControl::NotScrambled,
+				continuity_counter: counter,
+			},
+			adaptation_field: Some(AdaptationField {
+				discontinuity_indicator: false,
+				random_access_indicator: false,
+				es_priority_indicator: false,
+				pcr: Some(clock.into()),
+				opcr: None,
+				splice_countdown: None,
+				transport_private_data: Vec::new(),
+				extension: None,
+			}),
+			payload: None,
+		};
+		TsPacketWriter::new(out)
+			.write_ts_packet(&packet)
+			.map_err(anyhow::Error::msg)?;
+		Ok(())
+	}
+
+	/// The wall-clock deadline for the current window's live-edge wait: one window past its
+	/// pace instant, the point by which its media should have arrived in real time.
+	fn window_deadline(&self) -> Option<Instant> {
+		self.window.as_ref().map(|w| w.pace + WINDOW)
+	}
+
+	/// Whether any unfinished track has no pending frame (it blocked at the live edge), so the
+	/// current window can't yet be declared complete.
+	fn any_blocking(&self) -> bool {
+		self.tracks.values().any(|t| !t.finished && t.pending.is_none())
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
@@ -558,7 +722,7 @@ impl<E: CatalogExt> Export<E> {
 		self.tracks
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
-			.filter_map(|t| t.pending.as_ref().map(|f| f.timestamp))
+			.filter_map(|t| t.pending.as_ref().map(|p| p.frame.timestamp))
 			.min()
 	}
 
@@ -688,27 +852,25 @@ impl<E: CatalogExt> Export<E> {
 		Ok(())
 	}
 
-	/// Name of the track whose pending frame has the smallest timestamp.
+	/// Name of the track whose pending frame has the smallest decode time. Interleaving on
+	/// the decode clock keeps the mux (and its windows) monotonic across reordered video.
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (n.clone(), f.timestamp)))
-			.min_by_key(|(_, ts)| *ts)
+			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (n.clone(), p.decode)))
+			.min_by_key(|(_, decode)| *decode)
 			.map(|(n, _)| n)
 	}
 
-	/// Packetize one media frame into an [`Output`], re-emitting PAT/PMT before video
-	/// keyframes (and periodically) so receivers can tune in mid-stream. The output
-	/// keeps the source `timestamp` and `keyframe` flag, plus a decode-clock `pace`
-	/// instant for real-time delivery.
-	fn write_frame(&mut self, name: &str, frame: Frame) -> anyhow::Result<Output> {
+	/// Mux one pending frame into the current window's buffer, re-emitting PAT/PMT before
+	/// video keyframes (and periodically) so receivers can tune in mid-stream. The window
+	/// already carries its leading PCR, so no PCR is written here.
+	fn mux_into_window(&mut self, name: &str, pending: PendingFrame) -> anyhow::Result<()> {
+		let PendingFrame { frame, dts, .. } = pending;
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
-		let is_pcr = self.psi.as_ref().is_some_and(|p| p.pcr_pid == pid);
 		let is_video = matches!(kind, Kind::Video(_));
-		let timestamp = frame.timestamp;
-		let keyframe = frame.keyframe;
 
 		// Build the elementary-stream payload for this frame. Video needs the
 		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. Section-framed
@@ -741,28 +903,7 @@ impl<E: CatalogExt> Export<E> {
 			} => None,
 		};
 
-		// Author a monotonic decode timeline for reordered video (B-frames). Other kinds
-		// never reorder, so DTS == PTS and the PES stays PTS-only.
-		let dts = if is_video {
-			let pts = to_ticks(frame.timestamp);
-			let track = self.tracks.get_mut(name).context("missing track")?;
-			author_dts(pts, track.dts_reserve, &mut track.last_dts)
-		} else {
-			None
-		};
-
-		// Pace on the decode clock: reordered video uses the authored DTS (monotonic), so
-		// a caller honoring `pace` emits B-frames evenly instead of bursting on their
-		// non-monotonic PTS. Audio and non-reordered video have DTS == PTS. The pace buffer
-		// follows the read latency unless overridden (an SRT egress pins it to zero).
-		let decode = match dts {
-			Some(ticks) => from_ticks(ticks).unwrap_or(timestamp),
-			None => timestamp,
-		};
-		let lead = self.pace_lead.unwrap_or(self.latency);
-		let pace = self.pacer.due(decode, lead);
-
-		let mut out = Vec::with_capacity(TsPacket::SIZE);
+		let mut out = std::mem::take(&mut self.window.as_mut().context("no open window")?.buf);
 
 		// Refresh PSI at keyframes or after the interval lapses.
 		let psi_due = match self.last_psi {
@@ -794,7 +935,6 @@ impl<E: CatalogExt> Export<E> {
 				};
 				let unit = PesUnit {
 					pid,
-					is_pcr,
 					is_video,
 					keyframe: frame.keyframe,
 					timestamp: frame.timestamp,
@@ -804,12 +944,11 @@ impl<E: CatalogExt> Export<E> {
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		Ok(Output {
-			payload: Bytes::from(out),
-			timestamp,
-			keyframe,
-			pace,
-		})
+
+		let window = self.window.as_mut().context("no open window")?;
+		window.buf = out;
+		window.has_media = true;
+		Ok(())
 	}
 
 	/// Packetize a PES payload into 188-byte TS packets.
@@ -849,18 +988,17 @@ impl<E: CatalogExt> Export<E> {
 			u16::try_from(optional_len + payload.len()).unwrap_or(0)
 		};
 
-		// PCR follows the decode clock, so a B-frame stream advertises DTS (not PTS) here.
-		let pcr = dts.unwrap_or(pts);
-
 		let mut offset = 0;
 		let mut first = true;
 		loop {
-			let adaptation = if first && (unit.is_pcr || unit.keyframe) {
+			// The window's leading PCR packet carries the clock; a keyframe's first packet
+			// only flags random access here.
+			let adaptation = if first && unit.keyframe {
 				Some(AdaptationField {
 					discontinuity_indicator: false,
-					random_access_indicator: unit.keyframe,
+					random_access_indicator: true,
 					es_priority_indicator: false,
-					pcr: if unit.is_pcr { Some(pcr.into()) } else { None },
+					pcr: None,
 					opcr: None,
 					splice_countdown: None,
 					transport_private_data: Vec::new(),
@@ -983,6 +1121,11 @@ const DEFAULT_DTS_RESERVE: u64 = 16;
 
 fn psi_interval() -> Timestamp {
 	Timestamp::try_from(PSI_INTERVAL).unwrap_or(Timestamp::ZERO)
+}
+
+/// [`WINDOW`] as a media [`Timestamp`], the span each output window covers.
+fn window_len() -> Timestamp {
+	Timestamp::try_from(WINDOW).unwrap_or(Timestamp::ZERO)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's

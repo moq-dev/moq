@@ -324,7 +324,8 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	let mut send_at = Instant::now();
 	let mut buffer = bytes::BytesMut::new();
 	while let Some(frame) = subscriber.next().await? {
-		send_at = frame.pace;
+		// The muxer paces on the tokio clock; SRT's TSBPD send time is a std instant.
+		send_at = frame.pace.into_std();
 
 		buffer.extend_from_slice(&frame.payload);
 		while buffer.len() >= SRT_PAYLOAD {

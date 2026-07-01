@@ -302,6 +302,11 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 	let mut unbounded = false;
 
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		// PCR rides its own leading packet per window; random access flags the keyframe PES.
+		if let Some(af) = &packet.adaptation_field {
+			saw_random_access |= af.random_access_indicator;
+			saw_pcr |= af.pcr.is_some();
+		}
 		match packet.payload {
 			Some(TsPayload::Pmt(pmt)) => {
 				assert_eq!(pmt.es_info.len(), 1);
@@ -309,11 +314,6 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 				video_pid = Some(pmt.es_info[0].elementary_pid);
 			}
 			Some(TsPayload::PesStart(pes)) => {
-				// The first packet of a keyframe must signal random access and carry a PCR.
-				if let Some(af) = &packet.adaptation_field {
-					saw_random_access |= af.random_access_indicator;
-					saw_pcr |= af.pcr.is_some();
-				}
 				unbounded = pes.pes_packet_len == 0;
 				reassembled.extend_from_slice(&pes.data);
 			}
@@ -324,7 +324,7 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 
 	assert!(video_pid.is_some(), "missing video PMT entry");
 	assert!(saw_random_access, "keyframe should set random_access_indicator");
-	assert!(saw_pcr, "PCR pid should carry a PCR on the keyframe");
+	assert!(saw_pcr, "the PCR pid should carry a PCR");
 	assert!(unbounded, "video PES should be unbounded");
 	reassembled
 }
@@ -1406,5 +1406,70 @@ async fn opus_export_import_roundtrip() {
 	assert_eq!(recovered.len(), packets.len(), "frame count");
 	for (orig, got) in packets.iter().zip(&recovered) {
 		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");
+	}
+}
+
+/// The exporter emits fixed 20 ms windows, each led by a PCR, inserting bare-PCR filler
+/// windows to bridge a low-frame-rate gap. So even at 10 fps the reference clock stays dense
+/// and uniform (well under the 40 ms TR 101 290 limit) instead of one sparse sample per frame.
+#[tokio::test(start_paused = true)]
+async fn windows_emit_uniform_pcr_with_fillers() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let vtrack = broadcast
+		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")))
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+
+	// Keyframes every 100 ms (10 fps): each pair is five 20 ms windows apart, so most windows
+	// carry no media and must be filled with a bare PCR.
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xABu8, 200));
+	let payload = annexb(&[SPS, PPS, &idr]);
+	for i in 0..5u64 {
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 100_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			})
+			.unwrap();
+		video.finish_group().unwrap();
+	}
+	video.finish().unwrap();
+
+	let ts = drain(consumer).await;
+
+	// PCR values (27 MHz) in transport order.
+	let mut pcrs = Vec::new();
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(pcr) = packet.adaptation_field.and_then(|af| af.pcr) {
+			pcrs.push(pcr.as_u64());
+		}
+	}
+
+	// ~400 ms of media at 20 ms windows is ~20 PCRs, far more than the 5 frames: fillers bridge.
+	assert!(pcrs.len() >= 15, "expected filler-dense PCR, got {}", pcrs.len());
+	assert!(
+		pcrs.windows(2).all(|w| w[1] > w[0]),
+		"PCR must increase monotonically: {pcrs:?}"
+	);
+	// Every step is a uniform 20 ms (20 ms at 27 MHz = 540000), never past the 40 ms limit.
+	for w in pcrs.windows(2) {
+		assert_eq!(w[1] - w[0], 540_000, "PCR spacing must be a uniform 20 ms");
 	}
 }
