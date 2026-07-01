@@ -17,7 +17,7 @@ use crate::Result;
 ///
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
-/// next call (the same pattern `moq-cli publish ts` uses against stdin).
+/// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
 /// Dropping the publisher ends the broadcast: the importer's producer clone
 /// closes, which unannounces it from the origin.
 pub struct Publisher {

@@ -7,7 +7,7 @@ both directions with [`moq-mux`](../moq-mux): on **publish** it re-wraps a
 client's messages as FLV tags, demuxes them, and publishes the result into a MoQ
 origin as ordinary broadcasts; on **play** it subscribes to a broadcast from the
 origin, muxes it back to FLV, and streams the tags down to the player. It's the
-sibling of `moq-srt`, `moq-cli hls` import/export, and `moq-rtc`'s WHIP/WHEP. Both
+sibling of `moq-srt`, `moq-cli` HLS import/export, and `moq-rtc`'s WHIP/WHEP. Both
 legacy RTMP (H.264 + AAC) and enhanced RTMP (E-RTMP: HEVC, AV1, VP9, Opus, AC-3)
 work in each direction, since the codec handling lives in the `moq-mux` FLV
 demuxer/muxer. Pure Rust: the protocol is provided by `rml_rtmp`, with no librtmp

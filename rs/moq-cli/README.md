@@ -19,40 +19,40 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ## Usage
 
-`moq-cli` reads media from stdin (or writes media to stdout) and exchanges it with a MoQ relay. Pick a subcommand based on whether you want to publish or subscribe, and whether your relay is local or remote.
+`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq-cli <import|export> <MoQ side> <endpoint>`. `import` moves media into MoQ, `export` moves it out. The MoQ side is either `--client-connect <url>` (dial a relay) or `--server-bind <addr>` (self-host), and the endpoint is `stdin`/`stdout`, `hls`, `rtmp`, `srt`, or `rtc`.
 
 ### Publish to a remote relay
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq-cli publish --url https://relay.example.com --broadcast my-stream fmp4
+    moq-cli import --client-connect https://relay.example.com --broadcast my-stream.hang stdin fmp4
 ```
 
 ### Subscribe from a remote relay
 
 ```bash
-moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format fmp4 | \
+moq-cli export --client-connect https://relay.example.com --broadcast my-stream.hang stdout fmp4 | \
     ffplay -
 ```
 
-### Self-host: publish into a local relay (`serve`)
+### Self-host: publish into a local relay
 
-Runs a relay and publishes a single broadcast read from stdin into it. Useful for local testing without a separate relay process.
+Hosts a MoQ server and publishes a single broadcast read from stdin into it. Useful for local testing without a separate relay process.
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq-cli serve --broadcast my-stream fmp4
+    moq-cli import --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang stdin fmp4
 ```
 
-### Self-host: subscribe to an inbound broadcast (`accept`)
+### Self-host: subscribe to an inbound broadcast
 
-Runs a relay and writes the first incoming broadcast's media to stdout. The inverse of `serve`.
+Hosts a MoQ server and writes an incoming broadcast's media to stdout. The inverse of the above.
 
 ```bash
-moq-cli accept --broadcast my-stream --format fmp4 | ffplay -
+moq-cli export --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang stdout fmp4 | ffplay -
 ```
 
-### Input formats (`publish` / `serve`)
+### Input formats (`stdin`)
 
 - `avc3` raw H.264 Annex-B from stdin
 - `fmp4` fragmented MP4 from stdin

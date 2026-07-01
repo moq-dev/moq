@@ -1,14 +1,17 @@
-use clap::Subcommand;
+use clap::ValueEnum;
 use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
-#[derive(Subcommand, Clone)]
+/// Container format read from stdin on the import (source) side.
+#[derive(ValueEnum, Clone, Copy)]
 pub enum PublishFormat {
+	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
+	/// Fragmented MP4 (CMAF).
 	Fmp4,
-	/// MPEG-TS (transport stream) read from stdin.
+	/// MPEG-TS (transport stream).
 	Ts,
-	/// FLV (Flash Video / RTMP) read from stdin.
+	/// FLV (Flash Video / RTMP).
 	Flv,
 }
 

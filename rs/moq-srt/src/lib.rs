@@ -6,7 +6,7 @@
 //!
 //! - `m=publish` (the default): demux the MPEG-TS the connection carries with
 //!   [`moq_mux`] and publish it into the origin as an ordinary broadcast. The
-//!   contribution-ingest analogue of `moq-cli hls import` and `moq-rtc`'s WHIP.
+//!   contribution-ingest analogue of `moq-cli import ... hls` and `moq-rtc`'s WHIP.
 //! - `m=request`: re-mux a broadcast from the origin back to MPEG-TS and stream
 //!   it to the caller, so a plain SRT player (VLC, ffmpeg) can watch it.
 //!

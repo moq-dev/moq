@@ -8,6 +8,26 @@ use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
+/// Serve an axum router over TCP, optionally terminating TLS. Used by the HLS
+/// and WebRTC (WHIP/WHEP) HTTP endpoints.
+pub async fn serve(
+	listener: std::net::TcpListener,
+	app: Router,
+	tls: Option<Arc<rustls::ServerConfig>>,
+) -> anyhow::Result<()> {
+	let service = app.into_make_service();
+	match tls {
+		Some(config) => {
+			let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
+			axum_server::from_tcp_rustls(listener, config)?.serve(service).await?;
+		}
+		None => {
+			axum_server::from_tcp(listener)?.serve(service).await?;
+		}
+	}
+	Ok(())
+}
+
 // Initialize the HTTP server (but don't serve yet).
 pub async fn run_web(
 	bind: &str,

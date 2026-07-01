@@ -69,6 +69,9 @@ moq-msf = { version = "0.3", path = "rs/moq-msf" }
 moq-mux = { version = "0.7", path = "rs/moq-mux" }
 moq-native = { version = "0.17", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
+moq-rtc = { version = "0.0.1", path = "rs/moq-rtc" }
+moq-rtmp = { version = "0.0.1", path = "rs/moq-rtmp" }
+moq-srt = { version = "0.0.1", path = "rs/moq-srt" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 moq-video = { version = "0.0.6", path = "rs/moq-video" }
 qmux = { version = "0.2", default-features = false }
