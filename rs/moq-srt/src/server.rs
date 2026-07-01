@@ -50,6 +50,8 @@ pub struct Server {
 	/// Held to keep the listener (and its UDP socket) alive for the server's lifetime.
 	_listener: SrtListener,
 	incoming: SrtIncoming,
+	/// The configured SRT latency, reused as the egress muxer's read/skip budget.
+	latency: Duration,
 }
 
 impl Server {
@@ -63,6 +65,7 @@ impl Server {
 		Ok(Self {
 			_listener: listener,
 			incoming,
+			latency,
 		})
 	}
 
@@ -87,6 +90,7 @@ impl Server {
 				resource,
 				stream_id,
 				peer,
+				latency: self.latency,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -111,6 +115,8 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
+	/// The server's configured SRT latency, applied as the egress read/skip budget.
+	latency: Duration,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -243,7 +249,7 @@ impl Subscribe {
 	pub async fn accept(self, origin: &OriginConsumer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
-		serve_subscribe(origin, path, socket).await
+		serve_subscribe(origin, path, socket, self.0.latency).await
 	}
 
 	/// Reject the subscribe, sending the client a `Forbidden` rejection.
@@ -282,16 +288,14 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// Waits for the broadcast to be announced (so a caller may connect before the
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket) -> Result<()> {
+async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket, latency: Duration) -> Result<()> {
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
-	// Match the muxer's read/skip budget to the connection's negotiated SRT latency (the
-	// max of our floor and the caller's requested `?latency`), so the track tolerates the
-	// same jitter the receiver's TSBPD does. The muxer's pace lead stays zero: the TSBPD
-	// owns the output buffer.
-	let latency = socket.settings().send_tsbpd_latency;
+	// The muxer's read/skip budget matches the server's configured SRT latency, so a track
+	// tolerates the same jitter the receiver's TSBPD does. The pace lead stays zero: the
+	// TSBPD owns the output buffer.
 	let subscriber = tokio::select! {
 		biased;
 		_ = wait_closed(&mut socket) => {

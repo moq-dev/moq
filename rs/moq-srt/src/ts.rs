@@ -75,10 +75,10 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `latency` is the SRT receive buffer negotiated for this connection: the muxer
-	/// matches it as the read/skip budget so a track tolerates the same jitter the SRT
-	/// receiver does. The pace lead stays zero, since the receiver's TSBPD owns the
-	/// output buffer (adding a muxer lead would just double the latency).
+	/// `latency` is the server's configured SRT latency: the muxer matches it as the
+	/// read/skip budget so a track tolerates the same jitter the SRT receiver does. The
+	/// pace lead stays zero, since the receiver's TSBPD owns the output buffer (adding a
+	/// muxer lead would just double the latency).
 	///
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast

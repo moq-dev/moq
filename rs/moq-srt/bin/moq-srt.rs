@@ -80,8 +80,9 @@ struct SrtArgs {
 	#[arg(long = "srt-prefix", env = "MOQ_SRT_PREFIX", default_value = "")]
 	prefix: String,
 
-	/// SRT receive latency: the negotiated buffer that trades delay for loss recovery.
-	#[arg(long = "srt-latency", env = "MOQ_SRT_LATENCY", default_value = "200ms", value_parser = humantime::parse_duration)]
+	/// SRT receive latency: the buffer that trades delay for loss recovery. Also the
+	/// egress muxer's read/skip budget.
+	#[arg(long = "latency", alias = "srt-latency", env = "MOQ_SRT_LATENCY", default_value = "200ms", value_parser = humantime::parse_duration)]
 	latency: Duration,
 }
 
