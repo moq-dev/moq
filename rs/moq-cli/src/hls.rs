@@ -9,6 +9,26 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::moq::notify_ready;
 
+/// HLS export (serve) args. Import is just a playlist URL, so it has no struct.
+#[derive(clap::Args, Clone)]
+pub struct Args {
+	/// HTTP listener for the HLS endpoints.
+	#[arg(long, default_value = "[::]:8089")]
+	pub listen: SocketAddr,
+
+	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
+	#[command(flatten)]
+	pub tls: moq_native::tls::Server,
+
+	/// LL-HLS part target duration.
+	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
+	pub part_target: Duration,
+
+	/// Minimum media kept in each rendition's sliding window.
+	#[arg(long, default_value = "16s", value_parser = humantime::parse_duration)]
+	pub window: Duration,
+}
+
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
 pub async fn import(origin: &moq_net::OriginProducer, name: String, playlist: String) -> anyhow::Result<()> {
 	let mut producer = moq_net::Broadcast::new().produce();
@@ -28,16 +48,10 @@ pub async fn import(origin: &moq_net::OriginProducer, name: String, playlist: St
 }
 
 /// Serve HLS/LL-HLS over HTTP from the Origin's broadcasts.
-pub async fn export(
-	origin: moq_net::OriginConsumer,
-	listen: SocketAddr,
-	tls: moq_native::tls::Server,
-	part_target: Duration,
-	window: Duration,
-) -> anyhow::Result<()> {
+pub async fn export(origin: moq_net::OriginConsumer, args: Args) -> anyhow::Result<()> {
 	let config = moq_hls::export::Config {
-		part_target,
-		window,
+		part_target: args.part_target,
+		window: args.window,
 		..Default::default()
 	};
 	let server = moq_hls::Server::new(origin, config);
@@ -45,16 +59,16 @@ pub async fn export(
 		.router()
 		.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
 
-	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
+	let tls = if args.tls.cert.is_empty() && args.tls.generate.is_empty() {
 		None
 	} else {
 		let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-		Some(tls.server_config(alpn)?)
+		Some(args.tls.server_config(alpn)?)
 	};
 
-	let listener = moq_native::bind::tcp(listen)?;
+	let listener = moq_native::bind::tcp(args.listen)?;
 
-	tracing::info!(%listen, "serving HLS");
+	tracing::info!(listen = %args.listen, "serving HLS");
 	notify_ready();
 
 	crate::web::serve(listener, app, tls).await

@@ -10,6 +10,24 @@ use url::Url;
 
 use crate::moq::notify_ready;
 
+/// RTMP endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
+/// The parent direction fixes whether that dial/bind pushes or pulls.
+#[derive(clap::Args, Clone)]
+#[command(group = clap::ArgGroup::new("rtmp-mode").required(true).multiple(false).args(["rtmp-connect", "rtmp-listen"]))]
+pub struct Args {
+	/// Dial `rtmp://host[:1935]/<app>/<key>`.
+	#[arg(id = "rtmp-connect", long = "connect", value_name = "URL")]
+	pub connect: Option<Url>,
+
+	/// Bind an RTMP listener. Broadcasts are named from the RTMP app/key.
+	#[arg(id = "rtmp-listen", long = "listen", value_name = "ADDR")]
+	pub listen: Option<SocketAddr>,
+
+	/// Prefix prepended to the app/key when naming broadcasts.
+	#[arg(long, requires = "rtmp-listen")]
+	pub prefix: Option<String>,
+}
+
 /// Accept incoming RTMP publishes into the Origin; reject plays (import).
 pub async fn listen_import(
 	origin: moq_net::OriginProducer,

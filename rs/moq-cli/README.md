@@ -19,19 +19,19 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ## Usage
 
-`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq-cli <import|export> <MoQ side> <endpoint>`. `import` moves media into MoQ, `export` moves it out. The MoQ side is either `--client-connect <url>` (dial a relay) or `--server-bind <addr>` (self-host), and the endpoint is `stdin`/`stdout`, `hls`, `rtmp`, `srt`, or `rtc`.
+`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq-cli <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) is either `--client-connect <url>` (dial a relay) or `--server-bind <addr>` (self-host). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`).
 
 ### Publish to a remote relay
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq-cli import --client-connect https://relay.example.com --broadcast my-stream.hang stdin fmp4
+    moq-cli --client-connect https://relay.example.com --broadcast my-stream.hang import fmp4
 ```
 
 ### Subscribe from a remote relay
 
 ```bash
-moq-cli export --client-connect https://relay.example.com --broadcast my-stream.hang stdout fmp4 | \
+moq-cli --client-connect https://relay.example.com --broadcast my-stream.hang export fmp4 | \
     ffplay -
 ```
 
@@ -41,7 +41,7 @@ Hosts a MoQ server and publishes a single broadcast read from stdin into it. Use
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq-cli import --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang stdin fmp4
+    moq-cli --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang import fmp4
 ```
 
 ### Self-host: subscribe to an inbound broadcast
@@ -49,10 +49,10 @@ ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
 Hosts a MoQ server and writes an incoming broadcast's media to stdout. The inverse of the above.
 
 ```bash
-moq-cli export --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang stdout fmp4 | ffplay -
+moq-cli --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang export fmp4 | ffplay -
 ```
 
-### Input formats (`stdin`)
+### Import formats
 
 - `avc3` raw H.264 Annex-B from stdin
 - `fmp4` fragmented MP4 from stdin

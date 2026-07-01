@@ -278,7 +278,7 @@ logs a warning when the address is not loopback but does not refuse to start,
 so firewalling the port is your responsibility.
 
 ```bash
-moq import --client-connect "tcp://127.0.0.1:4444/?jwt=$TOKEN" --broadcast my-broadcast.hang stdin fmp4 < video.mp4
+moq --client-connect "tcp://127.0.0.1:4444/my-broadcast.hang?jwt=$TOKEN" import fmp4 < video.mp4
 ```
 
 ### Unix socket (with a uid/gid/pid allowlist)
@@ -307,7 +307,7 @@ read. A pid requirement rejects peers whose PID the platform doesn't report
 of the JWT, not a replacement for it.
 
 ```bash
-moq import --client-connect "unix:///run/moq/internal.sock/?jwt=$TOKEN" --broadcast my-broadcast.hang stdin fmp4 < video.mp4
+moq --client-connect "unix:///run/moq/internal.sock/?jwt=$TOKEN" --broadcast my-broadcast.hang import fmp4 < video.mp4
 ```
 
 ### Notes

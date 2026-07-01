@@ -10,6 +10,28 @@ use url::Url;
 
 use crate::moq::notify_ready;
 
+/// WebRTC endpoint args: exactly one of `--connect` (WHIP/WHEP client) /
+/// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
+#[derive(clap::Args, Clone)]
+#[command(group = clap::ArgGroup::new("rtc-mode").required(true).multiple(false).args(["rtc-connect", "rtc-listen"]))]
+pub struct Args {
+	/// Dial a remote WHIP/WHEP endpoint URL.
+	#[arg(id = "rtc-connect", long = "connect", value_name = "URL")]
+	pub connect: Option<Url>,
+
+	/// Bind an HTTP listener for WHIP/WHEP.
+	#[arg(id = "rtc-listen", long = "listen", value_name = "ADDR")]
+	pub listen: Option<SocketAddr>,
+
+	/// Shared UDP socket for ICE/media (one port for all sessions).
+	#[arg(long, requires = "rtc-listen", default_value = "[::]:0")]
+	pub udp_bind: SocketAddr,
+
+	/// Public UDP address(es) advertised as ICE host candidates (repeatable).
+	#[arg(long, requires = "rtc-listen")]
+	pub public_addr: Vec<SocketAddr>,
+}
+
 /// WHIP server: accept incoming WebRTC publishes into the Origin (import).
 pub async fn listen_import(
 	origin: moq_net::OriginProducer,

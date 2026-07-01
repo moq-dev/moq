@@ -1,9 +1,8 @@
-use clap::ValueEnum;
 use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
 /// Container format read from stdin on the import (source) side.
-#[derive(ValueEnum, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub enum PublishFormat {
 	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,

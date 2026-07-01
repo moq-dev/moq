@@ -5,7 +5,8 @@ use hang::moq_net;
 use moq_mux::catalog::CatalogFormat;
 use tokio::io::AsyncWriteExt;
 
-#[derive(ValueEnum, Clone, Copy)]
+/// Container format written to stdout on the export (sink) side.
+#[derive(Clone, Copy)]
 pub enum SubscribeFormat {
 	Fmp4,
 	Mkv,
@@ -33,30 +34,19 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	}
 }
 
-#[derive(clap::Args, Clone)]
+/// The resolved stdout export settings (built from the `export` flags + format).
+#[derive(Clone)]
 pub struct SubscribeArgs {
 	/// The format to write to stdout.
-	#[arg(long)]
 	pub format: SubscribeFormat,
 
-	/// Maximum latency before skipping groups (e.g. `500ms`, `1s`).
-	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
+	/// Maximum latency before skipping groups.
 	pub max_latency: Duration,
 
-	/// Cap the output fragment duration (e.g. `2s`, `500ms`).
-	///
-	/// By default a fragment covers one GOP (rolled over on video keyframes).
-	/// Setting this caps each fragment to roughly the given duration.
-	/// The cap applies in addition to GOP rollover.
-	#[arg(long, value_parser = humantime::parse_duration)]
+	/// Cap the output fragment duration (default: one GOP). Applies to fmp4 / mkv.
 	pub fragment_duration: Option<Duration>,
 
-	/// Catalog format to subscribe to for track discovery.
-	///
-	/// When omitted, the format is auto-detected from the broadcast name suffix
-	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang. Pass `hangz` to read
-	/// the DEFLATE-compressed `catalog.json.z` track instead (same `.hang` broadcast).
-	#[arg(long)]
+	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
 }
 

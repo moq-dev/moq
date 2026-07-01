@@ -10,6 +10,27 @@ use url::Url;
 
 use crate::moq::notify_ready;
 
+/// SRT endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
+#[derive(clap::Args, Clone)]
+#[command(group = clap::ArgGroup::new("srt-mode").required(true).multiple(false).args(["srt-connect", "srt-listen"]))]
+pub struct Args {
+	/// Dial `srt://host:port?streamid=...`.
+	#[arg(id = "srt-connect", long = "connect", value_name = "URL")]
+	pub connect: Option<Url>,
+
+	/// Bind an SRT listener. Broadcasts are named from the stream id.
+	#[arg(id = "srt-listen", long = "listen", value_name = "ADDR")]
+	pub listen: Option<SocketAddr>,
+
+	/// Prefix prepended to the stream id when naming broadcasts.
+	#[arg(long)]
+	pub prefix: Option<String>,
+
+	/// SRT receive latency: the negotiated buffer trading delay for loss recovery.
+	#[arg(long, default_value = "200ms", value_parser = humantime::parse_duration)]
+	pub latency: Duration,
+}
+
 /// Accept incoming SRT publishes into the Origin; reject requests (import).
 pub async fn listen_import(
 	origin: moq_net::OriginProducer,
