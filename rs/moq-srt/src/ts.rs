@@ -94,8 +94,8 @@ impl Subscriber {
 		Ok(Some(Self { export }))
 	}
 
-	/// Pull the next muxed frame (TS bytes + media timestamp), or `None` once the
-	/// broadcast ends.
+	/// Pull the next muxed frame (TS bytes, media timestamp, and pacing instant), or
+	/// `None` once the broadcast ends.
 	pub async fn next(&mut self) -> Result<Option<ts::Output>> {
 		Ok(self.export.next().await?)
 	}

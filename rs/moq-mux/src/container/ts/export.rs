@@ -141,6 +141,7 @@ enum Kind {
 /// One muxed MPEG-TS frame produced by [`Export::next`].
 ///
 /// `payload` is the TS packets (188-byte aligned) for a single media frame.
+#[non_exhaustive]
 pub struct Output {
 	/// The TS packets for one media frame.
 	pub payload: Bytes,
