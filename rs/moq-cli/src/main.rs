@@ -1,3 +1,9 @@
+//! moq-cli: a media router that wires one endpoint onto a shared MoQ Origin.
+//!
+//! The binary is `moq`. See [`args`] for the `import`/`export` command grammar;
+//! this module orchestrates the shared Origin and spawns the MoQ side plus the
+//! selected endpoint.
+
 mod args;
 mod hls;
 mod moq;
