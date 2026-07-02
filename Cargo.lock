@@ -4112,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4300,7 +4300,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4319,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4338,7 +4338,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
