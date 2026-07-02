@@ -25,9 +25,15 @@ typedef struct {
     int video_started; // guard: start the video track only once
 } ctx_t;
 
-// Callbacks run on libmoq's runtime thread; main waits on the condvar. ctx
-// lives on main's stack and outlives the callbacks (main blocks until got/
-// timeout, then the process exits), so there's no use-after-free.
+// Callbacks run on libmoq's runtime thread while main waits on the condvar.
+// The video track-consume task keeps firing on_frame until it's closed AND has
+// delivered a terminal callback; moq_session_close only signals shutdown, it
+// doesn't synchronously stop that task. So a frame callback can still be in
+// flight when main is ready to leave. We terminate the terminal paths with
+// _exit rather than returning, so main's stack frame (which backs ctx, mu, and
+// cv) is never unwound out from under an in-flight callback. Returning normally
+// let the racing on_frame lock a mutex on a dead stack frame and corrupt it,
+// tripping a glibc tpp.c assertion (abort) on Linux.
 static void on_status(void *ud, int32_t code) {
     (void)ud;
     fprintf(stderr, "session status: %d\n", code);
@@ -139,11 +145,15 @@ int main(int argc, char **argv) {
     int got = c.got;
     pthread_mutex_unlock(&c.mu);
 
+    // The track-consume task is still running on libmoq's runtime thread and may
+    // be mid on_frame, touching mu/cv on this stack frame. _exit ends the process
+    // without unwinding the stack or running teardown, so that memory stays valid
+    // for any in-flight callback (see the note above on_status). We already have
+    // our verdict, so a clean session close isn't worth the teardown race.
     if (got) {
         fprintf(stderr, "received a frame from %s\n", broadcast);
-        moq_session_close((uint32_t)session);
-        return 0;
+        _exit(0);
     }
     fprintf(stderr, "error: timed out waiting for data\n");
-    return 1;
+    _exit(1);
 }
