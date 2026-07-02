@@ -51,3 +51,4 @@ tracing = "0.1"
 # The RTMPS test borrows moq-native's self-signed cert generation to build a
 # `rustls::ServerConfig`; `quinn` pulls in a backend so `tls::Server` is built.
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "quinn"] }
+tokio = { workspace = true, features = ["test-util"] }
