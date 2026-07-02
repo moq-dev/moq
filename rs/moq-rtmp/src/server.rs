@@ -56,6 +56,13 @@ const READ_BUFFER: usize = 16 * 1024;
 /// handshake.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a play request may wait for its broadcast and initial FLV header
+/// before the server rejects it.
+#[cfg(not(test))]
+const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// TCP keepalive idle period before the kernel starts probing a silent peer, and
 /// the interval between probes. Once a connection is publishing or playing it can
 /// block in a `read` indefinitely, so without keepalive a half-open connection (a
@@ -493,6 +500,61 @@ impl<S: Stream> Play<S> {
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
 	pub async fn accept(mut self, origin: &OriginConsumer, path: &str) -> Result<()> {
+		// Wait for the broadcast before telling the client playback started. Feed the
+		// client's bytes through the session (not discard them) so its deserializer
+		// stays in sync for everything `play_pump` parses next.
+		let broadcast = tokio::select! {
+			biased;
+			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
+				res?;
+				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
+				return Ok(());
+			}
+			broadcast = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.announced_broadcast(path)) => {
+				match broadcast {
+					Ok(broadcast) => broadcast,
+					Err(_) => {
+						tracing::debug!(peer = %self.peer, %path, "play broadcast resolve timed out");
+						return self.reject("stream not found").await;
+					}
+				}
+			}
+		};
+		let Some(broadcast) = broadcast else {
+			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
+			return self.reject("stream not found").await;
+		};
+
+		let mut export = FlvExport::new(broadcast)
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.with_latency(self.latency);
+
+		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
+		// broadcast that never produces a playable FLV header looks successful to the
+		// viewer but never emits media.
+		let first_chunk = tokio::select! {
+			biased;
+			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
+				res?;
+				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
+				return Ok(());
+			}
+			chunk = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
+				match chunk {
+					Ok(Ok(Some(chunk))) => chunk,
+					Ok(Ok(None)) => {
+						tracing::debug!(peer = %self.peer, %path, "play broadcast ended before FLV header");
+						return self.reject("stream not available").await;
+					}
+					Ok(Err(e)) => return Err(e.into()),
+					Err(_) => {
+						tracing::debug!(peer = %self.peer, %path, "play FLV header resolve timed out");
+						return self.reject("stream not available").await;
+					}
+				}
+			}
+		};
+
 		// Tell the client playback is starting (Play.Reset / Play.Start + StreamBegin).
 		let results = self
 			.session
@@ -503,31 +565,12 @@ impl<S: Stream> Play<S> {
 
 		tracing::info!(peer = %self.peer, %path, "rtmp play accepted");
 
-		// Wait for the broadcast, but abandon the wait if the viewer hangs up. Feed
-		// the client's bytes through the session (not discard them) so its
-		// deserializer stays in sync for everything `play_pump` parses next.
-		let broadcast = tokio::select! {
-			biased;
-			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
-				res?;
-				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
-				return Ok(());
-			}
-			broadcast = origin.announced_broadcast(path) => broadcast,
-		};
-		let Some(broadcast) = broadcast else {
-			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
-			return Ok(());
-		};
-
-		let mut export = FlvExport::new(broadcast)
-			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_latency(self.latency);
 		let result = play_pump(
 			&mut self.stream,
 			&mut self.session,
 			&mut self.work,
 			&mut export,
+			Some(first_chunk),
 			self.stream_id,
 			self.peer,
 		)
@@ -716,6 +759,7 @@ async fn play_pump<S: Stream>(
 	session: &mut ServerSession,
 	work: &mut VecDeque<ServerSessionResult>,
 	export: &mut FlvExport,
+	first_chunk: Option<bytes::Bytes>,
 	stream_id: u32,
 	peer: SocketAddr,
 ) -> Result<()> {
@@ -723,38 +767,21 @@ async fn play_pump<S: Stream>(
 	let mut tags = flv::TagReader::new();
 	let mut buffer = [0u8; READ_BUFFER];
 
-	loop {
-		// Flush responses queued by the last batch of client input.
-		while let Some(result) = work.pop_front() {
-			match result {
-				ServerSessionResult::OutboundResponse(packet) => writer.write_all(&packet.bytes).await?,
-				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. }) => {
-					tracing::debug!(%peer, "viewer stopped playback");
-					return Ok(());
-				}
-				ServerSessionResult::RaisedEvent(other) => {
-					tracing::trace!(%peer, ?other, "ignoring RTMP event during play")
-				}
-				ServerSessionResult::UnhandleableMessageReceived(_) => {}
-			}
-		}
+	if flush_play_work(work, &mut writer, peer).await? {
+		return Ok(());
+	}
+	if let Some(bytes) = first_chunk {
+		send_flv_chunk(&mut writer, session, &mut tags, stream_id, bytes).await?;
+	}
 
+	loop {
+		if flush_play_work(work, &mut writer, peer).await? {
+			return Ok(());
+		}
 		tokio::select! {
 			// Media from the broadcast: split into tags and send each one down.
 			chunk = export.next() => match chunk? {
-				Some(bytes) => {
-					tags.push(&bytes);
-					while let Some(tag) = tags.next()? {
-						let ts = RtmpTimestamp::new(tag.timestamp);
-						let packet = match tag.tag_type {
-							flv::TAG_VIDEO => session.send_video_data(stream_id, tag.body, ts, false),
-							flv::TAG_AUDIO => session.send_audio_data(stream_id, tag.body, ts, false),
-							_ => continue,
-						}
-						.map_err(|e| anyhow::anyhow!("rtmp send media: {e:?}"))?;
-						writer.write_all(&packet.bytes).await?;
-					}
-				}
+				Some(bytes) => send_flv_chunk(&mut writer, session, &mut tags, stream_id, bytes).await?,
 				// Broadcast ended: tell the player and finish.
 				None => {
 					let packet = session
@@ -777,6 +804,50 @@ async fn play_pump<S: Stream>(
 			}
 		}
 	}
+}
+
+/// Flush responses queued by RTMP client input during playback.
+async fn flush_play_work<W: AsyncWrite + Unpin>(
+	work: &mut VecDeque<ServerSessionResult>,
+	writer: &mut W,
+	peer: SocketAddr,
+) -> Result<bool> {
+	while let Some(result) = work.pop_front() {
+		match result {
+			ServerSessionResult::OutboundResponse(packet) => writer.write_all(&packet.bytes).await?,
+			ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. }) => {
+				tracing::debug!(%peer, "viewer stopped playback");
+				return Ok(true);
+			}
+			ServerSessionResult::RaisedEvent(other) => {
+				tracing::trace!(%peer, ?other, "ignoring RTMP event during play")
+			}
+			ServerSessionResult::UnhandleableMessageReceived(_) => {}
+		}
+	}
+	Ok(false)
+}
+
+/// Convert one FLV chunk into RTMP media messages.
+async fn send_flv_chunk<W: AsyncWrite + Unpin>(
+	writer: &mut W,
+	session: &mut ServerSession,
+	tags: &mut flv::TagReader,
+	stream_id: u32,
+	bytes: bytes::Bytes,
+) -> Result<()> {
+	tags.push(&bytes);
+	while let Some(tag) = tags.next()? {
+		let ts = RtmpTimestamp::new(tag.timestamp);
+		let packet = match tag.tag_type {
+			flv::TAG_VIDEO => session.send_video_data(stream_id, tag.body, ts, false),
+			flv::TAG_AUDIO => session.send_audio_data(stream_id, tag.body, ts, false),
+			_ => continue,
+		}
+		.map_err(|e| anyhow::anyhow!("rtmp send media: {e:?}"))?;
+		writer.write_all(&packet.bytes).await?;
+	}
+	Ok(())
 }
 
 /// Write every queued [`OutboundResponse`](ServerSessionResult::OutboundResponse)
@@ -1005,6 +1076,14 @@ mod tests {
 	/// A received RTMP media message: `is_video` and the message body.
 	type Media = (bool, bytes::Bytes);
 
+	/// The outcome of an RTMP play request from the test client's perspective.
+	#[derive(Debug, PartialEq, Eq)]
+	enum PlayOutcome {
+		Accepted,
+		Failed(String),
+		Closed,
+	}
+
 	/// Drive an RTMP play client over `stream` through handshake -> connect(`live`)
 	/// -> play(`cam0`), collecting media messages until `want` have arrived.
 	async fn play_client_collect<S: Stream>(mut stream: S, want: usize) -> Vec<Media> {
@@ -1067,6 +1146,70 @@ mod tests {
 			let n = stream.read(&mut buffer).await.unwrap();
 			if n == 0 {
 				return media;
+			}
+			work.extend(session.handle_input(&buffer[..n]).unwrap());
+		}
+	}
+
+	/// Drive an RTMP play client until the server accepts, rejects, or closes it.
+	async fn play_client_outcome<S: Stream>(mut stream: S) -> PlayOutcome {
+		// Handshake.
+		let mut handshake = Handshake::new(PeerType::Client);
+		stream
+			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0u8; 4096];
+		let remaining = loop {
+			let n = stream.read(&mut buffer).await.unwrap();
+			match handshake.process_bytes(&buffer[..n]).unwrap() {
+				HandshakeProcessResult::InProgress { response_bytes } => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+				}
+				HandshakeProcessResult::Completed {
+					response_bytes,
+					remaining_bytes,
+				} => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+					break remaining_bytes;
+				}
+			}
+		};
+
+		let (mut session, initial) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
+		if !remaining.is_empty() {
+			work.extend(session.handle_input(&remaining).unwrap());
+		}
+		work.push_back(session.request_connection("live".to_string()).unwrap());
+
+		loop {
+			while let Some(result) = work.pop_front() {
+				match result {
+					ClientSessionResult::OutboundResponse(packet) => {
+						stream.write_all(&packet.bytes).await.unwrap();
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => {
+						work.push_back(session.request_playback("cam0".to_string()).unwrap());
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::PlaybackRequestAccepted) => {
+						return PlayOutcome::Accepted;
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::UnhandleableOnStatusCode { code })
+						if code.contains("Failed") =>
+					{
+						return PlayOutcome::Failed(code);
+					}
+					_ => {}
+				}
+			}
+			let n = stream.read(&mut buffer).await.unwrap();
+			if n == 0 {
+				return PlayOutcome::Closed;
 			}
 			work.extend(session.handle_input(&buffer[..n]).unwrap());
 		}
@@ -1135,6 +1278,36 @@ mod tests {
 		assert_eq!(media[1].1[1], 0x01);
 
 		server_task.abort();
+	}
+
+	#[tokio::test]
+	async fn play_missing_broadcast_rejects_without_start() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+
+		let origin = moq_net::Origin::random().produce();
+		let consumer = origin.consume();
+		let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+		let server_task = tokio::spawn(async move {
+			let request = server.accept().await.expect("a request");
+			let Request::Play(play) = request else {
+				panic!("expected a play request");
+			};
+			ready_tx.send(()).ok();
+			play.accept(&consumer, "live/missing").await.unwrap();
+		});
+
+		let stream = TcpStream::connect(addr).await.unwrap();
+		let client = tokio::spawn(async move { play_client_outcome(stream).await });
+
+		ready_rx.await.unwrap();
+		let outcome = tokio::time::timeout(Duration::from_secs(1), client)
+			.await
+			.expect("play client timed out")
+			.unwrap();
+
+		assert_ne!(outcome, PlayOutcome::Accepted);
+		server_task.await.unwrap();
 	}
 
 	#[tokio::test]
