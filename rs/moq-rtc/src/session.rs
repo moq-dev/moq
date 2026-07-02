@@ -15,7 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use str0m::{Event, IceConnectionState, Input, Output, Rtc, net::Receive};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, net::Receive};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -497,7 +497,7 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 	};
 
 	for addr in &candidates {
-		str0m::ice::Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
+		Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
 	}
 	Ok(candidates)
 }
