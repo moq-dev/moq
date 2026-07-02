@@ -300,7 +300,6 @@ mod tests {
 		if !driver_libs_present() {
 			return;
 		}
-		// 320 % 64 == 0, so the flat-write pitch assumption holds.
 		let config = crate::encode::Config {
 			kind: crate::encode::Kind::Named(NAME.into()),
 			..crate::encode::Config::new(320, 240, 30)
