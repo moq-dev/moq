@@ -34,9 +34,12 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
+use moq_mux::container::flv::{EnhancedCodecs, Export as FlvExport, Import as FlvImport};
 use moq_net::{Broadcast, OriginConsumer, OriginProducer};
+use rml_rtmp::chunk_io::ChunkDeserializer;
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
+use rml_rtmp::messages::RtmpMessage;
+use rml_rtmp::rml_amf0::Amf0Value;
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
 use rml_rtmp::time::RtmpTimestamp;
 use socket2::{SockRef, TcpKeepalive};
@@ -70,6 +73,187 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// momentarily quiet connection.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+const FOURCC_CAN_DECODE: u32 = 0x01;
+const FOURCC_CAN_FORWARD: u32 = 0x04;
+
+#[derive(Clone, Debug, Default)]
+struct ClientCapabilities {
+	any_fourcc: bool,
+	fourcc_list: Vec<[u8; 4]>,
+	any_video: bool,
+	video_fourccs: Vec<[u8; 4]>,
+	any_audio: bool,
+	audio_fourccs: Vec<[u8; 4]>,
+}
+
+impl ClientCapabilities {
+	fn supports_video(&self, fourcc: [u8; 4]) -> bool {
+		self.any_fourcc || self.any_video || self.fourcc_list.contains(&fourcc) || self.video_fourccs.contains(&fourcc)
+	}
+
+	fn supports_audio(&self, fourcc: [u8; 4]) -> bool {
+		self.any_fourcc || self.any_audio || self.fourcc_list.contains(&fourcc) || self.audio_fourccs.contains(&fourcc)
+	}
+
+	fn unsupported_reason(&self, codecs: EnhancedCodecs) -> Option<String> {
+		if codecs.is_empty() {
+			return None;
+		}
+		let mut unsupported = Vec::new();
+		if let Some(fourcc) = codecs.video
+			&& !self.supports_video(fourcc)
+		{
+			unsupported.push(format!("video {}", fourcc_name(fourcc)));
+		}
+		if let Some(fourcc) = codecs.audio
+			&& !self.supports_audio(fourcc)
+		{
+			unsupported.push(format!("audio {}", fourcc_name(fourcc)));
+		}
+		if unsupported.is_empty() {
+			None
+		} else {
+			Some(format!(
+				"unsupported enhanced RTMP codec(s): {}",
+				unsupported.join(", ")
+			))
+		}
+	}
+}
+
+struct ConnectCapabilitiesParser {
+	chunks: ChunkDeserializer,
+	done: bool,
+}
+
+impl Default for ConnectCapabilitiesParser {
+	fn default() -> Self {
+		Self {
+			chunks: ChunkDeserializer::new(),
+			done: false,
+		}
+	}
+}
+
+impl ConnectCapabilitiesParser {
+	fn observe(&mut self, bytes: &[u8]) -> Option<ClientCapabilities> {
+		if self.done {
+			return None;
+		}
+
+		let mut input = bytes;
+		loop {
+			let payload = match self.chunks.get_next_message(input) {
+				Ok(Some(payload)) => payload,
+				Ok(None) => return None,
+				Err(err) => {
+					self.done = true;
+					tracing::debug!(%err, "failed to parse RTMP connect capabilities");
+					return None;
+				}
+			};
+			input = &[];
+
+			let message = match payload.to_rtmp_message() {
+				Ok(message) => message,
+				Err(err) => {
+					tracing::trace!(%err, "failed to parse RTMP message while looking for connect capabilities");
+					continue;
+				}
+			};
+			match message {
+				RtmpMessage::SetChunkSize { size } => {
+					if let Err(err) = self.chunks.set_max_chunk_size(size as usize) {
+						self.done = true;
+						tracing::debug!(%err, "failed to update RTMP capability parser chunk size");
+						return None;
+					}
+				}
+				RtmpMessage::Amf0Command {
+					command_name,
+					command_object,
+					..
+				} if command_name == "connect" => {
+					self.done = true;
+					return Some(ClientCapabilities::from_connect_object(&command_object));
+				}
+				_ => {}
+			}
+		}
+	}
+}
+
+impl ClientCapabilities {
+	fn from_connect_object(value: &Amf0Value) -> Self {
+		let mut capabilities = Self::default();
+		let Amf0Value::Object(properties) = value else {
+			return capabilities;
+		};
+
+		if let Some(value) = properties.get("fourCcList") {
+			capabilities.add_fourcc_list(value);
+		}
+		if let Some(value) = properties.get("videoFourCcInfoMap") {
+			add_fourcc_info_map(value, &mut capabilities.any_video, &mut capabilities.video_fourccs);
+		}
+		if let Some(value) = properties.get("audioFourCcInfoMap") {
+			add_fourcc_info_map(value, &mut capabilities.any_audio, &mut capabilities.audio_fourccs);
+		}
+
+		capabilities
+	}
+
+	fn add_fourcc_list(&mut self, value: &Amf0Value) {
+		let Amf0Value::StrictArray(values) = value else {
+			return;
+		};
+		for value in values {
+			let Amf0Value::Utf8String(value) = value else {
+				continue;
+			};
+			if value == "*" {
+				self.any_fourcc = true;
+			} else if let Some(fourcc) = parse_fourcc(value) {
+				push_unique(&mut self.fourcc_list, fourcc);
+			}
+		}
+	}
+}
+
+fn add_fourcc_info_map(value: &Amf0Value, any: &mut bool, fourccs: &mut Vec<[u8; 4]>) {
+	let Amf0Value::Object(properties) = value else {
+		return;
+	};
+	for (name, value) in properties {
+		let Amf0Value::Number(mask) = value else {
+			continue;
+		};
+		let mask = *mask as u32;
+		if mask & (FOURCC_CAN_DECODE | FOURCC_CAN_FORWARD) == 0 {
+			continue;
+		}
+		if name == "*" {
+			*any = true;
+		} else if let Some(fourcc) = parse_fourcc(name) {
+			push_unique(fourccs, fourcc);
+		}
+	}
+}
+
+fn parse_fourcc(value: &str) -> Option<[u8; 4]> {
+	value.as_bytes().try_into().ok()
+}
+
+fn push_unique(values: &mut Vec<[u8; 4]>, value: [u8; 4]) {
+	if !values.contains(&value) {
+		values.push(value);
+	}
+}
+
+fn fourcc_name(fourcc: [u8; 4]) -> String {
+	String::from_utf8_lossy(&fourcc).into_owned()
+}
 
 /// A bidirectional byte stream carrying an RTMP session.
 ///
@@ -455,6 +639,7 @@ pub struct Play<S = Conn> {
 	app: String,
 	stream_key: String,
 	peer: SocketAddr,
+	capabilities: ClientCapabilities,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
 	/// one. Zero (the default) drops stale groups aggressively; raise it with
 	/// [`with_latency`](Self::with_latency).
@@ -525,6 +710,31 @@ impl<S: Stream> Play<S> {
 		let mut export = FlvExport::new(broadcast)
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.with_latency(self.latency);
+
+		let codecs = tokio::select! {
+			biased;
+			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
+				res?;
+				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play codecs resolved");
+				return Ok(());
+			}
+			codecs = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, export.enhanced_codecs()) => {
+				match codecs {
+					Ok(Ok(codecs)) => codecs,
+					Ok(Err(e)) => return Err(e.into()),
+					Err(_) => {
+						tracing::debug!(peer = %self.peer, %path, "play FLV codec resolve timed out");
+						return self.reject("stream not available").await;
+					}
+				}
+			}
+		};
+		if let Some(codecs) = codecs
+			&& let Some(reason) = self.capabilities.unsupported_reason(codecs)
+		{
+			tracing::debug!(peer = %self.peer, %path, %reason, "rtmp play rejected for unsupported codecs");
+			return self.reject(&reason).await;
+		}
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
 		// broadcast that never produces a playable FLV header looks successful to the
@@ -613,9 +823,14 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 	let (mut session, initial) =
 		ServerSession::new(ServerSessionConfig::new()).map_err(|e| anyhow::anyhow!("rtmp session init: {e:?}"))?;
 	let mut work: VecDeque<ServerSessionResult> = VecDeque::from(initial);
+	let mut capabilities = ClientCapabilities::default();
+	let mut capabilities_parser = ConnectCapabilitiesParser::default();
 
 	// Any RTMP bytes bundled with the final handshake packet.
 	if !remaining.is_empty() {
+		if let Some(parsed) = capabilities_parser.observe(&remaining) {
+			capabilities = parsed;
+		}
 		let results = session
 			.handle_input(&remaining)
 			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
@@ -672,6 +887,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
+							capabilities,
 							latency: Duration::ZERO,
 						})));
 					}
@@ -686,6 +902,9 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 		let n = stream.read(&mut buffer).await?;
 		if n == 0 {
 			return Ok(None);
+		}
+		if let Some(parsed) = capabilities_parser.observe(&buffer[..n]) {
+			capabilities = parsed;
 		}
 		let results = session
 			.handle_input(&buffer[..n])
@@ -992,6 +1211,9 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::collections::HashMap;
+
+	use rml_rtmp::chunk_io::ChunkSerializer;
 	use rml_rtmp::sessions::{
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};
@@ -1146,6 +1368,77 @@ mod tests {
 		}
 	}
 
+	async fn play_client_status<S: Stream>(mut stream: S) -> Option<String> {
+		// Handshake.
+		let mut handshake = Handshake::new(PeerType::Client);
+		stream
+			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0u8; 4096];
+		let remaining = loop {
+			let n = stream.read(&mut buffer).await.unwrap();
+			match handshake.process_bytes(&buffer[..n]).unwrap() {
+				HandshakeProcessResult::InProgress { response_bytes } => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+				}
+				HandshakeProcessResult::Completed {
+					response_bytes,
+					remaining_bytes,
+				} => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+					break remaining_bytes;
+				}
+			}
+		};
+
+		let (mut session, initial) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
+		if !remaining.is_empty() {
+			work.extend(session.handle_input(&remaining).unwrap());
+		}
+		work.push_back(session.request_connection("live".to_string()).unwrap());
+
+		loop {
+			while let Some(result) = work.pop_front() {
+				match result {
+					ClientSessionResult::OutboundResponse(packet) => {
+						stream.write_all(&packet.bytes).await.unwrap();
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => {
+						work.push_back(session.request_playback("cam0".to_string()).unwrap());
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::PlaybackRequestAccepted) => {
+						return Some("NetStream.Play.Start".to_string());
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::UnhandleableOnStatusCode { code }) => {
+						return Some(code);
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::UnknownTransactionResultReceived {
+						mut additional_values,
+						..
+					}) => {
+						if let Some(Amf0Value::Object(mut properties)) = additional_values.pop()
+							&& let Some(Amf0Value::Utf8String(code)) = properties.remove("code")
+						{
+							return Some(code);
+						}
+					}
+					_ => {}
+				}
+			}
+			let n = stream.read(&mut buffer).await.unwrap();
+			if n == 0 {
+				return None;
+			}
+			work.extend(session.handle_input(&buffer[..n]).unwrap());
+		}
+	}
+
 	/// End-to-end play: publish a real broadcast into an origin (via the FLV
 	/// importer, so it carries a catalog + frames), then drive an RTMP play client
 	/// and assert it receives the muxed AVC sequence header and keyframe back.
@@ -1249,6 +1542,95 @@ mod tests {
 		}
 		server_task.await.unwrap();
 		client.abort();
+	}
+
+	#[tokio::test]
+	async fn play_rejects_enhanced_codecs_for_legacy_client() {
+		let head = moq_mux::codec::opus::Config {
+			sample_rate: 48000,
+			channel_count: 2,
+		}
+		.encode()
+		.unwrap();
+		let mut aseq = vec![0x90];
+		aseq.extend_from_slice(b"Opus");
+		aseq.extend_from_slice(&head);
+		let mut aframe = vec![0x91];
+		aframe.extend_from_slice(b"Opus");
+		aframe.extend_from_slice(&[0xfc, 0xff, 0xfe]);
+
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = Broadcast::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut importer = FlvImport::new(broadcast.clone(), catalog);
+		assert!(origin.publish_broadcast("live/cam0", broadcast.consume()));
+		importer.decode(&flv::file_header()).unwrap();
+		importer.decode(&flv::tag(flv::TAG_AUDIO, 0, &aseq)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_AUDIO, 20, &aframe)).unwrap();
+		importer.finish().unwrap();
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let consumer = origin.consume();
+
+		let server_task = tokio::spawn(async move {
+			let request = server.accept().await.expect("a request");
+			let Request::Play(play) = request else {
+				panic!("expected a play request");
+			};
+			play.accept(&consumer, "live/cam0").await.unwrap();
+		});
+
+		let stream = TcpStream::connect(addr).await.unwrap();
+		let status = tokio::time::timeout(Duration::from_secs(5), play_client_status(stream))
+			.await
+			.expect("play client timed out");
+
+		assert_eq!(status.as_deref(), Some("NetStream.Play.Failed"));
+		tokio::time::timeout(Duration::from_secs(5), server_task)
+			.await
+			.expect("server timed out")
+			.unwrap();
+	}
+
+	#[test]
+	fn parses_connect_fourcc_capabilities() {
+		let mut properties = HashMap::new();
+		properties.insert("app".to_string(), Amf0Value::Utf8String("live".to_string()));
+		properties.insert(
+			"fourCcList".to_string(),
+			Amf0Value::StrictArray(vec![Amf0Value::Utf8String("av01".to_string())]),
+		);
+		properties.insert(
+			"videoFourCcInfoMap".to_string(),
+			Amf0Value::Object(HashMap::from([
+				("vp09".to_string(), Amf0Value::Number(FOURCC_CAN_DECODE as f64)),
+				("hvc1".to_string(), Amf0Value::Number(0.0)),
+			])),
+		);
+		properties.insert(
+			"audioFourCcInfoMap".to_string(),
+			Amf0Value::Object(HashMap::from([(
+				"*".to_string(),
+				Amf0Value::Number(FOURCC_CAN_FORWARD as f64),
+			)])),
+		);
+		let message = RtmpMessage::Amf0Command {
+			command_name: "connect".to_string(),
+			transaction_id: 1.0,
+			command_object: Amf0Value::Object(properties),
+			additional_arguments: Vec::new(),
+		};
+		let payload = message.into_message_payload(RtmpTimestamp::new(0), 0).unwrap();
+		let packet = ChunkSerializer::new().serialize(&payload, false, false).unwrap();
+
+		let mut parser = ConnectCapabilitiesParser::default();
+		let capabilities = parser.observe(&packet.bytes).expect("connect capabilities");
+
+		assert!(capabilities.supports_video(*b"av01"));
+		assert!(capabilities.supports_video(*b"vp09"));
+		assert!(!capabilities.supports_video(*b"hvc1"));
+		assert!(capabilities.supports_audio(*b"Opus"));
 	}
 
 	#[tokio::test]
