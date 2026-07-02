@@ -34,6 +34,15 @@ ignore = [
     # proc-macro via local-ip-address -> neli -> getset; no runtime exposure.
     # Drop the ignore when getset migrates off proc-macro-error2.
     "RUSTSEC-2026-0173",
+
+    # quick-xml 0.39 DoS advisories (quadratic attribute scan / unbounded
+    # namespace allocation), reachable only via iroh -> netdev -> netwatch ->
+    # plist for network-interface discovery in moq-native's iroh QUIC backend.
+    # plist 1.9 pins quick-xml 0.39, so the patched 0.41 can't be selected yet;
+    # our media/protocol paths never feed it untrusted XML. Drop when the iroh /
+    # plist chain moves to quick-xml >=0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
