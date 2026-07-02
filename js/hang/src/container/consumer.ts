@@ -132,7 +132,7 @@ export class Consumer {
 			}
 
 			if (drop) {
-				console.warn(`skipping old group: ${consumer.sequence}`);
+				console.warn(`skipping old group: track=${this.#track.name} ${consumer.sequence}`);
 				consumer.close();
 				continue;
 			}
@@ -306,7 +306,9 @@ export class Consumer {
 			return !stale;
 		});
 
-		console.warn(`buffer reset: group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`);
+		console.warn(
+			`buffer reset: track=${this.#track.name} group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`,
+		);
 
 		// Resume from the earliest survivor; if none, from the rewound group. Anchor the live
 		// edge at the rewind point (delivered), not group.latest (buffered ahead of playback).

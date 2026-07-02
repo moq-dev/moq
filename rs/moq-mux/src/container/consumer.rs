@@ -224,7 +224,11 @@ impl<F: Container> Consumer<F> {
 						// evicted alongside it, so jump straight to that group instead of
 						// stepping one-by-one and then blocking on a sequence gap of groups
 						// that will never arrive.
-						tracing::warn!(error = ?e, "current group evicted; skipping to next buffered group");
+						tracing::warn!(
+							track = self.track.name(),
+							error = ?e,
+							"current group evicted; skipping to next buffered group"
+						);
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 					}
@@ -303,7 +307,12 @@ impl<F: Container> Consumer<F> {
 				self.pending.drain(0..new_idx);
 				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
 
-				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
+				tracing::debug!(
+					track = self.track.name(),
+					old = self.current,
+					new = new_current,
+					"skipping slow groups"
+				);
 
 				self.current = new_current;
 				continue;
@@ -343,7 +352,7 @@ impl<F: Container> Consumer<F> {
 				None => sequence < self.current,
 			};
 			if drop {
-				tracing::debug!(old = ?sequence, current = ?self.current, "skipping old group");
+				tracing::debug!(track = self.track.name(), old = ?sequence, current = ?self.current, "skipping old group");
 				continue;
 			}
 
@@ -413,6 +422,7 @@ impl<F: Container> Consumer<F> {
 
 		self.rewind.discontinuity += 1;
 		tracing::debug!(
+			track = self.track.name(),
 			prev_max = reset.prev_max,
 			group = reset.group,
 			discontinuity = self.rewind.discontinuity,
