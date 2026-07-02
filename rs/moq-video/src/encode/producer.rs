@@ -11,7 +11,8 @@ use moq_net::Timestamp;
 use crate::Error;
 use crate::capture;
 
-use super::encoder::{self, Codec, Encoder};
+use super::encoder::{self, Codec};
+use super::sink::Sink;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -161,6 +162,24 @@ pub async fn publish_capture(
 	result
 }
 
+/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
+/// `tokio::spawn` it: the encoder runs on its own thread and the capture guard
+/// is `Send` there. This is never called; it exists only to fail compilation if
+/// the future ever regains a `!Send` component. macOS is exempt (the objc
+/// capture session is `!Send`).
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn assert_publish_capture_send(
+	broadcast: moq_net::BroadcastProducer,
+	catalog: moq_mux::catalog::Producer,
+	capture: capture::Config,
+	encode: Options,
+	clock: moq_mux::Clock,
+) {
+	fn is_send<T: Send>(_: &T) {}
+	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
+}
+
 /// A dropped or closed track is the normal end of a publish; any other cause is
 /// a real abort (e.g. a transport reset) worth surfacing rather than treating as
 /// a clean exit.
@@ -177,9 +196,12 @@ fn log_track_ended(err: moq_net::Error) {
 /// SPS), then releases the camera whenever the last viewer leaves and reopens it
 /// when one returns.
 ///
-/// Cancel safety: every wait here is a real `.await` (a frame read or a demand
-/// transition), so dropping this future (e.g. on Ctrl+C) drops `camera`, which
-/// releases the device and turns the LED off. No blocking thread is left behind.
+/// Cancel safety: every wait here is a real `.await` (a frame read, a demand
+/// transition, or an encode), so dropping this future (e.g. on Ctrl+C) drops
+/// `camera` and `encoder`, which release the device (LED off) and join the
+/// encode thread. Both the capture and encode threads sit idle between frames,
+/// so their joins return promptly unless the underlying device or encoder is
+/// itself wedged.
 async fn capture_loop(
 	producer: &mut Producer,
 	demand: &moq_net::TrackDemand,
@@ -214,7 +236,8 @@ async fn capture_loop(
 		encoder_config.bitrate = encode.bitrate;
 		encoder_config.codec = encode.codec;
 		encoder_config.kind = encode.kind.clone();
-		let mut encoder = Encoder::new(&encoder_config)?;
+		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
+		let mut encoder = Sink::open(&encoder_config).await?;
 		// Force an IDR on the first frame of each (re)open so a viewer subscribing
 		// after an idle gap can start decoding immediately.
 		let mut force_keyframe = true;
@@ -243,7 +266,7 @@ async fn capture_loop(
 			let Some(frame) = frame else { break }; // device stopped producing frames
 
 			let ts = Timestamp::from_micros(clock.micros())?;
-			let packets = encoder.encode(&frame, force_keyframe)?;
+			let packets = encoder.encode(frame, force_keyframe).await?;
 			force_keyframe = false;
 			// Once the encoder emits a frame the importer has parsed the SPS and
 			// the catalog rendition exists, so demand gating can take over.

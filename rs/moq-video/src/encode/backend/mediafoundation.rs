@@ -9,8 +9,9 @@
 //! The MFT emits an Annex-B byte stream with parameter sets inline ahead of each
 //! IDR/IRAP (SPS/PPS for H.264, VPS/SPS/PPS for H.265), which is exactly what
 //! `moq_mux` avc3 / hev1 mode wants, so unlike VideoToolbox there's no
-//! AVCC/HVCC -> Annex-B rewrite. Used only from the one capture/encode thread, so
-//! the COM handles are wrapped in a thread-confined `Send` type.
+//! AVCC/HVCC -> Annex-B rewrite. The whole encoder lives on the dedicated encode
+//! thread (see `encode::sink`), so its COM apartment stays balanced and its
+//! blocking waits never park a tokio worker.
 
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -74,8 +75,10 @@ pub(crate) struct MediaFoundation {
 	_com: ComGuard,
 }
 
-// The MFT and its COM handles are only ever touched from the one capture/encode
-// thread (see `publish_capture`'s `spawn_blocking`).
+// The MFT and its COM handles are created, driven, and dropped only on the
+// dedicated encode thread (see `encode::sink`), so the per-thread COM apartment
+// this opens in `ComGuard::new` stays balanced. `Send` lets the boxed trait
+// object satisfy `Backend: Send`.
 unsafe impl Send for MediaFoundation {}
 
 impl MediaFoundation {
@@ -323,7 +326,8 @@ impl MediaFoundation {
 	}
 
 	/// Block on events until the MFT is ready for input, collecting any output
-	/// that arrives meanwhile.
+	/// that arrives meanwhile. Runs on the dedicated encode thread (see
+	/// `encode::sink`), so this blocking wait never parks a tokio worker.
 	fn wait_for_input(&mut self, out: &mut Vec<Bytes>) -> Result<(), Error> {
 		while !self.needs_input {
 			let event = unsafe {

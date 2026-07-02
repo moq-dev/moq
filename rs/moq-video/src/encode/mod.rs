@@ -17,6 +17,7 @@
 mod backend;
 mod encoder;
 mod producer;
+mod sink;
 
 pub use encoder::{Codec, Config, Encoder, Kind};
 pub use producer::{Options, Producer, publish_capture};
