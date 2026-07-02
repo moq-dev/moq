@@ -18,7 +18,7 @@ use url::Url;
 #[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses to advertise as ICE host candidates in
-	/// our outbound offer. Same semantics as [`crate::server::Config`].
+	/// our outbound offer. Same semantics as [`crate::server::Config::ice_candidates`].
 	pub ice_candidates: Vec<SocketAddr>,
 }
 
