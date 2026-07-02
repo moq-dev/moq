@@ -64,7 +64,7 @@ impl Microphone {
 	pub async fn open(config: &Config) -> Result<Self, AudioError> {
 		// Fail fast on a denied/restricted mic (macOS TCC) instead of opening a
 		// stream that silently delivers nothing. A no-op on other platforms.
-		permission::ensure_microphone_access()?;
+		permission::ensure_microphone_access().await?;
 
 		let (device, sample_format, stream_config) = resolve(config)?;
 		let sample_rate = stream_config.sample_rate;

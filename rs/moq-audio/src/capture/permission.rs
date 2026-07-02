@@ -11,7 +11,7 @@
 use crate::AudioError;
 
 #[cfg(target_os = "macos")]
-pub(super) fn ensure_microphone_access() -> Result<(), AudioError> {
+pub(super) async fn ensure_microphone_access() -> Result<(), AudioError> {
 	use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 
 	let media =
@@ -31,7 +31,7 @@ pub(super) fn ensure_microphone_access() -> Result<(), AudioError> {
 		));
 	}
 	if status == AVAuthorizationStatus::NotDetermined {
-		return request_access(media);
+		return request_access(media).await;
 	}
 
 	// Unknown future status: don't block capture, let the stream open and the
@@ -47,29 +47,34 @@ pub(super) fn ensure_microphone_access() -> Result<(), AudioError> {
 #[cfg(target_os = "macos")]
 const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Trigger the system prompt and block (on this `spawn_blocking` thread) until
-/// the user answers. Unbundled CLIs usually get auto-denied without UI, which we
-/// surface as the same clear error.
+/// Trigger the system prompt and await the user's answer. Unbundled CLIs usually
+/// get auto-denied without UI, which we surface as the same clear error.
 #[cfg(target_os = "macos")]
-fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), AudioError> {
+async fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), AudioError> {
+	use std::sync::Mutex;
+
 	use objc2_av_foundation::AVCaptureDevice;
 
-	let (tx, rx) = std::sync::mpsc::channel::<bool>();
-	// `handler` owns `tx` and stays alive until this function returns, so the
-	// channel never reports `Disconnected`; a never-firing callback surfaces as
-	// `Timeout` instead of hanging.
+	// requestAccess invokes the handler once, asynchronously, on an arbitrary
+	// queue. Bridge it to a oneshot we await, so the prompt doesn't block a
+	// runtime worker and a cancelled capture drops cleanly mid-prompt.
+	let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+	let tx = Mutex::new(Some(tx));
 	let handler = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
-		let _ = tx.send(granted.as_bool());
+		if let Some(tx) = tx.lock().unwrap().take() {
+			let _ = tx.send(granted.as_bool());
+		}
 	});
 
 	unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
 
-	match rx.recv_timeout(PROMPT_TIMEOUT) {
-		Ok(true) => Ok(()),
-		Ok(false) => Err(denied()),
-		// Callback never fired within the window: don't hard-fail, fall through to
-		// the stream open and let the first-buffer timeout catch a real hang.
-		Err(_) => Ok(()),
+	match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
+		Ok(Ok(true)) => Ok(()),
+		Ok(Ok(false)) => Err(denied()),
+		// Prompt dismissed without a decision, or the callback never fired within
+		// the window: don't hard-fail, fall through to the stream open and let the
+		// first-buffer timeout catch a real hang.
+		Ok(Err(_)) | Err(_) => Ok(()),
 	}
 }
 
@@ -81,6 +86,6 @@ fn denied() -> AudioError {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn ensure_microphone_access() -> Result<(), AudioError> {
+pub(super) async fn ensure_microphone_access() -> Result<(), AudioError> {
 	Ok(())
 }
