@@ -1369,4 +1369,3 @@ fn session_connect_and_close() {
 	assert_eq!(moq_session_close(session), 0);
 	assert!(cb.recv() <= 0, "session close delivers a terminal code");
 }
-
