@@ -7,6 +7,7 @@ import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
 import { AnnounceRequest } from "./announce.ts";
+import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { type Origin, randomOrigin } from "./origin.ts";
@@ -218,6 +219,9 @@ export class Connection implements Established {
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
+		} else if (typ === StreamId.Fetch) {
+			const msg = await Fetch.decode(stream.reader, this.#version);
+			await this.#publisher.runFetch(msg, stream);
 		} else if (typ === StreamId.Track) {
 			const msg = await TrackMessage.decode(stream.reader, this.#version);
 			await this.#publisher.runTrackInfo(msg, stream);

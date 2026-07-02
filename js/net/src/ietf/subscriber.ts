@@ -198,6 +198,9 @@ export class Subscriber {
 	 */
 	consume(path: Path.Valid): Broadcast {
 		const broadcast = new Broadcast();
+		broadcast.onFetchGroup(() => {
+			throw new Error("fetch group is not supported for moq-transport");
+		});
 
 		void (async () => {
 			for (;;) {

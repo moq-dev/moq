@@ -1,7 +1,7 @@
 import { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
-import { Broadcast, type TrackRequest } from "../broadcast.ts";
+import { Broadcast, type FetchGroupOptions, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -10,6 +10,7 @@ import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
+import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -235,6 +236,7 @@ export class Subscriber {
 				ordered: info.ordered,
 			};
 		});
+		broadcast.onFetchGroup((name, sequence, options) => this.#fetchGroup(path, name, sequence, options));
 
 		void (async () => {
 			for (;;) {
@@ -390,6 +392,59 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(error(err));
 			throw err;
+		}
+	}
+
+	async #fetchGroup(
+		broadcast: Path.Valid,
+		track: string,
+		sequence: number,
+		options: FetchGroupOptions,
+	): Promise<Group> {
+		if (!supportsTrackStream(this.version)) {
+			throw new Error("fetch group requires moq-lite-05 or newer");
+		}
+
+		const info = await this.#trackInfo(broadcast, track);
+		const priority = options.priority ?? 0;
+		const stream = await Stream.open(this.#quic, undefined, priority);
+		const group = new Group(sequence);
+
+		try {
+			await stream.writer.u53(StreamId.Fetch);
+			await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
+		} catch (err: unknown) {
+			const e = error(err);
+			group.close(e);
+			stream.abort(e);
+			throw e;
+		}
+
+		void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
+		return group;
+	}
+
+	async #runFetchResponse(stream: Stream, group: Group, timescale: Time.Timescale): Promise<void> {
+		try {
+			let prevTs = 0n;
+
+			for (;;) {
+				const done = await Promise.race([stream.reader.done(), group.closed]);
+				if (done !== false) break;
+
+				prevTs += unzigzag(await stream.reader.u62());
+				const timestamp = new Time.Timestamp(Number(prevTs), timescale);
+				const size = await stream.reader.u53();
+				const payload = await stream.reader.read(size);
+				group.writeFrame({ data: payload, timestamp });
+			}
+
+			group.close();
+			stream.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			group.close(e);
+			stream.abort(e);
 		}
 	}
 

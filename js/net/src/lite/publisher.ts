@@ -1,12 +1,13 @@
 import { type Dispose, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast.ts";
-import type { Group } from "../group.ts";
+import { CacheFull, type Frame, type Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { TrackSubscriber } from "../track.ts";
 import { error } from "../util/error.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
+import type { Fetch as FetchMessage } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -332,6 +333,39 @@ export class Publisher {
 		}
 	}
 
+	/**
+	 * Handles a FETCH stream by serving one group as bare frame records.
+	 *
+	 * @internal
+	 */
+	async runFetch(msg: FetchMessage, stream: Stream) {
+		if (!supportsTrackStream(this.version)) {
+			throw new Error("fetch requires moq-lite-05 or newer");
+		}
+
+		const broadcast = this.#broadcasts.peek()?.get(msg.broadcast);
+		if (!broadcast) {
+			console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
+			stream.writer.reset(new Error("not found"));
+			return;
+		}
+
+		try {
+			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
+			const group = await broadcast.track(msg.track).fetchGroup(msg.group, { priority: msg.priority });
+			await this.#runFetchGroup(msg, group, stream.writer, Timescale(info.timescale));
+			console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+			stream.close();
+			group.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(
+				`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${e.message}`,
+			);
+			stream.abort(e);
+		}
+	}
+
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
 	// `broadcast.track(name).info()` triggers a TrackRequest the app answers with
 	// accept(TrackInfo); only the immutable properties are needed (not the groups).
@@ -363,6 +397,44 @@ export class Publisher {
 		pending.catch(() => this.#trackInfo.delete(key));
 		this.#trackInfo.set(key, pending);
 		return pending;
+	}
+
+	async #runFetchGroup(msg: FetchMessage, group: Group, stream: Writer, timescale: Timescale) {
+		let prevTs = 0n;
+
+		for (;;) {
+			const frame = await this.#readFetchFrame(group, msg.frameStart);
+			if (!frame) break;
+
+			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
+			await stream.u62(zigzag(ts - prevTs));
+			prevTs = ts;
+
+			await stream.u53(frame.data.byteLength);
+			await stream.write(frame.data);
+		}
+
+		stream.close();
+	}
+
+	async #readFetchFrame(group: Group, frameStart: number): Promise<Frame | undefined> {
+		for (;;) {
+			if (group.state.offset > frameStart) throw new CacheFull();
+
+			const frames = group.state.frames.peek();
+			const frame = frames.shift();
+			if (frame) {
+				const index = group.state.total.peek() - frames.length - 1;
+				if (index >= frameStart) return frame;
+				continue;
+			}
+
+			const closed = group.state.closed.peek();
+			if (closed instanceof Error) throw closed;
+			if (closed) return;
+
+			await Signal.race(group.state.frames, group.state.closed);
+		}
 	}
 
 	/**
