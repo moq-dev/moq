@@ -1,5 +1,7 @@
 use std::num::NonZero;
 use std::sync::LazyLock;
+
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
@@ -302,15 +304,34 @@ impl Timestamp {
 		}
 	}
 
-	/// Wall-clock now, expressed in the default timescale ([`Timescale::MILLI`]).
+	/// Current time, expressed in the default timescale ([`Timescale::MILLI`]).
 	///
-	/// This is the one-way bridge from wall-clock time to a track timestamp: there is
+	/// This is the one-way bridge from a local clock to a track timestamp: there is
 	/// deliberately no inverse (a [`Timestamp`] is relative and jittered, never a clock).
 	/// Used to stamp frames that arrive without one, e.g. on protocols whose wire can't
-	/// carry a timestamp. Uses [`tokio::time::Instant::now`] so it honors
+	/// carry a timestamp. Uses [`web_async::time::Instant::now`] so it works on wasm and honors
 	/// `tokio::time::pause` in tests.
 	pub fn now() -> Self {
-		tokio::time::Instant::now().into()
+		Self::from_web_instant(web_async::time::Instant::now())
+	}
+
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	fn from_web_instant(instant: web_async::time::Instant) -> Self {
+		let instant: std::time::Instant = instant.into();
+		instant.into()
+	}
+
+	#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+	fn from_web_instant(instant: web_async::time::Instant) -> Self {
+		let (anchor_instant, anchor_duration) = *TIME_ANCHOR;
+		let duration = match instant.checked_duration_since(anchor_instant) {
+			Some(forward) => anchor_duration + forward,
+			None => anchor_duration
+				.checked_sub(anchor_instant.duration_since(instant))
+				.unwrap_or(std::time::Duration::ZERO),
+		};
+
+		Self::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
 	}
 }
 
@@ -414,9 +435,11 @@ impl std::ops::SubAssign for Timestamp {
 /// A [`Timestamp`] isn't a real clock, it just needs to be non-negative and roughly
 /// monotonic with wall time. Anchoring 50 years after the Unix epoch keeps the value
 /// ~1.5e12 ms smaller, trimming a byte or two off the first frame's varint.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 const ANCHOR_EPOCH_SECS: u64 = 1_577_836_800;
 
 // There's no zero Instant, so we need to use a reference point.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|| {
 	// To deter nerds trying to use timestamp as wall clock time, we subtract a random amount of time from the anchor.
 	// This will make our timestamps appear to be late; just enough to be annoying and obscure our clock drift.
@@ -425,6 +448,13 @@ static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|
 	(std::time::Instant::now(), SystemTime::now() - jitter)
 });
 
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+static TIME_ANCHOR: LazyLock<(web_async::time::Instant, std::time::Duration)> = LazyLock::new(|| {
+	let jitter = std::time::Duration::from_millis(rand::rng().random_range(1..69_420));
+	(web_async::time::Instant::now(), jitter)
+});
+
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 impl From<std::time::Instant> for Timestamp {
 	/// Convert an [`std::time::Instant`] into a millisecond-scale timestamp (the default
 	/// timescale), anchored at 2020-01-01 plus a per-process jitter (see `TIME_ANCHOR`).
@@ -448,6 +478,7 @@ impl From<std::time::Instant> for Timestamp {
 	}
 }
 
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 impl From<tokio::time::Instant> for Timestamp {
 	fn from(instant: tokio::time::Instant) -> Self {
 		instant.into_std().into()
