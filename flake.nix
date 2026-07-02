@@ -152,6 +152,12 @@
             gzip
           ];
 
+        # Developer workflow tooling not needed for builds: the GitHub CLI
+        # for opening/reviewing PRs from the dev shell.
+        devTools = with pkgs; [
+          gh
+        ];
+
         # Linters / formatters required by `just ci`; `just check` and
         # `just fix` guard each tool with `command -v` so they skip
         # silently when the binary isn't on $PATH.
@@ -237,7 +243,8 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps ++ obsDeps;
+          packages =
+            rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps ++ obsDeps ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

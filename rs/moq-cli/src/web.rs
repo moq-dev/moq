@@ -1,10 +1,42 @@
 use anyhow::Context;
 use axum::handler::HandlerWithoutStateExt;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::{Router, http::Method, routing::get};
+use axum::{Router, routing::get};
 use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
+
+/// Browser CORS policy for HTTP gateway listeners.
+#[derive(clap::Args, Clone, Default)]
+pub struct Cors {
+	/// Browser origin allowed to call this listener. Repeat to allow multiple.
+	#[arg(long = "cors-origin", value_name = "ORIGIN", value_parser = parse_origin)]
+	pub origin: Vec<HeaderValue>,
+}
+
+impl Cors {
+	/// Build a CORS layer for the given listener methods.
+	pub fn layer<const N: usize>(&self, methods: [Method; N]) -> anyhow::Result<CorsLayer> {
+		let layer = CorsLayer::new().allow_methods(methods).allow_headers(Any);
+		let wildcard = HeaderValue::from_static("*");
+
+		Ok(match self.origin.as_slice() {
+			[] => layer,
+			[origin] if origin == wildcard => layer.allow_origin(Any),
+			origins => {
+				anyhow::ensure!(
+					!origins.contains(&wildcard),
+					"`--cors-origin *` cannot be combined with specific origins"
+				);
+				layer.allow_origin(origins.to_vec())
+			}
+		})
+	}
+}
+
+fn parse_origin(origin: &str) -> Result<HeaderValue, axum::http::header::InvalidHeaderValue> {
+	origin.parse()
+}
 
 /// Serve an axum router over TCP, optionally terminating TLS. Used by the HLS
 /// and WebRTC (WHIP/WHEP) HTTP endpoints.
@@ -63,4 +95,37 @@ pub async fn run_web(bind: &str, tls_info: Arc<RwLock<moq_native::tls::Info>>) -
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn cors_origin_defaults_to_no_browser_origin() {
+		let cors = Cors::default();
+
+		assert!(cors.layer([Method::GET]).is_ok());
+	}
+
+	#[test]
+	fn cors_origin_allows_specific_allowlist() {
+		let cors = Cors {
+			origin: vec![HeaderValue::from_static("https://example.com")],
+		};
+
+		assert!(cors.layer([Method::GET]).is_ok());
+	}
+
+	#[test]
+	fn cors_origin_rejects_wildcard_with_allowlist() {
+		let cors = Cors {
+			origin: vec![
+				HeaderValue::from_static("*"),
+				HeaderValue::from_static("https://example.com"),
+			],
+		};
+
+		assert!(cors.layer([Method::GET]).is_err());
+	}
 }

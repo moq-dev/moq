@@ -21,12 +21,13 @@ default:
     	echo ">>> Port 4443 is busy, using $port instead" >&2
     fi
 
-    export MOQ_SERVER_BIND="[::]:$port"
-    export MOQ_WEB_HTTP_LISTEN="[::]:$port"
     base="http://localhost:$port"
 
+    # Scope the bind env vars to the relay only. The unified `moq` binary also
+    # reads MOQ_SERVER_BIND, so exporting it globally would make the `pub` client
+    # try to start a server (and fail without a TLS cert).
     bun run concurrently --kill-others --names rly,bbb,web --prefix-colors auto \
-    	"just relay" \
+    	"MOQ_SERVER_BIND='[::]:$port' MOQ_WEB_HTTP_LISTEN='[::]:$port' just relay" \
     	"just wait $base/certificate.sha256 && just pub bbb $base" \
     	"just wait $base/certificate.sha256 && just web serve $base"
 

@@ -5,9 +5,9 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
+use axum::http::Method;
 use hang::moq_net;
 use hang::moq_net::AsPath;
-use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 
 use crate::moq::notify_ready;
@@ -33,6 +33,10 @@ pub struct Args {
 	/// Public UDP address(es) advertised as ICE host candidates (repeatable).
 	#[arg(long, requires = "rtc-listen")]
 	pub public_addr: Vec<SocketAddr>,
+
+	/// Browser CORS policy for the WHIP/WHEP listener.
+	#[command(flatten)]
+	pub cors: crate::web::Cors,
 }
 
 /// WHIP server: accept incoming WebRTC publishes into the Origin as `name` (import).
@@ -41,11 +45,12 @@ pub async fn listen_import(
 	listen: SocketAddr,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
+	cors: crate::web::Cors,
 	name: String,
 ) -> anyhow::Result<()> {
 	let publisher = scope_producer(&origin, &name)?;
 	let server = server(publisher, origin.consume(), udp_bind, public_addr);
-	serve(server.publish_router(), listen, "WHIP").await
+	serve(server.publish_router(), listen, "WHIP", cors).await
 }
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
@@ -54,6 +59,7 @@ pub async fn listen_export(
 	listen: SocketAddr,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
+	cors: crate::web::Cors,
 	name: String,
 ) -> anyhow::Result<()> {
 	let subscriber = origin
@@ -63,7 +69,7 @@ pub async fn listen_export(
 	// glue, so hand it an unused, empty Origin producer.
 	let publisher = moq_net::Origin::random().produce();
 	let server = server(publisher, subscriber, udp_bind, public_addr);
-	serve(server.subscribe_router(), listen, "WHEP").await
+	serve(server.subscribe_router(), listen, "WHEP", cors).await
 }
 
 /// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.
@@ -114,8 +120,9 @@ fn server(
 	moq_rtc::Server::new(config, publisher, subscriber)
 }
 
-async fn serve(router: axum::Router, listen: SocketAddr, role: &str) -> anyhow::Result<()> {
-	let app = router.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+async fn serve(router: axum::Router, listen: SocketAddr, role: &str, cors: crate::web::Cors) -> anyhow::Result<()> {
+	let cors = cors.layer([Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])?;
+	let app = router.layer(cors);
 	let listener = moq_native::bind::tcp(listen)?;
 
 	tracing::info!(%listen, role, "serving WebRTC");

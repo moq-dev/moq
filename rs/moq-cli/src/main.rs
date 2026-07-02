@@ -76,6 +76,12 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
+	if let ImportSource::Rtc(rtc) = &import.source {
+		if rtc.connect.is_some() {
+			reject_listener_cors(&rtc.cors, "import rtc")?;
+		}
+	}
+
 	// MoQ side: publish the Origin outward.
 	if let Some(url) = moq.client_connect.clone() {
 		let client = net.client(moq.client.clone())?;
@@ -129,6 +135,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 						addr,
 						rtc.udp_bind,
 						rtc.public_addr,
+						rtc.cors,
 						name,
 					));
 				} else if let Some(url) = rtc.connect {
@@ -149,6 +156,12 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+	if let ExportSink::Rtc(rtc) = &export.sink {
+		if rtc.connect.is_some() {
+			reject_listener_cors(&rtc.cors, "export rtc")?;
+		}
+	}
 
 	// MoQ side: fill the Origin.
 	if let Some(url) = moq.client_connect.clone() {
@@ -203,6 +216,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 						addr,
 						rtc.udp_bind,
 						rtc.public_addr,
+						rtc.cors,
 						name,
 					));
 				} else if let Some(url) = rtc.connect {
@@ -265,4 +279,12 @@ fn warn_if_missing_format(name: &str) {
 			"You should append .hang to your broadcast name to make the catalog format explicit."
 		);
 	}
+}
+
+fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Result<()> {
+	anyhow::ensure!(
+		cors.origin.is_empty(),
+		"`--cors-origin` only applies to `{endpoint} --listen`"
+	);
+	Ok(())
 }
