@@ -275,3 +275,16 @@ test("Reader stream with partial reads", async () => {
 
 	expect(await reader.done()).toBe(true);
 });
+
+test("Reader u53 decodes two-byte stream type prefixes", async () => {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream);
+
+	await writer.u53(0x40);
+	writer.close();
+	await writer.closed;
+
+	const reader = new Reader(undefined, concatChunks(written));
+	expect(await reader.u53()).toBe(0x40);
+	expect(await reader.done()).toBe(true);
+});
