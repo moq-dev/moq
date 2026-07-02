@@ -214,6 +214,10 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
     export hls --listen '[::]:8089'
 ```
 
+HLS export does not allow cross-origin browser access unless configured. Pass
+`--cors-origin <origin>` one or more times to allow specific origins, or
+`--cors-origin '*'` to allow any browser origin.
+
 ## Network Gateways (RTMP / SRT / WebRTC)
 
 The `rtmp`, `srt`, and `rtc` endpoints bridge other live protocols. Each takes
@@ -273,6 +277,10 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang i
 # WHEP playback: serve a broadcast to browsers
 moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export rtc --listen '[::]:8080'
 ```
+
+The WHIP/WHEP HTTP listener does not allow cross-origin browser access unless
+configured. Pass `--cors-origin <origin>` one or more times to allow specific
+origins, or `--cors-origin '*'` to allow any browser origin.
 
 ## Authentication
 

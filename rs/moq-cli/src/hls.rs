@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
+use axum::http::Method;
 use hang::moq_net;
 use hang::moq_net::AsPath;
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::moq::notify_ready;
 
@@ -36,6 +36,10 @@ pub struct ExportArgs {
 	/// Minimum media kept in each rendition's sliding window.
 	#[arg(long, default_value = "16s", value_parser = humantime::parse_duration)]
 	pub window: Duration,
+
+	/// Browser CORS policy for the HLS listener.
+	#[command(flatten)]
+	pub cors: crate::web::Cors,
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
@@ -69,9 +73,7 @@ pub async fn export(origin: moq_net::OriginConsumer, args: ExportArgs, name: Str
 		..Default::default()
 	};
 	let server = moq_hls::Server::new(scoped, config);
-	let app = server
-		.router()
-		.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+	let app = server.router().layer(args.cors.layer([Method::GET])?);
 
 	let tls = if args.tls.cert.is_empty() && args.tls.generate.is_empty() {
 		None

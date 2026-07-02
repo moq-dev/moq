@@ -129,9 +129,11 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 						addr,
 						rtc.udp_bind,
 						rtc.public_addr,
+						rtc.cors,
 						name,
 					));
 				} else if let Some(url) = rtc.connect {
+					reject_listener_cors(&rtc.cors, "import rtc")?;
 					tasks.spawn(rtc::connect_import(origin.clone(), url, name));
 				}
 			}
@@ -203,9 +205,11 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 						addr,
 						rtc.udp_bind,
 						rtc.public_addr,
+						rtc.cors,
 						name,
 					));
 				} else if let Some(url) = rtc.connect {
+					reject_listener_cors(&rtc.cors, "export rtc")?;
 					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
 				}
 			}
@@ -265,4 +269,12 @@ fn warn_if_missing_format(name: &str) {
 			"You should append .hang to your broadcast name to make the catalog format explicit."
 		);
 	}
+}
+
+fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Result<()> {
+	anyhow::ensure!(
+		cors.origin.is_empty(),
+		"`--cors-origin` only applies to `{endpoint} --listen`"
+	);
+	Ok(())
 }
