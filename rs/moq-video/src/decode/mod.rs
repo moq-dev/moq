@@ -12,7 +12,10 @@
 
 use bytes::Bytes;
 
-mod backend;
+// Crate-visible so the NVENC encode backend's round-trip test can decode its
+// output with the software decoder (an in-crate, ffmpeg-free encode->decode
+// check that catches input-pitch corruption).
+pub(crate) mod backend;
 mod consumer;
 mod decoder;
 
