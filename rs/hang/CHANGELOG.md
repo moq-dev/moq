@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/moq-dev/moq/compare/hang-v0.19.3...hang-v0.20.0) - 2026-07-02
+
+### Added
+
+- *(moq-mux)* add FLAC support (catalog + mp4/mkv import/export) ([#1969](https://github.com/moq-dev/moq/pull/1969))
+- *(moq-mux)* add MP3 audio support for FLV/RTMP ([#1967](https://github.com/moq-dev/moq/pull/1967))
+
 ## [0.19.3](https://github.com/moq-dev/moq/compare/hang-v0.19.2...hang-v0.19.3) - 2026-06-30
 
 ### Added
