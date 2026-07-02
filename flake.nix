@@ -87,6 +87,8 @@
             libressl
             ffmpeg
             curl
+            # Independent MPEG-TS validation (tsanalyze) in moq-mux's tests.
+            tsduck
             cargo-sort
             cargo-shear
             cargo-edit
