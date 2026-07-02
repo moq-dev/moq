@@ -34,6 +34,12 @@ ignore = [
     # proc-macro via local-ip-address -> neli -> getset; no runtime exposure.
     # Drop the ignore when getset migrates off proc-macro-error2.
     "RUSTSEC-2026-0173",
+
+    # plist 1.9 pins quick-xml 0.39 via netdev -> netwatch -> iroh. The fixed
+    # quick-xml 0.41 release is outside plist's current semver constraint, and
+    # this XML parser path is OS network interface discovery, not MoQ input.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
