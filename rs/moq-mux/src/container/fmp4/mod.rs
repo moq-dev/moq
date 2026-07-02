@@ -337,7 +337,8 @@ pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u3
 	// importer preserved the source scale (the common passthrough case), this is a
 	// no-op; otherwise it's a single rescale rather than the legacy `micros * scale
 	// / 1_000_000` round-trip.
-	let dts = frames[0].timestamp.as_scale(timescale) as u64;
+	let base_dts = frames[0].timestamp.as_scale(timescale) as u64;
+	let mut dts = base_dts;
 
 	let entries: Vec<_> = frames
 		.iter()
@@ -346,14 +347,24 @@ pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u3
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
 			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
-			mp4_atom::TrunEntry {
+			let pts = f.timestamp.as_scale(timescale) as i128;
+			let cts = pts - i128::from(dts);
+			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
+
+			// Frame timestamps are PTS while sample order is decode order. Author DTS
+			// by accumulating durations and store PTS-DTS as the signed CTS.
+			if let Some(duration) = duration {
+				dts = dts.checked_add(u64::from(duration)).ok_or(Error::PtsOverflow)?;
+			}
+
+			Ok(mp4_atom::TrunEntry {
+				duration,
 				size: Some(f.payload.len() as u32),
 				flags: Some(flags),
-				duration,
-				..Default::default()
-			}
+				cts: (cts != 0).then_some(cts),
+			})
 		})
-		.collect();
+		.collect::<Result<_>>()?;
 
 	let mdat_data: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 
@@ -365,7 +376,7 @@ pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u3
 				..Default::default()
 			},
 			tfdt: Some(mp4_atom::Tfdt {
-				base_media_decode_time: dts,
+				base_media_decode_time: base_dts,
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: Some(data_offset),
@@ -707,6 +718,41 @@ mod tests {
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
+	}
+
+	#[test]
+	fn reordered_pts_round_trips_with_cts() {
+		let timescale = 1_000_000;
+		let input = vec![
+			Frame {
+				timestamp: ts(0),
+				payload: Bytes::from_static(&[0x00]),
+				keyframe: true,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(99_000),
+				payload: Bytes::from_static(&[0x01]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(33_000),
+				payload: Bytes::from_static(&[0x02]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+		];
+
+		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let frames = decode(fragment, timescale).unwrap();
+
+		assert_eq!(frames.len(), input.len());
+		for (actual, expected) in frames.iter().zip(&input) {
+			assert_eq!(actual.timestamp, expected.timestamp);
+			assert_eq!(actual.duration, expected.duration);
+			assert_eq!(actual.payload, expected.payload);
+		}
 	}
 
 	#[test]
