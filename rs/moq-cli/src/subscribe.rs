@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
-use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, FilterAudio, FilterVideo, Stream, TargetAudio, TargetVideo};
 use tokio::io::AsyncWriteExt;
 
@@ -214,15 +213,15 @@ impl SubscribeArgs {
 }
 
 pub struct Subscribe {
-	broadcast: moq_net::BroadcastConsumer,
+	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
 }
 
 impl Subscribe {
-	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+	pub fn new(source: impl Into<moq_mux::Source>, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
 		Self {
-			broadcast,
+			source: source.into(),
 			catalog,
 			args,
 		}
@@ -230,7 +229,7 @@ impl Subscribe {
 
 	/// Build the catalog stream from the configured filter/target flags.
 	async fn stream(&self) -> anyhow::Result<catalog::Target<catalog::Filter<catalog::Consumer>>> {
-		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog).await?;
+		let consumer = catalog::Consumer::new(self.source.broadcast(), self.catalog).await?;
 
 		let mut filter = consumer.filter();
 		filter.set_video(self.args.filter_video()?);
@@ -258,7 +257,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast.clone(), stream)
+		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source.clone(), stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -274,7 +273,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast.clone(), stream)
+		let mut mkv = moq_mux::container::mkv::Export::new(self.source.clone(), stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -291,7 +290,7 @@ impl Subscribe {
 
 		let stream = self.stream().await?;
 		let mut h264 =
-			moq_mux::codec::h264::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
+			moq_mux::codec::h264::Export::new(self.source.clone(), stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -306,7 +305,7 @@ impl Subscribe {
 
 		let stream = self.stream().await?;
 		let mut h265 =
-			moq_mux::codec::h265::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
+			moq_mux::codec::h265::Export::new(self.source.clone(), stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -324,7 +323,7 @@ impl Subscribe {
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
-		let mut ts = moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)
+		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
 			.with_latency(self.args.max_latency);
 
@@ -343,7 +342,7 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)
+		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
 			.await?
 			.with_latency(self.args.max_latency);
 

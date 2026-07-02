@@ -61,6 +61,12 @@ impl Audio {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct AudioConfig {
+	/// Optional reference to another broadcast that publishes this track, expressed
+	/// relative to the broadcast that served this catalog (e.g. `../source`). If unset,
+	/// the track lives in the same broadcast as the catalog.
+	#[serde(default)]
+	pub broadcast: Option<moq_net::PathRelativeOwned>,
+
 	// The codec, see the registry for details:
 	// https://w3c.github.io/webcodecs/codec_registry.html
 	#[serde_as(as = "DisplayFromStr")]
@@ -110,6 +116,7 @@ impl AudioConfig {
 	/// since the type is `#[non_exhaustive]`.
 	pub fn new(codec: impl Into<AudioCodec>, sample_rate: u32, channel_count: u32) -> Self {
 		Self {
+			broadcast: None,
 			codec: codec.into(),
 			sample_rate,
 			channel_count,

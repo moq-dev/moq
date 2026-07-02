@@ -72,7 +72,7 @@ impl Flavor {
 /// keyframe). Only Legacy and LOC container tracks (raw codec payloads) are
 /// supported; CMAF tracks are rejected.
 pub struct Export {
-	broadcast: moq_net::BroadcastConsumer,
+	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
 
@@ -99,21 +99,22 @@ struct FlvTrack {
 }
 
 impl Export {
-	/// Subscribe to `broadcast` and produce FLV byte chunks, using the default
+	/// Subscribe to `source` and produce FLV byte chunks, using the default
 	/// catalog format ([`CatalogFormat::Hang`]).
-	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
+	pub async fn new(source: impl Into<crate::Source>) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(source, CatalogFormat::default()).await
 	}
 
-	/// Subscribe to `broadcast` and produce FLV byte chunks, selecting an explicit
+	/// Subscribe to `source` and produce FLV byte chunks, selecting an explicit
 	/// `catalog_format` for track discovery.
 	pub async fn with_catalog_format(
-		broadcast: moq_net::BroadcastConsumer,
+		source: impl Into<crate::Source>,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
+		let source = source.into();
+		let catalog = crate::catalog::Consumer::new(source.broadcast(), catalog_format).await?;
 		Ok(Self {
-			broadcast,
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			video: None,
@@ -237,7 +238,7 @@ impl Export {
 				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
 				_ => None,
 			};
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			self.video = Some(FlvTrack {
 				name: name.clone(),
 				source,
@@ -256,7 +257,7 @@ impl Export {
 		{
 			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			self.audio = Some(FlvTrack {
 				name: name.clone(),
 				source,

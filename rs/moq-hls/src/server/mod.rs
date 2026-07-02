@@ -65,10 +65,14 @@ impl Server {
 			.ok()
 			.flatten()?;
 
+		// Keep the origin attached so renditions referencing a sibling broadcast
+		// (the catalog `broadcast` field) can be resolved.
+		let source = moq_mux::Source::new(broadcast).with_origin(self.inner.origin.consume(), name);
+
 		let mut broadcasters = self.inner.broadcasters.lock().unwrap();
 		let broadcaster = broadcasters
 			.entry(name.to_string())
-			.or_insert_with(|| Broadcaster::new(broadcast, self.inner.config.clone()));
+			.or_insert_with(|| Broadcaster::new(source, self.inner.config.clone()));
 		Some(broadcaster.clone())
 	}
 }

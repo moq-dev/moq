@@ -79,7 +79,11 @@ impl Subscriber {
 			return Ok(None);
 		};
 
-		let export = ts::Export::new(broadcast).await?;
+		// Keep the origin attached so renditions referencing a sibling broadcast
+		// (the catalog `broadcast` field) can be resolved.
+		let source = moq_mux::Source::new(broadcast).with_origin(origin.consume(), path);
+
+		let export = ts::Export::new(source).await?;
 		Ok(Some(Self { export }))
 	}
 

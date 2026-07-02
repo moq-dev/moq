@@ -9,6 +9,7 @@ export * from "./audio";
 export * from "./container";
 export * from "./format";
 export * from "./integers";
+export * from "./path";
 export * from "./priority";
 export * from "./root";
 export * from "./track";

@@ -21,3 +21,34 @@ test("extended schema validates app sections", () => {
 	// The extended schema enforces the app's section type.
 	expect(() => ExtendedSchema.parse({ scte35: { spliceId: "nope" } })).toThrow();
 });
+
+test("rendition broadcast reference is parsed and normalized", () => {
+	const catalog = {
+		video: {
+			renditions: {
+				video: {
+					broadcast: ".././source/",
+					codec: "avc1.64001f",
+					container: { kind: "legacy" },
+				},
+			},
+		},
+	};
+	const parsed = RootSchema.parse(catalog);
+	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	// Normalized like Rust PathRelative: `.` and empty segments dropped, `..` preserved.
+	expect(parsed.video.renditions.video?.broadcast).toBe("../source");
+});
+
+test("rendition without broadcast reference stays undefined", () => {
+	const catalog = {
+		video: {
+			renditions: {
+				video: { codec: "avc1.64001f", container: { kind: "legacy" } },
+			},
+		},
+	};
+	const parsed = RootSchema.parse(catalog);
+	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	expect(parsed.video.renditions.video?.broadcast).toBeUndefined();
+});

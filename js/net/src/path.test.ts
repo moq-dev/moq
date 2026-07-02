@@ -189,3 +189,53 @@ test("from sanitizes multiple arguments with slashes", () => {
 	expect(Path.from("/foo/", "/bar/", "/baz/")).toBe("foo/bar/baz" as Path.Valid);
 	expect(Path.from("foo//", "//bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
 });
+
+test("resolve appends named segments", () => {
+	expect(Path.resolve(Path.from("a/b"), "c")).toBe(Path.from("a/b/c"));
+	expect(Path.resolve(Path.from("a/b"), "c/d")).toBe(Path.from("a/b/c/d"));
+});
+
+test("resolve with empty rel returns base", () => {
+	expect(Path.resolve(Path.from("a/b"), "")).toBe(Path.from("a/b"));
+});
+
+test("resolve single dotdot pops one segment", () => {
+	expect(Path.resolve(Path.from("a/b/c"), "../d")).toBe(Path.from("a/b/d"));
+	expect(Path.resolve(Path.from("a/b/c"), "..")).toBe(Path.from("a/b"));
+});
+
+test("resolve multiple dotdot pops multiple segments", () => {
+	expect(Path.resolve(Path.from("a/b/c"), "../../x")).toBe(Path.from("a/x"));
+	expect(Path.resolve(Path.from("a/b/c"), "../../../x")).toBe(Path.from("x"));
+});
+
+test("resolve excess dotdot clamps at empty", () => {
+	expect(Path.resolve(Path.from("a"), "../../../foo")).toBe(Path.from("foo"));
+	expect(Path.resolve(Path.from("a"), "..")).toBe(Path.from(""));
+});
+
+test("resolve with empty base", () => {
+	expect(Path.resolve(Path.empty(), "foo")).toBe(Path.from("foo"));
+	expect(Path.resolve(Path.empty(), "..")).toBe(Path.from(""));
+});
+
+test("resolve treats dot as a no-op", () => {
+	expect(Path.resolve(Path.from("a/b"), ".")).toBe(Path.from("a/b"));
+	expect(Path.resolve(Path.from("a/b"), "./c")).toBe(Path.from("a/b/c"));
+	expect(Path.resolve(Path.from("a/b"), "./../c")).toBe(Path.from("a/c"));
+	expect(Path.resolve(Path.from("a/b"), "foo/./bar")).toBe(Path.from("a/b/foo/bar"));
+});
+
+test("resolve self-reference via dotdot equals base", () => {
+	expect(Path.resolve(Path.from("a/b"), "../b")).toBe(Path.from("a/b"));
+});
+
+test("normalizeRelative drops empty and dot segments", () => {
+	expect(Path.normalizeRelative("")).toBe("");
+	expect(Path.normalizeRelative(".")).toBe("");
+	expect(Path.normalizeRelative("./foo")).toBe("foo");
+	expect(Path.normalizeRelative("foo//bar")).toBe("foo/bar");
+	expect(Path.normalizeRelative("foo/./bar")).toBe("foo/bar");
+	expect(Path.normalizeRelative("/foo/")).toBe("foo");
+	expect(Path.normalizeRelative("../foo")).toBe("../foo");
+});

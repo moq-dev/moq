@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
+import { RelativeBroadcastSchema } from "./path";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
@@ -9,6 +10,11 @@ const TrackSchema = z.object({
 
 /** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
 export const VideoConfigSchema = z.object({
+	// Optional reference to another broadcast that publishes this track, expressed
+	// relative to the broadcast that served this catalog (e.g. "../source").
+	// If unset, the track lives in the same broadcast as the catalog.
+	broadcast: z.optional(RelativeBroadcastSchema),
+
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
 

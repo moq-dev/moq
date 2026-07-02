@@ -94,11 +94,16 @@ export class Broadcast {
 	}
 
 	#runAnnouncedNow(effect: Effect): void {
+		const name = effect.get(this.input.name);
+		this.#announcedNow.set(this.#isPathAnnounced(effect, name));
+	}
+
+	// Whether `name` is currently announced on the connection (or skipping the check
+	// because reload is off or the relay doesn't support announcements). Used by both
+	// `#runAnnouncedNow` (for `input.name`) and `#override` (for cross-broadcast refs).
+	#isPathAnnounced(effect: Effect, name: Moq.Path.Valid): boolean {
 		const reload = effect.get(this.input.reload);
-		if (!reload) {
-			this.#announcedNow.set(true);
-			return;
-		}
+		if (!reload) return true;
 
 		// Cloudflare's relay does not yet support announcement subscriptions,
 		// so an announcement will never arrive. Fall back to subscribing
@@ -106,13 +111,11 @@ export class Broadcast {
 		const conn = effect.get(this.input.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
 			console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
-			this.#announcedNow.set(true);
-			return;
+			return true;
 		}
 
-		const name = effect.get(this.input.name);
 		const announced = effect.get(this.#announced);
-		this.#announcedNow.set(announced.has(name));
+		return announced.has(name);
 	}
 
 	#runBroadcast(effect: Effect): void {
@@ -193,6 +196,58 @@ export class Broadcast {
 				this.#output.status.set("offline");
 			}
 		});
+	}
+
+	/**
+	 * Resolve the `Moq.Broadcast` that publishes a given track.
+	 *
+	 * If `rel` is set (a rendition's catalog `broadcast` field), treat it as a path
+	 * relative to this broadcast's name and consume the resolved broadcast on the same
+	 * connection. Otherwise return the catalog's own active broadcast.
+	 *
+	 * Override broadcasts are cached per resolved path and owned by this Broadcast's
+	 * `signals`; the caller's `effect` only subscribes to the cached signal. Many
+	 * renditions referencing the same source thus share one underlying subscription,
+	 * and the override outlives any single caller effect.
+	 */
+	trackBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast | undefined {
+		if (!rel) return effect.get(this.output.active);
+
+		const base = effect.get(this.input.name);
+		const resolved = Path.resolve(base, rel);
+
+		// A reference that walks back to the catalog's own broadcast (or resolves to
+		// the empty root, via excess `..`) is served by the catalog broadcast itself,
+		// avoiding a duplicate subscription on the same path.
+		if (resolved === base || resolved === Path.empty()) return effect.get(this.output.active);
+
+		return effect.get(this.#override(resolved));
+	}
+
+	#overrides = new Map<Moq.Path.Valid, Signal<Moq.Broadcast | undefined>>();
+
+	#override(path: Moq.Path.Valid): Signal<Moq.Broadcast | undefined> {
+		const cached = this.#overrides.get(path);
+		if (cached) return cached;
+
+		const signal = new Signal<Moq.Broadcast | undefined>(undefined);
+		this.#overrides.set(path, signal);
+
+		this.signals.run((effect) => {
+			const enabled = effect.get(this.input.enabled);
+			if (!enabled) return;
+
+			const conn = effect.get(this.input.connection);
+			if (!conn) return;
+
+			if (!this.#isPathAnnounced(effect, path)) return;
+
+			const broadcast = conn.consume(path);
+			effect.cleanup(() => broadcast.close());
+			effect.set(signal, broadcast, undefined);
+		});
+
+		return signal;
 	}
 
 	close() {
