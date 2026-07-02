@@ -36,3 +36,13 @@ smoke-full:
 # harness can actually report failure).
 smoke-negative *args:
     ./smoke/smoke.sh --negative {{ args }}
+
+# Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
+# ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
+# burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
+# (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
+# (use a real capture). See ts-compliance/README.md.
+
+# Check the subscriber's MPEG-TS output for IRD compliance.
+ts-compliance *args:
+    ./ts-compliance/run.sh {{ args }}
