@@ -250,7 +250,9 @@ export class Consumer {
 			const first = this.#groups.shift();
 			if (!first) break;
 			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
+			console.warn(
+				`skipping slow group: track=${this.#track.name} ${first.consumer.sequence} -> ${this.#active}`,
+			);
 
 			first.consumer.close();
 			first.frames.length = 0;
