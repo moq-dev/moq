@@ -109,6 +109,15 @@ export class Group {
 		}
 	}
 
+	#readBufferedFrame(): { sequence: number; frame: Frame } | undefined {
+		const frames = this.state.frames.peek();
+		const frame = frames.shift();
+		if (!frame) return undefined;
+
+		this.#cacheBytes -= frame.data.byteLength;
+		return { sequence: this.state.total.peek() - frames.length - 1, frame };
+	}
+
 	/**
 	 * Create an independent copy that receives every frame written to this group.
 	 *
@@ -175,10 +184,9 @@ export class Group {
 	 * lives only in the blocking {@link readFrame}/{@link readFrameSequence} paths.
 	 */
 	tryReadFrameSequence(): { sequence: number; data: Uint8Array } | undefined {
-		const frames = this.state.frames.peek();
-		const frame = frames.shift();
-		if (frame === undefined) return undefined;
-		return { sequence: this.state.total.peek() - frames.length - 1, data: frame.data };
+		const read = this.#readBufferedFrame();
+		if (!read) return undefined;
+		return { sequence: read.sequence, data: read.frame.data };
 	}
 
 	/**
@@ -205,9 +213,8 @@ export class Group {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
-			const frames = this.state.frames.peek();
-			const frame = frames.shift();
-			if (frame) return frame;
+			const read = this.#readBufferedFrame();
+			if (read) return read.frame;
 
 			const closed = this.state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -222,9 +229,8 @@ export class Group {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
-			const frames = this.state.frames.peek();
-			const frame = frames.shift();
-			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, data: frame.data };
+			const read = this.#readBufferedFrame();
+			if (read) return { sequence: read.sequence, data: read.frame.data };
 
 			const closed = this.state.closed.peek();
 			if (closed instanceof Error) throw closed;

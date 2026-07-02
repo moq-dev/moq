@@ -35,6 +35,17 @@ test("a group caps its byte size, dropping from the front", () => {
 	expect(frames.length).toBe(MAX_GROUP_CACHE_BYTES / oneMiB);
 });
 
+test("a caught-up reader does not trip the byte cache cap", async () => {
+	const group = new Group(0);
+
+	const oneMiB = 1024 * 1024;
+	const frames = MAX_GROUP_CACHE_BYTES / oneMiB + 8;
+	for (let i = 0; i < frames; i++) {
+		group.writeFrame({ data: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
+		expect((await group.readFrame())?.data.byteLength).toBe(oneMiB);
+	}
+});
+
 test("reading a group whose frames were evicted throws CacheFull", async () => {
 	const group = new Group(0);
 
@@ -77,6 +88,15 @@ test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 	expect(group.tryReadFrameSequence()).toEqual({ sequence: 0, data: new TextEncoder().encode("a") });
 	expect(group.tryReadFrameSequence()).toEqual({ sequence: 1, data: new TextEncoder().encode("b") });
 	expect(group.tryReadFrameSequence()).toBeUndefined();
+});
+
+test("readFrameSequence reports per-frame sequence numbers", async () => {
+	const group = new Group(7);
+	group.writeString("a");
+	group.writeString("b");
+
+	expect(await group.readFrameSequence()).toEqual({ sequence: 0, data: new TextEncoder().encode("a") });
+	expect(await group.readFrameSequence()).toEqual({ sequence: 1, data: new TextEncoder().encode("b") });
 });
 
 test("done distinguishes a finished group from one that is merely empty", () => {
