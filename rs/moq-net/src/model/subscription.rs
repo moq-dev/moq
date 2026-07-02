@@ -75,10 +75,10 @@ impl Subscription {
 
 		let merged = Subscription {
 			priority: self.priority.max(combined.priority),
-			ordered: !self.ordered || !combined.ordered,
+			ordered: self.ordered || combined.ordered,
 			stale: self.stale.max(combined.stale),
-			group_start: self.group_start.min(combined.group_start),
-			group_end: self.group_end.max(combined.group_end),
+			group_start: min_some(self.group_start, combined.group_start),
+			group_end: max_unbounded(self.group_end, combined.group_end),
 		};
 
 		if &merged != combined {
@@ -86,5 +86,85 @@ impl Subscription {
 		}
 
 		Poll::Pending
+	}
+}
+
+fn min_some(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(Some(a), None) | (None, Some(a)) => Some(a),
+		(None, None) => None,
+	}
+}
+
+fn max_unbounded(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.max(b)),
+		(None, _) | (_, None) => None,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn combine(subscriptions: &[Subscription]) -> Option<Subscription> {
+		let mut combined = None;
+		for sub in subscriptions {
+			if let Poll::Ready(merged) = sub.poll_combined(&combined) {
+				combined = Some(merged);
+			}
+		}
+		combined
+	}
+
+	#[test]
+	fn combined_ordered_stays_ordered_for_multiple_ordered_viewers() {
+		let subscription = Subscription::default().with_ordered(true);
+
+		let combined = combine(&[subscription.clone(), subscription.clone(), subscription]).unwrap();
+
+		assert!(combined.ordered);
+	}
+
+	#[test]
+	fn combined_ordered_preserves_any_ordered_viewer() {
+		let unordered = Subscription::default().with_ordered(false);
+		let ordered = Subscription::default().with_ordered(true);
+
+		let combined = combine(&[unordered, ordered]).unwrap();
+
+		assert!(combined.ordered);
+	}
+
+	#[test]
+	fn combined_group_start_uses_earliest_explicit_start() {
+		let live = Subscription::default().with_group_start(None);
+		let catchup = Subscription::default().with_group_start(10);
+		let older_catchup = Subscription::default().with_group_start(5);
+
+		let combined = combine(&[live, catchup, older_catchup]).unwrap();
+
+		assert_eq!(combined.group_start, Some(5));
+	}
+
+	#[test]
+	fn combined_group_end_keeps_live_subscription_unbounded() {
+		let live = Subscription::default().with_group_end(None);
+		let bounded = Subscription::default().with_group_end(10);
+
+		let combined = combine(&[live, bounded]).unwrap();
+
+		assert_eq!(combined.group_end, None);
+	}
+
+	#[test]
+	fn combined_group_end_uses_latest_bounded_end() {
+		let early = Subscription::default().with_group_end(10);
+		let late = Subscription::default().with_group_end(20);
+
+		let combined = combine(&[early, late]).unwrap();
+
+		assert_eq!(combined.group_end, Some(20));
 	}
 }
