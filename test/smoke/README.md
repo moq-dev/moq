@@ -15,6 +15,15 @@ broadcast and confirms every subscriber sees data flowing (a non-empty frame
 before the timeout). We check that bytes move end-to-end across implementations,
 not that H.264 decodes.
 
+After the matrix it captures ~10 s of `moq export ts` from a live rust publisher
+and hands it to TSDuck's `tsanalyze`, an independent MPEG-TS reference analyzer.
+Every error counter must be zero (sync bytes, continuity, PES prefixes,
+unreferenced PIDs, PCR/PTS/DTS leaps), and the PCR span must match the
+wall-clock capture window. That last check is why this lives in the smoke test:
+only live, real-time-paced output can prove the PCR advances at the right rate.
+`tsanalyze` comes from the `nix develop` shell; without it the step is skipped
+locally and fails in CI.
+
 ## Clients
 
 | Client | Source under test | Built with | Roles |

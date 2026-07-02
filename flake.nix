@@ -87,6 +87,8 @@
             libressl
             ffmpeg
             curl
+            # Independent MPEG-TS validation (tsanalyze) in the smoke test.
+            tsduck
             cargo-sort
             cargo-shear
             cargo-edit

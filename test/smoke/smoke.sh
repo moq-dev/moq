@@ -12,6 +12,12 @@
 # broadcast and confirms every subscriber sees data flowing (a non-empty frame
 # before the timeout). We check that bytes move end-to-end across
 # implementations, not that H.264 decodes.
+#
+# After the matrix it also captures a real-time `moq export ts` window and hands
+# it to TSDuck (tsanalyze), validating the MPEG-TS muxer against an independent
+# reference analyzer, including that the PCR advances at wall-clock rate. That
+# check only means something on live paced output, which is why it lives here
+# and not in a unit test.
 set -euo pipefail
 
 SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -26,6 +32,8 @@ SIZE="${SMOKE_SIZE:-320x240}"
 PORT="${SMOKE_PORT:-4443}"
 URL="http://127.0.0.1:${PORT}"
 NEGATIVE=0
+# Wall-clock seconds of TS export captured for the TSDuck validation.
+TS_SECONDS="${SMOKE_TS_SECONDS:-10}"
 
 # Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
 # what a smoke test wants; the workload (320x240@30) is trivial either way.
@@ -438,6 +446,154 @@ run_subscriber() {
     esac
 }
 
+# ── mpeg-ts validation (tsduck) ─────────────────────────────────────────────
+# Capture TS_SECONDS of `moq export ts` from a live rust publisher and hand it
+# to TSDuck's tsanalyze. Every error counter in the analysis must be zero, and
+# the PCR must advance at wall-clock rate: the capture window is real time
+# (ffmpeg -re pacing), so the PCR span has to roughly match it. A PCR built
+# from a wrong clock rate or a non-realtime timeline passes structural checks
+# but fails this one, which is what makes live output the right subject.
+check_ts_analysis() {
+    # stdin: `tsanalyze --normalized` output. Prints one line per violation and
+    # fails if any. Fields are matched strictly: a key the analyzer stopped
+    # emitting is a failure, not a silent pass.
+    awk -F: -v dur="$TS_SECONDS" -v fps="$FPS" '
+        function val(key,    i) {
+            for (i = 1; i <= NF; i++) {
+                if (index($i, key "=") == 1) return substr($i, length(key) + 2)
+            }
+            return ""
+        }
+        function num(key,    v) {
+            v = val(key)
+            if (v == "") { print "missing field " key " on " $1 " line"; fail = 1; return 0 }
+            return v + 0
+        }
+        function flag(key,    i) {
+            for (i = 1; i <= NF; i++) if ($i == key) return 1
+            return 0
+        }
+        function zero(key,    v) {
+            v = num(key)
+            if (v != 0) { print $1 " line: " key "=" v " (want 0)"; fail = 1 }
+        }
+        /^ts:/ {
+            zero("invalidsyncs"); zero("transporterrors"); zero("suspectignored")
+            zero("unreferencedpids"); zero("scrambledpids")
+            if (num("services") != 1) { print "want exactly one service"; fail = 1 }
+            if (num("pcrpids") != 1) { print "want exactly one PCR pid"; fail = 1 }
+        }
+        /^pid:/ {
+            pid = val("pid")
+            zero("discontinuities"); zero("invalidscrambling")
+            zero("pcrleap"); zero("ptsleap"); zero("dtsleap")
+            # Only PES-carrying pids report this counter.
+            if (val("pes") != "") zero("invalidpesprefix")
+            if (flag("video")) {
+                video++
+                pcr_cnt = num("pcr")
+                pcr_first = val("firstpcr"); pcr_last = val("lastpcr")
+            }
+        }
+        END {
+            if (video != 1) { print "want exactly one video pid, got " video + 0; fail = 1 }
+            else if (pcr_first == "" || pcr_last == "" || pcr_cnt < 2) {
+                print "video pid carries no usable PCR"; fail = 1
+            } else {
+                # 27 MHz PCR ticks. The capture is dur seconds of wall time; the
+                # first keyframe plus subscribe latency eats some of the front.
+                span = (pcr_last - pcr_first) / 27000000
+                if (span < dur / 2 || span > dur + 2) {
+                    printf "PCR span %.2fs is not wall-clock for a %ss capture\n", span, dur
+                    fail = 1
+                }
+                # PCR rides the video PES, so its cadence tracks the frame rate
+                # and stays far inside the 100 ms the spec allows.
+                if (span > 0 && pcr_cnt / span < fps / 2) {
+                    printf "PCR cadence %.1f/s too sparse for %s fps\n", pcr_cnt / span, fps
+                    fail = 1
+                }
+            }
+            exit fail
+        }
+    '
+}
+
+run_ts_validation() {
+    echo "=== mpeg-ts validation: tsduck on ${TS_SECONDS}s of live TS export ==="
+    if ! have tsanalyze; then
+        # Same two-tier deal as the lint tools: optional locally, required in CI
+        # (the nix dev shell provides TSDuck), so the check cannot silently
+        # evaporate from coverage.
+        if [[ -n "${CI:-}" ]]; then
+            echo "  FAIL  ts-validate (tsanalyze missing under CI; nix develop provides it)"
+            overall=1
+        else
+            echo "  SKIP  ts-validate (tsanalyze not on PATH; nix develop provides it)"
+        fi
+        return 0
+    fi
+
+    local broadcast="smoke-ts-$$-${RANDOM}.hang"
+    local capture="$TMP/capture.ts" analysis="$TMP/ts-analysis.txt"
+    start_publisher rust "$broadcast"
+
+    # Wait for media to actually flow (same one-byte bar as the matrix) before
+    # opening the timed window, so publisher startup doesn't eat into the
+    # capture and the PCR span bound stays tight.
+    local n
+    n=$(timeout -s INT -k 3 "$TIMEOUT" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
+        export ts 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+    if [[ "${n:-0}" -lt 1 ]]; then
+        echo "  FAIL  ts-validate (no data from the live publisher)"
+        sed 's/^/        /' "$TMP/pub-rust.log" 2>/dev/null || true
+        kill_tree "$PUB_PID"
+        wait "$PUB_PID" 2>/dev/null || true
+        PUB_PID=""
+        overall=1
+        return 0
+    fi
+
+    # timeout ends the real-time capture window (exit 124 is the expected way
+    # out). moq handles SIGINT, not the default SIGTERM; sending INT keeps the
+    # window bounded to TS_SECONDS (the PCR span check depends on it) instead
+    # of stretching to the -k SIGKILL backstop.
+    timeout -s INT -k 3 "$TS_SECONDS" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
+        export ts >"$capture" 2>"$TMP/ts-export.log" || true
+    kill_tree "$PUB_PID"
+    wait "$PUB_PID" 2>/dev/null || true
+    PUB_PID=""
+
+    # The kill can land mid-write; drop a trailing partial packet so it doesn't
+    # read as corruption.
+    local size pkts
+    size=$(wc -c <"$capture" | tr -d ' ')
+    pkts=$((size / 188))
+    if [[ "$pkts" -lt "$((TS_SECONDS * 10))" ]]; then
+        echo "  FAIL  ts-validate (captured only $pkts TS packets)"
+        sed 's/^/        /' "$TMP/ts-export.log" 2>/dev/null || true
+        overall=1
+        return 0
+    fi
+    dd if="$capture" of="$capture.aligned" bs=188 count="$pkts" 2>/dev/null
+
+    if ! tsanalyze --normalized --deterministic "$capture.aligned" >"$analysis" 2>"$TMP/ts-analyze.log"; then
+        echo "  FAIL  ts-validate (tsanalyze failed)"
+        sed 's/^/        /' "$TMP/ts-analyze.log" 2>/dev/null || true
+        overall=1
+        return 0
+    fi
+
+    if check_ts_analysis <"$analysis" >"$TMP/ts-violations.txt"; then
+        echo "  PASS  ts-validate ($pkts packets)"
+    else
+        echo "  FAIL  ts-validate:"
+        sed 's/^/        /' "$TMP/ts-violations.txt"
+        overall=1
+    fi
+    return 0
+}
+
 # ── matrix ──────────────────────────────────────────────────────────────────
 overall=0
 
@@ -502,6 +658,7 @@ else
         start_publisher "$pub" "$broadcast"
         run_round "$pub" "$broadcast" "$PUB_PID"
     done
+    run_ts_validation
 fi
 
 if [[ "$overall" -eq 0 ]]; then
