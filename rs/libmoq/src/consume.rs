@@ -247,20 +247,24 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let (rendition, config) = consume
 			.catalog
 			.video
 			.renditions
-			.keys()
+			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
+
+		// Consume with the container the catalog actually advertises (Legacy /
+		// Cmaf / Loc) instead of assuming Legacy — otherwise CMAF/fMP4 sources
+		// (e.g. ffmpeg moqenc, browser @moq/publish) are misread as raw frames.
+		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
 
 		let track = consume.broadcast.subscribe_track(&moq_net::Track {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
 		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+		let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -291,20 +295,21 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let (rendition, config) = consume
 			.catalog
 			.audio
 			.renditions
-			.keys()
+			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
+
+		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
 
 		let track = consume.broadcast.subscribe_track(&moq_net::Track {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
 		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+		let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
