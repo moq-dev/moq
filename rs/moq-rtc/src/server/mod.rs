@@ -140,8 +140,9 @@ pub struct Config {
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
 	/// answer so a remote peer can reach us.
 	///
-	/// If empty, the mux advertises whatever address the OS picked for the
-	/// shared socket. That works for loopback testing but not behind NAT.
+	/// If empty, the mux advertises the bound address, substituting loopback
+	/// when the socket is bound to an unspecified address. That works for
+	/// loopback testing but not behind NAT.
 	pub ice_candidates: Vec<SocketAddr>,
 
 	/// Address the shared WebRTC media socket binds to. Every WHIP/WHEP session
