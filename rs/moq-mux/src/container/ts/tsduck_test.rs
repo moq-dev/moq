@@ -7,47 +7,36 @@
 //! report is zero: sync bytes, transport errors, continuity discontinuities,
 //! PCR/PTS/DTS leaps, PES start prefixes, and unreferenced PIDs.
 //!
-//! They skip when `tsanalyze` is not on `$PATH`; the nix dev shell provides
-//! TSDuck, so `just ci` always runs them.
+//! They skip when `tsanalyze` is not on `$PATH` (the nix dev shell provides
+//! TSDuck). Under CI a missing binary fails the test instead, so the
+//! validation cannot silently evaporate from coverage.
 
 use std::process::Command;
 
 use bytes::{Bytes, BytesMut};
 
+use super::export_test::{CUE, drain_with};
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::Timestamp;
 use crate::container::ts::{Export, Import, catalog as tscat};
 use crate::container::{Frame, Producer};
 
-// libklvanc public-sample SCTE-35 cue: splice_info_section, table_id 0xFC, 30 bytes.
-const CUE: &[u8] = &[
-	0xfc, 0x30, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xf0, 0x0a, 0x05, 0x00, 0x00, 0x2b, 0xb4, 0x7f,
-	0xdf, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xad, 0x25, 0xe8, 0x39,
-];
-
 /// True when TSDuck's `tsanalyze` is runnable; otherwise the test skips.
+/// Skipping is not allowed under CI, where the nix dev shell provides TSDuck.
 fn tsduck_available() -> bool {
-	if Command::new("tsanalyze").arg("--version").output().is_ok() {
+	if Command::new("tsanalyze")
+		.arg("--version")
+		.output()
+		.is_ok_and(|out| out.status.success())
+	{
 		return true;
 	}
+	assert!(
+		std::env::var_os("CI").is_none(),
+		"tsanalyze (TSDuck) missing under CI; the nix dev shell provides it"
+	);
 	eprintln!("skipping: tsanalyze (TSDuck) not on $PATH; `nix develop` provides it");
 	false
-}
-
-/// Drive an exporter until it stops producing output, concatenating every
-/// chunk. Same shape as `export_test::drain_with`: the producers stay alive so
-/// the exporter can subscribe to the finished, retained tracks, meaning it
-/// never reaches a hard end-of-stream; we pull until a `next()` blocks
-/// (`Pending`, surfaced as a timeout under paused time).
-async fn drain<E: crate::catalog::hang::CatalogExt>(mut exporter: Export<E>) -> BytesMut {
-	let mut out = BytesMut::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
-		let Some(frame) = res.expect("exporter error") else {
-			break;
-		};
-		out.extend_from_slice(&frame.payload);
-	}
-	out
 }
 
 /// Import a TS fixture into a broadcast and export it back to TS.
@@ -60,14 +49,14 @@ async fn reexport(data: &[u8]) -> BytesMut {
 	import.finish().unwrap();
 
 	// `import` and `catalog` stay alive: retained tracks the exporter subscribes to.
-	drain(Export::new(consumer).unwrap()).await
+	drain_with(Export::new(consumer).unwrap()).await
 }
 
 /// Run `tsanalyze --json` on the exported bytes and assert every error counter
 /// is zero. Returns the parsed report for scenario-specific checks, or `None`
-/// when TSDuck is unavailable (the caller skips). On failure the TS file is
-/// left in the temp dir for inspection (the panic message carries its path);
-/// it is removed once the shared checks pass.
+/// when TSDuck is unavailable (the caller skips). When one of these shared
+/// checks fails, the TS file is left in the temp dir for inspection (the panic
+/// message carries its path); it is removed once they pass.
 fn validate(name: &str, ts: &[u8]) -> Option<serde_json::Value> {
 	assert!(!ts.is_empty(), "{name}: no TS output");
 	if !tsduck_available() {
@@ -100,10 +89,8 @@ fn validate(name: &str, ts: &[u8]) -> Option<serde_json::Value> {
 	for counter in ["invalid-syncs", "transport-errors", "suspect-ignored"] {
 		assert_eq!(packets[counter], 0, "{name}: ts.packets.{counter} ({file})");
 	}
-	assert_eq!(
-		report["ts"]["pids"]["unreferenced"], 0,
-		"{name}: unreferenced PIDs ({file})"
-	);
+	// Unreferenced PIDs are covered per PID below; the global counter shares its
+	// JSON path with an object in some TSDuck versions, so don't compare it.
 	assert_eq!(report["ts"]["pids"]["scrambled"], 0, "{name}: scrambled PIDs ({file})");
 	assert_eq!(report["ts"]["pids"]["pcr"], 1, "{name}: exactly one PCR PID ({file})");
 	assert_eq!(report["ts"]["services"]["total"], 1, "{name}: single program ({file})");
@@ -123,14 +110,25 @@ fn validate(name: &str, ts: &[u8]) -> Option<serde_json::Value> {
 				"{name}: PID {id} packets.{counter} ({file})"
 			);
 		}
-		// Only PES-carrying PIDs report this one.
-		if !pid["invalid-pes-prefix"].is_null() {
+		// TSDuck reports this only for PES-carrying PIDs; keying on `pes` keeps
+		// the check loud if `invalid-pes-prefix` ever moves in the schema.
+		if !pid["pes"].is_null() {
 			assert_eq!(
 				pid["invalid-pes-prefix"], 0,
 				"{name}: PID {id} invalid PES prefix ({file})"
 			);
 		}
 	}
+
+	// Every scenario carries media, so the PES checks above must have fired.
+	assert!(
+		report["pids"]
+			.as_array()
+			.expect("pids array")
+			.iter()
+			.any(|p| !p["pes"].is_null()),
+		"{name}: no PES-carrying PID in the analysis ({file})"
+	);
 
 	std::fs::remove_file(&path).unwrap();
 	Some(report)
@@ -227,7 +225,7 @@ async fn scte35_export() {
 
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
 	// exporter must carry the extension to see the mpegts section.
-	let ts = drain(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
+	let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
 	let Some(report) = validate("scte35", &ts) else { return };
 	assert!(
 		report["pids"]

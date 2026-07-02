@@ -34,6 +34,14 @@ ignore = [
     # proc-macro via local-ip-address -> neli -> getset; no runtime exposure.
     # Drop the ignore when getset migrates off proc-macro-error2.
     "RUSTSEC-2026-0173",
+
+    # quick-xml 0.39 CPU/memory DoS on crafted XML (duplicate-attribute scan,
+    # unbounded namespace declarations). Reached only via plist -> netdev ->
+    # netwatch -> iroh, which parses local macOS system configuration, never
+    # attacker-controlled XML. plist 1.9 pins quick_xml ^0.39, so no upgrade
+    # path exists yet. Drop both when plist releases with quick-xml >= 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
