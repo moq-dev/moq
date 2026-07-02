@@ -108,12 +108,17 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	return c, nil
 }
 
-// Publish publishes a broadcast under path, served to the remote.
-func (c *Client) Publish(path string, broadcast *BroadcastProducer) error {
+// Announce advertises a broadcast under path so the remote can discover it.
+func (c *Client) Announce(path string, broadcast *BroadcastProducer) error {
 	if c.publishOrigin == nil {
 		return ErrNoPublishOrigin
 	}
-	return c.publishOrigin.Publish(path, broadcast)
+	return c.publishOrigin.Announce(path, broadcast)
+}
+
+// Deprecated: use Announce.
+func (c *Client) Publish(path string, broadcast *BroadcastProducer) error {
+	return c.Announce(path, broadcast)
 }
 
 // Announced streams broadcasts announced by the remote under prefix.

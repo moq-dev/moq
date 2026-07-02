@@ -34,9 +34,9 @@ plugins {
 
 version = providers.gradleProperty("moq.version").get()
 
-// Compatible-patch range for the bindings: any 0.2.x, never 0.3.0. Published
+// Compatible-patch range for the bindings: any 0.3.x, never 0.4.0. Published
 // into the wrapper's POM so consumers float to the newest bindings patch.
-val MOQ_FFI_RANGE = "[0.2,0.3)"
+val MOQ_FFI_RANGE = "[0.3,0.4)"
 
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"
 

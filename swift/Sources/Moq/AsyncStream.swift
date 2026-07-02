@@ -3,29 +3,24 @@ import MoqFFI
 
 /// Bridge a `next()`-style native consumer into an `AsyncThrowingStream`.
 ///
-/// Pulls from `next` until it returns nil (the track/origin ended), finishes on
-/// error, and calls `cancel` when the consuming task terminates, so a broken
-/// `for await` loop or a cancelled parent `Task` releases the native handle and
-/// unblocks any in-flight read.
+/// Pull-per-demand: `next` is called only when the consumer asks for the next
+/// element, never ahead of it. This is what preserves the FFI jitter buffer's
+/// fall-behind skipping (`maxLatencyMs` GoP-skipping): draining eagerly would
+/// move the backlog into an unbounded Swift buffer, so a slow consumer would
+/// grow memory and receive stale groups instead of skipping forward.
+///
+/// Pulls until `next` returns nil (the track/origin ended) or throws. Cancelling
+/// the consuming task calls `cancel` to release the native handle and unblock any
+/// in-flight read.
 func moqStream<Element>(
     cancel: @escaping @Sendable () -> Void,
     next: @escaping @Sendable () async throws -> Element?
 ) -> AsyncThrowingStream<Element, Swift.Error> {
-    AsyncThrowingStream { continuation in
-        let task = Task {
-            do {
-                while let item = try await next() {
-                    try Task.checkCancellation()
-                    continuation.yield(item)
-                }
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: error)
-            }
-        }
-        continuation.onTermination = { _ in
-            task.cancel()
+    AsyncThrowingStream(unfolding: {
+        try await withTaskCancellationHandler {
+            try await next()
+        } onCancel: {
             cancel()
         }
-    }
+    })
 }

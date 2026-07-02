@@ -121,6 +121,11 @@ public final class TrackProducer: Sendable {
         try ffi.writeFrame(payload: payload)
     }
 
+    /// Abort the track with an application error code, failing active consumers.
+    public func abort(errorCode: Int32) throws {
+        try ffi.abort(errorCode: errorCode)
+    }
+
     /// Finish the track. No more groups can be appended.
     public func finish() throws {
         try ffi.finish()

@@ -21,6 +21,10 @@ public typealias Container = MoqFFI.Container
 public typealias Subscription = MoqFFI.MoqSubscription
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
 
+/// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
+/// counters). Fields are `nil` when the transport backend doesn't report them.
+public typealias ConnectionStats = MoqFFI.MoqConnectionStats
+
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.
 public typealias MoqError = MoqFFI.MoqError

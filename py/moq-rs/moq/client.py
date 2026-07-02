@@ -89,11 +89,16 @@ class Client:
             self._inner = None
         self._session = None
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
+        """Advertise ``broadcast`` at ``path`` so subscribers can discover it."""
         origin = self._publish_origin
         if origin is None:
             raise RuntimeError("no publish origin configured")
-        origin.publish(path, broadcast)
+        origin.announce(path, broadcast)
+
+    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+        # Deprecated alias for announce(); kept for back-compat.
+        self.announce(path, broadcast)
 
     def announced(self, prefix: str = "") -> Announced:
         if self._consumer is None:

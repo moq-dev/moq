@@ -14,6 +14,19 @@ public final class Client: Sendable {
         ffi.setTlsDisableVerify(disable: !verify)
     }
 
+    /// Trust these PEM root certificate file path(s) instead of the system roots.
+    public func setTlsRoots(_ paths: [String]) {
+        ffi.setTlsRoots(paths: paths)
+    }
+
+    /// Pin the peer certificate to these hex SHA-256 fingerprints, the native
+    /// equivalent of `serverCertificateHashes`. Accepts the values a server
+    /// reports via `Server.certFingerprints`, so a self-signed certificate can be
+    /// trusted without disabling verification.
+    public func setTlsFingerprints(_ fingerprints: [String]) {
+        ffi.setTlsFingerprints(fingerprints: fingerprints)
+    }
+
     /// Set the local UDP socket bind address (defaults to `[::]:0`). Throws if
     /// the address cannot be parsed.
     public func bind(_ addr: String) throws {
@@ -77,5 +90,12 @@ public final class Session: Sendable {
     /// Graceful shutdown. Alias for `cancel(code: 0)`.
     public func shutdown() {
         ffi.shutdown()
+    }
+
+    /// Snapshot the current connection statistics (RTT, bandwidth estimates,
+    /// byte/packet counters). Cheap to call; intended for periodic polling.
+    /// Individual fields are `nil` when the transport backend doesn't report them.
+    public func stats() -> ConnectionStats {
+        ffi.stats()
     }
 }
