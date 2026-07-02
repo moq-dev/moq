@@ -25,5 +25,3 @@ pub use import::*;
 mod export_test;
 #[cfg(test)]
 mod import_test;
-#[cfg(test)]
-mod tsduck_test;

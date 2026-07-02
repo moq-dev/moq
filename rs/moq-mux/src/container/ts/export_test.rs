@@ -27,8 +27,7 @@ const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 const PPS1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
 
 // libklvanc public-sample SCTE-35 cue: splice_info_section, table_id 0xFC, 30 bytes.
-// Shared with `tsduck_test`.
-pub(super) const CUE: &[u8] = &[
+const CUE: &[u8] = &[
 	0xfc, 0x30, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xf0, 0x0a, 0x05, 0x00, 0x00, 0x2b, 0xb4, 0x7f,
 	0xdf, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xad, 0x25, 0xe8, 0x39,
 ];
@@ -65,8 +64,7 @@ async fn drain(consumer: moq_net::BroadcastConsumer) -> BytesMut {
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-/// Shared with `tsduck_test`.
-pub(super) async fn drain_with<E: crate::catalog::hang::CatalogExt>(mut exporter: Export<E>) -> BytesMut {
+async fn drain_with<E: crate::catalog::hang::CatalogExt>(mut exporter: Export<E>) -> BytesMut {
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
