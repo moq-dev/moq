@@ -161,7 +161,7 @@ fn h264_convert(config: &VideoConfig) -> Result<TrackConvert> {
 	let Some(avcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
-	let params = moq_mux::codec::h264::parse_avcc_param_sets(avcc)
+	let params = moq_mux::codec::h264::Avcc::parse(avcc)
 		.map_err(|err| crate::Error::Other(anyhow::anyhow!("avcc parse: {err}")))?;
 	// Without SPS+PPS the keyframe prefix would be empty and every keyframe
 	// would reach the peer without inline parameter sets, i.e. undecodable.
@@ -189,7 +189,7 @@ fn h265_convert(config: &VideoConfig) -> Result<TrackConvert> {
 	let Some(hvcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
-	let params = moq_mux::codec::h265::parse_hvcc_param_sets(hvcc)
+	let params = moq_mux::codec::h265::Hvcc::parse(hvcc)
 		.map_err(|err| crate::Error::Other(anyhow::anyhow!("hvcc parse: {err}")))?;
 	// Same reasoning as `h264_convert`: a keyframe with no inline VPS/SPS/PPS
 	// is undecodable, so reject an hvcC that omits any of them.

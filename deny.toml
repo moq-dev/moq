@@ -26,14 +26,18 @@ ignore = [
     # requires Rust 1.92; workspace MSRV is 1.85. Build-time only.
     "RUSTSEC-2024-0436",
 
-    # http-cache (via http-cache-reqwest in moq-relay) still depends on
-    # bincode 1.x. Awaits upstream bump to bincode 2.x.
-    "RUSTSEC-2025-0141",
-
     # proc-macro-error2 unmaintained. Pulled in transitively as a build-time
     # proc-macro via local-ip-address -> neli -> getset; no runtime exposure.
     # Drop the ignore when getset migrates off proc-macro-error2.
     "RUSTSEC-2026-0173",
+
+    # quick-xml 0.39 DoS on untrusted XML (quadratic attribute check, unbounded
+    # namespace allocation). Fixed in 0.41, but the only consumer is
+    # plist -> netdev -> netwatch -> iroh, and even the latest plist pins
+    # quick-xml 0.39. netdev only parses local macOS system configuration, not
+    # attacker-controlled XML. Drop both when plist moves to quick-xml >= 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]

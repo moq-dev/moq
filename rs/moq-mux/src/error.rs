@@ -1,6 +1,6 @@
 /// Errors from moq-mux operations.
 ///
-/// Most variants are delegations to underlying layers — [`moq_net::Error`] for
+/// Most variants are delegations to underlying layers: [`moq_net::Error`] for
 /// transport / pub-sub failures, [`hang::Error`] for catalog/codec parsing, the
 /// per-format Errors for container shape problems, and the per-codec Errors for
 /// bitstream parsing problems.
@@ -46,6 +46,14 @@ pub enum Error {
 	/// Error parsing Opus.
 	#[error("opus: {0}")]
 	Opus(#[from] crate::codec::opus::Error),
+
+	/// Error parsing FLAC.
+	#[error("flac: {0}")]
+	Flac(#[from] crate::codec::flac::Error),
+
+	/// Error parsing MP3.
+	#[error("mp3: {0}")]
+	Mp3(#[from] crate::codec::mp3::Error),
 
 	/// Error parsing H.264.
 	#[error("h264: {0}")]

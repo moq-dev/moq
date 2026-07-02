@@ -42,19 +42,23 @@ ci FILES="":
     cargo shear
     cargo deny check --show-stats
 
-    # Compiles. The all-features clippy / doc / test were crane derivations built
-    # by `nix flake check`; they now run here as plain cargo (flake.nix `checks`
-    # is unwired). The default / no-default-feature `cargo check`s cover feature
-    # edges the all-features run doesn't. Everything builds into the in-workspace
-    # ./target, which the runner wipes per job; on the self-hosted runner the
-    # heavy compilation is transparently cached per-crate by sccache (wired into
-    # the runner environment, not here), so there's no persistent target dir to
-    # bound. (Local devs still get the full cargo loop via `just rs check`.)
-    cargo check --workspace --all-targets
+    # Compiles. The all-features clippy / doc / test run as plain cargo (flake.nix
+    # `checks` is unwired). Each full-workspace compile below is expensive, so we
+    # run the minimum set that still covers every feature edge:
+    #   - clippy --all-targets --all-features is the gate and a superset of a plain
+    #     `cargo check --all-targets` (default features), so that redundant check
+    #     pass is intentionally omitted -- one fewer full workspace compile.
+    #   - --no-default-features stays: it's the only pass that exercises code behind
+    #     `#[cfg(not(feature = ...))]`, which the all-features run never compiles.
+    # (Local devs still get the full cargo loop via `just rs check`.)
     cargo check --workspace --no-default-features
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-    cargo test --workspace --all-targets --all-features
+    # nextest compiles + runs the test binaries with real parallelism (faster than
+    # `cargo test`'s serial harness). It does not build or run
+    # doctests, so the `/// ```` examples are no longer compile-checked in CI -- an
+    # accepted trade for speed (they still render in `cargo doc` output).
+    cargo nextest run --workspace --all-targets --all-features
 
 # Auto-fix clippy/format/shear/sort.
 fix:

@@ -2,7 +2,7 @@
 //!
 //! A [`Broadcaster`] watches one broadcast's catalog and, per rendition, runs a
 //! [`moq_mux::container::fmp4::Export`] narrowed to that single track (via
-//! [`moq_mux::catalog::Filter`]) feeding a [`store::SegmentStore`]. The HTTP
+//! [`moq_mux::catalog::Select`]) feeding a [`store::SegmentStore`]. The HTTP
 //! [`server`](crate::server) reads the stores to answer playlist and segment
 //! requests.
 
@@ -21,6 +21,9 @@ use tokio::sync::watch;
 
 pub use playlist::render_media;
 pub use rendition::{Kind, Rendition};
+
+/// How long to wait before retrying the initial catalog subscription.
+const CATALOG_RETRY: Duration = Duration::from_millis(250);
 
 /// Export tuning shared across renditions.
 #[derive(Clone, Debug)]
@@ -169,11 +172,16 @@ impl Broadcaster {
 }
 
 async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
-	let mut consumer = match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
-		Ok(consumer) => consumer,
-		Err(err) => {
-			tracing::warn!(%err, "failed to subscribe to broadcast catalog");
-			return;
+	let mut consumer = loop {
+		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
+			Ok(consumer) => break consumer,
+			Err(err) => {
+				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
+				tokio::select! {
+					_ = tokio::time::sleep(CATALOG_RETRY) => {}
+					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => return,
+				}
+			}
 		}
 	};
 

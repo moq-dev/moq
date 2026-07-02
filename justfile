@@ -10,6 +10,9 @@ mod kt
 mod swift
 mod go
 
+# OBS Studio plugin (C++). See doc/bin/obs.md.
+mod obs 'cpp/obs'
+
 # Unit tests per language (`just test`).
 mod test
 

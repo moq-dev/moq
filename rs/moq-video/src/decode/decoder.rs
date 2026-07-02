@@ -85,7 +85,7 @@ impl Decoder {
 					let avcc = catalog.description.as_ref().ok_or_else(|| {
 						Error::Codec(anyhow::anyhow!("avc1 H.264 track is missing its avcC description"))
 					})?;
-					let params = h264::parse_avcc_param_sets(avcc).map_err(moq_mux::Error::from)?;
+					let params = h264::Avcc::parse(avcc).map_err(moq_mux::Error::from)?;
 					let keyframe_prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
 					Conversion::LengthPrefixed {
 						length_size: params.length_size,
@@ -101,7 +101,7 @@ impl Decoder {
 					let hvcc = catalog.description.as_ref().ok_or_else(|| {
 						Error::Codec(anyhow::anyhow!("hvc1 H.265 track is missing its hvcC description"))
 					})?;
-					let params = h265::parse_hvcc_param_sets(hvcc).map_err(moq_mux::Error::from)?;
+					let params = h265::Hvcc::parse(hvcc).map_err(moq_mux::Error::from)?;
 					let keyframe_prefix =
 						annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
 					Conversion::LengthPrefixed {

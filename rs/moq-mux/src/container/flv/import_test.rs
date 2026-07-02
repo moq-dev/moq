@@ -223,6 +223,41 @@ async fn import_enhanced_opus() {
 	assert_eq!(a.description.as_ref().map(|b| b.as_ref()), Some(head.as_ref()));
 }
 
+/// Legacy SoundFormat 2 MP3 configures from the first frame's in-band header and
+/// carries the frame through verbatim.
+#[tokio::test(start_paused = true)]
+async fn import_legacy_mp3() {
+	// MPEG-1 Layer III, 128 kbps, 44.1 kHz, joint stereo, padded to a plausible frame.
+	let mut mp3 = vec![0xFF, 0xFB, 0x90, 0x44];
+	mp3.resize(417, 0xAA);
+
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x04); // audio only
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	// Legacy audio tag: SoundFormat 2 (MP3) header byte, then the raw frame.
+	let mut tag = vec![super::MP3_AUDIO_TAG_HEADER];
+	tag.extend_from_slice(&mp3);
+	write_tag(&mut out, super::TAG_AUDIO, 0, &tag);
+
+	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.clone());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	assert_eq!(snap.audio.renditions.len(), 1);
+	let a = snap.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Mp3));
+	assert_eq!(a.sample_rate, 44100);
+	assert_eq!(a.channel_count, 2);
+	assert!(a.description.is_none(), "MP3 config is in band");
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_rejects_non_flv() {
 	let mut producer = moq_net::BroadcastInfo::new().produce();

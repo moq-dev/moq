@@ -27,13 +27,13 @@ A test pattern plus tone, so you don't need a media file:
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \
     -c:v libx264 -preset ultrafast -tune zerolatency -g 60 -c:a aac \
     -f mp4 -movflags cmaf+frag_keyframe+empty_moov+default_base_moof - \
-| moq-cli publish --url https://your-relay.example.com --broadcast bbb.hang fmp4
+| moq --client-connect https://your-relay.example.com --broadcast bbb.hang import fmp4
 ```
 
 ## Subscribe
 
 ```bash
-moq-cli subscribe --url https://your-relay.example.com --broadcast bbb.hang --format fmp4 | ffplay -
+moq --client-connect https://your-relay.example.com --broadcast bbb.hang export fmp4 | ffplay -
 ```
 
 If it plays, you interop. That's the whole test.

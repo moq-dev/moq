@@ -109,6 +109,10 @@ enum Kind {
 		sample_rate: u32,
 		channel_count: u32,
 	},
+	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
+	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
+	/// registration plus DVB extension descriptor.
+	Opus { channel_count: u32 },
 	/// MP2, carried verbatim. The sample rate picks the stream type on the way
 	/// out (0x03 vs 0x04).
 	Mp2 { sample_rate: u32 },
@@ -533,9 +537,12 @@ impl<E: catalog::Catalog> Export<E> {
 		);
 		let pcr_pid = video
 			.or_else(|| {
-				tracks
-					.iter()
-					.find(|t| matches!(t.kind, Kind::Aac { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3))
+				tracks.iter().find(|t| {
+					matches!(
+						t.kind,
+						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+					)
+				})
 			})
 			.map(|t| t.pid)
 			.context("TS export requires a video or audio track for the PCR")?;
@@ -546,6 +553,9 @@ impl<E: catalog::Catalog> Export<E> {
 				let stream_type = match &t.kind {
 					Kind::Video(stream_type) => *stream_type,
 					Kind::Aac { .. } => StreamType::AdtsAac,
+					// Opus rides private-data PES; the registration + extension descriptors
+					// below tell the demuxer it's Opus.
+					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
 					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
 					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
 					// header, so the mapping is faithful.
@@ -572,6 +582,7 @@ impl<E: catalog::Catalog> Export<E> {
 							tag: 0x05,
 							data: b"EAC3".to_vec(),
 						}],
+						Kind::Opus { channel_count } => opus_descriptors(*channel_count),
 						_ => Vec::new(),
 					}
 				};
@@ -665,6 +676,8 @@ impl<E: catalog::Catalog> Export<E> {
 				framed.extend_from_slice(&frame.payload);
 				Some(framed)
 			}
+			// Each moq Opus frame is one packet; prefix the Opus-in-TS control header.
+			Kind::Opus { .. } => Some(opus_es_payload(&frame.payload)),
 			// Legacy audio frames were ingested whole (framing header included), so
 			// they pass through untouched. PES-framed verbatim payloads likewise.
 			Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
@@ -714,6 +727,8 @@ impl<E: catalog::Catalog> Export<E> {
 				// derives it from is_video.
 				let stream_id = match &kind {
 					Kind::Verbatim { stream_id, .. } => Some(stream_id.unwrap_or(StreamId::PRIVATE_STREAM_1)),
+					// Opus is private-data PES, carried under private_stream_1 like ffmpeg.
+					Kind::Opus { .. } => Some(StreamId::PRIVATE_STREAM_1),
 					_ => None,
 				};
 				let unit = PesUnit {
@@ -976,10 +991,54 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 		AudioCodec::Mp2 => Ok(Kind::Mp2 {
 			sample_rate: config.sample_rate,
 		}),
+		AudioCodec::Opus => Ok(Kind::Opus {
+			channel_count: config.channel_count,
+		}),
 		AudioCodec::Ac3 => Ok(Kind::Ac3),
 		AudioCodec::Ec3 => Ok(Kind::Eac3),
 		other => anyhow::bail!("TS export does not support audio codec {other:?} (track '{name}')"),
 	}
+}
+
+/// The two PMT descriptors for an Opus elementary stream: the `Opus` registration
+/// descriptor (which sets the codec) and the DVB extension descriptor 0x80 carrying
+/// the channel configuration. ffmpeg's demuxer requires both to recognize the stream.
+fn opus_descriptors(channel_count: u32) -> Vec<Descriptor> {
+	vec![
+		Descriptor {
+			tag: 0x05,
+			data: b"Opus".to_vec(),
+		},
+		Descriptor {
+			tag: 0x7f,
+			// extension_descriptor_tag 0x80, then channel_config_code (1=mono, 2=stereo,
+			// = channel count for the Vorbis mapping), clamped to the 1..=8 the demuxer reads.
+			data: vec![0x80, channel_count.clamp(1, 8) as u8],
+		},
+	]
+}
+
+/// Wrap a raw Opus packet in the Opus-in-TS access-unit control header, producing one
+/// PES access unit. Emits the 11-bit `0x3FF` sync (no trim, no control extension), then
+/// the `0xFF`-run `au_size`, then the packet.
+fn opus_es_payload(packet: &[u8]) -> Vec<u8> {
+	let mut out = Vec::with_capacity(packet.len() + 4);
+	// Sync 0x3FF over 11 bits: all of byte 0 (0x7F) plus the top 3 bits of byte 1. The
+	// low 5 bits of byte 1 are the start-trim/end-trim/control-extension flags, all clear.
+	out.push(0x7f);
+	out.push(0xe0);
+	// au_size: a run of 0xFF bytes summing toward the size, then a final byte < 0xFF. A
+	// size that is an exact multiple of 255 still emits a terminating 0x00 byte.
+	let mut n = packet.len();
+	loop {
+		out.push(n.min(255) as u8);
+		if n < 255 {
+			break;
+		}
+		n -= 255;
+	}
+	out.extend_from_slice(packet);
+	out
 }
 
 /// The PMT descriptors recorded for `name` in the `mpegts` section, if any.

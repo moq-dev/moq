@@ -242,6 +242,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
+
+				// AnnounceInit batches the initial active set into one message; attribute
+				// it per broadcast by name length so Lite01/02 isn't undercounted.
+				for absolute in stats_guards.keys() {
+					stats
+						.broadcast(absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
+				}
 			}
 			Version::Lite05Wip => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
@@ -297,6 +305,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
 						.await?;
 				}
+
+				// Count each initial announce by broadcast name length, mirroring the
+				// live loop below (the name, not the encoded message size).
+				for absolute in stats_guards.keys() {
+					stats
+						.broadcast(absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
+				}
 			}
 			_ => {
 				// Lite03/Lite04: no announce init, no AnnounceOk.
@@ -324,8 +340,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									continue;
 								};
 								tracing::debug!(broadcast = %absolute, "announce");
-								let guard = stats.broadcast(&absolute).publisher();
-								let prev = stats_guards.insert(absolute.clone(), guard);
+								let bs = stats.broadcast(&absolute);
+								// Count the broadcast name length, not the encoded message size, so
+								// stats don't penalize the broadcast for hop/framing overhead.
+								bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+								let prev = stats_guards.insert(absolute.clone(), bs.publisher());
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 							}
@@ -337,10 +356,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								match Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) {
 									Some(hops) => {
 										tracing::debug!(broadcast = %absolute, "restart");
+										let bs = stats.broadcast(&absolute);
 										// Continuity: keep the existing stats guard (no close + reopen).
 										if lite::restart_supported(version) {
+											// One Active message on the wire, one name-length count.
+											bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 										} else {
+											// Ended + Active pair, so count the name twice.
+											bs.publisher_announced_bytes(2 * absolute.as_str().len() as u64);
 											stream
 												.writer
 												.encode(&lite::AnnounceBroadcast::Ended {
@@ -354,6 +378,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									None => {
 										// The replacement loops back to us; from this peer's view the broadcast is gone.
 										tracing::debug!(broadcast = %absolute, "restart replacement looped; unannouncing");
+										stats.broadcast(&absolute)
+											.publisher_announced_bytes(absolute.as_str().len() as u64);
 										stats_guards.remove(&absolute);
 										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 									}
@@ -361,6 +387,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							}
 							crate::Announced::Ended => {
 								tracing::debug!(broadcast = %absolute, "unannounce");
+								// Count the name length whether or not a guard is held: the Ended
+								// message is sent even for announces we filtered out above.
+								stats.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								stats_guards.remove(&absolute);
 								// An ended announce doesn't need hops; the receiver matches on path only.
 								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;

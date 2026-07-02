@@ -72,7 +72,8 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::Broadcas
 	let inbound = session::spawn_socket_reader(socket.clone());
 	let session = session::Session::egress(rtc, socket, candidates, inbound, source);
 	tokio::spawn(async move {
-		session::log_session_end("whip client", session.run().await);
+		let result = session.run().await;
+		session::log_session_end("whip client", &result);
 	});
 
 	Ok(())

@@ -27,10 +27,10 @@ class MoqCli < Formula
   end
 
   def install
-    bin.install "bin/moq-cli"
+    bin.install "bin/moq"
   end
 
   test do
-    system bin/"moq-cli", "--help"
+    system bin/"moq", "--help"
   end
 end

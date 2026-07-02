@@ -15,26 +15,24 @@
 //!
 //! On the consume side, [`Consumer`] is the unified entry point: it
 //! subscribes to whichever catalog track `format` advertises and yields
-//! [`Catalog<E>`](hang::Catalog) snapshots. Wrap it with [`Filter`] (hard
-//! match on name / codec family) or [`Target`] (soft match picking one
-//! rendition per axis) to narrow the set before handing it to an exporter;
-//! both also implement [`Stream`] so they compose either direction.
+//! [`Catalog<E>`](hang::Catalog) snapshots. Wrap it with [`Select`] (driven by a
+//! [`select::Broadcast`](crate::select::Broadcast)) to narrow the set before
+//! handing it to an exporter; both also implement [`Stream`] so they compose
+//! either direction.
 
 pub mod hang;
 pub mod msf;
 
 mod consumer;
-mod filter;
 mod format;
 mod producer;
+mod select;
 mod stream;
-mod target;
 mod tracks;
 
 pub use consumer::Consumer;
-pub use filter::{Filter, FilterAudio, FilterVideo};
 pub use format::*;
 pub use producer::{Guard, Producer};
+pub use select::Select;
 pub use stream::Stream;
-pub use target::{Target, TargetAudio, TargetVideo};
 pub use tracks::{AudioTrack, VideoTrack};

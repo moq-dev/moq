@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::Error;
 use crate::Result;
@@ -24,6 +24,7 @@ use crate::Result;
 /// **Audio:**
 /// - AAC (MP4A)
 /// - Opus
+/// - FLAC
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::BroadcastProducer,
@@ -31,8 +32,15 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The catalog being produced
 	catalog: crate::catalog::Producer<E>,
 
+	// Which track roles to publish. `None` imports every supported track.
+	select: Option<crate::select::Broadcast>,
+
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
+
+	// Track ids skipped by `select`, so their moof fragments are ignored rather
+	// than treated as referencing an unknown track.
+	skipped: HashSet<u32>,
 
 	// The moov atom at the start of the file.
 	moov: Option<Moov>,
@@ -78,12 +86,35 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			catalog,
+			select: None,
 			tracks: HashMap::default(),
+			skipped: HashSet::default(),
 			moov: None,
 			moof: None,
 			moof_size: 0,
 			broadcast,
 			buffer: BytesMut::new(),
+		}
+	}
+
+	/// Restrict which track roles are published.
+	///
+	/// fMP4 import selects whole roles: a [`select::Broadcast`](crate::select::Broadcast)
+	/// that doesn't select video drops every video track, and likewise for audio. The
+	/// rendition-level narrowing inside a [`select::Video`](crate::select::Video) /
+	/// [`select::Audio`](crate::select::Audio) (by name or codec) is a consume-side
+	/// concern and is ignored here. Without this, every supported track is imported.
+	pub fn with_select(mut self, select: crate::select::Broadcast) -> Self {
+		self.select = Some(select);
+		self
+	}
+
+	/// Whether `kind` is selected for import (every role when unset).
+	fn selects(&self, kind: &TrackKind) -> bool {
+		match (&self.select, kind) {
+			(None, _) => true,
+			(Some(select), TrackKind::Video) => select.has_video(),
+			(Some(select), TrackKind::Audio) => select.has_audio(),
 		}
 	}
 
@@ -156,6 +187,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
+			let kind = match handler.as_ref() {
+				b"vide" => TrackKind::Video,
+				b"soun" => TrackKind::Audio,
+				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
+				handler => {
+					let mut buf = [0u8; 4];
+					buf[..handler.len().min(4)].copy_from_slice(&handler[..handler.len().min(4)]);
+					return Err(Error::UnknownTrackHandler(buf).into());
+				}
+			};
+
+			// Drop tracks whose role isn't selected before minting or publishing them; their
+			// moof fragments are ignored in `extract`.
+			if !self.selects(&kind) {
+				self.skipped.insert(track_id);
+				continue;
+			}
+
 			// Declare the track at the fMP4's native timescale. Frame timestamps are
 			// emitted at this same scale (see below), so they satisfy the track's
 			// timescale invariant and ride the wire for the relay, redundant with the
@@ -166,24 +215,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				moq_net::TrackInfo::default().with_timescale(timescale),
 			)?;
 
-			let kind = match handler.as_ref() {
-				b"vide" => {
+			match kind {
+				TrackKind::Video => {
 					let config = self.init_video(trak, &moov)?;
 					catalog.video.renditions.insert(track.name().to_string(), config);
-					TrackKind::Video
 				}
-				b"soun" => {
+				TrackKind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
 					catalog.audio.renditions.insert(track.name().to_string(), config);
-					TrackKind::Audio
 				}
-				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
-				handler => {
-					let mut buf = [0u8; 4];
-					buf[..handler.len().min(4)].copy_from_slice(&handler[..handler.len().min(4)]);
-					return Err(Error::UnknownTrackHandler(buf).into());
-				}
-			};
+			}
 
 			self.tracks.insert(
 				track_id,
@@ -393,6 +434,46 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.container = container;
 				config
 			}
+			mp4_atom::Codec::Flac(flac) => {
+				// Rate/channels come from STREAMINFO, not the sample entry's `Audio`
+				// box: the latter's sample rate is 16.16 fixed point and can't carry
+				// FLAC's high rates (96k/192k). STREAMINFO is also where the decoder
+				// description comes from.
+				let info = flac
+					.dfla
+					.blocks
+					.iter()
+					.find_map(|block| match block {
+						mp4_atom::FlacMetadataBlock::StreamInfo {
+							minimum_block_size,
+							maximum_block_size,
+							minimum_frame_size,
+							maximum_frame_size,
+							sample_rate,
+							num_channels_minus_one,
+							bits_per_sample_minus_one,
+							number_of_interchannel_samples,
+							md5_checksum,
+						} => Some(crate::codec::flac::Config {
+							min_block_size: *minimum_block_size,
+							max_block_size: *maximum_block_size,
+							min_frame_size: u32::from(*minimum_frame_size),
+							max_frame_size: u32::from(*maximum_frame_size),
+							sample_rate: *sample_rate,
+							channel_count: *num_channels_minus_one as u32 + 1,
+							bits_per_sample: *bits_per_sample_minus_one as u32 + 1,
+							total_samples: *number_of_interchannel_samples,
+							md5: md5_checksum.as_slice().try_into().unwrap_or([0; 16]),
+						}),
+						_ => None,
+					})
+					.ok_or(crate::codec::flac::Error::MissingStreamInfo)?;
+
+				let mut config = AudioConfig::new(AudioCodec::Flac, info.sample_rate, info.channel_count);
+				config.description = Some(info.description());
+				config.container = container;
+				config
+			}
 			mp4_atom::Codec::Unknown(unknown) => return Err(Error::UnknownCodec(*unknown).into()),
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
@@ -410,7 +491,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
-			let track = self.tracks.get_mut(&track_id).ok_or(Error::UnknownTrack(track_id))?;
+			let track = match self.tracks.get_mut(&track_id) {
+				Some(track) => track,
+				// A fragment for a track `select` dropped: ignore it.
+				None if self.skipped.contains(&track_id) => continue,
+				None => return Err(Error::UnknownTrack(track_id).into()),
+			};
 
 			// Find the track information in the moov
 			let trak = moov
@@ -487,12 +573,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						return Err(Error::MissingSampleDuration.into());
 					}
 
-					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
+					// Checked: a negative composition offset must not wrap into a huge u64 PTS.
+					let pts = dts
+						.checked_add_signed(entry.cts.unwrap_or_default() as i64)
+						.ok_or(Error::PtsOverflow)?;
 					// Preserve the fmp4 track's native timescale so a passthrough re-emit
 					// doesn't go through a lossy microsecond detour.
 					let timestamp = moq_net::Timestamp::new(pts, timescale)?;
 
-					if offset + size > mdat.data.len() {
+					let sample_end = offset.checked_add(size).ok_or(Error::InvalidDataOffset)?;
+					if sample_end > mdat.data.len() {
 						return Err(Error::InvalidDataOffset.into());
 					}
 
@@ -524,9 +614,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					track.last_timestamp = Some(timestamp);
 
 					if let Some(duration) = duration {
-						dts += duration as u64;
+						dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
 					}
-					offset += size;
+					offset = sample_end;
 					sample_index += 1;
 				}
 			}

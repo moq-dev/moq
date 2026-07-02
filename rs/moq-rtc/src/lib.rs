@@ -16,21 +16,19 @@
 //!
 //! ## Embedding
 //!
-//! Depend on this crate with `default-features = false` to embed the gateway
-//! in another process: build a [`Server`] over your own
+//! Build a [`Server`] over your own
 //! [`OriginProducer`](moq_net::OriginProducer) /
 //! [`OriginConsumer`](moq_net::OriginConsumer) and merge
 //! [`Server::publish_router`] / [`Server::subscribe_router`] into your own axum
-//! app, or dial out with [`Client`]. That lean build skips the standalone
-//! binary's deps (axum-server, clap, moq-native, rustls, sd-notify, tower-http),
-//! which the `server` feature (on by default) pulls back in for the `moq-rtc`
-//! binary.
+//! app, or dial out with [`Client`]. A command-line interface is provided by the
+//! `moq-cli` binary, on top of this library.
 //!
 //! The bundled routers are unauthenticated: they derive the broadcast name from
 //! the request path. To own the HTTP route and authorize requests yourself
 //! (resolving the broadcast name from a verified token), skip the routers and
 //! call [`whip::accept`] (ingest) / [`whep::accept`] (egress) from your own
-//! handler.
+//! handler. Return the [`Response::answer`] in your HTTP response, then run
+//! [`Response::run`] to drive the media session for its lifetime.
 //!
 //! ## Bitstream gotcha
 //!

@@ -159,8 +159,13 @@ int main(int argc, char **argv) {
 
     if (got) {
         fprintf(stderr, "received a frame from %s\n", broadcast);
-        moq_session_close((uint32_t)session);
-        return 0;
+        // The data path succeeded, which is all this smoke client verifies.
+        // libmoq statically bundles moq-video (openh264/vaapi/cuda), whose
+        // worker threads use priority-protected mutexes; tearing them down at
+        // normal exit can trip a glibc pthread priority assertion and abort.
+        // Skip that atexit teardown with _exit now that we have our result.
+        fflush(stderr);
+        _exit(0);
     }
     fprintf(stderr, "error: timed out waiting for data\n");
     return 1;

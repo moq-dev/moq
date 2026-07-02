@@ -57,6 +57,10 @@ pub enum Error {
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
+	#[cfg(target_os = "android")]
+	#[error("failed to initialize the Android platform verifier")]
+	AndroidInit(#[source] jni::errors::Error),
+
 	#[error("failed to configure client certificate")]
 	ClientAuth(#[source] rustls::Error),
 
@@ -251,9 +255,14 @@ pub(crate) enum Verification {
 	/// this is mutually exclusive with any roots.
 	Fingerprints(Vec<[u8; 32]>),
 
-	/// Standard verification against these roots (system and/or custom, already
-	/// resolved). The two sets are additive.
-	Roots(Vec<CertificateDer<'static>>),
+	/// Standard CA verification. When `system` is set the platform/default trust
+	/// store is trusted too; each backend resolves that its own way (the rustls
+	/// backends use the OS platform verifier, quiche loads the native roots).
+	/// `custom` are extra PEM roots trusted in addition.
+	Roots {
+		custom: Vec<CertificateDer<'static>>,
+		system: bool,
+	},
 }
 
 impl Client {
@@ -326,31 +335,26 @@ impl Client {
 		let root = self.effective_root();
 		// Default to system roots only when no custom root is given, so passing a
 		// root replaces them unless the system roots are explicitly re-enabled.
-		let system_roots = self.effective_system_roots().unwrap_or(root.is_empty());
+		let system = self.effective_system_roots().unwrap_or(root.is_empty());
 
-		let mut roots = Vec::new();
-		if system_roots {
-			let native = rustls_native_certs::load_native_certs();
-			for err in native.errors {
-				tracing::warn!(%err, "failed to load root cert");
-			}
-			roots.extend(native.certs);
-		}
+		let mut custom = Vec::new();
 		for root in &root {
 			let certs = read_certs(root)?;
 			if certs.is_empty() {
 				return Err(Error::EmptyRoots(root.clone()));
 			}
-			roots.extend(certs);
+			custom.extend(certs);
 		}
 
 		// WebPKI needs at least one trusted root to ever succeed, so fail fast
-		// instead of producing confusing handshake errors later.
-		if roots.is_empty() {
+		// instead of producing confusing handshake errors later. With system
+		// trust enabled the verifier supplies its own roots, so custom roots are
+		// optional.
+		if !system && custom.is_empty() {
 			return Err(Error::NoRoots);
 		}
 
-		Ok(Verification::Roots(roots))
+		Ok(Verification::Roots { custom, system })
 	}
 
 	/// Whether an insecure `http://` certificate-fingerprint bootstrap may be
@@ -384,35 +388,22 @@ impl Client {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
 
-		let mut roots = rustls::RootCertStore::empty();
-		if let Verification::Roots(certs) = &verification {
-			for cert in certs {
-				roots.add(cert.clone()).map_err(Error::AddRoot)?;
-			}
-		}
-
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
 		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-			.with_root_certificates(roots);
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?;
 
-		let mut tls = match (&self.cert, &self.key) {
-			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
-				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-					.collect::<std::result::Result<_, _>>()
-					.map_err(Error::Read)?;
-				if chain.is_empty() {
-					return Err(Error::Empty);
-				}
-				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
-				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
+		// Install the server-certificate verifier. Disabled/Fingerprints get a
+		// placeholder empty store here and swap in their own verifier below.
+		let builder = match &verification {
+			Verification::Roots { custom, system: true } => Self::system_verifier(builder, custom, &provider)?,
+			Verification::Roots { custom, system: false } => builder.with_root_certificates(root_store(custom)?),
+			Verification::Disabled | Verification::Fingerprints(_) => {
+				builder.with_root_certificates(rustls::RootCertStore::empty())
 			}
-			(None, None) => builder.with_no_client_auth(),
-			_ => return Err(Error::IncompleteClientAuth),
 		};
+
+		let mut tls = self.with_client_auth(builder)?;
 
 		match verification {
 			Verification::Disabled => {
@@ -427,12 +418,107 @@ impl Client {
 				let verifier = FingerprintVerifier::new(provider, fingerprints);
 				tls.dangerous().set_certificate_verifier(Arc::new(verifier));
 			}
-			// Roots are already in the store above; use the default WebPKI verifier.
-			Verification::Roots(_) => {}
+			// The verifier was installed by the builder above.
+			Verification::Roots { .. } => {}
 		}
 
 		Ok(tls)
 	}
+
+	/// Build the verifier for system/default trust on the rustls backends.
+	///
+	/// Uses the OS-native platform verifier (Keychain/SecTrust, Windows
+	/// CryptoAPI, or the native store on Linux) everywhere it works, optionally
+	/// extended with `custom` PEM roots. Android's platform verifier needs JNI
+	/// setup (see [`init_android`]); until that has run we trust the bundled
+	/// Mozilla roots so verification still works out of the box.
+	fn system_verifier(
+		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+		custom: &[CertificateDer<'static>],
+		provider: &crypto::Provider,
+	) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
+		// Android's platform verifier needs JNI init (see `init_android`) and,
+		// unlike the other platforms, can't be extended with custom roots. So use
+		// it only once initialized and with no custom roots; otherwise trust the
+		// bundled Mozilla roots (plus any custom roots) so verification still works.
+		#[cfg(target_os = "android")]
+		{
+			if ANDROID_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) && custom.is_empty() {
+				let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
+				return Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)));
+			}
+
+			let mut roots = rustls::RootCertStore::empty();
+			roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+			for cert in custom {
+				roots.add(cert.clone()).map_err(Error::AddRoot)?;
+			}
+			Ok(builder.with_root_certificates(roots))
+		}
+
+		#[cfg(not(target_os = "android"))]
+		{
+			let verifier = if custom.is_empty() {
+				rustls_platform_verifier::Verifier::new(provider.clone())?
+			} else {
+				rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
+			};
+			Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
+		}
+	}
+
+	/// Attach the optional mTLS client identity, finishing the rustls builder.
+	fn with_client_auth(
+		&self,
+		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>,
+	) -> Result<rustls::ClientConfig> {
+		Ok(match (&self.cert, &self.key) {
+			(Some(cert_path), Some(key_path)) => {
+				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
+				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+					.collect::<std::result::Result<_, _>>()
+					.map_err(Error::Read)?;
+				if chain.is_empty() {
+					return Err(Error::Empty);
+				}
+				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
+				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
+			}
+			(None, None) => builder.with_no_client_auth(),
+			_ => return Err(Error::IncompleteClientAuth),
+		})
+	}
+}
+
+/// Build a [`rustls::RootCertStore`] from a list of custom PEM roots.
+fn root_store(custom: &[CertificateDer<'static>]) -> Result<rustls::RootCertStore> {
+	let mut roots = rustls::RootCertStore::empty();
+	for cert in custom {
+		roots.add(cert.clone()).map_err(Error::AddRoot)?;
+	}
+	Ok(roots)
+}
+
+/// Whether [`init_android`] has successfully wired up the platform verifier.
+#[cfg(target_os = "android")]
+static ANDROID_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Initialize Android platform certificate verification.
+///
+/// On Android the OS trust store is only reachable through the JVM, so the
+/// platform verifier needs a JNI handle to the application `Context` before it
+/// can be used. Call this once at startup (e.g. from `JNI_OnLoad`) with a
+/// `JNIEnv` for the calling thread and the application `Context`. The `moq-ffi`
+/// bindings call it automatically, so most consumers never touch this directly.
+///
+/// Until it succeeds, clients fall back to the bundled Mozilla roots, so a
+/// missing or failed init degrades to webpki verification rather than failing.
+#[cfg(target_os = "android")]
+pub fn init_android(env: &mut jni::JNIEnv, context: jni::objects::JObject) -> Result<()> {
+	rustls_platform_verifier::android::init_with_env(env, context).map_err(Error::AndroidInit)?;
+	ANDROID_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+	Ok(())
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -600,6 +686,17 @@ pub struct Info {
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub fingerprints: Vec<String>,
+}
+
+impl Info {
+	/// An empty certificate set, used when no TLS-bearing backend is configured.
+	pub(crate) fn empty() -> Self {
+		Self {
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+			certs: Vec::new(),
+			fingerprints: Vec::new(),
+		}
+	}
 }
 
 // ── NoCertificateVerification ───────────────────────────────────────
@@ -842,6 +939,51 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(with_custom.build(), Err(Error::FingerprintWithRoots)));
+	}
+
+	/// Write a self-signed cert to a temp PEM file, returning the keep-alive
+	/// handle alongside its path.
+	fn self_signed_root() -> (tempfile::NamedTempFile, PathBuf) {
+		use std::io::Write;
+		let key = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		let cert = params.self_signed(&key).unwrap();
+		let mut file = tempfile::NamedTempFile::new().unwrap();
+		file.write_all(cert.pem().as_bytes()).unwrap();
+		let path = file.path().to_path_buf();
+		(file, path)
+	}
+
+	#[test]
+	fn build_uses_platform_verifier_by_default() {
+		// No custom roots, system trust on: resolves to the OS platform verifier
+		// (bundled Mozilla roots on Android) and must build cleanly everywhere.
+		assert!(Client::default().build().is_ok());
+	}
+
+	#[test]
+	fn build_with_custom_roots_only() {
+		// A custom root with system trust left at its default disables the system
+		// roots, verifying against the custom PEM alone.
+		let (_keep, path) = self_signed_root();
+		let config = Client {
+			root: vec![path],
+			..Default::default()
+		};
+		assert!(config.build().is_ok());
+	}
+
+	#[test]
+	fn build_with_custom_and_system_roots() {
+		// Custom roots layered on top of system trust: exercises the platform
+		// verifier's extra-roots path (or the bundled roots plus custom on Android).
+		let (_keep, path) = self_signed_root();
+		let config = Client {
+			root: vec![path],
+			system_roots: Some(true),
+			..Default::default()
+		};
+		assert!(config.build().is_ok());
 	}
 }
 

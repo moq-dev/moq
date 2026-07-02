@@ -3,19 +3,24 @@ use std::time::Duration;
 use clap::ValueEnum;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use hang::moq_net;
-use moq_mux::catalog::{self, CatalogFormat, FilterAudio, FilterVideo, Stream, TargetAudio, TargetVideo};
+use moq_mux::catalog::{self, CatalogFormat, Stream};
+use moq_mux::select;
 use tokio::io::AsyncWriteExt;
 
-#[derive(ValueEnum, Clone, Copy)]
+/// Container format written to stdout on the export (sink) side.
+#[derive(Clone, Copy)]
 pub enum SubscribeFormat {
+	/// Fragmented MP4 (CMAF).
 	Fmp4,
+	/// Matroska / WebM.
 	Mkv,
 	/// H.264 Annex-B elementary stream (no container).
 	H264,
 	/// H.265 Annex-B elementary stream (no container).
 	H265,
-	/// MPEG-TS (transport stream) container.
+	/// MPEG-TS (transport stream).
 	Ts,
+	/// FLV (Flash Video / RTMP).
 	Flv,
 }
 
@@ -24,6 +29,8 @@ pub enum SubscribeFormat {
 #[derive(ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
+	#[value(name = "hangz")]
+	HangZ,
 	Msf,
 }
 
@@ -31,6 +38,7 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	fn from(format: CatalogFormatArg) -> Self {
 		match format {
 			CatalogFormatArg::Hang => Self::Hang,
+			CatalogFormatArg::HangZ => Self::HangZ,
 			CatalogFormatArg::Msf => Self::Msf,
 		}
 	}
@@ -74,31 +82,10 @@ impl From<AudioCodecArg> for AudioCodecKind {
 	}
 }
 
-#[derive(clap::Args, Clone)]
-pub struct SubscribeArgs {
-	/// The format to write to stdout.
-	#[arg(long)]
-	pub format: SubscribeFormat,
-
-	/// Maximum latency before skipping groups (e.g. `500ms`, `1s`).
-	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub max_latency: Duration,
-
-	/// Cap the output fragment duration (e.g. `2s`, `500ms`).
-	///
-	/// By default a fragment covers one GOP (rolled over on video keyframes).
-	/// Setting this caps each fragment to roughly the given duration.
-	/// The cap applies in addition to GOP rollover.
-	#[arg(long, value_parser = humantime::parse_duration)]
-	pub fragment_duration: Option<Duration>,
-
-	/// Catalog format to subscribe to for track discovery.
-	///
-	/// When omitted, the format is auto-detected from the broadcast name suffix
-	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang.
-	#[arg(long)]
-	pub catalog: Option<CatalogFormatArg>,
-
+/// Rendition selection flags for the stdout container sinks. With no flags set,
+/// every rendition is kept.
+#[derive(clap::Args, Clone, Default)]
+pub struct SelectArgs {
 	/// Pick the video rendition with this exact name.
 	#[arg(long)]
 	pub video_name: Option<String>,
@@ -107,22 +94,6 @@ pub struct SubscribeArgs {
 	#[arg(long)]
 	pub video_codec: Option<VideoCodecArg>,
 
-	/// Prefer a video rendition no wider than this (px).
-	#[arg(long)]
-	pub video_width_max: Option<u32>,
-
-	/// Prefer a video rendition no taller than this (px).
-	#[arg(long)]
-	pub video_height_max: Option<u32>,
-
-	/// Prefer a video rendition with at most this many pixels (`coded_width * coded_height`).
-	#[arg(long)]
-	pub video_pixels_max: Option<u32>,
-
-	/// Prefer a video rendition under this bitrate (bits per second).
-	#[arg(long)]
-	pub video_bitrate_max: Option<u64>,
-
 	/// Pick the audio rendition with this exact name.
 	#[arg(long)]
 	pub audio_name: Option<String>,
@@ -130,10 +101,25 @@ pub struct SubscribeArgs {
 	/// Keep only audio renditions whose codec family matches.
 	#[arg(long)]
 	pub audio_codec: Option<AudioCodecArg>,
+}
 
-	/// Prefer an audio rendition under this bitrate (bits per second).
-	#[arg(long)]
-	pub audio_bitrate_max: Option<u64>,
+/// The resolved stdout export settings (built from the `export` flags + format).
+#[derive(Clone)]
+pub struct SubscribeArgs {
+	/// The format to write to stdout.
+	pub format: SubscribeFormat,
+
+	/// Maximum latency before skipping groups.
+	pub max_latency: Duration,
+
+	/// Cap the output fragment duration (default: one GOP). Applies to fmp4 / mkv.
+	pub fragment_duration: Option<Duration>,
+
+	/// Catalog format for track discovery (default: detect from the broadcast suffix).
+	pub catalog: Option<CatalogFormatArg>,
+
+	/// Rendition selection (name / codec) applied before export.
+	pub select: SelectArgs,
 }
 
 impl SubscribeArgs {
@@ -146,8 +132,8 @@ impl SubscribeArgs {
 			.unwrap_or_default()
 	}
 
-	/// Codec implied by the output format. `--format h264` / `--format h265`
-	/// each force a single codec family; container formats leave it open.
+	/// Codec implied by the output format. The `h264` / `h265` sinks each force
+	/// a single codec family; container formats leave it open.
 	fn format_codec(&self) -> Option<VideoCodecKind> {
 		match self.format {
 			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
@@ -156,63 +142,46 @@ impl SubscribeArgs {
 		}
 	}
 
-	/// Build a video filter from the parsed flags, plus any codec defaulted by
-	/// the chosen output format (e.g. `--format h264` implies `codec = H264`).
+	/// Build the rendition selection from the flags, plus any codec forced by
+	/// the output format (the `h264` sink implies `codec = H264`).
 	///
-	/// Errors if `--video-codec` contradicts the format-implied codec — fail
+	/// Errors if `--video-codec` contradicts the format-implied codec, failing
 	/// fast in the CLI rather than later in the exporter.
-	fn filter_video(&self) -> anyhow::Result<Option<FilterVideo>> {
-		let user_codec = self.video_codec.map(VideoCodecKind::from);
+	fn selection(&self) -> anyhow::Result<select::Broadcast> {
+		let user_codec = self.select.video_codec.map(VideoCodecKind::from);
 		let codec = match (self.format_codec(), user_codec) {
 			(Some(fmt), Some(user)) if fmt != user => {
 				anyhow::bail!(
-					"--format implies video codec {fmt:?}, but --video-codec {user:?} was passed; \
+					"the output format implies video codec {fmt:?}, but --video-codec {user:?} was passed; \
 					 remove --video-codec or pick a matching format"
 				);
 			}
 			(Some(fmt), _) => Some(fmt),
 			(None, user) => user,
 		};
-		if self.video_name.is_none() && codec.is_none() {
-			return Ok(None);
-		}
-		Ok(Some(FilterVideo {
-			name: self.video_name.clone(),
-			codec,
-		}))
-	}
 
-	fn filter_audio(&self) -> Option<FilterAudio> {
-		if self.audio_name.is_none() && self.audio_codec.is_none() {
-			return None;
+		// Both roles stay opted in; criteria-free roles keep every rendition.
+		let mut video = select::Video::default();
+		if let Some(name) = &self.select.video_name {
+			video = video.name(name);
 		}
-		Some(FilterAudio {
-			name: self.audio_name.clone(),
-			codec: self.audio_codec.map(Into::into),
-		})
-	}
-
-	fn target_video(&self) -> Option<TargetVideo> {
-		if self.video_width_max.is_none()
-			&& self.video_height_max.is_none()
-			&& self.video_pixels_max.is_none()
-			&& self.video_bitrate_max.is_none()
-		{
-			return None;
+		if let Some(codec) = codec {
+			video = video.codec(codec);
 		}
-		Some(TargetVideo {
-			width: self.video_width_max,
-			height: self.video_height_max,
-			pixels: self.video_pixels_max,
-			bitrate: self.video_bitrate_max,
-		})
-	}
 
-	fn target_audio(&self) -> Option<TargetAudio> {
-		self.audio_bitrate_max.map(|b| TargetAudio { bitrate: Some(b) })
+		let mut audio = select::Audio::default();
+		if let Some(name) = &self.select.audio_name {
+			audio = audio.name(name);
+		}
+		if let Some(codec) = self.select.audio_codec {
+			audio = audio.codec(codec.into());
+		}
+
+		Ok(select::Broadcast::default().video(video).audio(audio))
 	}
 }
 
+/// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: CatalogFormat,
@@ -220,6 +189,7 @@ pub struct Subscribe {
 }
 
 impl Subscribe {
+	/// Wrap the broadcast + resolved settings; [`run`](Self::run) drives it.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
 		Self {
 			broadcast,
@@ -228,21 +198,14 @@ impl Subscribe {
 		}
 	}
 
-	/// Build the catalog stream from the configured filter/target flags.
-	async fn stream(&self) -> anyhow::Result<catalog::Target<catalog::Filter<catalog::Consumer>>> {
+	/// Build the catalog stream, narrowed by the rendition selection flags. The
+	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
+	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
 		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog).await?;
-
-		let mut filter = consumer.filter();
-		filter.set_video(self.args.filter_video()?);
-		filter.set_audio(self.args.filter_audio());
-
-		let mut target = filter.target();
-		target.set_video(self.args.target_video());
-		target.set_audio(self.args.target_audio());
-
-		Ok(target)
+		Ok(consumer.select(self.args.selection()?))
 	}
 
+	/// Write the broadcast to stdout until it ends.
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.args.format {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
@@ -257,8 +220,10 @@ impl Subscribe {
 	async fn run_fmp4(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
+		// Fmp4 builds the merged init segment from the first catalog snapshot, then
+		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
-		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast.clone(), stream)
+		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast, stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -273,8 +238,11 @@ impl Subscribe {
 	async fn run_mkv(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
+		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
+		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
+		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
-		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast.clone(), stream)
+		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast, stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -290,8 +258,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 =
-			moq_mux::codec::h264::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.broadcast, stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -305,8 +272,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 =
-			moq_mux::codec::h265::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.broadcast, stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;

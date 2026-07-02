@@ -101,6 +101,8 @@ enum TrackKind<E: CatalogExt = ()> {
 	Vp9(crate::codec::vp9::Import<E>),
 	Aac(crate::codec::aac::Import<E>),
 	Opus(crate::codec::opus::Import<E>),
+	Mp3(crate::codec::mp3::Import<E>),
+	Flac(crate::codec::flac::Import<E>),
 }
 
 /// A single-codec importer for whole frames.
@@ -168,6 +170,13 @@ impl<E: CatalogExt> Track<E> {
 				let import = crate::codec::opus::Import::new(track, catalog, config)?;
 				TrackKind::Opus(import)
 			}
+			"flac" => {
+				// `init` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
+				let mut data = init;
+				let config = crate::codec::flac::Config::parse(&mut data)?;
+				let import = crate::codec::flac::Import::new(track, catalog, config)?;
+				TrackKind::Flac(import)
+			}
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 
@@ -215,6 +224,8 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Vp9(ref mut import) => import.decode(frame, pts)?,
 			TrackKind::Aac(ref mut import) => import.decode(frame, pts)?,
 			TrackKind::Opus(ref mut import) => import.decode(frame, pts)?,
+			TrackKind::Mp3(ref mut import) => import.decode(frame, pts)?,
+			TrackKind::Flac(ref mut import) => import.decode(frame, pts)?,
 		}
 
 		Ok(())
@@ -231,6 +242,8 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Vp9(ref mut import) => import.finish(),
 			TrackKind::Aac(ref mut import) => import.finish(),
 			TrackKind::Opus(ref mut import) => import.finish(),
+			TrackKind::Mp3(ref mut import) => import.finish(),
+			TrackKind::Flac(ref mut import) => import.finish(),
 		}
 	}
 
@@ -263,6 +276,8 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Vp9(ref mut import) => import.seek(sequence),
 			TrackKind::Aac(ref mut import) => import.seek(sequence),
 			TrackKind::Opus(ref mut import) => import.seek(sequence),
+			TrackKind::Mp3(ref mut import) => import.seek(sequence),
+			TrackKind::Flac(ref mut import) => import.seek(sequence),
 		}
 	}
 
@@ -277,6 +292,8 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Vp9(ref import) => import.demand(),
 			TrackKind::Aac(ref import) => import.demand(),
 			TrackKind::Opus(ref import) => import.demand(),
+			TrackKind::Mp3(ref import) => import.demand(),
+			TrackKind::Flac(ref import) => import.demand(),
 		}
 	}
 
@@ -301,6 +318,17 @@ impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
 	fn from(aac: crate::codec::aac::Import<E>) -> Self {
 		Self {
 			kind: TrackKind::Aac(aac),
+		}
+	}
+}
+
+// Lift an already-built mp3 importer into a `Track` so callers that build their
+// config out-of-band (e.g. moq-gst, which reads rate/channels from gstreamer caps
+// rather than parsing a frame header) can keep using `.into()`.
+impl<E: CatalogExt> From<crate::codec::mp3::Import<E>> for Track<E> {
+	fn from(mp3: crate::codec::mp3::Import<E>) -> Self {
+		Self {
+			kind: TrackKind::Mp3(mp3),
 		}
 	}
 }
