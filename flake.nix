@@ -95,6 +95,7 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-nextest
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
