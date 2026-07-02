@@ -53,6 +53,7 @@ impl Default for Config {
 
 /// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
+	broadcast: moq_net::BroadcastConsumer,
 	renditions: Mutex<BTreeMap<String, Arc<Rendition>>>,
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
@@ -69,6 +70,7 @@ impl Broadcaster {
 		let (ready, _) = watch::channel(0);
 		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
+			broadcast: broadcast.clone(),
 			renditions: Mutex::new(BTreeMap::new()),
 			ready,
 			paused,
@@ -94,6 +96,14 @@ impl Broadcaster {
 	/// Whether the export is currently paused.
 	pub fn is_paused(&self) -> bool {
 		*self.paused.borrow()
+	}
+
+	pub(crate) fn is_closed(&self) -> bool {
+		self.broadcast.is_closed()
+	}
+
+	pub(crate) async fn closed(&self) {
+		self.broadcast.closed().await;
 	}
 
 	/// Look up a rendition by name.
