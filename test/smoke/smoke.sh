@@ -516,6 +516,10 @@ fi
 if [[ "$overall" -eq 0 ]]; then
     echo "smoke: all checks passed"
 else
+    # The relay's view is often the only place that says WHY a session died
+    # (auth rejection, protocol error, close codes), so surface it on failure.
     echo "smoke: FAILURES detected" >&2
+    echo "--- relay log (last 150 lines) ---" >&2
+    tail -n 150 "$TMP/relay.log" 2>/dev/null | sed 's/^/  relay: /' >&2 || true
 fi
 exit "$overall"
