@@ -538,9 +538,27 @@ run_ts_validation() {
     local capture="$TMP/capture.ts" analysis="$TMP/ts-analysis.txt"
     start_publisher rust "$broadcast"
 
+    # Wait for media to actually flow (same one-byte bar as the matrix) before
+    # opening the timed window, so publisher startup doesn't eat into the
+    # capture and the PCR span bound stays tight.
+    local n
+    n=$(timeout -s INT -k 3 "$TIMEOUT" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
+        export ts 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+    if [[ "${n:-0}" -lt 1 ]]; then
+        echo "  FAIL  ts-validate (no data from the live publisher)"
+        sed 's/^/        /' "$TMP/pub-rust.log" 2>/dev/null || true
+        kill_tree "$PUB_PID"
+        wait "$PUB_PID" 2>/dev/null || true
+        PUB_PID=""
+        overall=1
+        return 0
+    fi
+
     # timeout ends the real-time capture window (exit 124 is the expected way
-    # out); -k covers moq only handling SIGINT.
-    timeout -k 3 "$TS_SECONDS" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
+    # out). moq handles SIGINT, not the default SIGTERM; sending INT keeps the
+    # window bounded to TS_SECONDS (the PCR span check depends on it) instead
+    # of stretching to the -k SIGKILL backstop.
+    timeout -s INT -k 3 "$TS_SECONDS" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
         export ts >"$capture" 2>"$TMP/ts-export.log" || true
     kill_tree "$PUB_PID"
     wait "$PUB_PID" 2>/dev/null || true
