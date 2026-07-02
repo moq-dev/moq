@@ -57,6 +57,7 @@ pub struct Broadcaster {
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
+	finished: watch::Sender<bool>,
 	/// Pause flag shared with every rendition pump. While true the pumps stop
 	/// reading; renditions discovered later inherit the current value (they
 	/// `subscribe()` to this sender).
@@ -67,10 +68,12 @@ impl Broadcaster {
 	/// Subscribe to `broadcast` and start tracking its renditions.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, config: Config) -> Arc<Self> {
 		let (ready, _) = watch::channel(0);
+		let (finished, _) = watch::channel(false);
 		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
 			renditions: Mutex::new(BTreeMap::new()),
 			ready,
+			finished,
 			paused,
 		});
 		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
@@ -94,6 +97,22 @@ impl Broadcaster {
 	/// Whether the export is currently paused.
 	pub fn is_paused(&self) -> bool {
 		*self.paused.borrow()
+	}
+
+	pub(crate) fn is_finished(&self) -> bool {
+		*self.finished.borrow()
+	}
+
+	pub(crate) async fn closed(&self) {
+		let mut rx = self.finished.subscribe();
+		if *rx.borrow() {
+			return;
+		}
+		while rx.changed().await.is_ok() {
+			if *rx.borrow() {
+				break;
+			}
+		}
 	}
 
 	/// Look up a rendition by name.
@@ -169,6 +188,10 @@ impl Broadcaster {
 		}
 		let _ = self.ready.send(renditions.len());
 	}
+
+	fn finish(&self) {
+		self.finished.send_replace(true);
+	}
 }
 
 async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
@@ -179,7 +202,10 @@ async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, br
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
 				tokio::select! {
 					_ = tokio::time::sleep(CATALOG_RETRY) => {}
-					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => return,
+					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
+						broadcaster.finish();
+						return;
+					}
 				}
 			}
 		}
@@ -194,5 +220,26 @@ async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, br
 				break;
 			}
 		}
+	}
+
+	broadcaster.finish();
+}
+
+#[cfg(test)]
+impl Broadcaster {
+	pub(crate) fn new_for_test() -> Arc<Self> {
+		let (ready, _) = watch::channel(0);
+		let (finished, _) = watch::channel(false);
+		let (paused, _) = watch::channel(false);
+		Arc::new(Self {
+			renditions: Mutex::new(BTreeMap::new()),
+			ready,
+			finished,
+			paused,
+		})
+	}
+
+	pub(crate) fn finish_for_test(&self) {
+		self.finish();
 	}
 }
