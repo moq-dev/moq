@@ -7,8 +7,7 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
-/** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
-export const VideoConfigSchema = z.object({
+const VideoConfigWireSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
 
@@ -30,6 +29,8 @@ export const VideoConfigSchema = z.object({
 	// If not provided, the display ratio is 1:1
 	displayAspectWidth: z.optional(u53Schema),
 	displayAspectHeight: z.optional(u53Schema),
+	displayRatioWidth: z.optional(u53Schema),
+	displayRatioHeight: z.optional(u53Schema),
 
 	// The frame rate of the video in frames per second
 	framerate: z.optional(z.number()),
@@ -52,6 +53,21 @@ export const VideoConfigSchema = z.object({
 	// - If frames are buffered into 2s segments, this would be 2s.
 	jitter: z.optional(u53Schema),
 });
+
+/** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
+export const VideoConfigSchema = z.pipe(
+	VideoConfigWireSchema,
+	z.transform(({ displayRatioWidth, displayRatioHeight, ...config }) => {
+		const displayAspectWidth = config.displayAspectWidth ?? displayRatioWidth;
+		const displayAspectHeight = config.displayAspectHeight ?? displayRatioHeight;
+
+		return {
+			...config,
+			...(displayAspectWidth !== undefined ? { displayAspectWidth } : undefined),
+			...(displayAspectHeight !== undefined ? { displayAspectHeight } : undefined),
+		};
+	}),
+);
 
 /**
  * Schema for the catalog video section: renditions plus display size, rotation, and flip.
