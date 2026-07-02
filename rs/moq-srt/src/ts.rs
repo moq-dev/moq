@@ -76,9 +76,12 @@ impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
 	/// `latency` bounds how long the muxer waits for a stalled group before it
-	/// skips ahead to a newer one. We reuse the SRT receive latency for it: SRT
-	/// paces egress on the media clock, so the skip threshold and the negotiated
-	/// receive buffer are the same end-to-end budget.
+	/// skips ahead to a newer one. We reuse the locally configured SRT receive
+	/// latency for it: SRT paces egress on the media clock, so the skip threshold
+	/// shares the same latency budget. It's the configured value, not the
+	/// handshake result (srt-tokio doesn't expose the negotiated latency), so a
+	/// peer that requests a higher receive latency gets a larger actual buffer
+	/// than this skip threshold.
 	///
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
