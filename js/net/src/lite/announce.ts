@@ -2,12 +2,16 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { type Origin, OriginSchema } from "./origin.ts";
-import { Version } from "./version.ts";
+import { hasAnnounceOk, Version } from "./version.ts";
 
 // Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
 // hop chains are rejected; this keeps loop-detection bounded and rejects
 // pathological announcements across clusters with unbounded forwarding.
 export const MAX_HOPS = 32;
+
+const ANNOUNCE_ENDED = 0;
+const ANNOUNCE_ACTIVE = 1;
+const ANNOUNCE_RESTART = 2;
 
 /**
  * ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast.
@@ -29,7 +33,7 @@ export class AnnounceBroadcast {
 	}
 
 	async #encode(w: Writer, version: Version) {
-		await w.bool(this.active);
+		await w.u8(this.active ? ANNOUNCE_ACTIVE : ANNOUNCE_ENDED);
 		await w.string(this.suffix);
 
 		switch (version) {
@@ -50,7 +54,11 @@ export class AnnounceBroadcast {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceBroadcast> {
-		const active = await r.bool();
+		const status = await r.u8();
+		const active = status === ANNOUNCE_ACTIVE || (status === ANNOUNCE_RESTART && hasAnnounceOk(version));
+		if (status !== ANNOUNCE_ENDED && status !== ANNOUNCE_ACTIVE && !active) {
+			throw new Error("invalid announce status");
+		}
 		const suffix = Path.from(await r.string());
 
 		let hops: Origin[] = [];
@@ -211,11 +219,8 @@ export class AnnounceOk {
 	}
 
 	static #guard(version: Version) {
-		switch (version) {
-			case Version.DRAFT_05_WIP:
-				break;
-			default:
-				throw new Error("announce ok not supported for this version");
+		if (!hasAnnounceOk(version)) {
+			throw new Error("announce ok not supported for this version");
 		}
 	}
 

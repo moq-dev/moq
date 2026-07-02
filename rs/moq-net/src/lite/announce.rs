@@ -215,9 +215,8 @@ pub struct AnnounceOk {
 
 impl Message for AnnounceOk {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Lite05Wip => {}
-			_ => return Err(DecodeError::Version),
+		if !version.has_announce_ok() {
+			return Err(DecodeError::Version);
 		}
 
 		let origin = Origin::decode(r, version)?;
@@ -230,9 +229,8 @@ impl Message for AnnounceOk {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			Version::Lite05Wip => {}
-			_ => return Err(EncodeError::Version),
+		if !version.has_announce_ok() {
+			return Err(EncodeError::Version);
 		}
 
 		self.origin.encode(w, version)?;
