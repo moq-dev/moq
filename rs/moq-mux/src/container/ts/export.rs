@@ -36,7 +36,7 @@ use mpeg2ts::ts::{
 use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
-use crate::container::{ExportSource, Frame, Pacer, Timer, Timestamp};
+use crate::container::{ExportSource, Frame, Pacer, Timestamp};
 
 use super::adts;
 use super::catalog;
@@ -96,9 +96,9 @@ pub struct Export<E: CatalogExt = ()> {
 
 	/// The in-progress output window, or `None` before the first frame is placed.
 	window: Option<Window>,
-	/// Wall-clock timer for the live-edge case: when a track blocks mid-window, wait for
-	/// its media or for the window's deadline (then flush a filler), rather than stalling.
-	timer: Timer,
+	/// The live-edge wait: a sleep to the current window's deadline, constructed once when a
+	/// track blocks mid-window and dropped when the window flushes. `None` when not waiting.
+	sleep: Option<kio::tokio::Sleep>,
 }
 
 struct Track {
@@ -266,7 +266,7 @@ impl<E: CatalogExt> Export<E> {
 			last_psi: None,
 			video_start: None,
 			window: None,
-			timer: Timer::default(),
+			sleep: None,
 		})
 	}
 
@@ -396,12 +396,18 @@ impl<E: CatalogExt> Export<E> {
 		}
 
 		// A track is blocking at the live edge. Wait for its media or, once the window's
-		// wall-clock deadline passes, flush what we have (a filler PCR if it's empty).
+		// wall-clock deadline passes, flush what we have (a filler PCR if it's empty). The
+		// sleep is built once for this window's deadline and reused until the window flushes.
 		if let Some(deadline) = self.window_deadline() {
-			match self.timer.poll(deadline, waiter) {
-				Poll::Ready(_) => return Poll::Ready(Ok(Some(self.flush_window()?))),
-				Poll::Pending => return Poll::Pending,
+			let ready = self
+				.sleep
+				.get_or_insert_with(|| kio::tokio::Sleep::new(tokio::time::sleep_until(deadline)))
+				.poll(waiter)
+				.is_ready();
+			if ready {
+				return Poll::Ready(Ok(Some(self.flush_window()?)));
 			}
+			return Poll::Pending;
 		}
 
 		Poll::Pending
@@ -476,9 +482,11 @@ impl<E: CatalogExt> Export<E> {
 		Ok(())
 	}
 
-	/// Emit the current window and open the next one on the continuous grid.
+	/// Emit the current window and open the next one on the continuous grid. Drops any
+	/// live-edge sleep, whose deadline belonged to the window just flushed.
 	fn flush_window(&mut self) -> anyhow::Result<Output> {
 		let window = self.window.take().context("no window to flush")?;
+		self.sleep = None;
 		let output = Output {
 			payload: Bytes::from(window.buf),
 			pace: window.pace,
@@ -490,6 +498,7 @@ impl<E: CatalogExt> Export<E> {
 	/// Emit the trailing window at end of stream, or `None` when it holds only its PCR: with
 	/// nothing left to bridge to, an empty window is not worth a filler.
 	fn flush_final(&mut self) -> Option<Output> {
+		self.sleep = None;
 		let window = self.window.take()?;
 		window.has_media.then(|| Output {
 			payload: Bytes::from(window.buf),
