@@ -102,6 +102,62 @@ fn import_ac3_catalog() {
 	assert!(audio.description.is_none(), "verbatim AC-3 needs no description");
 }
 
+/// `opus.ts` is an ffmpeg-authored audio-only Opus program (private stream_type 0x06
+/// plus the 'Opus' registration and DVB extension descriptors), generated with:
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
+/// -ac 2 -c:a libopus -b:a 96k -f mpegts opus.ts`. It validates our importer against
+/// real ffmpeg control-header framing, not just our own exporter's.
+#[test]
+fn import_opus_catalog() {
+	let data = include_bytes!("test_data/opus.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.video.renditions.len(), 0);
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one Opus track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.codec.to_string(), "opus");
+	assert_eq!(audio.sample_rate, 48_000, "Opus is always reckoned at 48 kHz");
+	assert_eq!(audio.channel_count, 2);
+}
+
+/// Opus frames from real ffmpeg output must decode: a non-empty run of Opus packets,
+/// each a plausible size (the control header was stripped, not left in the payload).
+#[tokio::test(start_paused = true)]
+async fn import_opus_frames() {
+	let data = include_bytes!("test_data/opus.ts");
+
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let name = catalog
+		.snapshot()
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.expect("an Opus track")
+		.clone();
+
+	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut frames = Vec::new();
+	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+		let Some(frame) = res.unwrap() else { break };
+		frames.push(frame.payload);
+	}
+
+	assert!(frames.len() > 5, "expected a run of Opus packets, got {}", frames.len());
+	for frame in &frames {
+		assert!(!frame.is_empty(), "Opus packet must not be empty");
+		// The Opus-in-TS control header starts with 0x7f; a stripped packet must not.
+		assert_ne!(frame[0], 0x7f, "control header was not stripped");
+	}
+}
+
 /// `eac3.ts` is an ffmpeg-authored audio-only ATSC E-AC-3 program (stream_type
 /// 0x87 plus the 'EAC3' registration descriptor), regenerated with:
 /// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5

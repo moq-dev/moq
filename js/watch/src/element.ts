@@ -36,6 +36,12 @@ function parseVisible(value: string | null): Video.Visible {
 	return "0px";
 }
 
+function parseBoolean(value: string | null, defaultValue: boolean): boolean {
+	if (value === null) return defaultValue;
+	const normalized = value.trim().toLowerCase();
+	return normalized !== "false" && normalized !== "0";
+}
+
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
@@ -70,7 +76,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Broadcast configuration owned here and wired into `broadcast` as inputs.
 	#name = new Signal<Moq.Path.Valid>(Moq.Path.empty());
-	#reload = new Signal(false);
+	#reload = new Signal(true);
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
 
@@ -286,7 +292,7 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "visible") {
 			this.controls.visible.set(parseVisible(newValue));
 		} else if (name === "reload") {
-			this.#reload.set(newValue !== null);
+			this.#reload.set(parseBoolean(newValue, true));
 		} else if (name === "latency") {
 			// Sugar: collapse the floor and ceiling to a single value.
 			this.latency = this.#parseBound(newValue);

@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -39,11 +39,6 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub web: WebConfig,
-
-	/// Optionally run an unauthenticated plain-TCP listener for trusted clients.
-	#[command(flatten)]
-	#[serde(default)]
-	pub internal: InternalConfig,
 
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[command(flatten)]
@@ -383,16 +378,12 @@ id = 12345
 		// the same env vars.
 		unsafe {
 			std::env::remove_var("MOQ_CLUSTER_TIER");
-			std::env::remove_var("MOQ_INTERNAL_TIER");
 			std::env::remove_var("MOQ_AUTH_MTLS_TIER");
 		}
 
 		let toml = r#"
 [cluster]
 tier = "region"
-
-[internal]
-tier = "local"
 
 [auth]
 mtls_tier = "edge"
@@ -411,63 +402,59 @@ mtls_tier = "edge"
 			"TOML cluster.tier must survive"
 		);
 		assert_eq!(
-			config.internal.tier.as_deref(),
-			Some("local"),
-			"TOML internal.tier must survive"
-		);
-		assert_eq!(
 			config.auth.mtls_tier.as_deref(),
 			Some("edge"),
 			"TOML auth.mtls_tier must survive"
 		);
 	}
 
-	/// Same clap+TOML clobber guard for the internal listeners. Both
-	/// `internal.tcp.listen` (`Option<SocketAddr>`) and `internal.uds.listen`
-	/// (`Option<PathBuf>`) must survive the `update_from` re-parse when their
-	/// CLI flags are absent, or a TOML-configured listener gets silently
-	/// disabled.
-	static INTERNAL_LISTEN_ENV_LOCK: Mutex<()> = Mutex::new(());
+	/// Same clap+TOML clobber guard for the stream listeners. The `[server.unix]`
+	/// bind (`Option<PathBuf>`) and its peer-credential allowlist must survive the
+	/// `update_from` re-parse when their CLI flags are absent, or a TOML-configured
+	/// Unix listener (and its allowlist) gets silently dropped.
+	#[cfg(all(feature = "uds", unix))]
+	static SERVER_UNIX_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+	#[cfg(all(feature = "uds", unix))]
 	#[test]
-	fn cli_does_not_clobber_toml_internal_listen() {
-		let _guard = INTERNAL_LISTEN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: INTERNAL_LISTEN_ENV_LOCK serializes this with any sibling test
+	fn cli_does_not_clobber_toml_server_unix() {
+		let _guard = SERVER_UNIX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: SERVER_UNIX_ENV_LOCK serializes this with any sibling test
 		// touching the same env vars.
 		unsafe {
-			std::env::remove_var("MOQ_INTERNAL_LISTEN");
-			std::env::remove_var("MOQ_INTERNAL_UDS_LISTEN");
+			std::env::remove_var("MOQ_SERVER_UNIX_BIND");
+			std::env::remove_var("MOQ_SERVER_UNIX_ALLOW_UID");
 		}
 
 		let toml = r#"
-[internal.tcp]
-listen = "127.0.0.1:4444"
+[server]
+bind = "[::]:443"
 
-[internal.uds]
-listen = "/run/moq/internal.sock"
+[server.unix]
+bind = "/run/moq/internal.sock"
 
-[internal.uds.allow]
+[server.unix.allow]
 uid = [1001]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("internal-listen-toml-wins.toml");
+		let path = dir.join("server-unix-toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
+		assert_eq!(config.server.bind.as_deref(), Some("[::]:443"));
 		assert_eq!(
-			config.internal.tcp.listen,
-			Some("127.0.0.1:4444".parse().unwrap()),
-			"TOML's internal.tcp.listen must not be clobbered by the CLI re-parse"
-		);
-		assert_eq!(
-			config.internal.uds.listen.as_deref(),
+			config.server.unix.bind.as_deref(),
 			Some(std::path::Path::new("/run/moq/internal.sock")),
-			"TOML's internal.uds.listen must not be clobbered by the CLI re-parse"
+			"TOML's server.unix.bind must not be clobbered by the CLI re-parse"
 		);
-		assert_eq!(config.internal.uds.allow.uid, vec![1001]);
+		assert_eq!(
+			config.server.unix.allow.expect("allow present").uid,
+			vec![1001],
+			"TOML's server.unix.allow must not be clobbered by the CLI re-parse"
+		);
 	}
 
 	#[test]

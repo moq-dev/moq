@@ -42,8 +42,8 @@ See the [moq-cli source](https://github.com/moq-dev/moq/tree/main/rs/moq-cli) fo
 
 **Video:**
 
-- H.264 (AVC) - requires `h264` feature
-- H.265 (HEVC) - requires `h265` feature
+- H.264 (AVC)
+- H.265 (HEVC)
 - AV1
 - VP8
 - VP9
@@ -52,6 +52,7 @@ See the [moq-cli source](https://github.com/moq-dev/moq/tree/main/rs/moq-cli) fo
 
 - AAC
 - Opus
+- MP3
 - MP2 (MPEG-TS only, carried verbatim)
 - AC-3 (MPEG-TS only, carried verbatim)
 - E-AC-3 (MPEG-TS only, carried verbatim)
@@ -86,11 +87,11 @@ cargo install moq-cli
 
 # Publish a video file (remux to MPEG-TS and pipe it in)
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
+    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
 
 # Publish from FFmpeg
 ffmpeg -i input.mp4 -f mpegts - | \
-    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
+    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
 ```
 
 ## Next Steps

@@ -28,9 +28,13 @@ RUN --mount=type=cache,target=/root/.cache --mount=type=cache,target=/nix,from=n
 # Default to `/bin/sh` for the entrypoint if no package is specified
 ARG package="sh"
 
-# Create entry.sh script that knows which binary to run
-RUN echo '#!/bin/sh' > /output/entry.sh && \
-	echo "exec /bin/${package} \"\$@\"" >> /output/entry.sh && \
+# Create entry.sh script that knows which binary to run. Derive it from the
+# single binary the package produced (so a crate whose `[[bin]]` name differs
+# from its package name, e.g. `moq-cli` shipping as `moq`, just works); fall
+# back to the package name when there's no binary (the `sh` default).
+RUN binary="$(ls /output/result/bin 2>/dev/null | head -n1)"; \
+	[ -n "$binary" ] || binary="${package}"; \
+	printf '#!/bin/sh\nexec /bin/%s "$@"\n' "${binary}" > /output/entry.sh && \
 	chmod +x /output/entry.sh
 
 # Final image (when no specific package is selected, defaults to sh)

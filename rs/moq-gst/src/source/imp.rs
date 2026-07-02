@@ -688,6 +688,12 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 			}
 			builder.build()
 		}
+		hang::catalog::AudioCodec::Mp3 => gst::Caps::builder("audio/mpeg")
+			.field("mpegversion", 1)
+			.field("layer", 3)
+			.field("rate", config.sample_rate)
+			.field("channels", config.channel_count)
+			.build(),
 		other => bail!("unsupported audio codec: {other:?}"),
 	};
 	Ok(caps)

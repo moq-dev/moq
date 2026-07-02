@@ -57,6 +57,8 @@ let
   moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
     cargoExtraArgs = "-p moq-cli";
+    # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
+    meta.mainProgram = "moq";
   };
 
   moqTokenCliArgs = crateInfo ../rs/moq-token-cli/Cargo.toml // {

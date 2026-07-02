@@ -7,6 +7,8 @@
 //! mirror image for egress: it consumes a broadcast from the origin and re-muxes
 //! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use moq_mux::container::{Frame, ts};
 use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
@@ -17,7 +19,7 @@ use crate::Result;
 ///
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
-/// next call (the same pattern `moq-cli publish ts` uses against stdin).
+/// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
 /// Dropping the publisher ends the broadcast: the held [`OriginPublish`] guard
 /// unannounces it from the origin.
 pub struct Publisher {
@@ -71,15 +73,23 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
+	/// `latency` bounds how long the muxer waits for a stalled group before it
+	/// skips ahead to a newer one. We reuse the locally configured SRT receive
+	/// latency for it: SRT paces egress on the media clock, so the skip threshold
+	/// shares the same latency budget. It's the configured value, not the
+	/// handshake result (srt-tokio doesn't expose the negotiated latency), so a
+	/// peer that requests a higher receive latency gets a larger actual buffer
+	/// than this skip threshold.
+	///
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
 	/// to be announced, so a caller may connect before the publisher does.
-	pub async fn new(origin: &OriginConsumer, path: &str) -> Result<Option<Self>> {
+	pub async fn new(origin: &OriginConsumer, path: &str, latency: Duration) -> Result<Option<Self>> {
 		let Some(broadcast) = origin.announced_broadcast(path).await else {
 			return Ok(None);
 		};
 
-		let export = ts::Export::new(broadcast).await?;
+		let export = ts::Export::new(broadcast).await?.with_latency(latency);
 		Ok(Some(Self { export }))
 	}
 

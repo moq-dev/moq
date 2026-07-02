@@ -557,6 +557,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let request_id = self.control.next_request_id().await?;
 		let mut stream = Stream::open(&self.session, self.version).await?;
 
+		let bs = self.stats.broadcast(&absolute);
+
 		stream.writer.encode(&ietf::PublishNamespace::ID).await?;
 		stream
 			.writer
@@ -565,6 +567,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				track_namespace: suffix.as_path(),
 			})
 			.await?;
+		// Count the broadcast name length (not the encoded message size) as soon
+		// as the request is on the wire, so a rejected namespace still counts the
+		// announce we spent.
+		bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 
 		let type_id: u64 = stream.reader.decode().await?;
 		let size: u16 = stream.reader.decode().await?;
@@ -576,8 +582,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				tracing::debug!(message = ?msg, "publish namespace ok");
 				// Holds the announce guard (bumps `announced` / `announced_closed`)
 				// until the namespace stream is torn down.
-				let guard = self.stats.broadcast(&absolute).publisher();
-				namespace_streams.insert(suffix, (request_id, stream, guard));
+				namespace_streams.insert(suffix, (request_id, stream, bs.publisher()));
 			}
 			(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
@@ -586,8 +591,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			(_, ietf::RequestOk::ID) => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "publish namespace ok");
-				let guard = self.stats.broadcast(&absolute).publisher();
-				namespace_streams.insert(suffix, (request_id, stream, guard));
+				namespace_streams.insert(suffix, (request_id, stream, bs.publisher()));
 			}
 			(_, ietf::RequestError::ID) => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
@@ -621,6 +625,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 				_ => {}
 			}
+			// Count the unannounce name length, mirroring the announce above (we
+			// measure the name, not the on-wire framing, so this is draft-agnostic).
+			let absolute = self.origin.absolute(suffix).to_owned();
+			self.stats
+				.broadcast(&absolute)
+				.publisher_announced_bytes(absolute.as_str().len() as u64);
 			stream.writer.finish().ok();
 		}
 	}

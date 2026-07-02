@@ -637,3 +637,46 @@ async fn next_fragment_reports_segment_metadata() {
 	drop(catalog);
 	drop(producer);
 }
+
+/// A legacy FLAC rendition (no init segment) synthesizes a `fLaC` sample entry
+/// whose `dfLa` STREAMINFO is rebuilt from the catalog description.
+#[test]
+fn synthesize_flac_trak() {
+	let description = crate::codec::flac::Config {
+		min_block_size: 4096,
+		max_block_size: 4096,
+		min_frame_size: 0,
+		max_frame_size: 0,
+		sample_rate: 96_000,
+		channel_count: 2,
+		bits_per_sample: 24,
+		total_samples: 0,
+		md5: [0; 16],
+	}
+	.description();
+
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Flac, 96_000, 2);
+	config.description = Some(description);
+
+	let trak = super::synthesize_audio_trak(1, 96_000, &config).expect("synthesize FLAC trak");
+	let codec = &trak.mdia.minf.stbl.stsd.codecs[0];
+	let mp4_atom::Codec::Flac(flac) = codec else {
+		panic!("expected a FLAC sample entry, got {codec:?}");
+	};
+
+	let stream_info = flac
+		.dfla
+		.blocks
+		.iter()
+		.find_map(|b| match b {
+			mp4_atom::FlacMetadataBlock::StreamInfo {
+				sample_rate,
+				num_channels_minus_one,
+				..
+			} => Some((*sample_rate, *num_channels_minus_one)),
+			_ => None,
+		})
+		.expect("STREAMINFO block");
+	// STREAMINFO carries the real 96 kHz rate even though the 16.16 audio box can't.
+	assert_eq!(stream_info, (96_000, 1));
+}

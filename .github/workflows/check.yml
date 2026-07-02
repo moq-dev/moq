@@ -22,77 +22,34 @@ jobs:
     # Skip the actual work on close/merge: this run exists only to cancel the
     # superseded in-flight build via the concurrency group above.
     if: github.event.action != 'closed'
-    # Trusted events run on the moq-dev self-hosted A1 runner (warm /nix/store +
-    # persistent CARGO_TARGET_DIR). Fork PRs fall back to GitHub-hosted ARM so
-    # untrusted code never runs on the box.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["ubuntu-24.04-arm"]') || fromJSON('["self-hosted", "nix"]') }}
+    runs-on: ubuntu-24.04-arm
     # Backstop a hang (e.g. a wedged test) instead of holding the runner for the
     # 6-hour default. Generous enough for a cold first build.
     timeout-minutes: 60
 
     steps:
-      # GitHub-hosted fallback only: the self-hosted box already has disk space,
-      # Determinate Nix, and a warm store.
       - name: Free disk space
-        if: runner.environment == 'github-hosted'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
         with:
           tool-cache: false
 
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           # Full history so `just changed` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      - if: runner.environment == 'github-hosted'
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - if: runner.environment == 'github-hosted'
-        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
-      - if: runner.environment == 'github-hosted'
-        uses: DeterminateSystems/flake-checker-action@a0f068d37b542f3150564fbf1164fec2d958ee11 # main
+      - uses: DeterminateSystems/flake-checker-action@a0f068d37b542f3150564fbf1164fec2d958ee11 # main
 
-      # GitHub-hosted fallback caches Rust via the Actions cache. The self-hosted
-      # box runs the heavy Rust CI (clippy/doc/test) as crane derivations via
-      # `nix flake check`, so deps cache in /nix/store and there's no persistent
-      # CARGO_TARGET_DIR to manage -- the residual `cargo check`s use the
-      # workspace ./target, which the runner wipes per job.
+      # Cache Rust dependencies and build artifacts via the Actions cache.
       - name: Rust Cache
-        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
 
-      # Mark a baseline so the post-run assertion can tell whether anything wrote
-      # under the old persistent target dir (i.e. a CARGO_TARGET_DIR override
-      # leaked back in and would re-grow an unbounded tree).
-      - name: Target-dir baseline
-        if: runner.environment == 'self-hosted'
-        run: touch "$RUNNER_TEMP/target-baseline"
-
       # `just ci` calls `just changed` internally to skip unchanged scopes.
-      # Login shell so /etc/profile.d puts Nix on PATH; Actions shells don't by
-      # default. Harmless on the hosted fallback.
       - run: nix develop --command just ci
-        shell: bash -leo pipefail {0}
-
-      # Invariant: nothing should write to the old persistent target dir anymore.
-      # Fails loudly if a CARGO_TARGET_DIR override sneaks back in. Scope it to
-      # *this* repo's old per-runner dir (moq-$RUNNER_NAME) -- the box's
-      # $HOME/cargo-target is shared with other repos (e.g. moq-pro) and runners,
-      # whose jobs may run concurrently and legitimately still write there.
-      - name: Assert the persistent target dir stayed unused
-        if: runner.environment == 'self-hosted'
-        run: |
-          target="$HOME/cargo-target/moq-$RUNNER_NAME"
-          mkdir -p "$target"
-          leaked=$(find "$target" -type f -newer "$RUNNER_TEMP/target-baseline" 2>/dev/null | head)
-          if [ -n "$leaked" ]; then
-            echo "::error::cargo wrote to $target; a CARGO_TARGET_DIR override leaked back in"
-            echo "$leaked"
-            exit 1
-          fi
-          echo "OK: $target untouched this run"

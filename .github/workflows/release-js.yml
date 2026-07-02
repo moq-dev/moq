@@ -18,26 +18,25 @@ concurrency:
 jobs:
   release:
     name: Release JS Packages
-    # Trusted push to main, so run on the moq-dev self-hosted A1 runner (warm
-    # /nix/store).
-    runs-on: [self-hosted, nix]
+    runs-on: ubuntu-latest
     if: github.repository_owner == 'moq-dev'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
 
       - name: Setup npm registry
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           registry-url: 'https://registry.npmjs.org'
 
-      # Login shell so /etc/profile.d puts Nix on PATH; Actions shells don't by
-      # default.
       - name: Install dependencies
         run: nix develop --command bun install --frozen-lockfile
-        shell: bash -leo pipefail {0}
 
       - name: Release packages
         # Web-component packages register custom elements via global type
@@ -46,4 +45,3 @@ jobs:
         env:
           JSR_ALLOW_SLOW_TYPES: "true"
         run: nix develop --command bun --filter '*' release
-        shell: bash -leo pipefail {0}

@@ -16,11 +16,19 @@ use m3u8_rs::{
 };
 use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
+use moq_mux::select;
 use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{Error, Result};
+
+/// Per-request timeout for the default HTTP client (playlist + segment fetches).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Backoff before retrying after a failed import step, so a transient upstream
+/// error (a 5xx, a truncated segment) doesn't tear down the whole import.
+const ERROR_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Configuration for the single-rendition HLS import loop.
 #[derive(Clone)]
@@ -34,6 +42,7 @@ pub struct Config {
 }
 
 impl Config {
+	/// Create an import configuration for `playlist` using the default HTTP client.
 	pub fn new(playlist: String) -> Self {
 		Self { playlist, client: None }
 	}
@@ -99,30 +108,55 @@ enum TrackKind {
 
 struct TrackState {
 	playlist: Url,
+	// Which roles this playlist's importer publishes (a muxed variant alongside a
+	// separate audio rendition publishes video only).
+	select: select::Broadcast,
 	next_sequence: Option<u64>,
+	next_discontinuity: Option<u64>,
 	init_ready: bool,
 }
 
 impl TrackState {
-	fn new(playlist: Url) -> Self {
+	fn new(playlist: Url, select: select::Broadcast) -> Self {
 		Self {
 			playlist,
+			select,
 			next_sequence: None,
+			next_discontinuity: None,
 			init_ready: false,
 		}
 	}
+}
+
+/// Selection for a muxed rendition (the only source): publish every track.
+fn select_muxed() -> select::Broadcast {
+	select::Broadcast::default()
+		.video(select::Video::default())
+		.audio(select::Audio::default())
+}
+
+/// Selection for a video variant that has a separate audio rendition: video only.
+fn select_video_only() -> select::Broadcast {
+	select::Broadcast::default().video(select::Video::default())
+}
+
+/// Selection for a separate audio rendition: audio only.
+fn select_audio_only() -> select::Broadcast {
+	select::Broadcast::default().audio(select::Audio::default())
 }
 
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
-		let client = cfg.client.unwrap_or_else(|| {
-			Client::builder()
+		let client = match cfg.client {
+			Some(client) => client,
+			None => Client::builder()
 				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-				.build()
-				.unwrap()
-		});
+				// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
+				.timeout(REQUEST_TIMEOUT)
+				.build()?,
+		};
 		Ok(Self {
 			broadcast,
 			catalog,
@@ -149,9 +183,19 @@ impl Import {
 	}
 
 	/// Run the import loop until cancelled.
+	///
+	/// A failed step (e.g. a transient playlist fetch error) is logged and
+	/// retried after a short backoff rather than ending the import.
 	pub async fn run(&mut self) -> Result<()> {
 		loop {
-			let outcome = self.step().await?;
+			let outcome = match self.step().await {
+				Ok(outcome) => outcome,
+				Err(err) => {
+					warn!(%err, "HLS import step failed, retrying");
+					tokio::time::sleep(ERROR_BACKOFF).await;
+					continue;
+				}
+			};
 			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
 
 			info!(
@@ -210,31 +254,27 @@ impl Import {
 		let mut wrote = 0usize;
 		let mut target_duration = None;
 
-		// Ingest a step from all active video variants.
+		// Ingest a step from all active video variants. A single variant failing is
+		// logged and skipped (the track is always restored) so one bad rendition or
+		// segment doesn't drop the others or abort the whole step.
 		let video_tracks = std::mem::take(&mut self.video);
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
-			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			// Use the first video's target duration as the base.
-			if target_duration.is_none() {
-				target_duration = Some(playlist.target_duration);
+			match self
+				.ingest(TrackKind::Video(index), &mut track, &mut target_duration)
+				.await
+			{
+				Ok(count) => wrote += count,
+				Err(err) => warn!(index, %err, "video rendition import step failed, will retry"),
 			}
-			let count = self
-				.consume_segments(TrackKind::Video(index), &mut track, &playlist, None)
-				.await?;
-			wrote += count;
 			self.video.push(track);
 		}
 
 		// Ingest from the shared audio track, if present.
 		if let Some(mut track) = self.audio.take() {
-			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			if target_duration.is_none() {
-				target_duration = Some(playlist.target_duration);
+			match self.ingest(TrackKind::Audio, &mut track, &mut target_duration).await {
+				Ok(count) => wrote += count,
+				Err(err) => warn!(%err, "audio rendition import step failed, will retry"),
 			}
-			let count = self
-				.consume_segments(TrackKind::Audio, &mut track, &playlist, None)
-				.await?;
-			wrote += count;
 			self.audio = Some(track);
 		}
 
@@ -242,6 +282,21 @@ impl Import {
 			wrote_segments: wrote,
 			target_duration,
 		})
+	}
+
+	/// Fetch one track's current media playlist and consume any fresh segments,
+	/// recording the playlist's target duration if not already known.
+	async fn ingest(
+		&mut self,
+		kind: TrackKind,
+		track: &mut TrackState,
+		target_duration: &mut Option<u64>,
+	) -> Result<usize> {
+		let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
+		if target_duration.is_none() {
+			*target_duration = Some(playlist.target_duration);
+		}
+		self.consume_segments(kind, track, &playlist, None).await
 	}
 
 	/// Compute the delay before the next import step should run.
@@ -278,24 +333,31 @@ impl Import {
 				return Err(Error::NoVariants);
 			}
 
-			// Create a video track state for every usable variant.
-			for variant in &variants {
-				let video_url = resolve_uri(&self.base_url, &variant.uri)?;
-				self.video.push(TrackState::new(video_url));
-			}
-
-			// Choose an audio rendition based on the first variant with an audio group.
+			// Choose an audio rendition first, so the video variants below know whether
+			// they need to drop their muxed audio.
 			if let Some(group_id) = variants.iter().find_map(|v| v.audio.as_deref()) {
 				if let Some(audio_tag) = select_audio(&master, group_id) {
 					if let Some(uri) = &audio_tag.uri {
 						let audio_url = resolve_uri(&self.base_url, uri)?;
-						self.audio = Some(TrackState::new(audio_url));
+						self.audio = Some(TrackState::new(audio_url, select_audio_only()));
 					} else {
 						warn!(%group_id, "audio rendition missing URI");
 					}
 				} else {
 					warn!(%group_id, "audio group not found in master playlist");
 				}
+			}
+
+			// With a separate audio rendition, the variants are muxed but should publish
+			// video only so the audio isn't duplicated; otherwise import every track.
+			let variant_select = if self.audio.is_some() {
+				select_video_only()
+			} else {
+				select_muxed()
+			};
+			for variant in &variants {
+				let video_url = resolve_uri(&self.base_url, &variant.uri)?;
+				self.video.push(TrackState::new(video_url, variant_select.clone()));
 			}
 
 			let audio_url = self.audio.as_ref().map(|a| a.playlist.to_string());
@@ -308,8 +370,8 @@ impl Import {
 			return Ok(());
 		}
 
-		// Fallback: treat the provided URL as a single media playlist.
-		self.video.push(TrackState::new(self.base_url.clone()));
+		// Fallback: treat the provided URL as a single (muxed) media playlist.
+		self.video.push(TrackState::new(self.base_url.clone(), select_muxed()));
 		Ok(())
 	}
 
@@ -327,22 +389,30 @@ impl Import {
 		let total_segments = playlist.segments.len();
 		let last_playlist_seq = playlist_seq + total_segments as u64;
 
+		// Both out-of-window cases re-anchor to the current playlist (skip 0) and clear
+		// `next_sequence` so the next push re-bases. The warning is suppressed on the
+		// first step (`next_sequence` still None), where starting mid-window is normal.
 		let skip = if next_seq > last_playlist_seq {
-			warn!(
-				?kind,
-				next_sequence = next_seq,
-				playlist_sequence = playlist_seq,
-				last_playlist_sequence = last_playlist_seq,
-				"imported ahead of playlist, waiting for new segments"
-			);
-			total_segments
+			if track.next_sequence.is_some() {
+				warn!(
+					?kind,
+					next_sequence = next_seq,
+					playlist_sequence = playlist_seq,
+					last_playlist_sequence = last_playlist_seq,
+					"imported ahead of playlist (upstream sequence reset?), re-anchoring to current window"
+				);
+			}
+			track.next_sequence = None;
+			0
 		} else if next_seq < playlist_seq {
-			warn!(
-				?kind,
-				next_sequence = next_seq,
-				playlist_sequence = playlist_seq,
-				"next_sequence behind playlist, resetting to start of playlist"
-			);
+			if track.next_sequence.is_some() {
+				warn!(
+					?kind,
+					next_sequence = next_seq,
+					playlist_sequence = playlist_seq,
+					"next_sequence behind playlist, resetting to start of playlist"
+				);
+			}
 			track.next_sequence = None;
 			0
 		} else {
@@ -350,9 +420,10 @@ impl Import {
 		};
 
 		let available = total_segments.saturating_sub(skip);
-		let to_process = match limit {
-			Some(max) => available.min(max),
-			None => available,
+		let to_process = if let Some(max) = limit {
+			available.min(max)
+		} else {
+			available
 		};
 
 		info!(
@@ -367,8 +438,23 @@ impl Import {
 
 		if to_process > 0 {
 			let base_seq = playlist_seq + skip as u64;
+
+			// Discontinuity sequence names a fresh media timeline; the tag count for the
+			// skipped prefix gets us to the discontinuity sequence of the first segment
+			// we actually push.
+			let mut discontinuity_seq = playlist.discontinuity_sequence;
+			for segment in &playlist.segments[..skip] {
+				if segment.discontinuity {
+					discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
+				}
+			}
+
 			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
-				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
+				if segment.discontinuity {
+					discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
+				}
+				self.push_segment(kind, track, segment, base_seq + i as u64, discontinuity_seq)
+					.await?;
 			}
 			info!(?kind, consumed = to_process, "consumed HLS segments");
 		} else {
@@ -393,8 +479,8 @@ impl Import {
 		let url = resolve_uri(&track.playlist, &map.uri)?;
 		let bytes = self.fetch_bytes(url).await?;
 		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index),
-			TrackKind::Audio => self.ensure_audio_importer(),
+			TrackKind::Video(index) => self.ensure_video_importer_for(index, &track.select),
+			TrackKind::Audio => self.ensure_audio_importer(&track.select),
 		};
 
 		// The importer buffers internally, so a fully-parsed init segment leaves it
@@ -413,6 +499,7 @@ impl Import {
 		track: &mut TrackState,
 		segment: &MediaSegment,
 		sequence: u64,
+		discontinuity_sequence: u64,
 	) -> Result<()> {
 		if segment.uri.is_empty() {
 			return Err(Error::EmptySegmentUri);
@@ -421,22 +508,27 @@ impl Import {
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
 		let bytes = self.fetch_bytes(url).await?;
 
-		// Ensure the importer is initialized before processing fragments
-		// Use track.init_ready to avoid borrowing issues
-		if !track.init_ready {
-			// Try to ensure init segment is processed
-			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			self.ensure_init_segment(kind, track, &playlist).await?;
-		}
-
-		// Get importer after ensuring init segment
+		// `consume_segments` always runs `ensure_init_segment` before reaching here, so
+		// the importer is already initialized.
 		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index),
-			TrackKind::Audio => self.ensure_audio_importer(),
+			TrackKind::Video(index) => self.ensure_video_importer_for(index, &track.select),
+			TrackKind::Audio => self.ensure_audio_importer(&track.select),
 		};
+
+		// HLS media sequence names the live window, while discontinuity sequence names a
+		// new media timeline. Whenever we join, skip ahead, or cross a discontinuity, anchor
+		// the MoQ group sequence to both so consumers do not wait on groups HLS has moved
+		// past. Contiguous segments let the importer auto-increment instead; we still pack
+		// (and so validate) the sequence on that path so media sequence can't silently
+		// auto-increment into the discontinuity bits.
+		let group_sequence = moq_sequence(discontinuity_sequence, sequence)?;
+		if track.next_sequence != Some(sequence) || track.next_discontinuity != Some(discontinuity_sequence) {
+			importer.seek(group_sequence)?;
+		}
 
 		importer.decode(&bytes)?;
 		track.next_sequence = Some(sequence + 1);
+		track.next_discontinuity = Some(discontinuity_sequence);
 
 		Ok(())
 	}
@@ -462,9 +554,9 @@ impl Import {
 	///
 	/// Each video variant gets its own importer so that their tracks remain
 	/// independent while still contributing to the same shared catalog.
-	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
+	fn ensure_video_importer_for(&mut self, index: usize, select: &select::Broadcast) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone());
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone()).with_select(select.clone());
 			self.video_importers.push(importer);
 		}
 
@@ -472,9 +564,12 @@ impl Import {
 	}
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
-	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
+	fn ensure_audio_importer(&mut self, select: &select::Broadcast) -> &mut Fmp4 {
+		let broadcast = self.broadcast.clone();
+		let catalog = self.catalog.clone();
+		let select = select.clone();
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone()))
+			.get_or_insert_with(|| Fmp4::new(broadcast, catalog).with_select(select))
 	}
 
 	#[cfg(test)]
@@ -510,12 +605,6 @@ fn select_audio<'a>(master: &'a MasterPlaylist, group_id: &str) -> Option<&'a Al
 }
 
 fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
-	// Helper to extract the first video codec token from the CODECS attribute.
-	fn first_video_codec(variant: &VariantStream) -> Option<&str> {
-		let codecs = variant.codecs.as_deref()?;
-		codecs.split(',').map(|s| s.trim()).find(|s| !s.is_empty())
-	}
-
 	// Map codec strings into a coarse "family" so we can prefer H.264 over others.
 	fn codec_family(codec: &str) -> Option<&'static str> {
 		if codec.starts_with("avc1.") || codec.starts_with("avc3.") {
@@ -523,6 +612,16 @@ fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
 		} else {
 			None
 		}
+	}
+
+	// Extract the first *video* codec token from the CODECS attribute. A list like
+	// `mp4a.40.2,avc1.4d401f` (audio first) must still surface the video codec.
+	fn first_video_codec(variant: &VariantStream) -> Option<&str> {
+		let codecs = variant.codecs.as_deref()?;
+		codecs
+			.split(',')
+			.map(|s| s.trim())
+			.find(|codec| codec_family(codec).is_some())
 	}
 
 	// Consider only non-i-frame variants with a URI and a known codec family.
@@ -591,6 +690,41 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 	base.join(value)
 }
 
+/// Advance the running discontinuity sequence, rejecting a u64 wrap on absurd input.
+fn bump_discontinuity(sequence: u64) -> Result<u64> {
+	sequence.checked_add(1).ok_or(Error::SequenceOverflow {
+		kind: "discontinuity",
+		value: sequence,
+	})
+}
+
+/// Pack HLS discontinuity + media sequence into a single MoQ group sequence.
+///
+/// HLS media sequence alone can rewind after an upstream reset, and discontinuity
+/// sequence alone cannot order segments inside the same epoch. The lower 48 bits hold
+/// the media sequence (ample for realistic playlists) while the upper 16 bits hold the
+/// discontinuity sequence, so a new epoch always sorts after every segment of the last.
+fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64> {
+	const MEDIA_BITS: u32 = 48;
+	const MEDIA_MASK: u64 = (1u64 << MEDIA_BITS) - 1;
+	const DISCONTINUITY_MASK: u64 = u64::MAX >> MEDIA_BITS;
+
+	if media_sequence > MEDIA_MASK {
+		return Err(Error::SequenceOverflow {
+			kind: "media",
+			value: media_sequence,
+		});
+	}
+	if discontinuity_sequence > DISCONTINUITY_MASK {
+		return Err(Error::SequenceOverflow {
+			kind: "discontinuity",
+			value: discontinuity_sequence,
+		});
+	}
+
+	Ok((discontinuity_sequence << MEDIA_BITS) | media_sequence)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -603,6 +737,15 @@ mod tests {
 	}
 
 	#[test]
+	fn select_variants_handles_audio_first_codecs() {
+		// CODECS lists the audio codec first; the video codec must still be found.
+		let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4a.40.2,avc1.4d401f\"\nvideo.m3u8\n";
+		let (_, master) = m3u8_rs::parse_master_playlist(master).unwrap();
+		let variants = select_variants(&master);
+		assert_eq!(variants.len(), 1);
+	}
+
+	#[test]
 	fn hls_import_starts_without_importers() {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
@@ -612,5 +755,87 @@ mod tests {
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());
+	}
+
+	/// Resolve `ensure_tracks` against a master playlist written to a temp file.
+	async fn discover(master_body: &str) -> Import {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+		let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+		let dir = std::env::temp_dir().join(format!("moq-hls-test-{}-{n}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("master.m3u8");
+		std::fs::write(&path, master_body).unwrap();
+
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		// `Config` takes a filesystem path for non-http inputs.
+		let cfg = Config::new(path.to_str().unwrap().to_string());
+		let mut hls = Import::new(broadcast, catalog, cfg).unwrap();
+		hls.ensure_tracks().await.unwrap();
+		hls
+	}
+
+	/// A master with a separate audio rendition: variants publish video only, the
+	/// alternate rendition publishes audio only.
+	#[tokio::test]
+	async fn discover_splits_separate_audio() {
+		let master = "#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"audio.m3u8\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\n\
+			video.m3u8\n";
+		let hls = discover(master).await;
+
+		assert_eq!(hls.video.len(), 1);
+		assert!(hls.video[0].select.has_video() && !hls.video[0].select.has_audio());
+
+		let audio = hls.audio.as_ref().expect("separate audio rendition");
+		assert!(audio.select.has_audio() && !audio.select.has_video());
+	}
+
+	/// A master whose variant carries muxed A/V (no separate audio group) publishes
+	/// every track.
+	#[tokio::test]
+	async fn discover_muxed_variant_keeps_both() {
+		let master = "#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f\"\n\
+			video.m3u8\n";
+		let hls = discover(master).await;
+
+		assert_eq!(hls.video.len(), 1);
+		assert!(hls.video[0].select.has_video() && hls.video[0].select.has_audio());
+		assert!(hls.audio.is_none());
+	}
+
+	#[test]
+	fn moq_sequence_orders_discontinuities_after_media_sequence() {
+		// A new epoch outranks every segment of the previous one, even a higher media seq.
+		let last_of_epoch_0 = moq_sequence(0, u64::from(u32::MAX)).unwrap();
+		let first_of_epoch_1 = moq_sequence(1, 0).unwrap();
+		assert!(first_of_epoch_1 > last_of_epoch_0);
+	}
+
+	#[test]
+	fn moq_sequence_preserves_media_order_within_epoch() {
+		assert!(moq_sequence(3, 10).unwrap() > moq_sequence(3, 9).unwrap());
+	}
+
+	#[test]
+	fn moq_sequence_rejects_unrepresentable_media_sequence() {
+		let err = moq_sequence(0, 1u64 << 48).unwrap_err();
+		assert!(matches!(err, Error::SequenceOverflow { kind: "media", .. }));
+	}
+
+	#[test]
+	fn moq_sequence_rejects_unrepresentable_discontinuity_sequence() {
+		let err = moq_sequence(1u64 << 16, 0).unwrap_err();
+		assert!(matches!(
+			err,
+			Error::SequenceOverflow {
+				kind: "discontinuity",
+				..
+			}
+		));
 	}
 }

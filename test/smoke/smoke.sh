@@ -175,9 +175,8 @@ build_relay_cli() {
         exit 1
     }
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
-    # `cargo build -p moq-cli` names the binary after the crate (moq-cli); the
-    # apt/rpm packages rename it to `moq`, but from source it's moq-cli.
-    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq-cli"
+    # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
+    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
 }
 
 # Editable-install the workspace Python build (maturin builds rs/moq-ffi, then
@@ -254,7 +253,9 @@ prepare_c() {
     }
     case "$(uname -s)" in
         Darwin) os_libs=(-framework CoreFoundation -framework Security -framework CoreServices) ;;
-        *) os_libs=(-ldl -lm -lpthread) ;;
+        # libmoq.a bundles openh264 (C++) and, on Linux, moq-vaapi (libva), so
+        # the static link needs their runtimes alongside the usual system libs.
+        *) os_libs=(-ldl -lm -lpthread -lstdc++ -lva -lva-drm) ;;
     esac
     C_SMOKE="$TMP/c-smoke"
     if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_SMOKE" >"$TMP/c-compile.log" 2>&1; then
@@ -351,7 +352,7 @@ start_publisher() {
     local lang="$1" broadcast="$2" log="$TMP/pub-$1.log"
     case "$lang" in
         rust)
-            (ffmpeg_h264 | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
+            (ffmpeg_h264 | "$MOQ" --client-connect "$URL" --broadcast "$broadcast" import avc3) >"$log" 2>&1 &
             ;;
         python)
             (ffmpeg_h264 | "$PY" "$CLIENTS/python/smoke.py" \
@@ -390,8 +391,8 @@ run_subscriber() {
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
             local n
-            n=$(timeout -k 3 "$TIMEOUT" "$MOQ" subscribe --url "$URL" --broadcast "$broadcast" \
-                --format fmp4 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(timeout -k 3 "$TIMEOUT" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
+                export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
@@ -461,7 +462,7 @@ run_round() {
         echo "  WARN  publisher '$pub' exited early:"
         sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
     fi
-    local want_pass=1 got
+    local want_pass=1 got round_pass=0
     [[ "$NEGATIVE" -eq 1 ]] && want_pass=0
     # ${arr[@]+...} guard: a round may have no live subscribers (all broken),
     # and bash 3.2 (macOS) errors on "${!pids[@]}" for an empty array under `set -u`.
@@ -469,12 +470,19 @@ run_round() {
         if wait "${pids[$i]}"; then got=1; else got=0; fi
         if [[ "$got" -eq "$want_pass" ]]; then
             echo "  PASS  $pub -> ${names[$i]}"
+            round_pass=1
         else
             echo "  FAIL  $pub -> ${names[$i]}"
             sed 's/^/        /' "$TMP/$pub-${names[$i]}.log" 2>/dev/null || true
             overall=1
         fi
     done
+    # Every leg failing points at the publisher; surface its log even when the
+    # process is still alive (e.g. connected and announcing but producing nothing).
+    if [[ "$NEGATIVE" -eq 0 && "$round_pass" -eq 0 && ${#pids[@]} -gt 0 && -n "$pub_pid" ]]; then
+        echo "  INFO  publisher '$pub' log:"
+        sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
+    fi
     if [[ -n "$pub_pid" ]]; then
         kill_tree "$pub_pid"
         wait "$pub_pid" 2>/dev/null || true
@@ -508,6 +516,10 @@ fi
 if [[ "$overall" -eq 0 ]]; then
     echo "smoke: all checks passed"
 else
+    # The relay's view is often the only place that says WHY a session died
+    # (auth rejection, protocol error, close codes), so surface it on failure.
     echo "smoke: FAILURES detected" >&2
+    echo "--- relay log (last 150 lines) ---" >&2
+    tail -n 150 "$TMP/relay.log" 2>/dev/null | sed 's/^/  relay: /' >&2 || true
 fi
 exit "$overall"

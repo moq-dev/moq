@@ -309,6 +309,17 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 				channel_count: cfg.channel_count,
 			})
 		}
+		AudioCodec::Flac => {
+			// The init data is the FLAC header (`fLaC` marker + STREAMINFO). `parse` stops
+			// after STREAMINFO; trailing metadata blocks (Vorbis comments, etc.) are valid
+			// and left unread, so unlike Opus there is no trailing-bytes check.
+			let cfg =
+				crate::codec::flac::Config::parse(&mut buf).map_err(|_| Error::MalformedFlac(track.name.clone()))?;
+			Ok(DerivedAudio {
+				sample_rate: cfg.sample_rate,
+				channel_count: cfg.channel_count,
+			})
+		}
 		_ => Err(Error::UnsupportedDerivationCodec(track.name.clone()).into()),
 	}
 }
@@ -330,7 +341,7 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 
 	// Walk every trak looking for an audio sample entry. A single-track audio init is
 	// the only thing we expect here, but rather than enforce that we just take the first
-	// audio trak we find — the rest of the catalog identifies tracks by name, not by
+	// audio trak we find. The rest of the catalog identifies tracks by name, not by
 	// position in the moov.
 	for trak in &moov.trak {
 		let stbl = &trak.mdia.minf.stbl;
@@ -461,6 +472,39 @@ mod test {
 		};
 		let catalog = from_msf(&msf).unwrap();
 		assert!(catalog.video.renditions["video0"].description.is_none());
+	}
+
+	#[test]
+	fn flac_params_derived_from_streaminfo() {
+		// MSF omits samplerate/channelConfig, so they must be derived from the FLAC
+		// header (`fLaC` marker + STREAMINFO) carried in init_data.
+		let description = crate::codec::flac::Config {
+			min_block_size: 4096,
+			max_block_size: 4096,
+			min_frame_size: 0,
+			max_frame_size: 0,
+			sample_rate: 96_000,
+			channel_count: 2,
+			bits_per_sample: 24,
+			total_samples: 0,
+			md5: [0; 16],
+		}
+		.description();
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode(&description);
+
+		let mut audio = audio_track("audio0", moq_msf::Packaging::Loc);
+		audio.codec = Some("flac".to_string());
+		audio.samplerate = None;
+		audio.channel_config = None;
+		audio.init_data = Some(init_b64);
+
+		let msf = moq_msf::Catalog { tracks: vec![audio] };
+
+		let catalog = from_msf(&msf).expect("flac track should convert");
+		let a = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
+		assert_eq!(a.codec, AudioCodec::Flac);
+		assert_eq!(a.sample_rate, 96_000);
+		assert_eq!(a.channel_count, 2);
 	}
 
 	#[test]

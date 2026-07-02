@@ -1,5 +1,5 @@
 use std::net;
-#[cfg(test)]
+#[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
 use crate::{Error, QuicBackend};
@@ -19,16 +19,30 @@ use futures::stream::StreamExt;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct ServerConfig {
-	/// Listen for UDP packets on the given address.
-	/// Defaults to `[::]:443` if not provided.
+	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
 	///
 	/// Accepts standard socket address syntax (e.g. `[::]:443`) or a DNS
-	/// `host:port` pair (e.g. `fly-global-services:443`), which is resolved
-	/// at bind time. Only the first resolved address is used; Quinn does not
-	/// support binding to multiple addresses.
+	/// `host:port` pair (e.g. `fly-global-services:443`), resolved at bind time
+	/// (first address only; Quinn cannot bind multiple). Leave unset while a
+	/// `tcp`/`unix` listener is configured to run a stream-only server with no
+	/// QUIC.
 	#[serde(alias = "listen")]
 	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
 	pub bind: Option<String>,
+
+	/// Plaintext qmux TCP listener (`--server-tcp-bind`, no TLS). Requires the
+	/// `tcp` feature.
+	#[cfg(feature = "tcp")]
+	#[command(flatten)]
+	#[serde(default)]
+	pub tcp: TcpConfig,
+
+	/// Plaintext qmux Unix-socket listener (`--server-unix-bind`) with an optional
+	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
+	#[cfg(all(feature = "uds", unix))]
+	#[command(flatten)]
+	#[serde(default)]
+	pub unix: UnixConfig,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
@@ -103,6 +117,98 @@ pub struct ServerConfig {
 	pub tls: crate::tls::Server,
 }
 
+/// Plaintext-TCP qmux listener settings (no TLS, no UDP).
+///
+/// TCP carries no peer identity, so it must only be reachable from trusted
+/// clients. Bind it to loopback or a private interface; a non-loopback bind
+/// logs a warning but is allowed.
+#[cfg(feature = "tcp")]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct TcpConfig {
+	/// Bind a plaintext qmux TCP listener on this address.
+	#[arg(long = "server-tcp-bind", id = "server-tcp-bind", env = "MOQ_SERVER_TCP_BIND")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<net::SocketAddr>,
+}
+
+/// Plaintext Unix-socket qmux listener settings, with an optional
+/// peer-credential allowlist.
+#[cfg(all(feature = "uds", unix))]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct UnixConfig {
+	/// Bind a plaintext qmux Unix-socket listener at this path.
+	#[arg(long = "server-unix-bind", id = "server-unix-bind", env = "MOQ_SERVER_UNIX_BIND")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<PathBuf>,
+
+	/// Peer-credential allowlist. `None` (the default) enforces nothing, so the
+	/// socket's filesystem permissions are the only gate.
+	#[command(flatten)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub allow: Option<UnixAllow>,
+}
+
+/// Peer-credential allowlist for a `unix://` listener.
+///
+/// The kernel reports the connecting process's credentials. Each populated list
+/// constrains the corresponding credential (AND across the three, OR within
+/// each); all empty means no check.
+#[cfg(all(feature = "uds", unix))]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct UnixAllow {
+	/// Allowed peer user IDs. Empty means any uid.
+	#[arg(
+		long = "server-unix-allow-uid",
+		env = "MOQ_SERVER_UNIX_ALLOW_UID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub uid: Vec<u32>,
+
+	/// Allowed peer group IDs. Empty means any gid.
+	#[arg(
+		long = "server-unix-allow-gid",
+		env = "MOQ_SERVER_UNIX_ALLOW_GID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub gid: Vec<u32>,
+
+	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
+	/// whose PID the platform doesn't report.
+	#[arg(
+		long = "server-unix-allow-pid",
+		env = "MOQ_SERVER_UNIX_ALLOW_PID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub pid: Vec<i32>,
+}
+
+#[cfg(all(feature = "uds", unix))]
+impl UnixAllow {
+	/// Whether any field is populated (i.e. the allowlist enforces something).
+	fn is_empty(&self) -> bool {
+		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
+	}
+
+	/// Whether `cred` satisfies every populated field (AND across fields, OR
+	/// within a field). A required pid is unsatisfiable when the platform
+	/// reports none.
+	fn permits(&self, cred: &crate::unix::PeerCred) -> bool {
+		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
+		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
+		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
+		uid_ok && gid_ok && pid_ok
+	}
+}
+
 impl ServerConfig {
 	pub fn init(self) -> crate::Result<Server> {
 		Server::new(self)
@@ -116,18 +222,40 @@ impl ServerConfig {
 			moq_net::Versions::from(self.version.clone())
 		}
 	}
+
+	/// Whether a `tcp`/`unix` stream listener is configured.
+	///
+	/// When true and [`bind`](Self::bind) is unset, the server runs stream-only
+	/// (no default QUIC listener).
+	#[allow(unused_mut)]
+	fn has_stream_listener(&self) -> bool {
+		let mut has = false;
+		#[cfg(feature = "tcp")]
+		{
+			has |= self.tcp.bind.is_some();
+		}
+		#[cfg(all(feature = "uds", unix))]
+		{
+			has |= self.unix.bind.is_some();
+		}
+		has
+	}
 }
 
 /// Default bind address used when [`ServerConfig::bind`] is not set.
 pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
-/// Server for accepting MoQ connections over QUIC.
+/// Server for accepting MoQ connections.
 ///
-/// Create via [`ServerConfig::init`] or [`Server::new`].
+/// Accepts QUIC (and optionally WebSocket), plus plaintext qmux over TCP
+/// (`--server-tcp-bind`) and Unix sockets (`--server-unix-bind`). Create via
+/// [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	moq: moq_net::Server,
 	versions: moq_net::Versions,
 	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
+	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+	streams: StreamListeners,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "noq")]
@@ -161,7 +289,12 @@ impl Server {
 
 		let versions = config.versions();
 
-		if !config.tls.root.is_empty() {
+		// Build a QUIC backend when `--server-bind` is set, or when nothing else
+		// is (the default). A stream-only server (`--server-unix-bind` with no
+		// `--server-bind`) doesn't also open UDP/443.
+		let build_quic = config.bind.is_some() || !config.has_stream_listener();
+
+		if build_quic && !config.tls.root.is_empty() {
 			let mtls_supported = match backend {
 				#[cfg(feature = "quinn")]
 				QuicBackend::Quinn => true,
@@ -178,27 +311,51 @@ impl Server {
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
 		let noq = match backend {
-			QuicBackend::Noq => Some(crate::noq::NoqServer::new(config.clone())?),
+			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone())?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
-			QuicBackend::Quinn => Some(crate::quinn::QuinnServer::new(config.clone())?),
+			QuicBackend::Quinn if build_quic => Some(crate::quinn::QuinnServer::new(config.clone())?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
-			QuicBackend::Quiche => Some(crate::quiche::QuicheServer::new(config)?),
+			QuicBackend::Quiche if build_quic => Some(crate::quiche::QuicheServer::new(config.clone())?),
 			_ => None,
 		};
+
+		// Collect the configured stream listeners (at most one TCP, one Unix).
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		let mut stream_binds = Vec::new();
+		#[cfg(feature = "tcp")]
+		if let Some(addr) = config.tcp.bind {
+			stream_binds.push(StreamBind::Tcp(addr));
+		}
+		#[cfg(all(feature = "uds", unix))]
+		if let Some(path) = config.unix.bind.clone() {
+			stream_binds.push(StreamBind::Unix(path));
+		}
+		// `None` (or an all-empty allowlist) means the listener enforces nothing.
+		#[cfg(all(feature = "uds", unix))]
+		let unix_allow = config.unix.allow.clone().filter(|allow| !allow.is_empty());
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		let streams = StreamListeners::new(
+			stream_binds,
+			stream_versions(&versions),
+			#[cfg(all(feature = "uds", unix))]
+			unix_allow,
+		);
 
 		Ok(Server {
 			accept: Default::default(),
 			moq: moq_net::Server::new().with_versions(versions.clone()),
 			versions,
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			streams,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			#[cfg(feature = "noq")]
@@ -271,23 +428,45 @@ impl Server {
 		if let Some(quiche) = self.quiche.as_ref() {
 			return quiche.tls_info();
 		}
-		unreachable!("no QUIC backend compiled");
+		// No QUIC backend (e.g. a stream-only `--server-bind`): no certificates.
+		Arc::new(RwLock::new(crate::tls::Info::empty()))
 	}
 
-	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
+	#[cfg(not(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "tcp",
+		all(feature = "uds", unix)
+	)))]
 	pub async fn accept(&mut self) -> Option<Request> {
-		unreachable!("no QUIC backend compiled; enable noq, quinn, quiche, or iroh feature");
+		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
 	}
 
-	/// Returns the next partially established QUIC or WebTransport session.
+	/// Returns the next partially established session, across every configured
+	/// transport (QUIC, WebSocket, and plaintext qmux over TCP/Unix).
 	///
-	/// This returns a [Request] instead of an established `web_transport` session
-	/// so the connection can be rejected early on an invalid path or missing auth.
-	///
-	/// The [Request] is either a WebTransport or a raw QUIC request.
-	/// Call [Request::ok] or [Request::close] to complete the handshake.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
+	/// This returns a [Request] instead of a session so the connection can be
+	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
+	/// [Request::close] to complete the handshake.
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "tcp",
+		all(feature = "uds", unix)
+	))]
 	pub async fn accept(&mut self) -> Option<Request> {
+		// Bind the stream (tcp/unix) listeners on first poll; a bind failure is
+		// fatal, mirroring how a QUIC bind failure aborts startup.
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		if let Err(err) = self.streams.ensure_started().await {
+			tracing::error!(%err, "failed to bind stream listener");
+			return None;
+		}
+
 		loop {
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			#[cfg(feature = "noq")]
@@ -346,10 +525,21 @@ impl Server {
 			#[cfg(not(feature = "websocket"))]
 			let ws_accept = std::future::pending::<Option<crate::Result<()>>>();
 
+			#[allow(unused_variables)]
 			let server = self.moq.clone();
+			#[allow(unused_variables)]
 			let versions = self.versions.clone();
 
+			// No streams configured: never resolves, so it doesn't disturb select!.
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			let stream_accept = self.streams.recv();
+			#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
+			let stream_accept = std::future::pending::<Option<Request>>();
+
 			tokio::select! {
+				Some(request) = stream_accept => {
+					return Some(request);
+				}
 				Some(_conn) = noq_accept => {
 					#[cfg(feature = "noq")]
 					{
@@ -395,7 +585,7 @@ impl Server {
 						let iroh = super::iroh::Request::accept(_conn).await?;
 						Ok(Request {
 							server,
-							kind: RequestKind::Iroh(iroh),
+							kind: RequestKind::Iroh(Box::new(iroh)),
 						})
 					}.boxed());
 				}
@@ -443,7 +633,8 @@ impl Server {
 		if let Some(quiche) = self.quiche.as_ref() {
 			return Ok(quiche.local_addr()?);
 		}
-		unreachable!("no QUIC backend compiled");
+		// No QUIC backend (e.g. a stream-only `--server-bind`).
+		Err(Error::NoBackend("no QUIC listener configured"))
 	}
 
 	#[cfg(feature = "websocket")]
@@ -480,6 +671,197 @@ impl Server {
 	}
 }
 
+/// The version set offered on stream (`tcp://`/`unix://`) listeners.
+///
+/// A URL-less transport carries the request path in the moq-lite-05 SETUP, so
+/// lite-05 is offered on top of the configured versions even when a custom set
+/// omits it. Older versions still work for clients that need no path.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
+	let mut versions: Vec<moq_net::Version> = base.iter().copied().collect();
+	if let Ok(lite05) = "moq-lite-05-wip".parse::<moq_net::Version>() {
+		if !versions.contains(&lite05) {
+			versions.push(lite05);
+		}
+	}
+	moq_net::Versions::from(versions)
+}
+
+/// A configured stream listener (`--server-tcp-bind` / `--server-unix-bind`).
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+enum StreamBind {
+	#[cfg(feature = "tcp")]
+	Tcp(net::SocketAddr),
+	#[cfg(all(feature = "uds", unix))]
+	Unix(PathBuf),
+}
+
+/// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
+///
+/// Bound lazily on the first [`Server::accept`] (they need a runtime), after
+/// which each runs an accept loop in its own task and feeds completed [`Request`]s
+/// back over a channel. The tasks own their listeners and are aborted when the
+/// `Server` (and thus this) is dropped, so bound sockets don't linger.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+struct StreamListeners {
+	binds: Vec<StreamBind>,
+	versions: moq_net::Versions,
+	#[cfg(all(feature = "uds", unix))]
+	unix_allow: Option<UnixAllow>,
+	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
+	tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+impl StreamListeners {
+	fn new(
+		binds: Vec<StreamBind>,
+		versions: moq_net::Versions,
+		#[cfg(all(feature = "uds", unix))] unix_allow: Option<UnixAllow>,
+	) -> Self {
+		Self {
+			binds,
+			versions,
+			#[cfg(all(feature = "uds", unix))]
+			unix_allow,
+			rx: None,
+			tasks: Vec::new(),
+		}
+	}
+
+	/// Bind the configured listeners and spawn their accept loops, once.
+	async fn ensure_started(&mut self) -> crate::Result<()> {
+		if self.rx.is_some() || self.binds.is_empty() {
+			return Ok(());
+		}
+
+		let (tx, rx) = tokio::sync::mpsc::channel(16);
+		for bind in self.binds.drain(..) {
+			let versions = self.versions.clone();
+			match bind {
+				#[cfg(feature = "tcp")]
+				StreamBind::Tcp(addr) => {
+					if !addr.ip().is_loopback() {
+						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
+					}
+					let listener = crate::tcp::Listener::bind(addr).await?.with_protocols(versions.alpns());
+					tracing::info!(%addr, "listening (tcp)");
+					self.tasks.push(spawn_tcp_loop(listener, versions, tx.clone()));
+				}
+				#[cfg(all(feature = "uds", unix))]
+				StreamBind::Unix(path) => {
+					let listener = crate::unix::Listener::bind(&path)
+						.await?
+						.with_protocols(versions.alpns());
+					// Loose file perms: the uid/gid/pid allow list is the real gate,
+					// and the worker usually runs as a different user than the server.
+					listener.set_mode(0o666)?;
+					tracing::info!(path = %path.display(), allow = ?self.unix_allow, "listening (unix)");
+					self.tasks
+						.push(spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone()));
+				}
+			}
+		}
+
+		self.rx = Some(rx);
+		Ok(())
+	}
+
+	/// Yield the next stream [`Request`], or pend forever if none are running.
+	async fn recv(&mut self) -> Option<Request> {
+		match self.rx.as_mut() {
+			Some(rx) => rx.recv().await,
+			None => std::future::pending().await,
+		}
+	}
+}
+
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+impl Drop for StreamListeners {
+	fn drop(&mut self) {
+		// Stop the accept loops so their listeners (and bound sockets) are freed.
+		for task in &self.tasks {
+			task.abort();
+		}
+	}
+}
+
+#[cfg(feature = "tcp")]
+fn spawn_tcp_loop(
+	listener: crate::tcp::Listener,
+	versions: moq_net::Versions,
+	tx: tokio::sync::mpsc::Sender<Request>,
+) -> tokio::task::JoinHandle<()> {
+	tokio::spawn(async move {
+		loop {
+			match listener.accept().await {
+				Some(Ok(session)) => spawn_stream_request(session, "tcp", versions.clone(), tx.clone()),
+				Some(Err(err)) => tracing::warn!(%err, "tcp listener accept failed"),
+				None => break,
+			}
+		}
+	})
+}
+
+#[cfg(all(feature = "uds", unix))]
+fn spawn_unix_loop(
+	listener: crate::unix::Listener,
+	versions: moq_net::Versions,
+	allow: Option<UnixAllow>,
+	tx: tokio::sync::mpsc::Sender<Request>,
+) -> tokio::task::JoinHandle<()> {
+	tokio::spawn(async move {
+		loop {
+			match listener.accept().await {
+				Some(Ok((session, cred))) => {
+					// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
+					if let Some(allow) = &allow
+						&& !allow.permits(&cred)
+					{
+						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
+						continue;
+					}
+					spawn_stream_request(session, "unix", versions.clone(), tx.clone());
+				}
+				Some(Err(err)) => tracing::warn!(%err, "unix listener accept failed"),
+				None => break,
+			}
+		}
+	})
+}
+
+/// Read the SETUP from an accepted stream session (concurrently, so one slow or
+/// malicious peer doesn't stall the listener) and forward the resulting request.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+fn spawn_stream_request(
+	session: qmux::Session,
+	transport: &'static str,
+	versions: moq_net::Versions,
+	tx: tokio::sync::mpsc::Sender<Request>,
+) {
+	tokio::spawn(async move {
+		let server = moq_net::Server::new().with_versions(versions);
+		match server.accept_request(session).await {
+			Ok(request) => {
+				let request = Request {
+					server: moq_net::Server::new(),
+					kind: RequestKind::Stream(Box::new(StreamRequest { request, transport })),
+				};
+				let _ = tx.send(request).await;
+			}
+			Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
+		}
+	});
+}
+
+/// A stream (`tcp://`/`unix://`) request: the moq SETUP has already been read so
+/// its in-band path is available for authorization before accepting.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+pub(crate) struct StreamRequest {
+	request: moq_net::Request<qmux::Session>,
+	transport: &'static str,
+}
+
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
@@ -489,9 +871,11 @@ pub(crate) enum RequestKind {
 	#[cfg(feature = "quiche")]
 	Quiche(Box<crate::quiche::QuicheRequest>),
 	#[cfg(feature = "iroh")]
-	Iroh(crate::iroh::Request),
+	Iroh(Box<crate::iroh::Request>),
 	#[cfg(feature = "websocket")]
 	WebSocket(Box<qmux::Session>),
+	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+	Stream(Box<StreamRequest>),
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
@@ -540,19 +924,62 @@ impl Request {
 				// WebSocket doesn't support HTTP status codes; just drop to close.
 				Ok(())
 			}
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(stream) => {
+				// A raw stream has no HTTP status; convey auth failures as the moq
+				// Unauthorized code, anything else as an app code.
+				let err = match _code {
+					401 | 403 => moq_net::Error::Unauthorized,
+					other => moq_net::Error::App(other),
+				};
+				stream.request.close(err);
+				Ok(())
+			}
 		}
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
-		self.server = self.server.with_publisher(publish);
-		self
+	pub fn with_publisher(self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
+		let Request { server, kind } = self;
+		match kind {
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(stream) => {
+				let StreamRequest { request, transport } = *stream;
+				Request {
+					server,
+					kind: RequestKind::Stream(Box::new(StreamRequest {
+						request: request.with_publisher(publish),
+						transport,
+					})),
+				}
+			}
+			kind => Request {
+				server: server.with_publisher(publish),
+				kind,
+			},
+		}
 	}
 
 	/// Subscribe to the given origin from the session.
-	pub fn with_subscriber(mut self, subscribe: moq_net::OriginProducer) -> Self {
-		self.server = self.server.with_subscriber(subscribe);
-		self
+	pub fn with_subscriber(self, subscribe: moq_net::OriginProducer) -> Self {
+		let Request { server, kind } = self;
+		match kind {
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(stream) => {
+				let StreamRequest { request, transport } = *stream;
+				Request {
+					server,
+					kind: RequestKind::Stream(Box::new(StreamRequest {
+						request: request.with_subscriber(subscribe),
+						transport,
+					})),
+				}
+			}
+			kind => Request {
+				server: server.with_subscriber(subscribe),
+				kind,
+			},
+		}
 	}
 
 	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
@@ -568,9 +995,25 @@ impl Request {
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.
-	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
-		self.server = self.server.with_stats(stats);
-		self
+	pub fn with_stats(self, stats: moq_net::StatsHandle) -> Self {
+		let Request { server, kind } = self;
+		match kind {
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(stream) => {
+				let StreamRequest { request, transport } = *stream;
+				Request {
+					server,
+					kind: RequestKind::Stream(Box::new(StreamRequest {
+						request: request.with_stats(stats),
+						transport,
+					})),
+				}
+			}
+			kind => Request {
+				server: server.with_stats(stats),
+				kind,
+			},
+		}
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
@@ -598,10 +1041,12 @@ impl Request {
 				.await?),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(session) => Ok(self.server.accept(*session).await?),
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(stream) => Ok(stream.request.ok().await?),
 		}
 	}
 
-	/// Returns the transport type as a string (e.g. "quic", "iroh").
+	/// Returns the transport type as a string (e.g. "quic", "tcp", "unix").
 	pub fn transport(&self) -> &'static str {
 		match self.kind {
 			#[cfg(feature = "noq")]
@@ -614,14 +1059,27 @@ impl Request {
 			RequestKind::Iroh(_) => "iroh",
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => "websocket",
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(ref stream) => stream.transport,
 		}
 	}
 
-	/// Returns the URL provided by the client.
+	/// Returns the URL provided by the client, for transports that carry one.
+	///
+	/// Stream transports (`tcp`/`unix`) are URL-less; use [`Self::path`] for their
+	/// in-band request path.
 	pub fn url(&self) -> Option<&Url> {
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
-		unreachable!("no QUIC backend compiled; enable noq, quinn, quiche, or iroh feature");
+		#[cfg(not(any(
+			feature = "noq",
+			feature = "quinn",
+			feature = "quiche",
+			feature = "iroh",
+			feature = "tcp",
+			all(feature = "uds", unix)
+		)))]
+		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
 
+		#[allow(unreachable_code)]
 		match self.kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq(ref request) => request.url(),
@@ -633,6 +1091,19 @@ impl Request {
 			RequestKind::Iroh(ref request) => request.url(),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(_) => None,
+		}
+	}
+
+	/// The in-band request path for stream transports (the moq-lite-05 SETUP
+	/// path), or `None` for URL-bearing transports (use [`Self::url`] there).
+	pub fn path(&self) -> Option<&str> {
+		match self.kind {
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(ref stream) => stream.request.path(),
+			#[allow(unreachable_patterns)]
+			_ => None,
 		}
 	}
 
@@ -654,12 +1125,16 @@ impl Request {
 			RequestKind::Iroh(_) => None,
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(_) => None,
 			#[cfg(not(any(
 				feature = "noq",
 				feature = "quinn",
 				feature = "quiche",
 				feature = "iroh",
-				feature = "websocket"
+				feature = "websocket",
+				feature = "tcp",
+				all(feature = "uds", unix)
 			)))]
 			_ => None,
 		}
@@ -725,5 +1200,49 @@ mod tests {
 		assert_eq!(config.key, vec![PathBuf::from("a.key"), PathBuf::from("b.key")]);
 		assert_eq!(config.generate, vec!["localhost".to_string()]);
 		assert_eq!(config.root, vec![PathBuf::from("ca.pem")]);
+	}
+
+	#[test]
+	fn bind_string_or_listen_alias() {
+		// The QUIC bind is a plain address; the `listen` alias still works.
+		let bind: ServerConfig = toml::from_str(r#"bind = "[::]:443""#).unwrap();
+		assert_eq!(bind.bind.as_deref(), Some("[::]:443"));
+
+		let alias: ServerConfig = toml::from_str(r#"listen = "0.0.0.0:4443""#).unwrap();
+		assert_eq!(alias.bind.as_deref(), Some("0.0.0.0:4443"));
+	}
+
+	#[cfg(all(feature = "uds", unix))]
+	#[test]
+	fn stream_listener_config_parses() {
+		let config: ServerConfig = toml::from_str(
+			r#"
+bind = "[::]:443"
+
+[unix]
+bind = "/run/moq.sock"
+
+[unix.allow]
+uid = [1001, 1002]
+"#,
+		)
+		.unwrap();
+		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
+		assert_eq!(config.unix.allow.as_ref().expect("allow").uid, vec![1001, 1002]);
+		assert!(config.has_stream_listener());
+	}
+
+	#[cfg(all(feature = "uds", unix))]
+	#[test]
+	fn stream_only_config_has_no_quic() {
+		// A unix listener with no `--server-bind` is stream-only.
+		let mut config = ServerConfig::default();
+		config.unix.bind = Some(PathBuf::from("/run/moq.sock"));
+		assert!(config.has_stream_listener());
+		assert!(config.bind.is_none());
+
+		// The default (nothing configured) still runs QUIC.
+		assert!(!ServerConfig::default().has_stream_listener());
 	}
 }

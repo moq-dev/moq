@@ -224,11 +224,36 @@ mod tests {
 		assert_eq!(cfg.channel_count, 2);
 	}
 
-	// TODO: a round-trip test for the explicit-frequency (freq_index=0xF) form
-	// fails today because the parser reads `channel_config` from byte 1 even
-	// though ISO 14496-3 §1.6.2.1 puts it *after* the 24-bit explicit sample
-	// rate. The encoder follows the spec, the parser doesn't. Fixing requires
-	// a bit-level reader; deferred to a separate PR.
+	#[test]
+	fn round_trip_explicit_sample_rate() {
+		// A non-standard rate (no freq_index) forces the explicit 24-bit form, where
+		// channelConfiguration lands mid-byte after the rate. A byte-aligned parser
+		// misreads both fields; the bit reader round-trips them.
+		let cfg = Config {
+			profile: 2,
+			sample_rate: 44_056, // not in the standard table
+			channel_count: 2,
+		};
+		let encoded = cfg.encode();
+		assert_eq!(encoded.len(), 5, "explicit-rate config is 5 bytes");
+
+		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
+		assert_eq!(parsed.profile, 2);
+		assert_eq!(parsed.sample_rate, 44_056);
+		assert_eq!(parsed.channel_count, 2);
+	}
+
+	#[test]
+	fn parses_extended_object_type() {
+		// audioObjectType 31 escapes to a 6-bit extended type. Bytes encode
+		// AOT=31, ext=4 (-> object_type 36), freq_index=3 (48000), channel_config=2,
+		// which straddle byte boundaries: 11111 000100 0011 0010 + padding.
+		let buf: [u8; 3] = [0xF8, 0x86, 0x40];
+		let cfg = Config::parse(&mut buf.as_slice()).unwrap();
+		assert_eq!(cfg.profile, 36);
+		assert_eq!(cfg.sample_rate, 48_000);
+		assert_eq!(cfg.channel_count, 2);
+	}
 
 	#[test]
 	fn round_trip_5_1_channels() {

@@ -124,7 +124,7 @@ impl<S: Stream> Export<S> {
 			tracing::warn!(
 				count = picked.len(),
 				"multiple H.265 renditions in catalog snapshot; using the first by name. \
-				 Narrow with catalog::Target to pick one explicitly."
+				 Narrow with catalog::Select to pick one explicitly."
 			);
 		}
 
@@ -145,7 +145,7 @@ impl<S: Stream> Export<S> {
 		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
 			None => None,
 			Some(hvcc) => {
-				let params = super::parse_hvcc_param_sets(hvcc)?;
+				let params = super::Hvcc::parse(hvcc)?;
 				if params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty() {
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),

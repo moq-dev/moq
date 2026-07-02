@@ -38,7 +38,7 @@ jobs:
             use_nix: false
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -82,7 +82,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -106,5 +106,107 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts
+
+  # The OBS plugin (cpp/obs) statically links libmoq, so it ships with every
+  # libmoq release: rebuild it against the release we just published (no
+  # second cargo build, guaranteed-matching ABI) and cut a parallel
+  # obs-moq-v<version> release. Runs after `release` so the libmoq archives
+  # the plugin's CMake fetches are already live.
+  obs-build:
+    name: OBS plugin (${{ matrix.target }})
+    needs: release
+    runs-on: ${{ matrix.os }}
+
+    # macOS + Windows only. These link the ffmpeg the obs-deps bundle ships
+    # (the same one OBS uses), so the binaries are portable. A Linux build
+    # would link nix/distro ffmpeg and not be portable, so Linux is
+    # build-from-source (see doc/bin/obs.md) and ships no prebuilt binary.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      # Shallow: this job only compiles, it never reads git history or tags.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version libmoq
+
+      # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
+      # bundle and libmoq from the release we just published (--libmoq-release).
+      - name: Build and package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          ./cpp/obs/build.sh --target "$TARGET" --libmoq-release "$VERSION" --output dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: obs-moq-${{ matrix.target }}
+          path: dist/*
+
+  obs-release:
+    name: OBS plugin release
+    needs: obs-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        run: .github/scripts/release.sh parse-version libmoq
+
+      # Only the obs-moq archives: the libmoq-* artifacts from the build job
+      # belong to the libmoq release, not this one.
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          pattern: obs-moq-*
+          merge-multiple: true
+
+      # release.sh prev-tag keys off the current tag, but the trigger here is a
+      # libmoq-v* tag, so it can't find the previous obs-moq tag. Take the
+      # newest existing obs-moq tag (excluding this version, for safe re-runs)
+      # so the release notes span only since the last obs-moq release.
+      - name: Find previous obs-moq tag
+        id: prev_tag
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          cur="obs-moq-v${VERSION}"
+          # awk (not grep -vx | head) so an empty result is exit 0, not 1:
+          # under `set -eo pipefail` the inaugural release has no prior tag and
+          # grep's exit 1 would fail the step. Empty tag is fine downstream.
+          prev=$(git tag --list 'obs-moq-v*' --sort=-v:refname | awk -v cur="$cur" '$0 != cur { print; exit }')
+          echo "tag=${prev}" >>"$GITHUB_OUTPUT"
+
+      # Cut a parallel obs-moq-v<version> release at this commit (gh creates
+      # the tag).
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: "obs-moq-v${{ steps.parse.outputs.version }}"
+          RELEASE_TITLE: "obs-moq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts

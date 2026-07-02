@@ -62,7 +62,7 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         track_name = next(iter(catalog.video))
         video = catalog.video[track_name]
 
-        media = consumer.subscribe_media(track_name, video.container, MAX_LATENCY_MS)
+        media = await consumer.subscribe_media(track_name, video.container, MAX_LATENCY_MS)
 
         total = 0
 

@@ -276,6 +276,57 @@ async fn export_roundtrips_enhanced() {
 	));
 }
 
+/// Legacy MP3 audio survives an import -> export -> import round trip, muxed back
+/// out as the legacy SoundFormat 2 tag with the config still in band.
+#[tokio::test(start_paused = true)]
+async fn export_roundtrips_mp3() {
+	// MPEG-1 Layer III, 44.1 kHz, joint stereo.
+	let mut mp3 = vec![0xFF, 0xFB, 0x90, 0x44];
+	mp3.resize(417, 0xAA);
+
+	let mut flv = Vec::new();
+	flv.extend_from_slice(b"FLV");
+	flv.push(1);
+	flv.push(0x04); // audio only
+	flv.extend_from_slice(&9u32.to_be_bytes());
+	flv.extend_from_slice(&0u32.to_be_bytes());
+	let mut tag = vec![super::MP3_AUDIO_TAG_HEADER];
+	tag.extend_from_slice(&mp3);
+	write_tag(&mut flv, super::TAG_AUDIO, 0, &tag);
+
+	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+
+	let mut importer = Import::new(producer, catalog.clone());
+	importer.decode(&bytes::BytesMut::from(flv.as_slice())).unwrap();
+	catalog.finish().unwrap();
+
+	let exporter = Export::new(consumer).await.unwrap();
+	let exported = drain_export(exporter, importer).await;
+
+	// The audio is muxed as a legacy SoundFormat 2 (MP3) tag, no sequence header.
+	let tags = parse_tags(&exported);
+	assert!(
+		tags.iter()
+			.any(|t| t.tag_type == super::TAG_AUDIO && (t.body[0] >> 4) == super::AUDIO_FORMAT_MP3),
+		"expected a legacy MP3 audio tag"
+	);
+
+	// Re-import and confirm the codec rebuilds.
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.clone());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	let snap = cat2.snapshot();
+	let a = snap.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Mp3));
+	assert_eq!(a.sample_rate, 44100);
+	assert_eq!(a.channel_count, 2);
+}
+
 struct ParsedTag {
 	tag_type: u8,
 	timestamp: u32,

@@ -10,9 +10,13 @@ const AUDIO_GROUP: &str = "aud";
 
 /// A video rendition entry for the master playlist.
 pub struct VideoVariant {
+	/// Rendition name (also its `<name>/media.m3u8` path component).
 	pub name: String,
+	/// `BANDWIDTH` attribute, in bits per second.
 	pub bandwidth: u64,
+	/// Coded width for the `RESOLUTION` attribute, if known.
 	pub width: Option<u32>,
+	/// Coded height for the `RESOLUTION` attribute, if known.
 	pub height: Option<u32>,
 	/// RFC 6381 codec string (e.g. `avc1.42c01f`).
 	pub codec: String,
@@ -20,8 +24,11 @@ pub struct VideoVariant {
 
 /// An audio rendition entry for the master playlist.
 pub struct AudioVariant {
+	/// Rendition name (also its `<name>/media.m3u8` path component).
 	pub name: String,
+	/// `BANDWIDTH` attribute, in bits per second.
 	pub bandwidth: u64,
+	/// RFC 6381 codec string (e.g. `mp4a.40.2`).
 	pub codec: String,
 }
 

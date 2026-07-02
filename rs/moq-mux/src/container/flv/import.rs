@@ -9,20 +9,22 @@
 //! - **Enhanced RTMP (E-RTMP)**: the FourCC-signaled payloads OBS and ffmpeg emit
 //!   for HEVC (`hvc1`), AV1 (`av01`), VP9 (`vp09`), and the legacy AVC FourCC
 //!   (`avc1`); plus enhanced audio for Opus (`Opus`), AC-3 (`ac-3`), E-AC-3
-//!   (`ec-3`), and AAC (`mp4a`).
+//!   (`ec-3`), AAC (`mp4a`), and MP3 (`.mp3`).
+//!
+//! MP3 is also accepted as the legacy SoundFormat 2 audio tag.
 //!
 //! Each codec's out-of-band config record (avcC / hvcC / av1C / `AudioSpecificConfig`
 //! / `OpusHead`) becomes the catalog `description`; VP9 and the verbatim audio
-//! codecs (AC-3 / E-AC-3) carry their config in band, so they configure from the
-//! first frame instead. Sample bytes already match the [`Legacy`](crate::catalog::hang::Container)
-//! container, so no codec transform is needed. FLAC (`fLaC`) and MP3 (`.mp3`)
-//! enhanced audio, and any other codec, are logged and dropped.
+//! codecs (MP3 / AC-3 / E-AC-3) carry their config in band, so they configure from
+//! the first frame instead. Sample bytes already match the [`Legacy`](crate::catalog::hang::Container)
+//! container, so no codec transform is needed. FLAC (`fLaC`) enhanced audio, and
+//! any other codec, are logged and dropped.
 
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 use super::{
-	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AUDIO_FORMAT_EX, AUDIO_PACKET_CODED_FRAMES,
+	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AUDIO_FORMAT_EX, AUDIO_FORMAT_MP3, AUDIO_PACKET_CODED_FRAMES,
 	AUDIO_PACKET_MULTICHANNEL_CONFIG, AUDIO_PACKET_SEQUENCE_END, AUDIO_PACKET_SEQUENCE_START, AVC_NALU,
 	AVC_SEQUENCE_HEADER, FILE_HEADER_LEN, FRAME_TYPE_KEY, PREV_TAG_SIZE_LEN, TAG_AUDIO, TAG_HEADER_LEN, TAG_SCRIPT,
 	TAG_VIDEO, VIDEO_CODEC_AVC, VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES, VIDEO_PACKET_CODED_FRAMES_X,
@@ -235,6 +237,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if sound_format == AUDIO_FORMAT_EX {
 			return self.handle_audio_enhanced(first, body, timestamp);
 		}
+		if sound_format == AUDIO_FORMAT_MP3 {
+			// Legacy MP3: the raw frame follows the one-byte tag header, with the
+			// config in band. Configure from the first frame, then write it.
+			let frame = &body[1..];
+			if self.audio.is_none() {
+				self.init_audio(config_from_mp3(frame)?)?;
+			}
+			return self.write_audio(frame, timestamp);
+		}
 		if sound_format != AUDIO_FORMAT_AAC {
 			tracing::warn!(sound_format, "unsupported FLV audio format, dropping");
 			return Ok(());
@@ -263,7 +274,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				let config = match &fourcc {
 					b"Opus" => config_from_opus_head(payload)?,
 					b"mp4a" => config_from_asc(payload)?,
-					// AC-3 / E-AC-3 are verbatim with no sequence header; they
+					// MP3 / AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
 					other => {
 						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV audio codec, dropping");
@@ -273,10 +284,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				self.init_audio(config)
 			}
 			AUDIO_PACKET_CODED_FRAMES => {
-				// AC-3 / E-AC-3 carry their config in the frame header, so configure
-				// from the first frame when no sequence header preceded it.
+				// MP3 / AC-3 / E-AC-3 carry their config in the frame header, so
+				// configure from the first frame when no sequence header preceded it.
 				if self.audio.is_none() {
 					let config = match &fourcc {
+						b".mp3" => Some(config_from_mp3(payload)?),
 						b"ac-3" => Some(config_from_ac3(payload)?),
 						b"ec-3" => Some(config_from_eac3(payload)?),
 						_ => None,
@@ -465,6 +477,14 @@ fn config_from_opus_head(head: &[u8]) -> anyhow::Result<AudioConfig> {
 	let cfg = crate::codec::opus::Config::parse(&mut cursor)?;
 	let mut config = AudioConfig::new(AudioCodec::Opus, cfg.sample_rate, cfg.channel_count);
 	config.description = Some(Bytes::copy_from_slice(head));
+	config.container = Container::Legacy;
+	Ok(config)
+}
+
+/// Build an audio config for MP3 from a frame header (config is in band).
+fn config_from_mp3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
+	let cfg = crate::codec::mp3::Config::parse(frame)?;
+	let mut config = AudioConfig::new(AudioCodec::Mp3, cfg.sample_rate, cfg.channel_count);
 	config.container = Container::Legacy;
 	Ok(config)
 }

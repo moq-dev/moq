@@ -53,11 +53,10 @@ struct Avc1Convert {
 impl<S: Stream> Export<S> {
 	/// Subscribe to `broadcast` and emit an Annex-B H.264 byte stream.
 	///
-	/// `catalog` is expected to be narrowed to a single H.264 rendition (e.g.
-	/// `consumer.filter()` with `codec = H264` then `.target()` for ABR
-	/// selection). Renditions of other codecs are ignored; if multiple H.264
-	/// renditions appear in a snapshot, the first by BTreeMap order wins and
-	/// a warning is logged.
+	/// `catalog` is expected to be narrowed to a single H.264 rendition by name (e.g.
+	/// `consumer.select(select::Broadcast::default().video(select::Video::default().name("hd")))`).
+	/// Renditions of other codecs are ignored; if multiple H.264 renditions appear
+	/// in a snapshot, the first by BTreeMap order wins and a warning is logged.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
 		Self {
 			broadcast,
@@ -133,7 +132,7 @@ impl<S: Stream> Export<S> {
 			tracing::warn!(
 				count = picked.len(),
 				"multiple H.264 renditions in catalog snapshot; using the first by name. \
-				 Narrow with catalog::Target to pick one explicitly."
+				 Narrow with catalog::Select to pick one explicitly."
 			);
 		}
 
@@ -154,7 +153,7 @@ impl<S: Stream> Export<S> {
 		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
 			None => None,
 			Some(avcc) => {
-				let params = super::parse_avcc_param_sets(avcc)?;
+				let params = super::Avcc::parse(avcc)?;
 				if params.sps.is_empty() || params.pps.is_empty() {
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),

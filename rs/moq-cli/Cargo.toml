@@ -5,12 +5,17 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.7.34"
+version = "0.8.0"
 edition = "2024"
 rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
+
+# The package is `moq-cli`, but the binary it ships is `moq`.
+[[bin]]
+name = "moq"
+path = "src/main.rs"
 
 [features]
 default = ["iroh", "noq", "websocket", "nvenc", "vaapi"]
@@ -42,14 +47,17 @@ clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 humantime = "2.3"
 moq-audio = { workspace = true, optional = true }
-# `server` enables the HTTP egress server for `moq hls export`; the importer is always available.
+# `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-rtc = { workspace = true }
+moq-rtmp = { workspace = true }
+moq-srt = { workspace = true }
 moq-video = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.7", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 url = "2"
 

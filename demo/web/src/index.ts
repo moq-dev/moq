@@ -105,7 +105,6 @@ function createTile(name: string): WatchTile {
 	// `broadcast`/`backend`, so the shared inspector panel reflects the active tile.
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
-	watch.reload = true; // wait for (re)announcement; survives publisher restarts
 	watch.muted = true; // unmuted only while active (see below)
 	// Default to a fixed 100ms jitter buffer (instead of adaptive "real-time") so
 	// the latency visualization has something to show. Drag it in the panel.

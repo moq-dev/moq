@@ -1,163 +1,50 @@
-mod client;
+//! moq-cli: a media router that wires one endpoint onto a shared MoQ Origin.
+//!
+//! The binary is `moq`. See [`args`] for the `import`/`export` command grammar;
+//! this module orchestrates the shared Origin and spawns the MoQ side plus the
+//! selected endpoint.
+
+mod args;
+mod hls;
+mod moq;
 mod publish;
-mod server;
+mod rtc;
+mod rtmp;
+mod srt;
 mod subscribe;
 mod web;
 
-use client::*;
+use args::{Cli, Direction, Export, ExportSink, Import, ImportSource, MoqSide};
 use hang::moq_net;
-use publish::*;
-use server::*;
-use subscribe::*;
-use web::*;
+use publish::Publish;
+use subscribe::{Subscribe, SubscribeArgs};
 
-use clap::{Parser, Subcommand};
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-use tower_http::cors::{Any, CorsLayer};
-use url::Url;
+use anyhow::Context;
+use clap::Parser;
+use tokio::task::JoinSet;
 
-#[derive(Parser, Clone)]
-#[command(version = env!("VERSION"))]
-pub struct Cli {
-	#[command(flatten)]
-	log: moq_native::Log,
-
-	/// Iroh configuration
-	#[command(flatten)]
+/// Everything needed to build MoQ clients/servers, encapsulating the optional
+/// iroh endpoint so the rest of the code is feature-agnostic.
+#[derive(Clone)]
+struct Net {
 	#[cfg(feature = "iroh")]
-	iroh: moq_native::iroh::EndpointConfig,
-
-	#[command(subcommand)]
-	command: Command,
+	iroh: Option<moq_native::iroh::Endpoint>,
 }
 
-#[derive(Subcommand, Clone)]
-pub enum Command {
-	/// Run a relay and publish a single broadcast read from stdin into it.
-	Serve {
-		#[command(flatten)]
-		config: moq_native::ServerConfig,
+impl Net {
+	fn client(&self, config: moq_native::ClientConfig) -> anyhow::Result<moq_native::Client> {
+		let client = config.init()?;
+		#[cfg(feature = "iroh")]
+		let client = client.with_iroh(self.iroh.clone());
+		Ok(client)
+	}
 
-		/// The name of the broadcast to serve.
-		#[arg(long, alias = "name")]
-		broadcast: String,
-
-		/// Optionally serve static files from the given directory.
-		#[arg(long)]
-		dir: Option<PathBuf>,
-
-		/// The format of the input media.
-		#[command(subcommand)]
-		format: PublishFormat,
-	},
-	/// Run a relay and write the first incoming broadcast's media to stdout.
-	Accept {
-		#[command(flatten)]
-		config: moq_native::ServerConfig,
-
-		/// The name of the broadcast to accept.
-		#[arg(long, alias = "name")]
-		broadcast: String,
-
-		/// Optionally serve static files from the given directory.
-		#[arg(long)]
-		dir: Option<PathBuf>,
-
-		#[command(flatten)]
-		args: SubscribeArgs,
-	},
-	/// Publish a broadcast read from stdin to a remote relay.
-	Publish {
-		/// The MoQ client configuration.
-		#[command(flatten)]
-		config: moq_native::ClientConfig,
-
-		/// The URL of the MoQ server.
-		///
-		/// The URL must start with `https://` or `http://`.
-		/// - If `http` is used, a HTTP fetch to "/certificate.sha256" is first made to get the TLS certificiate fingerprint (insecure).
-		/// - If `https` is used, then A WebTransport connection is made via QUIC to the provided host/port.
-		///
-		/// The `?jwt=` query parameter is used to provide a JWT token from moq-token-cli.
-		/// Otherwise, the public path (if any) is used instead.
-		///
-		/// The path currently must be `/` or you'll get an error on connect.
-		#[arg(long)]
-		url: Url,
-
-		/// The name of the broadcast to publish.
-		#[arg(long, alias = "name")]
-		broadcast: String,
-
-		/// The format of the input media.
-		#[command(subcommand)]
-		format: PublishFormat,
-	},
-	/// Subscribe to a broadcast on a remote relay and write the media to stdout.
-	Subscribe {
-		/// The MoQ client configuration.
-		#[command(flatten)]
-		config: moq_native::ClientConfig,
-
-		/// The URL of the MoQ server.
-		#[arg(long)]
-		url: Url,
-
-		/// The name of the broadcast to subscribe to.
-		#[arg(long, alias = "name")]
-		broadcast: String,
-
-		#[command(flatten)]
-		args: SubscribeArgs,
-	},
-	/// Import or export HLS / LL-HLS via a MoQ relay.
-	Hls {
-		/// The MoQ client configuration.
-		#[command(flatten)]
-		config: moq_native::ClientConfig,
-
-		/// The URL of the MoQ server.
-		#[arg(long, alias = "relay", env = "MOQ_HLS_RELAY")]
-		url: Url,
-
-		#[command(subcommand)]
-		command: HlsCommand,
-	},
-}
-
-#[derive(Subcommand, Clone)]
-pub enum HlsCommand {
-	/// Serve HLS / LL-HLS over HTTP from MoQ broadcasts.
-	Export {
-		/// HTTP listener for the HLS endpoints.
-		#[arg(long, env = "MOQ_HLS_LISTEN", default_value = "[::]:8089")]
-		listen: SocketAddr,
-
-		/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
-		#[command(flatten)]
-		tls: moq_native::tls::Server,
-
-		/// LL-HLS part target duration.
-		#[arg(long, env = "MOQ_HLS_PART_TARGET", default_value = "500ms", value_parser = humantime::parse_duration)]
-		part_target: Duration,
-
-		/// Minimum duration of media kept in each rendition's sliding window.
-		#[arg(long, env = "MOQ_HLS_WINDOW", default_value = "16s", value_parser = humantime::parse_duration)]
-		window: Duration,
-	},
-	/// Pull a remote HLS master/media playlist and publish it into MoQ.
-	Import {
-		/// Broadcast name to publish on the relay.
-		#[arg(long, alias = "name", env = "MOQ_HLS_BROADCAST")]
-		broadcast: String,
-
-		/// Remote HLS playlist URL (http/https) or local file path.
-		#[arg(long, env = "MOQ_HLS_PLAYLIST")]
-		playlist: String,
-	},
+	fn server(&self, config: moq_native::ServerConfig) -> anyhow::Result<moq_native::Server> {
+		let server = config.init()?;
+		#[cfg(feature = "iroh")]
+		let server = server.with_iroh(self.iroh.clone());
+		Ok(server)
+	}
 }
 
 #[tokio::main]
@@ -171,105 +58,247 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init()?;
 
-	#[cfg(feature = "iroh")]
-	let iroh = cli.iroh.bind().await?;
+	let net = Net {
+		#[cfg(feature = "iroh")]
+		iroh: cli.moq.iroh.clone().bind().await?,
+	};
 
-	match cli.command {
-		Command::Serve {
-			config,
-			dir,
-			broadcast,
-			format,
-		} => {
-			warn_if_missing_format(&broadcast);
-			let publish = Publish::new(&format)?;
-			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
-
-			let server = config.init()?;
-			#[cfg(feature = "iroh")]
-			let server = server.with_iroh(iroh);
-
-			let web_tls = server.tls_info();
-
-			tokio::select! {
-				res = run_server(server, broadcast, publish.consume()) => res,
-				res = run_web(&web_bind, web_tls, dir) => res,
-				res = publish.run() => res,
-			}
-		}
-		Command::Accept {
-			config,
-			broadcast,
-			dir,
-			args,
-		} => {
-			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
-
-			let server = config.init()?;
-			#[cfg(feature = "iroh")]
-			let server = server.with_iroh(iroh);
-
-			let web_tls = server.tls_info();
-
-			let origin = moq_net::Origin::random().produce();
-			let consumer = origin.consume();
-
-			tokio::select! {
-				res = run_accept(server, origin) => res,
-				res = run_web(&web_bind, web_tls, dir) => res,
-				res = run_announced_subscribe(consumer, broadcast, args) => res,
-				_ = tokio::signal::ctrl_c() => Ok(()),
-			}
-		}
-		Command::Publish {
-			config,
-			url,
-			broadcast,
-			format,
-		} => {
-			warn_if_missing_format(&broadcast);
-			let publish = Publish::new(&format)?;
-			let client = config.init()?;
-
-			#[cfg(feature = "iroh")]
-			let client = client.with_iroh(iroh);
-
-			run_client(client, url, broadcast, publish).await
-		}
-		Command::Subscribe {
-			config,
-			url,
-			broadcast,
-			args,
-		} => {
-			let client = config.init()?;
-
-			#[cfg(feature = "iroh")]
-			let client = client.with_iroh(iroh);
-
-			run_subscribe(client, url, broadcast, args).await
-		}
-		Command::Hls { config, url, command } => {
-			let client = config.init()?;
-
-			#[cfg(feature = "iroh")]
-			let client = client.with_iroh(iroh);
-
-			match command {
-				HlsCommand::Export {
-					listen,
-					tls,
-					part_target,
-					window,
-				} => run_hls_export(client, url, listen, tls, part_target, window).await,
-				HlsCommand::Import { broadcast, playlist } => run_hls_import(client, url, broadcast, playlist).await,
-			}
-		}
+	match cli.direction {
+		Direction::Import(import) => run_import(cli.moq, import, net).await,
+		Direction::Export(export) => run_export(cli.moq, export, net).await,
 	}
 }
 
+/// Route one source INTO the shared Origin, exposing it to the MoQ network.
+async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()> {
+	let origin = moq_net::Origin::random().produce();
+	// The broadcast defaults to "": MoQ names each broadcast by the connection
+	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
+	let name = moq.broadcast.clone().unwrap_or_default();
+	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+	// RAII guards keeping our broadcasts announced until the endpoints finish.
+	let mut announce = Vec::new();
+	// The stdin/capture pipeline runs on this task instead of the JoinSet: the
+	// platform capture stream is not Send, so its future cannot be spawned.
+	let mut local: Option<Publish> = None;
+
+	if let ImportSource::Rtc(rtc) = &import.source {
+		if rtc.connect.is_some() {
+			reject_listener_cors(&rtc.cors, "import rtc")?;
+		}
+	}
+
+	// MoQ side: publish the Origin outward.
+	if let Some(url) = moq.client_connect.clone() {
+		let client = net.client(moq.client.clone())?;
+		let origin = origin.clone();
+		tasks.spawn(async move { moq::client_import(client, url, &origin).await });
+	}
+	if let Some(web_bind) = moq.server.bind.clone() {
+		let server = net.server(moq.server.clone())?;
+		let tls_info = server.tls_info();
+		tasks.spawn(moq::server_import(server, origin.clone()));
+		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
+	}
+
+	// Foreign side: the single source.
+	if let Some(format) = import.source.stdin_format() {
+		warn_if_missing_format(&name);
+		let publish = Publish::new(&format)?;
+		announce.push(
+			origin
+				.publish_broadcast(&name, publish.consume())
+				.context("failed to publish broadcast")?,
+		);
+		local = Some(publish);
+	} else {
+		match import.source {
+			ImportSource::Hls(hls) => {
+				warn_if_missing_format(&name);
+				let origin = origin.clone();
+				tasks.spawn(async move { hls::import(&origin, name, hls.playlist).await });
+			}
+			ImportSource::Rtmp(rtmp) => {
+				if let Some(addr) = rtmp.listen {
+					let name = require_broadcast(name, "import rtmp --listen")?;
+					tasks.spawn(rtmp::listen_import(origin.clone(), addr, name));
+				} else if let Some(url) = rtmp.connect {
+					tasks.spawn(rtmp::connect_import(origin.clone(), url, name));
+				}
+			}
+			ImportSource::Srt(srt) => {
+				if let Some(addr) = srt.listen {
+					let name = require_broadcast(name, "import srt --listen")?;
+					tasks.spawn(srt::listen_import(origin.clone(), addr, name, srt.latency));
+				} else if let Some(url) = srt.connect {
+					tasks.spawn(srt::connect_import(origin.clone(), url, name, srt.latency));
+				}
+			}
+			ImportSource::Rtc(rtc) => {
+				if let Some(addr) = rtc.listen {
+					let name = require_broadcast(name, "import rtc --listen")?;
+					tasks.spawn(rtc::listen_import(
+						origin.clone(),
+						addr,
+						rtc.udp_bind,
+						rtc.public_addr,
+						rtc.cors,
+						name,
+					));
+				} else if let Some(url) = rtc.connect {
+					tasks.spawn(rtc::connect_import(origin.clone(), url, name));
+				}
+			}
+			#[cfg(feature = "capture")]
+			ImportSource::Capture(capture) => {
+				warn_if_missing_format(&name);
+				let publish = Publish::capture(&capture)?;
+				announce.push(
+					origin
+						.publish_broadcast(&name, publish.consume())
+						.context("failed to publish broadcast")?,
+				);
+				local = Some(publish);
+			}
+			_ => unreachable!("container formats are handled by stdin_format above"),
+		}
+	}
+
+	match local {
+		Some(publish) => tokio::select! {
+			res = publish.run() => res,
+			res = drive(tasks) => res,
+		},
+		None => drive(tasks).await,
+	}
+}
+
+/// Route the shared Origin OUT to one sink, filling it from the MoQ network.
+async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()> {
+	let origin = moq_net::Origin::random().produce();
+	// The broadcast defaults to "": MoQ names each broadcast by the connection
+	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
+	let name = moq.broadcast.clone().unwrap_or_default();
+	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+	if let ExportSink::Rtc(rtc) = &export.sink {
+		if rtc.connect.is_some() {
+			reject_listener_cors(&rtc.cors, "export rtc")?;
+		}
+	}
+
+	// MoQ side: fill the Origin.
+	if let Some(url) = moq.client_connect.clone() {
+		let client = net.client(moq.client.clone())?;
+		let origin = origin.clone();
+		tasks.spawn(async move { moq::client_export(client, url, origin).await });
+	}
+	if let Some(web_bind) = moq.server.bind.clone() {
+		let server = net.server(moq.server.clone())?;
+		let tls_info = server.tls_info();
+		tasks.spawn(moq::server_export(server, origin.clone()));
+		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
+	}
+
+	// Foreign side: the single sink.
+	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {
+		let args = SubscribeArgs {
+			format,
+			max_latency,
+			fragment_duration,
+			catalog: export.catalog_format,
+			select: export.select,
+		};
+		let consumer = origin.consume();
+		tasks.spawn(async move { run_stdout(consumer, name, args).await });
+	} else {
+		match export.sink {
+			ExportSink::Hls(args) => {
+				let name = require_broadcast(name, "export hls")?;
+				tasks.spawn(hls::export(origin.consume(), args, name));
+			}
+			ExportSink::Rtmp(rtmp) => {
+				if let Some(addr) = rtmp.endpoint.listen {
+					let name = require_broadcast(name, "export rtmp --listen")?;
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, rtmp.latency_max));
+				} else if let Some(url) = rtmp.endpoint.connect {
+					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, rtmp.latency_max));
+				}
+			}
+			ExportSink::Srt(srt) => {
+				if let Some(addr) = srt.listen {
+					let name = require_broadcast(name, "export srt --listen")?;
+					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency));
+				} else if let Some(url) = srt.connect {
+					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency));
+				}
+			}
+			ExportSink::Rtc(rtc) => {
+				if let Some(addr) = rtc.listen {
+					let name = require_broadcast(name, "export rtc --listen")?;
+					tasks.spawn(rtc::listen_export(
+						origin.consume(),
+						addr,
+						rtc.udp_bind,
+						rtc.public_addr,
+						rtc.cors,
+						name,
+					));
+				} else if let Some(url) = rtc.connect {
+					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
+				}
+			}
+			_ => unreachable!("container formats are handled by stdout_format above"),
+		}
+	}
+
+	drive(tasks).await
+}
+
+/// Subscribe to `name` from the Origin and write it to stdout.
+async fn run_stdout(consumer: moq_net::OriginConsumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+	let catalog = args.catalog_format(&name);
+	let broadcast = consumer
+		.announced_broadcast(&name)
+		.await
+		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+
+	Subscribe::new(broadcast, catalog, args).run().await
+}
+
+/// Run every endpoint until the first finishes (stdin EOF, Ctrl-C, or an error),
+/// then drop the rest.
+async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
+	tasks.spawn(async {
+		let _ = tokio::signal::ctrl_c().await;
+		Ok(())
+	});
+
+	while let Some(res) = tasks.join_next().await {
+		match res {
+			Ok(Ok(())) => return Ok(()),
+			Ok(Err(err)) => return Err(err),
+			Err(err) if err.is_cancelled() => continue,
+			Err(err) => return Err(err.into()),
+		}
+	}
+
+	Ok(())
+}
+
+/// The listener / HTTP-serving endpoints bridge one named broadcast, so an
+/// empty `--broadcast` is rejected rather than silently defaulting to the root.
+fn require_broadcast(name: String, endpoint: &str) -> anyhow::Result<String> {
+	anyhow::ensure!(
+		!name.is_empty(),
+		"`{endpoint}` requires a broadcast: pass --broadcast <name>"
+	);
+	Ok(name)
+}
+
 fn warn_if_missing_format(name: &str) {
-	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
+	// The empty (root) broadcast has no name to suffix, so there's nothing to warn about.
+	if !name.is_empty() && moq_mux::catalog::CatalogFormat::detect(name).is_none() {
 		tracing::warn!(
 			name,
 			"You should append .hang to your broadcast name to make the catalog format explicit."
@@ -277,160 +306,10 @@ fn warn_if_missing_format(name: &str) {
 	}
 }
 
-async fn run_subscribe(
-	client: moq_native::Client,
-	url: Url,
-	broadcast: String,
-	args: SubscribeArgs,
-) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
-	let consumer = origin.consume();
-
-	tracing::info!(%url, %broadcast, "connecting");
-
-	let reconnect = client.with_subscriber(origin).reconnect(url);
-
-	#[cfg(unix)]
-	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
-
-	tokio::select! {
-		res = run_announced_subscribe(consumer, broadcast, args) => res,
-		res = reconnect.closed() => Ok(res?),
-		_ = tokio::signal::ctrl_c() => Ok(()),
-	}
-}
-
-async fn run_announced_subscribe(
-	consumer: moq_net::OriginConsumer,
-	broadcast: String,
-	args: SubscribeArgs,
-) -> anyhow::Result<()> {
-	let catalog = args.catalog_format(&broadcast);
-
-	let consumer = consumer
-		.announced_broadcast(&broadcast)
-		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
-
-	Subscribe::new(consumer, catalog, args).run().await
-}
-
-async fn run_hls_export(
-	client: moq_native::Client,
-	url: Url,
-	listen: SocketAddr,
-	tls: moq_native::tls::Server,
-	part_target: Duration,
-	window: Duration,
-) -> anyhow::Result<()> {
-	let subscriber = moq_net::Origin::random().produce();
-	let consumer = subscriber.consume();
-	let reconnect = client.with_subscriber(subscriber).reconnect(url.clone());
-
-	let config = moq_hls::export::Config {
-		part_target,
-		window,
-		..Default::default()
-	};
-	let server = moq_hls::Server::new(consumer, config);
-	let app = server
-		.router()
-		.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
-
-	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
-		None
-	} else {
-		let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-		Some(tls.server_config(alpn)?)
-	};
-
-	let listener = moq_native::bind::tcp(listen)?;
-
-	tracing::info!(%url, %listen, "serving HLS");
-
-	#[cfg(unix)]
-	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
-
-	tokio::select! {
-		res = serve_hls(listener, app, tls) => res,
-		res = reconnect.closed() => res.map_err(Into::into),
-		_ = shutdown_signal() => Ok(()),
-	}
-}
-
-async fn run_hls_import(
-	client: moq_native::Client,
-	url: Url,
-	broadcast: String,
-	playlist: String,
-) -> anyhow::Result<()> {
-	warn_if_missing_format(&broadcast);
-
-	let publisher = moq_net::Origin::random().produce();
-	let reconnect = client.with_publisher(publisher.consume()).reconnect(url.clone());
-
-	let mut producer = moq_net::BroadcastInfo::new().produce();
-	let consumer = producer.consume();
-	// Held for the import's lifetime; dropping the guard unannounces the broadcast.
-	let _publish = publisher.publish_broadcast(&broadcast, consumer)?;
-
-	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
-	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
-
-	tracing::info!(%url, %broadcast, "importing HLS");
-
-	tokio::select! {
-		res = async {
-			importer.init().await?;
-
-			#[cfg(unix)]
-			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
-
-			importer.run().await
-		} => res.map_err(Into::into),
-		res = reconnect.closed() => res.map_err(Into::into),
-		_ = shutdown_signal() => Ok(()),
-	}
-}
-
-async fn serve_hls(
-	listener: std::net::TcpListener,
-	app: axum::Router,
-	tls: Option<Arc<rustls::ServerConfig>>,
-) -> anyhow::Result<()> {
-	let service = app.into_make_service();
-	match tls {
-		Some(config) => {
-			let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
-			axum_server::from_tcp_rustls(listener, config)?.serve(service).await?;
-		}
-		None => {
-			axum_server::from_tcp(listener)?.serve(service).await?;
-		}
-	}
+fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Result<()> {
+	anyhow::ensure!(
+		cors.origin.is_empty(),
+		"`--cors-origin` only applies to `{endpoint} --listen`"
+	);
 	Ok(())
-}
-
-async fn shutdown_signal() {
-	#[cfg(unix)]
-	{
-		use tokio::signal::unix::{SignalKind, signal};
-
-		let mut term = match signal(SignalKind::terminate()) {
-			Ok(term) => term,
-			Err(_) => {
-				let _ = tokio::signal::ctrl_c().await;
-				return;
-			}
-		};
-		tokio::select! {
-			_ = tokio::signal::ctrl_c() => {}
-			_ = term.recv() => {}
-		}
-	}
-
-	#[cfg(not(unix))]
-	{
-		let _ = tokio::signal::ctrl_c().await;
-	}
 }

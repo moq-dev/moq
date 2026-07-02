@@ -169,7 +169,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
-					let _ = self.stop_announce(path);
+					let _ = self.stop_announce(path, true);
 				}
 				_ => {
 					tracing::warn!(type_id, "unexpected message on subscribe_namespace stream");
@@ -229,7 +229,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match self.start_announce(path.clone()) {
 			Ok(_) => {
 				if let Err(err) = self.write_ok(&mut stream, request_id).await {
-					let _ = self.stop_announce(path);
+					// Local rollback, not a peer unannounce: don't count announce bytes.
+					let _ = self.stop_announce(path, false);
 					return Err(err);
 				}
 			}
@@ -245,7 +246,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// in v17 the stream simply closes).
 		let _ = stream.reader.closed().await;
 
-		self.stop_announce(path)?;
+		self.stop_announce(path, true)?;
 
 		Ok(())
 	}
@@ -287,7 +288,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 		if let Some(path) = state.publishes.remove(&request_id) {
 			drop(state);
-			let _ = self.stop_announce(path);
+			// Count the unannounce only when the publish was OK'd and its stream then
+			// closed (a real end); a failed write_publish_ok is a local rollback.
+			let _ = self.stop_announce(path, res.is_ok());
 		}
 
 		res
@@ -446,6 +449,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
 		let abs = self.origin.absolute(&path).to_owned();
+		// Count the broadcast name length per announce (not the encoded message
+		// size, so framing overhead isn't charged), keyed by path so it's
+		// independent of the lifetime guard below.
+		self.stats
+			.broadcast(&abs)
+			.subscriber_announced_bytes(abs.as_str().len() as u64);
 
 		let mut state = self.state.lock();
 		match state.broadcasts.entry(path.clone()) {
@@ -496,7 +505,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
+	/// `count_bytes` records the unannounce name length (mirroring the announce in
+	/// [`Self::start_announce`]). Pass `true` for a real unannounce / stream-close
+	/// control event and `false` for a local rollback (e.g. a failed OK write),
+	/// which is a teardown rather than an announce the peer ended.
+	fn stop_announce(&mut self, path: PathOwned, count_bytes: bool) -> Result<(), Error> {
+		if count_bytes {
+			let abs = self.origin.absolute(&path).to_owned();
+			self.stats
+				.broadcast(&abs)
+				.subscriber_announced_bytes(abs.as_str().len() as u64);
+		}
+
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
@@ -523,7 +543,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = match broadcast.create_track(msg.track_name.to_string(), None) {
 			Ok(track) => track,
 			Err(err) => {
-				let _ = self.stop_announce(namespace);
+				let _ = self.stop_announce(namespace, false);
 				return Err(err);
 			}
 		};
@@ -542,7 +562,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Occupied(_) => {
 				drop(state);
-				let _ = self.stop_announce(namespace);
+				let _ = self.stop_announce(namespace, false);
 				return Err(Error::Duplicate);
 			}
 		};
@@ -554,7 +574,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Entry::Occupied(_) => {
 				state.subscribes.remove(&request_id);
 				drop(state);
-				let _ = self.stop_announce(namespace);
+				let _ = self.stop_announce(namespace, false);
 				return Err(Error::Duplicate);
 			}
 		}

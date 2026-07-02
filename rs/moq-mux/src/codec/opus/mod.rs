@@ -72,7 +72,7 @@ impl Config {
 	/// 0, zero pre-skip and gain).
 	///
 	/// Errors with [`Error::UnsupportedChannelCount`] unless `channel_count` is 1
-	/// or 2 — mapping family 0 is only defined for mono/stereo per RFC 7845 §5.1.
+	/// or 2, since mapping family 0 is only defined for mono/stereo per RFC 7845 §5.1.
 	/// Multi-channel streams need family 1 with a channel mapping table, which
 	/// this helper does not emit.
 	pub fn encode(&self) -> Result<Bytes> {
@@ -91,9 +91,59 @@ impl Config {
 	}
 }
 
+/// Number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 §3.1).
+///
+/// MPEG-TS aggregates several Opus packets into one PES, so the importer advances each
+/// packet's timestamp by this. Opus timing is always reckoned at 48 kHz regardless of the
+/// encoder's internal bandwidth. Returns `None` for an empty packet or a code-3 packet
+/// missing its frame-count byte.
+pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
+	let toc = *packet.first()?;
+	let frames = match toc & 0b11 {
+		0 => 1,
+		1 | 2 => 2,
+		// Code 3: the frame count is the low 6 bits of the following byte.
+		_ => (packet.get(1)? & 0b0011_1111) as u32,
+	};
+	Some(config_samples(toc >> 3) * frames)
+}
+
+/// 48 kHz samples per frame for an Opus TOC config index (0..=31), per RFC 6716 Table 1.
+fn config_samples(config: u8) -> u32 {
+	match config {
+		// SILK NB/MB/WB: 10, 20, 40, 60 ms.
+		0 | 4 | 8 => 480,
+		1 | 5 | 9 => 960,
+		2 | 6 | 10 => 1920,
+		3 | 7 | 11 => 2880,
+		// Hybrid SWB/FB: 10, 20 ms.
+		12 | 14 => 480,
+		13 | 15 => 960,
+		// CELT NB/WB/SWB/FB: 2.5, 5, 10, 20 ms.
+		16 | 20 | 24 | 28 => 120,
+		17 | 21 | 25 | 29 => 240,
+		18 | 22 | 26 | 30 => 480,
+		// 19, 23, 27, 31 are the 20 ms CELT configs.
+		_ => 960,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn packet_samples_reads_toc() {
+		// config 16 (CELT NB 2.5 ms = 120 samples), code 0 (1 frame).
+		assert_eq!(packet_samples(&[16 << 3]), Some(120));
+		// config 3 (SILK NB 60 ms = 2880), code 0.
+		assert_eq!(packet_samples(&[3 << 3]), Some(2880));
+		// config 1 (SILK NB 20 ms = 960), code 1 (2 frames) -> 1920.
+		assert_eq!(packet_samples(&[(1 << 3) | 1]), Some(1920));
+		// config 1, code 3 with 4 frames -> 3840.
+		assert_eq!(packet_samples(&[(1 << 3) | 3, 4]), Some(3840));
+		assert_eq!(packet_samples(&[]), None);
+	}
 
 	#[test]
 	fn parses_valid_opus_head() {

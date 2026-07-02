@@ -28,7 +28,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Auth, AuthParams, AuthToken, Cluster};
+use crate::{Auth, AuthParams, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -315,12 +315,13 @@ async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<
 	}
 }
 
-/// Marker inserted as a request extension when rustls verified a client cert
-/// against the configured mTLS CA. We don't carry the cert bytes. "Verified
-/// by our CA" is the entire signal we need (mirrors `peer_identity` on
-/// the QUIC side).
+/// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
+///
+/// Embedded routes can extract `Option<Extension<MtlsPeer>>` to mirror the
+/// built-in relay handlers, then call [`Auth::verify_mtls`] with their route
+/// path when the marker is present.
 #[derive(Clone, Debug)]
-pub(crate) struct MtlsPeer;
+pub struct MtlsPeer;
 
 /// Wraps [`RustlsAcceptor`] so that, after the TLS handshake, we extract the
 /// peer cert presence from rustls's `ServerConnection` and attach it to every
@@ -509,10 +510,7 @@ async fn serve_announced(
 	};
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, tier) = state.auth.resolve_mtls(&params.path).await?;
-		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
-		token.tier = tier;
-		token
+		state.auth.verify_mtls(&params.path).await?
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -554,10 +552,7 @@ async fn serve_fetch(
 	};
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, tier) = state.auth.resolve_mtls(&auth.path).await?;
-		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
-		token.tier = tier;
-		token
+		state.auth.verify_mtls(&auth.path).await?
 	} else {
 		state.auth.verify(&auth).await?
 	};

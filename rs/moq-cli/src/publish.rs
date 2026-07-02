@@ -1,25 +1,17 @@
-use clap::Subcommand;
 use hang::moq_net;
-use moq_hls::import as hls;
 use moq_mux::container::{flv, fmp4, ts};
 
-#[derive(Subcommand, Clone)]
+/// Container format read from stdin on the import (source) side.
+#[derive(Clone, Copy)]
 pub enum PublishFormat {
+	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
+	/// Fragmented MP4 (CMAF).
 	Fmp4,
-	/// MPEG-TS (transport stream) read from stdin.
+	/// MPEG-TS (transport stream).
 	Ts,
-	/// FLV (Flash Video / RTMP) read from stdin.
+	/// FLV (Flash Video / RTMP).
 	Flv,
-	// NOTE: No aac support because it needs framing.
-	Hls {
-		/// URL or file path of an HLS playlist to ingest.
-		#[arg(long)]
-		playlist: String,
-	},
-	/// Capture and publish the camera (H.264) and microphone (Opus).
-	#[cfg(feature = "capture")]
-	Capture(CaptureArgs),
 }
 
 /// `clap` adapter for [`moq_video::encode::Codec`].
@@ -114,31 +106,38 @@ enum PublishDecoder {
 	// verbatim, so it uses the `mpegts` catalog extension rather than the media-only `()`.
 	Ts(Box<ts::Import<ts::catalog::Ext>>),
 	Flv(Box<flv::Import>),
-	Hls(Box<hls::Import>),
 }
 
 impl PublishDecoder {
-	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, Ts, or Flv).
-	fn decode_buf(&mut self, data: &[u8]) -> anyhow::Result<()> {
+	/// Decode a chunk of stdin bytes. Each importer buffers any partial trailing
+	/// frame internally, so the caller feeds fresh chunks rather than an
+	/// accumulating buffer.
+	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
 		match self {
 			Self::Avc3 { split, import } => {
-				let frames = split.decode(data, None)?;
+				let frames = split.decode(chunk, None)?;
 				import.decode(frames)?;
-				Ok(())
 			}
-			Self::Fmp4(d) => Ok(d.decode(data)?),
-			Self::Ts(d) => Ok(d.decode(data)?),
-			Self::Flv(d) => Ok(d.decode(data)?),
-			Self::Hls(_) => unreachable!(),
+			Self::Fmp4(d) => d.decode(chunk)?,
+			Self::Ts(d) => d.decode(chunk)?,
+			Self::Flv(d) => d.decode(chunk)?,
 		}
+		Ok(())
 	}
 
-	/// Flush any in-flight access unit at end of stream. The avc3 split holds the
-	/// final AU until the next start code, so stdin EOF must flush it.
+	/// Flush any buffered trailing frame and close the tracks at end of input.
+	/// The avc3 split holds the final access unit until the next start code, so
+	/// stdin EOF must flush it explicitly.
 	fn finish(&mut self) -> anyhow::Result<()> {
-		if let Self::Avc3 { split, import } = self {
-			let tail = split.flush(None)?;
-			import.decode(tail)?;
+		match self {
+			Self::Avc3 { split, import } => {
+				let tail = split.flush(None)?;
+				import.decode(tail)?;
+				import.finish()?;
+			}
+			Self::Fmp4(d) => d.finish()?,
+			Self::Ts(d) => d.finish()?,
+			Self::Flv(d) => d.finish()?,
 		}
 		Ok(())
 	}
@@ -148,7 +147,7 @@ impl PublishDecoder {
 // Stream variant and the larger Capture config is irrelevant.
 #[allow(clippy::large_enum_variant)]
 enum Source {
-	/// Decode a container read from stdin (or an HLS playlist).
+	/// Decode a container read from stdin.
 	Stream(PublishDecoder),
 	/// Capture from local devices. The per-medium producers are built on their
 	/// own capture threads (native camera/screen capture, microphone via cpal), publishing
@@ -162,12 +161,15 @@ enum Source {
 	},
 }
 
+/// A single-broadcast publisher: decodes stdin (or captures local devices) into
+/// a broadcast that the MoQ side announces.
 pub struct Publish {
 	source: Source,
 	broadcast: moq_net::BroadcastProducer,
 }
 
 impl Publish {
+	/// Build a publisher decoding the given container format from stdin.
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 
@@ -207,32 +209,35 @@ impl Publish {
 				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
 				Source::Stream(PublishDecoder::Flv(Box::new(flv)))
 			}
-			PublishFormat::Hls { playlist } => {
-				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
-				Source::Stream(PublishDecoder::Hls(Box::new(hls)))
-			}
-			#[cfg(feature = "capture")]
-			PublishFormat::Capture(args) => {
-				let video = (!args.no_video).then(|| (args.video_config(), args.video_encode()));
-				let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
-				anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
-				Source::Capture { catalog, video, audio }
-			}
 		};
 
 		Ok(Self { source, broadcast })
 	}
 
+	/// Build a publisher capturing local devices (camera/screen and microphone).
+	#[cfg(feature = "capture")]
+	pub fn capture(args: &CaptureArgs) -> anyhow::Result<Self> {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+
+		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode()));
+		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
+		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
+
+		Ok(Self {
+			source: Source::Capture { catalog, video, audio },
+			broadcast,
+		})
+	}
+
+	/// A consumer of the broadcast being published, for announcing it on an Origin.
 	pub fn consume(&self) -> moq_net::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 
+	/// Drive the source until stdin EOF (or the capture devices stop).
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.source {
-			Source::Stream(PublishDecoder::Hls(mut decoder)) => {
-				decoder.init().await?;
-				Ok(decoder.run().await?)
-			}
 			Source::Stream(mut decoder) => {
 				let mut stdin = tokio::io::stdin();
 				let mut buffer = bytes::BytesMut::new();
@@ -241,10 +246,11 @@ impl Publish {
 					buffer.clear();
 					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
 					if n == 0 {
+						// EOF: flush the importer's buffered trailing frame and close the tracks.
 						decoder.finish()?;
 						return Ok(());
 					}
-					decoder.decode_buf(&buffer)?;
+					decoder.decode_chunk(&buffer)?;
 				}
 			}
 			#[cfg(feature = "capture")]
@@ -478,11 +484,8 @@ mod tests {
 		let Source::Stream(decoder) = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		decoder.decode_buf(&input).unwrap();
-		let PublishDecoder::Ts(import) = decoder else {
-			panic!("expected a TS decoder");
-		};
-		import.finish().unwrap();
+		decoder.decode_chunk(&input).unwrap();
+		decoder.finish().unwrap();
 
 		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
 		// ancillary streams verbatim.

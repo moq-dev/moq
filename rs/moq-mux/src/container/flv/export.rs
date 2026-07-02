@@ -2,9 +2,9 @@
 //!
 //! [`Export`] subscribes to a MoQ broadcast and produces a single FLV byte
 //! stream: the file header, the video/audio sequence headers, then one tag per
-//! media frame interleaved by timestamp. Legacy H.264 + AAC are muxed as the
-//! classic CodecID tags; HEVC, AV1, VP9, Opus, AC-3, and E-AC-3 are muxed as the
-//! enhanced-RTMP (E-RTMP) FourCC payloads. Frames flow through [`ExportSource`],
+//! media frame interleaved by timestamp. Legacy H.264 + AAC + MP3 are muxed as
+//! the classic CodecID tags; HEVC, AV1, VP9, Opus, AC-3, and E-AC-3 are muxed as
+//! the enhanced-RTMP (E-RTMP) FourCC payloads. Frames flow through [`ExportSource`],
 //! which normalizes H.264/H.265 to length-prefixed NALU plus a resolved
 //! avcC/hvcC (parsing inline avc3/hev1 parameter sets when needed) and hands the
 //! other codecs through unchanged. FLV carries a single video and a single audio
@@ -20,8 +20,8 @@ use hang::catalog::{AV1, AudioCodec, Catalog, Container, VideoCodec};
 
 use super::{
 	AAC_AUDIO_TAG_HEADER, AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_EX, AUDIO_PACKET_CODED_FRAMES,
-	AUDIO_PACKET_SEQUENCE_START, AVC_NALU, AVC_SEQUENCE_HEADER, FRAME_TYPE_INTER, FRAME_TYPE_KEY, TAG_AUDIO,
-	TAG_HEADER_LEN, TAG_VIDEO, VIDEO_CODEC_AVC, VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES,
+	AUDIO_PACKET_SEQUENCE_START, AVC_NALU, AVC_SEQUENCE_HEADER, FRAME_TYPE_INTER, FRAME_TYPE_KEY, MP3_AUDIO_TAG_HEADER,
+	TAG_AUDIO, TAG_HEADER_LEN, TAG_VIDEO, VIDEO_CODEC_AVC, VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES,
 	VIDEO_PACKET_SEQUENCE_START,
 };
 use crate::catalog::{CatalogFormat, Stream};
@@ -36,6 +36,7 @@ enum Flavor {
 	Av1,
 	Vp9,
 	Aac,
+	Mp3,
 	Opus,
 	Ac3,
 	Eac3,
@@ -43,7 +44,7 @@ enum Flavor {
 
 impl Flavor {
 	/// The enhanced-RTMP FourCC for this codec, or `None` for the legacy
-	/// (CodecID-signaled) AVC and AAC shapes.
+	/// (CodecID-signaled) AVC, AAC, and MP3 shapes.
 	fn fourcc(self) -> Option<[u8; 4]> {
 		match self {
 			Flavor::Hevc => Some(*b"hvc1"),
@@ -52,7 +53,7 @@ impl Flavor {
 			Flavor::Opus => Some(*b"Opus"),
 			Flavor::Ac3 => Some(*b"ac-3"),
 			Flavor::Eac3 => Some(*b"ec-3"),
-			Flavor::Avc | Flavor::Aac => None,
+			Flavor::Avc | Flavor::Aac | Flavor::Mp3 => None,
 		}
 	}
 }
@@ -387,12 +388,17 @@ impl Export {
 		} else {
 			let flavor = self.audio.as_ref().expect("audio frame without an audio track").flavor;
 			let mut body = BytesMut::with_capacity(5 + frame.payload.len());
-			match flavor.fourcc() {
-				None => {
+			match flavor {
+				// Legacy AAC: tag header + AACPacketType (raw frame follows).
+				Flavor::Aac => {
 					body.put_u8(AAC_AUDIO_TAG_HEADER);
 					body.put_u8(AAC_RAW);
 				}
-				Some(fourcc) => {
+				// Legacy MP3: tag header only; the raw frame carries its own config.
+				Flavor::Mp3 => body.put_u8(MP3_AUDIO_TAG_HEADER),
+				// Enhanced FourCC CodedFrames.
+				_ => {
+					let fourcc = flavor.fourcc().expect("enhanced audio flavor missing FourCC");
 					body.put_u8((AUDIO_FORMAT_EX << 4) | AUDIO_PACKET_CODED_FRAMES);
 					body.put_slice(&fourcc);
 				}
@@ -445,6 +451,7 @@ fn video_flavor(config: &hang::catalog::VideoConfig) -> anyhow::Result<Flavor> {
 fn audio_flavor(config: &hang::catalog::AudioConfig) -> anyhow::Result<Flavor> {
 	match &config.codec {
 		AudioCodec::AAC(_) => Ok(Flavor::Aac),
+		AudioCodec::Mp3 => Ok(Flavor::Mp3),
 		AudioCodec::Opus => Ok(Flavor::Opus),
 		AudioCodec::Ac3 => Ok(Flavor::Ac3),
 		AudioCodec::Ec3 => Ok(Flavor::Eac3),
@@ -481,13 +488,15 @@ fn video_sequence_header(track: &FlvTrack) -> anyhow::Result<Option<BytesMut>> {
 		}
 		// VP9 configures the decoder from the key frame; no sequence header tag.
 		Flavor::Vp9 => return Ok(None),
-		Flavor::Aac | Flavor::Opus | Flavor::Ac3 | Flavor::Eac3 => unreachable!("audio flavor on a video track"),
+		Flavor::Aac | Flavor::Mp3 | Flavor::Opus | Flavor::Ac3 | Flavor::Eac3 => {
+			unreachable!("audio flavor on a video track")
+		}
 	}
 	Ok(Some(body))
 }
 
 /// Build the FLV audio sequence-header tag body, or `None` for codecs that carry
-/// their config in band (AC-3 / E-AC-3).
+/// their config in band (MP3 / AC-3 / E-AC-3).
 fn audio_sequence_header(track: &FlvTrack) -> anyhow::Result<Option<BytesMut>> {
 	let mut body = BytesMut::new();
 	match track.flavor {
@@ -506,8 +515,8 @@ fn audio_sequence_header(track: &FlvTrack) -> anyhow::Result<Option<BytesMut>> {
 			body.put_slice(b"Opus");
 			body.put_slice(head);
 		}
-		// AC-3 / E-AC-3 carry their config in each sync frame; no sequence header tag.
-		Flavor::Ac3 | Flavor::Eac3 => return Ok(None),
+		// MP3 / AC-3 / E-AC-3 carry their config in each frame; no sequence header tag.
+		Flavor::Mp3 | Flavor::Ac3 | Flavor::Eac3 => return Ok(None),
 		Flavor::Avc | Flavor::Hevc | Flavor::Av1 | Flavor::Vp9 => unreachable!("video flavor on an audio track"),
 	}
 	Ok(Some(body))

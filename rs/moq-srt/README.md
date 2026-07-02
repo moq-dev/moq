@@ -7,7 +7,7 @@ by its stream id `m=` mode:
 
 - `m=publish` (the default): ingest. Demux the connection's transport stream
   with [`moq-mux`](../moq-mux) and publish it into a MoQ origin as an ordinary
-  broadcast. The contribution-ingest analogue of `moq-hls`'s import and
+  broadcast. The contribution-ingest analogue of `moq-cli` HLS import and
   `moq-rtc`'s WHIP.
 - `m=request`: egress. Re-mux a broadcast from the origin back to MPEG-TS and
   stream it to the caller, so `vlc srt://...` and `ffmpeg -i srt://...` can play
@@ -20,12 +20,7 @@ Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg dependency.
 Two entry points. `Config` + `run` is the unauthenticated convenience: a relay
 embeds ingest by calling `run` against its own origin, so the ingested media is
 published locally with no extra hop. For auth, drive `Server` / `Request`
-directly (see [Auth](#auth) below). Depend on it with `default-features = false`
-to skip the binary's relay client/server and CLI dependencies:
-
-```toml
-moq-srt = { version = "0.0.1", default-features = false }
-```
+directly (see [Auth](#auth) below).
 
 ```rust
 let mut srt = moq_srt::Config::default();
@@ -39,29 +34,12 @@ tokio::select! {
 }
 ```
 
-## Binary
+## CLI
 
-The `moq-srt` binary (needs the default `server` feature) has two modes.
+A command-line interface is provided by the [`moq-cli`](../moq-cli) binary, on
+top of this library.
 
-`serve` ingests SRT and serves it directly as a local relay, so MoQ subscribers
-(native or browser) connect straight to this binary. It also exposes the
-`/certificate.sha256` endpoint browsers need for self-signed `http://` origins,
-and can serve a static player directory with `--dir`:
-
-```bash
-moq-srt serve --server-bind [::]:443 --tls-generate localhost \
-  --srt-listen 0.0.0.0:9000 --srt-prefix live/
-```
-
-`publish` instead forwards every ingested broadcast out to a remote relay over
-WebTransport (like `moq-hls import`):
-
-```bash
-moq-srt publish --relay https://relay.example.com \
-  --srt-listen 0.0.0.0:9000 --srt-prefix live/
-```
-
-Feed either mode with any SRT source:
+Feed any SRT source:
 
 ```bash
 # Publish: lands at broadcast `live/cam0`.

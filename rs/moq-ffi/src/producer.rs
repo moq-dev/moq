@@ -97,6 +97,22 @@ enum StreamDecoder {
 	Container(moq_mux::import::ContainerStream<Extra>),
 }
 
+impl StreamDecoder {
+	fn decode(&mut self, data: &[u8]) -> moq_mux::Result<()> {
+		match self {
+			Self::Track(t) => t.decode(data),
+			Self::Container(c) => c.decode(data),
+		}
+	}
+
+	fn finish(&mut self) -> moq_mux::Result<()> {
+		match self {
+			Self::Track(t) => t.finish(),
+			Self::Container(c) => c.finish(),
+		}
+	}
+}
+
 struct MediaStreamProducer {
 	// The importer buffers any partial trailing frame internally, so callers can
 	// write arbitrary chunks without retaining a remainder here.
@@ -187,7 +203,8 @@ impl MoqBroadcastProducer {
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		let catalog = moq_mux::catalog::Producer::new_extra(&mut broadcast)?;
+		let catalog =
+			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
@@ -202,7 +219,7 @@ impl MoqBroadcastProducer {
 	pub fn set_catalog_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
-		self.with_state(|state| Ok(state.catalog.set_section(name, value)?))
+		self.with_state(|state| Ok(state.catalog.lock().set_section(name, value)?))
 	}
 
 	/// Remove a top-level application catalog section by name.
@@ -211,7 +228,7 @@ impl MoqBroadcastProducer {
 	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		self.with_state(|state| {
-			state.catalog.remove_section(&name);
+			state.catalog.lock().remove_section(&name);
 			Ok(())
 		})
 	}
@@ -310,10 +327,13 @@ impl MoqBroadcastProducer {
 					let request = broadcast
 						.reserve_track(name)
 						.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-					StreamDecoder::Track(Box::new(
-						moq_mux::import::TrackStream::new(request, state.catalog.clone(), &format)
-							.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?,
-					))
+					match moq_mux::import::TrackStream::new(request, state.catalog.clone(), &format) {
+						Ok(import) => StreamDecoder::Track(Box::new(import)),
+						Err(moq_mux::Error::UnknownFormat(_)) => {
+							return Err(MoqError::Codec(format!("unknown stream format: {format}")));
+						}
+						Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
+					}
 				}
 				Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
 			};
@@ -661,11 +681,10 @@ impl MoqMediaStreamProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
-		match &mut media.decoder {
-			StreamDecoder::Track(decoder) => decoder.decode(&payload),
-			StreamDecoder::Container(decoder) => decoder.decode(&payload),
-		}
-		.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
+		media
+			.decoder
+			.decode(&payload)
+			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
 		Ok(())
 	}
 
@@ -678,11 +697,10 @@ impl MoqMediaStreamProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or_else(|| MoqError::Closed)?;
-		match &mut media.decoder {
-			StreamDecoder::Track(decoder) => decoder.finish(),
-			StreamDecoder::Container(decoder) => decoder.finish(),
-		}
-		.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
+		media
+			.decoder
+			.finish()
+			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
 		Ok(())
 	}
 }

@@ -15,50 +15,27 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [lib]
 doctest = false
 
-[[bin]]
-name = "moq-hls"
-path = "bin/moq-hls.rs"
-doc = false
-# The binary (and the HTTP export server) need the `server` feature; the library
-# can be depended on with `default-features = false` for import only (e.g. moq-cli).
-required-features = ["server"]
-
 [features]
-default = ["server", "iroh", "noq", "websocket"]
-# HTTP export server + the moq-hls binary. Pulls in axum / moq-native / clap.
-server = ["dep:axum", "dep:axum-server", "dep:clap", "dep:humantime", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tower-http"]
-iroh = ["server", "moq-native/iroh"]
-noq = ["server", "moq-native/noq"]
-quinn = ["server", "moq-native/quinn"]
-quiche = ["server", "moq-native/quiche"]
-websocket = ["server", "moq-native/websocket"]
+default = ["server"]
+server = ["dep:axum"]
 
 [dependencies]
 # Always required (import + export library).
 anyhow = { version = "1", features = ["backtrace"] }
 
-# Only needed by the HTTP export server / binary (gated by `server`).
+# Only needed by the HTTP export server (gated by `server`).
 axum = { version = "0.8", features = ["tokio"], optional = true }
-axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 bytes = "1"
-clap = { version = "4", features = ["derive"], optional = true }
 hang = { workspace = true }
-humantime = { version = "2.3", optional = true }
 kio = { workspace = true }
 m3u8-rs = "6"
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"], optional = true }
 moq-net = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
-rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false, optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.7", features = ["cors"], optional = true }
 tracing = "0.1"
 url = "2"
-
-[target.'cfg(unix)'.dependencies]
-sd-notify = { version = "0.5", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

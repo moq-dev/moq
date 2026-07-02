@@ -1,7 +1,7 @@
 {
 	"name": "@moq/net",
 	"type": "module",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"description": "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -17,7 +17,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/qmux": "^0.1.1",
+		"@moq/qmux": "^0.1.3",
 		"@moq/signals": "workspace:*",
 		"async-mutex": "^0.5.0"
 	},

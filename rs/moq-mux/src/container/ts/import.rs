@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use bytes::BytesMut;
 use mpeg2ts::es::StreamType;
 use mpeg2ts::pes::PesHeader;
@@ -23,7 +24,7 @@ use mpeg2ts::ts::{Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
 use super::adts;
 use super::catalog;
 use crate::catalog::hang::CatalogExt;
-use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2};
+use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
 use moq_net::Timestamp;
 
 /// Demuxes an MPEG-TS byte stream into a MoQ broadcast.
@@ -323,6 +324,21 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::Mpeg1Audio | StreamType::Mpeg2HalvedSampleRateAudio => self.legacy_stream(&mp2::DESCRIPTOR),
 			StreamType::DolbyDigitalUpToSixChannelAudio => self.legacy_stream(&ac3::DESCRIPTOR),
 			StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc => self.legacy_stream(&eac3::DESCRIPTOR),
+			// Opus rides private-data PES (0x06), distinguished from other private streams
+			// by an 'Opus' registration descriptor. Channels and the (always 48 kHz) rate
+			// come from the descriptors, so the importer is built up front.
+			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
+				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
+				let track = crate::import::unique_track(&mut self.broadcast, ".opus")?;
+				let config = opus::Config {
+					sample_rate: 48_000,
+					channel_count,
+				};
+				Stream::Opus(Box::new(OpusStream {
+					import: opus::Import::new(track, self.catalog.clone(), config)?,
+					unwrap: PtsUnwrap::default(),
+				}))
+			}
 			StreamType::Mpeg1Video | StreamType::Mpeg2Video => Stream::Clock,
 			// A codec we don't decode. Carry it verbatim as PES when the catalog supports
 			// the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS audio, or a
@@ -961,6 +977,7 @@ enum Stream<E: catalog::Catalog = ()> {
 		unwrap: PtsUnwrap,
 	},
 	Aac(Box<AacStream<E>>),
+	Opus(Box<OpusStream<E>>),
 	Legacy(Box<LegacyStream<E>>),
 	/// A codec we don't decode, carried verbatim as PES (DTS audio, private PES, ...).
 	Verbatim(Box<VerbatimStream<E>>),
@@ -1003,6 +1020,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				Ok(())
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
+			Stream::Opus(stream) => stream.write(pending),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
 			Stream::Clock | Stream::Ignored => Ok(()),
@@ -1020,6 +1038,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				Ok(import.seek(sequence)?)
 			}
 			Stream::Aac(stream) => stream.seek(sequence),
+			Stream::Opus(stream) => stream.seek(sequence),
 			Stream::Legacy(stream) => stream.seek(sequence),
 			Stream::Verbatim(stream) => stream.seek(sequence),
 			Stream::Clock | Stream::Ignored => Ok(()),
@@ -1031,6 +1050,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { import, .. } => Ok(import.finish()?),
 			Stream::H265 { import, .. } => Ok(import.finish()?),
 			Stream::Aac(stream) => stream.finish(),
+			Stream::Opus(stream) => stream.finish(),
 			Stream::Legacy(stream) => stream.finish(),
 			Stream::Verbatim(stream) => stream.finish(),
 			Stream::Clock | Stream::Ignored => Ok(()),
@@ -1044,6 +1064,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { import, .. } => Some(import.name().to_string()),
 			Stream::H265 { import, .. } => Some(import.name().to_string()),
 			Stream::Aac(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
+			Stream::Opus(stream) => Some(stream.import.name().to_string()),
 			Stream::Legacy(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
 			Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => None,
 		}
@@ -1168,6 +1189,125 @@ impl<E: CatalogExt> AacStream<E> {
 		}
 		Ok(())
 	}
+}
+
+/// One Opus elementary stream. The channels come from the PMT descriptors and the rate
+/// is always 48 kHz, so (unlike AAC) the importer is built up front. A PES carries one or
+/// more Opus packets, each prefixed by the Opus-in-TS control header.
+struct OpusStream<E: CatalogExt = ()> {
+	import: opus::Import<E>,
+	unwrap: PtsUnwrap,
+}
+
+impl<E: CatalogExt> OpusStream<E> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+
+		let data = &pending.data;
+		let mut offset = 0;
+		// 48 kHz samples elapsed since this PES's PTS, advancing each packet after the first.
+		let mut elapsed: u64 = 0;
+		while offset < data.len() {
+			let (header_len, size) = parse_opus_control_header(&data[offset..])?;
+			let start = offset + header_len;
+			let end = start + size;
+			anyhow::ensure!(end <= data.len(), "Opus access unit exceeds PES payload");
+			let packet = &data[start..end];
+
+			let pts = match base {
+				Some(base) if elapsed > 0 => {
+					let advance = Timestamp::from_scale(elapsed, 48_000)?;
+					// `base` is a 90 kHz PTS; rescale the sample advance to match before
+					// adding (the scale-aware Timestamp rejects mixed scales).
+					Some(base + advance.convert(base.scale())?)
+				}
+				other => other,
+			};
+			self.import.decode(packet, pts)?;
+
+			// Default to 20 ms (960 samples) if the TOC can't be read, so a malformed packet
+			// doesn't stall the timeline for the rest of the PES.
+			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
+			offset = end;
+		}
+		Ok(())
+	}
+
+	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		Ok(self.import.seek(sequence)?)
+	}
+
+	fn finish(&mut self) -> anyhow::Result<()> {
+		Ok(self.import.finish()?)
+	}
+}
+
+/// The 4-byte registration `format_identifier` from a PMT registration descriptor
+/// (tag 0x05), if present. Identifies the codec of a private-data (0x06) stream.
+fn registration_format(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<[u8; 4]> {
+	descriptors
+		.iter()
+		.find(|d| d.tag == 0x05)
+		.and_then(|d| d.data.get(..4))
+		.and_then(|s| s.try_into().ok())
+}
+
+/// The Opus channel count from the DVB extension descriptor (tag 0x7f, ext tag 0x80).
+///
+/// `channel_config_code` follows the Opus-in-TS mapping (and ffmpeg's demuxer): 0 is dual
+/// mono (decoded as stereo), 1..=8 is the channel count directly. Higher codes (0x81
+/// explicitly-coded layouts, reserved values) aren't supported, so they fall back to the
+/// caller's default rather than being read as a raw 129..=255 count.
+fn opus_channel_count(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<u32> {
+	descriptors
+		.iter()
+		.find(|d| d.tag == 0x7f && d.data.first() == Some(&0x80))
+		.and_then(|d| d.data.get(1))
+		.and_then(|&cc| match cc {
+			0 => Some(2),
+			1..=8 => Some(cc as u32),
+			_ => None,
+		})
+}
+
+/// Parse one Opus-in-TS access-unit control header, returning `(header_len, payload_size)`.
+fn parse_opus_control_header(data: &[u8]) -> anyhow::Result<(usize, usize)> {
+	anyhow::ensure!(data.len() >= 2, "Opus control header truncated");
+	// 11-bit 0x3FF sync: byte 0 == 0x7F and the top 3 bits of byte 1 == 0b111.
+	anyhow::ensure!(
+		data[0] == 0x7f && (data[1] & 0xe0) == 0xe0,
+		"invalid Opus control header sync (0x{:02x}{:02x})",
+		data[0],
+		data[1]
+	);
+	let start_trim = (data[1] & 0x10) != 0;
+	let end_trim = (data[1] & 0x08) != 0;
+	let control_ext = (data[1] & 0x04) != 0;
+
+	let mut pos = 2;
+	// au_size: sum a run of 0xFF bytes plus the final byte < 0xFF.
+	let mut size = 0usize;
+	loop {
+		let b = *data.get(pos).context("Opus au_size truncated")?;
+		pos += 1;
+		size += b as usize;
+		if b != 0xff {
+			break;
+		}
+	}
+	// Each trim field is 16 bits; the control extension is a length byte plus that many bytes.
+	if start_trim {
+		pos += 2;
+	}
+	if end_trim {
+		pos += 2;
+	}
+	if control_ext {
+		let len = *data.get(pos).context("Opus control extension truncated")? as usize;
+		pos += 1 + len;
+	}
+	anyhow::ensure!(pos <= data.len(), "Opus control header exceeds payload");
+	Ok((pos, size))
 }
 
 /// One stream of legacy broadcast audio (MP2, AC-3, E-AC-3), carried verbatim:
