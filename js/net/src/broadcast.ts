@@ -1,5 +1,16 @@
 import { Signal } from "@moq/signals";
+import type { Group } from "./group.ts";
 import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber } from "./track.ts";
+
+/**
+ * Options for fetching one group without holding a live subscription.
+ */
+export interface FetchGroupOptions {
+	/**
+	 * Delivery priority for the fetch stream. Defaults to `0`.
+	 */
+	priority?: number;
+}
 
 /**
  * A request for a track the peer wants, yielded by {@link Broadcast.requested}.
@@ -43,8 +54,8 @@ export class TrackRequest {
 /**
  * A lazy handle to a track on a consumed broadcast, mirroring the Rust
  * `TrackConsumer`. Holding it sends nothing over the network; call {@link subscribe}
- * to open a live subscription or {@link info} to fetch the immutable publisher
- * properties (lite-05+).
+ * to open a live subscription, {@link fetchGroup} to fetch one group, or
+ * {@link info} to fetch the immutable publisher properties (lite-05+).
  */
 export class TrackConsumer {
 	readonly name: string;
@@ -70,6 +81,16 @@ export class TrackConsumer {
 	 */
 	info(): Promise<TrackInfo> {
 		return this.#broadcast.resolveTrackInfo(this.name);
+	}
+
+	/**
+	 * Fetch a single group by sequence without holding a live subscription.
+	 *
+	 * Lite-05+ only for remote broadcasts. Local broadcasts serve from the same retained
+	 * group window used for late subscribers.
+	 */
+	fetchGroup(sequence: number, options: FetchGroupOptions = {}): Promise<Group> {
+		return this.#broadcast.resolveFetchGroup(this.name, sequence, options);
 	}
 }
 
@@ -98,6 +119,7 @@ export class Broadcast {
 	// a track's immutable TRACK_INFO over a Track stream. Undefined on a published
 	// broadcast, where info comes from the producer's accept() instead.
 	#infoResolver?: (name: string) => Promise<TrackInfo>;
+	#fetchResolver?: (name: string, sequence: number, options: FetchGroupOptions) => Promise<Group>;
 
 	constructor() {
 		this.closed = new Promise((resolve) => {
@@ -229,6 +251,13 @@ export class Broadcast {
 		this.#infoResolver = resolver;
 	}
 
+	/**
+	 * Install the consume-side FETCH resolver. Internal.
+	 */
+	onFetchGroup(resolver: (name: string, sequence: number, options: FetchGroupOptions) => Promise<Group>): void {
+		this.#fetchResolver = resolver;
+	}
+
 	/** Resolve a track's immutable info, used by {@link TrackConsumer.info}. Internal. */
 	resolveTrackInfo(name: string): Promise<TrackInfo> {
 		// Consume side: a TRACK stream (lite-05+) answers it.
@@ -271,6 +300,27 @@ export class Broadcast {
 				state.closed.set(true);
 			}
 		})();
+	}
+
+	/** Resolve a fetched group, used by {@link TrackConsumer.fetchGroup}. Internal. */
+	async resolveFetchGroup(name: string, sequence: number, options: FetchGroupOptions = {}): Promise<Group> {
+		if (this.#fetchResolver) {
+			return this.#fetchResolver(name, sequence, options);
+		}
+
+		const subscriber = this.subscribe(name, options.priority ?? 0);
+		try {
+			for (;;) {
+				const group = await subscriber.recvGroup();
+				if (!group) throw new Error(`group not found: ${sequence}`);
+				if (group.sequence === sequence) return group;
+
+				group.close();
+				if (group.sequence > sequence) throw new Error(`group not found: ${sequence}`);
+			}
+		} finally {
+			subscriber.close();
+		}
 	}
 
 	/**

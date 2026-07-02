@@ -5,6 +5,7 @@ import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import * as Path from "./path.ts";
+import { Timestamp } from "./time.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -80,6 +81,44 @@ test("integration: lite draft-05-wip", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_05_WIP);
 });
 
+test("integration: lite draft-05-wip fetches a cached group", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05_WIP);
+	const enc = new TextEncoder();
+	const dec = new TextDecoder();
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new Broadcast();
+	const producer = broadcast.createTrack("video");
+	server.publish(Path.from("test"), broadcast);
+
+	const group0 = producer.appendGroup();
+	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	group0.close();
+
+	const group1 = producer.appendGroup();
+	group1.writeFrame({ data: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) });
+	group1.close();
+
+	const remote = client.consume(Path.from("test"));
+	const fetched = await remote.track("video").fetchGroup(0);
+
+	const first = await fetched.readFrame();
+	expect(dec.decode(first?.data)).toBe("alpha");
+	expect(first?.timestamp.asMillis()).toBe(10);
+
+	const second = await fetched.readFrame();
+	expect(dec.decode(second?.data)).toBe("beta");
+	expect(second?.timestamp.asMillis()).toBe(15);
+	expect(await fetched.readFrame()).toBeUndefined();
+
+	remote.close();
+	broadcast.close();
+	client.close();
+	server.close();
+});
+
 test("integration: ietf draft-14", async () => {
 	await runPublishSubscribeFlow("", Ietf.Version.DRAFT_14);
 });
@@ -119,6 +158,19 @@ test("integration: subscribe to non-existent broadcast", async () => {
 		})(),
 	).rejects.toThrow();
 
+	client.close();
+	server.close();
+});
+
+test("integration: ietf fetch group is explicitly unsupported", async () => {
+	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const remote = client.consume(Path.from("test"));
+	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
+
+	remote.close();
 	client.close();
 	server.close();
 });
