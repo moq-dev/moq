@@ -32,8 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unverified on hardware (the test box had no HEVC decoder MFT installed).
 - H.265 encode via the NVENC backend (Linux, `nvenc` feature). The codec is
   selected by `encode::Codec`; the NVENC HEVC path shares the H.264 preset / GOP
-  / rate-control setup and emits Annex-B with inline VPS/SPS/PPS. Not yet
-  validated on hardware.
+  / rate-control setup and emits Annex-B with inline VPS/SPS/PPS.
+- NVENC H.264/H.265 encode verified end-to-end on a Linux + NVIDIA box (RTX 30
+  series), which fixed three correctness bugs the software-only path had hidden:
+  a forced keyframe now emits an IDR (via the `FORCEIDR` picture flag, since
+  picture-type decision makes NVENC ignore `pictureType`); every IDR, not just
+  the first, carries inline SPS/PPS (VPS too for HEVC) so a mid-stream subscriber
+  can join at any keyframe (`repeatSPSPPS` + `idrPeriod`); and the input frame is
+  copied at NVENC's real buffer pitch (e.g. 512 for a 320-wide buffer) instead of
+  a flat copy that sheared the image, which also drops the former width-multiple-
+  of-64 restriction. Requires a matching `nvidia-video-codec-sdk` fork bump
+  (`force_idr` flag + pitched `BufferLock::write_rows`).
 
 ## [0.0.5](https://github.com/moq-dev/moq/compare/moq-video-v0.0.4...moq-video-v0.0.5) - 2026-06-23
 
