@@ -137,12 +137,6 @@ impl ImportSource {
 /// export = MoQ -> one sink.
 #[derive(Args, Clone)]
 pub struct Export {
-	/// Maximum latency before skipping groups (e.g. `500ms`, `1s`), for the stdout
-	/// container formats. The gateways (`hls`, `srt`, ...) have their own latency
-	/// controls.
-	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub latency_max: Duration,
-
 	/// Catalog format to read for track discovery (default: detect from the broadcast suffix).
 	#[arg(long = "catalog-format")]
 	pub catalog_format: Option<CatalogFormatArg>,
@@ -161,13 +155,13 @@ pub enum ExportSink {
 	/// Matroska / WebM to stdout.
 	Mkv(Fragmented),
 	/// MPEG-TS to stdout.
-	Ts,
+	Ts(Container),
 	/// FLV / RTMP container to stdout.
-	Flv,
+	Flv(Container),
 	/// Serve HLS / LL-HLS over HTTP.
 	Hls(crate::hls::ExportArgs),
 	/// RTMP: push to a remote (`--connect`) or serve plays (`--listen`).
-	Rtmp(crate::rtmp::Args),
+	Rtmp(crate::rtmp::ExportArgs),
 	/// SRT: push to a remote (`--connect`) or serve requests (`--listen`).
 	Srt(crate::srt::Args),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
@@ -175,22 +169,38 @@ pub enum ExportSink {
 }
 
 impl ExportSink {
-	/// The stdout container format and its fragment cap, when this sink writes to
-	/// stdout (the container formats). The fragment cap is fmp4/mkv-only.
-	pub fn stdout(&self) -> Option<(SubscribeFormat, Option<Duration>)> {
+	/// The stdout container format plus its latency and fragment cap, when this
+	/// sink writes to stdout (the container formats). The fragment cap is
+	/// fmp4/mkv-only.
+	pub fn stdout(&self) -> Option<(SubscribeFormat, Duration, Option<Duration>)> {
 		Some(match self {
-			Self::Fmp4(args) => (SubscribeFormat::Fmp4, args.fragment_duration),
-			Self::Mkv(args) => (SubscribeFormat::Mkv, args.fragment_duration),
-			Self::Ts => (SubscribeFormat::Ts, None),
-			Self::Flv => (SubscribeFormat::Flv, None),
+			Self::Fmp4(args) => (
+				SubscribeFormat::Fmp4,
+				args.container.latency_max,
+				args.fragment_duration,
+			),
+			Self::Mkv(args) => (SubscribeFormat::Mkv, args.container.latency_max, args.fragment_duration),
+			Self::Ts(args) => (SubscribeFormat::Ts, args.latency_max, None),
+			Self::Flv(args) => (SubscribeFormat::Flv, args.latency_max, None),
 			_ => return None,
 		})
 	}
 }
 
-/// Fragmenting option shared by the fmp4 / mkv stdout containers.
+/// Options shared by every stdout container sink.
+#[derive(Args, Clone)]
+pub struct Container {
+	/// Maximum latency before skipping a stalled group (e.g. `500ms`, `1s`).
+	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
+	pub latency_max: Duration,
+}
+
+/// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.
 #[derive(Args, Clone)]
 pub struct Fragmented {
+	#[command(flatten)]
+	pub container: Container,
+
 	/// Cap the output fragment/cluster duration (e.g. `2s`). Default: one GOP.
 	#[arg(long, value_parser = humantime::parse_duration)]
 	pub fragment_duration: Option<Duration>,

@@ -21,6 +21,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use moq_net::OriginProducer;
 
@@ -43,6 +44,11 @@ pub struct Config {
 	/// Prefix prepended to every ingested broadcast path. Lets one listener
 	/// namespace all of its streams (e.g. `live/`).
 	pub prefix: String,
+
+	/// How long a play's FLV muxer waits for a stalled group before skipping to a
+	/// newer one (the moq-level frame-drop latency). Zero (the default) drops
+	/// stale groups aggressively. Only affects egress (plays); ingest ignores it.
+	pub latency: Duration,
 
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
 	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
@@ -97,6 +103,7 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 	// of clobbering the live one.
 	let active = ActivePaths::default();
 	let prefix = Arc::new(config.prefix);
+	let latency = config.latency;
 	// Players are served out of the same origin the publishers write into.
 	let consumer = origin.consume();
 
@@ -139,7 +146,7 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 						let _ = play.reject("missing broadcast path (RTMP app/key)").await;
 						return;
 					};
-					if let Err(err) = play.accept(&consumer, &path).await {
+					if let Err(err) = play.with_latency(latency).accept(&consumer, &path).await {
 						tracing::warn!(%peer, %path, %err, "RTMP play ended with error");
 					}
 				});

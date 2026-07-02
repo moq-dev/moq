@@ -40,8 +40,9 @@ pub async fn publish(
 	origin: &OriginConsumer,
 	path: &str,
 ) -> Result<()> {
+	let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 	let socket = call(addr, resource, Mode::Publish, latency).await?;
-	serve_subscribe(origin, path, socket).await
+	serve_subscribe(origin, path, socket, latency).await
 }
 
 /// Dial `addr` and pull a remote stream into `origin`: connect as an SRT caller

@@ -64,6 +64,7 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
 
 - **MoQ side** attaches the Origin to the network, and comes before the verb. At
   least one of:
+
   - `--client-connect <url>` dials a relay. The URL path is the relay auth path
     (e.g. `/anon`), `?jwt=<token>` supplies a token, and `--broadcast` names the
     broadcast.
@@ -156,6 +157,14 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hang` - the `catalog.json` JSON catalog (default)
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
+
+Every export sink caps how long a stalled group is waited on before the muxer
+skips to a newer one. Each owns the knob so its default fits the transport: the
+stdout containers and `rtmp` take `--latency-max` (default `500ms`), `hls` takes
+`--latency-max` (default `10s`, generous so live GOPs aren't skipped while
+segments build), and `srt` reuses its `--latency` (the receive buffer doubles as
+the skip threshold). WebRTC (`rtc`) is real-time and doesn't buffer, so it has no
+such knob.
 
 ### MPEG-TS
 

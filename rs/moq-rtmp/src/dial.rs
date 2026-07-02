@@ -26,6 +26,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use bytes::Bytes;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
@@ -64,6 +65,9 @@ pub struct Client<S = TcpStream> {
 	session: ClientSession,
 	/// Session results queued during connect, drained by the first publish/pull.
 	work: VecDeque<ClientSessionResult>,
+	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
+	/// before skipping. Zero (the default) drops stale groups aggressively.
+	latency: Duration,
 }
 
 impl Client<TcpStream> {
@@ -137,7 +141,20 @@ impl<S: Stream> Client<S> {
 			work.extend(results);
 		}
 
-		Ok(Self { stream, session, work })
+		Ok(Self {
+			stream,
+			session,
+			work,
+			latency: Duration::ZERO,
+		})
+	}
+
+	/// Set how long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
+	/// before skipping to a newer one (the moq-level frame-drop latency). Defaults
+	/// to zero, which drops stale groups aggressively.
+	pub fn with_latency(mut self, latency: Duration) -> Self {
+		self.latency = latency;
+		self
 	}
 
 	/// Push a MoQ broadcast out to the remote: request `publish` on `stream_key`,
@@ -161,7 +178,9 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let mut export = FlvExport::new(broadcast).map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+		let mut export = FlvExport::new(broadcast)
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.with_latency(self.latency);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 

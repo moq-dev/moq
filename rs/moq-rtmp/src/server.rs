@@ -451,6 +451,10 @@ pub struct Play<S = Conn> {
 	app: String,
 	stream_key: String,
 	peer: SocketAddr,
+	/// How long the FLV muxer waits for a stalled group before skipping to a newer
+	/// one. Zero (the default) drops stale groups aggressively; raise it with
+	/// [`with_latency`](Self::with_latency).
+	latency: Duration,
 }
 
 impl<S: Stream> Play<S> {
@@ -470,6 +474,15 @@ impl<S: Stream> Play<S> {
 	/// The remote peer address.
 	pub fn peer(&self) -> SocketAddr {
 		self.peer
+	}
+
+	/// Set how long the FLV muxer waits for a stalled group before skipping to a
+	/// newer one (the moq-level frame-drop latency). Defaults to zero, which drops
+	/// stale groups aggressively. RTMP is unpaced (tags go out as fast as the
+	/// socket accepts them), so this bounds buffering, not the wire rate.
+	pub fn with_latency(mut self, latency: Duration) -> Self {
+		self.latency = latency;
+		self
 	}
 
 	/// Accept the play: subscribe to the broadcast at `path` in `origin`, mux it
@@ -507,7 +520,9 @@ impl<S: Stream> Play<S> {
 			return Ok(());
 		};
 
-		let mut export = FlvExport::new(broadcast).map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+		let mut export = FlvExport::new(broadcast)
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.with_latency(self.latency);
 		let result = play_pump(
 			&mut self.stream,
 			&mut self.session,
@@ -607,6 +622,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
+							latency: Duration::ZERO,
 						})));
 					}
 					other => tracing::trace!(%peer, ?other, "ignoring RTMP event before publish/play"),
