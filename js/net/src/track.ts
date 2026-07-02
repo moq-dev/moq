@@ -1,9 +1,22 @@
 import { Signal } from "@moq/signals";
+import { type Datagram, MAX_DATAGRAM_PAYLOAD } from "./datagram.ts";
 import { CacheFull, type Frame, Group } from "./group.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, type Timestamp } from "./time.ts";
 
 /** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
+
+/**
+ * How long (milliseconds) a datagram stays in the per-subscriber buffer before it is dropped.
+ *
+ * Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last few
+ * tens of milliseconds are kept, so a consumer that stalls loses stale datagrams instead of
+ * replaying them. Mirrors the Rust `MAX_DATAGRAM_AGE`.
+ */
+const MAX_DATAGRAM_AGE_MS = 50;
+
+/** A datagram buffered with its arrival time, so the send buffer can evict by age. */
+type BufferedDatagram = { datagram: Datagram; time: number };
 
 /**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
@@ -43,6 +56,8 @@ export function trackInfoDefaults(info: Partial<TrackInfo> = {}): TrackInfo {
 /** The shared state behind a {@link TrackProducer} / {@link TrackSubscriber} pair. */
 export class TrackState {
 	groups = new Signal<Group[]>([]);
+	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
+	datagrams = new Signal<BufferedDatagram[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	priority = new Signal<number | undefined>(undefined);
 	/** Resolved once the producer commits the immutable properties. */
@@ -258,6 +273,55 @@ export class TrackProducer extends TrackHandle {
 		this.#publish(group);
 	}
 
+	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
+	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
+	#publishDatagram(datagram: Datagram): void {
+		const now = Date.now();
+		for (const sink of this.#sinks) {
+			sink.datagrams.mutate((list) => {
+				list.push({ datagram, time: now });
+				// Drop anything older than the send-buffer window.
+				while (list.length > 0 && now - list[0].time > MAX_DATAGRAM_AGE_MS) list.shift();
+			});
+		}
+	}
+
+	/**
+	 * Append a datagram with the next sequence number, returning the assigned sequence.
+	 *
+	 * A datagram is delivered best-effort over a single QUIC datagram, parallel to the track's
+	 * groups but drawing from the same sequence namespace (interleaving with {@link appendGroup}
+	 * never reuses a number). The payload must not exceed {@link MAX_DATAGRAM_PAYLOAD}; there is no
+	 * group fallback. An origin publisher uses this; a relay preserving upstream numbering uses
+	 * {@link writeDatagram}.
+	 */
+	appendDatagram(timestamp: Timestamp, payload: Uint8Array): number {
+		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (payload.byteLength > MAX_DATAGRAM_PAYLOAD) throw new Error("datagram payload too large");
+
+		const sequence = this.#next ?? 0;
+		this.#next = sequence + 1;
+		this.#publishDatagram({ sequence, timestamp, payload });
+		return sequence;
+	}
+
+	/**
+	 * Write a datagram with an explicit sequence number.
+	 *
+	 * Preserves the supplied sequence (advancing the shared counter if needed) so a relay can
+	 * forward a datagram without renumbering it. The payload must not exceed
+	 * {@link MAX_DATAGRAM_PAYLOAD}. Most origin publishers want {@link appendDatagram} instead.
+	 */
+	writeDatagram(datagram: Datagram) {
+		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (datagram.payload.byteLength > MAX_DATAGRAM_PAYLOAD) throw new Error("datagram payload too large");
+
+		if (datagram.sequence >= (this.#next ?? 0)) {
+			this.#next = datagram.sequence + 1;
+		}
+		this.#publishDatagram(datagram);
+	}
+
 	/** Close the track and every subscriber, mirroring the abort to their groups. */
 	override close(abort?: Error) {
 		this.state.closed.set(abort ?? true);
@@ -326,6 +390,29 @@ export class TrackSubscriber extends TrackHandle {
 			if (closed) return undefined;
 
 			await Signal.race(this.state.groups, this.state.closed);
+		}
+	}
+
+	/**
+	 * Receive the next datagram in arrival order.
+	 *
+	 * Datagrams are a separate best-effort channel from groups (see
+	 * {@link TrackProducer.appendDatagram}); they share only the sequence namespace. A consumer
+	 * that falls too far behind silently loses the oldest datagrams. Read this alongside
+	 * {@link recvGroup} (e.g. in a separate loop) to receive both channels concurrently.
+	 */
+	async recvDatagram(): Promise<Datagram | undefined> {
+		for (;;) {
+			const datagrams = this.state.datagrams.peek();
+			if (datagrams.length > 0) {
+				return datagrams.shift()?.datagram;
+			}
+
+			const closed = this.state.closed.peek();
+			if (closed instanceof Error) throw closed;
+			if (closed) return undefined;
+
+			await Signal.race(this.state.datagrams, this.state.closed);
 		}
 	}
 

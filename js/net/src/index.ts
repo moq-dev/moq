@@ -12,6 +12,7 @@ export * from "./bandwidth.ts";
 export * from "./broadcast.ts";
 /** Connection helpers: connect to or accept a MoQ session and reconnect on failure. */
 export * as Connection from "./connection/index.ts";
+export * from "./datagram.ts";
 export * from "./group.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. */
 export * as Path from "./path.ts";

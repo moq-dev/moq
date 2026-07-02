@@ -15,7 +15,7 @@
 
 use crate::{BroadcastInfo, Error, Result, Subscription, Timescale, Timestamp, coding};
 
-use super::{Fetch, GroupConsumer, GroupInfo, GroupProducer};
+use super::{Datagram, Fetch, GroupConsumer, GroupInfo, GroupProducer, MAX_DATAGRAM_PAYLOAD};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -26,6 +26,13 @@ use std::{
 
 /// Default [`TrackInfo::cache`] age when the publisher doesn't set one.
 pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
+
+/// How long a datagram stays in the per-track buffer before it is dropped.
+///
+/// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
+/// few tens of milliseconds are kept, so a consumer that stalls loses stale datagrams instead of
+/// replaying them. Sized like a typical send buffer for real-time audio/video.
+const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 
 /// Publisher-side properties of a track.
 ///
@@ -150,6 +157,15 @@ struct TrackState {
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
 	groups: VecDeque<Option<(GroupProducer, web_async::time::Instant)>>,
 
+	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
+	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
+	// is otherwise independent.
+	datagrams: VecDeque<(Datagram, web_async::time::Instant)>,
+
+	// Number of datagrams dropped off the front (aged out), mapping a subscriber's absolute
+	// cursor to an index into `datagrams` (mirrors `offset` for groups).
+	datagram_offset: usize,
+
 	// TODO Do we need this?
 	duplicates: HashSet<u64>,
 
@@ -207,6 +223,40 @@ impl TrackState {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
+		}
+	}
+
+	/// Find the next datagram at or after the subscriber's absolute `index`.
+	///
+	/// Returns the datagram and its absolute index so the consumer can advance past it. A
+	/// consumer whose `index` has fallen behind `datagram_offset` (older datagrams dropped)
+	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
+	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(Datagram, usize)>>> {
+		let start = index.saturating_sub(self.datagram_offset);
+		if let Some((datagram, _)) = self.datagrams.get(start) {
+			return Poll::Ready(Ok(Some((datagram.clone(), self.datagram_offset + start))));
+		}
+
+		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
+		if self.final_sequence.is_some() {
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	/// Push a datagram onto the buffer, dropping any that have aged past [`MAX_DATAGRAM_AGE`].
+	fn push_datagram(&mut self, datagram: Datagram) {
+		let now = web_async::time::Instant::now();
+		self.datagrams.push_back((datagram, now));
+		while let Some((_, at)) = self.datagrams.front() {
+			if now.duration_since(*at) <= MAX_DATAGRAM_AGE {
+				break;
+			}
+			self.datagrams.pop_front();
+			self.datagram_offset += 1;
 		}
 	}
 
@@ -550,6 +600,66 @@ impl TrackProducer {
 		Ok(group)
 	}
 
+	/// Append a datagram with the next sequence number, returning the assigned sequence.
+	///
+	/// A datagram is delivered best-effort over a single QUIC datagram, parallel to the
+	/// track's groups but drawing from the same sequence namespace (so interleaving with
+	/// [`Self::append_group`] never reuses a number). The payload must not exceed
+	/// [`MAX_DATAGRAM_PAYLOAD`]; there is no group fallback. An origin publisher uses this;
+	/// a relay preserving upstream numbering uses [`Self::write_datagram`].
+	pub fn append_datagram<B: Into<bytes::Bytes>>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
+		let payload = payload.into();
+		if payload.len() > MAX_DATAGRAM_PAYLOAD {
+			return Err(Error::WrongSize);
+		}
+		let mut state = self.modify()?;
+		// Normalize into the track's timescale, like frames (see `GroupProducer::create_frame`).
+		let timescale = state.info.as_ref().unwrap().timescale;
+		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
+		let sequence = match state.max_sequence {
+			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
+			None => 0,
+		};
+		if let Some(fin) = state.final_sequence
+			&& sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+		state.max_sequence = Some(sequence);
+		state.push_datagram(Datagram {
+			sequence,
+			timestamp,
+			payload,
+		});
+		Ok(sequence)
+	}
+
+	/// Write a datagram with an explicit sequence number.
+	///
+	/// Preserves the supplied sequence (bumping the shared `max_sequence` if needed), so a
+	/// relay can forward a datagram without renumbering it. The payload must not exceed
+	/// [`MAX_DATAGRAM_PAYLOAD`]. Most origin publishers want [`Self::append_datagram`] instead.
+	pub fn write_datagram(&mut self, mut datagram: Datagram) -> Result<()> {
+		if datagram.payload.len() > MAX_DATAGRAM_PAYLOAD {
+			return Err(Error::WrongSize);
+		}
+		let mut state = self.modify()?;
+		// Normalize into the track's timescale, like frames (see `GroupProducer::create_frame`).
+		let timescale = state.info.as_ref().unwrap().timescale;
+		datagram.timestamp = datagram
+			.timestamp
+			.convert(timescale)
+			.map_err(|_| Error::TimestampMismatch)?;
+		if let Some(fin) = state.final_sequence
+			&& datagram.sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(datagram.sequence));
+		state.push_datagram(datagram);
+		Ok(())
+	}
+
 	/// Create a group with a single frame, at the given presentation timestamp.
 	///
 	/// The timestamp is converted into the track's timescale. Use
@@ -614,6 +724,7 @@ impl TrackProducer {
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
 		guard.groups.clear();
+		guard.datagrams.clear();
 		guard.duplicates.clear();
 		guard.close();
 		Ok(())
@@ -710,6 +821,7 @@ impl TrackProducer {
 			state: self.state.consume(),
 			subscription,
 			index: 0,
+			datagram_index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
@@ -888,6 +1000,7 @@ impl Drop for TrackProducer {
 			&& state.final_sequence.is_none()
 		{
 			state.groups.clear();
+			state.datagrams.clear();
 			state.duplicates.clear();
 		}
 	}
@@ -1083,6 +1196,7 @@ impl TrackSubscribe {
 			state: self.state.clone(),
 			subscription: self.subscription.clone(),
 			index: 0,
+			datagram_index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
@@ -1215,6 +1329,8 @@ pub struct TrackSubscriber {
 	subscription: kio::Producer<Subscription>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
+	/// Arrival-order cursor used by [`Self::recv_datagram`], independent of groups.
+	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
 	min_sequence: u64,
 	/// One past the highest sequence returned by [`Self::next_group`].
@@ -1276,6 +1392,35 @@ impl TrackSubscriber {
 	/// only want groups whose sequence number is higher than any previously returned.
 	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
 		kio::wait(|waiter| self.poll_recv_group(waiter)).await
+	}
+
+	/// Poll for the next datagram in arrival order, without blocking.
+	///
+	/// Datagrams are a separate best-effort channel from groups (see
+	/// [`TrackProducer::append_datagram`]); they share only the sequence namespace. A consumer
+	/// that falls too far behind silently loses the oldest datagrams.
+	///
+	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
+	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
+	/// is aborted, or `Poll::Pending` when none is buffered yet.
+	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+		let Some((datagram, found_index)) =
+			ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
+		else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.datagram_index = found_index + 1;
+		Poll::Ready(Ok(Some(datagram)))
+	}
+
+	/// Receive the next datagram in arrival order.
+	///
+	/// A best-effort channel parallel to [`Self::recv_group`]; the two share only the sequence
+	/// namespace. Because each borrows `&mut self`, drive groups and datagrams from separate
+	/// subscribers (or tasks) to receive both concurrently.
+	pub async fn recv_datagram(&mut self) -> Result<Option<Datagram>> {
+		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// Poll for the next group with a higher sequence number than any previously returned.
@@ -1592,6 +1737,195 @@ mod test {
 	/// Helper: get the sequence number of the first live group.
 	fn first_live_sequence(state: &TrackState) -> u64 {
 		state.groups.iter().flatten().next().unwrap().0.sequence
+	}
+
+	/// Helper: non-blocking datagram receive that must be ready with a datagram.
+	fn recv_datagram(dg: &mut TrackSubscriber) -> Datagram {
+		dg.recv_datagram()
+			.now_or_never()
+			.expect("datagram would have blocked")
+			.expect("would have errored")
+			.expect("track was closed")
+	}
+
+	#[tokio::test]
+	async fn append_datagram_shares_group_sequence() {
+		let mut producer = track_producer("test", None);
+		let ts = Timestamp::from_millis(10).unwrap();
+
+		// Interleave groups and datagrams: they draw from one monotonic counter.
+		assert_eq!(producer.append_group().unwrap().sequence, 0);
+		assert_eq!(producer.append_datagram(ts, &b"a"[..]).unwrap(), 1);
+		assert_eq!(producer.append_group().unwrap().sequence, 2);
+		assert_eq!(producer.append_datagram(ts, &b"b"[..]).unwrap(), 3);
+		assert_eq!(producer.latest(), Some(3));
+	}
+
+	#[tokio::test]
+	async fn append_datagram_roundtrip() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+
+		let ts = Timestamp::from_millis(42).unwrap();
+		let seq = producer.append_datagram(ts, &b"hello"[..]).unwrap();
+
+		let got = recv_datagram(&mut dg);
+		assert_eq!(got.sequence, seq);
+		assert_eq!(got.timestamp, ts);
+		assert_eq!(&got.payload[..], b"hello");
+	}
+
+	#[tokio::test]
+	async fn write_datagram_preserves_sequence() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+
+		let ts = Timestamp::from_millis(5).unwrap();
+		// A relay forwarding an upstream datagram keeps its sequence number.
+		producer
+			.write_datagram(Datagram {
+				sequence: 100,
+				timestamp: ts,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+
+		assert_eq!(recv_datagram(&mut dg).sequence, 100);
+		// max_sequence advanced, so the next appended group/datagram continues past it.
+		assert_eq!(producer.append_group().unwrap().sequence, 101);
+	}
+
+	#[tokio::test]
+	async fn datagram_normalized_to_track_timescale() {
+		let info = TrackInfo::default().with_timescale(Timescale::MICRO);
+		let mut producer = track_producer("test", info);
+		let mut dg = producer.subscribe(None);
+
+		// Supplied at millis; stored/emitted at the track's micro timescale.
+		producer
+			.append_datagram(Timestamp::from_millis(2).unwrap(), &b"z"[..])
+			.unwrap();
+		let got = recv_datagram(&mut dg);
+		assert_eq!(got.timestamp.scale(), Timescale::MICRO);
+		assert_eq!(got.timestamp.value(), 2_000);
+	}
+
+	#[tokio::test]
+	async fn datagram_rejects_oversized() {
+		let mut producer = track_producer("test", None);
+		let big = bytes::Bytes::from(vec![0u8; MAX_DATAGRAM_PAYLOAD + 1]);
+		let ts = Timestamp::from_millis(0).unwrap();
+		assert!(matches!(
+			producer.append_datagram(ts, big.clone()),
+			Err(Error::WrongSize)
+		));
+		assert!(matches!(
+			producer.write_datagram(Datagram {
+				sequence: 0,
+				timestamp: ts,
+				payload: big,
+			}),
+			Err(Error::WrongSize)
+		));
+	}
+
+	#[tokio::test]
+	async fn datagram_fanout_to_subscribers() {
+		let mut producer = track_producer("test", None);
+		// Two independent subscribers, each with its own datagram cursor.
+		let mut a = producer.subscribe(None);
+		let mut b = producer.subscribe(None);
+		let ts = Timestamp::from_millis(1).unwrap();
+
+		producer.append_datagram(ts, &b"first"[..]).unwrap();
+		producer.append_datagram(ts, &b"second"[..]).unwrap();
+
+		// Both receive every datagram in order, independently.
+		assert_eq!(&recv_datagram(&mut a).payload[..], b"first");
+		assert_eq!(&recv_datagram(&mut a).payload[..], b"second");
+		assert_eq!(&recv_datagram(&mut b).payload[..], b"first");
+		assert_eq!(&recv_datagram(&mut b).payload[..], b"second");
+	}
+
+	#[tokio::test]
+	async fn datagram_evicts_stale() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		producer.append_datagram(ts, &b"old"[..]).unwrap(); // sequence 0
+
+		// Age past the send-buffer window, then push a fresh datagram: the stale one is evicted.
+		tokio::time::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10)).await;
+		producer.append_datagram(ts, &b"new"[..]).unwrap(); // sequence 1
+
+		// A lagging consumer resumes at the oldest still-buffered datagram (the fresh one).
+		let got = recv_datagram(&mut dg);
+		assert_eq!(got.sequence, 1);
+		assert_eq!(&got.payload[..], b"new");
+	}
+
+	#[tokio::test]
+	async fn datagram_recv_pends_until_written() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+
+		assert!(
+			dg.recv_datagram().now_or_never().is_none(),
+			"should block with no datagrams"
+		);
+
+		producer
+			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"go"[..])
+			.unwrap();
+		assert_eq!(&recv_datagram(&mut dg).payload[..], b"go");
+	}
+
+	/// Exercises the full producer -> publisher-encode -> subscriber-decode -> producer seam
+	/// (everything but the QUIC datagram send/recv), catching any field-order mismatch between
+	/// the wire codec and the model.
+	#[tokio::test]
+	async fn datagram_wire_roundtrip_between_tracks() {
+		use crate::coding::{Decode, Encode};
+		use crate::lite;
+
+		let version = lite::Version::Lite05Wip;
+
+		// Origin publishes a datagram; the publisher reads it and encodes the wire body.
+		let mut origin = track_producer("test", None);
+		let mut origin_dg = origin.subscribe(None);
+		let ts = Timestamp::from_millis(7).unwrap();
+		let seq = origin.append_datagram(ts, &b"payload"[..]).unwrap();
+
+		let d = recv_datagram(&mut origin_dg);
+		let body = lite::Datagram {
+			subscribe: 5,
+			sequence: d.sequence,
+			timestamp: d.timestamp.value(),
+			payload: d.payload.clone(),
+		}
+		.encode_bytes(version)
+		.unwrap();
+
+		// Subscriber decodes the body and writes it downstream, preserving the sequence.
+		let mut slice = &body[..];
+		let wire = lite::Datagram::decode(&mut slice, version).unwrap();
+		let mut downstream = track_producer("test", None);
+		let mut downstream_dg = downstream.subscribe(None);
+		downstream
+			.write_datagram(Datagram {
+				sequence: wire.sequence,
+				timestamp: Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
+				payload: wire.payload,
+			})
+			.unwrap();
+
+		let got = recv_datagram(&mut downstream_dg);
+		assert_eq!(got.sequence, seq);
+		assert_eq!(got.timestamp, ts);
+		assert_eq!(&got.payload[..], b"payload");
 	}
 
 	#[tokio::test]

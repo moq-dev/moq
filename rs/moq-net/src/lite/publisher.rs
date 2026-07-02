@@ -5,7 +5,7 @@ use web_transport_trait::Stats;
 
 use crate::{
 	AnnounceConsumer, AsPath, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, TrackSubscriber,
-	coding::{Stream, Writer},
+	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
@@ -553,7 +553,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
 		// immediately otherwise (including an unroutable/dropped error).
 		let broadcast = broadcast.await?;
-		let track = broadcast.track(&subscribe.track)?.subscribe(subscription).await?;
+		let track_consumer = broadcast.track(&subscribe.track)?;
+		// A second subscriber dedicated to datagrams so they can be served concurrently with
+		// groups (each `recv` borrows `&mut`, so one subscriber can't drive both). Cheap: it
+		// shares the same cached state, just with its own cursor.
+		let datagrams = track_consumer.subscribe(subscription.clone()).await?;
+		let track = track_consumer.subscribe(subscription).await?;
 
 		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
 		// every frame with a zigzag-delta timestamp at the track's timescale; older
@@ -600,21 +605,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			version,
 			timescale,
 		};
+		let dg_sub = sub.clone();
 
 		// `end_group` is a serving cap, not a subscription terminator: groups with
 		// sequence > cap are held in the producer's cache until the subscriber raises
 		// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
 		// peer FIN actually ends the subscription. This is what lets relays pause an
 		// upstream subscription across consumer churn without tearing it down.
-		sub.run_track(
-			track,
-			subscribe.start_group,
-			subscribe.end_group,
-			&mut stream.reader,
-			&mut stream.writer,
-			&track_priority_tx,
-		)
-		.await?;
+		//
+		// Groups and datagrams are served concurrently. run_datagrams returns Ok once the
+		// track finishes (or when datagrams aren't supported), so run_track alone decides when
+		// the subscription ends; only a datagram error tears things down.
+		tokio::select! {
+			res = sub.run_track(
+				track,
+				subscribe.start_group,
+				subscribe.end_group,
+				&mut stream.reader,
+				&mut stream.writer,
+				&track_priority_tx,
+			) => res,
+			Err(err) = dg_sub.run_datagrams(datagrams) => Err(err),
+		}?;
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
@@ -910,6 +922,43 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		tracing::debug!(sequence, "finished group");
 
 		Ok(())
+	}
+
+	/// Forward datagrams best-effort until the track finishes.
+	///
+	/// Returns `Ok(())` when datagrams aren't supported (pre-lite-05 or a non-datagram transport)
+	/// or once the track finishes, so the caller's `select!` matches only on the error case and
+	/// lets run_track decide when the subscription ends. Errors only if the track aborts.
+	async fn run_datagrams(self, mut datagrams: TrackSubscriber) -> Result<(), Error> {
+		if !self.version.has_datagrams() || self.session.max_datagram_size() == 0 {
+			return Ok(());
+		}
+		while let Some(datagram) = datagrams.recv_datagram().await? {
+			self.serve_datagram(datagram);
+		}
+		Ok(())
+	}
+
+	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
+	///
+	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
+	/// transport's datagram limit or the send fails (congestion / no capacity right now).
+	fn serve_datagram(&self, datagram: crate::Datagram) {
+		let body = lite::Datagram {
+			subscribe: self.id,
+			sequence: datagram.sequence,
+			// Already at the track timescale (normalized by the model producer).
+			timestamp: datagram.timestamp.value(),
+			payload: datagram.payload,
+		};
+		// has_datagrams is checked before this runs, so encoding never hits the version guard.
+		let Ok(body) = body.encode_bytes(self.version) else {
+			return;
+		};
+
+		if body.len() <= self.session.max_datagram_size() && self.session.send_datagram(body).is_ok() {
+			self.track_stats.group();
+		}
 	}
 
 	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we

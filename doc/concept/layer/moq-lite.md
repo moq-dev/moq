@@ -22,6 +22,7 @@ See the [specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/
 - **Track** - A series of **groups**, potentially delivered out-of-order until closed/cancelled.
 - **Group** - A series of **frames** delivered in order until closed/cancelled.
 - **Frame** - A chunk of bytes with an upfront size.
+- **Datagram** - A single unreliable payload delivered best-effort over a QUIC datagram (lite-05+), an alternative to a group for tiny, latency-critical frames.
 
 **NOTE:** The IETF draft uses some different names.
 THE BIKE SHED MUST BE PAINTED RED.
@@ -89,6 +90,13 @@ Each group consists of one or more **frames**.
 Frames within a group are delivered reliably and in order.
 You can and should take advantage of this, for example using delta encoding.
 If frames within a group are actually independent, you should probably split them into individual groups!
+
+#### Datagrams
+
+As an optimization (lite-05+), the publisher may deliver a small single-frame group as a **datagram** instead of opening a QUIC stream.
+A datagram carries `subscribe ID | group sequence | timestamp | payload` in a single QUIC datagram, routed over the existing subscription: unreliable, unordered, never retransmitted, and capped at ~1200 bytes.
+It is a separate best-effort channel parallel to groups (they share one sequence namespace), suited to tiny latency-critical frames like audio.
+There is no group fallback, so a payload that doesn't fit simply isn't delivered this way.
 
 ### Congestion
 
@@ -162,7 +170,6 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 - **No object properties**: Encode your metadata into the frame payload.
 - **No pausing**: Unsubscribe if you don't want a track.
 - **No binary names**: Uses UTF-8 strings instead of arrays of byte arrays.
-- **No datagrams**: Maybe one day.
 
 This may seem like a lot of missing features, but in practice you don't need them.
 For example, [MSF](/concept/standard/msf) doesn't use any of these features so it's fully compatible with moq-lite.
