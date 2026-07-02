@@ -75,6 +75,18 @@ For example, it's not possible to have a different `flip` or `rotation` value fo
 Each rendition is an extension of [VideoDecoderConfig](https://www.w3.org/TR/webcodecs/#video-decoder-config).
 This is the minimum amount of information required to initialize a video decoder.
 
+### Cross-broadcast renditions
+
+A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"../source"`), pointing at another broadcast that publishes the actual track.
+A consumer resolves the reference against the catalog broadcast's own path (`..` pops a segment, other segments append) and subscribes to the track on the resolved broadcast over the same connection.
+When the field is absent, the track lives in the same broadcast as the catalog.
+
+This lets a transcoder publish a sidecar catalog that adds new renditions while pointing unchanged ones at the original broadcast, instead of re-publishing those bytes through the transcoder.
+For example, a transcoder consuming `room/source` can publish `room/transcode` whose catalog contains a downscaled `480p` rendition plus the original `1080p` rendition marked `"broadcast": "../source"`.
+A viewer of `room/transcode` then pulls `480p` from the transcoder and `1080p` directly from the source, and the relay dedupes the source subscription with the transcoder's own.
+
+`@moq/watch` resolves the reference automatically. In Rust, the `moq-mux` exporters do the same when built from a `Source` carrying origin context (`Source::new(broadcast).with_origin(origin, path)`); a bare `BroadcastConsumer` cannot resolve one and fails with a clear error.
+
 ### Extensions
 
 The base catalog carries only the media sections (`video` and `audio`).

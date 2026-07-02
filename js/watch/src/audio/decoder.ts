@@ -202,7 +202,9 @@ export class Decoder {
 		const config = effect.get(this.source.output.config);
 		if (!config) return;
 
-		const active = effect.get(broadcast.output.active);
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast.
+		const active = broadcast.trackBroadcast(effect, config.broadcast);
 		if (!active) return;
 
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });

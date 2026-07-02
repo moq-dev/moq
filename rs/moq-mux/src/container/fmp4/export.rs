@@ -15,7 +15,8 @@ use moq_net::Timestamp;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
-/// Built from a [`moq_net::BroadcastConsumer`], `Export` subscribes to the hang catalog,
+/// Built from a [`Source`](crate::Source) (or a bare [`moq_net::BroadcastConsumer`] via
+/// `Into`), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init
 /// segment + moof+mdat fragments in presentation-timestamp order across tracks. This
@@ -35,7 +36,7 @@ use moq_net::Timestamp;
 /// onto segments and parts; narrow the catalog to a single rendition with
 /// [`catalog::Filter`](crate::catalog::Filter) so the fragments belong to one track.
 pub struct Export<S: Stream> {
-	broadcast: moq_net::BroadcastConsumer,
+	source: crate::Source,
 	catalog: Option<S>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
@@ -100,16 +101,16 @@ struct Fmp4Track {
 }
 
 impl<S: Stream> Export<S> {
-	/// Subscribe to `broadcast` and produce fMP4 byte chunks, driving track
+	/// Subscribe to `source` and produce fMP4 byte chunks, driving track
 	/// (un)subscription from `catalog`.
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or wrapped in
 	/// [`catalog::Filter`](crate::catalog::Filter) /
 	/// [`catalog::Target`](crate::catalog::Target) to narrow the rendition set.
-	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
+	pub fn new(source: impl Into<crate::Source>, catalog: S) -> Self {
 		Self {
-			broadcast,
+			source: source.into(),
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,
@@ -315,7 +316,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			let timescale = catalog_timescale_video(config);
 			self.tracks.insert(
 				name.clone(),
@@ -339,7 +340,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			let timescale = catalog_timescale_audio(config);
 			self.tracks.insert(
 				name.clone(),

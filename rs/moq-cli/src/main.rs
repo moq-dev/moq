@@ -307,12 +307,16 @@ async fn run_announced_subscribe(
 ) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&broadcast);
 
-	let consumer = consumer
+	let announced = consumer
 		.announced_broadcast(&broadcast)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
 
-	Subscribe::new(consumer, catalog, args).run().await
+	// Keep the origin around so catalogs referencing sibling broadcasts (a rendition's
+	// `broadcast` field, e.g. "../source") can be resolved.
+	let source = moq_mux::Source::new(announced).with_origin(consumer, &broadcast);
+
+	Subscribe::new(source, catalog, args).run().await
 }
 
 async fn run_hls_export(

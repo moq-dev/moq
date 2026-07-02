@@ -61,8 +61,8 @@ pub struct Broadcaster {
 }
 
 impl Broadcaster {
-	/// Subscribe to `broadcast` and start tracking its renditions.
-	pub fn new(broadcast: moq_net::BroadcastConsumer, config: Config) -> Arc<Self> {
+	/// Subscribe to `source` and start tracking its renditions.
+	pub fn new(source: impl Into<moq_mux::Source>, config: Config) -> Arc<Self> {
 		let (ready, _) = watch::channel(0);
 		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
@@ -70,7 +70,7 @@ impl Broadcaster {
 			ready,
 			paused,
 		});
-		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
+		tokio::spawn(watch_catalog(source.into(), config, broadcaster.clone()));
 		broadcaster
 	}
 
@@ -140,14 +140,14 @@ impl Broadcaster {
 
 	/// Add renditions newly present in `catalog`. Renditions are not removed when
 	/// they disappear; their stores simply go stale (rare for a live broadcast).
-	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
+	fn sync(&self, source: &moq_mux::Source, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
 			renditions.entry(name.clone()).or_insert_with(|| {
 				Arc::new(Rendition::video(
 					name.clone(),
 					video,
-					broadcast.clone(),
+					source.clone(),
 					config,
 					self.paused.subscribe(),
 				))
@@ -158,7 +158,7 @@ impl Broadcaster {
 				Arc::new(Rendition::audio(
 					name.clone(),
 					audio,
-					broadcast.clone(),
+					source.clone(),
 					config,
 					self.paused.subscribe(),
 				))
@@ -168,8 +168,8 @@ impl Broadcaster {
 	}
 }
 
-async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
-	let mut consumer = match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
+async fn watch_catalog(source: moq_mux::Source, config: Config, broadcaster: Arc<Broadcaster>) {
+	let mut consumer = match catalog::Consumer::<()>::new(source.broadcast(), CatalogFormat::Hang).await {
 		Ok(consumer) => consumer,
 		Err(err) => {
 			tracing::warn!(%err, "failed to subscribe to broadcast catalog");
@@ -179,7 +179,7 @@ async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, br
 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => broadcaster.sync(&broadcast, &config, &catalog),
+			Ok(Some(catalog)) => broadcaster.sync(&source, &config, &catalog),
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");

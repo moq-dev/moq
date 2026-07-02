@@ -38,7 +38,7 @@ impl Rendition {
 	pub fn video(
 		name: String,
 		config: &VideoConfig,
-		broadcast: moq_net::BroadcastConsumer,
+		source: moq_mux::Source,
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
@@ -48,7 +48,7 @@ impl Rendition {
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
 		));
-		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
+		spawn_pump(source, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Video,
@@ -63,7 +63,7 @@ impl Rendition {
 	pub fn audio(
 		name: String,
 		config: &AudioConfig,
-		broadcast: moq_net::BroadcastConsumer,
+		source: moq_mux::Source,
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
@@ -73,7 +73,7 @@ impl Rendition {
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
 		));
-		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
+		spawn_pump(source, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -87,7 +87,7 @@ impl Rendition {
 }
 
 fn spawn_pump(
-	broadcast: moq_net::BroadcastConsumer,
+	source: moq_mux::Source,
 	name: String,
 	kind: Kind,
 	store: Arc<SegmentStore>,
@@ -95,7 +95,7 @@ fn spawn_pump(
 	paused: watch::Receiver<bool>,
 ) {
 	tokio::spawn(async move {
-		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
+		if let Err(err) = run_pump(source, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
@@ -104,14 +104,14 @@ fn spawn_pump(
 }
 
 async fn run_pump(
-	broadcast: moq_net::BroadcastConsumer,
+	source: moq_mux::Source,
 	name: &str,
 	kind: Kind,
 	store: &SegmentStore,
 	cfg: &Config,
 	mut paused: watch::Receiver<bool>,
 ) -> Result<()> {
-	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
+	let consumer = catalog::Consumer::<()>::new(source.broadcast(), CatalogFormat::Hang).await?;
 	let mut filter = Filter::new(consumer);
 
 	// Narrow *both* axes to this rendition's name so the exporter sees exactly one
@@ -128,9 +128,9 @@ async fn run_pump(
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
 	// below takes its own clone for pulling fragments.
-	let closed = broadcast.clone();
+	let closed = source.broadcast().clone();
 
-	let mut export = Export::new(broadcast, filter)
+	let mut export = Export::new(source, filter)
 		.with_fragment_duration(cfg.part_target)
 		.with_latency(cfg.latency);
 

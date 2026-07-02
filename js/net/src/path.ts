@@ -137,3 +137,55 @@ export function join(path: Valid, other: Valid): Valid {
 export function empty(): Valid {
 	return "" as Valid;
 }
+
+/**
+ * Normalize a relative path reference: trim leading/trailing slashes, drop empty
+ * segments, and drop `.` segments (no-ops, matching POSIX). `..` is preserved and
+ * only interpreted by {@link resolve}.
+ *
+ * Mirrors the Rust `PathRelative::new` normalization, so JS and Rust agree
+ * byte-for-byte on the stored form. Two callers comparing normalized strings can
+ * detect that `""`, `"."`, `"/./"` etc. all mean "no reference".
+ */
+export function normalizeRelative(rel: string): string {
+	return rel
+		.split("/")
+		.filter((s) => s !== "" && s !== ".")
+		.join("/");
+}
+
+/**
+ * Resolve a relative path reference against a base path.
+ *
+ * `..` segments pop the last segment of the base; other segments are appended.
+ * `.` and empty segments are no-ops. Excess `..` once the base is empty is also a
+ * no-op (subsequent named segments still append). An empty / normalized-empty `rel`
+ * returns the base path unchanged.
+ *
+ * Mirrors the Rust `Path::resolve`, used by hang catalogs to express
+ * cross-broadcast track references (a rendition's `broadcast` field).
+ *
+ * @example
+ * ```typescript
+ * Path.resolve(Path.from("a/b/c"), "../source"); // "a/b/source"
+ * Path.resolve(Path.from("a/b"), "x/y");         // "a/b/x/y"
+ * Path.resolve(Path.from("a"), "../../x");       // "x"
+ * Path.resolve(Path.from("a/b"), "./c");         // "a/b/c"
+ * ```
+ */
+export function resolve(base: Valid, rel: string): Valid {
+	const segments = base === "" ? [] : base.split("/");
+
+	for (const seg of rel.split("/")) {
+		if (seg === "" || seg === ".") {
+			continue;
+		}
+		if (seg === "..") {
+			segments.pop();
+		} else {
+			segments.push(seg);
+		}
+	}
+
+	return segments.join("/") as Valid;
+}
