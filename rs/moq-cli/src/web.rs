@@ -38,39 +38,6 @@ fn parse_origin(origin: &str) -> Result<HeaderValue, axum::http::header::Invalid
 	origin.parse()
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn cors_origin_defaults_to_no_browser_origin() {
-		let cors = Cors::default();
-
-		assert!(cors.layer([Method::GET]).is_ok());
-	}
-
-	#[test]
-	fn cors_origin_allows_specific_allowlist() {
-		let cors = Cors {
-			origin: vec![HeaderValue::from_static("https://example.com")],
-		};
-
-		assert!(cors.layer([Method::GET]).is_ok());
-	}
-
-	#[test]
-	fn cors_origin_rejects_wildcard_with_allowlist() {
-		let cors = Cors {
-			origin: vec![
-				HeaderValue::from_static("*"),
-				HeaderValue::from_static("https://example.com"),
-			],
-		};
-
-		assert!(cors.layer([Method::GET]).is_err());
-	}
-}
-
 /// Serve an axum router over TCP, optionally terminating TLS. Used by the HLS
 /// and WebRTC (WHIP/WHEP) HTTP endpoints.
 pub async fn serve(
@@ -128,4 +95,37 @@ pub async fn run_web(bind: &str, tls_info: Arc<RwLock<moq_native::tls::Info>>) -
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn cors_origin_defaults_to_no_browser_origin() {
+		let cors = Cors::default();
+
+		assert!(cors.layer([Method::GET]).is_ok());
+	}
+
+	#[test]
+	fn cors_origin_allows_specific_allowlist() {
+		let cors = Cors {
+			origin: vec![HeaderValue::from_static("https://example.com")],
+		};
+
+		assert!(cors.layer([Method::GET]).is_ok());
+	}
+
+	#[test]
+	fn cors_origin_rejects_wildcard_with_allowlist() {
+		let cors = Cors {
+			origin: vec![
+				HeaderValue::from_static("*"),
+				HeaderValue::from_static("https://example.com"),
+			],
+		};
+
+		assert!(cors.layer([Method::GET]).is_err());
+	}
 }
