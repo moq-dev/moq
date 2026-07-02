@@ -11,7 +11,7 @@
 //! stream, so only the first rendition of each kind is muxed; extra renditions
 //! and any unsupported codec are rejected.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -55,6 +55,24 @@ impl Flavor {
 			Flavor::Eac3 => Some(*b"ec-3"),
 			Flavor::Avc | Flavor::Aac | Flavor::Mp3 => None,
 		}
+	}
+}
+
+/// Enhanced RTMP FourCC codecs required by an FLV export.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnhancedCodecs {
+	/// The enhanced video FourCC, if the selected video rendition needs one.
+	pub video: Option<[u8; 4]>,
+
+	/// The enhanced audio FourCC, if the selected audio rendition needs one.
+	pub audio: Option<[u8; 4]>,
+}
+
+impl EnhancedCodecs {
+	/// True when the export can use only legacy FLV/RTMP codec signaling.
+	pub fn is_empty(&self) -> bool {
+		self.video.is_none() && self.audio.is_none()
 	}
 }
 
@@ -134,9 +152,63 @@ impl Export {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Get the enhanced RTMP FourCC codecs this export will emit.
+	///
+	/// This waits until the FLV header is ready, because Annex-B H.264/H.265
+	/// sources may need a keyframe before their codec configuration record exists.
+	/// Returns `None` if the broadcast ends before any FLV tracks can be bound.
+	pub async fn enhanced_codecs(&mut self) -> anyhow::Result<Option<EnhancedCodecs>> {
+		kio::wait(|waiter| self.poll_enhanced_codecs(waiter)).await
+	}
+
+	/// Poll for the enhanced RTMP FourCC codecs this export will emit.
+	pub fn poll_enhanced_codecs(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<EnhancedCodecs>>> {
+		match ready!(self.poll_header_status(waiter))? {
+			HeaderStatus::Ready => Poll::Ready(Ok(Some(self.enhanced_codecs_now()))),
+			HeaderStatus::Unavailable => Poll::Ready(Ok(None)),
+		}
+	}
+
 	/// Poll for the next byte chunk.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
-		// 1. Drain catalog updates to discover the track layout.
+		// 1. Emit the header once every track's codec config has resolved.
+		if !self.header_emitted {
+			match ready!(self.poll_header_status(waiter))? {
+				HeaderStatus::Ready => {
+					let header = self.build_header()?;
+					self.header_emitted = true;
+					return Poll::Ready(Ok(Some(header)));
+				}
+				HeaderStatus::Unavailable => return Poll::Ready(Ok(None)),
+			}
+		}
+
+		// 2. Emit the smallest-timestamp pending frame as one tag.
+		if let Some(is_video) = self.pick_next_track() {
+			let track = if is_video {
+				self.video.as_mut()
+			} else {
+				self.audio.as_mut()
+			};
+			let track = track.unwrap();
+			let frame = track.pending.take().unwrap();
+			let chunk = self.encode_frame(is_video, frame)?;
+			return Poll::Ready(Ok(Some(chunk)));
+		}
+
+		// 3. End-of-stream once every subscribed track is drained.
+		if self.has_tracks() && self.tracks().all(|t| t.finished && t.pending.is_none()) {
+			if self.catalog.is_none() {
+				return Poll::Ready(Ok(None));
+			}
+		} else if self.catalog.is_none() && !self.has_tracks() {
+			return Poll::Ready(Ok(None));
+		}
+
+		Poll::Pending
+	}
+
+	fn poll_header_status(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<HeaderStatus>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot.media())?,
@@ -148,10 +220,9 @@ impl Export {
 			}
 		}
 
-		// 2. Pull frames from each track into `pending`. Pre-header, drop slices
+		// Pull frames from each track into `pending`. Pre-header, drop slices
 		// that arrived before the track's codec config is ready: a mid-GOP joiner
 		// can't render them, and parking would block polling for the next SPS/PPS.
-		let waiting_for_header = !self.header_emitted;
 		for track in [self.video.as_mut(), self.audio.as_mut()].into_iter().flatten() {
 			if track.pending.is_some() || track.finished {
 				continue;
@@ -159,7 +230,7 @@ impl Export {
 			loop {
 				match track.source.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
-						if waiting_for_header && !track.source.header_ready() {
+						if !track.source.header_ready() {
 							continue;
 						}
 						track.pending = Some(frame);
@@ -175,41 +246,13 @@ impl Export {
 			}
 		}
 
-		// 3. Emit the header once every track's codec config has resolved.
-		if !self.header_emitted {
-			if self.header_ready() {
-				let header = self.build_header()?;
-				self.header_emitted = true;
-				return Poll::Ready(Ok(Some(header)));
-			}
-			// The catalog closed and nothing more can resolve a codec config (no
-			// tracks arrived, or every bound track ended first): there's no header.
-			if self.catalog.is_none() && (!self.has_tracks() || self.tracks().all(|t| t.finished)) {
-				return Poll::Ready(Ok(None));
-			}
-			return Poll::Pending;
+		if self.header_ready() {
+			return Poll::Ready(Ok(HeaderStatus::Ready));
 		}
 
-		// 4. Emit the smallest-timestamp pending frame as one tag.
-		if let Some(is_video) = self.pick_next_track() {
-			let track = if is_video {
-				self.video.as_mut()
-			} else {
-				self.audio.as_mut()
-			};
-			let track = track.unwrap();
-			let frame = track.pending.take().unwrap();
-			let chunk = self.encode_frame(is_video, frame)?;
-			return Poll::Ready(Ok(Some(chunk)));
-		}
-
-		// 5. End-of-stream once every subscribed track is drained.
-		if self.has_tracks() && self.tracks().all(|t| t.finished && t.pending.is_none()) {
-			if self.catalog.is_none() {
-				return Poll::Ready(Ok(None));
-			}
-		} else if self.catalog.is_none() && !self.has_tracks() {
-			return Poll::Ready(Ok(None));
+		// The catalog closed and nothing more can resolve a codec config.
+		if self.catalog.is_none() && (!self.has_tracks() || self.tracks().all(|t| t.finished)) {
+			return Poll::Ready(Ok(HeaderStatus::Unavailable));
 		}
 
 		Poll::Pending
@@ -222,6 +265,13 @@ impl Export {
 
 	fn has_tracks(&self) -> bool {
 		self.video.is_some() || self.audio.is_some()
+	}
+
+	fn enhanced_codecs_now(&self) -> EnhancedCodecs {
+		EnhancedCodecs {
+			video: self.video.as_ref().and_then(|t| t.flavor.fourcc()),
+			audio: self.audio.as_ref().and_then(|t| t.flavor.fourcc()),
+		}
 	}
 
 	fn update_catalog(&mut self, catalog: Catalog) -> anyhow::Result<()> {
@@ -408,6 +458,11 @@ impl Export {
 		}
 		Ok(out.freeze())
 	}
+}
+
+enum HeaderStatus {
+	Ready,
+	Unavailable,
 }
 
 /// Append one FLV tag (header + body + trailing `PreviousTagSize`) to `out`.
