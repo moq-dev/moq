@@ -216,7 +216,7 @@ export class Publisher {
 				subGroupId: 0,
 				publisherPriority: 0,
 				flags: {
-					hasExtensions: false,
+					hasExtensions: true,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
 					hasEnd: true,
@@ -231,8 +231,8 @@ export class Publisher {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					const obj = new Frame({ payload: frame.data });
-					await obj.encode(stream, header.flags);
+					const obj = new Frame({ payload: frame.data, timestamp: frame.timestamp });
+					await obj.encode(stream, header.flags, this.#session.version);
 				}
 
 				stream.close();
