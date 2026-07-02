@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.6](https://github.com/moq-dev/moq/compare/moq-native-v0.17.5...moq-native-v0.17.6) - 2026-07-02
+
+### Added
+
+- *(moq-mux)* Opus audio over MPEG-TS (import + export) ([#1965](https://github.com/moq-dev/moq/pull/1965))
+- *(moq-net)* moq-lite-05 SETUP message + PATH parameter ([#1954](https://github.com/moq-dev/moq/pull/1954))
+
+### Fixed
+
+- *(moq-native)* verify server certs with the OS platform verifier ([#1968](https://github.com/moq-dev/moq/pull/1968))
+
+### Other
+
+- Fold the internal listener into --server-bind (one authenticated accept path) ([#1974](https://github.com/moq-dev/moq/pull/1974))
+- *(rs)* upgrade reqwest 0.12 -> 0.13 across the workspace ([#1972](https://github.com/moq-dev/moq/pull/1972))
+
 ## [0.17.5](https://github.com/moq-dev/moq/compare/moq-native-v0.17.4...moq-native-v0.17.5) - 2026-06-30
 
 ### Added

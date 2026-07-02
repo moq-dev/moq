@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/moq-dev/moq/compare/moq-hls-v0.0.1...moq-hls-v0.0.2) - 2026-07-02
+
+### Other
+
+- *(rs)* upgrade reqwest 0.12 -> 0.13 across the workspace ([#1972](https://github.com/moq-dev/moq/pull/1972))
+
 ## [0.0.1](https://github.com/moq-dev/moq/releases/tag/moq-hls-v0.0.1) - 2026-06-30
 
 ### Other

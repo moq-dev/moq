@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.0...moq-mux-v0.7.1) - 2026-07-02
+
+### Added
+
+- *(moq-mux)* add FLAC support (catalog + mp4/mkv import/export) ([#1969](https://github.com/moq-dev/moq/pull/1969))
+- *(moq-mux,moq-gst)* MP3 support for MKV and GStreamer ([#1970](https://github.com/moq-dev/moq/pull/1970))
+- *(moq-mux)* add MP3 audio support for FLV/RTMP ([#1967](https://github.com/moq-dev/moq/pull/1967))
+- *(moq-mux)* Opus audio over MPEG-TS (import + export) ([#1965](https://github.com/moq-dev/moq/pull/1965))
+
+### Other
+
+- Add track name to the consumer skip/reset logs ([#2012](https://github.com/moq-dev/moq/pull/2012))
+
 ## [0.7.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.6.0...moq-mux-v0.7.0) - 2026-06-30
 
 ### Added
