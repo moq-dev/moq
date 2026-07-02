@@ -56,10 +56,12 @@ pub struct Config {
 	/// `moq_native::tls::Server::server_config` (pass an empty ALPN list) or
 	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext.
 	///
-	/// To serve both RTMP and RTMPS, run two listeners: call [`run`] once per
-	/// config (one with `tls`, one without) against a cloned origin.
+	/// To serve both RTMP and RTMPS, clone one base config and call [`run`] for
+	/// each listener against a cloned origin.
 	#[cfg(feature = "tls")]
 	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+
+	active: ActivePaths,
 }
 
 /// Run the RTMP listener until it fails, bridging each connection to `origin`:
@@ -100,8 +102,9 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 
 	// Tracks which broadcast paths are currently being ingested so a second
 	// publisher on the same stream key is rejected (first-publisher-wins) instead
-	// of clobbering the live one.
-	let active = ActivePaths::default();
+	// of clobbering the live one. This lives on Config so cloned RTMP/RTMPS
+	// listeners share the same claim table.
+	let active = config.active.clone();
 	let prefix = Arc::new(config.prefix);
 	let latency = config.latency;
 	// Players are served out of the same origin the publishers write into.
@@ -176,7 +179,7 @@ pub(crate) fn resolve_path(prefix: &str, app: &str, key: &str) -> Option<String>
 
 /// The set of broadcast paths with a live ingest, used to reject duplicate
 /// stream keys. Cheap to clone (shared `Arc`).
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ActivePaths(Arc<Mutex<HashSet<String>>>);
 
 impl ActivePaths {
@@ -247,5 +250,17 @@ mod tests {
 		assert!(active.claim("live/cam0").is_some());
 
 		drop(other);
+	}
+
+	#[test]
+	fn cloned_configs_share_active_paths() {
+		let config = Config::default();
+		let cloned = config.clone();
+
+		let guard = config.active.claim("live/cam0").expect("first claim succeeds");
+		assert!(cloned.active.claim("live/cam0").is_none());
+
+		drop(guard);
+		assert!(cloned.active.claim("live/cam0").is_some());
 	}
 }
