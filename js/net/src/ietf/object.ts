@@ -1,7 +1,10 @@
-import type { Reader, Writer } from "../stream.ts";
+import { Reader, Writer } from "../stream.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 const GROUP_END = 0x03;
+const PROP_TIMESTAMP = 0x06n;
+const PROP_TIMESCALE = 0x08n;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
 // 11.4.2. moq-lite always starts subgroups at object 0, so the bit carries no
@@ -18,6 +21,96 @@ function hasFirstObjectBit(version: IetfVersion): boolean {
 		default:
 			return true;
 	}
+}
+
+function hasDeltaObjectPropertyTypes(version: IetfVersion | undefined): boolean {
+	switch (version) {
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+			return false;
+		default:
+			return true;
+	}
+}
+
+async function encodeObjectPropertyType(
+	w: Writer,
+	id: bigint,
+	prev: bigint,
+	version: IetfVersion | undefined,
+): Promise<void> {
+	const encoded = hasDeltaObjectPropertyTypes(version) ? id - prev : id;
+	await w.u62(encoded);
+}
+
+async function encodeObjectTime(w: Writer, timestamp: Timestamp, version: IetfVersion | undefined): Promise<void> {
+	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
+	await w.u62(BigInt(Math.round(timestamp.value)));
+	await encodeObjectPropertyType(w, PROP_TIMESCALE, PROP_TIMESTAMP, version);
+	await w.u62(BigInt(timestamp.scale));
+}
+
+async function encodeObjectExtensions(
+	timestamp: Timestamp | undefined,
+	version: IetfVersion | undefined,
+): Promise<Uint8Array> {
+	if (timestamp === undefined) {
+		return new Uint8Array();
+	}
+
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({
+			write(chunk) {
+				chunks.push(new Uint8Array(chunk));
+			},
+		}),
+		version,
+	);
+	await encodeObjectTime(writer, timestamp, version);
+	writer.close();
+	await writer.closed;
+
+	const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+	const result = new Uint8Array(size);
+	let offset = 0;
+	for (const chunk of chunks) {
+		result.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return result;
+}
+
+async function decodeObjectTime(r: Reader, version: IetfVersion | undefined): Promise<Timestamp | undefined> {
+	let timestamp: bigint | undefined;
+	let timescale: bigint | undefined;
+	let prevType = 0n;
+	let first = true;
+
+	while (!(await r.done())) {
+		const step = await r.u62();
+		const id = !hasDeltaObjectPropertyTypes(version) || first ? step : prevType + step;
+		first = false;
+		prevType = id;
+
+		if (id % 2n === 0n) {
+			const value = await r.u62();
+			if (id === PROP_TIMESTAMP) {
+				timestamp = value;
+			} else if (id === PROP_TIMESCALE) {
+				timescale = value;
+			}
+		} else {
+			const size = await r.u53();
+			await r.read(size);
+		}
+	}
+
+	if (timestamp === undefined) {
+		return undefined;
+	}
+
+	return new Timestamp(Number(timestamp), Timescale(Number(timescale ?? BigInt(Timescale.MICRO))));
 }
 
 export interface GroupFlags {
@@ -128,19 +221,26 @@ export class Group {
 	}
 }
 
+/** A moq-transport object inside a group stream. */
 export class Frame {
-	// undefined means end of group
+	/** The object payload, or `undefined` for the end of group marker. */
 	payload?: Uint8Array;
+	/** The presentation timestamp carried in object properties, when present. */
+	timestamp?: Timestamp;
 
-	constructor({ payload }: { payload?: Uint8Array } = {}) {
+	constructor({ payload, timestamp }: { payload?: Uint8Array; timestamp?: Timestamp } = {}) {
 		this.payload = payload;
+		this.timestamp = timestamp;
 	}
 
-	async encode(w: Writer, flags: GroupFlags): Promise<void> {
+	/** Encode this frame using the group flags and negotiated IETF version. */
+	async encode(w: Writer, flags: GroupFlags, version = w.version): Promise<void> {
 		await w.u53(0); // id_delta = 0
 
 		if (flags.hasExtensions) {
-			await w.u53(0); // extensions length = 0
+			const extensions = await encodeObjectExtensions(this.timestamp, version);
+			await w.u53(extensions.byteLength);
+			await w.write(extensions);
 		}
 
 		if (this.payload !== undefined) {
@@ -157,30 +257,32 @@ export class Frame {
 		}
 	}
 
-	static async decode(r: Reader, flags: GroupFlags): Promise<Frame> {
+	/** Decode a frame using the group flags and negotiated IETF version. */
+	static async decode(r: Reader, flags: GroupFlags, version = r.version): Promise<Frame> {
 		const delta = await r.u53();
 		if (delta !== 0) {
 			throw new Error(`object ID delta is not supported: ${delta}`);
 		}
 
+		let timestamp: Timestamp | undefined;
 		if (flags.hasExtensions) {
 			const extensionsLength = await r.u53();
-			// We don't care about extensions
-			await r.read(extensionsLength);
+			const extensions = await r.read(extensionsLength);
+			timestamp = await decodeObjectTime(new Reader(undefined, extensions, version), version);
 		}
 
 		const payloadLength = await r.u53();
 
 		if (payloadLength > 0) {
 			const payload = await r.read(payloadLength);
-			return new Frame({ payload });
+			return new Frame({ payload, timestamp });
 		}
 
 		const status = await r.u53();
 
 		if (flags.hasEnd) {
 			// Empty frame
-			if (status === 0) return new Frame({ payload: new Uint8Array(0) });
+			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
 		} else if (status === 0 || status === GROUP_END) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
 			return new Frame();

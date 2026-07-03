@@ -11,24 +11,35 @@ use crate::ietf::Param;
 const PROP_TIMESTAMP: u64 = 0x06;
 const PROP_TIMESCALE: u64 = 0x08;
 
-/// Encode a frame's presentation timestamp as moq-transport Object Properties:
-/// Timestamp (0x06) in Timescale (0x08) units, both absolute varints.
+/// Encode a frame's presentation timestamp as moq-transport Object Properties.
 ///
 /// Matches the LOC encoding of the same registry ids so a relay or LOC-aware peer
-/// reads the same bytes. (moq-lite delta-compresses its per-frame timestamps; the
-/// moq-transport object property is the absolute value.) Writes the raw KVP bytes
+/// reads the same bytes on drafts that delta-encode KVP type ids. The Timestamp
+/// value is always absolute. Writes the raw KVP bytes
 /// (no outer length prefix); the caller frames the block with its byte length.
 pub fn encode_object_time<W: bytes::BufMut>(
 	w: &mut W,
 	timestamp: Timestamp,
 	version: Version,
 ) -> Result<(), EncodeError> {
-	// KVP type ids are delta-encoded ascending: 0x06 then 0x08 (delta 0x02).
-	PROP_TIMESTAMP.encode(w, version)?;
+	encode_object_property_type(w, PROP_TIMESTAMP, 0, version)?;
 	timestamp.value().encode(w, version)?;
-	(PROP_TIMESCALE - PROP_TIMESTAMP).encode(w, version)?;
+	encode_object_property_type(w, PROP_TIMESCALE, PROP_TIMESTAMP, version)?;
 	u64::from(timestamp.scale()).encode(w, version)?;
 	Ok(())
+}
+
+fn encode_object_property_type<W: bytes::BufMut>(
+	w: &mut W,
+	kind: u64,
+	prev: u64,
+	version: Version,
+) -> Result<(), EncodeError> {
+	let encoded = match version {
+		Version::Draft14 | Version::Draft15 => kind,
+		_ => kind.checked_sub(prev).ok_or(EncodeError::BoundsExceeded)?,
+	};
+	encoded.encode(w, version)
 }
 
 /// Decode the Timestamp (0x06) + Timescale (0x08) Object Properties from an object's
@@ -42,10 +53,10 @@ pub fn decode_object_time<R: bytes::Buf>(r: &mut R, version: Version) -> Result<
 
 	while r.has_remaining() {
 		let step = u64::decode(r, version)?;
-		let abs = if first {
-			step
-		} else {
-			prev_type.checked_add(step).ok_or(DecodeError::BoundsExceeded)?
+		let abs = match version {
+			Version::Draft14 | Version::Draft15 => step,
+			_ if first => step,
+			_ => prev_type.checked_add(step).ok_or(DecodeError::BoundsExceeded)?,
 		};
 		first = false;
 		prev_type = abs;
@@ -324,6 +335,62 @@ mod tests {
 		assert_eq!(decoded.value(), 96_000);
 		assert_eq!(decoded.scale(), Timescale::MICRO);
 		assert!(!bytes.has_remaining());
+	}
+
+	#[test]
+	fn test_object_time_legacy_uses_absolute_types() {
+		let ts = Timestamp::new(96_000, Timescale::MILLI).unwrap();
+		let mut buf = bytes::BytesMut::new();
+		encode_object_time(&mut buf, ts, Version::Draft15).unwrap();
+
+		let mut bytes = buf.clone().freeze();
+		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), PROP_TIMESTAMP);
+		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), ts.value());
+		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), PROP_TIMESCALE);
+		assert_eq!(
+			u64::decode(&mut bytes, Version::Draft15).unwrap(),
+			u64::from(ts.scale())
+		);
+		assert!(!bytes.has_remaining());
+
+		let mut bytes = buf.freeze();
+		let decoded = decode_object_time(&mut bytes, Version::Draft15).unwrap().unwrap();
+		assert_eq!(decoded.value(), ts.value());
+		assert_eq!(decoded.scale(), Timescale::MILLI);
+	}
+
+	#[test]
+	fn test_object_time_delta_types_start_at_draft16() {
+		let ts = Timestamp::new(96_000, Timescale::MILLI).unwrap();
+		let mut buf = bytes::BytesMut::new();
+		encode_object_time(&mut buf, ts, Version::Draft16).unwrap();
+
+		let mut bytes = buf.freeze();
+		assert_eq!(u64::decode(&mut bytes, Version::Draft16).unwrap(), PROP_TIMESTAMP);
+		assert_eq!(u64::decode(&mut bytes, Version::Draft16).unwrap(), ts.value());
+		assert_eq!(
+			u64::decode(&mut bytes, Version::Draft16).unwrap(),
+			PROP_TIMESCALE - PROP_TIMESTAMP
+		);
+		assert_eq!(
+			u64::decode(&mut bytes, Version::Draft16).unwrap(),
+			u64::from(ts.scale())
+		);
+		assert!(!bytes.has_remaining());
+	}
+
+	#[test]
+	fn test_object_time_decodes_draft14_absolute_timescale() {
+		let mut buf = bytes::BytesMut::new();
+		PROP_TIMESTAMP.encode(&mut buf, Version::Draft14).unwrap();
+		42u64.encode(&mut buf, Version::Draft14).unwrap();
+		PROP_TIMESCALE.encode(&mut buf, Version::Draft14).unwrap();
+		u64::from(Timescale::MILLI).encode(&mut buf, Version::Draft14).unwrap();
+
+		let mut bytes = buf.freeze();
+		let decoded = decode_object_time(&mut bytes, Version::Draft14).unwrap().unwrap();
+		assert_eq!(decoded.value(), 42);
+		assert_eq!(decoded.scale(), Timescale::MILLI);
 	}
 
 	/// A timescale-less extension block falls back to microseconds (registry default).
