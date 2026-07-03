@@ -71,8 +71,9 @@ require_tools() {
         have "$t" || missing+=("$t")
     done
     # ffmpeg + cargo are only needed for the round-trip, not for --analyze-only.
+    # pgrep backs kill_tree; without it grandchild tsp/moq processes would leak.
     if [[ -z "$ANALYZE_ONLY" ]]; then
-        for t in cargo ffmpeg curl timeout; do have "$t" || missing+=("$t"); done
+        for t in cargo ffmpeg curl timeout pgrep; do have "$t" || missing+=("$t"); done
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "error: missing required tools: ${missing[*]}" >&2
@@ -149,7 +150,10 @@ if [[ -n "$SOURCE" ]]; then
     }
     echo "### cutting ~${DURATION}s from $SOURCE with TSDuck (all PIDs preserved)"
     PKTS=$((DURATION * BITRATE / 8 / 188))
-    tsp -I file "$SOURCE" -P until --packets "$PKTS" -O file "$SRC_TS" 2>/dev/null
+    tsp -I file "$SOURCE" -P until --packets "$PKTS" -O file "$SRC_TS" 2>"$TMP/tsp-cut.log" || {
+        sed 's/^/  tsp: /' "$TMP/tsp-cut.log" >&2 || true
+        exit 1
+    }
 else
     echo "### generating ~${DURATION}s broadcast-like clip with ffmpeg"
     ffmpeg -y -hide_banner -loglevel error \
@@ -187,9 +191,15 @@ sleep 1
 
 # Pace on the source PCR (real media time), not a fixed bitrate: a synthetic clip
 # compresses tiny, so bitrate pacing would rush the whole stream out in a blink.
+# Bounded like the subscriber: if the relay stalls after readiness, `moq import
+# ts` could otherwise block `wait "$PUB_PID"` forever. tsp/moq stderr lands in
+# pub.log, which the empty-capture handler below dumps on failure.
 echo "### publishing PCR-paced TS -> $BROADCAST"
-(tsp -I file "$SRC_TS" -P regulate --pcr-synchronous 2>/dev/null |
-    "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" import ts) >"$TMP/pub.log" 2>&1 &
+# shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
+timeout -k 3 $((DURATION + 20)) bash -c '
+    tsp -I file "$1" -P regulate --pcr-synchronous |
+        "$2" --client-connect "$3" --broadcast "$4" import ts
+' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" >"$TMP/pub.log" 2>&1 &
 PUB_PID=$!
 
 wait "$PUB_PID" 2>/dev/null || true

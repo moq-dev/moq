@@ -6,12 +6,12 @@ checks an Integrated Receiver/Decoder cares about and prints a PASS/WARN/FAIL
 summary, exiting non-zero on failure.
 
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
-`tsanalyze --json` for PSI/service/structure and to `tsp -P pcrextract` for the
-PCR/PTS/DTS timeline), and this script does the model math TSDuck does not cover
-directly (PCR jitter/repetition, packet inter-arrival, burstiness, instantaneous
-bitrate, and a transport-buffer model). The only raw-byte work done here is a
-188/204-byte packet-header scan for per-packet PID + PCR, which the timing model
-needs and which pcrextract does not expose per packet.
+`tsanalyze --json` for PSI/service/structure), and this script does the model
+math TSDuck does not cover directly (PCR jitter/repetition, packet
+inter-arrival, burstiness, instantaneous bitrate, and a transport-buffer model).
+The PCR/PTS/DTS timeline the timing model needs comes from a 188/204-byte
+packet-header scan done here, which also gives the per-packet PID that
+`tsp -P pcrextract` does not expose.
 
 Checks split into two severities:
   - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import csv
 import json
 import subprocess
 import sys
@@ -101,31 +100,6 @@ def run_tsanalyze(ts_path: str) -> dict:
     data = json.loads(proc.stdout)
     data["_stderr"] = proc.stderr
     return data
-
-
-def run_pcrextract(ts_path: str) -> list[dict]:
-    """Return pcrextract rows: {pid, ts_index, type, value} for PCR/PTS/DTS events."""
-    proc = subprocess.run(
-        ["tsp", "-I", "file", ts_path, "-P", "pcrextract", "--pcr", "--pts", "--dts", "-O", "drop"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    rows: list[dict] = []
-    reader = csv.DictReader(proc.stdout.splitlines())
-    for row in reader:
-        try:
-            rows.append(
-                {
-                    "pid": int(row["PID"]),
-                    "ts_index": int(row["Packet index in TS"]),
-                    "type": row["Type"],
-                    "value": int(row["Value"]),
-                }
-            )
-        except (KeyError, ValueError):
-            continue
-    return rows
 
 
 @dataclass
