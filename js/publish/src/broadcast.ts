@@ -27,10 +27,14 @@ export class Broadcast {
 	audio: Audio.Encoder;
 	video: Video.Root;
 
-	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
-	// sections (e.g. `scte35`) by mutating it too. Catalog.Producer pins deltas off (one snapshot per
-	// group) to stay byte-compatible with consumers that only read snapshots.
+	/**
+	 * The catalog, editable at any time regardless of whether anyone is subscribed.
+	 *
+	 * The base `video`/`audio` sections are kept in sync from the encoders; an
+	 * application adds its own root sections (e.g. `scte35`) by mutating it too.
+	 * `Catalog.Producer` pins deltas off to stay byte-compatible with consumers
+	 * that only read snapshots.
+	 */
 	readonly catalog: Catalog.Producer = new Catalog.Producer();
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across

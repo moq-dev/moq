@@ -1,4 +1,5 @@
 export * as Hang from "@moq/hang";
+export { Producer as CatalogProducer } from "@moq/hang/catalog";
 export * as Json from "@moq/json";
 export * as Net from "@moq/net";
 /** @deprecated Use `Net` instead. */

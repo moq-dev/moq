@@ -49,6 +49,9 @@ export class TrackInfo {
 	timescale: number;
 
 	constructor(props: { priority?: number; ordered?: boolean; maxLatency?: number; timescale: number }) {
+		if (!Number.isInteger(props.timescale) || props.timescale <= 0) {
+			throw new Error("TRACK_INFO timescale must be a positive integer");
+		}
 		this.priority = props.priority ?? 0;
 		this.ordered = props.ordered ?? false;
 		this.maxLatency = props.maxLatency ?? 0;
@@ -68,15 +71,12 @@ export class TrackInfo {
 		const maxLatency = await r.u53();
 		const timescale = await r.u53();
 		// A zero timescale is a protocol violation: every track has a media timeline.
-		if (timescale === 0) throw new Error("TRACK_INFO timescale must be non-zero");
+		if (timescale === 0) throw new Error("TRACK_INFO timescale must be a positive integer");
 		return new TrackInfo({ priority, ordered, maxLatency, timescale });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		if (!hasTrackStream(version)) throw new Error("TRACK_INFO requires moq-lite-05+");
-		// Reject a zero timescale on encode too (mirrors the Rust side), so an invalid
-		// TrackInfo fails fast on the sender rather than only at the peer's decoder.
-		if (this.timescale === 0) throw new Error("TRACK_INFO timescale must be non-zero");
 		return Message.encode(w, this.#encode.bind(this));
 	}
 

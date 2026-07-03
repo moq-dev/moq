@@ -9,13 +9,20 @@ import { toHang } from "./msf";
 /** Consumes a custom track once subscribed, scoped to the subscription's lifetime. */
 export type ConsumeTrack = (track: Moq.Track, effect: Effect) => void;
 
-// Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
-// DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
-// catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
-// and is never auto-detected, so set it explicitly via `catalogFormat`.
+/**
+ * Catalog formats accepted by Watch.
+ *
+ * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus
+ * `"hangz"` (the DEFLATE-compressed `catalog.json.z` track) and `"manual"`, where
+ * the user supplies the catalog directly without fetching. `"hangz"` is opt-in
+ * only: it shares the `.hang` broadcast suffix and is never auto-detected, so set
+ * it explicitly via `catalogFormat`.
+ */
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
+/** A catalog format accepted by Watch. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
+/** Parse a catalog format string, returning `undefined` for unknown values. */
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
 	if (value === null) return undefined;
 	return CATALOG_FORMATS.find((f) => f === value);
@@ -54,7 +61,7 @@ export interface BroadcastProps {
 	catalog?: Catalog.Root | Signal<Catalog.Root | undefined>;
 }
 
-// A catalog source that (optionally) reloads automatically when live/offline.
+/** A catalog source that optionally reloads automatically when live or offline. */
 export class Broadcast {
 	connection: Signal<Moq.Connection.Established | undefined>;
 
