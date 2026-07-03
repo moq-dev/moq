@@ -165,7 +165,8 @@ impl SegmentStore {
 			// put a `#EXT-X-DISCONTINUITY` in front of a segment a decoder can't start on,
 			// resetting it onto a P-frame (green video). So defer the discontinuity until
 			// the next independent fragment; any P-frames arriving first are dropped rather
-			// than appended to the pre-pause timeline.
+			// than appended to the pre-pause timeline. A resume reads from the next group,
+			// which begins on a keyframe, so at most a partial GOP is dropped.
 			let discontinuity_pending = inner.discontinuity_pending;
 			if discontinuity_pending && self.kind == Kind::Video && !fragment.independent {
 				return;

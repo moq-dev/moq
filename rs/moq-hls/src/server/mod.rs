@@ -20,7 +20,7 @@
 mod routes;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -59,34 +59,33 @@ struct Inner {
 	origin: moq_net::OriginConsumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
-	/// Optional per-request authorizer; `None` allows every request.
-	auth: Option<Arc<dyn Authorizer>>,
+	/// Optional per-request authorizer, set at most once via [`Server::with_authorizer`];
+	/// unset allows every request. On the shared inner so a clone or an
+	/// already-handed-out router sees it too (no auth-bypass from call ordering).
+	auth: OnceLock<Arc<dyn Authorizer>>,
 }
 
 impl Server {
 	/// Build a server reading broadcasts from `origin`. Every request is allowed;
 	/// call [`with_authorizer`](Self::with_authorizer) to gate access.
 	pub fn new(origin: moq_net::OriginConsumer, config: Config) -> Self {
-		Self::build(origin, config, None)
-	}
-
-	fn build(origin: moq_net::OriginConsumer, config: Config, auth: Option<Arc<dyn Authorizer>>) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
-				auth,
+				auth: OnceLock::new(),
 			}),
 		}
 	}
 
-	/// Gate every request through `auth`. A denied request is rejected before the
-	/// server touches the origin. Call this on the freshly-built server, before
-	/// cloning it or handing out its router.
+	/// Gate every request through `auth`, rejecting a denied request before the server
+	/// touches the origin. The authorizer lives on the shared inner, so every clone of
+	/// this server and its router enforces it regardless of call order. Set at most
+	/// once; a second call is ignored.
 	pub fn with_authorizer(self, auth: impl Authorizer) -> Self {
-		let inner = &self.inner;
-		Self::build(inner.origin.clone(), inner.config.clone(), Some(Arc::new(auth)))
+		let _ = self.inner.auth.set(Arc::new(auth));
+		self
 	}
 
 	/// Authorize a request, allowing it when no authorizer is configured.
@@ -96,7 +95,7 @@ impl Server {
 		headers: &HeaderMap,
 		query: Option<&str>,
 	) -> Result<(), StatusCode> {
-		match &self.inner.auth {
+		match self.inner.auth.get() {
 			Some(auth) => auth.authorize(broadcast, headers, query),
 			None => Ok(()),
 		}

@@ -3,8 +3,8 @@
 //! `m3u8-rs` can parse classic playlists but cannot emit the LL-HLS tags
 //! (`EXT-X-PART`, `EXT-X-PART-INF`, `EXT-X-SERVER-CONTROL`,
 //! `EXT-X-PRELOAD-HINT`), so the export playlists are written by hand. URIs are
-//! relative to the media playlist (`/<broadcast>/<rendition>/media.m3u8`), so
-//! they resolve against the rendition directory.
+//! relative to the media playlist (`/<broadcast>/<kind>/<rendition>/media.m3u8`),
+//! so they resolve against the rendition directory.
 
 use std::fmt::Write;
 
