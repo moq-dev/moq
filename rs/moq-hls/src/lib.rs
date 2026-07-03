@@ -6,7 +6,9 @@
 //! - [`import`] pulls a remote HLS master/media playlist and publishes its CMAF
 //!   segments into MoQ (an HTTP *client* that *publishes*).
 //! - [`server`] subscribes to a MoQ broadcast and serves HLS + LL-HLS playlists
-//!   and CMAF segments over HTTP (an HTTP *server* that *subscribes*).
+//!   and CMAF segments over HTTP (an HTTP *server* that *subscribes*). It serves
+//!   every request by default; gate access with
+//!   [`Server::with_authorizer`](server::Server::with_authorizer).
 //!
 //! All CMAF byte handling (import via [`moq_mux::container::fmp4::Import`],
 //! export via [`moq_mux::container::fmp4::Export`]) lives in `moq-mux`; this
@@ -21,4 +23,4 @@ pub mod server;
 
 pub use error::*;
 #[cfg(feature = "server")]
-pub use server::Server;
+pub use server::{Authorizer, Server};

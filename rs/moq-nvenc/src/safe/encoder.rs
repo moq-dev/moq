@@ -72,9 +72,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::Encoder;
+	/// # use moq_nvenc::Encoder;
 	/// let cuda_ctx = CudaContext::new(0).unwrap();
 	/// let encoder = Encoder::initialize_with_cuda(cuda_ctx).unwrap();
 	/// ```
@@ -122,9 +122,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{sys::nvEncodeAPI::NV_ENC_CODEC_H264_GUID, Encoder};
+	/// # use moq_nvenc::{sys::nvEncodeAPI::NV_ENC_CODEC_H264_GUID, Encoder};
 	/// # let cuda_ctx = CudaContext::new(0).unwrap();
 	/// let encoder = Encoder::initialize_with_cuda(cuda_ctx).unwrap();
 	/// let encode_guids = encoder.get_encode_guids().unwrap();
@@ -161,9 +161,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P1_GUID},
 	/// #     Encoder,
 	/// # };
@@ -214,9 +214,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{NV_ENC_CODEC_H264_GUID, NV_ENC_H264_PROFILE_HIGH_GUID},
 	/// #     Encoder,
 	/// # };
@@ -268,9 +268,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID},
 	/// #     Encoder,
 	/// # };
@@ -327,9 +327,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{
 	/// #         NV_ENC_CODEC_H264_GUID,
 	/// #         NV_ENC_PRESET_P1_GUID,
@@ -397,9 +397,9 @@ impl Encoder {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{
 	/// #         NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
 	/// #         NV_ENC_CODEC_H264_GUID,

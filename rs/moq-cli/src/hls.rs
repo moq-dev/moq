@@ -72,12 +72,10 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		.scope(&[name.as_path()])
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
-	let config = moq_hls::export::Config {
-		part_target: args.part_target,
-		window: args.window,
-		latency: args.latency_max,
-		..Default::default()
-	};
+	let mut config = moq_hls::export::Config::default();
+	config.part_target = args.part_target;
+	config.window = args.window;
+	config.latency = args.latency_max;
 	let server = moq_hls::Server::new(scoped, config);
 	let app = server.router().layer(args.cors.layer([Method::GET])?);
 

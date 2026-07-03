@@ -323,16 +323,8 @@ async fn run_session(
 		}
 
 		tokio::select! {
-			// Full session shutdown: cancel every pump, then wait for them all to drop
-			// their pads. Cancel all up front (pumps only exit on their own `cancel`), or
-			// the not-yet-cancelled ones would keep streaming while we await the rest.
-			_ = shutdown.changed() => {
-				for (_, track) in active.drain() {
-					let _ = track.cancel.send(true);
-				}
-				while pumps.join_next().await.is_some() {}
-				break;
-			}
+			// Full session shutdown: break to the drain below.
+			_ = shutdown.changed() => break,
 			// A pump finished; loop back so the `retain` above prunes its entry and the
 			// break condition sees the drained set.
 			_ = pumps.join_next(), if !pumps.is_empty() => {}
@@ -340,7 +332,14 @@ async fn run_session(
 			// returning None) while we wait for the remaining pumps to drain.
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
-					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element).await?,
+					// Race reconcile against shutdown. It awaits a per-rendition `subscribe`
+					// that only resolves once track info arrives, so a catalog naming a track
+					// the publisher never accepts would otherwise park here and make the whole
+					// session deaf to shutdown, leaking the connection and pads.
+					Some(catalog) => tokio::select! {
+						result = reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element) => result?,
+						_ = shutdown.changed() => break,
+					},
 					// Catalog track closed. Don't cancel the pumps: let each reach its
 					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
 					// bare pad drop. We just stop reconciling and wait for them to drain.
@@ -349,6 +348,15 @@ async fn run_session(
 			}
 		}
 	}
+
+	// Shutdown, including a shutdown that interrupted a reconcile: cancel every pump, then
+	// wait for them all to drop their pads. Cancel all up front (pumps only exit on their own
+	// `cancel`), or the not-yet-cancelled ones would keep streaming while we await the rest.
+	// On the clean catalog-closed exit `active`/`pumps` are already drained, so this is a no-op.
+	for (_, track) in active.drain() {
+		let _ = track.cancel.send(true);
+	}
+	while pumps.join_next().await.is_some() {}
 
 	Ok(())
 }

@@ -32,19 +32,16 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Configuration for the single-rendition HLS import loop.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Config {
 	/// The master or media playlist URL or file path to import.
 	pub playlist: String,
-
-	/// An optional HTTP client to use for fetching the playlist and segments.
-	/// If not provided, a default client will be created.
-	pub client: Option<Client>,
 }
 
 impl Config {
-	/// Create an import configuration for `playlist` using the default HTTP client.
+	/// Create an import configuration for `playlist`.
 	pub fn new(playlist: String) -> Self {
-		Self { playlist, client: None }
+		Self { playlist }
 	}
 
 	/// Parse the playlist string into a URL.
@@ -149,14 +146,11 @@ impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
-		let client = match cfg.client {
-			Some(client) => client,
-			None => Client::builder()
-				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-				// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
-				.timeout(REQUEST_TIMEOUT)
-				.build()?,
-		};
+		let client = Client::builder()
+			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+			// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
+			.timeout(REQUEST_TIMEOUT)
+			.build()?;
 		Ok(Self {
 			broadcast,
 			catalog,
