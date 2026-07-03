@@ -144,7 +144,7 @@ export class MultiBackend implements Backend {
 		this.audio = new AudioBackend(this.#audioSource);
 
 		this.paused = Signal.from(props?.paused ?? false);
-		this.visible = Signal.from(props?.visible ?? "0px");
+		this.visible = Signal.from(props?.visible ?? "20%");
 
 		this.signals.run(this.#runElement.bind(this));
 	}

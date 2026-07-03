@@ -23,7 +23,7 @@ export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
 	/** Whether playback is paused; when paused only a single preview frame is fetched. */
 	paused?: boolean | Signal<boolean>;
-	/** When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to `"0px"`. */
+	/** When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to `"20%"`. */
 	visible?: Visible | Signal<Visible>;
 };
 
@@ -55,7 +55,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
-		this.visible = Signal.from(props?.visible ?? "0px");
+		this.visible = Signal.from(props?.visible ?? "20%");
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);

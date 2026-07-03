@@ -70,7 +70,7 @@ The simplest way to watch a stream:
 | `name`    | string                              | required | Broadcast name/path                      |
 | `paused`  | boolean                             | false    | Pause playback                           |
 | `muted`   | boolean                             | false    | Mute audio                               |
-| `visible` | never, distance, or always          | `0px`    | When to download video (see below)       |
+| `visible` | never, distance, or always          | `20%`    | When to download video (see below)       |
 | `volume`  | number                              | 0.5      | Audio volume (0-1)                       |
 | `reload`  | boolean                             | true     | Wait for (re)announcement before subscribing. Defaults off for `mediaoverquic.com` relays until they support broadcast discovery. |
 
@@ -79,8 +79,8 @@ position relative to the viewport:
 
 - `never`: never download video.
 - a distance (`0px`, `200px`, `100%`, ...): download while the canvas is within that distance
-  of the viewport **and** the tab is visible. `0px` (the default) means strictly on screen; a
-  larger distance pre-warms the video before it scrolls into view.
+  of the viewport **and** the tab is visible. `0px` means strictly on screen; a larger distance
+  (`20%`, the default) pre-warms the video before it scrolls into view.
 - `always`: always download video, regardless of the canvas position or tab visibility.
 
 Only the distance mode suspends video while the tab is hidden; `always` keeps downloading.
