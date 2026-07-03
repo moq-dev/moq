@@ -91,7 +91,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 						(Some(w), Some(h)) => Some(MoqDimensions { width: w, height: h }),
 						_ => None,
 					},
-					display_ratio: match (config.display_ratio_width, config.display_ratio_height) {
+					display_ratio: match (config.display_aspect_width, config.display_aspect_height) {
 						(Some(w), Some(h)) => Some(MoqDimensions { width: w, height: h }),
 						_ => None,
 					},

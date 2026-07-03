@@ -15,29 +15,15 @@ test("video config accepts canonical display aspect fields", () => {
 	expect("displayRatioHeight" in parsed).toBe(false);
 });
 
-test("video config accepts legacy display ratio fields", () => {
-	const parsed = VideoConfigSchema.parse({
-		codec: "avc1.64001f",
-		container: { kind: "legacy" },
-		displayRatioWidth: 4,
-		displayRatioHeight: 3,
-	});
-
-	expect(Number(parsed.displayAspectWidth)).toBe(4);
-	expect(Number(parsed.displayAspectHeight)).toBe(3);
-	expect("displayRatioWidth" in parsed).toBe(false);
-	expect("displayRatioHeight" in parsed).toBe(false);
-});
-
-test("legacy video arrays derive display size from normalized aspect fields", () => {
+test("legacy video arrays derive display size from display aspect fields", () => {
 	const parsed = VideoSchema.parse([
 		{
 			track: { name: "video" },
 			config: {
 				codec: "avc1.64001f",
 				container: { kind: "legacy" },
-				displayRatioWidth: 16,
-				displayRatioHeight: 9,
+				displayAspectWidth: 16,
+				displayAspectHeight: 9,
 			},
 		},
 	]);

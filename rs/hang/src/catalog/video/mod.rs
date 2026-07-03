@@ -114,10 +114,8 @@ pub struct VideoConfig {
 	///
 	/// This allows you to stretch/shrink pixels of the video.
 	/// If not provided, the display aspect ratio is 1:1
-	#[serde(rename = "displayAspectWidth", alias = "displayRatioWidth")]
-	pub display_ratio_width: Option<u32>,
-	#[serde(rename = "displayAspectHeight", alias = "displayRatioHeight")]
-	pub display_ratio_height: Option<u32>,
+	pub display_aspect_width: Option<u32>,
+	pub display_aspect_height: Option<u32>,
 
 	// TODO color space
 	/// The maximum bitrate of the video track, if known.
@@ -167,8 +165,8 @@ impl VideoConfig {
 			description: None,
 			coded_width: None,
 			coded_height: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
+			display_aspect_width: None,
+			display_aspect_height: None,
 			bitrate: None,
 			framerate: None,
 			optimize_for_latency: None,
@@ -180,8 +178,6 @@ impl VideoConfig {
 
 #[cfg(test)]
 mod test {
-	use serde_json::json;
-
 	use crate::catalog::{Container, H264};
 
 	use super::*;
@@ -194,8 +190,8 @@ mod test {
 			level: 0x1f,
 			inline: false,
 		});
-		config.display_ratio_width = Some(4);
-		config.display_ratio_height = Some(3);
+		config.display_aspect_width = Some(4);
+		config.display_aspect_height = Some(3);
 		config.container = Container::Legacy;
 
 		let encoded = serde_json::to_value(config).expect("failed to encode");
@@ -203,18 +199,5 @@ mod test {
 		assert_eq!(encoded["displayAspectHeight"], 3);
 		assert!(encoded.get("displayRatioWidth").is_none());
 		assert!(encoded.get("displayRatioHeight").is_none());
-	}
-
-	#[test]
-	fn display_aspect_accepts_legacy_json_names() {
-		let decoded: VideoConfig = serde_json::from_value(json!({
-			"codec": "avc1.64001f",
-			"displayRatioWidth": 4,
-			"displayRatioHeight": 3
-		}))
-		.expect("failed to decode");
-
-		assert_eq!(decoded.display_ratio_width, Some(4));
-		assert_eq!(decoded.display_ratio_height, Some(3));
 	}
 }
