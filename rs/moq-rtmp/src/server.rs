@@ -56,6 +56,13 @@ const READ_BUFFER: usize = 16 * 1024;
 /// handshake.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Maximum number of accepted sockets that can be handshaking or waiting for a
+/// publish/play request at once.
+const MAX_PENDING_REQUESTS: usize = 128;
+
+/// Maximum gap between media packets from an accepted publisher.
+const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// TCP keepalive idle period before the kernel starts probing a silent peer, and
 /// the interval between probes. Once a connection is publishing or playing it can
 /// block in a `read` indefinitely, so without keepalive a half-open connection (a
@@ -81,6 +88,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 /// This is the stream type behind a [`Server`]-produced [`Request`] (hence
 /// `Request<Conn>`). Bring-your-own-transport callers using [`accept_stream`]
 /// keep their own stream type instead.
+#[non_exhaustive]
 pub enum Conn {
 	/// A plaintext TCP connection (`rtmp://`).
 	Plain(TcpStream),
@@ -189,7 +197,7 @@ impl Server {
 					}
 				}
 				// A new TCP connection: start its (TLS +) handshake concurrently.
-				res = self.listener.accept() => match res {
+				res = self.listener.accept(), if self.pending.len() < MAX_PENDING_REQUESTS => match res {
 					Ok((stream, peer)) => {
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
@@ -225,6 +233,9 @@ impl Server {
 								}
 							}
 						}));
+						if self.pending.len() == MAX_PENDING_REQUESTS {
+							tracing::warn!(pending = MAX_PENDING_REQUESTS, "RTMP pending request limit reached");
+						}
 					}
 					Err(err) => {
 						// A failed accept must not take the listener down; back off so a
@@ -653,6 +664,7 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
+	let mut media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
@@ -665,11 +677,13 @@ async fn pump<S: Stream>(
 					// consumes whole tags atomically, so one bad frame doesn't desync
 					// the stream, and tearing down a live publish over it would be worse.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
+						media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						if let Err(err) = publisher.push(flv::TAG_AUDIO, timestamp.value, &data) {
 							tracing::warn!(%peer, %err, "dropping RTMP audio frame that failed to demux");
 						}
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
+						media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						if let Err(err) = publisher.push(flv::TAG_VIDEO, timestamp.value, &data) {
 							tracing::warn!(%peer, %err, "dropping RTMP video frame that failed to demux");
 						}
@@ -689,7 +703,12 @@ async fn pump<S: Stream>(
 			break;
 		}
 
-		let n = stream.read(&mut buffer).await?;
+		let n = tokio::select! {
+			res = stream.read(&mut buffer) => res?,
+			_ = tokio::time::sleep_until(media_deadline) => {
+				anyhow::bail!("peer {peer} sent no RTMP media for {:?}", PUBLISH_IDLE_TIMEOUT);
+			}
+		};
 		if n == 0 {
 			break;
 		}
@@ -834,11 +853,6 @@ async fn feed_input<S: Stream>(
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
 	let mut handshake = Handshake::new(PeerType::Server);
-	let p0_p1 = handshake
-		.generate_outbound_p0_and_p1()
-		.map_err(|e| anyhow::anyhow!("rtmp handshake p0/p1: {e:?}"))?;
-	stream.write_all(&p0_p1).await?;
-
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;

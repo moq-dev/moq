@@ -40,7 +40,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"],
 # stream-key slot forever.
 socket2 = "0.6"
 thiserror = "2"
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
 # RTMPS: TLS-terminate accepted connections. Mirrors moq-relay's pinning so the
 # workspace shares one tokio-rustls; the crypto provider comes from the supplied
 # `rustls::ServerConfig`, so no default crypto feature is needed here.
