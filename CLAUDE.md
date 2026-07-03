@@ -157,16 +157,15 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 ## Branch Targeting
 
-Two long-lived branches:
+Two long-lived branches. The split is about **semver breakage, not size or novelty**: `dev` is only for changes that break an existing published contract. Everything else (bug fixes, new behavior, new/additive APIs, docs, refactors) goes to `main`, however large.
 
-- **`main`**: stable. Bug fixes, small additive changes, docs, refactors that preserve public/wire behavior.
-- **`dev`**: staging branch for disruptive work. Target it for:
+- **`main`**: the default. Bug fixes, new behavior, new/additive APIs, docs, and refactors that preserve the existing public/wire contract. A change that only *adds* is additive and lands here even when it is big: a new `pub` item, a new option, or a parser accepting a broader set of inputs it previously rejected. Changing what a component does with input it *already* takes (e.g. recognizing a media pattern it used to mishandle) is a fix, not a break, so it also lands here.
+- **`dev`**: reserved for changes that violate semver by breaking an existing contract. Target it only for:
   - Wire-protocol changes (anything under `rs/moq-net`, including `moq-lite` / `moq-transport` framing or draft bumps).
-  - Breaking changes to public APIs in `rs/moq-ffi`, `rs/libmoq`, `rs/moq-net`, `rs/hang`, `js/net`, `js/hang`, or any of the language wrappers under `swift/`, `kt/`, `go/`, `py/`.
-  - Catalog/container format changes in `rs/hang` or `js/hang`.
-  - Major features that need time to settle before shipping.
+  - Breaking changes to public APIs in `rs/moq-ffi`, `rs/libmoq`, `rs/moq-net`, `rs/hang`, `js/net`, `js/hang`, or any of the language wrappers under `swift/`, `kt/`, `go/`, `py/`. This means a renamed, removed, or signature-changed `pub` item, not a newly *added* one (adding is additive, so it goes to `main`).
+  - Catalog/container format changes in `rs/hang` or `js/hang` that alter existing on-the-wire framing or fields.
 
-`dev` periodically merges into `main` (or vice versa) when the batch is ready to ship. When in doubt, target `main`; reviewers will redirect to `dev` if needed. CI (`pull_request:` workflows) runs on PRs against either branch, so no extra setup is needed when you switch the base.
+`dev` periodically merges into `main` (or vice versa) when the batch is ready to ship. When in doubt, target `main`; reviewers will redirect to `dev` if a change turns out to break an existing contract. CI (`pull_request:` workflows) runs on PRs against either branch, so no extra setup is needed when you switch the base.
 
 ## Workflow
 
