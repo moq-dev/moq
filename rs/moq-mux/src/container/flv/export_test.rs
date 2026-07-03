@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodec};
 
 use super::{Export, Import};
@@ -356,7 +357,7 @@ fn parse_tags(flv: &[u8]) -> Vec<ParsedTag> {
 	tags
 }
 
-/// A frame's tag timestamp must survive the round trip (PTS in milliseconds).
+/// A frame's presentation timestamp must survive as DTS plus composition time.
 #[tokio::test(start_paused = true)]
 async fn export_preserves_timestamps() {
 	let mut producer = moq_net::Broadcast::new().produce();
@@ -371,10 +372,119 @@ async fn export_preserves_timestamps() {
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
-	let video_ts: Vec<u32> = tags
+	let video_pts: Vec<i64> = tags
 		.iter()
 		.filter(|t| t.tag_type == super::TAG_VIDEO && t.body[1] == super::AVC_NALU)
-		.map(|t| t.timestamp)
+		.map(|t| i64::from(t.timestamp) + i64::from(super::read_i24(&t.body[2..5])))
 		.collect();
-	assert_eq!(video_ts, vec![0, 33]);
+	assert_eq!(video_pts, vec![0, 33]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_authors_dts_and_composition_time_for_reordered_avc() {
+	use crate::container::Timestamp;
+	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let video_track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".avc1")))
+		.unwrap();
+	let audio_track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".aac")))
+		.unwrap();
+
+	let mut video_config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: false,
+	});
+	video_config.container = Container::Legacy;
+	video_config.description = Some(Bytes::from(avcc()));
+	video_config.jitter = Some(moq_net::Time::try_from(Duration::from_millis(80)).unwrap());
+	catalog
+		.lock()
+		.video
+		.renditions
+		.insert(video_track.name().to_string(), video_config);
+
+	let mut audio_config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	audio_config.container = Container::Legacy;
+	audio_config.description = Some(Bytes::from_static(&ASC));
+	catalog
+		.lock()
+		.audio
+		.renditions
+		.insert(audio_track.name().to_string(), audio_config);
+
+	let mut video = crate::container::Producer::new(video_track, crate::catalog::hang::Container::Legacy);
+	let video_frame = |timestamp_ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+		duration: None,
+		payload: Bytes::from_static(payload),
+		keyframe,
+	};
+	video.write(video_frame(0, &[0, 0, 0, 1, 0x65], true)).unwrap();
+	video.write(video_frame(80, &[0, 0, 0, 1, 0x41], false)).unwrap();
+	video.write(video_frame(40, &[0, 0, 0, 1, 0x01], false)).unwrap();
+	video.write(video_frame(120, &[0, 0, 0, 1, 0x41], false)).unwrap();
+	video.finish().unwrap();
+
+	let mut audio = crate::container::Producer::new(audio_track, crate::catalog::hang::Container::Legacy);
+	audio
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_millis(20).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xde, 0xad]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let exporter = Export::new(consumer).unwrap();
+	let exported = drain_exporter_chunks(exporter, 6).await;
+	let tags = parse_tags(&exported);
+
+	let tag_timestamps: Vec<u32> = tags.iter().map(|tag| tag.timestamp).collect();
+	assert!(
+		tag_timestamps.windows(2).all(|pair| pair[1] >= pair[0]),
+		"FLV tag timestamps must not go backwards: {tag_timestamps:?}"
+	);
+
+	let video_frames: Vec<(u32, i32)> = tags
+		.iter()
+		.filter(|tag| tag.tag_type == super::TAG_VIDEO && tag.body[1] == super::AVC_NALU)
+		.map(|tag| (tag.timestamp, super::read_i24(&tag.body[2..5])))
+		.collect();
+	assert_eq!(
+		video_frames.iter().map(|(dts, _)| *dts).collect::<Vec<_>>(),
+		vec![0, 1, 2, 40],
+		"video tag timestamps should be authored DTS"
+	);
+	assert_eq!(
+		video_frames
+			.iter()
+			.map(|(dts, cts)| i64::from(*dts) + i64::from(*cts))
+			.collect::<Vec<_>>(),
+		vec![0, 80, 40, 120],
+		"composition time should recover the source PTS"
+	);
+}
+
+async fn drain_exporter_chunks(mut exporter: Export, chunks: usize) -> Vec<u8> {
+	let mut exported = Vec::new();
+	for _ in 0..chunks {
+		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
+			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
+			Ok(Ok(None)) => panic!("exporter ended early"),
+			Ok(Err(e)) => panic!("exporter error: {e}"),
+			Err(_) => panic!("exporter timed out"),
+		}
+	}
+	exported
 }

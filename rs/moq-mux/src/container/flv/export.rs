@@ -56,6 +56,10 @@ impl Flavor {
 			Flavor::Avc | Flavor::Aac | Flavor::Mp3 => None,
 		}
 	}
+
+	fn has_composition_time(self) -> bool {
+		matches!(self, Flavor::Avc | Flavor::Hevc)
+	}
 }
 
 /// Subscribe to a broadcast and produce an FLV byte stream.
@@ -97,6 +101,21 @@ struct FlvTrack {
 	/// tag, used when the catalog (and thus [`ExportSource::description`]) carries
 	/// none. Only AV1 needs this today (its av1C is optional in the catalog).
 	fallback_description: Option<Bytes>,
+	/// How far to run the authored decode clock behind the PTS, in FLV milliseconds.
+	dts_reserve: u32,
+	/// Last authored video DTS, in FLV milliseconds.
+	last_dts: Option<u32>,
+}
+
+impl FlvTrack {
+	fn tag_timestamp(&self, frame: &Frame) -> anyhow::Result<u32> {
+		let pts = frame_timestamp_ms(frame)?;
+		if self.flavor.has_composition_time() {
+			author_dts(pts, self.dts_reserve, self.last_dts)
+		} else {
+			Ok(pts)
+		}
+	}
 }
 
 impl Export {
@@ -190,8 +209,8 @@ impl Export {
 			return Poll::Pending;
 		}
 
-		// 4. Emit the smallest-timestamp pending frame as one tag.
-		if let Some(is_video) = self.pick_next_track() {
+		// 4. Emit the smallest FLV tag timestamp as one tag.
+		if let Some(is_video) = self.pick_next_track()? {
 			let track = if is_video {
 				self.video.as_mut()
 			} else {
@@ -246,6 +265,8 @@ impl Export {
 				finished: false,
 				flavor,
 				fallback_description,
+				dts_reserve: dts_reserve(config),
+				last_dts: None,
 			});
 		}
 		if catalog.video.renditions.len() > 1 {
@@ -265,6 +286,8 @@ impl Export {
 				finished: false,
 				flavor,
 				fallback_description: None,
+				dts_reserve: 0,
+				last_dts: None,
 			});
 		}
 		if catalog.audio.renditions.len() > 1 {
@@ -330,36 +353,36 @@ impl Export {
 		Ok(out.freeze())
 	}
 
-	/// Pick the track with the smallest pending timestamp. Returns whether it's the
-	/// video track, or `None` if no frame is pending.
-	fn pick_next_track(&self) -> Option<bool> {
+	/// Pick the track with the smallest pending FLV tag timestamp. Returns whether
+	/// it's the video track, or `None` if no frame is pending.
+	fn pick_next_track(&self) -> anyhow::Result<Option<bool>> {
 		let video = self
 			.video
 			.as_ref()
-			.and_then(|t| t.pending.as_ref())
-			.map(|f| f.timestamp);
+			.and_then(|track| track.pending.as_ref().map(|frame| track.tag_timestamp(frame)))
+			.transpose()?;
 		let audio = self
 			.audio
 			.as_ref()
 			.and_then(|t| t.pending.as_ref())
-			.map(|f| f.timestamp);
-		match (video, audio) {
+			.map(frame_timestamp_ms)
+			.transpose()?;
+		Ok(match (video, audio) {
 			(Some(v), Some(a)) => Some(v <= a),
 			(Some(_), None) => Some(true),
 			(None, Some(_)) => Some(false),
 			(None, None) => None,
-		}
+		})
 	}
 
 	/// Encode one frame as a single FLV tag.
-	fn encode_frame(&self, is_video: bool, frame: Frame) -> anyhow::Result<Bytes> {
-		let timestamp_ms: u32 = (frame.timestamp.as_millis())
-			.try_into()
-			.context("FLV timestamp exceeds 32 bits")?;
-
+	fn encode_frame(&mut self, is_video: bool, frame: Frame) -> anyhow::Result<Bytes> {
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		if is_video {
-			let flavor = self.video.as_ref().expect("video frame without a video track").flavor;
+			let track = self.video.as_mut().expect("video frame without a video track");
+			let flavor = track.flavor;
+			let pts_ms = frame_timestamp_ms(&frame)?;
+			let timestamp_ms = track.tag_timestamp(&frame)?;
 			let frame_type = if frame.keyframe {
 				FRAME_TYPE_KEY
 			} else {
@@ -367,25 +390,29 @@ impl Export {
 			};
 			let mut body = BytesMut::with_capacity(8 + frame.payload.len());
 			match flavor.fourcc() {
-				// Legacy AVC: CodecID + AVCPacketType + composition time (PTS in the tag).
+				// Legacy AVC: CodecID + AVCPacketType + signed composition time.
 				None => {
 					body.put_u8((frame_type << 4) | VIDEO_CODEC_AVC);
 					body.put_u8(AVC_NALU);
-					body.put_slice(&[0, 0, 0]);
+					write_i24(&mut body, composition_time(pts_ms, timestamp_ms)?)?;
 				}
 				// Enhanced FourCC CodedFrames. hvc1 keeps the 3-byte composition
-				// time (zero, since we carry PTS in the tag); av01/vp09 omit it.
+				// time; av01/vp09 omit it.
 				Some(fourcc) => {
 					body.put_u8(VIDEO_EX_HEADER | (frame_type << 4) | VIDEO_PACKET_CODED_FRAMES);
 					body.put_slice(&fourcc);
 					if flavor == Flavor::Hevc {
-						body.put_slice(&[0, 0, 0]);
+						write_i24(&mut body, composition_time(pts_ms, timestamp_ms)?)?;
 					}
 				}
+			}
+			if flavor.has_composition_time() {
+				track.last_dts = Some(timestamp_ms);
 			}
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_VIDEO, timestamp_ms, &body)?;
 		} else {
+			let timestamp_ms = frame_timestamp_ms(&frame)?;
 			let flavor = self.audio.as_ref().expect("audio frame without an audio track").flavor;
 			let mut body = BytesMut::with_capacity(5 + frame.payload.len());
 			match flavor {
@@ -457,6 +484,49 @@ fn audio_flavor(config: &hang::catalog::AudioConfig) -> anyhow::Result<Flavor> {
 		AudioCodec::Ec3 => Ok(Flavor::Eac3),
 		other => anyhow::bail!("FLV export does not support audio codec {other:?}"),
 	}
+}
+
+fn frame_timestamp_ms(frame: &Frame) -> anyhow::Result<u32> {
+	frame
+		.timestamp
+		.as_millis()
+		.try_into()
+		.context("FLV timestamp exceeds 32 bits")
+}
+
+fn composition_time(pts: u32, dts: u32) -> anyhow::Result<i32> {
+	let cts = i64::from(pts) - i64::from(dts);
+	i32::try_from(cts)
+		.ok()
+		.filter(|cts| (-0x80_0000..=0x7f_ffff).contains(cts))
+		.context("FLV composition time exceeds signed 24 bits")
+}
+
+fn write_i24(out: &mut BytesMut, value: i32) -> anyhow::Result<()> {
+	anyhow::ensure!(
+		(-0x80_0000..=0x7f_ffff).contains(&value),
+		"FLV composition time exceeds signed 24 bits"
+	);
+	out.put_slice(&(value as u32).to_be_bytes()[1..]);
+	Ok(())
+}
+
+fn author_dts(pts: u32, reserve: u32, last: Option<u32>) -> anyhow::Result<u32> {
+	let mut dts = pts.saturating_sub(reserve);
+	if let Some(prev) = last
+		&& dts <= prev
+	{
+		dts = prev.checked_add(1).context("FLV DTS exceeds 32 bits")?;
+	}
+	Ok(dts)
+}
+
+fn dts_reserve(config: &hang::catalog::VideoConfig) -> u32 {
+	config
+		.jitter
+		.and_then(|t| u32::try_from(t.as_millis()).ok())
+		.filter(|reserve| *reserve > 0)
+		.unwrap_or(1)
 }
 
 /// Build the FLV video sequence-header tag body, or `None` for codecs that carry
