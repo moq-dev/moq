@@ -16,8 +16,9 @@ C-ABI definitions and nothing links at build time. It only actually loads NVENC
 on Linux (that is the only place `moq-video` calls it); elsewhere it is a
 compile-only stub.
 
-The `sys` bindings are generated with bindgen; see `src/sys/linux_sys/bindgen.sh`
-and `src/sys/windows_sys/bindgen.ps1` to regenerate from the vendored headers.
+The `sys` bindings are generated with bindgen from the vendored headers
+(`src/sys/headers/`); see the [upstream repo](https://github.com/ViliamVadocz/nvidia-video-codec-sdk)
+for the generation scripts.
 
 ## License
 
