@@ -1,63 +1,10 @@
 //! Pace media output on a media clock, following the live edge.
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 use super::Timestamp;
-
-/// A one-shot wall-clock timer wired into kio's poll model.
-///
-/// [`Pacer`] answers "at what wall-clock instant is this media due"; `Timer` is the
-/// other half, letting a `poll_*` function actually wait for that instant. It drives a
-/// stored tokio sleep against the poll's [`kio::Waiter`], so the poll re-fires when the
-/// deadline passes. moq-mux already depends on tokio, so this keeps the wait local
-/// instead of pushing a runtime dependency into kio.
-#[derive(Default)]
-pub(crate) struct Timer {
-	/// The armed sleep, kept alive across polls so its timer registration persists.
-	sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-	/// The instant `sleep` targets, so we only re-arm when it moves.
-	until: Option<Instant>,
-}
-
-impl Timer {
-	/// Poll until `after`. Returns `Ready(now)` once the clock reaches `after`; otherwise
-	/// arms (or re-arms) against `waiter` and returns `Pending`. Re-arms only when `after`
-	/// changes, so repeated polls for one deadline reuse a single timer registration.
-	///
-	/// Reads the clock through `tokio::time`, so a `tokio::time::pause()` test advances the
-	/// deadline check and the sleep together.
-	pub(crate) fn poll(&mut self, after: Instant, waiter: &kio::Waiter) -> Poll<Instant> {
-		let now = Instant::now();
-		if now >= after {
-			self.disarm();
-			return Poll::Ready(now);
-		}
-		if self.until != Some(after) {
-			self.until = Some(after);
-			self.sleep = Some(Box::pin(tokio::time::sleep_until(after)));
-		}
-		let mut cx = Context::from_waker(waiter.waker());
-		match self.sleep.as_mut().unwrap().as_mut().poll(&mut cx) {
-			Poll::Ready(()) => {
-				self.disarm();
-				Poll::Ready(Instant::now())
-			}
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
-	/// Drop the armed sleep. Called once the deadline fires so a later poll for a new
-	/// deadline starts clean.
-	fn disarm(&mut self) {
-		self.sleep = None;
-		self.until = None;
-	}
-}
 
 /// Maps media (decode) timestamps onto the wall clock so a caller can emit frames at
 /// the source's real-time rate while bounding how far behind the live edge it falls.
@@ -136,17 +83,6 @@ mod tests {
 
 	fn ms(m: u64) -> Timestamp {
 		Timestamp::from_micros(m * 1_000).unwrap()
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn timer_fires_at_its_deadline() {
-		let start = Instant::now();
-		let deadline = start + Duration::from_millis(50);
-		let mut timer = Timer::default();
-		// `kio::wait` drives the poll; under paused time tokio auto-advances to the armed
-		// sleep, so this resolves at the deadline rather than blocking for real.
-		let fired = kio::wait(|waiter| timer.poll(deadline, waiter)).await;
-		assert!(fired >= deadline, "fired {fired:?} before deadline {deadline:?}");
 	}
 
 	#[test]

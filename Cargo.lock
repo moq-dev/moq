@@ -3729,6 +3729,7 @@ name = "kio"
 version = "0.4.1"
 dependencies = [
  "smallvec",
+ "tokio",
 ]
 
 [[package]]
