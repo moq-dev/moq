@@ -5,7 +5,7 @@
 #[allow(non_snake_case)]
 /// Macro to generate per-structure version for use with API.
 pub const fn NVENCAPI_STRUCT_VERSION(ver: u32) -> u32 {
-    super::nvEncodeAPI::NVENCAPI_VERSION | (ver << 16) | (0x7 << 28)
+	super::nvEncodeAPI::NVENCAPI_VERSION | (ver << 16) | (0x7 << 28)
 }
 
 // Search for `#define \w+_VER` and copy the whole line.

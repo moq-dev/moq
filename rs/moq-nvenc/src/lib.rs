@@ -27,12 +27,12 @@
 //! There is no safe wrapper yet.
 
 #![warn(
-    missing_docs,
-    clippy::pedantic,
-    clippy::style,
-    clippy::unwrap_used,
-    missing_debug_implementations,
-    missing_copy_implementations
+	missing_docs,
+	clippy::pedantic,
+	clippy::style,
+	clippy::unwrap_used,
+	missing_debug_implementations,
+	missing_copy_implementations
 )]
 
 pub mod safe;
