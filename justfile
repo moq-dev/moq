@@ -1,8 +1,10 @@
 #!/usr/bin/env just --justfile
-
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
+set unstable := true
+
 # Per-language modules. Anything that's specific to one language lives in
+
 # its own justfile; the recipes below orchestrate across them.
 mod js
 mod rs
@@ -10,20 +12,15 @@ mod py
 mod kt
 mod swift
 mod go
-
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
-
 # Unit tests per language (`just test`).
 mod test
-
 # Demos and infra.
 mod demo
 mod infra
-
 # GitHub Actions workflow linting.
 mod gh '.github'
-
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
 mod pub 'demo/pub'
@@ -40,6 +37,7 @@ dev:
     just demo
 
 # Install repo-wide tooling. Per-language deps install on first invocation
+
 # of `just <lang> check`.
 install:
     bun install
@@ -48,6 +46,7 @@ install:
 # Fast inner-loop checks. Runs JS, Rust, and Markdown lints.
 # Shell + workflow + TOML + Nix + justfile lints skip silently if their
 # binaries aren't on $PATH; `nix develop` provides them, and `just ci`
+
 # requires them.
 check *args:
     just js check
@@ -56,11 +55,12 @@ check *args:
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f .) && shellcheck $(shfmt -f .); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); fi
-    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --check --justfile "$f"; done
+    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --check --justfile "$f"; done
     just gh check
 
 # Run every per-language `ci` with the diff vs BASE; each greps for its
 # own scope and skips when nothing relevant changed. Pass BASE="" to
+
 # default to $GITHUB_BASE_REF (CI) or origin/main (local).
 ci BASE="":
     #!/usr/bin/env bash
@@ -113,10 +113,11 @@ ci BASE="":
     shellcheck $(shfmt -f .)
     RUST_LOG=error taplo format --check
     nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*')
-    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --check --justfile "$f"; done
+    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --check --justfile "$f"; done
     just gh ci
 
 # Auto-fix linting/formatting issues across all languages.
+
 # shfmt / taplo / nixfmt / just --fmt skipped silently if missing locally.
 fix:
     just js fix
@@ -126,7 +127,7 @@ fix:
     @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f .); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); fi
-    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --justfile "$f"; done
+    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --justfile "$f"; done
 
 # Build the packages.
 build:
@@ -137,6 +138,7 @@ build:
 # Delete build artifacts and caches to reclaim disk space. Each language
 # owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this
 # orchestrates them, sweeps the caches no language owns, then recurses into
+
 # any agent worktrees under .claude/worktrees/.
 clean:
     #!/usr/bin/env bash
