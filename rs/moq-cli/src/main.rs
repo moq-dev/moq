@@ -83,7 +83,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	}
 
 	// MoQ side: publish the Origin outward.
-	if let Some(url) = moq.client_connect.clone() {
+	if let Some(url) = moq.client.connect.clone() {
 		let client = net.client(moq.client.clone())?;
 		let origin = origin.clone();
 		tasks.spawn(async move { moq::client_import(client, url, &origin).await });
@@ -164,7 +164,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 
 	// MoQ side: fill the Origin.
-	if let Some(url) = moq.client_connect.clone() {
+	if let Some(url) = moq.client.connect.clone() {
 		let client = net.client(moq.client.clone())?;
 		let origin = origin.clone();
 		tasks.spawn(async move { moq::client_export(client, url, origin).await });

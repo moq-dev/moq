@@ -16,7 +16,6 @@
 use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
-use url::Url;
 
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
@@ -43,20 +42,6 @@ pub struct Cli {
 #[derive(Args, Clone)]
 #[command(group = ArgGroup::new("moq").required(true).multiple(true).args(["client-connect", "server-bind"]))]
 pub struct MoqSide {
-	/// Dial a MoQ relay/server over WebTransport.
-	///
-	/// The URL path is the relay auth path (e.g. `/anon` for a public relay); the
-	/// broadcast rides on top of it (via `--broadcast` or the endpoint). `?jwt=`
-	/// supplies a token. `http://` first fetches `/certificate.sha256` for the
-	/// (insecure) self-signed fingerprint; `https://` connects directly.
-	#[arg(
-		id = "client-connect",
-		long = "client-connect",
-		env = "MOQ_CLIENT_CONNECT",
-		help_heading = "MoQ"
-	)]
-	pub client_connect: Option<Url>,
-
 	/// The broadcast name. Optional for the point endpoints (stdin/stdout, HLS
 	/// import, and the `--connect` dials), which default to the root broadcast at
 	/// the connection path; required by the `--listen` endpoints and `hls export`,
@@ -64,7 +49,7 @@ pub struct MoqSide {
 	#[arg(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
-	/// MoQ client transport config (`--client-bind`, `--client-tls-*`, ...).
+	/// MoQ client config (`--client-connect`, `--client-bind`, `--client-tls-*`, ...).
 	#[command(flatten)]
 	pub client: moq_native::ClientConfig,
 

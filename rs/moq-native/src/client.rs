@@ -9,6 +9,17 @@ use url::Url;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct ClientConfig {
+	/// The URL to dial.
+	///
+	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
+	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
+	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
+	/// self-signed fingerprint; `https://` connects directly.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-connect", long = "client-connect", env = "MOQ_CLIENT_CONNECT")]
+	pub connect: Option<Url>,
+
 	/// Listen for UDP packets on the given address.
 	#[arg(
 		id = "client-bind",
@@ -75,6 +86,7 @@ impl ClientConfig {
 impl Default for ClientConfig {
 	fn default() -> Self {
 		Self {
+			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
 			max_streams: None,
