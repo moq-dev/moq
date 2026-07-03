@@ -58,7 +58,7 @@ impl Default for Config {
 
 /// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	/// Keyed by `(kind, name)` so a video and an audio rendition can share a name
 	/// without one silently evicting the other.
 	renditions: Mutex<BTreeMap<(Kind, String), Arc<Rendition>>>,
@@ -77,7 +77,7 @@ pub struct Broadcaster {
 
 impl Broadcaster {
 	/// Subscribe to `broadcast` and start tracking its renditions.
-	pub fn new(broadcast: moq_net::BroadcastConsumer, config: Config) -> Arc<Self> {
+	pub fn new(broadcast: moq_net::broadcast::Consumer, config: Config) -> Arc<Self> {
 		let (ready, _) = watch::channel(0);
 		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
@@ -169,7 +169,7 @@ impl Broadcaster {
 
 	/// Add renditions newly present in `catalog`. Renditions are not removed when
 	/// they disappear; their stores simply go stale (rare for a live broadcast).
-	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
+	fn sync(&self, broadcast: &moq_net::broadcast::Consumer, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
 			renditions.entry((Kind::Video, name.clone())).or_insert_with(|| {
@@ -203,7 +203,7 @@ impl Drop for Broadcaster {
 	}
 }
 
-async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Weak<Broadcaster>) {
+async fn watch_catalog(broadcast: moq_net::broadcast::Consumer, config: Config, broadcaster: Weak<Broadcaster>) {
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,

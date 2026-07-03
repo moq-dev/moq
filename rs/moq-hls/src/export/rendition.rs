@@ -55,7 +55,7 @@ impl std::str::FromStr for Kind {
 /// don't take a long list of easily-transposed positional arguments.
 pub(crate) struct Context<'a> {
 	/// The broadcast whose track this rendition exports.
-	pub broadcast: moq_net::BroadcastConsumer,
+	pub broadcast: moq_net::broadcast::Consumer,
 	/// Export tuning shared across renditions.
 	pub cfg: &'a Config,
 	/// Pause signal shared with every rendition pump.
@@ -139,7 +139,7 @@ fn spawn_pump(name: String, kind: Kind, store: Arc<SegmentStore>, ctx: &Context<
 }
 
 async fn run_pump(
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	name: &str,
 	kind: Kind,
 	store: &SegmentStore,

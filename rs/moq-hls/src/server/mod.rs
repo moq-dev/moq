@@ -56,7 +56,7 @@ pub struct Server {
 }
 
 struct Inner {
-	origin: moq_net::OriginConsumer,
+	origin: moq_net::origin::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
 	/// Optional per-request authorizer, set at most once via [`Server::with_authorizer`];
@@ -68,7 +68,7 @@ struct Inner {
 impl Server {
 	/// Build a server reading broadcasts from `origin`. Every request is allowed;
 	/// call [`with_authorizer`](Self::with_authorizer) to gate access.
-	pub fn new(origin: moq_net::OriginConsumer, config: Config) -> Self {
+	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				origin,
@@ -158,7 +158,7 @@ mod tests {
 	use super::*;
 
 	fn closed_broadcaster() -> Arc<Broadcaster> {
-		let producer = moq_net::BroadcastInfo::new().produce();
+		let producer = moq_net::broadcast::Info::new().produce();
 		let broadcaster = Broadcaster::new(producer.consume(), Config::default());
 		drop(producer);
 		broadcaster
@@ -189,7 +189,7 @@ mod tests {
 		let origin = moq_net::Origin::random().produce();
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster();
-		let new_producer = moq_net::BroadcastInfo::new().produce();
+		let new_producer = moq_net::broadcast::Info::new().produce();
 		let new = Broadcaster::new(new_producer.consume(), Config::default());
 
 		server
