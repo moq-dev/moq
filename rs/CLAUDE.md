@@ -46,7 +46,7 @@ The whole stack is built on a split-handle pattern: a `Producer` writes, one or 
 - Broadcast: `BroadcastProducer` / `BroadcastConsumer` / `BroadcastDynamic` (`model/broadcast.rs:74,370,216`).
 - Track: `TrackProducer` / `TrackConsumer` / `TrackWeak` (`model/track.rs:206,459,425`).
 - Group: `GroupProducer` / `GroupConsumer` (`model/group.rs:140,286`). Consumers `clone()` for fanout.
-- Frame: `FrameProducer` (impls `BufMut`) / `FrameConsumer` (`model/frame.rs:162,317`).
+- Frame: `FrameProducer` / `FrameConsumer` (`model/frame.rs`).
 - Origin: `OriginProducer` / `OriginConsumer` (`model/origin.rs`).
 
 ## Async / poll plumbing

@@ -875,9 +875,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut frame: FrameProducer,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
-		while bytes::BufMut::has_remaining_mut(&frame) {
-			let remaining = bytes::BufMut::remaining_mut(&frame);
-			match stream.read_chunk(remaining).await? {
+		while frame.remaining() > 0 {
+			match stream.read_chunk(frame.remaining()).await? {
 				Some(chunk) if !chunk.is_empty() => {
 					track_stats.bytes(chunk.len() as u64);
 					frame.write(chunk)?;
