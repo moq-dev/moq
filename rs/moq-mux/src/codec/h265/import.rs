@@ -126,8 +126,8 @@ impl<E: CatalogExt> Import<E> {
 		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
 		config.coded_height = Some(sps.rbsp.cropped_height() as u32);
 		config.framerate = vui_data.framerate;
-		config.display_ratio_width = vui_data.display_ratio_width;
-		config.display_ratio_height = vui_data.display_ratio_height;
+		config.display_aspect_width = vui_data.display_ratio_width;
+		config.display_aspect_height = vui_data.display_ratio_height;
 		config.container = hang::catalog::Container::Legacy;
 
 		self.last_sps = Some(sps_nal.clone());

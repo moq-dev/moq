@@ -52,7 +52,7 @@ pub struct MoqVideo {
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub coded: Option<MoqDimensions>,
-	pub display_ratio: Option<MoqDimensions>,
+	pub display_aspect: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
 	pub framerate: Option<f64>,
 	pub container: Container,
@@ -91,7 +91,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 						(Some(w), Some(h)) => Some(MoqDimensions { width: w, height: h }),
 						_ => None,
 					},
-					display_ratio: match (config.display_ratio_width, config.display_ratio_height) {
+					display_aspect: match (config.display_aspect_width, config.display_aspect_height) {
 						(Some(w), Some(h)) => Some(MoqDimensions { width: w, height: h }),
 						_ => None,
 					},
