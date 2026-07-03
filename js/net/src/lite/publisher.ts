@@ -62,13 +62,10 @@ export class Publisher {
 
 	#quic: WebTransport;
 
-	// Whether the transport actually carries QUIC datagrams (a real WebTransport, not a
-	// qmux Session whose datagram streams are inert stubs). Combined with hasDatagrams and
-	// a non-zero maxDatagramSize to decide whether to serve datagrams for a subscription.
-	#datagramsUsable: boolean;
-
-	// A single cached writer for the shared outbound datagram stream, opened lazily the
-	// first time a subscription serves a datagram (getWriter locks the stream).
+	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
+	// construction when this version + transport carry datagrams, released in close(). Its
+	// presence is the gate: undefined means datagrams aren't served on this connection. All
+	// subscriptions share it, since a second getWriter on the same stream would throw.
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
 	// Our published broadcasts.
@@ -86,15 +83,19 @@ export class Publisher {
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
 	 * @param origin - Origin id shared with the Subscriber
-	 * @param datagramsUsable - Whether the transport actually carries QUIC datagrams
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Origin, datagramsUsable = false) {
+	constructor(quic: WebTransport, version: Version, origin: Origin) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
-		this.#datagramsUsable = datagramsUsable;
+
+		// Grab the datagram writer up front when the transport carries datagrams (no group
+		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
+		if (hasDatagrams(version) && quic.datagrams.maxDatagramSize > 0) {
+			this.#datagramWriter = quic.datagrams.writable.getWriter();
+		}
 	}
 
 	/**
@@ -260,12 +261,9 @@ export class Publisher {
 
 			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale);
 
-			// Serve datagrams concurrently with groups, but only on lite-05+ over a transport
-			// that actually carries them. A qmux Session lies about maxDatagramSize, so the
-			// transport-type check (datagramsUsable) is the real gate; a real WebTransport with
-			// datagrams unavailable reports size 0. There is no group fallback: otherwise they
-			// simply aren't sent.
-			if (hasDatagrams(this.version) && this.#datagramsUsable && this.#quic.datagrams.maxDatagramSize > 0) {
+			// Serve datagrams concurrently with groups whenever the transport carries them
+			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
+			if (this.#datagramWriter) {
 				datagrams = this.#runDatagrams(msg.id, track, timescale);
 			}
 
@@ -396,15 +394,6 @@ export class Publisher {
 		return pending;
 	}
 
-	// The shared outbound datagram writer, opened lazily (getWriter locks the stream) and
-	// reused across every subscription's datagram loop.
-	#datagrams(): WritableStreamDefaultWriter<Uint8Array> {
-		if (!this.#datagramWriter) {
-			this.#datagramWriter = this.#quic.datagrams.writable.getWriter();
-		}
-		return this.#datagramWriter;
-	}
-
 	/**
 	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
 	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
@@ -414,10 +403,11 @@ export class Publisher {
 	 * @internal
 	 */
 	async #runDatagrams(sub: bigint, track: TrackSubscriber, timescale: Timescale) {
+		const writer = this.#datagramWriter;
+		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = this.#quic.datagrams.maxDatagramSize;
 
 		try {
-			const writer = this.#datagrams();
 			for (;;) {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
@@ -552,5 +542,9 @@ export class Publisher {
 			}
 			return undefined;
 		});
+
+		// Release the datagram writer's lock so the stream can be torn down.
+		this.#datagramWriter?.releaseLock();
+		this.#datagramWriter = undefined;
 	}
 }

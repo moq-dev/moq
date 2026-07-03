@@ -101,10 +101,6 @@ export class Subscriber {
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
 
-	// Whether the transport actually carries QUIC datagrams (a real WebTransport, not a
-	// qmux Session whose datagram streams are inert stubs). Gates the datagram recv loop.
-	#datagramsUsable: boolean;
-
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -113,7 +109,6 @@ export class Subscriber {
 	 * @param recvBandwidth - Optional bandwidth producer for PROBE
 	 * @param rtt - Optional RTT signal for PROBE
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
-	 * @param datagramsUsable - Whether the transport actually carries QUIC datagrams
 	 *
 	 * @internal
 	 */
@@ -124,7 +119,6 @@ export class Subscriber {
 		recvBandwidth?: Bandwidth,
 		rtt?: Signal<Time.Milli | undefined>,
 		peerSetup?: Signal<Setup | undefined>,
-		datagramsUsable = false,
 	) {
 		this.#quic = quic;
 		this.version = version;
@@ -132,7 +126,6 @@ export class Subscriber {
 		this.#recvBandwidth = recvBandwidth;
 		this.#rtt = rtt;
 		this.#peerSetup = peerSetup;
-		this.#datagramsUsable = datagramsUsable;
 	}
 
 	/**
@@ -540,7 +533,7 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runDatagrams(): Promise<void> {
-		if (!hasDatagrams(this.version) || !this.#datagramsUsable || this.#quic.datagrams.maxDatagramSize === 0) {
+		if (!hasDatagrams(this.version) || this.#quic.datagrams.maxDatagramSize === 0) {
 			return;
 		}
 

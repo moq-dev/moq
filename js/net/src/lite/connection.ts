@@ -66,26 +66,20 @@ export class Connection implements Established {
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
 
-	// Whether the transport actually carries QUIC datagrams (a real WebTransport, not a
-	// qmux Session whose datagram streams are inert stubs). Shared with Publisher/Subscriber.
-	#datagramsUsable: boolean;
-
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
 	 * @param quic - The WebTransport session
 	 * @param session - The session stream
-	 * @param datagramsUsable - Whether the transport actually carries QUIC datagrams
 	 *
 	 * @internal
 	 */
-	constructor(url: URL, quic: WebTransport, version: Version, session?: Stream, datagramsUsable = false) {
+	constructor(url: URL, quic: WebTransport, version: Version, session?: Stream) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
 		this.version = versionName(version);
 		this.#version = version;
-		this.#datagramsUsable = datagramsUsable;
 
 		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
 		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";
@@ -103,7 +97,7 @@ export class Connection implements Established {
 		this.rtt = new Signal<Time.Milli | undefined>(undefined);
 
 		this.origin = randomOrigin();
-		this.#publisher = new Publisher(this.#quic, this.#version, this.origin, this.#datagramsUsable);
+		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
 		this.#subscriber = new Subscriber(
 			this.#quic,
 			this.#version,
@@ -111,7 +105,6 @@ export class Connection implements Established {
 			this.recvBandwidth,
 			this.rtt,
 			this.#peerSetup,
-			this.#datagramsUsable,
 		);
 
 		void this.#run();
@@ -147,9 +140,9 @@ export class Connection implements Established {
 			tasks.push(this.#subscriber.runProbe());
 		}
 
-		// Route incoming QUIC datagrams into their subscriptions (lite-05+ over a real
-		// datagram transport; runDatagrams itself no-ops otherwise).
-		if (this.#datagramsUsable && hasDatagrams(this.#version)) {
+		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams
+		// no-ops on a transport that doesn't carry them).
+		if (hasDatagrams(this.#version)) {
 			tasks.push(this.#subscriber.runDatagrams());
 		}
 

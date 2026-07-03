@@ -425,6 +425,12 @@ export class TrackSubscriber extends TrackHandle {
 	async recvDatagram(): Promise<Datagram | undefined> {
 		for (;;) {
 			const datagrams = this.state.datagrams.peek();
+
+			// Evict datagrams older than the send-buffer window (also enforced on write), so a
+			// reader that stalled skips stale datagrams instead of replaying them.
+			const cutoff = Date.now() - MAX_DATAGRAM_AGE_MS;
+			while (datagrams.length > 0 && datagrams[0].time < cutoff) datagrams.shift();
+
 			if (datagrams.length > 0) {
 				return datagrams.shift()?.datagram;
 			}
