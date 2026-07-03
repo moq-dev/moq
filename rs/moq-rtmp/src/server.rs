@@ -906,12 +906,12 @@ impl Publisher {
 			"RTMP message body {} exceeds FLV's 24-bit tag size limit",
 			body.len()
 		);
-		self.importer.decode(&flv::tag(tag_type, timestamp, body))
+		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
 	/// Flush any buffered media and close out the broadcast's open groups.
 	fn finish(&mut self) -> anyhow::Result<()> {
-		self.importer.finish()
+		Ok(self.importer.finish()?)
 	}
 }
 
