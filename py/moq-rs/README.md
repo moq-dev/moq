@@ -162,7 +162,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
-- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_ratio`, `.bitrate`, `.framerate`, `.description`.
+- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
 - **`Dimensions`**. `.width: int`, `.height: int`.
 - **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 
