@@ -4370,6 +4370,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-nvenc"
+version = "0.0.1"
+dependencies = [
+ "cudarc",
+ "lazy_static",
+ "libloading 0.8.9",
+]
+
+[[package]]
 name = "moq-relay"
 version = "0.13.1"
 dependencies = [
@@ -4517,6 +4526,7 @@ dependencies = [
  "libloading 0.8.9",
  "moq-mux",
  "moq-net",
+ "moq-nvenc",
  "moq-vaapi",
  "objc2",
  "objc2-av-foundation",

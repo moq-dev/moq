@@ -1,4 +1,9 @@
 [workspace]
+# moq-nvenc lives in-tree but is excluded from the workspace: it only compiles on
+# Linux/Windows (no macOS bindings), so a workspace-wide `cargo build` on macOS
+# would fail on it. It is pulled in as a path dependency only where a Linux target
+# needs it (moq-video's `nvenc` feature).
+exclude = ["rs/moq-nvenc"]
 members = [
     "rs/hang",
     "rs/kio",
@@ -50,8 +55,8 @@ default-members = [
     "rs/moq-srt",
     "rs/moq-token",
     "rs/moq-token-cli",
-    "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
+    "rs/moq-video",
 ]
 resolver = "2"
 
@@ -71,6 +76,10 @@ moq-msf = { version = "0.3", path = "rs/moq-msf" }
 moq-mux = { version = "0.7", path = "rs/moq-mux" }
 moq-native = { version = "0.17", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
+# Linux/Windows-only NVENC bindings; excluded from the workspace (see [workspace]
+# exclude) and only built when a Linux target pulls it. Forked from
+# ViliamVadocz/nvidia-video-codec-sdk to add the `dynamic-loading` feature.
+moq-nvenc = { version = "0.0.1", path = "rs/moq-nvenc", default-features = false }
 moq-rtc = { version = "0.0.1", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.0.1", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.0.1", path = "rs/moq-srt" }
@@ -118,11 +127,3 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
-
-# moq-video's always-on NVENC backend (Linux) needs a `dynamic-loading` mode on
-# nvidia-video-codec-sdk so libnvidia-encode is dlopen'd at runtime instead of
-# linked: that lets a portable moq-cli build (and load) on machines without the
-# NVIDIA driver, and lets a GPU-less CI/release builder compile it. Upstream
-# doesn't have that feature yet, so consume a fork branch until it's merged.
-[patch.crates-io]
-nvidia-video-codec-sdk = { git = "https://github.com/kixelated/nvidia-video-codec-sdk.git", branch = "dynamic-loading" }
