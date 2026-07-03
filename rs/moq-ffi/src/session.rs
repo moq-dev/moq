@@ -65,6 +65,21 @@ mod tests {
 			MoqError::Forbidden
 		));
 	}
+
+	#[test]
+	fn sets_tls_system_roots() {
+		let client = MoqClient::new();
+
+		client.set_tls_system_roots(true);
+		{
+			let state = client.task.lock().expect("client state should be available");
+			assert_eq!(state.config.tls.system_roots, Some(true));
+		}
+
+		client.set_tls_system_roots(false);
+		let state = client.task.lock().expect("client state should be available");
+		assert_eq!(state.config.tls.system_roots, Some(false));
+	}
 }
 
 #[derive(uniffi::Object)]
@@ -101,6 +116,17 @@ impl MoqClient {
 	pub fn set_tls_roots(&self, paths: Vec<String>) {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.root = paths.into_iter().map(Into::into).collect();
+		}
+	}
+
+	/// Configure whether to also trust the platform's native root certificates.
+	///
+	/// By default, system roots are trusted only when no custom roots are configured.
+	/// Set this to `true` to trust system roots in addition to roots from
+	/// `set_tls_roots`, or `false` to trust only custom roots.
+	pub fn set_tls_system_roots(&self, system_roots: bool) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.system_roots = Some(system_roots);
 		}
 	}
 

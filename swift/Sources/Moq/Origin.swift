@@ -93,6 +93,12 @@ public final class Announcement: Sendable {
         ffi.path()
     }
 
+    /// Origin ids of the relay hops this broadcast traversed to reach you, oldest
+    /// first. Useful for routing decisions such as preferring a nearby edge.
+    public var hops: [UInt64] {
+        ffi.hops()
+    }
+
     /// A consumer for the announced broadcast.
     public var broadcast: BroadcastConsumer {
         BroadcastConsumer(ffi.broadcast())

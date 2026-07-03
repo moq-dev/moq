@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { Compression } from "../compression.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Track, TrackInfo } from "./track.ts";
@@ -31,15 +30,15 @@ test("TrackInfo round-trips on draft-05", async () => {
 	const info = new TrackInfo({
 		priority: 7,
 		ordered: false,
+		cache: 2000,
 		timescale: 90000,
-		compression: Compression.Deflate,
 	});
 	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05_WIP)));
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05_WIP);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(false);
+	expect(got.cache).toBe(2000);
 	expect(got.timescale).toBe(90000);
-	expect(got.compression).toBe(Compression.Deflate);
 });
 
 test("Track request round-trips on draft-05", async () => {
@@ -51,6 +50,6 @@ test("Track request round-trips on draft-05", async () => {
 });
 
 test("TRACK_INFO is rejected before draft-05", async () => {
-	const info = new TrackInfo({ compression: Compression.None });
+	const info = new TrackInfo({ timescale: 90000 });
 	await expect(bytes((w) => info.encode(w, Version.DRAFT_04))).rejects.toThrow();
 });

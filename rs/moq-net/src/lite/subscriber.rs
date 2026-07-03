@@ -11,10 +11,9 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
-	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, FrameInfo, FrameProducer,
-	GroupInfo, GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned,
-	StatsHandle, SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer,
-	TrackRequest,
+	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Error, FrameInfo, FrameProducer, GroupInfo,
+	GroupProducer, GroupRequest, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats,
+	SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 };
@@ -78,9 +77,8 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 struct TrackEntry {
 	producer: TrackProducer,
 	stats: Arc<SubscriberTrack>,
-	/// Codec + timestamp scale from this track's TRACK_INFO, known before the
-	/// SUBSCRIBE is even opened, so group streams decode frames without blocking.
-	compression: Compression,
+	/// Timestamp scale from this track's TRACK_INFO, known before the SUBSCRIBE is
+	/// even opened, so group streams decode frames without blocking.
 	timescale: Option<Timescale>,
 }
 
@@ -196,19 +194,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// peers ignore this field, in which case start_announce below still drops.
 		let msg = lite::AnnounceRequest {
 			prefix: prefix.as_path(),
-			exclude_hop: self.self_origin.id,
+			exclude_hop: self.self_origin.id(),
 		};
 		stream.writer.encode(&msg).await?;
 
 		// Lite05+: the publisher reports its own origin id (which we stamp onto every
 		// received Announce's hop chain, since it no longer does so itself) plus the
 		// count of initial active announces that follow immediately.
-		let (responder_origin, initial_count) = match self.version {
-			Version::Lite05Wip => {
-				let ok: lite::AnnounceOk = stream.reader.decode().await?;
-				(Some(ok.origin), ok.active)
-			}
-			_ => (None, 0),
+		let (responder_origin, initial_count) = if self.version.has_announce_ok() {
+			let ok: lite::AnnounceOk = stream.reader.decode().await?;
+			(Some(ok.origin), ok.active)
+		} else {
+			(None, 0)
 		};
 
 		let mut producers = HashMap::new();
@@ -234,15 +231,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
-					// Lite01/02 don't carry hop information or an epoch; the broadcast starts with
-					// an empty chain and a zero epoch (decoded as the 2020 base instant).
-					if self.start_announce(
-						path.clone(),
-						crate::OriginList::new(),
-						0,
-						responder_origin,
-						&mut producers,
-					)? {
+					// Count every received name, even ones start_announce drops as loops.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
+					// Lite01/02 don't carry hop information; the broadcast starts with
+					// an empty chain.
+					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -260,7 +255,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				connecting.take();
 				0
 			}
-			Version::Lite05Wip => {
+			_ if self.version.has_announce_ok() => {
 				if initial_count == 0 {
 					connecting.take();
 				}
@@ -274,14 +269,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await? {
 			match announce {
-				lite::AnnounceBroadcast::Active { suffix, epoch, hops } => {
+				lite::AnnounceBroadcast::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
+					// Count the broadcast name length (not the encoded message size) for
+					// every received announce, even ones start_announce drops as loops.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					if lite::restart_supported(self.version) && producers.contains_key(&path) {
 						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Older versions fall through to start_announce,
 						// which rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, epoch, responder_origin, &mut producers)? {
+						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -289,7 +289,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, epoch, responder_origin, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -304,13 +304,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				lite::AnnounceBroadcast::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
+					let abs = self.origin.absolute(&path).to_owned();
+					// Count the unannounce name length whether or not a matching guard exists.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `producers` has no entry; that's expected, not an error.
 					// Dropping the entry drops its OriginPublish guard, which unannounces.
 					if producers.remove(&path).is_some() {
-						let abs = self.origin.absolute(&path).to_owned();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -388,8 +392,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
-		// Broadcast instance epoch from ANNOUNCE_BROADCAST (wire value, 0 on pre-lite-05).
-		epoch: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
@@ -398,7 +400,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		producers: &mut HashMap<PathOwned, OriginPublish>,
 	) -> Result<bool, Error> {
 		if let Some(responder) = responder_origin {
-			// If the chain is already full, drop the announce — the same decision
+			// If the chain is already full, drop the announce. This is the same decision
 			// the Lite04 sender makes at its push site.
 			if hops.push(responder).is_err() {
 				tracing::warn!(
@@ -409,7 +411,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		// Drop announces that already passed through us — this connection is
+		// Drop announces that already passed through us. This connection is
 		// a reflection, not a new path. Peers should be filtering via
 		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
 		// the authoritative cluster-loop check on the receiver.
@@ -427,13 +429,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			hops.replace_first(crate::Origin::UNKNOWN, self.session_origin);
 		}
 
-		// Guarantee at least one hop we control. A peer is meant to stamp its
-		// own origin (Lite04), be reconstructed from the responder above (Lite05+),
-		// or filled in above (Lite03), but we don't trust an empty chain: a peer
-		// that sends zero hops would otherwise be indistinguishable from any other,
-		// so two empty-chain routes to the same path would collide. Insert our
-		// session origin so every broadcast stays attributable. The list is empty
-		// here, so this can't overflow.
+		// Guarantee at least one attributable hop for versions that did not provide
+		// one. Lite05 peers may legally advertise responder id 0; preserve it above
+		// rather than replacing it, even though that route stays loop-blind.
 		if hops.is_empty() {
 			hops.push(self.session_origin)
 				.expect("an empty hop chain always has room for one entry");
@@ -446,11 +444,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = BroadcastInfo {
-			hops,
-			epoch: BroadcastInfo::epoch_from_wire(epoch),
-		}
-		.produce();
+		let broadcast = BroadcastInfo { hops }.produce();
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -482,8 +476,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
-		// Broadcast instance epoch from ANNOUNCE_BROADCAST (wire value, 0 on pre-lite-05).
-		epoch: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
@@ -504,11 +496,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
-		let broadcast = BroadcastInfo {
-			hops,
-			epoch: BroadcastInfo::epoch_from_wire(epoch),
-		}
-		.produce();
+		let broadcast = BroadcastInfo { hops }.produce();
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
@@ -566,31 +554,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, compression, timescale) = {
+		let (mut group, track, track_stats, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = GroupInfo { sequence: hdr.sequence };
 			let group = entry.producer.create_group(group_info)?;
-			(
-				group,
-				entry.producer.clone(),
-				entry.stats.clone(),
-				entry.compression,
-				entry.timescale,
-			)
+			(group, entry.producer.clone(), entry.stats.clone(), entry.timescale)
 		};
 
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
-		// The codec/timescale came from TRACK_INFO (read before this subscription was
-		// even registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
+		// The timescale came from TRACK_INFO (read before this subscription was even
+		// registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), compression, timescale) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone(), timescale) => res,
 		};
 
 		match res {
@@ -614,7 +596,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
-		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// Previous frame's raw timestamp value (in `timescale` units), for the
@@ -644,47 +625,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				break;
 			};
 
-			match compression {
-				Compression::None => {
-					// `create_frame` is the allocation chokepoint and rejects an
-					// oversized `size` before allocating, so no pre-check is needed.
-					// No wire timestamp (pre-lite-05) means wall-clock at receive.
-					let mut frame = match timestamp {
-						Some(ts) => group.create_frame(FrameInfo { size, timestamp: ts })?,
-						None => group.create_frame_now(size)?,
-					};
-					track_stats.frame();
+			// `create_frame` is the allocation chokepoint and rejects an oversized
+			// `size` before allocating, so no pre-check is needed. No wire timestamp
+			// (pre-lite-05) means wall-clock at receive.
+			let mut frame = match timestamp {
+				Some(ts) => group.create_frame(FrameInfo { size, timestamp: ts })?,
+				None => group.create_frame_now(size)?,
+			};
+			track_stats.frame();
 
-					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
-						let _ = frame.abort(err.clone());
-						return Err(err);
-					}
-
-					frame.finish()?;
-				}
-				compression => {
-					// Here `size` is the compressed wire length, not the frame size, so
-					// it never reaches the `create_frame` chokepoint. Bound it directly
-					// so a peer can't make us buffer an unbounded blob before decoding.
-					if size > MAX_FRAME_SIZE {
-						return Err(Error::FrameTooLarge);
-					}
-					// Pull the compressed bytes off the wire, then inflate. The frame
-					// the consumer sees carries the original (decompressed) size.
-					let packed = stream.read_exact(size as usize).await?;
-					track_stats.frame();
-					track_stats.bytes(size);
-
-					let payload = compression.decompress(&packed)?;
-					let size = payload.len() as u64;
-					let mut frame = match timestamp {
-						Some(ts) => group.create_frame(FrameInfo { size, timestamp: ts })?,
-						None => group.create_frame_now(size)?,
-					};
-					frame.write(bytes::Bytes::from(payload))?;
-					frame.finish()?;
-				}
+			if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+				let _ = frame.abort(err.clone());
+				return Err(err);
 			}
+
+			frame.finish()?;
 		}
 
 		Ok(())
@@ -821,6 +776,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// SUBSCRIBE_UPDATE (and thus pause/resume linger) only exists on Lite03+.
 		// Older versions tear the upstream down as soon as the track goes idle.
 		let supports_linger = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
+		let supports_fetch = self.subscriber.version.has_track_stream();
 
 		// Mark the track as fetch-capable up front (before accept), so a consumer's
 		// cache-miss fetch waits to be served rather than failing fast. Held for the
@@ -829,16 +785,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		// Lite05+ learns the track's immutable properties once, up front, via a TRACK
 		// stream, and accepts the request immediately so downstream subscribers resolve.
-		// The codec/timescale then flow into every SUBSCRIBE and FETCH without a per-
-		// response header. Older drafts have no TRACK stream: the request stays pending
-		// until the first SUBSCRIBE_OK supplies the properties (see `establish`).
-		let (mut track, compression, timescale) = if self.subscriber.version.has_timestamps() {
+		// The timescale then flows into every SUBSCRIBE and FETCH without a per-response
+		// header. Older drafts have no TRACK stream: the request stays pending until the
+		// first SUBSCRIBE_OK supplies the properties (see `establish`).
+		let (mut track, timescale) = if self.subscriber.version.has_track_stream() {
 			match self.track_info().await {
-				Ok((info, compression)) => {
+				Ok(info) => {
 					// Lite05 carries per-frame timestamps on the wire at this scale; `Some`
 					// tells `run_group` to decode them (vs. wall-clock-stamping locally).
 					let timescale = Some(info.timescale);
-					(Some(Track::Active(request.accept(info))), compression, timescale)
+					(Some(Track::Active(request.accept(info))), timescale)
 				}
 				Err(err) => {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "track info failed");
@@ -847,7 +803,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 			}
 		} else {
-			(Some(Track::Pending(request)), Compression::None, None)
+			(Some(Track::Pending(request)), None)
 		};
 
 		let mut sub = Sub::None;
@@ -924,20 +880,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req, compression, timescale).maybe_boxed());
+					if supports_fetch {
+						fetches.push(self.clone().serve_fetch(req, timescale).maybe_boxed());
+					} else {
+						req.reject(Error::Version);
+					}
 				}
 				Event::Subscription(pref) => {
 					linger = None;
 					if let Err(err) = self
-						.handle_subscription(
-							&mut track,
-							&mut sub,
-							pref,
-							supports_linger,
-							completed,
-							compression,
-							timescale,
-						)
+						.handle_subscription(&mut track, &mut sub, pref, supports_linger, completed, timescale)
 						.await
 					{
 						return self.finish_track(track.take().unwrap(), sub, err);
@@ -986,9 +938,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	}
 
 	/// Open a TRACK stream, read the single TRACK_INFO, and map it to the model's
-	/// [`crate::TrackInfo`] plus the wire [`Compression`] (needed verbatim to decode
-	/// frames). Lite05+ only. Bails if the broadcast dies meanwhile.
-	async fn track_info(&self) -> Result<(crate::TrackInfo, Compression), Error> {
+	/// [`crate::TrackInfo`]. Lite05+ only. Bails if the broadcast dies meanwhile.
+	async fn track_info(&self) -> Result<crate::TrackInfo, Error> {
 		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
 		stream.writer.encode(&lite::ControlType::Track).await?;
 		stream
@@ -1006,17 +957,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 
-		// The wire no longer carries a cache hint (the publisher's retention is now
-		// best-effort, not a guarantee), so the local retention window falls back to
-		// the model default.
+		// Publisher Max Latency rides on the wire, so the local retention window
+		// matches what the upstream advertises (relays re-serve with the same bound).
 		let model = crate::TrackInfo {
-			compress: info.compression != Compression::None,
 			timescale: info.timescale,
-			cache: crate::DEFAULT_CACHE,
+			cache: info.cache,
 			priority: info.priority,
 			ordered: info.ordered,
 		};
-		Ok((model, info.compression))
+		Ok(model)
 	}
 
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
@@ -1029,7 +978,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		pref: Option<Subscription>,
 		supports_linger: bool,
 		completed: bool,
-		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		match pref {
@@ -1041,11 +989,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// track means it was never subscribed.
 					let establish = match track.as_ref() {
 						Some(Track::Pending(_)) => true,
-						Some(Track::Active(_)) => self.subscriber.version.has_timestamps() && !completed,
+						Some(Track::Active(_)) => self.subscriber.version.has_track_stream() && !completed,
 						None => false,
 					};
 					if establish {
-						self.establish(track, sub, subscription, compression, timescale).await?;
+						self.establish(track, sub, subscription, timescale).await?;
 					}
 				}
 				Sub::Active(active) if active.paused => {
@@ -1107,7 +1055,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		track: &mut Option<Track>,
 		sub: &mut Sub<S>,
 		subscription: Subscription,
-		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
@@ -1129,7 +1076,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(&msg).await?;
 
-		let producer = if self.subscriber.version.has_timestamps() {
+		let producer = if self.subscriber.version.has_track_stream() {
 			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
 			let Some(Track::Active(producer)) = track.as_ref() else {
 				unreachable!("lite05 track is active before establish");
@@ -1146,8 +1093,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				return Err(Error::ProtocolViolation);
 			}
 
-			// Accept with defaults: pre-lite-05 carries no codec/timescale, and the
-			// cache window falls back to the model default.
+			// Accept with defaults: pre-lite-05 carries no timescale, and the cache
+			// window falls back to the model default.
 			let Some(Track::Pending(request)) = track.take() else {
 				unreachable!("establish called without a pending track");
 			};
@@ -1170,7 +1117,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			TrackEntry {
 				producer,
 				stats: self.track_stats.clone(),
-				compression,
 				timescale,
 			},
 		);
@@ -1202,11 +1148,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	}
 
 	/// Serve one downstream fetch end-to-end on its own bidi stream: send FETCH, then
-	/// fill the group from the bare FRAME messages that follow. The codec/timescale
-	/// come from this track's TRACK_INFO (already known), and the group sequence is
+	/// fill the group from the bare FRAME messages that follow. The timescale comes
+	/// from this track's TRACK_INFO (already known), and the group sequence is
 	/// implicit from the request. Runs to completion as an independent future in the
 	/// serve loop's `FuturesUnordered`.
-	async fn serve_fetch(self, request: GroupRequest, compression: Compression, timescale: Option<Timescale>) {
+	async fn serve_fetch(self, request: GroupRequest, timescale: Option<Timescale>) {
 		let TrackServe {
 			mut subscriber,
 			path,
@@ -1222,6 +1168,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::warn!(track = %name, %err, "fetch stream open failed");
+				request.reject(err);
 				return;
 			}
 		};
@@ -1239,6 +1186,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 		if let Err(err) = send.await {
 			stream.writer.abort(&err);
+			request.reject(err);
 			return;
 		}
 
@@ -1246,8 +1194,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
 		// live subscription); otherwise the group inherits the accepted timescale.
 		let group_info = TrackInfo {
-			// FETCH is lite-05+, so `timescale` is `Some`; fall back to the default scale
-			// defensively rather than panicking.
+			// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
+			// default scale defensively rather than panicking.
 			timescale: timescale.unwrap_or_default(),
 			..Default::default()
 		};
@@ -1262,13 +1210,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 
 		let res = subscriber
-			.run_group(
-				&mut stream.reader,
-				producer.clone(),
-				track_stats,
-				compression,
-				timescale,
-			)
+			.run_group(&mut stream.reader, producer.clone(), track_stats, timescale)
 			.await;
 		match res {
 			Ok(()) => {

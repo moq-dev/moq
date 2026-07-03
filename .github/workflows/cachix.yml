@@ -28,13 +28,11 @@ jobs:
             runs-on: ubuntu-latest
           - os: macos-latest # aarch64-darwin
             runs-on: macos-latest
-          # aarch64-linux on the moq-dev self-hosted A1 (warm /nix/store). Tag
-          # pushes are trusted, so no fork concern.
           - os: aarch64-linux
-            runs-on: [self-hosted, nix]
+            runs-on: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -53,17 +51,7 @@ jobs:
           fi
           echo "name=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
 
-      # The cachix action and `nix build` below run `nix` directly, so put it on
-      # PATH. A login shell resolves it via /etc/profile.d regardless of the
-      # box's install path. Self-hosted only; the hosted runners get Nix from
-      # the installer step.
-      - name: Add Nix to PATH
-        if: runner.environment == 'self-hosted'
-        shell: bash -leo pipefail {0}
-        run: dirname "$(command -v nix)" >> "$GITHUB_PATH"
-
-      - if: runner.environment == 'github-hosted'
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
 
@@ -71,11 +59,6 @@ jobs:
         with:
           name: kixelated
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          # The self-hosted box's runner user isn't a Nix trusted-user and the
-          # box deliberately substitutes only from its warm local store, so
-          # don't let `cachix use` rewrite nix.conf there. Push auth (above)
-          # still works; this leg only pushes.
-          skipAddingSubstituter: ${{ runner.environment == 'self-hosted' }}
 
       - name: Build and cache
         env:

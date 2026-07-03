@@ -226,12 +226,21 @@ impl<F: Container> Consumer<F> {
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => break,
 					Poll::Ready(Err(e)) => {
-						// The group was dropped/aborted -- typically it aged out of the relay
-						// cache (`Error::Old`) while we weren't reading it. Any sequences
-						// between it and the next buffered group were evicted alongside it, so
-						// jump straight to that group instead of stepping one-by-one and then
-						// blocking on a sequence gap of groups that will never arrive.
-						tracing::warn!(error = ?e, "current group dropped; skipping to next buffered group");
+						// Tell a relay group eviction/abort (skip) from a payload decode error
+						// (propagate). The moq_net group's own terminal state is the source of
+						// truth: an evicted/aborted group reports the transport error from
+						// poll_finished, while a malformed payload leaves the group live or
+						// cleanly finished. A decode error is real and the caller must see it,
+						// not have the group silently dropped.
+						if !group.poll_aborted(waiter) {
+							return Poll::Ready(Err(e));
+						}
+						// The group aged out of the relay cache (`Error::Old`) or was otherwise
+						// aborted. Any sequences between it and the next buffered group were
+						// evicted alongside it, so jump straight to that group instead of
+						// stepping one-by-one and then blocking on a sequence gap of groups
+						// that will never arrive.
+						tracing::warn!(error = ?e, "current group evicted; skipping to next buffered group");
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 					}
@@ -617,6 +626,15 @@ impl GroupBuffer {
 		}
 
 		Poll::Pending
+	}
+
+	/// True if the group's moq_net stream was reset/aborted (evicted, `Old`,
+	/// cancelled, ...), as opposed to still live or cleanly finished. Lets the
+	/// consumer tell a transport eviction from a payload decode error: the former
+	/// surfaces as a terminal transport error from `poll_finished`, the latter
+	/// leaves the group readable or finished.
+	fn poll_aborted(&mut self, waiter: &kio::Waiter) -> bool {
+		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
 	}
 }
 
@@ -1372,6 +1390,75 @@ mod tests {
 		})
 		.await;
 		assert!(reached.is_ok(), "consumer hung on a missing sequence on a live track");
+	}
+
+	// ---- Decode errors ----
+
+	/// A container that decodes each frame's payload as an 8-byte LE microsecond
+	/// timestamp, but treats a `FAIL` payload as a malformed frame. Lets a test put a
+	/// decodable frame first (so startup selects the group) and a decode failure after.
+	struct FailingDecode;
+
+	impl ContainerTrait for FailingDecode {
+		type Error = crate::Error;
+
+		fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+			for frame in frames {
+				group.write_frame_now(frame.payload.clone())?;
+			}
+			Ok(())
+		}
+
+		fn poll_read(
+			&self,
+			group: &mut moq_net::GroupConsumer,
+			waiter: &kio::Waiter,
+		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+			use bytes::Buf;
+
+			let Some(mut data) = ready!(group.poll_read_frame(waiter)?) else {
+				return Poll::Ready(Ok(None));
+			};
+			if data.as_ref() == b"FAIL" {
+				return Poll::Ready(Err(crate::Error::UnknownFormat("malformed payload".into())));
+			}
+			Poll::Ready(Ok(Some(vec![Frame {
+				timestamp: ts(data.get_u64_le()),
+				payload: Bytes::new(),
+				keyframe: false,
+				duration: None,
+			}])))
+		}
+	}
+
+	/// A decode error on a cleanly-finished group must propagate to the caller, not be
+	/// mistaken for a relay eviction and silently skipped. Eviction-skip only fires when
+	/// the group's stream was actually aborted.
+	#[tokio::test]
+	async fn decode_error_propagates() {
+		tokio::time::pause();
+		let mut track = track_producer("test", None);
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, FailingDecode);
+
+		// A decodable frame first (so startup selects the group), then a malformed one.
+		let mut group = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		group.write_frame_now(Bytes::from(0u64.to_le_bytes().to_vec())).unwrap();
+		group.write_frame_now(Bytes::from_static(b"FAIL")).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		// The first frame decodes; the malformed second frame must surface as an error.
+		let first = consumer.read().await;
+		assert!(matches!(first, Ok(Some(_))), "first frame should decode, got {first:?}");
+
+		let second = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+			.await
+			.expect("consumer hung on a decode error");
+		assert!(
+			matches!(second, Err(crate::Error::UnknownFormat(_))),
+			"decode error must propagate, got {second:?}"
+		);
 	}
 
 	// ---- Frame Decoding ----

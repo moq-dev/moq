@@ -5,7 +5,7 @@ set -euo pipefail
 # macOS target, lays out a local XCFramework, and runs `swift test`.
 #
 # Skipped on hosts without `swift` (Linux dev environments) or without
-# `cargo`. Intended for `just check-ffi`.
+# `cargo`. Intended for `just swift check`.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SWIFT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

@@ -25,12 +25,17 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Publish announces a broadcast at the given path.
-func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) error {
+// Announce advertises a broadcast at the given path so subscribers can discover it.
+func (o *OriginProducer) Announce(path string, broadcast *BroadcastProducer) error {
 	if broadcast == nil {
 		return errors.New("moq: nil broadcast producer")
 	}
 	return o.inner.Announce(path, broadcast.inner)
+}
+
+// Deprecated: use Announce.
+func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) error {
+	return o.Announce(path, broadcast)
 }
 
 // OriginConsumer discovers broadcasts announced to an origin.

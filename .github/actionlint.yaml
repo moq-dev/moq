@@ -1,5 +1,0 @@
-# Custom labels for the moq-dev self-hosted A1 runner, so actionlint accepts
-# `runs-on: [self-hosted, nix]`. `self-hosted` is built in; `nix` is ours.
-self-hosted-runner:
-  labels:
-    - nix

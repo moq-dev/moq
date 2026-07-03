@@ -5,9 +5,8 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, Compression, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
-	TrackSubscriber,
-	coding::{Stream, Writer},
+	AnnounceConsumer, AsPath, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, TrackSubscriber,
+	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
@@ -212,12 +211,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
 
-		// Last advertised epoch per active path (wire value). An ANNOUNCE_BROADCAST
-		// `ended` carries the epoch of the instance that ended, but the origin's Ended
-		// event doesn't carry the broadcast, so we stash it here on every Active/Restart
-		// and read it back when the path goes away.
-		let mut epochs: std::collections::HashMap<crate::PathOwned, u64> = std::collections::HashMap::new();
-
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
@@ -250,13 +243,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
+
+				// AnnounceInit batches the initial active set into one message; attribute
+				// it per broadcast by name length so Lite01/02 isn't undercounted.
+				for absolute in stats_guards.keys() {
+					stats
+						.broadcast(absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
+				}
 			}
-			Version::Lite05Wip => {
+			_ if version.has_announce_ok() => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
-				// stashing suffix+epoch+hops so we can both COUNT them for AnnounceOk and
-				// re-send them afterward. The receiver stamps our origin onto each hop chain,
-				// so we forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, u64, OriginList)> = Vec::new();
+				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
+				// them afterward. The receiver stamps our origin onto each hop chain, so we
+				// forward the stored chain as-is (no self push here).
+				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
 				while let Some((path, event)) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
@@ -270,26 +271,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let hops = &info.hops;
 							// Apply the same exclude_hop and reflected-announce skips as the live
 							// loop so the count matches exactly what we send (minus the self push).
-							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+							if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
 								continue;
 							}
 							if hops.contains(&self_origin) {
 								continue;
 							}
-							let epoch = info.epoch_wire();
 							tracing::debug!(broadcast = %absolute, "announce");
 							let guard = stats.broadcast(&absolute).publisher();
 							stats_guards.entry(absolute.clone()).or_insert(guard);
-							epochs.insert(absolute, epoch);
-							initial.retain(|(s, _, _)| s != &suffix);
-							initial.push((suffix, epoch, hops.clone()));
+							initial.retain(|(s, _)| s != &suffix);
+							initial.push((suffix, hops.clone()));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
 							tracing::debug!(broadcast = %absolute, "unannounce");
 							stats_guards.remove(&absolute);
-							epochs.remove(&absolute);
-							initial.retain(|(s, _, _)| s != &suffix);
+							initial.retain(|(s, _)| s != &suffix);
 						}
 					}
 				}
@@ -300,13 +298,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					origin: self_origin,
 					active: initial.len() as u64,
 				};
-				stream.writer.encode(&ok).await?;
+				let mut buf = bytes::BytesMut::new();
+				ok.encode(&mut buf, version)?;
+				for (suffix, hops) in &initial {
+					lite::AnnounceBroadcast::Active {
+						suffix: suffix.as_path(),
+						hops: hops.clone(),
+					}
+					.encode(&mut buf, version)?;
+				}
+				let mut buf = buf.freeze();
+				stream.writer.write_all(&mut buf).await?;
 
-				for (suffix, epoch, hops) in initial {
-					stream
-						.writer
-						.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops })
-						.await?;
+				// Count each initial announce by broadcast name length, mirroring the
+				// live loop below (the name, not the encoded message size).
+				for absolute in stats_guards.keys() {
+					stats
+						.broadcast(absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
 				}
 			}
 			_ => {
@@ -334,13 +343,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								let Some(hops) = Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
 								};
-								let epoch = info.epoch_wire();
 								tracing::debug!(broadcast = %absolute, "announce");
-								let guard = stats.broadcast(&absolute).publisher();
-								let prev = stats_guards.insert(absolute.clone(), guard);
+								let bs = stats.broadcast(&absolute);
+								// Count the broadcast name length, not the encoded message size, so
+								// stats don't penalize the broadcast for hop/framing overhead.
+								bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+								let prev = stats_guards.insert(absolute.clone(), bs.publisher());
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								epochs.insert(absolute, epoch);
-								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops }).await?;
+								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 							}
 							crate::Announced::Restart(active) => {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
@@ -349,40 +359,45 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								let info = active.info();
 								match Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) {
 									Some(hops) => {
-										let epoch = info.epoch_wire();
 										tracing::debug!(broadcast = %absolute, "restart");
-										epochs.insert(absolute.clone(), epoch);
+										let bs = stats.broadcast(&absolute);
 										// Continuity: keep the existing stats guard (no close + reopen).
 										if lite::restart_supported(version) {
-											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops }).await?;
+											// One Active message on the wire, one name-length count.
+											bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 										} else {
+											// Ended + Active pair, so count the name twice.
+											bs.publisher_announced_bytes(2 * absolute.as_str().len() as u64);
 											stream
 												.writer
 												.encode(&lite::AnnounceBroadcast::Ended {
 													suffix: suffix.clone(),
-													epoch,
 													hops: OriginList::new(),
 												})
 												.await?;
-											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, epoch, hops }).await?;
+											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 										}
 									}
 									None => {
 										// The replacement loops back to us; from this peer's view the broadcast is gone.
 										tracing::debug!(broadcast = %absolute, "restart replacement looped; unannouncing");
+										stats.broadcast(&absolute)
+											.publisher_announced_bytes(absolute.as_str().len() as u64);
 										stats_guards.remove(&absolute);
-										let epoch = epochs.remove(&absolute).unwrap_or(0);
-										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, epoch, hops: OriginList::new() }).await?;
+										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 									}
 								}
 							}
 							crate::Announced::Ended => {
 								tracing::debug!(broadcast = %absolute, "unannounce");
+								// Count the name length whether or not a guard is held: the Ended
+								// message is sent even for announces we filtered out above.
+								stats.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								stats_guards.remove(&absolute);
 								// An ended announce doesn't need hops; the receiver matches on path only.
-								// It carries the epoch of the instance that ended (0 if never seen).
-								let epoch = epochs.remove(&absolute).unwrap_or(0);
-								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, epoch, hops: OriginList::new() }).await?;
+								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 							}
 						}
 					}
@@ -401,7 +416,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 		absolute: &crate::Path,
 	) -> Option<OriginList> {
-		if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+		if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
 			tracing::debug!(broadcast = %absolute, %exclude_hop, "skipping announce per peer's exclude_hop");
 			return None;
 		}
@@ -413,7 +428,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
 		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
 		// chain is full.
-		if !matches!(version, Version::Lite05Wip) && hops.push(self_origin).is_err() {
+		if !version.has_announce_ok() && hops.push(self_origin).is_err() {
 			tracing::warn!(broadcast = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
 			return None;
 		}
@@ -422,7 +437,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub async fn recv_track(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		// The Track Stream is lite-05+ only.
-		if !self.version.has_timestamps() {
+		if !self.version.has_track_stream() {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -452,23 +467,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.request_broadcast(&request.broadcast).await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
-		// Same negotiation as a subscription, just answered once: codec only when
-		// both the producer asks for it and the draft can carry it; timescale only
-		// when the draft carries per-frame timestamps.
-		let compression = if info.compress {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
-		// track is timed, so the model's timescale goes on the wire verbatim.
+		// track is timed, so the model's timescale and retention bound go on the wire
+		// verbatim.
 		stream
 			.writer
 			.encode(&lite::TrackInfo {
 				priority: info.priority,
 				ordered: info.ordered,
+				cache: info.cache,
 				timescale: info.timescale,
-				compression,
 			})
 			.await?;
 
@@ -551,22 +559,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = broadcast.await?;
 		let track = broadcast.track(&subscribe.track)?.subscribe(subscription).await?;
 
-		// Compress only when the producer marked the track worth it and the
-		// negotiated draft can carry a codec. Older drafts (lite-04 and below) get
-		// None and the frames stream verbatim. On Lite05+ this matches the codec the
-		// subscriber already learned from TRACK_INFO.
-		let supports_compression = version.has_timestamps();
-		let compression = if track.info().compress && supports_compression {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
-
 		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
 		// every frame with a zigzag-delta timestamp at the track's timescale; older
 		// drafts have no wire field, so `None` here means "don't emit the prefix" (the
 		// frames still carry timestamps in the model, just not on this wire).
-		let timescale = if version.has_timestamps() {
+		let timescale = if version.has_track_stream() {
 			Some(track.info().timescale)
 		} else {
 			None
@@ -579,7 +576,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties live
 		// in TRACK_INFO, and the resolved range arrives as SUBSCRIBE_START/END emitted
 		// from run_track. Older drafts still acknowledge with SUBSCRIBE_OK here.
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			let info = lite::SubscribeOk {
 				priority: subscribe.priority,
 				ordered: false,
@@ -605,7 +602,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority,
 			track_priority: track_priority_rx,
 			version,
-			compression,
 			timescale,
 		};
 
@@ -629,8 +625,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn recv_fetch(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
-		// FETCH is lite-05+ only; older drafts have no per-frame timestamp format.
-		if !self.version.has_timestamps() {
+		// FETCH is lite-05+ only; older drafts have no dedicated FETCH stream.
+		if !self.version.has_track_stream() {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -682,25 +678,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			)
 			.await?;
 
-		// FETCH is gated to lite-05+, which always prefixes frames with a timestamp at
-		// the track's timescale.
-		let timescale = if version.has_timestamps() {
+		// FETCH is gated to lite-05+, which learned the track timescale via TRACK_INFO.
+		let timescale = if version.has_track_stream() {
 			Some(group.timescale())
 		} else {
 			None
 		};
 
-		// Compression is an immutable per-track property (reported in TRACK_INFO), so
-		// fetched frames use the same codec as live ones. The group resolved above, so
-		// the track's info is set and this resolves immediately.
-		let compression = if track.info().await?.compress && version.has_timestamps() {
-			Compression::Deflate
-		} else {
-			Compression::None
-		};
-
 		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
-		// the codec/timescale from TRACK_INFO and the group sequence from its request.
+		// the timescale from TRACK_INFO and the group sequence from its request.
 		track_stats.group();
 
 		// Honor frame_start: skip earlier frames, then stream the rest in order. The
@@ -709,15 +695,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
-			write_fetch_frame(
-				&mut stream.writer,
-				&mut frame,
-				compression,
-				timescale,
-				&mut prev_ts,
-				&track_stats,
-			)
-			.await?;
+			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts, &track_stats).await?;
 			index += 1;
 		}
 
@@ -775,38 +753,24 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut FrameConsumer,
-	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
-	match compression {
-		Compression::None => {
-			writer.encode(&frame.size).await?;
-			track_stats.frame();
-			while let Some(chunk) = frame.read_chunk().await? {
-				let n = chunk.len() as u64;
-				writer.write_chunk(chunk).await?;
-				track_stats.bytes(n);
-			}
-		}
-		compression => {
-			let payload = frame.read_all().await?;
-			let chunk = bytes::Bytes::from(compression.compress(&payload));
-			let n = chunk.len() as u64;
-			writer.encode(&n).await?;
-			track_stats.frame();
-			writer.write_chunk(chunk).await?;
-			track_stats.bytes(n);
-		}
+	writer.encode(&frame.size).await?;
+	track_stats.frame();
+	while let Some(chunk) = frame.read_chunk().await? {
+		let n = chunk.len() as u64;
+		writer.write_chunk(chunk).await?;
+		track_stats.bytes(n);
 	}
 
 	Ok(())
 }
 
-/// Shared per-subscription state for the publisher side. Cloned (cheaply — every
+/// Shared per-subscription state for the publisher side. Cloned cheaply. Every
 /// field is either small or already Arc-backed) for each spawned serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
 /// watch::Receiver.
@@ -819,12 +783,8 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Codec for this track (reported in TRACK_INFO on lite-05+); every frame on
-	/// this subscription is compressed with it before hitting the wire.
-	compression: Compression,
-	/// Negotiated timestamp scale for this track. `Some(_)` iff
-	/// [`Version::has_timestamps`] is true for `version` (gated in
-	/// `run_subscribe`); used to validate per-frame timestamps before encoding.
+	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
+	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
 	timescale: Option<crate::Timescale>,
 }
 
@@ -851,7 +811,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
 		// once the first group is known, SUBSCRIBE_END when the track finishes.
-		let emit_range = self.version.has_timestamps();
+		let emit_range = self.version.has_track_stream();
 		let mut start_sent = false;
 
 		loop {
@@ -880,7 +840,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 							// Track finished cleanly. Tell the subscriber no group will
 							// follow, then drain in-flight tasks and exit.
 							if emit_range {
-								let group = track.latest().unwrap_or(0);
+								let group = track
+									.latest()
+									.map(|group| group.checked_add(1).ok_or(crate::coding::BoundsExceeded))
+									.transpose()?
+									.unwrap_or(0);
 								writer
 									.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
 									.await?;
@@ -896,7 +860,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				// read primitives (see Reader::decode_maybe doc).
 				upd = reader.decode_maybe::<lite::SubscribeUpdate>() => {
 					let Some(upd) = upd? else {
-						// Peer FIN'd — they're done with this subscription. Drop any
+						// Peer FIN'd. They're done with this subscription. Drop any
 						// in-flight serve_group tasks (don't drain) so half-sent
 						// groups get cancelled rather than completed pointlessly.
 						return Ok(());
@@ -954,10 +918,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
-	/// Send one frame. Uncompressed frames stream chunk-by-chunk so we never
-	/// buffer the whole payload; a compressed frame must buffer to feed the
-	/// codec, and its wire size becomes the compressed length (the subscriber
-	/// inflates it from the track's codec, known from TRACK_INFO on lite-05+).
+	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we
+	/// never buffer the whole thing.
 	async fn serve_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
@@ -967,22 +929,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
-		match self.compression {
-			Compression::None => {
-				stream.encode(&frame.size).await?;
-				self.track_stats.frame();
+		stream.encode(&frame.size).await?;
+		self.track_stats.frame();
 
-				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
-					self.write_chunk(stream, priority, chunk).await?;
-				}
-			}
-			compression => {
-				let payload = self.read_all(stream, priority, &mut frame).await?;
-				let chunk = bytes::Bytes::from(compression.compress(&payload));
-				stream.encode(&(chunk.len() as u64)).await?;
-				self.track_stats.frame();
-				self.write_chunk(stream, priority, chunk).await?;
-			}
+		while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
+			self.write_chunk(stream, priority, chunk).await?;
 		}
 
 		Ok(())
@@ -1019,24 +970,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				chunk = frame.read_chunk() => return chunk,
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
-			}
-		}
-	}
-
-	/// Await the full frame payload, applying priority changes meanwhile.
-	async fn read_all(
-		&mut self,
-		stream: &mut Writer<S::SendStream, Version>,
-		priority: &mut PriorityHandle,
-		frame: &mut FrameConsumer,
-	) -> Result<bytes::Bytes, Error> {
-		loop {
-			tokio::select! {
-				biased;
-				_ = stream.closed() => return Err(Error::Cancel),
-				data = frame.read_all() => return data,
 				new_pri = priority.next() => stream.set_priority(new_pri),
 				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
 			}

@@ -36,6 +36,9 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	#[error("flac: {0}")]
+	Flac(#[from] crate::codec::flac::Error),
+
 	#[error("missing keyframe: a group must open on a keyframe")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
@@ -128,6 +131,9 @@ pub enum Error {
 
 	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
 	MissingAudioDescription(String),
+
+	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
+	MissingSampleDuration,
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -227,9 +233,15 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 	let default_size = traf.tfhd.default_sample_size;
 	let default_duration = traf.tfhd.default_sample_duration;
 
+	// DTS is reconstructed by accumulating each sample's duration. A non-final sample
+	// with no resolvable duration would leave every following sample stuck at the same
+	// DTS, silently collapsing their timestamps, so reject that fragment instead.
+	let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
+
 	let mut frames = Vec::new();
 	let mut offset = 0usize;
 	let mut dts = base_dts;
+	let mut sample_index = 0usize;
 
 	for trun in &traf.trun {
 		for entry in &trun.entries {
@@ -255,7 +267,15 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 
 			// Carry the sample-duration through at the track's scale when present, so
 			// the jitter buffer can use it and an exporter can write it back.
-			let sample_duration = entry.duration.or(default_duration);
+			let sample_duration = entry.duration.or(default_duration).filter(|d| *d != 0);
+
+			// The last sample needs no duration (nothing follows it to time), but any
+			// earlier sample without one makes the rest of the fragment's DTS ambiguous.
+			let is_last = sample_index + 1 == total_samples;
+			if sample_duration.is_none() && !is_last {
+				return Err(Error::MissingSampleDuration);
+			}
+
 			let duration = sample_duration
 				.map(|d| Timestamp::new(d as u64, timescale))
 				.transpose()?;
@@ -269,6 +289,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 
 			offset = end;
 			dts += sample_duration.unwrap_or(0) as u64;
+			sample_index += 1;
 		}
 	}
 
@@ -323,7 +344,8 @@ pub(crate) fn encode_fragment(
 	// importer preserved the source scale (the common passthrough case), this is a
 	// no-op; otherwise it's a single rescale rather than the legacy `micros * scale
 	// / 1_000_000` round-trip.
-	let dts = frames[0].timestamp.as_scale(timescale) as u64;
+	let base_dts = frames[0].timestamp.as_scale(timescale) as u64;
+	let mut dts = base_dts;
 
 	let entries: Vec<_> = frames
 		.iter()
@@ -332,14 +354,24 @@ pub(crate) fn encode_fragment(
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
 			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
-			mp4_atom::TrunEntry {
+			let pts = f.timestamp.as_scale(timescale) as i128;
+			let cts = pts - i128::from(dts);
+			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
+
+			// Frame timestamps are PTS while sample order is decode order. Author DTS
+			// by accumulating durations and store PTS-DTS as the signed CTS.
+			if let Some(duration) = duration {
+				dts = dts.checked_add(u64::from(duration)).ok_or(Error::PtsOverflow)?;
+			}
+
+			Ok(mp4_atom::TrunEntry {
+				duration,
 				size: Some(f.payload.len() as u32),
 				flags: Some(flags),
-				duration,
-				..Default::default()
-			}
+				cts: (cts != 0).then_some(cts),
+			})
 		})
-		.collect();
+		.collect::<Result<_>>()?;
 
 	let mdat_data: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 
@@ -351,7 +383,7 @@ pub(crate) fn encode_fragment(
 				..Default::default()
 			},
 			tfdt: Some(mp4_atom::Tfdt {
-				base_media_decode_time: dts,
+				base_media_decode_time: base_dts,
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: Some(data_offset),
@@ -505,6 +537,35 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				},
 				btrt: None,
 				taic: None,
+			})
+		}
+		AudioCodec::Flac => {
+			// The catalog `description` is the FLAC header (`fLaC` marker + STREAMINFO).
+			// Parse it back into the STREAMINFO fields the `dfLa` box stores.
+			let description = config
+				.description
+				.as_ref()
+				.ok_or_else(|| Error::MissingAudioDescription(config.codec.to_string()))?;
+			let info = crate::codec::flac::Config::parse(&mut description.as_ref())?;
+
+			let stream_info = mp4_atom::FlacMetadataBlock::StreamInfo {
+				minimum_block_size: info.min_block_size,
+				maximum_block_size: info.max_block_size,
+				// Frame sizes are 24-bit; clamp defensively so the conversion can't fail.
+				minimum_frame_size: info.min_frame_size.min(0xFF_FFFF).try_into().expect("fits in u24"),
+				maximum_frame_size: info.max_frame_size.min(0xFF_FFFF).try_into().expect("fits in u24"),
+				sample_rate: info.sample_rate,
+				num_channels_minus_one: info.channel_count.saturating_sub(1) as u8,
+				bits_per_sample_minus_one: info.bits_per_sample.saturating_sub(1) as u8,
+				number_of_interchannel_samples: info.total_samples,
+				md5_checksum: info.md5.to_vec(),
+			};
+
+			mp4_atom::Codec::from(mp4_atom::Flac {
+				audio,
+				dfla: mp4_atom::Dfla {
+					blocks: vec![stream_info],
+				},
 			})
 		}
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
@@ -667,6 +728,41 @@ mod tests {
 	}
 
 	#[test]
+	fn reordered_pts_round_trips_with_cts() {
+		let timescale = moq_net::Timescale::new(1_000_000).unwrap();
+		let input = vec![
+			Frame {
+				timestamp: ts(0),
+				payload: Bytes::from_static(&[0x00]),
+				keyframe: true,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(99_000),
+				payload: Bytes::from_static(&[0x01]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(33_000),
+				payload: Bytes::from_static(&[0x02]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+		];
+
+		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let frames = decode(fragment, timescale).unwrap();
+
+		assert_eq!(frames.len(), input.len());
+		for (actual, expected) in frames.iter().zip(&input) {
+			assert_eq!(actual.timestamp, expected.timestamp);
+			assert_eq!(actual.duration, expected.duration);
+			assert_eq!(actual.payload, expected.payload);
+		}
+	}
+
+	#[test]
 	fn decode_without_duration_reports_none() {
 		// encode_fragment writes no sample-duration for a duration-less frame,
 		// so decode must report None (and output stays byte-identical to before).
@@ -682,6 +778,45 @@ mod tests {
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].duration, None);
+	}
+
+	#[test]
+	fn decode_zero_duration_reports_none() {
+		use mp4_atom::Encode;
+
+		let timescale = moq_net::Timescale::new(24_000).unwrap();
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: 1,
+					default_sample_duration: Some(0),
+					default_sample_size: Some(2),
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 2_000,
+				}),
+				trun: vec![mp4_atom::Trun {
+					data_offset: Some(0),
+					entries: vec![mp4_atom::TrunEntry {
+						size: None,
+						duration: None,
+						..Default::default()
+					}],
+				}],
+				..Default::default()
+			}],
+		};
+
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		mp4_atom::Mdat { data: vec![0xDE, 0xAD] }.encode(&mut buf).unwrap();
+
+		let frames = decode(Bytes::from(buf), timescale).unwrap();
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].timestamp.as_micros(), 83_333);
 		assert_eq!(frames[0].duration, None);
 	}
 }

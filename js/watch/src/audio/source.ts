@@ -175,5 +175,11 @@ function defaultAudioJitter(config: Catalog.AudioConfig): number | undefined {
 		return Math.ceil((1024 / config.sampleRate) * 1000);
 	}
 
+	if (config.codec === "mp3") {
+		// 1152 samples per frame for MPEG-1 Layer III; MPEG-2/2.5 use 576.
+		const samples = config.sampleRate >= 32000 ? 1152 : 576;
+		return Math.ceil((samples / config.sampleRate) * 1000);
+	}
+
 	return undefined;
 }

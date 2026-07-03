@@ -1,7 +1,7 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 
 use crate::{
-	Compression, Path, Timescale,
+	Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
@@ -19,7 +19,7 @@ pub struct Track<'a> {
 
 impl Message for Track<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 
@@ -30,7 +30,7 @@ impl Message for Track<'_> {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
 
@@ -51,41 +51,42 @@ pub struct TrackInfo {
 	pub priority: u8,
 	/// The publisher's group ordering preference (newest-first when `false`).
 	pub ordered: bool,
+	/// Publisher Max Latency: an upper bound on how long the publisher caches a
+	/// non-latest group past the arrival of a newer one. Encoded as milliseconds.
+	pub cache: Duration,
 	/// Per-frame timestamp scale (units per second). Mandatory on Lite05+: every track
 	/// is timed, so this is always a real scale on the wire (never zero).
 	pub timescale: Timescale,
-	/// Codec applied to every frame payload on this track.
-	pub compression: Compression,
 }
 
 impl Message for TrackInfo {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
+		let cache = Duration::decode(r, version)?;
 		let timescale = Timescale::new(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
-		let compression = Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			priority,
 			ordered,
+			cache,
 			timescale,
-			compression,
 		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
 
 		self.priority.encode(w, version)?;
 		(self.ordered as u8).encode(w, version)?;
+		self.cache.encode(w, version)?;
 		u64::from(self.timescale).encode(w, version)?;
-		self.compression.to_code().encode(w, version)?;
 		Ok(())
 	}
 }
@@ -98,8 +99,8 @@ mod test {
 		TrackInfo {
 			priority: 7,
 			ordered: false,
+			cache: Duration::from_millis(2000),
 			timescale: Timescale::MICRO,
-			compression: Compression::Deflate,
 		}
 	}
 
@@ -115,8 +116,8 @@ mod test {
 		let got = info_roundtrip(Version::Lite05Wip, &info_sample());
 		assert_eq!(got.priority, 7);
 		assert!(!got.ordered);
+		assert_eq!(got.cache, Duration::from_millis(2000));
 		assert_eq!(got.timescale, Timescale::MICRO);
-		assert_eq!(got.compression, Compression::Deflate);
 	}
 
 	#[test]

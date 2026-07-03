@@ -46,11 +46,19 @@ let
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
     hardeningDisable = [ "fortify" ];
+    # Auth::new builds a rustls client config up front, which loads native
+    # roots and now errors when none are found. The build sandbox has no
+    # system trust store, so point rustls-native-certs at cacert's bundle
+    # for the check phase (even the http-only auth tests hit this path).
+    nativeBuildInputs = [ final.cacert ];
+    SSL_CERT_FILE = "${final.cacert}/etc/ssl/certs/ca-bundle.crt";
   };
 
   moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
     cargoExtraArgs = "-p moq-cli";
+    # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
+    meta.mainProgram = "moq";
   };
 
   moqTokenCliArgs = crateInfo ../rs/moq-token-cli/Cargo.toml // {

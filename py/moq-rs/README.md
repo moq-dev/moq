@@ -26,7 +26,8 @@ async def main():
             catalog = await announcement.broadcast.catalog()
 
             for name, track in catalog.audio.items():
-                async with announcement.broadcast.subscribe_media(name, track) as frames:
+                frames = await announcement.broadcast.subscribe_media(name, track)
+                async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
 
@@ -45,7 +46,7 @@ async def main():
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = broadcast.publish_media("opus", opus_init_bytes)
-        client.publish("my-stream", broadcast)
+        client.announce("my-stream", broadcast)
 
         # Write frames
         audio.write_frame(payload, timestamp_us=0)
@@ -68,7 +69,7 @@ async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
         track = broadcast.publish_track("events")
-        server.publish("hello", broadcast)
+        server.announce("hello", broadcast)
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -100,7 +101,7 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`connect(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
 - **`Client(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
   - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
@@ -108,7 +109,7 @@ client = moq.Client(
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.publish(path, broadcast)`. Publish a broadcast to be served.
+  - `.announce(path, broadcast)`. Advertise a broadcast to be served.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.transport`. Properties.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
@@ -119,6 +120,7 @@ client = moq.Client(
   - `await .closed()`. Wait until the session closes.
   - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
   - `.publisher() → OriginProducer`, `.consumer() → OriginConsumer`. The wired origin sides.
+  - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
 
 ### Publishing
 
@@ -127,8 +129,8 @@ client = moq.Client(
   - `.publish_media(format, init) → MediaProducer`
   - `.finish()`
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
-  - `await .requested_track() → TrackProducer`
-  - Async iterator yielding `TrackProducer`
+  - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
+  - Async iterator yielding `TrackRequest`
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
   - `.finish()`
@@ -136,8 +138,9 @@ client = moq.Client(
 ### Subscribing
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
-  - `.subscribe_catalog() → CatalogConsumer`
-  - `.subscribe_media(name, track, max_latency_ms=10000) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
+  - `await .subscribe_catalog() → CatalogConsumer`
+  - `await .subscribe_track(name) → TrackConsumer`
+  - `await .subscribe_media(name, track, max_latency_ms=10000) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
@@ -148,7 +151,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 
 - **`OriginProducer()`**. Manage broadcast announcements.
   - `.consume() → OriginConsumer`
-  - `.publish(path, broadcast)`
+  - `.announce(path, broadcast)`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix) → Announced` (async iterator)
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
@@ -159,7 +162,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
-- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_ratio`, `.bitrate`, `.framerate`, `.description`.
+- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
 - **`Dimensions`**. `.width: int`, `.height: int`.
 - **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 

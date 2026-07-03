@@ -243,7 +243,7 @@ def test_publish_lifecycle():
 async def test_publish_track_info_and_subscription():
     """Raw track published with explicit TrackInfo, consumed with a Subscription."""
     broadcast = moq.BroadcastProducer()
-    info = moq.TrackInfo(priority=5, compress=True, cache_ms=2_000)
+    info = moq.TrackInfo(priority=5, cache_ms=2_000)
     track = broadcast.publish_track("status", info)
 
     consumer = track.consume(moq.Subscription(priority=3))
@@ -410,6 +410,13 @@ def test_public_api_exports():
     assert hasattr(moq.Error, "Cancelled")
     assert callable(moq.log_level)
     assert isinstance(moq.connect("https://example.com"), moq.Client)
+    client = moq.connect(
+        "https://example.com",
+        tls_roots=["root.pem"],
+        tls_fingerprints=["abc123"],
+    )
+    assert client._tls_roots == ["root.pem"]
+    assert client._tls_fingerprints == ["abc123"]
 
 
 async def test_subscribe_media_default_latency_and_context_manager():

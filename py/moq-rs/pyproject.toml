@@ -28,11 +28,11 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Multimedia :: Video",
 ]
-# Compatible-release pin: floats to the latest 0.2.x moq-ffi patch without a
-# wrapper re-release. A moq-ffi minor bump (0.3) is the only thing that forces
-# bumping this constraint. Floor is 0.2.24, the first release exposing
-# MoqAnnouncement.hops() that Announcement.hops depends on.
-dependencies = ["moq-ffi ~= 0.2.24"]
+# Compatible-release pin: floats to the latest 0.3.x moq-ffi patch without a
+# wrapper re-release. A moq-ffi minor bump (0.4) is the only thing that forces
+# bumping this constraint. Floor is 0.3.0, the release that renamed the FFI
+# publish -> announce and required accepting a TrackRequest before writing.
+dependencies = ["moq-ffi ~= 0.3.0"]
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"

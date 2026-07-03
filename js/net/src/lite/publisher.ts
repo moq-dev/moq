@@ -1,13 +1,12 @@
 import { type Dispose, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast.ts";
-import { Compression, compress } from "../compression.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { TrackSubscriber } from "../track.ts";
 import { error } from "../util/error.ts";
-import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest, epochNow } from "./announce.ts";
+import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -20,7 +19,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { Version } from "./version.ts";
+import { hasAnnounceOk, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -66,13 +65,6 @@ export class Publisher {
 	// It's a signal so we can live update any announce streams.
 	#broadcasts = new Signal<Map<Path.Valid, Broadcast> | undefined>(new Map());
 
-	// Per-broadcast epoch (ms since 2020-01-01 UTC), stamped when the instance is
-	// published. Mirrors the Rust `BroadcastInfo.epoch` (SystemTime::now at creation):
-	// a newer instance of the same path carries a later epoch, so a consumer can prefer
-	// the newest route. Sent in every ANNOUNCE_BROADCAST (lite-05+), including the
-	// unannounce, so the peer can match the instance that ended.
-	#epochs = new Map<Path.Valid, number>();
-
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
 	// and reuse it for every later TRACK request of the same track. Keyed by
@@ -98,27 +90,17 @@ export class Publisher {
 	 * @param name - The broadcast to publish
 	 */
 	publish(path: Path.Valid, broadcast: Broadcast) {
-		// Stamp the instance epoch at publish time (mirrors Rust's SystemTime::now default).
-		this.#epochs.set(path, epochNow());
 		this.#broadcasts.mutate((broadcasts) => {
 			if (!broadcasts) throw new Error("closed");
 			broadcasts.set(path, broadcast);
 		});
 
-		// Remove the broadcast from the lookup when it's closed. Keep the epoch around:
-		// the unannounce announce (sent from the per-stream diff loop after the map change)
-		// still needs it to identify the instance that ended. It's overwritten on the next
-		// publish to the same path, so it can't go stale.
+		// Remove the broadcast from the lookup when it's closed.
 		void broadcast.closed.finally(() => {
 			this.#broadcasts.mutate((broadcasts) => {
 				broadcasts?.delete(path);
 			});
 		});
-	}
-
-	// The epoch of the broadcast published at `path`, or 0 if it was never seen.
-	#epoch(path: Path.Valid): number {
-		return this.#epochs.get(path) ?? 0;
 	}
 
 	/**
@@ -151,25 +133,26 @@ export class Publisher {
 				await init.encode(stream.writer, this.version);
 				break;
 			}
-			case Version.DRAFT_05_WIP: {
+			default: {
+				if (!hasAnnounceOk(this.version)) {
+					// Draft03/04: send individual Announce messages, stamping our origin as a hop.
+					for (const suffix of active) {
+						const wire = new AnnounceBroadcast({ suffix, active: true, hops: [this.origin] });
+						await wire.encode(stream.writer, this.version);
+					}
+					break;
+				}
+
 				// Report our origin id once via AnnounceOk and the count of initial announces
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
 				const ok = new AnnounceOk(this.origin, active.size);
 				await ok.encode(stream.writer, this.version);
 				for (const suffix of active) {
-					const epoch = this.#epoch(Path.join(msg.prefix, suffix));
-					const wire = new AnnounceBroadcast({ suffix, active: true, epoch });
+					const wire = new AnnounceBroadcast({ suffix, active: true });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
 			}
-			default:
-				// Draft03/04: send individual Announce messages, stamping our origin as a hop.
-				for (const suffix of active) {
-					const wire = new AnnounceBroadcast({ suffix, active: true, hops: [this.origin] });
-					await wire.encode(stream.writer, this.version);
-				}
-				break;
 		}
 
 		// Wait for updates to the broadcasts.
@@ -198,19 +181,16 @@ export class Publisher {
 			// the subscriber stamps it onto each hop chain; older versions stamp it here.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const hops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
-				const epoch = this.#epoch(Path.join(msg.prefix, added));
-				const wire = new AnnounceBroadcast({ suffix: added, active: true, epoch, hops });
+				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
+				const wire = new AnnounceBroadcast({ suffix: added, active: true, hops });
 				await wire.encode(stream.writer, this.version);
 			}
 
 			// Announce any removed broadcasts.
-			// Ended announces don't need hops — the peer matches on path only.
-			// They carry the epoch of the instance that ended so the peer can match it.
+			// Ended announces don't need hops. The peer matches on path only.
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
-				const epoch = this.#epoch(Path.join(msg.prefix, removed));
-				const wire = new AnnounceBroadcast({ suffix: removed, active: false, epoch });
+				const wire = new AnnounceBroadcast({ suffix: removed, active: false });
 				await wire.encode(stream.writer, this.version);
 			}
 
@@ -239,7 +219,6 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			let compression: Compression = Compression.None;
 			let timescale: Timescale = Timescale.MILLI;
 
 			if (supportsTrackStream(this.version)) {
@@ -247,13 +226,12 @@ export class Publisher {
 				// properties live in TRACK_INFO), and the resolved range arrives as
 				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
 				//
-				// The frame codec and timescale are immutable properties, so serving
-				// MUST use exactly what TRACK_INFO advertised. Both come from the
-				// producer's accept(), so they always agree. Awaiting info() also
-				// surfaces a rejected track (accept never called, track closed) as an
-				// error here, which resets the stream.
+				// The timescale is an immutable property, so serving MUST use exactly
+				// what TRACK_INFO advertised. It comes from the producer's accept(), so
+				// they always agree. Awaiting info() also surfaces a rejected track
+				// (accept never called, track closed) as an error here, which resets the
+				// stream.
 				const info = await track.info();
-				compression = info.compress ? Compression.Deflate : Compression.None;
 				timescale = info.timescale;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -263,7 +241,7 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, compression, timescale);
+			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale);
 
 			for (;;) {
 				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
@@ -299,14 +277,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runTrack(
-		sub: bigint,
-		broadcast: Path.Valid,
-		track: TrackSubscriber,
-		stream: Writer,
-		compression: Compression,
-		timescale: Timescale,
-	) {
+	async #runTrack(sub: bigint, broadcast: Path.Valid, track: TrackSubscriber, stream: Writer, timescale: Timescale) {
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -328,7 +299,7 @@ export class Publisher {
 				}
 				lastSequence = group.sequence;
 
-				void this.#runGroup(sub, group, compression, timescale);
+				void this.#runGroup(sub, group, timescale);
 			}
 
 			if (emitRange) {
@@ -378,15 +349,15 @@ export class Publisher {
 			if (!published) throw new Error("not found");
 
 			const info = await published.track(track).info();
-			// The wire no longer carries a cache hint (retention is best-effort, not a
-			// guarantee); the local `info.cache` stays a purely local retention window.
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,
+				// Publisher Max Latency: the publisher's retention bound, advertised so
+				// relays re-serve with the same window.
+				cache: info.cache,
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#runGroup` emits each frame converted to it.
 				timescale: info.timescale,
-				compression: info.compress ? Compression.Deflate : Compression.None,
 			});
 		})();
 
@@ -403,11 +374,11 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: Group, compression: Compression, timescale: Timescale) {
+	async #runGroup(sub: bigint, group: Group, timescale: Timescale) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			const stream = await Writer.open(this.#quic);
-			await stream.u8(0); // stream type
+			await stream.u53(0); // stream type
 			await msg.encode(stream);
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
@@ -427,11 +398,8 @@ export class Publisher {
 						prevTs = ts;
 					}
 
-					// On a compressed track the wire size is the compressed length;
-					// the subscriber inflates it back from the SUBSCRIBE_OK codec.
-					const payload = await compress(compression, frame.data);
-					await stream.u53(payload.byteLength);
-					await stream.write(payload);
+					await stream.u53(frame.data.byteLength);
+					await stream.write(frame.data);
 				}
 
 				stream.close();

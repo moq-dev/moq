@@ -1,0 +1,11 @@
+# CMake build trees (per the platform presets) and CPack output.
+build_macos/
+build_x64/
+build_x86_64/
+release/
+
+# Downloaded OBS sources + prebuilt obs-deps/Qt6 (macOS/Windows buildspec).
+.deps/
+
+# Generated build counter.
+cmake/.CMakeBuildNumber

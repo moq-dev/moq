@@ -109,6 +109,15 @@ export class Group {
 		}
 	}
 
+	#readBufferedFrame(): { sequence: number; frame: Frame } | undefined {
+		const frames = this.state.frames.peek();
+		const frame = frames.shift();
+		if (!frame) return undefined;
+
+		this.#cacheBytes -= frame.data.byteLength;
+		return { sequence: this.state.total.peek() - frames.length - 1, frame };
+	}
+
 	/**
 	 * Create an independent copy that receives every frame written to this group.
 	 *
@@ -149,6 +158,53 @@ export class Group {
 		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
 
+	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
+	get done(): boolean {
+		return this.state.frames.peek().length === 0 && this.state.closed.peek() !== false;
+	}
+
+	/**
+	 * Reads the next already-buffered frame's payload without blocking.
+	 *
+	 * Returns `undefined` when nothing is buffered right now. That is *not* by itself end-of-group:
+	 * check {@link done} to tell "no frame buffered yet" (more may arrive) from "the group finished".
+	 * Drain a backlog by looping until this returns `undefined`, then branch on {@link done}: if not
+	 * done, {@link readable} resolves when the next frame arrives.
+	 *
+	 * Non-throwing: unlike {@link readFrame} it does not raise {@link CacheFull} on an evicted prefix.
+	 */
+	tryReadFrame(): Uint8Array | undefined {
+		return this.tryReadFrameSequence()?.data;
+	}
+
+	/**
+	 * Like {@link tryReadFrame} but also reports the frame's sequence number within the group.
+	 *
+	 * Non-throwing: it does not raise {@link CacheFull} on an evicted prefix. The eviction check
+	 * lives only in the blocking {@link readFrame}/{@link readFrameSequence} paths.
+	 */
+	tryReadFrameSequence(): { sequence: number; data: Uint8Array } | undefined {
+		const read = this.#readBufferedFrame();
+		if (!read) return undefined;
+		return { sequence: read.sequence, data: read.frame.data };
+	}
+
+	/**
+	 * Resolves once {@link readFrame} would not block: a frame is buffered, or the group has closed.
+	 * Always settles (never hangs), so on a finished group it resolves immediately; pair it with
+	 * {@link done} to avoid re-waiting on a group that has nothing left.
+	 *
+	 * Lets a caller fold "this group has a frame" into a larger wait (e.g. racing it against a new
+	 * group arriving) without touching the group's internal signals.
+	 */
+	async readable(): Promise<void> {
+		for (;;) {
+			if (this.state.frames.peek().length > 0) return;
+			if (this.state.closed.peek()) return;
+			await Signal.race(this.state.frames, this.state.closed);
+		}
+	}
+
 	/**
 	 * Reads the next frame (timestamp + payload) from the group.
 	 * @returns A promise that resolves to the next frame or undefined
@@ -157,9 +213,8 @@ export class Group {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
-			const frames = this.state.frames.peek();
-			const frame = frames.shift();
-			if (frame) return frame;
+			const read = this.#readBufferedFrame();
+			if (read) return read.frame;
 
 			const closed = this.state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -174,9 +229,8 @@ export class Group {
 		for (;;) {
 			if (this.state.offset > 0) throw new CacheFull();
 
-			const frames = this.state.frames.peek();
-			const frame = frames.shift();
-			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, data: frame.data };
+			const read = this.#readBufferedFrame();
+			if (read) return { sequence: read.sequence, data: read.frame.data };
 
 			const closed = this.state.closed.peek();
 			if (closed instanceof Error) throw closed;

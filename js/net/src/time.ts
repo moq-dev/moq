@@ -104,6 +104,9 @@ export class Timestamp {
 
 	/** Build a timestamp of `value` units at `scale`. */
 	constructor(value: number, scale: Timescale) {
+		if (!Number.isFinite(value) || value < 0) {
+			throw new Error(`invalid timestamp: ${value}`);
+		}
 		this.value = value;
 		this.scale = scale;
 	}

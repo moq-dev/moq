@@ -9,6 +9,17 @@ use url::Url;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct ClientConfig {
+	/// The URL to dial.
+	///
+	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
+	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
+	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
+	/// self-signed fingerprint; `https://` connects directly.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-connect", long = "client-connect", env = "MOQ_CLIENT_CONNECT")]
+	pub connect: Option<Url>,
+
 	/// Listen for UDP packets on the given address.
 	#[arg(
 		id = "client-bind",
@@ -75,6 +86,7 @@ impl ClientConfig {
 impl Default for ClientConfig {
 	fn default() -> Self {
 		Self {
+			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
 			max_streams: None,
@@ -94,6 +106,8 @@ impl Default for ClientConfig {
 pub struct Client {
 	moq: moq_net::Client,
 	versions: moq_net::Versions,
+	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
+	connect: Option<Url>,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
@@ -179,6 +193,7 @@ impl Client {
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
+			connect: config.connect,
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
@@ -222,13 +237,13 @@ impl Client {
 		self
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
 	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
 	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
 		self.with_subscriber(subscribe)
@@ -246,6 +261,26 @@ impl Client {
 	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
 		Reconnect::new(self.clone(), url, self.backoff.clone())
+	}
+
+	/// Dial the configured [`ClientConfig::connect`] URL, publishing `origin` to it
+	/// and reconnecting with backoff until the returned handle is dropped.
+	///
+	/// Returns `None` when no `--client-connect` URL was configured, so a caller
+	/// that may run server-only doesn't have to branch on the URL itself.
+	pub fn publish(self, origin: moq_net::OriginConsumer) -> Option<Reconnect> {
+		let url = self.connect.clone()?;
+		Some(self.with_publisher(origin).reconnect(url))
+	}
+
+	/// Dial the configured [`ClientConfig::connect`] URL, consuming its broadcasts
+	/// into `origin` and reconnecting with backoff until the returned handle is
+	/// dropped.
+	///
+	/// Returns `None` when no `--client-connect` URL was configured.
+	pub fn consume(self, origin: moq_net::OriginProducer) -> Option<Reconnect> {
+		let url = self.connect.clone()?;
+		Some(self.with_subscriber(origin).reconnect(url))
 	}
 
 	#[cfg(not(any(
@@ -511,27 +546,57 @@ mod tests {
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
 		assert_eq!(config.tls.disable_verify, Some(true));
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --tls-disable-verify flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-disable-verify flag).
 		config.update_from(["test"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_flag() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_explicit_false() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=false"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify=false"]);
 		assert_eq!(config.tls.disable_verify, Some(false));
 	}
 
 	#[test]
 	fn test_cli_disable_verify_explicit_true() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-disable-verify=true"]);
 		assert_eq!(config.tls.disable_verify, Some(true));
+	}
+
+	#[test]
+	fn test_cli_deprecated_tls_flags_fold_into_canonical() {
+		// The bare --tls-* forms are deprecated. They parse into a hidden field and
+		// fold into the canonical values via the effective_* accessors build() uses,
+		// so they keep working without touching the public Client fields.
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true", "--tls-fingerprint", "abcd1234"]);
+		assert_eq!(
+			config.tls.disable_verify, None,
+			"deprecated flag must not set the canonical field"
+		);
+		assert_eq!(config.tls.effective_disable_verify(), Some(true));
+		assert_eq!(config.tls.effective_fingerprint(), vec!["abcd1234"]);
+	}
+
+	#[test]
+	fn test_canonical_tls_flag_wins_over_deprecated() {
+		// Both spellings given: canonical wins for scalar options, vecs concatenate.
+		let config = ClientConfig::parse_from([
+			"test",
+			"--client-tls-disable-verify=false",
+			"--tls-disable-verify=true",
+			"--client-tls-fingerprint",
+			"aaaa",
+			"--tls-fingerprint",
+			"bbbb",
+		]);
+		assert_eq!(config.tls.effective_disable_verify(), Some(false));
+		assert_eq!(config.tls.effective_fingerprint(), vec!["aaaa", "bbbb"]);
 	}
 
 	#[test]
@@ -549,7 +614,7 @@ mod tests {
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --tls-fingerprint flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-fingerprint flag).
 		config.update_from(["test"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 	}
@@ -566,7 +631,7 @@ mod tests {
 
 	#[test]
 	fn test_cli_fingerprint() {
-		let config = ClientConfig::parse_from(["test", "--tls-fingerprint", "abcd1234"]);
+		let config = ClientConfig::parse_from(["test", "--client-tls-fingerprint", "abcd1234"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
 	}
 
@@ -588,6 +653,35 @@ mod tests {
 	fn test_cli_version() {
 		let config = ClientConfig::parse_from(["test", "--client-version", "moq-lite-03"]);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
+	}
+
+	#[test]
+	fn test_toml_connect_survives_update_from() {
+		let toml = r#"
+			connect = "https://relay.example.com/anon"
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(
+			config.connect.as_ref().unwrap().as_str(),
+			"https://relay.example.com/anon"
+		);
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-connect flag).
+		config.update_from(["test"]);
+		assert_eq!(
+			config.connect.as_ref().unwrap().as_str(),
+			"https://relay.example.com/anon"
+		);
+	}
+
+	#[test]
+	fn test_cli_connect() {
+		let config = ClientConfig::parse_from(["test", "--client-connect", "https://relay.example.com/anon"]);
+		assert_eq!(
+			config.connect.as_ref().unwrap().as_str(),
+			"https://relay.example.com/anon"
+		);
 	}
 
 	#[test]

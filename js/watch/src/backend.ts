@@ -115,7 +115,7 @@ export class MultiBackend {
 			broadcast: getter(props?.broadcast),
 			connection: getter(props?.connection),
 			paused: getter(props?.paused ?? false),
-			visible: getter(props?.visible ?? "0px"),
+			visible: getter(props?.visible ?? "20%"),
 			latency: getter(props?.latency ?? ("real-time" as Latency)),
 			volume: getter(props?.volume ?? 0.5),
 			muted: getter(props?.muted ?? false),

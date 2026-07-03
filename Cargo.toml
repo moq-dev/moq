@@ -8,6 +8,7 @@ members = [
     "rs/moq-boy",
     "rs/moq-cli",
     "rs/moq-ffi",
+    "rs/moq-flate",
     "rs/moq-gst",
     "rs/moq-hls",
     "rs/moq-json",
@@ -16,6 +17,7 @@ members = [
     "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-net",
+    "rs/moq-nvenc",
     "rs/moq-relay",
     "rs/moq-rtc",
     "rs/moq-rtmp",
@@ -35,6 +37,7 @@ default-members = [
     "rs/moq-cli",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
+    "rs/moq-flate",
     "rs/moq-hls",
     "rs/moq-json",
     "rs/moq-loc",
@@ -42,14 +45,15 @@ default-members = [
     "rs/moq-net",
     "rs/moq-mux",
     "rs/moq-native",
+    "rs/moq-nvenc",
     "rs/moq-relay",
     "rs/moq-rtc",
     "rs/moq-rtmp",
     "rs/moq-srt",
     "rs/moq-token",
     "rs/moq-token-cli",
-    "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
+    "rs/moq-video",
 ]
 resolver = "2"
 
@@ -60,21 +64,29 @@ rust-version = "1.85"
 flate2 = "1.1"
 hang = { version = "0.19", path = "rs/hang" }
 kio = { version = "0.4", path = "rs/kio" }
-moq-audio = { version = "0.0.5", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.6", path = "rs/moq-audio" }
+moq-flate = { version = "0.1.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.0.1", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.0.4", path = "rs/moq-json" }
+moq-json = { version = "0.1.1", path = "rs/moq-json" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
-moq-msf = { version = "0.2", path = "rs/moq-msf" }
-moq-mux = { version = "0.6", path = "rs/moq-mux" }
+moq-msf = { version = "0.3", path = "rs/moq-msf" }
+moq-mux = { version = "0.7", path = "rs/moq-mux" }
 moq-native = { version = "0.17", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
+# NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
+# driver at runtime. Compiles on any platform (macOS included) but only actually
+# used by moq-video on Linux.
+moq-nvenc = { version = "0.0.1", path = "rs/moq-nvenc" }
+moq-rtc = { version = "0.0.1", path = "rs/moq-rtc" }
+moq-rtmp = { version = "0.0.1", path = "rs/moq-rtmp" }
+moq-srt = { version = "0.0.1", path = "rs/moq-srt" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 moq-vaapi = "0.0.2"
 # default-features off (the `nvenc` / `vaapi` hardware encoders) so each consumer
 # opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a self-compiler can
 # leave them off to drop the CUDA / libva deps. moq-video itself still defaults them on.
-moq-video = { version = "0.0.5", path = "rs/moq-video", default-features = false }
+moq-video = { version = "0.0.6", path = "rs/moq-video", default-features = false }
 qmux = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
@@ -112,11 +124,3 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
-
-# moq-video's always-on NVENC backend (Linux) needs a `dynamic-loading` mode on
-# nvidia-video-codec-sdk so libnvidia-encode is dlopen'd at runtime instead of
-# linked: that lets a portable moq-cli build (and load) on machines without the
-# NVIDIA driver, and lets a GPU-less CI/release builder compile it. Upstream
-# doesn't have that feature yet, so consume a fork branch until it's merged.
-[patch.crates-io]
-nvidia-video-codec-sdk = { git = "https://github.com/kixelated/nvidia-video-codec-sdk.git", branch = "dynamic-loading" }

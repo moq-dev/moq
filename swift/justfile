@@ -14,14 +14,14 @@ default:
 check:
     bash scripts/check.sh
 
-# Assemble the XCFramework + Package.swift from per-target moq-ffi
-# binaries + bindings. Used by .github/workflows/release-swift.yml; see
+# Assemble the released wrapper package from Package.swift.template.
 
-# swift/README.md for the expected --lib-dir layout.
+# Used by .github/workflows/release-swift-lib.yml.
 package *args:
     bash scripts/package.sh {{ args }}
 
 # Remove SwiftPM build output plus the XCFramework and generated bindings
+
 # that scripts/check.sh lays down (see swift/.gitignore).
 clean:
     rm -rf .build .swiftpm Package.resolved Sources/MoqFFI/Generated.swift MoqFFI.xcframework

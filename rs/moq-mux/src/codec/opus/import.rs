@@ -41,6 +41,11 @@ impl<E: CatalogExt> Import<E> {
 		})
 	}
 
+	/// The MoQ track name this importer publishes on.
+	pub fn name(&self) -> &str {
+		self.track.track().name()
+	}
+
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::TrackDemand {
 		self.track.track().demand()

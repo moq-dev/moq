@@ -153,9 +153,12 @@ class TrackRequest:
         """The requested track name."""
         return self._inner.name()
 
-    def accept(self) -> TrackProducer:
-        """Accept the request as a raw track."""
-        return TrackProducer(self._inner.accept(None))
+    def accept(self, info: TrackInfo | None = None) -> TrackProducer:
+        """Accept the request as a raw track.
+
+        ``info`` fixes the track's timescale, priority, ordering, and cache; omit for defaults.
+        """
+        return TrackProducer(self._inner.accept(info))
 
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""
@@ -237,7 +240,7 @@ class BroadcastProducer:
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
-        properties (priority, cache, compression); omit for defaults."""
+        properties (priority, cache, timescale); omit for defaults."""
         return TrackProducer(self._inner.publish_track(name, info))
 
     def set_catalog_section(self, name: str, value: str) -> None:

@@ -94,14 +94,16 @@ where
 		}
 	});
 
+	// Own the thread from here on, so cancelling this `await` (dropping the
+	// `open` future before geometry arrives) still stops and joins it instead of
+	// detaching a thread that holds the device open with the camera LED lit.
+	let guard = PumpGuard {
+		stop,
+		handle: Some(handle),
+	};
+
 	match geo_rx.await {
-		Ok(Ok(geometry)) => Ok((
-			geometry,
-			PumpGuard {
-				stop,
-				handle: Some(handle),
-			},
-		)),
+		Ok(Ok(geometry)) => Ok((geometry, guard)),
 		Ok(Err(err)) => Err(err),
 		Err(_) => Err(Error::Codec(anyhow::anyhow!(
 			"capture thread exited before reporting geometry"

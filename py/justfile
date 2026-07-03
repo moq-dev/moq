@@ -8,6 +8,7 @@
 #   moq-rs/   pure-python ergonomic wrapper depending on moq-ffi (dist `moq-rs`,
 #             import `moq`)
 
+set unstable
 set working-directory := '.'
 
 default:
@@ -15,6 +16,7 @@ default:
 
 # Build moq-ffi (maturin cdylib + bindings) and install the pure-python moq-rs
 # wrapper, both editable into the workspace venv. `--no-deps` on the wrapper
+
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
 _develop:
     cd moq-ffi && uv run --no-sync maturin develop --uv
@@ -22,6 +24,7 @@ _develop:
 
 # Lint + format + editable build + pyright. `--no-install-workspace` installs
 # the root dev group (ruff, maturin, pyright, pytest) without trying to
+
 # pip-build the workspace members; `_develop` then installs them editable.
 check:
     uv sync --no-install-workspace
@@ -41,6 +44,7 @@ test:
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
 # Local dev build: editable install of moq-ffi (with the cdylib + uniffi
+
 # bindings) and the moq-rs wrapper into the workspace venv.
 build:
     uv sync --no-install-workspace
@@ -48,6 +52,7 @@ build:
 
 # Remove the virtualenv, release dist, bytecode caches, and the uniffi
 # bindings maturin drops in during editable installs. The uv workspace venv
+
 # lives at the repo root, so reach up for it.
 clean:
     #!/usr/bin/env bash
@@ -59,6 +64,7 @@ clean:
 
 # Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
 # moq-ffi is built separately by maturin (see release-py.yml); the wrapper is
+
 # pure python so it needs no compilation, just a metadata-correct wheel.
 package:
     rm -rf dist
@@ -67,6 +73,7 @@ package:
 # Full Python CI: lint + tests + build. Takes a newline-separated list
 # of changed files; skips if FILES is non-empty and none match the
 # Python scope (which includes rs/moq-ffi because moq-ffi bundles it via
+
 # maturin). Run `just py ci` (no FILES) to force-run everything.
 ci FILES="":
     #!/usr/bin/env bash

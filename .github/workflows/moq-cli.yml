@@ -31,7 +31,7 @@ jobs:
             rpm-arch: aarch64
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -54,21 +54,10 @@ jobs:
         # and AlmaLinux/RHEL/Rocky 9+ (.rpm).
         run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-cli
 
-      - name: Rename binary
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          # The crate is named moq-cli but the .deb / .rpm and Homebrew
-          # formula present the binary as `moq`. Cargo produces
-          # target/release/moq-cli by default (no [[bin]] override),
-          # so make a sibling copy that the downstream packaging steps
-          # can point at without each one needing to know the rename.
-          cp "target/${TARGET}/release/moq-cli" "target/${TARGET}/release/moq"
-
       - name: Package bare binary
         shell: bash
         run: |
+          # The crate is named moq-cli but its `[[bin]]` ships as `moq`.
           version="${{ steps.parse.outputs.version }}"
           target="${{ matrix.target }}"
           name="moq-cli-v${version}-${target}"
@@ -83,7 +72,7 @@ jobs:
         run: |
           name="moq-cli-${VERSION}-${TARGET}"
           mkdir -p "dist/${name}/bin"
-          cp "target/${TARGET}/release/moq-cli" "dist/${name}/bin/moq-cli"
+          cp "target/${TARGET}/release/moq" "dist/${name}/bin/moq"
           cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
           if [[ -f rs/moq-cli/README.md ]]; then
             cp rs/moq-cli/README.md "dist/${name}/"
@@ -140,7 +129,7 @@ jobs:
             os: macos-latest
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -166,6 +155,7 @@ jobs:
         run: |
           ./rs/scripts/package-binary.sh \
             --crate moq-cli \
+            --bin moq \
             --target ${{ matrix.target }} \
             --version ${{ steps.parse.outputs.version }} \
             --output dist
@@ -187,7 +177,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -213,6 +203,7 @@ jobs:
         run: |
           ./rs/scripts/package-windows.sh \
             --crate moq-cli \
+            --bin moq \
             --target ${{ matrix.target }} \
             --version ${{ steps.parse.outputs.version }} \
             --output dist
@@ -232,7 +223,7 @@ jobs:
       actions: write
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false

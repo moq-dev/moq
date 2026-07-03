@@ -489,6 +489,12 @@ pub(crate) mod d3d11 {
 			let (cw, ch) = (w / 2, h / 2);
 			let pitch = mapped.RowPitch as usize;
 			let base = mapped.pData as *const u8;
+			// The UV plane begins after the *texture's* Y plane, which spans the
+			// allocated height, not the display height. A DXVA decode pool allocates
+			// textures at the coded size (e.g. 1088 rows for a 1080p display), so
+			// keying the offset off `self.height` would read chroma from inside the
+			// still-luma padding rows and produce garbage color.
+			let tex_height = desc.Height as usize;
 
 			let mut data = vec![0u8; I420::len(self.width, self.height)];
 			let (luma, chroma) = data.split_at_mut(w * h);
@@ -500,8 +506,8 @@ pub(crate) mod d3d11 {
 					ptr::copy_nonoverlapping(base.add(row * pitch), luma[row * w..].as_mut_ptr(), w);
 				}
 			}
-			// Interleaved UV plane sits right after Y at `pitch * h`, h/2 rows.
-			let uv_base = unsafe { base.add(pitch * h) };
+			// Interleaved UV plane sits right after the full Y plane, h/2 rows.
+			let uv_base = unsafe { base.add(pitch * tex_height) };
 			for row in 0..ch {
 				let src = unsafe { uv_base.add(row * pitch) };
 				for col in 0..cw {

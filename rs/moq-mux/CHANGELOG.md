@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.6.0...moq-mux-v0.7.0) - 2026-06-30
+
+### Added
+
+- *(moq-rtc)* add WebRTC (WHIP/WHEP) gateway ([#1916](https://github.com/moq-dev/moq/pull/1916))
+- *(moq-srt)* bidirectional SRT/MPEG-TS gateway (+ timestamped ts::Export) ([#1915](https://github.com/moq-dev/moq/pull/1915))
+- *(moq-rtmp)* RTMP/E-RTMP gateway + enhanced-RTMP FLV codecs on main ([#1914](https://github.com/moq-dev/moq/pull/1914))
+- *(hang)* compressed catalog track (catalog.json.z) ([#1904](https://github.com/moq-dev/moq/pull/1904))
+- *(json)* group-scoped DEFLATE compression with browser support ([#1897](https://github.com/moq-dev/moq/pull/1897))
+- *(moq-mux)* clear consumer buffer when group timestamps rewind ([#1884](https://github.com/moq-dev/moq/pull/1884))
+
+### Fixed
+
+- *(moq-mux)* codec/container correctness fixes from #1918 review ([#1923](https://github.com/moq-dev/moq/pull/1923)) ([#1925](https://github.com/moq-dev/moq/pull/1925))
+
+### Other
+
+- drop redundant non_exhaustive on select builders ([#1944](https://github.com/moq-dev/moq/pull/1944))
+- unify rendition selection behind select::Broadcast
+- API cleanup before the semver bump ([#1941](https://github.com/moq-dev/moq/pull/1941))
+- [codex] Route HLS CLI import through moq-hls ([#1939](https://github.com/moq-dev/moq/pull/1939))
+- Fix fMP4 zero-duration samples ([#1933](https://github.com/moq-dev/moq/pull/1933))
+- [codex] Backport moq-hls to main ([#1924](https://github.com/moq-dev/moq/pull/1924))
+- Backport moq-mux to main (adapted to main's moq-net, no wire/API breaks) ([#1918](https://github.com/moq-dev/moq/pull/1918))
+
 ### Changed
 
 - Emit MSF catalogs at draft-ietf-moq-msf-01: `version` is the string `"draft-01"` and init data is carried via the root `initDataList` + per-track `initRef`. The MSF consumer still accepts draft-00 (numeric `version`, inline `initData`).

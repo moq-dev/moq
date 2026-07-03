@@ -13,7 +13,7 @@
 //! length-prefixed -> Annex-B conversion, re-injecting the parameter sets as
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -109,6 +109,10 @@ enum Kind {
 		sample_rate: u32,
 		channel_count: u32,
 	},
+	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
+	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
+	/// registration plus DVB extension descriptor.
+	Opus { channel_count: u32 },
 	/// MP2, carried verbatim. The sample rate picks the stream type on the way
 	/// out (0x03 vs 0x04).
 	Mp2 { sample_rate: u32 },
@@ -210,11 +214,11 @@ impl<E: catalog::Catalog> Export<E> {
 	/// on the first frame (inheriting its timestamp), and is re-emitted at video
 	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
 	/// broadcast ends. `duration` is always `None`: the muxer has no use for it.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
+	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -260,7 +264,7 @@ impl<E: catalog::Catalog> Export<E> {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 					Poll::Pending => break,
 				}
 			}
@@ -331,7 +335,7 @@ impl<E: catalog::Catalog> Export<E> {
 		self.program_descriptors = mpegts.program_descriptors.clone();
 
 		// The desired track set: media renditions plus the verbatim streams.
-		let mut active: HashMap<String, ()> = HashMap::new();
+		let mut active: BTreeMap<String, ()> = BTreeMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
@@ -367,7 +371,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// runs every snapshot until the PMT is built and the tracks below are
 		// *refreshed*, not latched from the first (partial) snapshot.
 		let mut used: Vec<u16> = vec![0x0000, PMT_PID, 0x1FFF];
-		let mut pids: HashMap<String, u16> = HashMap::new();
+		let mut pids: BTreeMap<String, u16> = BTreeMap::new();
 		for name in active.keys() {
 			if let Some(pid) = mpegts.tracks.get(name).map(|t| t.pid)
 				&& !used.contains(&pid)
@@ -533,9 +537,12 @@ impl<E: catalog::Catalog> Export<E> {
 		);
 		let pcr_pid = video
 			.or_else(|| {
-				tracks
-					.iter()
-					.find(|t| matches!(t.kind, Kind::Aac { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3))
+				tracks.iter().find(|t| {
+					matches!(
+						t.kind,
+						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+					)
+				})
 			})
 			.map(|t| t.pid)
 			.context("TS export requires a video or audio track for the PCR")?;
@@ -546,6 +553,9 @@ impl<E: catalog::Catalog> Export<E> {
 				let stream_type = match &t.kind {
 					Kind::Video(stream_type) => *stream_type,
 					Kind::Aac { .. } => StreamType::AdtsAac,
+					// Opus rides private-data PES; the registration + extension descriptors
+					// below tell the demuxer it's Opus.
+					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
 					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
 					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
 					// header, so the mapping is faithful.
@@ -572,6 +582,7 @@ impl<E: catalog::Catalog> Export<E> {
 							tag: 0x05,
 							data: b"EAC3".to_vec(),
 						}],
+						Kind::Opus { channel_count } => opus_descriptors(*channel_count),
 						_ => Vec::new(),
 					}
 				};
@@ -631,9 +642,9 @@ impl<E: catalog::Catalog> Export<E> {
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (n.clone(), f.timestamp)))
-			.min_by_key(|(_, ts)| *ts)
-			.map(|(n, _)| n)
+			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (f.timestamp, t.pid, n)))
+			.min_by_key(|(timestamp, pid, name)| (*timestamp, *pid, *name))
+			.map(|(_, _, name)| name.clone())
 	}
 
 	/// Packetize one media frame into an output [`Frame`], re-emitting PAT/PMT
@@ -665,6 +676,8 @@ impl<E: catalog::Catalog> Export<E> {
 				framed.extend_from_slice(&frame.payload);
 				Some(framed)
 			}
+			// Each moq Opus frame is one packet; prefix the Opus-in-TS control header.
+			Kind::Opus { .. } => Some(opus_es_payload(&frame.payload)),
 			// Legacy audio frames were ingested whole (framing header included), so
 			// they pass through untouched. PES-framed verbatim payloads likewise.
 			Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
@@ -691,10 +704,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
 		// Refresh PSI at keyframes or after the interval lapses.
-		let psi_due = match self.last_psi {
-			None => true,
-			Some(last) => frame.timestamp >= last && (frame.timestamp - last) >= psi_interval(),
-		};
+		let psi_due = psi_due(frame.timestamp, self.last_psi);
 		if (is_video && frame.keyframe) || psi_due {
 			let psi = self.psi.as_ref().context("PSI not built")?;
 			let pat = TsPayload::Pat(psi.pat.clone());
@@ -714,6 +724,8 @@ impl<E: catalog::Catalog> Export<E> {
 				// derives it from is_video.
 				let stream_id = match &kind {
 					Kind::Verbatim { stream_id, .. } => Some(stream_id.unwrap_or(StreamId::PRIVATE_STREAM_1)),
+					// Opus is private-data PES, carried under private_stream_1 like ffmpeg.
+					Kind::Opus { .. } => Some(StreamId::PRIVATE_STREAM_1),
 					_ => None,
 				};
 				let unit = PesUnit {
@@ -905,8 +917,13 @@ const PES_DTS_LEN: usize = 5;
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
 
-fn psi_interval() -> Timestamp {
-	Timestamp::try_from(PSI_INTERVAL).unwrap_or(Timestamp::ZERO)
+fn psi_due(timestamp: Timestamp, last: Option<Timestamp>) -> bool {
+	let Some(last) = last else {
+		return true;
+	};
+	Duration::from(timestamp)
+		.checked_sub(Duration::from(last))
+		.is_some_and(|elapsed| elapsed >= PSI_INTERVAL)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -976,10 +993,54 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 		AudioCodec::Mp2 => Ok(Kind::Mp2 {
 			sample_rate: config.sample_rate,
 		}),
+		AudioCodec::Opus => Ok(Kind::Opus {
+			channel_count: config.channel_count,
+		}),
 		AudioCodec::Ac3 => Ok(Kind::Ac3),
 		AudioCodec::Ec3 => Ok(Kind::Eac3),
 		other => anyhow::bail!("TS export does not support audio codec {other:?} (track '{name}')"),
 	}
+}
+
+/// The two PMT descriptors for an Opus elementary stream: the `Opus` registration
+/// descriptor (which sets the codec) and the DVB extension descriptor 0x80 carrying
+/// the channel configuration. ffmpeg's demuxer requires both to recognize the stream.
+fn opus_descriptors(channel_count: u32) -> Vec<Descriptor> {
+	vec![
+		Descriptor {
+			tag: 0x05,
+			data: b"Opus".to_vec(),
+		},
+		Descriptor {
+			tag: 0x7f,
+			// extension_descriptor_tag 0x80, then channel_config_code (1=mono, 2=stereo,
+			// = channel count for the Vorbis mapping), clamped to the 1..=8 the demuxer reads.
+			data: vec![0x80, channel_count.clamp(1, 8) as u8],
+		},
+	]
+}
+
+/// Wrap a raw Opus packet in the Opus-in-TS access-unit control header, producing one
+/// PES access unit. Emits the 11-bit `0x3FF` sync (no trim, no control extension), then
+/// the `0xFF`-run `au_size`, then the packet.
+fn opus_es_payload(packet: &[u8]) -> Vec<u8> {
+	let mut out = Vec::with_capacity(packet.len() + 4);
+	// Sync 0x3FF over 11 bits: all of byte 0 (0x7F) plus the top 3 bits of byte 1. The
+	// low 5 bits of byte 1 are the start-trim/end-trim/control-extension flags, all clear.
+	out.push(0x7f);
+	out.push(0xe0);
+	// au_size: a run of 0xFF bytes summing toward the size, then a final byte < 0xFF. A
+	// size that is an exact multiple of 255 still emits a terminating 0x00 byte.
+	let mut n = packet.len();
+	loop {
+		out.push(n.min(255) as u8);
+		if n < 255 {
+			break;
+		}
+		n -= 255;
+	}
+	out.extend_from_slice(packet);
+	out
 }
 
 /// The PMT descriptors recorded for `name` in the `mpegts` section, if any.
@@ -1059,7 +1120,12 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 
 #[cfg(test)]
 mod tests {
-	use super::{DEFAULT_DTS_RESERVE, author_dts, is_complete_section};
+	use super::{DEFAULT_DTS_RESERVE, author_dts, is_complete_section, psi_due};
+	use moq_net::Timestamp;
+
+	fn ms(value: u64) -> Timestamp {
+		Timestamp::from_millis(value).unwrap()
+	}
 
 	/// Push a decode-order PTS stream (90 kHz) through the decode clock with a given reserve and
 	/// return the effective DTS per frame (the authored DTS, or the PTS when none is authored).
@@ -1153,6 +1219,14 @@ mod tests {
 		for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
 			assert_eq!(d, p - DEFAULT_DTS_RESERVE, "DTS should trail PTS by the reserve at {i}");
 		}
+	}
+
+	#[test]
+	fn psi_due_uses_elapsed_duration() {
+		assert!(psi_due(ms(1_000), None));
+		assert!(!psi_due(ms(1_250), Some(ms(1_000))));
+		assert!(psi_due(ms(1_500), Some(ms(1_000))));
+		assert!(!psi_due(ms(750), Some(ms(1_000))));
 	}
 
 	#[test]

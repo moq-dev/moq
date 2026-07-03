@@ -1,7 +1,6 @@
 mod bandwidth;
 mod broadcast;
 mod bytes;
-mod compression;
 mod frame;
 mod group;
 mod origin;
@@ -12,7 +11,6 @@ mod track;
 pub use bandwidth::*;
 pub use broadcast::*;
 pub use bytes::*;
-pub use compression::*;
 pub use frame::*;
 pub use group::*;
 pub use origin::*;

@@ -14,5 +14,5 @@ Rust crates providing the MoQ protocol implementation and related tooling.
 | [moq-token](./moq-token) | JWT authentication library |
 | [hang](./hang) | Media encoding/streaming (catalog, container) |
 | [web-transport](./web-transport) | WebTransport protocol support |
-| [moq-mux](./moq-mux) | Media muxers/demuxers (fMP4, CMAF, HLS) |
+| [moq-mux](./moq-mux) | Media muxers/demuxers (fMP4, CMAF, MPEG-TS, FLV) |
 | [libmoq](./libmoq) | C FFI bindings |

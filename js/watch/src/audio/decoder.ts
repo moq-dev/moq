@@ -38,11 +38,15 @@ type DecoderOutput = {
 };
 
 export interface AudioStats {
+	/** Number of encoded bytes received. */
 	bytesReceived: number;
 }
 
-// Downloads audio from a track and emits it to an AudioContext.
-// The user is responsible for hooking up audio to speakers, an analyzer, etc.
+/**
+ * Downloads audio from a track and emits it to an AudioContext.
+ *
+ * The user is responsible for hooking up audio to speakers, an analyzer, etc.
+ */
 export class Decoder {
 	readonly input: Readonlys<DecoderInput>;
 	source: Source;

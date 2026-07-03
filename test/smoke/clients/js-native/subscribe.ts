@@ -13,6 +13,7 @@
  */
 import { parseArgs } from "node:util";
 import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
@@ -62,12 +63,14 @@ async function run(): Promise<void> {
 
 		const bc = connection.consume(path);
 
-		// The .hang catalog lives on the "catalog.json" track. A lazy publisher may
-		// announce video in a later update, so keep reading frames until one has it.
-		const catalog = bc.subscribe("catalog.json", Catalog.PRIORITY.catalog);
+		// The .hang catalog lives on the "catalog.json" track. It's a @moq/json
+		// snapshot+delta value, reconstructed by Json.Consumer. A lazy publisher may
+		// announce video in a later update, so keep reading until one has it.
+		const track = bc.subscribe("catalog.json", Catalog.PRIORITY.catalog);
+		const catalog = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
 		let videoTrack: string | undefined;
 		while (!videoTrack) {
-			const root = await Catalog.fetch(catalog);
+			const root = await catalog.next();
 			if (!root) throw new Error("catalog ended without a video track");
 			const renditions = root.video?.renditions;
 			if (renditions) videoTrack = Object.keys(renditions)[0];
@@ -81,7 +84,7 @@ async function run(): Promise<void> {
 			for (;;) {
 				const frame = await group.readFrame();
 				if (!frame) break;
-				total += frame.byteLength;
+				total += frame.data.byteLength;
 				if (total > 0) {
 					// The harness judges success by this marker, not the exit code: the
 					// @moq/web-transport NAPI addon can segfault during the runtime's exit

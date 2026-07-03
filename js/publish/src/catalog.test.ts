@@ -32,6 +32,34 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	effect.close();
 });
 
+test("catalog producer publishes every update as a snapshot group", async () => {
+	const catalog = new CatalogProducer();
+	catalog.mutate((c) => {
+		c.video = { renditions: {} };
+	});
+
+	const effect = new Effect();
+	const track = new TrackProducer("catalog.json");
+	catalog.serve(track, effect);
+	const subscriber = track.subscribe();
+
+	const first = await subscriber.nextGroup();
+	expect(first?.sequence).toBe(0);
+	expect(await first?.readJson()).toEqual({ video: { renditions: {} } });
+	expect(first?.done).toBe(true);
+
+	catalog.mutate((c) => {
+		c.scte35 = { splices: [] };
+	});
+
+	const second = await subscriber.nextGroup();
+	expect(second?.sequence).toBe(1);
+	expect(await second?.readJson()).toEqual({ video: { renditions: {} }, scte35: { splices: [] } });
+	expect(second?.done).toBe(true);
+
+	effect.close();
+});
+
 test("a reconnecting subscriber is seeded with the full current catalog", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {

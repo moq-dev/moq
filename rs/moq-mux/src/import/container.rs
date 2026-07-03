@@ -40,7 +40,7 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
 			ContainerImpl::Fmp4(decoder) => decoder.decode(data),
 			ContainerImpl::Mkv(decoder) => decoder.decode(data),
 			ContainerImpl::Ts(decoder) => decoder.decode(data).map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.decode(data).map_err(Into::into),
+			ContainerImpl::Flv(decoder) => decoder.decode(data),
 		}
 	}
 
@@ -49,7 +49,7 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
 			ContainerImpl::Fmp4(decoder) => decoder.finish(),
 			ContainerImpl::Mkv(decoder) => decoder.finish(),
 			ContainerImpl::Ts(decoder) => decoder.finish().map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.finish().map_err(Into::into),
+			ContainerImpl::Flv(decoder) => decoder.finish(),
 		}
 	}
 
@@ -58,7 +58,7 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
 			ContainerImpl::Fmp4(decoder) => decoder.seek(sequence),
 			ContainerImpl::Mkv(decoder) => decoder.seek(sequence),
 			ContainerImpl::Ts(decoder) => decoder.seek(sequence).map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.seek(sequence).map_err(Into::into),
+			ContainerImpl::Flv(decoder) => decoder.seek(sequence),
 		}
 	}
 }

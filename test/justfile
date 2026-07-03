@@ -8,9 +8,10 @@
 #     package registry to catch packaging breakage in a release.
 #   - `just test smoke` (smoke/, below) builds every client from THIS checkout
 #     to catch interop regressions before anything is published.
-
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
+
 set fallback
+set unstable
 set working-directory := '.'
 
 # Run unit tests for every language (default).
@@ -22,17 +23,30 @@ default *args:
 # Cross-language media interop smoke test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only. Pass
 # flags through, e.g.
+
 # just test smoke --publishers rust,python,js --subscribers rust,c
 smoke *args:
     ./smoke/smoke.sh {{ args }}
 
 # Full interop matrix: rust + python + browser publish; everyone subscribes
 # (incl. native node/bun JS, the C libmoq client, and the GStreamer moqsrc
+
 # plugin). --timeout 30 gives headless Chromium cold-start headroom.
 smoke-full:
     ./smoke/smoke.sh --publishers rust,python,js --subscribers rust,python,js,js-native-node,js-native-bun,c,gst --timeout 30
 
 # Negative control: no publisher, every subscriber must time out (proves the
+
 # harness can actually report failure).
 smoke-negative *args:
     ./smoke/smoke.sh --negative {{ args }}
+
+# Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
+# ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
+# burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
+# (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
+# (use a real capture). See ts/README.md.
+
+# Check the subscriber's MPEG-TS output for IRD compliance.
+ts *args:
+    ./ts/run.sh {{ args }}

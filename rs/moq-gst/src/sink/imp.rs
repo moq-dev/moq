@@ -232,6 +232,13 @@ impl ElementImpl for MoqSink {
 					.field("stream-format", "raw")
 					.build(),
 			);
+			// MP3 (MPEG-1/2 Layer III). The frame header carries the config in band.
+			caps.merge(
+				gst::Caps::builder("audio/mpeg")
+					.field("mpegversion", gst::List::new([1i32, 2i32]))
+					.field("layer", 3i32)
+					.build(),
+			);
 			caps.merge(gst::Caps::builder("audio/x-opus").build());
 
 			let sink =

@@ -16,6 +16,18 @@ use crate::frame::Frame;
 mod channel;
 use channel::FrameChannel;
 
+/// Type-erased keep-alive for a capture backend, dropped to release the device.
+///
+/// `Send` off macOS (the backend is a pump-thread guard: an `Arc` stop flag plus
+/// a `JoinHandle`), which keeps [`publish_capture`](crate::encode::publish_capture)
+/// `Send` so a server can `tokio::spawn` it. On macOS the backend is the objc
+/// `AVCaptureSession` (plus its delegate), which is `!Send`, so that platform's
+/// capture future is `!Send` too.
+#[cfg(not(target_os = "macos"))]
+type Keepalive = Box<dyn std::any::Any + Send>;
+#[cfg(target_os = "macos")]
+type Keepalive = Box<dyn std::any::Any>;
+
 #[cfg(target_os = "macos")]
 mod avfoundation;
 #[cfg(target_os = "macos")]
@@ -90,7 +102,7 @@ pub(crate) struct FrameStream {
 	pending: Option<Frame>,
 	/// Keeps the backend alive and releases it on drop. Type-erased because it
 	/// differs per platform (objc session + delegate, or pump-thread guard).
-	_backend: Box<dyn std::any::Any>,
+	_backend: Keepalive,
 }
 
 impl FrameStream {
@@ -102,7 +114,7 @@ impl FrameStream {
 		framerate: Option<u32>,
 		device: String,
 		pending: Option<Frame>,
-		backend: Box<dyn std::any::Any>,
+		backend: Keepalive,
 	) -> Self {
 		Self {
 			chan,

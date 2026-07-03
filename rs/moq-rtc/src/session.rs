@@ -11,11 +11,11 @@
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use str0m::{Event, IceConnectionState, Input, Output, Rtc, net::Receive};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, net::Receive};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -38,6 +38,22 @@ pub(crate) const SESSION_INBOX: usize = 256;
 /// large keyframe and the rest of the current group via NACK; see
 /// [`rtc_config_with_codecs`].
 const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
+
+/// Backstop deadline for a session to reach a connected ICE state, covering the one
+/// case str0m's ICE agent deliberately never times out: a peer that answers the SDP
+/// but provides NO remote candidates and sends nothing (an abandoned WHIP/WHEP
+/// offer, or a probe that only exercises signalling). str0m DOES end a connection
+/// whose candidate pairs were tried and exhausted -- the agent goes to
+/// `IceConnectionState::Disconnected` (handled in `handle_event`) after
+/// ~`StunTiming::timeout()` (~21s at the defaults). But when `remote_candidates`
+/// stays empty the agent treats the session as "still possible" forever (trickle
+/// ICE: more candidates could arrive), so it sits in `Checking` indefinitely,
+/// pinning this task, its broadcast announcement, and its mux registration. Nothing
+/// upstream ends it, so we do. Set ABOVE str0m's ~21s pair-exhaustion so a
+/// connection that actually started checks is ended by str0m's native path (and a
+/// slow-but-real TURN/lossy peer isn't clipped); this only fires for the
+/// never-any-candidate case.
+const ICE_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
@@ -144,6 +160,8 @@ impl Session {
 	}
 
 	pub async fn run(mut self) -> Result<()> {
+		let started = Instant::now();
+		let mut connected = false;
 		loop {
 			// A dead Rtc (DTLS/SDP failure, explicit disconnect) makes poll_output
 			// return a never-firing timeout instead of erroring, which would hang
@@ -151,6 +169,12 @@ impl Session {
 			// registration. Bail so those release.
 			if !self.rtc.is_alive() {
 				return Err(Error::SessionClosed);
+			}
+
+			// Abort a session that never finishes connecting (see
+			// ICE_ESTABLISH_TIMEOUT); once connected, str0m's own timeouts take over.
+			if !connected && started.elapsed() >= ICE_ESTABLISH_TIMEOUT {
+				return Err(Error::IceTimeout);
 			}
 
 			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
@@ -162,13 +186,21 @@ impl Session {
 					continue;
 				}
 				Output::Event(event) => {
+					if let Event::IceConnectionStateChange(state) = &event {
+						connected |= state.is_connected();
+					}
 					self.handle_event(event)?;
 					continue;
 				}
 			};
 
 			let now = Instant::now();
-			let duration = timeout.saturating_duration_since(now);
+			let mut duration = timeout.saturating_duration_since(now);
+			// While still connecting, never sleep past the establishment deadline, so
+			// the check above fires on time even if str0m scheduled a far-off timeout.
+			if !connected {
+				duration = duration.min(ICE_ESTABLISH_TIMEOUT.saturating_sub(started.elapsed()));
+			}
 			if duration.is_zero() {
 				self.rtc.handle_input(Input::Timeout(now)).map_err(Error::Rtc)?;
 				continue;
@@ -236,7 +268,7 @@ impl Session {
 						data.mid,
 						codec::Frame {
 							timestamp_us,
-							payload: data.data.into(),
+							payload: bytes::Bytes::from_owner(data.data),
 						},
 					)?;
 				}
@@ -330,9 +362,12 @@ impl IngestClock {
 /// ([`Error::SessionClosed`]) is debug, a genuine failure is a warning. Keeps
 /// normal WebRTC churn out of the warning stream. `role` labels the path
 /// (e.g. `"whip server"`).
-pub(crate) fn log_session_end(role: &str, result: Result<()>) {
+pub(crate) fn log_session_end(role: &str, result: &Result<()>) {
 	match result {
 		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
+		// An abandoned offer (peer answered but never connected) is normal churn, not
+		// a failure: keep it out of the warning stream.
+		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
 	}
 }
@@ -431,23 +466,40 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
 /// server paths share one socket via `crate::server::mux` instead. `advertise`
-/// IPs are used verbatim (reusing the bound port); empty falls back to whatever
-/// address the OS picked (loopback only).
+/// IPs are used verbatim (reusing the bound port); empty falls back to the
+/// bound address, substituting loopback when that address is unspecified.
 pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>)> {
 	let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
 	let local = socket.local_addr()?;
-	let candidates = if advertise.is_empty() {
-		vec![local]
-	} else {
-		// Reuse the bound port across each advertised IP, since str0m's ICE
-		// agent picks the destination port from the candidate it's pairing
-		// against.
-		advertise
-			.iter()
-			.map(|addr| SocketAddr::new(addr.ip(), local.port()))
-			.collect()
-	};
+	let candidates = advertised_candidates(advertise, local)?;
 	Ok((Arc::new(socket), candidates))
+}
+
+/// Pair configured ICE candidates with the bound UDP port and validate them.
+pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr) -> Result<Vec<SocketAddr>> {
+	let port = local.port();
+	let candidates = if advertise.is_empty() {
+		let ip = match local.ip() {
+			IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+			IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+			ip => ip,
+		};
+
+		let candidate = SocketAddr::new(ip, port);
+		if candidate != local {
+			tracing::info!(bound = %local, advertised = %candidate, "webrtc udp bind is unspecified, advertising loopback ICE candidate");
+		}
+		vec![candidate]
+	} else {
+		// Reuse the bound port across each advertised IP, since str0m's ICE agent
+		// picks the destination port from the candidate it's pairing against.
+		advertise.iter().map(|addr| SocketAddr::new(addr.ip(), port)).collect()
+	};
+
+	for addr in &candidates {
+		Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
+	}
+	Ok(candidates)
 }
 
 /// Spawn a 1:1 reader pumping every datagram from `socket` into a channel, for
@@ -483,6 +535,44 @@ mod tests {
 	use str0m::media::Mid;
 
 	use super::*;
+
+	#[test]
+	fn advertised_candidates_use_loopback_for_unspecified_ipv4() {
+		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
+		let candidates = advertised_candidates(&[], local).unwrap();
+		assert_eq!(candidates, vec!["127.0.0.1:4444".parse().unwrap()]);
+	}
+
+	#[test]
+	fn advertised_candidates_use_loopback_for_unspecified_ipv6() {
+		let local: SocketAddr = "[::]:4444".parse().unwrap();
+		let candidates = advertised_candidates(&[], local).unwrap();
+		assert_eq!(candidates, vec!["[::1]:4444".parse().unwrap()]);
+	}
+
+	#[test]
+	fn advertised_candidates_keep_bound_address_when_specific() {
+		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
+		assert_eq!(advertised_candidates(&[], local).unwrap(), vec![local]);
+	}
+
+	#[test]
+	fn advertised_candidates_reuse_bound_port_for_configured_addresses() {
+		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
+		let advertised = vec!["127.0.0.1:1000".parse().unwrap(), "[::1]:2000".parse().unwrap()];
+
+		assert_eq!(
+			advertised_candidates(&advertised, local).unwrap(),
+			vec!["127.0.0.1:4444".parse().unwrap(), "[::1]:4444".parse().unwrap()]
+		);
+	}
+
+	#[test]
+	fn advertised_candidates_reject_configured_unspecified_addresses() {
+		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
+		let advertised = vec!["0.0.0.0:1000".parse().unwrap()];
+		assert!(advertised_candidates(&advertised, local).is_err());
+	}
 
 	#[test]
 	fn pick_local_matches_address_family() {

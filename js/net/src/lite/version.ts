@@ -11,11 +11,10 @@ export const Version = {
 
 export type Version = (typeof Version)[keyof typeof Version];
 
-/// Whether ANNOUNCE_BROADCAST carries a per-broadcast Epoch varint (after the suffix,
-/// before the hop chain). Added in lite-05 so a consumer can tell a newer instance of a
-/// broadcast from an older one. Older versions omit the field.
-export function hasBroadcastEpoch(version: Version): boolean {
-	// Explicitly list older versions so future versions default to carrying the epoch.
+/// Whether the session opens a unidirectional Setup Stream carrying a single SETUP message
+/// (capabilities + optional Path). Added in lite-05; older drafts have no Setup Stream.
+export function hasSetupStream(version: Version): boolean {
+	// Explicitly list older versions so future versions default to having the stream.
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
@@ -27,10 +26,9 @@ export function hasBroadcastEpoch(version: Version): boolean {
 	}
 }
 
-/// Whether the session opens a unidirectional Setup Stream carrying a single SETUP message
-/// (capabilities + optional Path). Added in lite-05; older drafts have no Setup Stream.
-export function hasSetupStream(version: Version): boolean {
-	// Explicitly list older versions so future versions default to having the stream.
+/** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
+export function hasAnnounceOk(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

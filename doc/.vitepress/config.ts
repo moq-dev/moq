@@ -137,6 +137,8 @@ export default defineConfig({
 							],
 						},
 						{ text: "CLI", link: "/bin/cli" },
+						{ text: "WebRTC", link: "/bin/rtc" },
+						{ text: "RTMP", link: "/bin/rtmp" },
 						{ text: "OBS", link: "/bin/obs" },
 						{ text: "GStreamer", link: "/bin/gstreamer" },
 						{ text: "HLS", link: "/bin/hls" },

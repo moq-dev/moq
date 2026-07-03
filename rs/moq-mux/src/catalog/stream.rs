@@ -2,9 +2,8 @@
 //!
 //! [`Stream`] yields a sequence of [`Catalog<E>`](super::hang::Catalog) snapshots. Both the
 //! raw [`Consumer`](super::Consumer) and the rendition-selecting
-//! [`Filter`](super::Filter) / [`Target`](super::Target) wrappers implement
-//! it, so exporters can be written against the trait and the caller picks
-//! the selection policy.
+//! [`Select`](super::Select) wrapper implement it, so exporters can be written
+//! against the trait and the caller picks the selection policy.
 //!
 //! The yielded catalog carries the application extension `E` (defaulting to
 //! `()` for media-only catalogs) via the [`Ext`](Stream::Ext) associated type,
@@ -12,8 +11,8 @@
 
 use std::task::Poll;
 
+use super::Select;
 use super::hang::{Catalog, CatalogExt};
-use super::{Filter, Target};
 
 /// A stream of catalog snapshots.
 ///
@@ -37,21 +36,12 @@ pub trait Stream: Send + 'static {
 		async move { kio::wait(|waiter| self.poll_next(waiter)).await }
 	}
 
-	/// Wrap this stream in a [`Filter`] that drops renditions which don't
-	/// match a hard-match criterion (name or codec family).
-	fn filter(self) -> Filter<Self>
+	/// Wrap this stream in a [`Select`] that drops every rendition `selection`
+	/// doesn't keep.
+	fn select(self, selection: crate::select::Broadcast) -> Select<Self>
 	where
 		Self: Sized,
 	{
-		Filter::new(self)
-	}
-
-	/// Wrap this stream in a [`Target`] that reduces each axis to at most
-	/// one rendition by soft-matching against width / height / bitrate.
-	fn target(self) -> Target<Self>
-	where
-		Self: Sized,
-	{
-		Target::new(self)
+		Select::new(self, selection)
 	}
 }

@@ -23,17 +23,23 @@ const OBSERVED = [
 ] as const;
 type Observed = (typeof OBSERVED)[number];
 
-// Parse the `visible` attribute into a Visible value, falling back to "0px" (on screen only).
+// Parse the `visible` attribute into a Visible value, falling back to "20%".
 function parseVisible(value: string | null): Video.Visible {
 	const trimmed = value?.trim();
-	if (!trimmed) return "0px";
+	if (!trimmed) return "20%";
 	if (trimmed === "never" || trimmed === "always") return trimmed;
 	// A CSS length usable as an IntersectionObserver rootMargin (px or %).
 	if (/^-?\d+(\.\d+)?(px|%)$/.test(trimmed)) return trimmed;
 	// Allow a bare number as a px convenience (e.g. visible="200").
 	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`;
 	console.warn(`moq-watch: invalid visible="${value}", expected "never", "always", or a CSS length like "200px"`);
-	return "0px";
+	return "20%";
+}
+
+function parseBoolean(value: string | null, defaultValue: boolean): boolean {
+	if (value === null) return defaultValue;
+	const normalized = value.trim().toLowerCase();
+	return normalized !== "false" && normalized !== "0";
 }
 
 // Close everything when this element is garbage collected.
@@ -62,7 +68,7 @@ export default class MoqWatch extends HTMLElement {
 		volume: new Signal(0.5),
 		muted: new Signal(false),
 		// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
-		visible: new Signal<Video.Visible>("0px"),
+		visible: new Signal<Video.Visible>("20%"),
 		latency: new Signal<Latency>("real-time"),
 		// The desired video rendition (resolution/bitrate cap).
 		target: new Signal<Video.Target | undefined>(undefined),
@@ -70,7 +76,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Broadcast configuration owned here and wired into `broadcast` as inputs.
 	#name = new Signal<Moq.Path.Valid>(Moq.Path.empty());
-	#reload = new Signal(false);
+	#reload = new Signal(true);
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
 
@@ -286,7 +292,7 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "visible") {
 			this.controls.visible.set(parseVisible(newValue));
 		} else if (name === "reload") {
-			this.#reload.set(newValue !== null);
+			this.#reload.set(parseBoolean(newValue, true));
 		} else if (name === "latency") {
 			// Sugar: collapse the floor and ceiling to a single value.
 			this.latency = this.#parseBound(newValue);

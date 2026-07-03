@@ -54,6 +54,11 @@ pub use rustls;
 #[cfg(feature = "watch")]
 pub use notify;
 
+/// Re-exported because [`tls::init_android`] takes `jni` handles; a major `jni`
+/// bump is therefore a breaking change for this crate.
+#[cfg(target_os = "android")]
+pub use jni;
+
 #[cfg(feature = "quiche")]
 pub mod quiche;
 

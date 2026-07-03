@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 rust-version.workspace = true
 
@@ -21,10 +21,11 @@ doctest = false
 # stays as the always-compiled software fallback and V4L2 capture is unaffected. Both
 # features are no-ops off Linux (their deps are Linux-only).
 default = ["nvenc", "vaapi"]
-# NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + the SDK's
-# `dynamic-loading`), with a libloading probe for the driver libs, so an nvenc build
-# still links GPU-less and starts driverless, falling back to the next encoder.
-nvenc = ["dep:cudarc", "dep:nvidia-video-codec-sdk", "dep:libloading"]
+# NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + moq-nvenc,
+# which loads libnvidia-encode), with a libloading probe for the driver libs, so
+# an nvenc build still links GPU-less and starts driverless, falling back to the
+# next encoder.
+nvenc = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi 0.0.2 hard-links libva (the
 # binary carries NEEDED libva.so.2 / libva-drm.so.2), so disable this feature for a
 # build with no libva dependency. See #1837.
@@ -50,17 +51,17 @@ yuv = "0.8.14"
 
 [target.'cfg(target_os="linux")'.dependencies]
 # NVENC hardware encoder, behind the default-on `nvenc` feature. Everything is
-# dlopen'd at runtime: cudarc loads CUDA, and nvidia-video-codec-sdk's
-# `dynamic-loading` (a fork feature, see the root [patch.crates-io]) loads
-# libnvidia-encode. So the binary links on a GPU-less builder and still starts on
-# machines without the NVIDIA driver, falling back to the next encoder (see
-# backend::open). `cuda-12020` pins the CUDA API version so the build needs no
-# CUDA toolkit.
+# dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
+# nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
+# links on a GPU-less builder and still starts on machines without the NVIDIA
+# driver, falling back to the next encoder (see backend::open). `cuda-12020` pins
+# the CUDA API version so the build needs no CUDA toolkit.
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
 libloading = { version = "0.8", optional = true }
+moq-nvenc = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware encoder, behind the default-on `vaapi` feature. As of
 # moq-vaapi 0.0.2 libva is dynamically linked via pkg-config (the binary carries
 # NEEDED libva.so.2 / libva-drm.so.2), so an enabled-vaapi Linux build needs libva
@@ -69,10 +70,6 @@ libloading = { version = "0.8", optional = true }
 # switch moq-vaapi to dlopen libva (one portable binary that falls back like the
 # NVENC backend); the latter is tracked in #1837.
 moq-vaapi = { workspace = true, optional = true }
-# default-features off so the crate's `cuda-version-from-build-system` default
-# stays off: we pin the CUDA version via our own cudarc dep (cuda-12020) instead,
-# so the build needs no CUDA toolkit.
-nvidia-video-codec-sdk = { version = "0.4", optional = true, default-features = false, features = ["dynamic-loading"] }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
 v4l = "0.14"

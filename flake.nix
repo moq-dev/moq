@@ -90,11 +90,14 @@
             libressl
             ffmpeg
             curl
+            # MPEG-TS validation (tsp, tsanalyze) for the ts-compliance harness.
+            tsduck
             cargo-sort
             cargo-shear
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-nextest
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
@@ -107,10 +110,12 @@
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
-            # moq-video's VAAPI backend (always-on for Linux): the moq-vaapi crate
-            # (moq-dev/vaapi) vendors the libva headers so bindgen needs no system
-            # libva, but libva is dlopen'd at runtime, so this provides libva.so for
-            # actually running vaapi encode in the devShell. macOS has no VAAPI.
+            # moq-video's VAAPI backend (always-on for Linux): moq-vaapi links
+            # libva via pkg-config at build time and the resulting binary carries
+            # NEEDED libva.so.2 / libva-drm.so.2, so libva must be present both to
+            # build and to run vaapi in the devShell. macOS has no VAAPI. (See
+            # #1837: if moq-vaapi switches to dlopen'ing libva, this stays needed
+            # only to run it, and a libva-less build/host would fall back cleanly.)
             pkgs.libva
           ];
 
@@ -163,6 +168,12 @@
             gzip
           ];
 
+        # Developer workflow tooling not needed for builds: the GitHub CLI
+        # for opening/reviewing PRs from the dev shell.
+        devTools = with pkgs; [
+          gh
+        ];
+
         # Linters / formatters required by `just ci`; `just check` and
         # `just fix` guard each tool with `command -v` so they skip
         # silently when the binary isn't on $PATH.
@@ -173,6 +184,21 @@
           taplo
           nixfmt
         ];
+
+        # Dependencies for building the OBS plugin (`just obs build`).
+        # Linux-only: nixpkgs marks obs-studio broken on Darwin, so macOS
+        # and Windows fetch libobs/Qt6 via the OBS buildspec instead (see
+        # cpp/obs/buildspec.json and doc/bin/obs.md). ffmpeg + cmake come from
+        # rustDeps. clang-tools/gersemi back `just obs check`.
+        obsDeps =
+          with pkgs;
+          lib.optionals (!stdenv.isDarwin) [
+            obs-studio
+            qt6.qtbase
+            ninja
+            clang-tools
+            gersemi
+          ];
 
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
@@ -233,7 +259,8 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps;
+          packages =
+            rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps ++ obsDeps ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

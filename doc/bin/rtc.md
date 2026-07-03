@@ -118,5 +118,3 @@ On ingest, H.264 is reassembled by str0m as Annex-B; `moq-mux`'s H.264
 importer in `Avc3` mode publishes the inline-parameter shape directly, which
 lines up with what the WebCodecs decoder in `@moq/watch` already expects. No
 extra conversion needed in the gateway.
-
-(Written by Claude)

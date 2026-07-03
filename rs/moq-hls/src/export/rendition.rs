@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use hang::catalog::{AudioConfig, VideoConfig};
-use moq_mux::catalog::{self, CatalogFormat, Filter, FilterAudio, FilterVideo};
+use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::container::fmp4::Export;
+use moq_mux::select;
 use tokio::sync::watch;
 
 use super::Config;
@@ -15,40 +16,80 @@ use crate::Result;
 const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Whether a rendition carries video or audio (drives the store's segmenting policy).
+///
+/// Also the first URL path component of a rendition (`/{broadcast}/{kind}/{name}/...`),
+/// so video and audio renditions that share a name don't collide.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Kind {
+	/// Video: a segment is a GOP, rolling on each independent fragment.
 	Video,
+	/// Audio: segments roll on accumulated duration (no keyframes).
 	Audio,
+}
+
+impl Kind {
+	/// The URL path component for this kind (`"video"` / `"audio"`).
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Kind::Video => "video",
+			Kind::Audio => "audio",
+		}
+	}
+}
+
+impl std::str::FromStr for Kind {
+	type Err = ();
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		match s {
+			"video" => Ok(Kind::Video),
+			"audio" => Ok(Kind::Audio),
+			_ => Err(()),
+		}
+	}
+}
+
+/// Shared context passed to every rendition constructor: the broadcast to pull
+/// from, the export tuning, and the pause signal. Grouped so the constructors
+/// don't take a long list of easily-transposed positional arguments.
+pub(crate) struct Context<'a> {
+	/// The broadcast whose track this rendition exports.
+	pub broadcast: moq_net::BroadcastConsumer,
+	/// Export tuning shared across renditions.
+	pub cfg: &'a Config,
+	/// Pause signal shared with every rendition pump.
+	pub paused: watch::Receiver<bool>,
 }
 
 /// A single HLS rendition: its display metadata for the master playlist plus the
 /// segment/part store fed by a background exporter task.
 pub struct Rendition {
+	/// Rendition name (the catalog track name; also its URL path component).
 	pub name: String,
+	/// Whether this rendition is video or audio.
 	pub kind: Kind,
+	/// Advertised bitrate for the master playlist `BANDWIDTH` attribute.
 	pub bandwidth: u64,
+	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
+	/// Coded height, for the master playlist `RESOLUTION` (video only).
 	pub height: Option<u32>,
 	/// RFC 6381 codec string for the master playlist `CODECS` attribute.
 	pub codec: String,
+	/// The segment/part store fed by this rendition's exporter task.
 	pub store: Arc<SegmentStore>,
+	/// Aborts the background exporter pump when the rendition is dropped, so a
+	/// pump doesn't outlive the [`Broadcaster`](super::Broadcaster) (and server)
+	/// that owns it.
+	pump: tokio::task::JoinHandle<()>,
 }
 
 impl Rendition {
-	pub fn video(
-		name: String,
-		config: &VideoConfig,
-		broadcast: moq_net::BroadcastConsumer,
-		cfg: &Config,
-		paused: watch::Receiver<bool>,
-	) -> Self {
-		let store = Arc::new(SegmentStore::new(
-			true,
-			cfg.part_target.as_secs_f64(),
-			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window.as_secs_f64(),
-		));
-		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
+	/// Build a video rendition and spawn its exporter pump.
+	pub(crate) fn video(name: String, config: &VideoConfig, ctx: Context<'_>) -> Self {
+		let store = Arc::new(SegmentStore::new(Kind::Video, ctx.cfg));
+		let pump = spawn_pump(name.clone(), Kind::Video, store.clone(), &ctx);
 		Self {
 			name,
 			kind: Kind::Video,
@@ -57,23 +98,14 @@ impl Rendition {
 			height: config.coded_height,
 			codec: config.codec.to_string(),
 			store,
+			pump,
 		}
 	}
 
-	pub fn audio(
-		name: String,
-		config: &AudioConfig,
-		broadcast: moq_net::BroadcastConsumer,
-		cfg: &Config,
-		paused: watch::Receiver<bool>,
-	) -> Self {
-		let store = Arc::new(SegmentStore::new(
-			false,
-			cfg.part_target.as_secs_f64(),
-			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window.as_secs_f64(),
-		));
-		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
+	/// Build an audio rendition and spawn its exporter pump.
+	pub(crate) fn audio(name: String, config: &AudioConfig, ctx: Context<'_>) -> Self {
+		let store = Arc::new(SegmentStore::new(Kind::Audio, ctx.cfg));
+		let pump = spawn_pump(name.clone(), Kind::Audio, store.clone(), &ctx);
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -82,25 +114,28 @@ impl Rendition {
 			height: None,
 			codec: config.codec.to_string(),
 			store,
+			pump,
 		}
 	}
 }
 
-fn spawn_pump(
-	broadcast: moq_net::BroadcastConsumer,
-	name: String,
-	kind: Kind,
-	store: Arc<SegmentStore>,
-	cfg: Config,
-	paused: watch::Receiver<bool>,
-) {
+impl Drop for Rendition {
+	fn drop(&mut self) {
+		self.pump.abort();
+	}
+}
+
+fn spawn_pump(name: String, kind: Kind, store: Arc<SegmentStore>, ctx: &Context<'_>) -> tokio::task::JoinHandle<()> {
+	let broadcast = ctx.broadcast.clone();
+	let cfg = ctx.cfg.clone();
+	let paused = ctx.paused.clone();
 	tokio::spawn(async move {
 		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
 		store.finish();
-	});
+	})
 }
 
 async fn run_pump(
@@ -112,25 +147,19 @@ async fn run_pump(
 	mut paused: watch::Receiver<bool>,
 ) -> Result<()> {
 	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
-	let mut filter = Filter::new(consumer);
 
-	// Narrow *both* axes to this rendition's name so the exporter sees exactly one
-	// track: the opposite axis can't hold a rendition with this name, so it empties.
-	filter.set_video(FilterVideo {
-		name: Some(name.to_string()),
-		..Default::default()
-	});
-	filter.set_audio(FilterAudio {
-		name: Some(name.to_string()),
-		..Default::default()
-	});
-	let _ = kind; // kind only drives the store policy; the exporter is codec-agnostic.
+	// Select this rendition's name on its own axis so the exporter sees exactly one track.
+	let selection = match kind {
+		Kind::Video => select::Broadcast::default().video(select::Video::default().name(name)),
+		Kind::Audio => select::Broadcast::default().audio(select::Audio::default().name(name)),
+	};
+	let filtered = consumer.select(selection);
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
 	// below takes its own clone for pulling fragments.
 	let closed = broadcast.clone();
 
-	let mut export = Export::new(broadcast, filter)
+	let mut export = Export::new(broadcast, filtered)
 		.with_fragment_duration(cfg.part_target)
 		.with_latency(cfg.latency);
 

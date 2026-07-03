@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.8...moq-gst-v0.2.9) - 2026-06-30
+
+### Other
+
+- Backport moq-mux to main (adapted to main's moq-net, no wire/API breaks) ([#1918](https://github.com/moq-dev/moq/pull/1918))
+- moqsink on a bare Element with direct (no-channel) writes ([#1893](https://github.com/moq-dev/moq/pull/1893))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.7...moq-gst-v0.2.8) - 2026-06-23
 
 ### Fixed

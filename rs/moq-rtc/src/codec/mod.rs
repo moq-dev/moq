@@ -13,9 +13,11 @@ pub mod opus;
 pub mod vp8;
 pub mod vp9;
 
+#[cfg(test)]
+mod bitstream_test;
+
 use bytes::Bytes;
 use hang::catalog::VideoConfig;
-use str0m::format::Codec;
 
 use crate::Result;
 
@@ -60,7 +62,6 @@ pub struct PacketizedFrame {
 /// the session loop.
 pub struct Track {
 	consumer: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-	codec: Codec,
 	convert: TrackConvert,
 }
 
@@ -89,7 +90,6 @@ impl Track {
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
 			consumer,
-			codec: Codec::Opus,
 			convert: TrackConvert::Passthrough,
 		})
 	}
@@ -104,24 +104,16 @@ impl Track {
 		let track = broadcast.track(name)?.subscribe(None).await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
-		let (codec, convert) = match &config.codec {
-			hang::catalog::VideoCodec::VP8 => (Codec::Vp8, TrackConvert::Passthrough),
-			hang::catalog::VideoCodec::VP9(_) => (Codec::Vp9, TrackConvert::Passthrough),
-			hang::catalog::VideoCodec::AV1(_) => (Codec::Av1, TrackConvert::Passthrough),
-			hang::catalog::VideoCodec::H264(_) => (Codec::H264, h264_convert(config)?),
-			hang::catalog::VideoCodec::H265(_) => (Codec::H265, h265_convert(config)?),
+		let convert = match &config.codec {
+			hang::catalog::VideoCodec::VP8 => TrackConvert::Passthrough,
+			hang::catalog::VideoCodec::VP9(_) => TrackConvert::Passthrough,
+			hang::catalog::VideoCodec::AV1(_) => TrackConvert::Passthrough,
+			hang::catalog::VideoCodec::H264(_) => h264_convert(config)?,
+			hang::catalog::VideoCodec::H265(_) => h265_convert(config)?,
 			other => return Err(crate::Error::UnsupportedCodec(format!("{other:?}"))),
 		};
 
-		Ok(Self {
-			consumer,
-			codec,
-			convert,
-		})
-	}
-
-	pub fn codec(&self) -> Codec {
-		self.codec
+		Ok(Self { consumer, convert })
 	}
 
 	/// Pull the next RTP-ready frame. Returns `None` when the track ends.
@@ -161,7 +153,7 @@ fn h264_convert(config: &VideoConfig) -> Result<TrackConvert> {
 	let Some(avcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
-	let params = moq_mux::codec::h264::parse_avcc_param_sets(avcc)
+	let params = moq_mux::codec::h264::Avcc::parse(avcc)
 		.map_err(|err| crate::Error::Other(anyhow::anyhow!("avcc parse: {err}")))?;
 	// Without SPS+PPS the keyframe prefix would be empty and every keyframe
 	// would reach the peer without inline parameter sets, i.e. undecodable.
@@ -189,7 +181,7 @@ fn h265_convert(config: &VideoConfig) -> Result<TrackConvert> {
 	let Some(hvcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
-	let params = moq_mux::codec::h265::parse_hvcc_param_sets(hvcc)
+	let params = moq_mux::codec::h265::Hvcc::parse(hvcc)
 		.map_err(|err| crate::Error::Other(anyhow::anyhow!("hvcc parse: {err}")))?;
 	// Same reasoning as `h264_convert`: a keyframe with no inline VPS/SPS/PPS
 	// is undecodable, so reject an hvcC that omits any of them.

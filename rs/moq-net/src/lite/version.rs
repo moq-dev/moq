@@ -16,25 +16,13 @@ pub enum Version {
 }
 
 impl Version {
-	/// Whether the track can carry a per-track timescale (reported in TRACK_INFO on
-	/// lite-05+). When the publisher advertises one, the publisher and subscriber
-	/// agree to prefix every frame with a zigzag-delta timestamp varint; with `None`
-	/// the wire skips the byte entirely, so this method only governs whether the
-	/// negotiation field exists, not whether timestamps are always present.
+	/// Whether the version has lite-05's dedicated TRACK stream and related stream
+	/// layout changes.
+	///
+	/// This is the common feature boundary for TRACK_INFO, FETCH streams,
+	/// SUBSCRIBE_START/END, and per-frame timestamp prefixes.
 	#[allow(clippy::match_like_matches_macro)]
-	pub fn has_timestamps(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
-		match self {
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
-			_ => true,
-		}
-	}
-
-	/// Whether ANNOUNCE_BROADCAST carries a per-broadcast Epoch varint (after the
-	/// suffix, before the hop chain). Added in lite-05 so a consumer can tell a newer
-	/// instance of a broadcast from an older one. Older versions omit the field.
-	#[allow(clippy::match_like_matches_macro)]
-	pub fn has_broadcast_epoch(self) -> bool {
+	pub fn has_track_stream(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
@@ -47,6 +35,17 @@ impl Version {
 	/// setup exchange (Lite01/02) and the no-setup drafts (Lite03/04) don't use it.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_setup_stream(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin
+	/// from each announcement's hop chain. Added in lite-05.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_announce_ok(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,

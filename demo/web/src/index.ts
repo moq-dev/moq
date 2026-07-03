@@ -19,7 +19,7 @@
 import "./highlight";
 import "@moq/watch/element"; // defines <moq-watch>
 import "@moq/watch/ui"; // defines <moq-watch-ui>
-import { Json, Net, Signals } from "@moq/watch";
+import { Hang, Json, Net, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";
@@ -105,7 +105,6 @@ function createTile(name: string): WatchTile {
 	// `broadcast`/`backend`, so the shared inspector panel reflects the active tile.
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
-	watch.reload = true; // wait for (re)announcement; survives publisher restarts
 	watch.muted = true; // unmuted only while active (see below)
 	// Default to a fixed 100ms jitter buffer (instead of adaptive "real-time") so
 	// the latency visualization has something to show. Drag it in the panel.
@@ -400,7 +399,7 @@ ui.run((effect) => {
 		return;
 	}
 
-	const track = broadcast.track(trackName).subscribe();
+	const track = broadcast.track(trackName).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
 	effect.cleanup(() => track.close());
 	const consumer = new Json.Consumer<unknown>(track);
 

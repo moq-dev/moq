@@ -7,9 +7,11 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 
 import { toHang } from "./msf";
 
-// Watch supports the two on-the-wire catalog formats from @moq/hang plus a
-// "manual" mode where the user supplies the catalog directly without fetching.
-export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
+// Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
+// DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
+// catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
+// and is never auto-detected, so set it explicitly via `catalogFormat`.
+export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
@@ -32,13 +34,14 @@ type BroadcastInput = {
 	name: Getter<Moq.Path.Valid>;
 
 	// Whether to reload the broadcast when it goes offline.
-	// Defaults to false; pass true to wait for an announcement before subscribing.
+	// Defaults to true; pass false to subscribe immediately without waiting for an announcement.
 	reload: Getter<boolean>;
 
 	// Which catalog format to use. When `undefined` (the default), the format is
 	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
 	// back to `"hang"` if the name has no recognized extension. Set to a
-	// specific value to override auto-detection.
+	// specific value to override auto-detection. `"hangz"` (the compressed
+	// `catalog.json.z` track) is opt-in only and never auto-detected.
 	catalogFormat: Getter<CatalogFormat | undefined>;
 
 	// The manual-mode catalog source. Used directly when catalogFormat is "manual";
@@ -65,8 +68,9 @@ export class Broadcast {
 	};
 	readonly output = readonlys(this.#output);
 
-	// All actively announced broadcast paths from the connection.
-	readonly #announced: Getter<Set<Moq.Path.Valid>>;
+	// All actively announced broadcast paths from the connection. If omitted, reload skips the
+	// announcement gate and subscribes immediately.
+	readonly #announced?: Getter<Set<Moq.Path.Valid>>;
 
 	// Whether `name` is currently in the announced set (or skipping the check).
 	// Derived in its own effect so that flaps for unrelated broadcasts don't
@@ -80,12 +84,12 @@ export class Broadcast {
 			connection: getter(props?.connection),
 			name: getter(props?.name ?? Path.empty()),
 			enabled: getter(props?.enabled ?? false),
-			reload: getter(props?.reload ?? false),
+			reload: getter(props?.reload ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
 		};
 
-		this.#announced = props?.announced ?? new Signal(new Set());
+		this.#announced = props?.announced;
 
 		this.signals.run(this.#runAnnouncedNow.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
@@ -99,12 +103,15 @@ export class Broadcast {
 			return;
 		}
 
+		if (!this.#announced) {
+			this.#announcedNow.set(true);
+			return;
+		}
+
 		// Cloudflare's relay does not yet support announcement subscriptions,
-		// so an announcement will never arrive. Fall back to subscribing
-		// immediately (reload=false behaviour) instead of waiting forever.
+		// so default to subscribing immediately instead of waiting forever.
 		const conn = effect.get(this.input.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
-			console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
 			this.#announcedNow.set(true);
 			return;
 		}
@@ -154,15 +161,18 @@ export class Broadcast {
 
 		this.#output.status.set("loading");
 
-		const trackName = format === "hang" ? "catalog.json" : "catalog";
+		const trackName = format === "hang" ? Catalog.TRACK : format === "hangz" ? Catalog.TRACK_COMPRESSED : "catalog";
 		const track = broadcast.track(trackName).subscribe({ priority: Catalog.PRIORITY.catalog });
 		effect.cleanup(() => track.close());
 
-		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json;
-		// MSF stays on its own one-blob-per-group fetch.
+		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, with
+		// "hangz" decompressing the `.z` track; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
-		if (format === "hang") {
-			const consumer = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
+		if (format === "hang" || format === "hangz") {
+			const consumer = new Json.Consumer<Catalog.Root>(track, {
+				schema: Catalog.RootSchema,
+				compression: format === "hangz",
+			});
 			fetchNext = () => consumer.next();
 		} else {
 			fetchNext = async () => {

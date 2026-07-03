@@ -1,10 +1,11 @@
-"""Session wrapper — an established MoQ connection."""
+"""Session wrapper for an established MoQ connection."""
 
 from __future__ import annotations
 
 from moq_ffi import MoqSession
 
 from .origin import OriginConsumer, OriginProducer
+from .types import ConnectionStats
 
 
 class Session:
@@ -49,3 +50,10 @@ class Session:
         """The subscribe-side origin: a read handle for announcements pushed by
         the remote."""
         return OriginConsumer(self._inner.consumer())
+
+    def stats(self) -> ConnectionStats:
+        """Snapshot the current connection statistics (RTT, bandwidth estimates,
+        byte/packet counters). Cheap to call; intended for periodic polling.
+
+        Individual fields are ``None`` when the transport backend doesn't report them."""
+        return self._inner.stats()

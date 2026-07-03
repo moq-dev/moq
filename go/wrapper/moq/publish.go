@@ -52,7 +52,7 @@ func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, o
 }
 
 // PublishTrack creates a track that carries arbitrary byte payloads with no
-// codec validation. info sets track properties (priority, cache, compression);
+// codec validation. info sets track properties (priority, cache, timescale);
 // pass nil for defaults.
 func (b *BroadcastProducer) PublishTrack(name string, info *TrackInfo) (*TrackProducer, error) {
 	inner, err := b.inner.PublishTrack(name, info)

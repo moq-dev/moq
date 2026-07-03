@@ -28,6 +28,9 @@ from moq_ffi import (
     MoqCatalog as Catalog,
 )
 from moq_ffi import (
+    MoqConnectionStats as ConnectionStats,
+)
+from moq_ffi import (
     MoqDimensions as Dimensions,
 )
 from moq_ffi import (
@@ -52,6 +55,7 @@ __all__ = [
     "AudioFormat",
     "AudioFrame",
     "Catalog",
+    "ConnectionStats",
     "Container",
     "Dimensions",
     "Frame",

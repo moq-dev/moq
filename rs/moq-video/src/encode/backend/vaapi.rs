@@ -34,8 +34,9 @@ pub(crate) struct Vaapi {
 	encoder: Encoder,
 }
 
-// The encoder is `!Send` (libva uses `Rc` internally) but is only ever touched
-// from the single capture/encode thread (see `publish_capture`).
+// The encoder is `!Send` (libva uses `Rc` internally) but is created, used, and
+// dropped only on the dedicated encode thread (see `encode::sink`); the `Send`
+// impl just lets the boxed trait object satisfy `Backend: Send`.
 unsafe impl Send for Vaapi {}
 
 impl Vaapi {

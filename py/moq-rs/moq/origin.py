@@ -1,4 +1,4 @@
-"""Origin wrappers — manage announcements and broadcast discovery."""
+"""Origin wrappers for announcements and broadcast discovery."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .subscribe import BroadcastConsumer
 
 
 class Announcement:
-    """Wraps MoqAnnouncement — a discovered broadcast."""
+    """Wraps MoqAnnouncement, a discovered broadcast."""
 
     def __init__(self, inner: MoqAnnouncement) -> None:
         self._inner = inner
@@ -54,7 +54,7 @@ class Announced:
 
 
 class AnnouncedBroadcast:
-    """Wraps MoqAnnouncedBroadcast — awaitable for a specific broadcast."""
+    """Wraps MoqAnnouncedBroadcast, awaitable for a specific broadcast."""
 
     def __init__(self, inner: MoqAnnouncedBroadcast) -> None:
         self._inner = inner
@@ -114,5 +114,10 @@ class OriginProducer:
     def consume(self) -> OriginConsumer:
         return OriginConsumer(self._inner.consume())
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
+        """Advertise ``broadcast`` at ``path`` so subscribers can discover it."""
         self._inner.announce(path, broadcast._inner)
+
+    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+        # Deprecated alias for announce(); kept for back-compat.
+        self.announce(path, broadcast)

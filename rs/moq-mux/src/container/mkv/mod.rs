@@ -82,6 +82,9 @@ pub enum Error {
 	#[error("AAC track missing AudioSpecificConfig (description)")]
 	MissingAacDescription,
 
+	#[error("FLAC track missing STREAMINFO (description)")]
+	MissingFlacDescription,
+
 	#[error("H.264 track missing AVCDecoderConfigurationRecord")]
 	MissingH264Avcc,
 
@@ -114,6 +117,10 @@ pub enum Error {
 
 	#[error("matroska write error: {0}")]
 	MatroskaWrite(std::sync::Arc<webm_iterable::errors::TagWriterError>),
+
+	/// Building the Opus codec-private OpusHead for an audio track failed.
+	#[error(transparent)]
+	Opus(#[from] crate::codec::opus::Error),
 }
 
 impl From<webm_iterable::errors::TagWriterError> for Error {

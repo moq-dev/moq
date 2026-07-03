@@ -222,7 +222,7 @@ export class Subscriber {
 
 		// IETF negotiates group order in SUBSCRIBE_OK; this implementation only
 		// supports descending (newest-first), so commit ordered: false. (There's no
-		// per-frame compression/timescale, so the rest stay at their defaults.) This
+		// per-frame timescale, so the rest stay at their defaults.) This
 		// resolves the consumer's track.info() and gives us the write side that
 		// incoming object streams are routed into.
 		const producer = request.accept({ ordered: false });
@@ -485,10 +485,10 @@ export class Subscriber {
 				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
 
-				const frame = await Frame.decode(stream, group.flags);
+				const frame = await Frame.decode(stream, group.flags, this.#session.version);
 				if (frame.payload === undefined) break;
 
-				producer.writeFrame({ data: frame.payload, timestamp: Timestamp.now() });
+				producer.writeFrame({ data: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
 			}
 
 			producer.close();

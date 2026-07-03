@@ -1,4 +1,4 @@
-"""Server wrapper — accept incoming sessions with automatic origin wiring."""
+"""Server wrapper for accepting incoming sessions with automatic origin wiring."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ Transport = Literal["quic", "iroh", "websocket"]
 
 
 class Request:
-    """Wraps MoqRequest — an incoming session that can be accepted or rejected.
+    """Wraps MoqRequest, an incoming session that can be accepted or rejected.
 
     Use `await request.ok()` to complete the handshake, or
     `await request.close(code)` to reject with an HTTP status code.
@@ -74,7 +74,7 @@ class Server:
     In simple mode (no origin provided), creates an internal origin automatically:
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-            server.publish("live", broadcast)
+            server.announce("live", broadcast)
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control:
@@ -180,12 +180,16 @@ class Server:
             raise StopAsyncIteration
         return Request(request)
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
-        """Publish a broadcast under the given path, served to incoming sessions."""
+    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
+        """Advertise a broadcast under the given path, served to incoming sessions."""
         origin = self._publish_origin
         if origin is None:
             raise RuntimeError("no publish origin configured")
-        origin.publish(path, broadcast)
+        origin.announce(path, broadcast)
+
+    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+        # Deprecated alias for announce(); kept for back-compat.
+        self.announce(path, broadcast)
 
     async def serve(
         self,

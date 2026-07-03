@@ -6,6 +6,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import html from "highlight.js/lib/languages/xml";
 
 import "highlight.js/styles/atom-one-dark.css";
+
 hljs.configure({
 	cssSelector: "code",
 });

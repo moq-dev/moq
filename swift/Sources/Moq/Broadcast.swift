@@ -56,6 +56,12 @@ public final class BroadcastProducer: Sendable {
         BroadcastConsumer(try ffi.consume())
     }
 
+    /// Accept subscriptions to tracks that are not published yet. Hold and iterate
+    /// the returned `BroadcastDynamic` while such requests should be served.
+    public func dynamic() throws -> BroadcastDynamic {
+        BroadcastDynamic(try ffi.dynamic())
+    }
+
     /// Open a media track. `format` controls how `initData` and frame payloads
     /// are interpreted (e.g. `"opus"`, `"avc3"`).
     public func publishMedia(format: String, initData: Data) throws -> MediaProducer {
@@ -69,7 +75,7 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
-    /// `info` sets track properties (priority, cache, compression); omit for defaults.
+    /// `info` sets track properties (priority, cache, timescale); omit for defaults.
     public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
         TrackProducer(try ffi.publishTrack(name: name, info: info))
     }
