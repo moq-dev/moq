@@ -104,6 +104,15 @@ pub enum Error {
 	#[error("{0}")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
+	/// A FLV video frame resolved to a negative presentation timestamp.
+	#[error("negative FLV video presentation timestamp: dts={dts_ms}ms composition_time={composition_time_ms}ms")]
+	NegativeFlvPts {
+		/// The FLV tag decode timestamp in milliseconds.
+		dts_ms: u64,
+		/// The signed FLV composition-time offset in milliseconds.
+		composition_time_ms: i32,
+	},
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]

@@ -91,7 +91,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
 		self.buffer.extend_from_slice(data);
 
-		Ok(self.drain()?)
+		match self.drain() {
+			Ok(()) => Ok(()),
+			Err(err) => match err.downcast::<crate::Error>() {
+				Ok(err) => Err(err),
+				Err(err) => Err(err.into()),
+			},
+		}
 	}
 
 	fn drain(&mut self) -> anyhow::Result<()> {
@@ -317,12 +323,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
 		if pts_ms < 0 {
-			tracing::warn!(
-				dts_ms = dts,
-				composition_time,
-				"dropping FLV video frame with negative PTS"
-			);
-			return Ok(());
+			return Err(crate::Error::NegativeFlvPts {
+				dts_ms: dts,
+				composition_time_ms: composition_time,
+			}
+			.into());
 		}
 		match stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(pts_ms as u64)?,

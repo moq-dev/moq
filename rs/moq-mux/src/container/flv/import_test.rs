@@ -351,7 +351,7 @@ async fn import_enhanced_eac3() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn import_drops_negative_pts_and_keeps_decoding() {
+async fn import_reports_negative_pts_and_can_resume() {
 	let mut out = flv_header(0x01);
 
 	let mut seq = vec![
@@ -388,7 +388,15 @@ async fn import_drops_negative_pts_and_keeps_decoding() {
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
-	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	let err = importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap_err();
+	assert!(matches!(
+		err,
+		crate::Error::NegativeFlvPts {
+			dts_ms: 0,
+			composition_time_ms: -1
+		}
+	));
+	importer.decode(&[]).unwrap();
 	importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
