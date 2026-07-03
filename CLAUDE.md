@@ -50,7 +50,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 
 ## Language Bindings
 
-`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the `swift`/`kt`/`go` source skeletons to `moq-dev/moq-{swift,kotlin,go}` on each `moq-ffi-v*` tag. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
+`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the Swift and Go source packages to their external repos; Kotlin publishes `dev.moq:*` artifacts to Maven Central. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
 
 ## Per-Directory Guides
 
@@ -60,7 +60,7 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 - **`js/CLAUDE.md`** - TypeScript/JS workspace: package map, the signals + Effect reactivity model and its lifecycle rules, Web Components UI, `bun`/Biome tooling.
 - **`py/CLAUDE.md`** - Python wrappers: the `moq-ffi` (generated bindings) vs `moq-rs` (ergonomic) split and the `moq` public surface.
 
-The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi` (mirrored to external repos); see each directory's `README.md` rather than a dedicated guide.
+The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
 
 This root file holds only cross-cutting rules that apply everywhere (writing style, branch targeting, cross-package sync, public-API scrutiny, comment/doc conventions).
 

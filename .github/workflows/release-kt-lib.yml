@@ -25,6 +25,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
+      - ".github/scripts/release.sh"
   pull_request:
     paths:
       - "kt/moq/**"
@@ -32,6 +33,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
+      - ".github/scripts/release.sh"
       - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise).
@@ -49,16 +51,16 @@ jobs:
     name: Check version
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.probe.outputs.version }}
-      should_publish: ${{ steps.probe.outputs.should_publish }}
+      version: ${{ steps.version.outputs.version }}
+      should_publish: ${{ steps.decide.outputs.should_publish }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - name: Read moq.version and probe Maven Central
-        id: probe
+      - name: Read moq.version
+        id: version
         run: |
           VERSION=$(sed -n 's/^moq\.version=//p' kt/gradle.properties | head -1)
           if [[ -z "$VERSION" ]]; then
@@ -67,25 +69,36 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          # Already published? HEAD the POM; 200 means this version exists.
-          POM_URL="https://repo1.maven.org/maven2/dev/moq/moq/${VERSION}/moq-${VERSION}.pom"
-          if curl -sfI "$POM_URL" >/dev/null 2>&1; then
+      - name: Check wrapper publication
+        id: wrapper
+        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
+
+      - name: Check bindings publication
+        id: bindings
+        if: steps.wrapper.outputs.exists != 'true'
+        run: .github/scripts/release.sh maven-version-in-range dev.moq moq-ffi "[0.3,0.4)"
+
+      - name: Decide publish
+        id: decide
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [[ "${{ steps.wrapper.outputs.exists }}" == "true" ]]; then
             echo "dev.moq:moq:${VERSION} already on Maven Central; nothing to publish."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.2,0.3),
+          # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.3,0.4),
           # so don't publish a wrapper that consumers can't resolve. Require a
-          # 0.2.x bindings release to exist first (it's published separately by
-          # release-kt-ffi.yml on a moq-ffi-v* tag). Re-run via workflow_dispatch
-          # once it lands.
-          FFI_META="https://repo1.maven.org/maven2/dev/moq/moq-ffi/maven-metadata.xml"
-          if curl -sf "$FFI_META" 2>/dev/null | grep -q "<version>0\.2\."; then
+          # compatible bindings release to exist first (it's published separately
+          # by release-kt-ffi.yml on a moq-ffi-v* tag). Re-run via
+          # workflow_dispatch once it lands.
+          if [[ "${{ steps.bindings.outputs.exists }}" == "true" ]]; then
             echo "dev.moq:moq:${VERSION} not published yet; bindings available; will publish."
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::dev.moq:moq-ffi has no 0.2.x release on Maven Central yet; skipping wrapper publish until the bindings land (then re-run this workflow)."
+            echo "::warning::dev.moq:moq-ffi has no [0.3,0.4) release on Maven Central yet; skipping wrapper publish until the bindings land (then re-run this workflow)."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 

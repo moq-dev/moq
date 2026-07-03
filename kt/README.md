@@ -19,7 +19,7 @@ dependencies {
 }
 ```
 
-The wrapper's POM declares `dev.moq:moq-ffi:[0.2,0.3)`, so Gradle resolves the latest `0.2.x` bindings automatically. Pin `dev.moq:moq-ffi` yourself if you need a reproducible bindings version.
+The wrapper's POM declares `dev.moq:moq-ffi:[0.3,0.4)`, so Gradle resolves the latest `0.3.x` bindings automatically. Pin `dev.moq:moq-ffi` yourself if you need a reproducible bindings version.
 
 ## Quick start
 

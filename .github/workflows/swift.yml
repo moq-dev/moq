@@ -1,0 +1,42 @@
+name: Swift
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "swift/**"
+      - "rs/moq-ffi/**"
+      - ".github/workflows/swift.yml"
+
+concurrency:
+  group: swift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Swift
+    if: github.event.action != 'closed'
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Swift check
+        run: ./swift/scripts/check.sh

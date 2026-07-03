@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-kt
+  group: release-kt-ffi
   cancel-in-progress: false
 
 jobs:
