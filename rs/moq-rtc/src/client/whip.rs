@@ -3,9 +3,9 @@
 //!
 //! Mints an SDP offer with `sendonly` audio + video, POSTs it to the WHIP
 //! resource URL, parses the returned answer, and hands the resulting
-//! `str0m::Rtc` to a `crate::session::Session` running in egress mode. The
+//! `str0m::Rtc` to the internal session driver running in egress mode. The
 //! bitstream / RTP packetization is identical to the WHEP server path, so
-//! most of the work lives in [`crate::egress`].
+//! most of the work lives in the crate-private egress source.
 
 use str0m::{
 	Candidate,

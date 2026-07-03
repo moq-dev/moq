@@ -13,9 +13,17 @@ use axum::{
 };
 use str0m::Candidate;
 
+use std::time::Duration;
+
 use crate::{Error, Result, egress::EgressSource, sdp, server::Server, session};
 
 pub use crate::server::Response;
+
+/// How long WHEP negotiation waits for the broadcast's first catalog snapshot
+/// before failing the request. A broadcast can be announced (or served by a
+/// dynamic origin fallback) yet never publish a catalog; without a bound the
+/// `accept` future parks forever inside the HTTP handler, leaking the request.
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the WHEP axum router.
 pub fn router(server: Server) -> Router {
@@ -103,7 +111,15 @@ pub async fn accept(
 		.await
 		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {broadcast} not announced")))?;
 
-	let source = EgressSource::new(consumer).await?;
+	// Bound the wait for the first catalog: an announced-but-catalog-less broadcast
+	// would otherwise park this handler forever.
+	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(consumer))
+		.await
+		.map_err(|_| {
+			Error::Other(anyhow::anyhow!(
+				"broadcast {broadcast} sent no catalog within {CATALOG_TIMEOUT:?}"
+			))
+		})??;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::Other(anyhow::anyhow!(
