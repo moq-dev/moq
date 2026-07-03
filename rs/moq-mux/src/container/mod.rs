@@ -36,7 +36,6 @@ pub(crate) use source::ExportSource;
 /// The exact shape depends on the codec (Annex B for H.264/H.265, OBU for
 /// AV1, and so on).
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 pub struct Frame {
 	/// Presentation timestamp.
 	///
@@ -48,8 +47,7 @@ pub struct Frame {
 	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: moq_net::Timestamp,
 
-	/// How long this frame occupies the presentation timeline, in the frame's
-	/// own scale, when the container reports it.
+	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration); containers
 	/// that don't (Legacy, LOC) leave this `None`. The [`Consumer`] adds it to
