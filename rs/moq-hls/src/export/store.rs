@@ -160,8 +160,17 @@ impl SegmentStore {
 
 			// A pending discontinuity forces a fresh segment so the resumed media never
 			// shares a segment with pre-pause media (matters for audio, which otherwise
-			// rolls on duration, not keyframes).
-			let discontinuity = inner.discontinuity_pending;
+			// rolls on duration, not keyframes). For video the discontinuity segment must
+			// begin on an independent (keyframe) fragment: opening it on a P-frame would
+			// put a `#EXT-X-DISCONTINUITY` in front of a segment a decoder can't start on,
+			// resetting it onto a P-frame (green video). So defer the discontinuity until
+			// the next independent fragment; any P-frames arriving first are dropped rather
+			// than appended to the pre-pause timeline.
+			let discontinuity_pending = inner.discontinuity_pending;
+			if discontinuity_pending && self.kind == Kind::Video && !fragment.independent {
+				return;
+			}
+			let discontinuity = discontinuity_pending;
 			let need_new = discontinuity
 				|| match inner.segments.back() {
 					None => true,
@@ -390,6 +399,15 @@ mod tests {
 		}
 	}
 
+	fn dependent_fragment(duration: f64) -> Fragment {
+		Fragment {
+			data: Bytes::new(),
+			init: false,
+			independent: false,
+			duration,
+		}
+	}
+
 	#[test]
 	fn evicting_discontinuous_segment_advances_sequence() {
 		let cfg = config(Duration::from_secs(2));
@@ -411,6 +429,35 @@ mod tests {
 		assert_eq!(snapshot.media_sequence, 2);
 		assert_eq!(snapshot.discontinuity_sequence, 1);
 		assert!(snapshot.segments.iter().all(|s| !s.discontinuity));
+	}
+
+	#[test]
+	fn video_discontinuity_waits_for_keyframe() {
+		// A resume that lands mid-GOP must not open the discontinuity segment on a
+		// P-frame: the segment after `#EXT-X-DISCONTINUITY` has to be decodable.
+		let cfg = config(Duration::from_secs(16));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.push(fragment(1.0)); // seq 0, keyframe
+		store.mark_discontinuity();
+
+		// P-frames arriving first are dropped, not tagged as the discontinuity segment.
+		store.push(dependent_fragment(1.0));
+		store.push(dependent_fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.segments.len(), 1);
+		assert!(!snapshot.segments[0].discontinuity);
+
+		// The next keyframe opens the discontinuity segment.
+		store.push(fragment(1.0)); // seq 1, keyframe
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.segments.len(), 2);
+		assert!(!snapshot.segments[0].discontinuity);
+		assert!(snapshot.segments[1].discontinuity);
+		// The discontinuity segment starts on an independent part.
+		assert!(snapshot.segments[1].parts[0].independent);
 	}
 
 	#[test]

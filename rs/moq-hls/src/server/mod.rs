@@ -9,6 +9,10 @@
 //! GET /{broadcast}/{rendition}/seg/{seq}.m4s
 //! GET /{broadcast}/{rendition}/part/{seq}/{idx}.m4s
 //! ```
+//!
+//! By default every request is served. Pass an [`Authorizer`] via
+//! [`Server::with_authorizer`] to gate access per request (token, cookie, or
+//! signed URL); a denied request is rejected before the origin is touched.
 
 mod routes;
 
@@ -17,11 +21,30 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
+use axum::http::{HeaderMap, StatusCode};
 
 use crate::export::{Broadcaster, Config};
 
 /// How long to wait for a requested broadcast to be announced by the relay.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-request authorization for the HLS endpoints. Return `Err(status)` to deny
+/// a request; the server never touches the origin for a denied request. A closure
+/// `Fn(&str, &HeaderMap, Option<&str>) -> Result<(), StatusCode>` implements this.
+pub trait Authorizer: Send + Sync + 'static {
+	/// `broadcast` is the requested broadcast path, `headers` the request headers
+	/// (Authorization / Cookie), `query` the raw query string (token / signed-URL schemes).
+	fn authorize(&self, broadcast: &str, headers: &HeaderMap, query: Option<&str>) -> Result<(), StatusCode>;
+}
+
+impl<F> Authorizer for F
+where
+	F: Fn(&str, &HeaderMap, Option<&str>) -> Result<(), StatusCode> + Send + Sync + 'static,
+{
+	fn authorize(&self, broadcast: &str, headers: &HeaderMap, query: Option<&str>) -> Result<(), StatusCode> {
+		self(broadcast, headers, query)
+	}
+}
 
 /// HLS export HTTP server. Cheap to clone (shared inner).
 #[derive(Clone)]
@@ -33,17 +56,46 @@ struct Inner {
 	origin: moq_net::OriginConsumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
+	/// Optional per-request authorizer; `None` allows every request.
+	auth: Option<Arc<dyn Authorizer>>,
 }
 
 impl Server {
-	/// Build a server reading broadcasts from `origin`.
+	/// Build a server reading broadcasts from `origin`. Every request is allowed;
+	/// call [`with_authorizer`](Self::with_authorizer) to gate access.
 	pub fn new(origin: moq_net::OriginConsumer, config: Config) -> Self {
+		Self::build(origin, config, None)
+	}
+
+	fn build(origin: moq_net::OriginConsumer, config: Config, auth: Option<Arc<dyn Authorizer>>) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
+				auth,
 			}),
+		}
+	}
+
+	/// Gate every request through `auth`. A denied request is rejected before the
+	/// server touches the origin. Call this on the freshly-built server, before
+	/// cloning it or handing out its router.
+	pub fn with_authorizer(self, auth: impl Authorizer) -> Self {
+		let inner = &self.inner;
+		Self::build(inner.origin.clone(), inner.config.clone(), Some(Arc::new(auth)))
+	}
+
+	/// Authorize a request, allowing it when no authorizer is configured.
+	pub(crate) fn authorize(
+		&self,
+		broadcast: &str,
+		headers: &HeaderMap,
+		query: Option<&str>,
+	) -> Result<(), StatusCode> {
+		match &self.inner.auth {
+			Some(auth) => auth.authorize(broadcast, headers, query),
+			None => Ok(()),
 		}
 	}
 

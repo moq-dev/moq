@@ -12,7 +12,7 @@ mod rendition;
 pub mod store;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
@@ -20,6 +20,7 @@ use moq_mux::catalog::{self, CatalogFormat, Stream};
 use tokio::sync::watch;
 
 pub use playlist::render_media;
+use rendition::Context;
 pub use rendition::{Kind, Rendition};
 
 /// How long to wait before retrying the initial catalog subscription.
@@ -62,6 +63,10 @@ pub struct Broadcaster {
 	/// reading; renditions discovered later inherit the current value (they
 	/// `subscribe()` to this sender).
 	paused: watch::Sender<bool>,
+	/// Aborts the catalog watcher when the broadcaster is dropped (and, with it,
+	/// its renditions, whose own `Drop` aborts their pumps). Set once, right after
+	/// construction.
+	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Broadcaster {
@@ -74,8 +79,12 @@ impl Broadcaster {
 			renditions: Mutex::new(BTreeMap::new()),
 			ready,
 			paused,
+			watcher: Mutex::new(None),
 		});
-		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
+		// The watcher holds a Weak so it can't keep the Broadcaster alive; the
+		// Broadcaster owns the watcher's handle and aborts it on Drop.
+		let watcher = tokio::spawn(watch_catalog(broadcast, config, Arc::downgrade(&broadcaster)));
+		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		broadcaster
 	}
 
@@ -157,31 +166,37 @@ impl Broadcaster {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
 			renditions.entry(name.clone()).or_insert_with(|| {
-				Arc::new(Rendition::video(
-					name.clone(),
-					video,
-					broadcast.clone(),
-					config,
-					self.paused.subscribe(),
-				))
+				let ctx = Context {
+					broadcast: broadcast.clone(),
+					cfg: config,
+					paused: self.paused.subscribe(),
+				};
+				Arc::new(Rendition::video(name.clone(), video, ctx))
 			});
 		}
 		for (name, audio) in &catalog.audio.renditions {
 			renditions.entry(name.clone()).or_insert_with(|| {
-				Arc::new(Rendition::audio(
-					name.clone(),
-					audio,
-					broadcast.clone(),
-					config,
-					self.paused.subscribe(),
-				))
+				let ctx = Context {
+					broadcast: broadcast.clone(),
+					cfg: config,
+					paused: self.paused.subscribe(),
+				};
+				Arc::new(Rendition::audio(name.clone(), audio, ctx))
 			});
 		}
 		let _ = self.ready.send(renditions.len());
 	}
 }
 
-async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
+impl Drop for Broadcaster {
+	fn drop(&mut self) {
+		if let Some(watcher) = self.watcher.lock().unwrap().take() {
+			watcher.abort();
+		}
+	}
+}
+
+async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Weak<Broadcaster>) {
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
@@ -197,7 +212,11 @@ async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, br
 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => broadcaster.sync(&broadcast, &config, &catalog),
+			Ok(Some(catalog)) => match broadcaster.upgrade() {
+				Some(broadcaster) => broadcaster.sync(&broadcast, &config, &catalog),
+				// The Broadcaster was dropped; nothing left to sync into.
+				None => break,
+			},
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
