@@ -1,7 +1,7 @@
 #!/usr/bin/env just --justfile
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
-set unstable := true
+set unstable
 
 # Per-language modules. Anything that's specific to one language lives in
 

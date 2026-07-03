@@ -10,8 +10,8 @@
 #     to catch interop regressions before anything is published.
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
 
-set fallback := true
-set unstable := true
+set fallback
+set unstable
 set working-directory := '.'
 
 # Run unit tests for every language (default).

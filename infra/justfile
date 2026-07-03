@@ -1,5 +1,5 @@
-set fallback := true
-set unstable := true
+set fallback
+set unstable
 
 mod apt
 mod rpm

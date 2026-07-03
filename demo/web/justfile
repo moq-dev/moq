@@ -1,5 +1,5 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
-set unstable := true
+set unstable
 
 # Run the web server targeting the default relay.
 default:

@@ -3,7 +3,7 @@
 # Language-specific recipes for the Go bindings under go/. Invoked from
 # the repo root as `just go <recipe>` via the `mod go` import.
 
-set unstable := true
+set unstable
 set working-directory := '.'
 
 default:

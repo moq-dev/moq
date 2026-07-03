@@ -1,5 +1,5 @@
-set fallback := true
-set unstable := true
+set fallback
+set unstable
 
 # Lint GitHub Actions workflows. Silently skipped if actionlint is not installed.
 check:
