@@ -468,6 +468,10 @@ impl TrackState {
 	fn reject_group_request(&mut self, id: u64, err: Error) {
 		self.fetch_rejections.entry(id).or_insert(err);
 	}
+
+	fn clear_group_request_rejection(&mut self, id: u64) {
+		self.fetch_rejections.remove(&id);
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -1243,15 +1247,21 @@ impl kio::Future for TrackFetch {
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		// `poll_fetch` already yields a `Result<GroupConsumer>` (group, or NotFound /
 		// abort); the outer error is the channel closing without one.
-		Poll::Ready(
-			match ready!(
-				self.state
-					.poll(waiter, |state| state.poll_fetch(self.sequence, self.request_id))
-			) {
-				Ok(res) => res,
-				Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
-			},
-		)
+		let res = match ready!(
+			self.state
+				.poll(waiter, |state| state.poll_fetch(self.sequence, self.request_id))
+		) {
+			Ok(res) => res,
+			Err(closed) => return Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+		};
+
+		if let Some(id) = self.request_id
+			&& let Ok(mut state) = self.state.write()
+		{
+			state.clear_group_request_rejection(id);
+		}
+
+		Poll::Ready(res)
 	}
 }
 
@@ -2478,6 +2488,7 @@ mod test {
 
 		req.reject(Error::Cancel);
 		assert!(matches!(pending.await, Err(Error::Cancel)));
+		assert!(producer.state.read().fetch_rejections.is_empty());
 	}
 
 	#[tokio::test]
