@@ -36,6 +36,9 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	#[error("flac: {0}")]
+	Flac(#[from] crate::codec::flac::Error),
+
 	#[error("missing keyframe: a group must open on a keyframe")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
@@ -523,6 +526,35 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				},
 				btrt: None,
 				taic: None,
+			})
+		}
+		AudioCodec::Flac => {
+			// The catalog `description` is the FLAC header (`fLaC` marker + STREAMINFO).
+			// Parse it back into the STREAMINFO fields the `dfLa` box stores.
+			let description = config
+				.description
+				.as_ref()
+				.ok_or_else(|| Error::MissingAudioDescription(config.codec.to_string()))?;
+			let info = crate::codec::flac::Config::parse(&mut description.as_ref())?;
+
+			let stream_info = mp4_atom::FlacMetadataBlock::StreamInfo {
+				minimum_block_size: info.min_block_size,
+				maximum_block_size: info.max_block_size,
+				// Frame sizes are 24-bit; clamp defensively so the conversion can't fail.
+				minimum_frame_size: info.min_frame_size.min(0xFF_FFFF).try_into().expect("fits in u24"),
+				maximum_frame_size: info.max_frame_size.min(0xFF_FFFF).try_into().expect("fits in u24"),
+				sample_rate: info.sample_rate,
+				num_channels_minus_one: info.channel_count.saturating_sub(1) as u8,
+				bits_per_sample_minus_one: info.bits_per_sample.saturating_sub(1) as u8,
+				number_of_interchannel_samples: info.total_samples,
+				md5_checksum: info.md5.to_vec(),
+			};
+
+			mp4_atom::Codec::from(mp4_atom::Flac {
+				audio,
+				dfla: mp4_atom::Dfla {
+					blocks: vec![stream_info],
+				},
 			})
 		}
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),

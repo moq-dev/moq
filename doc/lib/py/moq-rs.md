@@ -36,13 +36,13 @@ async with moq.Client("https://relay.example.com") as client:
 
 `Client(url, *, tls_verify=True, publish=None, subscribe=None)`. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
 
-A server can reject the connection on auth grounds: `moq.MoqError.Unauthorized` (HTTP 401) or `moq.MoqError.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting:
+A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting:
 
 ```python
 try:
     async with moq.Client("https://relay.example.com") as client:
         ...
-except (moq.MoqError.Unauthorized, moq.MoqError.Forbidden):
+except (moq.Error.Unauthorized, moq.Error.Forbidden):
     ...  # Prompt for credentials; don't reconnect.
 ```
 
@@ -51,7 +51,7 @@ except (moq.MoqError.Unauthorized, moq.MoqError.Forbidden):
 ```python
 broadcast = moq.BroadcastProducer()
 audio = broadcast.publish_media("opus", opus_init_bytes)
-client.publish("my-stream", broadcast)
+client.announce("my-stream", broadcast)
 
 audio.write_frame(payload, timestamp_us=0)
 audio.finish()
@@ -66,7 +66,7 @@ Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and othe
 async for announcement in client.announced("prefix/"):
     catalog = await announcement.broadcast.catalog()
     track_name, track = next(iter(catalog.audio.items()))
-    consumer = announcement.broadcast.subscribe_media(track_name, track)
+    consumer = await announcement.broadcast.subscribe_media(track_name, track)
 
     async for frame in consumer:
         ...
@@ -82,7 +82,7 @@ import json
 # Publish: attach a custom section.
 broadcast = moq.BroadcastProducer()
 broadcast.set_catalog_section("transcript", json.dumps({"track": "transcript.json"}))
-client.publish("my-stream", broadcast)
+client.announce("my-stream", broadcast)
 
 # Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
 catalog = await announcement.broadcast.catalog()
@@ -102,7 +102,8 @@ track.write_frame(b'{"cmd": "ready"}')
 track.finish()
 
 # Subscribe
-async for group in broadcast_consumer.subscribe_track("events"):
+track = await broadcast_consumer.subscribe_track("events")
+async for group in track:
     async for frame in group:
         print(frame)
 ```
@@ -116,15 +117,16 @@ Use a dynamic broadcast when subscribers should be able to request raw tracks th
 ```python
 broadcast = moq.BroadcastProducer()
 dynamic = broadcast.dynamic()
-client.publish("events", broadcast)
+client.announce("events", broadcast)
 
-async for track in dynamic:
-    if track.name == "alerts":
+async for request in dynamic:
+    if request.name == "alerts":
+        track = request.accept()
         track.write_frame(b"ready")
         track.finish()
 ```
 
-Missing track subscriptions are accepted while the `BroadcastDynamic` object is alive. Each requested track is returned as a `TrackProducer`.
+Missing track subscriptions are accepted while the `BroadcastDynamic` object is alive. Each one arrives as a `TrackRequest`; call `accept()` to turn it into a `TrackProducer` (or `abort(code)` to reject the subscriber).
 
 ### Discovering broadcasts
 

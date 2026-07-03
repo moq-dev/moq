@@ -12,7 +12,6 @@ mod cluster;
 mod config;
 mod connection;
 mod http_client;
-mod internal;
 mod stats;
 mod web;
 #[cfg(feature = "websocket")]
@@ -23,8 +22,7 @@ mod websocket;
 pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
 /// Default billing tier for trusted (non-JWT/public) connections when no label
-/// is configured, shared by the `--cluster-tier` / `--internal-tier` /
-/// `--auth-mtls-tier` defaults.
+/// is configured, shared by the `--cluster-tier` / `--auth-mtls-tier` defaults.
 const DEFAULT_TRUSTED_TIER: &str = "internal";
 
 /// Resolve a configured tier label to a [`moq_net::Tier`], defaulting to
@@ -38,6 +36,5 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
-pub use internal::*;
 pub use stats::*;
 pub use web::*;

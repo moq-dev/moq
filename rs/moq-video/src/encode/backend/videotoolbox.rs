@@ -8,8 +8,10 @@
 //! format description.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
-//! higher-level crate we trust. Used only from the single capture/encode thread,
-//! so the `!Send` CoreFoundation handles are wrapped in a thread-confined type.
+//! higher-level crate we trust. The capture loop drives it inline and always
+//! sequentially, so the `!Send` CoreFoundation handles are wrapped in a `Send`
+//! type (safe to move between tokio workers between frames, never used
+//! concurrently).
 
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
@@ -61,8 +63,10 @@ pub(crate) struct VideoToolbox {
 	frame_index: i64,
 }
 
-// The session and its CoreFoundation handles are only ever touched from the one
-// capture/encode thread (see `publish_capture`'s `spawn_blocking`).
+// The capture loop drives this inline (macOS skips the dedicated encode thread),
+// always sequentially. Core Foundation handles are safe to use from a different
+// thread as long as never concurrently, so `Send` (which just lets the encoder
+// move between tokio workers between frames) is sound.
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
@@ -268,10 +272,27 @@ fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<By
 	if status != 0 {
 		return Err(status);
 	}
-	if data_ptr.is_null() || total == 0 {
+	if total == 0 {
 		return Ok(None);
 	}
-	let avcc = unsafe { slice::from_raw_parts(data_ptr as *const u8, total) };
+
+	// `data_pointer` only guarantees `length_at_offset` contiguous bytes at
+	// `data_ptr`; a non-contiguous block buffer would make a `total`-length slice
+	// read past the mapped region. VideoToolbox output is contiguous in practice,
+	// but copy the whole access unit flat if it ever isn't.
+	let owned;
+	let avcc: &[u8] = if !data_ptr.is_null() && length_at_offset >= total {
+		unsafe { slice::from_raw_parts(data_ptr as *const u8, total) }
+	} else {
+		let mut buf = vec![0u8; total];
+		let dst = NonNull::new(buf.as_mut_ptr().cast::<c_void>()).ok_or(-1)?;
+		let status = unsafe { block.copy_data_bytes(0, total, dst) };
+		if status != 0 {
+			return Err(status);
+		}
+		owned = buf;
+		&owned
+	};
 
 	let slices = split_avcc(avcc, nal_length_size as usize);
 	let is_keyframe = slices.iter().any(|nal| is_keyframe_nal(nal, codec));

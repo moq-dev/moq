@@ -12,6 +12,12 @@ pub enum CatalogFormat {
 	/// `hang` JSON catalog (track `catalog.json`).
 	#[default]
 	Hang,
+	/// DEFLATE-compressed `hang` JSON catalog (track `catalog.json.z`).
+	///
+	/// Same broadcast-name suffix as [`Hang`](Self::Hang) (`.hang`): the compression is a track-level
+	/// choice, not a different broadcast. Opt in explicitly. [`detect`](Self::detect) never returns
+	/// this, so name-based auto-detection stays on the uncompressed track until consumers are moved over.
+	HangZ,
 	/// MSF catalog (track `catalog`).
 	Msf,
 }
@@ -25,7 +31,7 @@ impl CatalogFormat {
 	/// The filename-style suffix (including leading dot) for this format.
 	pub fn extension(self) -> &'static str {
 		match self {
-			Self::Hang => ".hang",
+			Self::Hang | Self::HangZ => ".hang",
 			Self::Msf => ".msf",
 		}
 	}

@@ -10,7 +10,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_native::moq_net::{self, Origin};
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, run_internal};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,7 +41,10 @@ async fn build_web(port: u16, ws: bool) -> Web {
 	let public = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
-	let auth = auth_config.init().await.expect("auth init");
+	let auth = auth_config
+		.init(&moq_native::tls::Client::default())
+		.await
+		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
@@ -364,25 +367,56 @@ async fn two_publish_only_clients_coexist() {
 	web_handle.abort();
 }
 
-/// Stand up just the unauthenticated internal listener (plain-TCP qmux, no
-/// auth stack) on a free loopback port. Returns the port and an abort handle.
-async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
+/// Run the relay's accept loop over a stream-only server (no QUIC), the same path
+/// `main.rs` uses. Authenticates through the shared [`Auth`], here with fully
+/// public access (`--auth-public ""`) so no-JWT stream clients get the root.
+async fn spawn_stream_relay(config: moq_native::ServerConfig) -> tokio::task::JoinHandle<()> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let mut server = config.init().expect("server init");
+
+	// Public Simple([""]) lets any no-JWT stream client through at the root.
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec![String::new()]);
+	let mut auth_config = AuthConfig::default();
+	auth_config.public = Some(public);
+	let auth = auth_config
+		.init(&moq_native::tls::Client::default())
+		.await
+		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
+	tokio::spawn(async move {
+		let mut id = 0;
+		while let Some(request) = server.accept().await {
+			let conn = Connection {
+				id,
+				request,
+				cluster: cluster.clone(),
+				auth: auth.clone(),
+			};
+			id += 1;
+			tokio::spawn(async move {
+				let _ = conn.run().await;
+			});
+		}
+	})
+}
+
+/// Stand up the relay listening only on a plain-TCP qmux `--server-bind` on a
+/// free loopback port, with fully public auth (no-JWT => whole root). Returns
+/// the port and an abort handle.
+async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	// Pick a free TCP port, then drop the probe so the listener can bind it.
 	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let mut internal = InternalConfig::default();
-	internal.tcp.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
-
-	let handle = tokio::spawn(async move {
-		// `run_internal` only returns on error; aborted at teardown.
-		let _ = run_internal(internal, cluster).await;
-	});
+	// Stream-only: a TCP listener with no `--server-bind`, so no QUIC.
+	let mut config = moq_native::ServerConfig::default();
+	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+	let handle = spawn_stream_relay(config).await;
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {
@@ -398,9 +432,9 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	(port, handle)
 }
 
-/// Connect a publisher and subscriber to the unauthenticated internal listener
-/// over `tcp://` (plain TCP, no TLS, no JWT) and confirm a frame round-trips.
-/// Exercises the qmux-over-TCP transport and the unrestricted internal grant.
+/// Connect a publisher and subscriber to a stream `--server-bind` over `tcp://`
+/// (plain TCP, no TLS, no JWT) and confirm a frame round-trips. Exercises the
+/// qmux-over-TCP transport and no-JWT resolution through public auth.
 #[tokio::test]
 async fn internal_tcp_round_trip() {
 	let (port, handle) = spawn_internal_relay().await;
@@ -467,14 +501,10 @@ async fn internal_tcp_round_trip() {
 	handle.abort();
 }
 
-/// Stand up the internal listener on a Unix socket and return the socket path
+/// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
 #[cfg(unix)]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
-
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux. A per-call counter
 	// keeps concurrent tests in the same process off each other's socket.
@@ -482,12 +512,10 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}-{seq}.sock", std::process::id()));
 
-	let mut internal = InternalConfig::default();
-	internal.uds.listen = Some(path.clone());
-
-	let handle = tokio::spawn(async move {
-		let _ = run_internal(internal, cluster).await;
-	});
+	// Stream-only: a Unix listener with no `--server-bind`, so no QUIC.
+	let mut config = moq_native::ServerConfig::default();
+	config.unix.bind = Some(path.clone());
+	let handle = spawn_stream_relay(config).await;
 
 	// Wait for the socket file to appear.
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);

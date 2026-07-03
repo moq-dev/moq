@@ -124,11 +124,11 @@ cargo install moq-cli
 ```bash
 # Publish a video file (remux to MPEG-TS and pipe it in)
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
+    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
 
 # Publish from FFmpeg
 ffmpeg -i input.mp4 -f mpegts - | \
-    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
+    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
 ```
 
 [Learn more](/bin/cli)

@@ -122,10 +122,17 @@ export class Game {
 
 		// Sources produce the per-rendition jitter that Sync reads, so they're created
 		// before Sync to avoid a construction cycle.
-		this.videoSource = new Watch.Video.Source({ broadcast: this.broadcast, target: this.#target });
+		this.videoSource = new Watch.Video.Source({
+			broadcast: this.broadcast,
+			target: this.#target,
+			supported: Watch.Video.Decoder.supported,
+		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
-		this.audioSource = new Watch.Audio.Source({ broadcast: this.broadcast });
+		this.audioSource = new Watch.Audio.Source({
+			broadcast: this.broadcast,
+			supported: Watch.Audio.Decoder.supported,
+		});
 		this.#signals.cleanup(() => this.audioSource.close());
 
 		this.sync = new Watch.Sync({

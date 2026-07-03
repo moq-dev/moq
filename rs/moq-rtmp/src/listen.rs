@@ -21,6 +21,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use moq_net::OriginProducer;
 
@@ -44,15 +45,20 @@ pub struct Config {
 	/// namespace all of its streams (e.g. `live/`).
 	pub prefix: String,
 
+	/// How long a play's FLV muxer waits for a stalled group before skipping to a
+	/// newer one (the moq-level frame-drop latency). Zero (the default) drops
+	/// stale groups aggressively. Only affects egress (plays); ingest ignores it.
+	pub latency: Duration,
+
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
 	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
 	/// so clients connect with `rtmps://`. Build it with
-	/// [`moq_native::tls::Server::server_config`] (pass an empty ALPN list) or
+	/// `moq_native::tls::Server::server_config` (pass an empty ALPN list) or
 	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext.
 	///
 	/// To serve both RTMP and RTMPS, run two listeners: call [`run`] once per
 	/// config (one with `tls`, one without) against a cloned origin.
-	#[cfg(feature = "server")]
+	#[cfg(feature = "tls")]
 	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
 }
 
@@ -77,15 +83,15 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 		unreachable!("pending future never resolves");
 	};
 
-	#[cfg_attr(not(feature = "server"), allow(unused_mut))]
+	#[cfg_attr(not(feature = "tls"), allow(unused_mut))]
 	let mut server = Server::bind(listen).await?;
 
-	#[cfg(feature = "server")]
+	#[cfg(feature = "tls")]
 	let tls = config.tls.is_some();
-	#[cfg(not(feature = "server"))]
+	#[cfg(not(feature = "tls"))]
 	let tls = false;
 
-	#[cfg(feature = "server")]
+	#[cfg(feature = "tls")]
 	if let Some(tls) = config.tls.clone() {
 		server = server.with_tls(tls);
 	}
@@ -97,6 +103,7 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 	// of clobbering the live one.
 	let active = ActivePaths::default();
 	let prefix = Arc::new(config.prefix);
+	let latency = config.latency;
 	// Players are served out of the same origin the publishers write into.
 	let consumer = origin.consume();
 
@@ -139,7 +146,7 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 						let _ = play.reject("missing broadcast path (RTMP app/key)").await;
 						return;
 					};
-					if let Err(err) = play.accept(&consumer, &path).await {
+					if let Err(err) = play.with_latency(latency).accept(&consumer, &path).await {
 						tracing::warn!(%peer, %path, %err, "RTMP play ended with error");
 					}
 				});

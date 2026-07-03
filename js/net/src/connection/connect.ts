@@ -444,17 +444,18 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 		[Ietf.ALPN.DRAFT_15]: null,
 	} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
 
-	// `withoutProtocol` also advertises bare `qmux-01`, `qmux-00`, and
-	// `webtransport` so we still interop with relays that only know a
-	// wire-format version (today's moq-relay only accepts bare `webtransport`).
+	// The default (`requireProtocol: false`) also advertises bare `qmux-01`,
+	// `qmux-00`, and `webtransport` so we still interop with relays that only
+	// know a wire-format version (today's moq-relay only accepts bare
+	// `webtransport`).
 	const quic = new Session(url, {
 		protocols: Object.keys(versions),
 		versions,
-		withoutProtocol: true,
 	});
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.
-	// Close the connection if we lost the race.
+	// `ready` rejects on a refused/failed connection, so a throw here is the caller's
+	// cue to retry; a lost cancel race instead resolves and we close the loser.
 	const loaded = await Promise.race([quic.ready.then(() => true), cancel]);
 	if (!loaded) {
 		quic.close();

@@ -71,66 +71,74 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// VPS, SPS, and PPS NAL units extracted from an hvcC.
+/// The parameter sets carried out-of-band in an HEVCDecoderConfigurationRecord,
+/// split by NAL type.
 #[derive(Debug, Clone)]
-pub struct HvccParamSets {
+#[non_exhaustive]
+pub struct Hvcc {
 	/// NALU length size in bytes (typically 4).
 	pub length_size: usize,
+	/// VPS NAL units carried out-of-band in the record.
 	pub vps: Vec<Bytes>,
+	/// SPS NAL units carried out-of-band in the record.
 	pub sps: Vec<Bytes>,
+	/// PPS NAL units carried out-of-band in the record.
 	pub pps: Vec<Bytes>,
 }
 
-/// Pull the VPS/SPS/PPS NAL units out of an HEVCDecoderConfigurationRecord.
-pub fn parse_hvcc_param_sets(hvcc: &[u8]) -> Result<HvccParamSets> {
-	if hvcc.len() < 23 {
-		return Err(Error::HvccTooShort);
-	}
-	let length_size = (hvcc[21] & 0x3) as usize + 1;
-	let num_arrays = hvcc[22] as usize;
-
-	let mut vps = Vec::new();
-	let mut sps = Vec::new();
-	let mut pps = Vec::new();
-	let mut pos: usize = 23;
-
-	for _ in 0..num_arrays {
-		let after_hdr = pos.checked_add(3).ok_or(Error::HvccTruncated)?;
-		if hvcc.len() < after_hdr {
-			return Err(Error::HvccTruncated);
+impl Hvcc {
+	/// Parse an HEVCDecoderConfigurationRecord, sorting the VPS/SPS/PPS NAL units
+	/// by type. The HEVC analogue of [`super::h264::Avcc::parse`].
+	pub fn parse(hvcc: &[u8]) -> Result<Self> {
+		if hvcc.len() < 23 {
+			return Err(Error::HvccTooShort);
 		}
-		let nal_type = hvcc[pos] & 0x3f;
-		let num_nalus = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]) as usize;
-		pos = after_hdr;
+		let length_size = (hvcc[21] & 0x3) as usize + 1;
+		let num_arrays = hvcc[22] as usize;
 
-		for _ in 0..num_nalus {
-			let after_len = pos.checked_add(2).ok_or(Error::HvccTruncated)?;
-			if hvcc.len() < after_len {
+		let mut vps = Vec::new();
+		let mut sps = Vec::new();
+		let mut pps = Vec::new();
+		let mut pos: usize = 23;
+
+		for _ in 0..num_arrays {
+			let after_hdr = pos.checked_add(3).ok_or(Error::HvccTruncated)?;
+			if hvcc.len() < after_hdr {
 				return Err(Error::HvccTruncated);
 			}
-			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-			let after_nal = after_len.checked_add(len).ok_or(Error::HvccTruncated)?;
-			if hvcc.len() < after_nal {
-				return Err(Error::HvccTruncated);
-			}
-			let bytes = Bytes::copy_from_slice(&hvcc[after_len..after_nal]);
-			pos = after_nal;
+			let nal_type = hvcc[pos] & 0x3f;
+			let num_nalus = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]) as usize;
+			pos = after_hdr;
 
-			match NALUnitType::from(nal_type) {
-				NALUnitType::VpsNut => vps.push(bytes),
-				NALUnitType::SpsNut => sps.push(bytes),
-				NALUnitType::PpsNut => pps.push(bytes),
-				_ => {}
+			for _ in 0..num_nalus {
+				let after_len = pos.checked_add(2).ok_or(Error::HvccTruncated)?;
+				if hvcc.len() < after_len {
+					return Err(Error::HvccTruncated);
+				}
+				let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
+				let after_nal = after_len.checked_add(len).ok_or(Error::HvccTruncated)?;
+				if hvcc.len() < after_nal {
+					return Err(Error::HvccTruncated);
+				}
+				let bytes = Bytes::copy_from_slice(&hvcc[after_len..after_nal]);
+				pos = after_nal;
+
+				match NALUnitType::from(nal_type) {
+					NALUnitType::VpsNut => vps.push(bytes),
+					NALUnitType::SpsNut => sps.push(bytes),
+					NALUnitType::PpsNut => pps.push(bytes),
+					_ => {}
+				}
 			}
 		}
-	}
 
-	Ok(HvccParamSets {
-		length_size,
-		vps,
-		sps,
-		pps,
-	})
+		Ok(Self {
+			length_size,
+			vps,
+			sps,
+			pps,
+		})
+	}
 }
 
 /// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) for the `hvc1`
@@ -142,7 +150,7 @@ pub fn parse_hvcc_param_sets(hvcc: &[u8]) -> Result<HvccParamSets> {
 /// already length-prefixed NALU, so the record passes straight through as the
 /// catalog `description` (`in_band: false`).
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
-	let params = parse_hvcc_param_sets(hvcc)?;
+	let params = Hvcc::parse(hvcc)?;
 	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
 	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
 	let profile = &sps.rbsp.profile_tier_level.general_profile;

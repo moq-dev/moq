@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.13...moq-relay-v0.13.0) - 2026-06-30
+
+### Added
+
+- *(moq-relay)* reuse client TLS for outbound auth HTTP; make --client-tls-* flags consistent ([#1901](https://github.com/moq-dev/moq/pull/1901))
+
+### Other
+
+- *(deps)* bump the cargo group across 1 directory with 18 updates ([#1942](https://github.com/moq-dev/moq/pull/1942))
+- [codex] support relay HTTPS cert arrays ([#1932](https://github.com/moq-dev/moq/pull/1932))
+- [codex] Backport relay web embedding ([#1930](https://github.com/moq-dev/moq/pull/1930))
+
 ## [0.12.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.12...moq-relay-v0.12.13) - 2026-06-23
 
 ### Added

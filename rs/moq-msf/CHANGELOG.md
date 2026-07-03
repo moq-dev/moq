@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.2.0...moq-msf-v0.3.0) - 2026-06-30
+
+### Other
+
+- Backport moq-mux to main (adapted to main's moq-net, no wire/API breaks) ([#1918](https://github.com/moq-dev/moq/pull/1918))
+
 ### Changed
 
 - Track draft-ietf-moq-msf-01, with the wire format hidden behind the API. `Catalog` is now a version-agnostic snapshot (`{ tracks }`); the `version` field and the `Version` enum are gone. Parsing accepts draft-00 (numeric `version`, inline `initData`) and draft-01 (string `version`, root `initDataList` + per-track `initRef`); serializing always emits draft-01. Init data is resolved to inline `Track::init_data` on parse and hoisted into a deduplicated `initDataList` on serialize, so callers never touch the version or the init-data indirection.

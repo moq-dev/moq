@@ -80,7 +80,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
     val audio = broadcast.publishMedia("opus", opusInitBytes)
 
-    moq.publish("my-stream", broadcast)
+    moq.announce("my-stream", broadcast)
 
     audio.writeFrame(payload, timestampUs = 0u)
     audio.writeFrame(payload, timestampUs = 20_000u)
@@ -95,22 +95,26 @@ Use a dynamic broadcast when subscribers should be able to request raw tracks th
 
 ```kotlin
 import dev.moq.*
-import uniffi.moq.MoqBroadcastProducer
 
-val broadcast = MoqBroadcastProducer()
-val dynamic = broadcast.dynamic()
+Moq.connect("https://relay.example.com").use { moq ->
+    val broadcast = BroadcastProducer()
+    val dynamic = broadcast.dynamic()
 
-origin.publish("events", broadcast)
+    moq.announce("events", broadcast)
 
-dynamic.requestedTracks().collect { track ->
-    if (track.name() == "alerts") {
-        track.writeFrame("ready".encodeToByteArray())
-        track.finish()
-    } else {
-        track.abort(404)
+    dynamic.requestedTracks().collect { request ->
+        if (request.name() == "alerts") {
+            val track = request.accept(null)
+            track.writeFrame("ready".encodeToByteArray())
+            track.finish()
+        } else {
+            request.abort(404)
+        }
     }
 }
 ```
+
+Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber.
 
 ## Cancellation
 

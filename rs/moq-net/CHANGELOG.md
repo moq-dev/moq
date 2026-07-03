@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/moq-dev/moq/compare/moq-net-v0.1.12...moq-net-v0.1.13) - 2026-06-30
+
+### Added
+
+- *(moq-net)* add OriginProducer::dynamic + infallible OriginConsumer::request_broadcast ([#1913](https://github.com/moq-dev/moq/pull/1913))
+
+### Other
+
+- Backport moq-mux to main (adapted to main's moq-net, no wire/API breaks) ([#1918](https://github.com/moq-dev/moq/pull/1918))
+
 ## [0.1.12](https://github.com/moq-dev/moq/compare/moq-net-v0.1.11...moq-net-v0.1.12) - 2026-06-23
 
 ### Added

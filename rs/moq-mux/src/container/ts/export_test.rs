@@ -9,7 +9,7 @@
 use std::io::Cursor;
 
 use bytes::{Bytes, BytesMut};
-use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
 use mpeg2ts::es::StreamType;
 use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
@@ -1288,5 +1288,179 @@ async fn scte35_fixtures_survive_roundtrip() {
 			after, before,
 			"{source}: every section survived TS -> MoQ -> TS byte-for-byte"
 		);
+	}
+}
+
+/// A raw Opus packet: a one-byte TOC (config 1 = SILK NB 20 ms, stereo, code 0) plus
+/// `len` filler bytes, so it parses as one 20 ms frame.
+fn opus_packet(fill: u8, len: usize) -> Bytes {
+	let mut p = vec![(1 << 3) | (1 << 2)]; // TOC: config=1, s=1 (stereo), c=0
+	p.extend(std::iter::repeat_n(fill, len));
+	Bytes::from(p)
+}
+
+/// Strip the Opus-in-TS control header from a PES payload, returning the raw packets it
+/// carries. Assumes no trim / no control extension (what the exporter emits).
+fn strip_opus_control(mut data: &[u8]) -> Vec<Vec<u8>> {
+	let mut packets = Vec::new();
+	while !data.is_empty() {
+		assert_eq!(data[0], 0x7f, "control header sync byte 0");
+		assert_eq!(data[1] & 0xe0, 0xe0, "control header sync byte 1");
+		assert_eq!(data[1] & 0x1c, 0x00, "exporter emits no trim / extension flags");
+		let mut pos = 2;
+		let mut size = 0usize;
+		loop {
+			let b = data[pos];
+			pos += 1;
+			size += b as usize;
+			if b != 0xff {
+				break;
+			}
+		}
+		packets.push(data[pos..pos + size].to_vec());
+		data = &data[pos + size..];
+	}
+	packets
+}
+
+/// Export an Opus broadcast and assert the program tables advertise a private-data
+/// (0x06) stream carrying the 'Opus' registration + DVB extension descriptors, and that
+/// the control-header-wrapped PES recovers the raw Opus packets with the right PTS.
+#[tokio::test(start_paused = true)]
+async fn export_opus_roundtrip() {
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".opus"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut cfg = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	// The last packet is > 184 bytes to force PES splitting across TS packets.
+	let packets: Vec<Bytes> = vec![opus_packet(0x01, 4), opus_packet(0x10, 8), opus_packet(0x20, 200)];
+	for (i, payload) in packets.iter().enumerate() {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i as u64 * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.finish_group().unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	// Pass 1: one private-data stream with the Opus registration + extension descriptors.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut saw_pmt = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			saw_pmt = true;
+			assert_eq!(pmt.es_info.len(), 1);
+			let es = &pmt.es_info[0];
+			assert_eq!(es.stream_type, StreamType::from_u8(0x06).unwrap());
+			let reg = es.descriptors.iter().find(|d| d.tag == 0x05).expect("registration");
+			assert_eq!(reg.data, b"Opus");
+			let ext = es.descriptors.iter().find(|d| d.tag == 0x7f).expect("extension");
+			assert_eq!(ext.data, vec![0x80, 0x02], "ext tag 0x80 + stereo channel_config_code");
+		}
+	}
+	assert!(saw_pmt, "missing PMT");
+
+	// Pass 2: reassemble PES packets and recover the raw Opus packets.
+	let mut pes = PesPacketReader::new(TsPacketReader::new(Cursor::new(ts.as_ref())));
+	let mut recovered: Vec<(u64, Vec<u8>)> = Vec::new();
+	while let Some(packet) = pes.read_pes_packet().unwrap() {
+		assert_eq!(
+			packet.header.stream_id.as_u8(),
+			mpeg2ts::es::StreamId::PRIVATE_STREAM_1,
+			"Opus rides private_stream_1"
+		);
+		let pts = packet.header.pts.expect("PES carried no PTS").as_u64();
+		for raw in strip_opus_control(&packet.data) {
+			recovered.push((pts, raw));
+		}
+	}
+
+	assert_eq!(recovered.len(), packets.len());
+	for (i, payload) in packets.iter().enumerate() {
+		let (pts, raw) = &recovered[i];
+		assert_eq!(*pts, i as u64 * 20 * 90, "PTS should be ms * 90 (90 kHz)");
+		assert_eq!(raw.as_slice(), payload.as_ref(), "raw Opus payload mismatch");
+	}
+}
+
+/// Round-trip an Opus broadcast through TS and back: export, re-import, and confirm the
+/// catalog surfaces one 48 kHz Opus track whose frames recover the original packets.
+#[tokio::test(start_paused = true)]
+async fn opus_export_import_roundtrip() {
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".opus"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut cfg = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	let packets: Vec<Bytes> = (0..4).map(|i| opus_packet(0x40 + i as u8, 24)).collect();
+	for (i, payload) in packets.iter().enumerate() {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i as u64 * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.finish_group().unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain(consumer).await;
+
+	// Re-import the TS we just produced.
+	let mut imported = moq_net::BroadcastInfo::new().produce();
+	let imported_consumer = imported.consume();
+	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
+	let mut import = crate::container::ts::Import::new(imported, import_catalog.clone());
+	import.decode(&ts).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = import_catalog.snapshot();
+	assert_eq!(snapshot.audio.renditions.len(), 1, "expected one Opus track");
+	let (opus_name, audio) = snapshot.audio.renditions.iter().next().unwrap();
+	assert_eq!(audio.codec.to_string(), "opus");
+	assert_eq!(audio.sample_rate, 48_000);
+	assert_eq!(audio.channel_count, 2);
+
+	// The imported packets must match what we published.
+	let recovered = read_frames(&imported_consumer, opus_name).await;
+	assert_eq!(recovered.len(), packets.len(), "frame count");
+	for (orig, got) in packets.iter().zip(&recovered) {
+		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");
 	}
 }

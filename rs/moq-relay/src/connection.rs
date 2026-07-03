@@ -2,7 +2,6 @@ use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
-use moq_net::Path;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -117,33 +116,41 @@ impl Connection {
 		}
 	}
 
-	/// Resolve an [`AuthToken`] from the request's URL and (optional) mTLS peer
-	/// identity. Any failure is returned as a [`StatusError`] so [`run`] can
-	/// close the request with the mapped HTTP status exactly once.
+	/// Resolve an [`AuthToken`] for this connection. Any failure is returned as a
+	/// [`StatusError`] so [`run`] can close the request with the mapped HTTP
+	/// status exactly once.
 	///
-	/// If the client presented a valid mTLS client certificate, JWT is skipped
-	/// and full access is granted within the URL path's root. The cert's chain
-	/// to the configured CA is the only credential we require.
+	/// Every transport goes through the same authenticator; only the source of
+	/// the path + JWT differs:
+	/// - URL-bearing transports (QUIC, WebSocket) take it from the request URL,
+	///   and a valid mTLS client certificate (QUIC only) stands in for a JWT,
+	///   granting full access within the URL path's root.
+	/// - Stream transports (`tcp`/`unix`) take the path + `?jwt=` from the
+	///   moq-lite-05 SETUP. A no-JWT connection resolves anonymous/public access
+	///   for its path exactly like a tokenless QUIC client (`--auth-public`).
+	///   Unix peer-credential gating happens earlier, in the listener.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
 		let params = match self.request.url() {
-			Some(url) => self.auth.params_from_url(url),
-			None => AuthParams::default(),
+			// URL-bearing transports: mTLS (QUIC only) can stand in for a JWT.
+			Some(url) => {
+				let params = self.auth.params_from_url(url);
+				if let Some(identity) = self.request.peer_identity() {
+					tracing::debug!("mTLS peer authenticated");
+					// Scope the grant to the canonical root. An mTLS publisher dialing a
+					// vanity alias lands on the same tree a JWT would; cluster peers dial
+					// "/", which the API resolves (typically to an unscoped root). The API
+					// also returns the billing tier (defaulting to internal for trusted peers).
+					let mut token = self.auth.verify_mtls(&params.path).await?;
+					// Close the session when the client certificate expires, mirroring
+					// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
+					token.expires = identity.expiry();
+					return Ok(token);
+				}
+				params
+			}
+			// URL-less stream transports: path + `?jwt=` ride the SETUP.
+			None => AuthParams::from_path(self.request.path().unwrap_or("")),
 		};
-
-		if let Some(identity) = self.request.peer_identity() {
-			tracing::debug!("mTLS peer authenticated");
-			// Scope the grant to the canonical root. An mTLS publisher dialing a
-			// vanity alias lands on the same tree a JWT would; cluster peers dial
-			// "/", which the API resolves (typically to an unscoped root). The API
-			// also returns the billing tier (defaulting to internal for trusted peers).
-			let (root, tier) = self.auth.resolve_mtls(&params.path).await?;
-			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
-			token.tier = tier;
-			// Close the session when the client certificate expires, mirroring
-			// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
-			token.expires = identity.expiry();
-			return Ok(token);
-		}
 
 		Ok(self.auth.verify(&params).await?)
 	}

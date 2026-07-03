@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.5](https://github.com/moq-dev/moq/compare/moq-native-v0.17.4...moq-native-v0.17.5) - 2026-06-30
+
+### Added
+
+- *(moq-rtmp)* RTMP/E-RTMP gateway + enhanced-RTMP FLV codecs on main ([#1914](https://github.com/moq-dev/moq/pull/1914))
+- *(moq-relay)* reuse client TLS for outbound auth HTTP; make --client-tls-* flags consistent ([#1901](https://github.com/moq-dev/moq/pull/1901))
+- *(moq-native)* unified client TLS verification + quiche backend support ([#1902](https://github.com/moq-dev/moq/pull/1902))
+
+### Other
+
+- [codex] support relay HTTPS cert arrays ([#1932](https://github.com/moq-dev/moq/pull/1932))
+
 ## [0.17.4](https://github.com/moq-dev/moq/compare/moq-native-v0.17.3...moq-native-v0.17.4) - 2026-06-23
 
 ### Added

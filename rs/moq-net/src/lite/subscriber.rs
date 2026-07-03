@@ -201,12 +201,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Lite05+: the publisher reports its own origin id (which we stamp onto every
 		// received Announce's hop chain, since it no longer does so itself) plus the
 		// count of initial active announces that follow immediately.
-		let (responder_origin, initial_count) = match self.version {
-			Version::Lite05Wip => {
-				let ok: lite::AnnounceOk = stream.reader.decode().await?;
-				(Some(ok.origin), ok.active)
-			}
-			_ => (None, 0),
+		let (responder_origin, initial_count) = if self.version.has_announce_ok() {
+			let ok: lite::AnnounceOk = stream.reader.decode().await?;
+			(Some(ok.origin), ok.active)
+		} else {
+			(None, 0)
 		};
 
 		let mut producers = HashMap::new();
@@ -232,6 +231,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
+					// Count every received name, even ones start_announce drops as loops.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					// Lite01/02 don't carry hop information; the broadcast starts with
 					// an empty chain.
 					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
@@ -252,7 +255,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				connecting.take();
 				0
 			}
-			Version::Lite05Wip => {
+			_ if self.version.has_announce_ok() => {
 				if initial_count == 0 {
 					connecting.take();
 				}
@@ -269,6 +272,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				lite::AnnounceBroadcast::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
+					// Count the broadcast name length (not the encoded message size) for
+					// every received announce, even ones start_announce drops as loops.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					if lite::restart_supported(self.version) && producers.contains_key(&path) {
 						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Older versions fall through to start_announce,
@@ -296,13 +304,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				lite::AnnounceBroadcast::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
+					let abs = self.origin.absolute(&path).to_owned();
+					// Count the unannounce name length whether or not a matching guard exists.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
 
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `producers` has no entry; that's expected, not an error.
 					// Dropping the entry drops its OriginPublish guard, which unannounces.
 					if producers.remove(&path).is_some() {
-						let abs = self.origin.absolute(&path).to_owned();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -771,6 +783,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// SUBSCRIBE_UPDATE (and thus pause/resume linger) only exists on Lite03+.
 		// Older versions tear the upstream down as soon as the track goes idle.
 		let supports_linger = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
+		let supports_fetch = self.subscriber.version.has_timestamps();
 
 		// Mark the track as fetch-capable up front (before accept), so a consumer's
 		// cache-miss fetch waits to be served rather than failing fast. Held for the
@@ -874,7 +887,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req, timescale).maybe_boxed());
+					if supports_fetch {
+						fetches.push(self.clone().serve_fetch(req, timescale).maybe_boxed());
+					} else {
+						req.reject(Error::Version);
+					}
 				}
 				Event::Subscription(pref) => {
 					linger = None;
@@ -1158,6 +1175,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::warn!(track = %name, %err, "fetch stream open failed");
+				request.reject(err);
 				return;
 			}
 		};
@@ -1175,6 +1193,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 		if let Err(err) = send.await {
 			stream.writer.abort(&err);
+			request.reject(err);
 			return;
 		}
 
@@ -1182,8 +1201,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
 		// live subscription); otherwise the group inherits the accepted timescale.
 		let group_info = TrackInfo {
-			// FETCH is lite-05+, so `timescale` is `Some`; fall back to the default scale
-			// defensively rather than panicking.
+			// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
+			// default scale defensively rather than panicking.
 			timescale: timescale.unwrap_or_default(),
 			..Default::default()
 		};

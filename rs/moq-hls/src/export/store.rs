@@ -12,6 +12,8 @@ use bytes::{Bytes, BytesMut};
 use moq_mux::container::fmp4::Fragment;
 use tokio::sync::watch;
 
+use super::{Config, Kind};
+
 /// One LL-HLS partial segment: a single CMAF moof+mdat fragment.
 #[derive(Clone)]
 struct Part {
@@ -37,15 +39,21 @@ struct Segment {
 
 /// Lightweight per-part metadata for rendering a playlist (no bytes).
 pub struct PartMeta {
+	/// Part presentation duration, in seconds.
 	pub duration: f64,
+	/// Whether the part can be decoded independently (starts a keyframe).
 	pub independent: bool,
 }
 
 /// Lightweight per-segment metadata for rendering a playlist (no bytes).
 pub struct SegmentMeta {
+	/// HLS media sequence number of this segment.
 	pub sequence: u64,
+	/// Parts making up this segment, in order.
 	pub parts: Vec<PartMeta>,
+	/// Total presentation duration so far (sum of part durations), in seconds.
 	pub duration: f64,
+	/// Whether the segment is finalized (a later segment has opened).
 	pub complete: bool,
 	/// True if this segment opens a new continuity region (post pause/resume); the
 	/// renderer emits `#EXT-X-DISCONTINUITY` before it.
@@ -55,11 +63,17 @@ pub struct SegmentMeta {
 /// A point-in-time view of the store, used to render a media playlist without
 /// holding the lock during formatting.
 pub struct Snapshot {
+	/// Whether the init segment (`init.mp4`) is available.
 	pub init_ready: bool,
+	/// LL-HLS PART-TARGET, in seconds.
 	pub part_target: f64,
+	/// `EXT-X-MEDIA-SEQUENCE`: sequence of the first segment in the window.
 	pub media_sequence: u64,
+	/// Sequence the next segment to roll will be assigned.
 	pub next_sequence: u64,
+	/// Segments currently in the sliding window, oldest first.
 	pub segments: Vec<SegmentMeta>,
+	/// Whether the track has ended (the playlist gains `#EXT-X-ENDLIST`).
 	pub finished: bool,
 }
 
@@ -67,9 +81,13 @@ pub struct Snapshot {
 /// `(_HLS_msn, _HLS_part)` target has been reached, without locking.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Version {
+	/// Sequence of the newest segment.
 	pub last_sequence: u64,
+	/// Number of parts in the newest segment.
 	pub last_parts: usize,
+	/// Sequence of the oldest segment still in the window.
 	pub media_sequence: u64,
+	/// Whether the track has ended.
 	pub finished: bool,
 }
 
@@ -87,7 +105,8 @@ struct Inner {
 pub struct SegmentStore {
 	inner: Mutex<Inner>,
 	notify: watch::Sender<Version>,
-	is_video: bool,
+	/// Video rolls a segment per GOP; audio rolls on duration.
+	kind: Kind,
 	/// LL-HLS PART-TARGET, in seconds.
 	part_target: f64,
 	/// Target segment duration for audio (video rolls on GOP boundaries instead).
@@ -98,7 +117,9 @@ pub struct SegmentStore {
 }
 
 impl SegmentStore {
-	pub fn new(is_video: bool, part_target: f64, audio_segment_target: f64, window: f64) -> Self {
+	/// Create an empty store for a rendition of `kind`, taking part/segment/window
+	/// timing from `config`.
+	pub fn new(kind: Kind, config: &Config) -> Self {
 		let (notify, _) = watch::channel(Version::default());
 		Self {
 			inner: Mutex::new(Inner {
@@ -109,10 +130,10 @@ impl SegmentStore {
 				discontinuity_pending: false,
 			}),
 			notify,
-			is_video,
-			part_target,
-			audio_segment_target,
-			window,
+			kind,
+			part_target: config.part_target.as_secs_f64(),
+			audio_segment_target: config.audio_segment_target.as_secs_f64(),
+			window: config.window.as_secs_f64(),
 		}
 	}
 
@@ -136,7 +157,7 @@ impl SegmentStore {
 				|| match inner.segments.back() {
 					None => true,
 					Some(cur) => {
-						if self.is_video {
+						if self.kind == Kind::Video {
 							// A new GOP (independent fragment) starts a new segment.
 							fragment.independent
 						} else {
@@ -212,6 +233,7 @@ impl SegmentStore {
 		let _ = self.notify.send(version);
 	}
 
+	/// Current [`Version`] watermark (newest sequence/part counts and window edge).
 	pub fn version(&self) -> Version {
 		let inner = self.inner.lock().unwrap();
 		let media_sequence = inner
@@ -235,10 +257,12 @@ impl SegmentStore {
 		}
 	}
 
+	/// Subscribe to [`Version`] updates (one tick per new part/segment/finish).
 	pub fn subscribe(&self) -> watch::Receiver<Version> {
 		self.notify.subscribe()
 	}
 
+	/// The init segment (`init.mp4`) bytes, once available.
 	pub fn init(&self) -> Option<Bytes> {
 		self.inner.lock().unwrap().init.clone()
 	}

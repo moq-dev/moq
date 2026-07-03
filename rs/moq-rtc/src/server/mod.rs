@@ -3,8 +3,8 @@
 //! Mounts axum routers that publish into [`moq_net::OriginProducer`] (WHIP
 //! / `server publish`) and pull from [`moq_net::OriginConsumer`] (WHEP /
 //! `server subscribe`). The HTTP listener itself is the caller's
-//! responsibility; the binary in `bin/moq-rtc.rs` mounts these under
-//! axum_server.
+//! responsibility; the `moq-cli` `rtc` subcommand mounts these under an
+//! HTTP server.
 
 pub mod whep;
 pub mod whip;
@@ -17,25 +17,116 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, Uri};
 use tokio::sync::{OnceCell, oneshot};
 
-use crate::Result;
+use crate::{Error, Result};
 use mux::Mux;
 
 /// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
 /// to return to the client, plus an opaque resource id for the `Location` header
 /// (the RFC 9725 session resource URL).
-#[derive(Clone, Debug)]
 pub struct Response {
 	/// Opaque id identifying the negotiated session, for the `Location` header.
 	pub resource_id: String,
 	/// The SDP answer body (`Content-Type: application/sdp`).
 	pub answer: String,
+	session: AcceptedSession,
+}
+
+impl Response {
+	/// Run the negotiated media session until the peer disconnects, DELETE terminates it, or it errors.
+	pub async fn run(self) -> Result<()> {
+		self.session.run().await
+	}
+}
+
+impl std::fmt::Debug for Response {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Response")
+			.field("resource_id", &self.resource_id)
+			.field("answer", &self.answer)
+			.finish_non_exhaustive()
+	}
+}
+
+/// The negotiated session runner behind [`Response::run`]: holds the broadcast
+/// announcement guard and mux registration for the session's lifetime, and
+/// unregisters the session from the server registry on drop. Built by
+/// [`whip::accept`] / [`whep::accept`] (descendant modules, so the private
+/// fields are in scope there).
+struct AcceptedSession {
+	server: Server,
+	resource_id: String,
+	session: Option<crate::session::Session>,
+	/// Announcement guard for the ingest (WHIP) path; unannounces on drop.
+	/// `None` for egress (WHEP) sessions.
+	publish: Option<moq_net::OriginPublish>,
+	registration: Option<mux::Registration>,
+	cancel: Option<oneshot::Receiver<()>>,
+	role: &'static str,
+}
+
+impl AcceptedSession {
+	async fn run(mut self) -> Result<()> {
+		let session = self.session.take().expect("accepted session missing driver");
+		let registration = self
+			.registration
+			.take()
+			.expect("accepted session missing mux registration");
+		let cancel = self.cancel.take().expect("accepted session missing cancel receiver");
+
+		let result = {
+			// Hold the announcement guard + mux registration for the session's
+			// lifetime; both release (unannounce / unregister) on exit.
+			let _publish = self.publish.take();
+			let _registration = registration;
+			tokio::select! {
+				res = session.run() => {
+					crate::session::log_session_end(self.role, &res);
+					res
+				}
+				_ = cancel => {
+					tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
+					Ok(())
+				}
+			}
+		};
+		normalize_session_result(result)
+	}
+}
+
+impl Drop for AcceptedSession {
+	fn drop(&mut self) {
+		self.server.unregister_session(&self.resource_id);
+	}
+}
+
+/// Fold an ordinary peer disconnect into `Ok` so [`Response::run`] only errors
+/// on genuine failures.
+fn normalize_session_result(result: Result<()>) -> Result<()> {
+	match result {
+		Ok(()) | Err(Error::SessionClosed) => Ok(()),
+		Err(err) => Err(err),
+	}
+}
+
+/// Build the `Location` header for a negotiated session by appending the
+/// resource id to the request path, preserving whatever prefix the router is
+/// mounted under.
+pub(crate) fn session_location(uri: &Uri, resource_id: &str) -> Option<HeaderValue> {
+	let base = uri.path().trim_end_matches('/');
+	let path = if base.is_empty() {
+		format!("/{resource_id}")
+	} else {
+		format!("{base}/{resource_id}")
+	};
+	HeaderValue::from_str(&path).ok()
 }
 
 /// Configuration shared by both `server publish` and `server subscribe`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses that should be advertised as ICE host
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
@@ -138,9 +229,9 @@ impl Server {
 		&self.inner.subscriber
 	}
 
-	/// Register a session under its resource id, returning the cancel receiver
-	/// the session task selects on. Called by [`whip::accept`] / [`whep::accept`]
-	/// before spawning the session.
+	/// Register a session under its resource id, returning the cancel receiver.
+	/// Called by [`whip::accept`] / [`whep::accept`] before returning the
+	/// negotiated session runner.
 	pub(crate) fn register_session(&self, resource_id: String) -> oneshot::Receiver<()> {
 		let (tx, rx) = oneshot::channel();
 		self.inner.sessions.lock().unwrap().insert(resource_id, tx);
@@ -209,5 +300,17 @@ mod tests {
 		let _cancel = server.register_session(id.to_string());
 		server.unregister_session(id);
 		assert!(!server.terminate(id), "unregistered session can't be terminated");
+	}
+
+	#[test]
+	fn peer_close_is_a_successful_session_result() {
+		assert!(normalize_session_result(Err(Error::SessionClosed)).is_ok());
+	}
+
+	#[test]
+	fn session_location_preserves_mount_path() {
+		let uri: Uri = "/whip/live/cam0?token=secret".parse().unwrap();
+		let location = session_location(&uri, "session-id").expect("header value");
+		assert_eq!(location, "/whip/live/cam0/session-id");
 	}
 }

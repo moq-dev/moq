@@ -6,7 +6,7 @@
 //!
 //! - `m=publish` (the default): demux the MPEG-TS the connection carries with
 //!   [`moq_mux`] and publish it into the origin as an ordinary broadcast. The
-//!   contribution-ingest analogue of `moq-hls`'s import and `moq-rtc`'s WHIP.
+//!   contribution-ingest analogue of `moq-cli import ... hls` and `moq-rtc`'s WHIP.
 //! - `m=request`: re-mux a broadcast from the origin back to MPEG-TS and stream
 //!   it to the caller, so a plain SRT player (VLC, ffmpeg) can watch it.
 //!
@@ -24,12 +24,19 @@
 //!   JWT and scoping the origin per token) plugs its policy in. It mirrors
 //!   `moq-native`'s `Server` / `Request`.
 //!
-//! The bundled `moq-srt` binary serves the origin locally or forwards it to a
-//! remote relay (those paths need the `server` feature).
+//! Beyond the listener, the [`dial`] module is the *dial-out* (client) role:
+//! connect to a remote SRT listener as a caller and either [`dial::publish`] a MoQ
+//! broadcast to it (restream MoQ out to a remote SRT ingest) or [`dial::pull`] a
+//! remote stream into an origin (ingest a remote SRT source). It reuses the same
+//! MPEG-TS <-> moq bridge; only the SRT caller transport is new.
+//!
+//! A command-line interface is provided by the `moq-cli` binary, on top of this
+//! library.
 //!
 //! Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg
 //! dependency.
 
+pub mod dial;
 mod error;
 mod listen;
 mod server;

@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.17.4"
+version = "0.17.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -19,7 +19,7 @@ doctest = false
 default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
-quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
+quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs"]
 # Filesystem watcher for hot-reloading on-disk TLS certs/keys; the QUIC backends imply it.
 watch = ["dep:notify"]
 # The QUIC backends pull in their crypto provider from these features (default-features
@@ -50,9 +50,12 @@ qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
 rand = "0.10.1"
 rcgen = { version = "0.14", default-features = false, optional = true }
-reqwest = { version = "0.12", default-features = false, optional = true }
+reqwest = { version = "0.13", default-features = false, optional = true }
 rustls = "0.23"
-rustls-native-certs = "0.8"
+rustls-native-certs = { version = "0.8", optional = true }
+# OS-native server-cert verifier for the rustls backends. Version matched to the
+# copy quinn-proto already pulls in, to avoid duplication.
+rustls-platform-verifier = "0.6"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
@@ -74,7 +77,12 @@ web-transport-trait = { workspace = true }
 x509-parser = "0.18"
 
 [target.'cfg(target_os = "android")'.dependencies]
+# Android's platform verifier needs a JNI handle to the app Context (see
+# `tls::init_android`); jni is the bridge. Until init runs, verification falls
+# back to the bundled Mozilla roots.
+jni = "0.21"
 tracing-android = { version = "0.2", optional = true }
+webpki-roots = "1"
 
 [dev-dependencies]
 anyhow = "1"

@@ -163,12 +163,20 @@ impl Sps {
 /// avcC bytes are still what gets stored as the catalog `description`; this
 /// struct is for the field extraction.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Avcc {
+	/// AVC profile indication (`profile_idc`) from the record.
 	pub profile: u8,
+	/// Packed constraint-set flags byte from the record.
 	pub constraints: u8,
+	/// AVC level indication (`level_idc`) from the record.
 	pub level: u8,
 	/// NALU length size in bytes (typically 4).
 	pub length_size: usize,
+	/// SPS NAL units carried out-of-band in the record.
+	pub sps: Vec<Bytes>,
+	/// PPS NAL units carried out-of-band in the record.
+	pub pps: Vec<Bytes>,
 	/// Resolution from the embedded SPS, if one was present and parseable.
 	pub coded_width: Option<u32>,
 	pub coded_height: Option<u32>,
@@ -177,7 +185,7 @@ pub struct Avcc {
 impl Avcc {
 	/// Parse an AVCDecoderConfigurationRecord buffer.
 	pub fn parse(avcc: &[u8]) -> Result<Self> {
-		if avcc.len() < 6 {
+		if avcc.len() < 7 {
 			return Err(Error::AvccTooShort);
 		}
 
@@ -185,20 +193,26 @@ impl Avcc {
 		let constraints = avcc[2];
 		let level = avcc[3];
 		let length_size = (avcc[4] & 0x03) as usize + 1;
-		let num_sps = avcc[5] & 0x1f;
+		let num_sps = (avcc[5] & 0x1f) as usize;
 
+		let mut pos = 6;
+		let sps = read_param_sets(avcc, &mut pos, num_sps)?;
+
+		if avcc.len() <= pos {
+			return Err(Error::AvccTruncated);
+		}
+		let num_pps = avcc[pos] as usize;
+		pos += 1;
+		let pps = read_param_sets(avcc, &mut pos, num_pps)?;
+
+		// Resolution from the first parseable SPS.
 		let (mut coded_width, mut coded_height) = (None, None);
-		if num_sps > 0 && avcc.len() >= 8 {
-			let sps_len = u16::from_be_bytes([avcc[6], avcc[7]]) as usize;
-			let sps_start = 8;
-			let sps_end = sps_start + sps_len;
-			if sps_end <= avcc.len()
-				&& sps_len > 1
-				&& let Ok(sps) = Sps::parse(&avcc[sps_start..sps_end])
-			{
-				coded_width = Some(sps.coded_width);
-				coded_height = Some(sps.coded_height);
-			}
+		if let Some(first) = sps.first()
+			&& first.len() > 1
+			&& let Ok(parsed) = Sps::parse(first)
+		{
+			coded_width = Some(parsed.coded_width);
+			coded_height = Some(parsed.coded_height);
 		}
 
 		Ok(Self {
@@ -206,6 +220,8 @@ impl Avcc {
 			constraints,
 			level,
 			length_size,
+			sps,
+			pps,
 			coded_width,
 			coded_height,
 		})
@@ -271,37 +287,6 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes
 		out.put_slice(pps);
 	}
 	Ok(out.freeze())
-}
-
-/// SPS and PPS NAL units extracted from an avcC.
-#[derive(Debug, Clone)]
-pub struct AvccParamSets {
-	/// NALU length size in bytes (typically 4).
-	pub length_size: usize,
-	pub sps: Vec<Bytes>,
-	pub pps: Vec<Bytes>,
-}
-
-/// Pull the SPS and PPS NAL units out of an AVCDecoderConfigurationRecord.
-pub fn parse_avcc_param_sets(avcc: &[u8]) -> Result<AvccParamSets> {
-	if avcc.len() < 7 {
-		return Err(Error::AvccTooShort);
-	}
-	let length_size = (avcc[4] & 0x03) as usize + 1;
-	let num_sps = (avcc[5] & 0x1f) as usize;
-
-	let mut pos = 6;
-	let sps = read_param_sets(avcc, &mut pos, num_sps)?;
-
-	if avcc.len() <= pos {
-		return Err(Error::AvccTruncated);
-	}
-	let num_pps = avcc[pos] as usize;
-	pos += 1;
-
-	let pps = read_param_sets(avcc, &mut pos, num_pps)?;
-
-	Ok(AvccParamSets { length_size, sps, pps })
 }
 
 /// Read `count` length-prefixed (u16) NAL units from `buf` starting at `*pos`,

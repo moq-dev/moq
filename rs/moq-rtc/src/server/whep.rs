@@ -6,7 +6,7 @@
 use axum::{
 	Router,
 	body::Bytes,
-	extract::{Path, State},
+	extract::{OriginalUri, Path, State},
 	http::{HeaderMap, HeaderValue, StatusCode, header},
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
@@ -24,15 +24,29 @@ pub fn router(server: Server) -> Router {
 		.with_state(server)
 }
 
-async fn handle(server: State<Server>, path: Path<String>, headers: HeaderMap, body: Bytes) -> HttpResponse {
+async fn handle(
+	server: State<Server>,
+	path: Path<String>,
+	OriginalUri(uri): OriginalUri,
+	headers: HeaderMap,
+	body: Bytes,
+) -> HttpResponse {
 	let (server, path) = (server.0, path.0);
 	match accept_offer(&server, &path, &headers, body).await {
-		Ok(Response { resource_id, answer }) => {
+		Ok(response) => {
+			let Response {
+				resource_id,
+				answer,
+				session,
+			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
-			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
+			if let Some(loc) = crate::server::session_location(&uri, &resource_id) {
 				response_headers.insert(header::LOCATION, loc);
 			}
+			tokio::spawn(async move {
+				let _ = session.run().await;
+			});
 			(StatusCode::CREATED, response_headers, answer).into_response()
 		}
 		Err(err) => {
@@ -63,9 +77,10 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// enforced by moq-net exactly as for a native session; the bundled [`router`]
 /// passes the server's own (unauthenticated) consumer. It parses the offer,
 /// resolves the broadcast on `subscriber`, restricts the answer to the codecs the
-/// catalog actually has, registers a media session on the shared mux, spawns the
-/// MoQ->RTP session, and returns the SDP answer plus an opaque `resource_id` for
-/// the WHEP `Location` header. Mirrors [`whip::accept`](super::whip::accept).
+/// catalog actually has, registers a media session on the shared mux, and
+/// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
+/// header. The caller must run the returned [`Response`] to drive the MoQ->RTP
+/// session. Mirrors [`whip::accept`](super::whip::accept).
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
@@ -114,24 +129,22 @@ pub async fn accept(
 	let resource_id = sdp::new_resource_id();
 	let session = session::Session::egress(rtc, mux.socket(), mux.candidates().to_vec(), inbound, source);
 
-	// Register before spawning so a DELETE that races startup still finds the
-	// session; the task unregisters itself when it ends.
+	// Register before returning so a DELETE that races startup still finds the
+	// session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	let task_server = server.clone();
-	let task_resource = resource_id.clone();
-	tokio::spawn(async move {
-		// Hold the mux registration for the session's lifetime (unregisters on exit).
-		let _registration = registration;
-		tokio::select! {
-			res = session.run() => session::log_session_end("whep server", res),
-			_ = cancel => tracing::debug!("whep session terminated by DELETE"),
-		}
-		task_server.unregister_session(&task_resource);
-	});
 
 	Ok(Response {
-		resource_id,
+		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
+		session: crate::server::AcceptedSession {
+			server: server.clone(),
+			resource_id,
+			session: Some(session),
+			publish: None,
+			registration: Some(registration),
+			cancel: Some(cancel),
+			role: "whep server",
+		},
 	})
 }
 

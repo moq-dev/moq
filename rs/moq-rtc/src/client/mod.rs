@@ -15,6 +15,7 @@ use url::Url;
 
 /// Configuration shared by both `client publish` and `client subscribe`.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses to advertise as ICE host candidates in
 	/// our outbound offer. Same semantics as [`crate::server::Config`].

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/moq-dev/moq/compare/kio-v0.4.0...kio-v0.4.1) - 2026-06-30
+
+### Added
+
+- *(moq-net)* add OriginProducer::dynamic + infallible OriginConsumer::request_broadcast ([#1913](https://github.com/moq-dev/moq/pull/1913))
+
 ## [0.4.0](https://github.com/moq-dev/moq/compare/kio-v0.3.0...kio-v0.4.0) - 2026-06-16
 
 ### Fixed

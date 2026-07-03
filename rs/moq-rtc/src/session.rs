@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, net::Receive};
 use tokio::net::UdpSocket;
@@ -38,6 +38,22 @@ pub(crate) const SESSION_INBOX: usize = 256;
 /// large keyframe and the rest of the current group via NACK; see
 /// [`rtc_config_with_codecs`].
 const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
+
+/// Backstop deadline for a session to reach a connected ICE state, covering the one
+/// case str0m's ICE agent deliberately never times out: a peer that answers the SDP
+/// but provides NO remote candidates and sends nothing (an abandoned WHIP/WHEP
+/// offer, or a probe that only exercises signalling). str0m DOES end a connection
+/// whose candidate pairs were tried and exhausted -- the agent goes to
+/// `IceConnectionState::Disconnected` (handled in `handle_event`) after
+/// ~`StunTiming::timeout()` (~21s at the defaults). But when `remote_candidates`
+/// stays empty the agent treats the session as "still possible" forever (trickle
+/// ICE: more candidates could arrive), so it sits in `Checking` indefinitely,
+/// pinning this task, its broadcast announcement, and its mux registration. Nothing
+/// upstream ends it, so we do. Set ABOVE str0m's ~21s pair-exhaustion so a
+/// connection that actually started checks is ended by str0m's native path (and a
+/// slow-but-real TURN/lossy peer isn't clipped); this only fires for the
+/// never-any-candidate case.
+const ICE_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
@@ -144,6 +160,8 @@ impl Session {
 	}
 
 	pub async fn run(mut self) -> Result<()> {
+		let started = Instant::now();
+		let mut connected = false;
 		loop {
 			// A dead Rtc (DTLS/SDP failure, explicit disconnect) makes poll_output
 			// return a never-firing timeout instead of erroring, which would hang
@@ -151,6 +169,12 @@ impl Session {
 			// registration. Bail so those release.
 			if !self.rtc.is_alive() {
 				return Err(Error::SessionClosed);
+			}
+
+			// Abort a session that never finishes connecting (see
+			// ICE_ESTABLISH_TIMEOUT); once connected, str0m's own timeouts take over.
+			if !connected && started.elapsed() >= ICE_ESTABLISH_TIMEOUT {
+				return Err(Error::IceTimeout);
 			}
 
 			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
@@ -162,13 +186,21 @@ impl Session {
 					continue;
 				}
 				Output::Event(event) => {
+					if let Event::IceConnectionStateChange(state) = &event {
+						connected |= state.is_connected();
+					}
 					self.handle_event(event)?;
 					continue;
 				}
 			};
 
 			let now = Instant::now();
-			let duration = timeout.saturating_duration_since(now);
+			let mut duration = timeout.saturating_duration_since(now);
+			// While still connecting, never sleep past the establishment deadline, so
+			// the check above fires on time even if str0m scheduled a far-off timeout.
+			if !connected {
+				duration = duration.min(ICE_ESTABLISH_TIMEOUT.saturating_sub(started.elapsed()));
+			}
 			if duration.is_zero() {
 				self.rtc.handle_input(Input::Timeout(now)).map_err(Error::Rtc)?;
 				continue;
@@ -236,7 +268,7 @@ impl Session {
 						data.mid,
 						codec::Frame {
 							timestamp_us,
-							payload: data.data.into(),
+							payload: bytes::Bytes::from_owner(data.data),
 						},
 					)?;
 				}
@@ -330,9 +362,12 @@ impl IngestClock {
 /// ([`Error::SessionClosed`]) is debug, a genuine failure is a warning. Keeps
 /// normal WebRTC churn out of the warning stream. `role` labels the path
 /// (e.g. `"whip server"`).
-pub(crate) fn log_session_end(role: &str, result: Result<()>) {
+pub(crate) fn log_session_end(role: &str, result: &Result<()>) {
 	match result {
 		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
+		// An abandoned offer (peer answered but never connected) is normal churn, not
+		// a failure: keep it out of the warning stream.
+		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
 	}
 }

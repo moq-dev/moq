@@ -7,7 +7,7 @@
 use axum::{
 	Router,
 	body::Bytes,
-	extract::{Path, State},
+	extract::{OriginalUri, Path, State},
 	http::{HeaderMap, HeaderValue, StatusCode, header},
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
@@ -28,16 +28,25 @@ pub fn router(server: Server) -> Router {
 async fn handle(
 	State(server): State<Server>,
 	Path(path): Path<String>,
+	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> HttpResponse {
 	match accept_offer(&server, &path, &headers, body).await {
-		Ok(Response { resource_id, answer }) => {
+		Ok(response) => {
+			let Response {
+				resource_id,
+				answer,
+				session,
+			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
-			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
+			if let Some(loc) = crate::server::session_location(&uri, &resource_id) {
 				response_headers.insert(header::LOCATION, loc);
 			}
+			tokio::spawn(async move {
+				let _ = session.run().await;
+			});
 			(StatusCode::CREATED, response_headers, answer).into_response()
 		}
 		Err(err) => {
@@ -69,8 +78,9 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// [`router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers the broadcast (so a fast subscriber doesn't 404 in the gap
 /// before the first RTP packet), registers a media session on the shared mux,
-/// spawns the RTP->MoQ session, and returns the SDP answer plus an opaque
-/// `resource_id` for the WHIP `Location` header.
+/// and returns the SDP answer plus an opaque `resource_id` for the WHIP
+/// `Location` header. The caller must run the returned [`Response`] to drive the
+/// RTP->MoQ session.
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with
@@ -113,26 +123,22 @@ pub async fn accept(
 	let resource_id = sdp::new_resource_id();
 	let session = session::Session::ingest(rtc, mux.socket(), mux.candidates().to_vec(), inbound, sink);
 
-	// Register before spawning so a DELETE that races the first packet still
-	// finds the session; the task unregisters itself when it ends.
+	// Register before returning so a DELETE that races the first packet still
+	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	let task_server = server.clone();
-	let task_resource = resource_id.clone();
-	tokio::spawn(async move {
-		// Hold the announcement guard + mux registration for the session's
-		// lifetime; both release (unannounce / unregister) on exit.
-		let _publish = publish;
-		let _registration = registration;
-		tokio::select! {
-			res = session.run() => session::log_session_end("whip server", res),
-			_ = cancel => tracing::debug!("whip session terminated by DELETE"),
-		}
-		task_server.unregister_session(&task_resource);
-	});
 
 	Ok(Response {
-		resource_id,
+		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
+		session: crate::server::AcceptedSession {
+			server: server.clone(),
+			resource_id,
+			session: Some(session),
+			publish: Some(publish),
+			registration: Some(registration),
+			cancel: Some(cancel),
+			role: "whip server",
+		},
 	})
 }
 

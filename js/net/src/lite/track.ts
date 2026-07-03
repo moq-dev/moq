@@ -108,6 +108,9 @@ export class TrackInfo {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardTrack(version);
+		// Reject a zero timescale on encode too, so an invalid TrackInfo fails fast on
+		// the sender rather than only at the peer's decoder.
+		if (this.timescale === 0) throw new Error("track timescale must be non-zero");
 		return Message.encode(w, (w) => this.#encode(w));
 	}
 

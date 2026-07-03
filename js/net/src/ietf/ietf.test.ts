@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { Group } from "./object.ts";
+import { Frame, Group, type GroupFlags } from "./object.ts";
 import { SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -59,6 +60,15 @@ async function decodeVersioned<T>(
 ): Promise<T> {
 	const reader = new Reader(undefined, bytes, version);
 	return await decoder(reader, version);
+}
+
+async function encodeFrameVersioned(frame: Frame, flags: GroupFlags, version: IetfVersion): Promise<Uint8Array> {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream, version);
+	await frame.encode(writer, flags, version);
+	writer.close();
+	await writer.closed;
+	return concatChunks(written);
 }
 
 // Subscribe tests (v14)
@@ -1114,4 +1124,58 @@ test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
 	const v17 = await encodeVersioned(makeGroup(), Version.DRAFT_17);
 	expect(Array.from(v18)).not.toEqual(Array.from(v17));
 	await expect(decodeVersioned(v18, Group.decode, Version.DRAFT_17)).rejects.toThrow(/Unsupported group type/);
+});
+
+test("Frame object time: draft-15 uses absolute property types", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+	};
+	const timestamp = new Timestamp(96_000, Timescale.MILLI);
+	const frame = new Frame({ payload: new Uint8Array([0xaa]), timestamp });
+	const encoded = await encodeFrameVersioned(frame, flags, Version.DRAFT_15);
+
+	const reader = new Reader(undefined, encoded, Version.DRAFT_15);
+	expect(await reader.u53()).toBe(0);
+	const extensions = await reader.read(await reader.u53());
+	const props = new Reader(undefined, extensions, Version.DRAFT_15);
+	expect(await props.u62()).toBe(0x06n);
+	expect(await props.u62()).toBe(96_000n);
+	expect(await props.u62()).toBe(0x08n);
+	expect(await props.u62()).toBe(1_000n);
+	expect(await props.done()).toBe(true);
+
+	const decoded = await Frame.decode(new Reader(undefined, encoded, Version.DRAFT_15), flags, Version.DRAFT_15);
+	expect(decoded.timestamp?.value).toBe(96_000);
+	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
+});
+
+test("Frame object time: draft-16 starts delta property types", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+	};
+	const timestamp = new Timestamp(96_000, Timescale.MILLI);
+	const frame = new Frame({ payload: new Uint8Array([0xaa]), timestamp });
+	const encoded = await encodeFrameVersioned(frame, flags, Version.DRAFT_16);
+
+	const reader = new Reader(undefined, encoded, Version.DRAFT_16);
+	expect(await reader.u53()).toBe(0);
+	const extensions = await reader.read(await reader.u53());
+	const props = new Reader(undefined, extensions, Version.DRAFT_16);
+	expect(await props.u62()).toBe(0x06n);
+	expect(await props.u62()).toBe(96_000n);
+	expect(await props.u62()).toBe(0x02n);
+	expect(await props.u62()).toBe(1_000n);
+	expect(await props.done()).toBe(true);
+
+	const decoded = await Frame.decode(new Reader(undefined, encoded, Version.DRAFT_16), flags, Version.DRAFT_16);
+	expect(decoded.timestamp?.value).toBe(96_000);
+	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });

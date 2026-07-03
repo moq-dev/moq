@@ -193,7 +193,7 @@ mod test {
 	#[test]
 	fn untyped_extra_roundtrip() {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		let mut producer = crate::catalog::Producer::new_extra(&mut broadcast).unwrap();
+		let mut producer = crate::catalog::Producer::<Extra>::with_catalog(&mut broadcast, Catalog::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();
 
 		// A media section (flat field) coexists with an arbitrary untyped application section.
@@ -202,12 +202,13 @@ mod test {
 			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
 		);
 		producer
+			.lock()
 			.set_section("transcript", serde_json::json!({ "track": "transcript.json" }))
 			.unwrap();
 
 		// Reserved media keys can't be smuggled in as application sections.
 		assert!(matches!(
-			producer.set_section("video", serde_json::json!({})),
+			producer.lock().set_section("video", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
 

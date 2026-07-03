@@ -74,7 +74,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := origin.Publish("live", broadcast); err != nil {
+	if err := origin.Announce("live", broadcast); err != nil {
 		t.Fatal(err)
 	}
 

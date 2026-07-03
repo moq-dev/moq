@@ -34,7 +34,7 @@ use moq_net::Timestamp;
 /// a media fragment begins at a sync sample, and its presentation duration. A
 /// segmenting consumer (e.g. an HLS/LL-HLS packager) needs that to map fragments
 /// onto segments and parts; narrow the catalog to a single rendition with
-/// [`catalog::Filter`](crate::catalog::Filter) so the fragments belong to one track.
+/// [`Stream::select`](crate::catalog::Stream::select) so the fragments belong to one track.
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
@@ -105,9 +105,8 @@ impl<S: Stream> Export<S> {
 	/// (un)subscription from `catalog`.
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
-	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or wrapped in
-	/// [`catalog::Filter`](crate::catalog::Filter) /
-	/// [`catalog::Target`](crate::catalog::Target) to narrow the rendition set.
+	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
+	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
 	pub fn new(source: impl Into<crate::Source>, catalog: S) -> Self {
 		Self {
 			source: source.into(),
@@ -318,6 +317,12 @@ impl<S: Stream> Export<S> {
 			}
 			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			let timescale = catalog_timescale_video(config);
+			// A zero / NaN / infinite framerate would make `1.0 / fps` non-finite and panic
+			// `Duration::from_secs_f64`; fall back to the default in that case.
+			let framerate = config
+				.framerate
+				.filter(|fps| fps.is_finite() && *fps > 0.0)
+				.unwrap_or(30.0);
 			self.tracks.insert(
 				name.clone(),
 				Fmp4Track {
@@ -326,7 +331,7 @@ impl<S: Stream> Export<S> {
 					buffer: Vec::new(),
 					buffer_independent: false,
 					is_video: true,
-					default_frame: Duration::from_secs_f64(1.0 / config.framerate.unwrap_or(30.0)),
+					default_frame: Duration::from_secs_f64(1.0 / framerate),
 					finished: false,
 					track_id: next_track_id,
 					timescale,

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.25](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.24...moq-ffi-v0.2.25) - 2026-06-30
+
+### Other
+
+- API cleanup before the semver bump ([#1941](https://github.com/moq-dev/moq/pull/1941))
+- Backport moq-mux to main (adapted to main's moq-net, no wire/API breaks) ([#1918](https://github.com/moq-dev/moq/pull/1918))
+
 ## [0.2.23](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.22...moq-ffi-v0.2.23) - 2026-06-23
 
 ### Added

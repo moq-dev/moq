@@ -87,7 +87,7 @@ pub enum Conn {
 
 	/// A TLS connection (`rtmps://`), established by [`Server::with_tls`]. Boxed
 	/// because a `TlsStream` is large relative to a bare `TcpStream`.
-	#[cfg(feature = "server")]
+	#[cfg(feature = "tls")]
 	Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
 }
 
@@ -95,7 +95,7 @@ impl AsyncRead for Conn {
 	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
-			#[cfg(feature = "server")]
+			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_read(cx, buf),
 		}
 	}
@@ -105,7 +105,7 @@ impl AsyncWrite for Conn {
 	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
-			#[cfg(feature = "server")]
+			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_write(cx, buf),
 		}
 	}
@@ -113,7 +113,7 @@ impl AsyncWrite for Conn {
 	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_flush(cx),
-			#[cfg(feature = "server")]
+			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_flush(cx),
 		}
 	}
@@ -121,7 +121,7 @@ impl AsyncWrite for Conn {
 	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_shutdown(cx),
-			#[cfg(feature = "server")]
+			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_shutdown(cx),
 		}
 	}
@@ -138,7 +138,7 @@ pub struct Server {
 
 	/// When set, each accepted connection is TLS-terminated (RTMPS) before the
 	/// RTMP handshake.
-	#[cfg(feature = "server")]
+	#[cfg(feature = "tls")]
 	tls: Option<tokio_rustls::TlsAcceptor>,
 
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
@@ -152,7 +152,7 @@ impl Server {
 		let listener = TcpListener::bind(addr).await?;
 		Ok(Self {
 			listener,
-			#[cfg(feature = "server")]
+			#[cfg(feature = "tls")]
 			tls: None,
 			pending: FuturesUnordered::new(),
 		})
@@ -160,9 +160,9 @@ impl Server {
 
 	/// Terminate TLS on every accepted connection, turning this into an RTMPS
 	/// listener (`rtmps://`). Pass a `rustls::ServerConfig` (e.g. from
-	/// [`moq_native::tls::Server::server_config`] with an empty ALPN list), or
+	/// `moq_native::tls::Server::server_config` with an empty ALPN list), or
 	/// `None` to leave it plaintext.
-	#[cfg(feature = "server")]
+	#[cfg(feature = "tls")]
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ServerConfig>>>) -> Self {
 		self.tls = tls.into().map(tokio_rustls::TlsAcceptor::from);
 		self
@@ -192,13 +192,13 @@ impl Server {
 				res = self.listener.accept() => match res {
 					Ok((stream, peer)) => {
 						configure_socket(&stream, peer);
-						#[cfg(feature = "server")]
+						#[cfg(feature = "tls")]
 						let tls = self.tls.clone();
 						self.pending.push(Box::pin(async move {
 							// The TLS handshake (if any) and the RTMP handshake share one
 							// budget, so a client that stalls either is dropped.
 							let outcome = tokio::time::timeout(REQUEST_TIMEOUT, async move {
-								#[cfg(feature = "server")]
+								#[cfg(feature = "tls")]
 								let conn = match tls {
 									Some(acceptor) => Conn::Tls(Box::new(
 										acceptor
@@ -208,7 +208,7 @@ impl Server {
 									)),
 									None => Conn::Plain(stream),
 								};
-								#[cfg(not(feature = "server"))]
+								#[cfg(not(feature = "tls"))]
 								let conn = Conn::Plain(stream);
 								accept_until_request(conn, peer).await
 							})
@@ -390,6 +390,7 @@ impl<S: Stream> Publish<S> {
 			.accept_request(self.request_id)
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
+
 		tracing::info!(peer = %self.peer, %path, "rtmp publish accepted");
 
 		let result = pump(
@@ -449,6 +450,10 @@ pub struct Play<S = Conn> {
 	app: String,
 	stream_key: String,
 	peer: SocketAddr,
+	/// How long the FLV muxer waits for a stalled group before skipping to a newer
+	/// one. Zero (the default) drops stale groups aggressively; raise it with
+	/// [`with_latency`](Self::with_latency).
+	latency: Duration,
 }
 
 impl<S: Stream> Play<S> {
@@ -468,6 +473,15 @@ impl<S: Stream> Play<S> {
 	/// The remote peer address.
 	pub fn peer(&self) -> SocketAddr {
 		self.peer
+	}
+
+	/// Set how long the FLV muxer waits for a stalled group before skipping to a
+	/// newer one (the moq-level frame-drop latency). Defaults to zero, which drops
+	/// stale groups aggressively. RTMP is unpaced (tags go out as fast as the
+	/// socket accepts them), so this bounds buffering, not the wire rate.
+	pub fn with_latency(mut self, latency: Duration) -> Self {
+		self.latency = latency;
+		self
 	}
 
 	/// Accept the play: subscribe to the broadcast at `path` in `origin`, mux it
@@ -507,7 +521,8 @@ impl<S: Stream> Play<S> {
 
 		let mut export = FlvExport::new(broadcast)
 			.await
-			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.with_latency(self.latency);
 		let result = play_pump(
 			&mut self.stream,
 			&mut self.session,
@@ -607,6 +622,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
+							latency: Duration::ZERO,
 						})));
 					}
 					other => tracing::trace!(%peer, ?other, "ignoring RTMP event before publish/play"),
@@ -1172,10 +1188,9 @@ mod tests {
 	}
 
 	/// The same publish flow, but over TLS: prove [`Server::with_tls`] terminates
-	/// RTMPS and yields an identical [`Request`]. Gated on `quinn` because it
-	/// borrows moq-native's cert generation (`server_config`), which needs a
-	/// moq-native backend feature.
-	#[cfg(feature = "quinn")]
+	/// RTMPS and yields an identical [`Request`]. Gated on `tls` (RTMPS support);
+	/// the cert is generated by the `moq-native` dev-dependency.
+	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn rtmps_accept_yields_publish_request() {
 		use std::sync::Arc;

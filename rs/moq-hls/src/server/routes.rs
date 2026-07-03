@@ -55,7 +55,15 @@ async fn media(
 		block_until(&store, msn, part).await;
 	}
 
-	m3u8(crate::export::render_media(&store.snapshot()))
+	let snapshot = store.snapshot();
+
+	// Don't advertise a rendition the player can't bootstrap yet: the playlist
+	// references init.mp4, which 404s until the first (init) fragment lands.
+	if !snapshot.init_ready {
+		return not_found();
+	}
+
+	m3u8(crate::export::render_media(&snapshot))
 }
 
 async fn init(State(server): State<Server>, Path((broadcast, rendition)): Path<(String, String)>) -> Response {
@@ -94,6 +102,14 @@ async fn part(
 	let Some(store) = store(&server, &broadcast, &rendition).await else {
 		return not_found();
 	};
+
+	// A legit preload-hint part is at most one sequence past the current last segment.
+	// Reject anything further ahead immediately rather than holding the connection for
+	// the full block timeout on a bogus/scanning request.
+	let version = store.version();
+	if !version.finished && sequence > version.last_sequence + 1 {
+		return not_found();
+	}
 
 	// The part may be a preload hint that hasn't been produced yet; block briefly.
 	block_until(&store, sequence, index).await;

@@ -206,4 +206,24 @@ mod tests {
 			Err(EncodeError::Version)
 		));
 	}
+
+	#[test]
+	fn ignores_unknown_parameters() {
+		// Frame a SETUP carrying an unknown parameter ID alongside the path.
+		let mut params = Parameters::default();
+		params.set_bytes(PARAM_PATH, b"/foo".to_vec());
+		params.set_bytes(0xbeef, b"whatever".to_vec());
+
+		let mut body = Vec::new();
+		params.encode(&mut body, Version::Lite05Wip).unwrap();
+
+		// Wrap with the message size prefix the Message impl expects.
+		let mut buf = bytes::BytesMut::new();
+		body.len().encode(&mut buf, Version::Lite05Wip).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut slice = &buf[..];
+		let got = Setup::decode(&mut slice, Version::Lite05Wip).unwrap();
+		assert_eq!(got.path.as_deref(), Some("/foo"));
+	}
 }

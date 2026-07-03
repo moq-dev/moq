@@ -100,6 +100,26 @@ impl Pad {
 			"video/x-av1" => Self::reserve(&mut broadcast, catalog, ".av01", "av01", &[])?,
 			"video/x-vp8" => Self::reserve(&mut broadcast, catalog, ".vp8", "vp8", &[])?,
 			"video/x-vp9" => Self::reserve(&mut broadcast, catalog, ".vp9", "vp9", &[])?,
+			// MP3: no config blob to parse (the config lives in each frame header), so the importer is
+			// built straight from the caps rate/channels. Keyed on `layer == 3`, which positively
+			// identifies Layer III: AAC (`audio/mpeg`, no layer field) and MP2 (`layer=2`) fall through
+			// to the AAC arm below.
+			"audio/mpeg" if structure.get::<i32>("layer").ok() == Some(3) => {
+				let rate: i32 = structure.get("rate").context("MP3 caps missing rate")?;
+				let channels: i32 = structure.get("channels").context("MP3 caps missing channels")?;
+				ensure!(rate > 0, "MP3 caps has non-positive sample rate {rate}");
+				ensure!(channels > 0, "MP3 caps has non-positive channel count {channels}");
+				let config = moq_mux::codec::mp3::Config {
+					sample_rate: rate as u32,
+					channel_count: channels as u32,
+				};
+				// MP3 builds its config from caps, so like Opus it constructs the codec importer
+				// directly and lifts it into a `Track` via `.into()`.
+				let name = broadcast.unique_name(".mp3");
+				let request = broadcast.reserve_track(name)?;
+				let producer = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
+				moq_mux::codec::mp3::Import::new(producer, catalog, config)?.into()
+			}
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
 				let codec_data = structure
