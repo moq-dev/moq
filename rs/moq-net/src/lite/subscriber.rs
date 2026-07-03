@@ -194,7 +194,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// peers ignore this field, in which case start_announce below still drops.
 		let msg = lite::AnnounceRequest {
 			prefix: prefix.as_path(),
-			exclude_hop: self.self_origin.id,
+			exclude_hop: self.self_origin.id(),
 		};
 		stream.writer.encode(&msg).await?;
 
@@ -429,13 +429,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			hops.replace_first(crate::Origin::UNKNOWN, self.session_origin);
 		}
 
-		// Guarantee at least one hop we control. A peer is meant to stamp its
-		// own origin (Lite04), be reconstructed from the responder above (Lite05+),
-		// or filled in above (Lite03), but we don't trust an empty chain: a peer
-		// that sends zero hops would otherwise be indistinguishable from any other,
-		// so two empty-chain routes to the same path would collide. Insert our
-		// session origin so every broadcast stays attributable. The list is empty
-		// here, so this can't overflow.
+		// Guarantee at least one attributable hop for versions that did not provide
+		// one. Lite05 peers may legally advertise responder id 0; preserve it above
+		// rather than replacing it, even though that route stays loop-blind.
 		if hops.is_empty() {
 			hops.push(self.session_origin)
 				.expect("an empty hop chain always has room for one entry");
@@ -783,7 +779,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// SUBSCRIBE_UPDATE (and thus pause/resume linger) only exists on Lite03+.
 		// Older versions tear the upstream down as soon as the track goes idle.
 		let supports_linger = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
-		let supports_fetch = self.subscriber.version.has_timestamps();
+		let supports_fetch = self.subscriber.version.has_track_stream();
 
 		// Mark the track as fetch-capable up front (before accept), so a consumer's
 		// cache-miss fetch waits to be served rather than failing fast. Held for the
@@ -795,7 +791,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// The timescale then flows into every SUBSCRIBE and FETCH without a per-response
 		// header. Older drafts have no TRACK stream: the request stays pending until the
 		// first SUBSCRIBE_OK supplies the properties (see `establish`).
-		let (mut track, timescale) = if self.subscriber.version.has_timestamps() {
+		let (mut track, timescale) = if self.subscriber.version.has_track_stream() {
 			match self.track_info().await {
 				Ok(info) => {
 					// Lite05 carries per-frame timestamps on the wire at this scale; `Some`
@@ -996,7 +992,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// track means it was never subscribed.
 					let establish = match track.as_ref() {
 						Some(Track::Pending(_)) => true,
-						Some(Track::Active(_)) => self.subscriber.version.has_timestamps() && !completed,
+						Some(Track::Active(_)) => self.subscriber.version.has_track_stream() && !completed,
 						None => false,
 					};
 					if establish {
@@ -1083,7 +1079,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(&msg).await?;
 
-		let producer = if self.subscriber.version.has_timestamps() {
+		let producer = if self.subscriber.version.has_track_stream() {
 			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
 			let Some(Track::Active(producer)) = track.as_ref() else {
 				unreachable!("lite05 track is active before establish");

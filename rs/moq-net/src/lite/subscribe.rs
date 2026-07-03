@@ -152,7 +152,7 @@ pub struct SubscribeStart {
 
 impl Message for SubscribeStart {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 		Ok(Self {
@@ -161,16 +161,17 @@ impl Message for SubscribeStart {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
 		self.group.encode(w, version)
 	}
 }
 
-/// Signals that no group after `group` (inclusive upper bound) will be produced on
-/// a Lite05+ subscription. Bounds the range but doesn't end the stream: stragglers
-/// at or below it may still be dropped before FIN.
+/// Signals the exclusive end of a Lite05+ subscription.
+///
+/// No group at or after `group` will be produced. `0` means the track ended
+/// before producing any groups.
 #[derive(Clone, Debug)]
 pub struct SubscribeEnd {
 	pub group: u64,
@@ -178,7 +179,7 @@ pub struct SubscribeEnd {
 
 impl Message for SubscribeEnd {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 		Ok(Self {
@@ -187,7 +188,7 @@ impl Message for SubscribeEnd {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
 		self.group.encode(w, version)

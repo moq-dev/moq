@@ -368,11 +368,11 @@ impl Cluster {
 			Some(id) if id >= 1 << 62 => {
 				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
 			}
-			Some(id) => Origin::from(id),
+			Some(id) => Origin::new(id).expect("cluster id already validated"),
 			None => Origin::random(),
 		}
 		.produce();
-		tracing::info!(origin_id = %origin.id, configured = config.id.is_some(), "cluster initialized");
+		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
 			client: None,
@@ -1146,7 +1146,7 @@ mod tests {
 			..Default::default()
 		})
 		.expect("valid id");
-		assert_eq!(cluster.origin.id, 42);
+		assert_eq!(cluster.origin.id(), 42);
 	}
 
 	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather
