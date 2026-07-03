@@ -46,6 +46,10 @@ pub struct Split {
 struct Avc3Frame {
 	chunks: BytesMut,
 	contains_idr: bool,
+	/// A recovery-point SEI was seen in this access unit: an open-GOP random
+	/// access point (a non-IDR I-slice that a receiver can tune in at), which is
+	/// how broadcast contribution/distribution H.264 signals random access.
+	contains_recovery_point: bool,
 	contains_slice: bool,
 	/// SPS NALs already inline in this access unit, so re-injection skips them.
 	sps_seen: Vec<Bytes>,
@@ -134,8 +138,16 @@ impl Split {
 				self.maybe_start_frame(pts)?;
 				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
 			}
-			Some(Avc3NalType::Aud) | Some(Avc3NalType::Sei) => {
+			Some(Avc3NalType::Aud) => {
 				self.maybe_start_frame(pts)?;
+			}
+			Some(Avc3NalType::Sei) => {
+				self.maybe_start_frame(pts)?;
+				// SEI precedes the slice in an access unit, so a recovery-point
+				// message here flags the coming I-slice as a random access point.
+				if sei_has_recovery_point(&nal) {
+					self.current.contains_recovery_point = true;
+				}
 			}
 			Some(Avc3NalType::IdrSlice) => {
 				// first_mb_in_slice == 0 (ue(v), so the byte-after-header high bit is set)
@@ -147,16 +159,7 @@ impl Split {
 				}
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.sps,
-					&mut self.current.sps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.pps,
-					&mut self.current.pps_seen,
-				);
+				self.reconcile_params();
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
@@ -166,6 +169,13 @@ impl Split {
 			| Some(Avc3NalType::DataPartitionC) => {
 				if nal.get(1).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
+				}
+				// The first slice of a recovery-point access unit is an open-GOP
+				// keyframe: reconcile parameter sets so it is self-contained, the
+				// same way an IDR does. `contains_slice` is still false here on the
+				// AU's first slice, so this runs once per access unit.
+				if self.current.contains_recovery_point && !self.current.contains_slice {
+					self.reconcile_params();
 				}
 				self.current.contains_slice = true;
 			}
@@ -179,13 +189,31 @@ impl Split {
 		Ok(())
 	}
 
+	/// Adopt the access unit's inline parameter sets as the retained set, or
+	/// re-inject the retained set when the keyframe carried none, so every
+	/// keyframe (IDR or open-GOP recovery point) is self-contained.
+	fn reconcile_params(&mut self) {
+		crate::codec::annexb::reconcile_keyframe_params(
+			&mut self.current.chunks,
+			&mut self.sps,
+			&mut self.current.sps_seen,
+		);
+		crate::codec::annexb::reconcile_keyframe_params(
+			&mut self.current.chunks,
+			&mut self.pps,
+			&mut self.current.pps_seen,
+		);
+	}
+
 	fn maybe_start_frame(&mut self, pts: crate::container::Timestamp) -> Result<()> {
 		if !self.current.contains_slice {
 			return Ok(());
 		}
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
-		let keyframe = self.current.contains_idr;
+		// A clean IDR or an open-GOP recovery point both mark a tune-in point.
+		let keyframe = self.current.contains_idr || self.current.contains_recovery_point;
 		self.current.contains_idr = false;
+		self.current.contains_recovery_point = false;
 		self.current.contains_slice = false;
 		self.current.sps_seen.clear();
 		self.current.pps_seen.clear();
@@ -218,6 +246,21 @@ impl Split {
 			zero.elapsed().as_micros() as u64
 		)?)
 	}
+}
+
+/// True if an SEI NAL carries a recovery-point message (payload type 6), the
+/// open-GOP random-access marker. The NAL header byte precedes the SEI RBSP.
+fn sei_has_recovery_point(nal: &[u8]) -> bool {
+	let Some(ebsp) = nal.get(1..) else {
+		return false;
+	};
+	let rbsp = h264_parser::nal::ebsp_to_rbsp(ebsp);
+	let Ok(messages) = h264_parser::sei::SeiMessage::parse(&rbsp) else {
+		return false;
+	};
+	messages
+		.iter()
+		.any(|m| matches!(m.payload, h264_parser::sei::SeiPayload::RecoveryPoint { .. }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
@@ -395,6 +438,71 @@ mod tests {
 		assert_eq!(tail.len(), 1);
 		assert!(tail[0].keyframe);
 		assert_eq!(tail[0].payload.as_ref(), annexb(&[sps, pps, idr]).freeze().as_ref());
+	}
+
+	/// A recovery-point SEI (payload type 6) with `recovery_frame_cnt == 0`,
+	/// followed by the recovery point's flag byte, then the RBSP stop bit.
+	const RECOVERY_SEI: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+
+	/// Open-GOP broadcast H.264: the random-access point is a non-IDR I-slice
+	/// flagged by a recovery-point SEI, not an IDR. The splitter must still flag
+	/// it a keyframe and package the inline parameter sets ahead of it.
+	#[tokio::test(start_paused = true)]
+	async fn recovery_point_islice_is_keyframe() {
+		let aud: &[u8] = &[0x09, 0x10];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		// Non-IDR slice (type 1), first_mb_in_slice == 0: the recovery I-slice.
+		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let mut split = Split::new();
+		let frames = decode_one(&mut split, &mut annexb(&[aud, RECOVERY_SEI, sps, pps, islice]), ts());
+
+		assert_eq!(frames.len(), 1);
+		assert!(frames[0].keyframe, "recovery-point I-slice AU must be a keyframe");
+		assert!(frames[0].payload.windows(sps.len()).any(|w| w == sps));
+		assert!(frames[0].payload.windows(islice.len()).any(|w| w == islice));
+	}
+
+	/// A later bare recovery-point AU (no inline parameter sets) re-injects the
+	/// cached SPS/PPS, exactly like a bare IDR, so tune-in there stays decodable.
+	#[tokio::test(start_paused = true)]
+	async fn bare_recovery_point_reinjects_params() {
+		let aud: &[u8] = &[0x09, 0x10];
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let mut split = Split::new();
+		// First open-GOP AU carries parameter sets inline, seeding the cache.
+		let first = decode_one(&mut split, &mut annexb(&[aud, RECOVERY_SEI, sps, pps, islice]), ts());
+		assert_eq!(first.len(), 1);
+		assert!(first[0].keyframe);
+
+		// A later bare recovery-point AU re-injects SPS+PPS ahead of the I-slice.
+		let second = decode_one(&mut split, &mut annexb(&[aud, RECOVERY_SEI, islice]), ts());
+		assert_eq!(second.len(), 1);
+		assert!(second[0].keyframe);
+		assert_eq!(
+			second[0].payload.as_ref(),
+			annexb(&[aud, RECOVERY_SEI, sps, pps, islice]).freeze().as_ref()
+		);
+	}
+
+	/// An access unit whose SEI is not a recovery point (e.g. pic_timing) stays a
+	/// delta frame: only recovery-point SEIs mark open-GOP random access.
+	#[tokio::test(start_paused = true)]
+	async fn non_recovery_sei_slice_is_delta() {
+		let aud: &[u8] = &[0x09, 0x10];
+		// SEI payload type 1 (pic_timing), not a recovery point.
+		let sei: &[u8] = &[0x06, 0x01, 0x01, 0x00, 0x80];
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let mut split = Split::new();
+		let frames = decode_one(&mut split, &mut annexb(&[aud, sei, pslice]), ts());
+
+		assert_eq!(frames.len(), 1);
+		assert!(!frames[0].keyframe, "a non-recovery SEI must not flag a keyframe");
 	}
 
 	/// A keyframe that presents a smaller parameter set than a prior one reinits

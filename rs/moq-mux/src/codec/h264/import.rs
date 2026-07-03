@@ -332,6 +332,49 @@ mod tests {
 		assert_eq!(h264.level, sps[3]);
 	}
 
+	/// Open-GOP broadcast H.264 (no IDR, random access via recovery-point SEI)
+	/// self-initializes: the splitter flags the recovery-point I-slice AU as a
+	/// keyframe, so the importer resolves the rendition from its inline SPS.
+	#[tokio::test(start_paused = true)]
+	async fn open_gop_self_initializes_from_recovery_point() {
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		// recovery-point SEI (payload type 6), then a non-IDR I-slice (type 1).
+		let sei: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let mut annexb = BytesMut::new();
+		for nal in [sei, sps, pps, islice] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.clone());
+
+		let pts = crate::container::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split open-GOP AU");
+		frames.extend(split.flush(pts).expect("flush open-GOP AU"));
+		import.decode(frames).expect("decode open-GOP AU");
+
+		let snapshot = catalog.snapshot();
+		let h264_cfg = snapshot
+			.video
+			.renditions
+			.get("video")
+			.expect("open-GOP stream must resolve a video rendition");
+		let hang::catalog::VideoCodec::H264(h264) = &h264_cfg.codec else {
+			panic!("expected H.264 codec")
+		};
+		assert!(h264.inline, "avc3 source should land as inline=true");
+		assert_eq!(h264.profile, sps[1]);
+		assert_eq!(h264.level, sps[3]);
+	}
+
 	/// A keyframe that carries no SPS (and no avcC/seed to fall back on) is
 	/// undecodable, so it's a hard error rather than an uncatalogued frame.
 	#[tokio::test(start_paused = true)]
