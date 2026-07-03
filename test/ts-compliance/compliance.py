@@ -626,15 +626,59 @@ def check_tstd(analysis: dict, scan: Scan, clock: PcrClock, th: Thresholds) -> C
     return Check("tstd", Severity.SHAPE, status, detail, metrics)
 
 
+def detect_packet_size(analysis: dict) -> int:
+    """188, or 204 when the stream carries the Reed-Solomon FEC trailer."""
+    ts = analysis["ts"]
+    total = ts["packets"]["total"]
+    return round(ts["bytes"] / total) if total and ts["bytes"] // total in (188, 204) else 188
+
+
+def pcr_span_seconds(scan: Scan) -> float:
+    """Seconds between the first and last PCR on the PID that carries the most PCRs."""
+    clocks = [PcrClock(samples) for samples in scan.pcr_by_pid.values()]
+    main = max(clocks, key=lambda c: len(c.idx), default=PcrClock([]))
+    return main.sec[-1] - main.sec[0] if main.ok() else 0.0
+
+
+def source_duration(ts_path: str) -> float:
+    """PCR span of a reference TS, used to pin the exported stream's absolute rate."""
+    analysis = run_tsanalyze(ts_path)
+    scan = scan_packets(ts_path, detect_packet_size(analysis))
+    return pcr_span_seconds(scan)
+
+
+def check_duration_fidelity(captured_s: float, reference_s: float) -> Check:
+    """The exported stream's duration must track the source it was muxed from.
+
+    Every timing check above reads the stream's own PCR, so a PCR emitted on the
+    wrong clock rate stays internally consistent and passes them all. Comparing
+    the exported PCR span against the source's independent duration is the one
+    check that pins the absolute rate. Keyframe alignment drops up to a GOP of
+    lead, so the captured span runs a shade short, never materially long; the
+    band is wide enough to ignore that yet catch a gross scale error.
+    """
+    metrics = {"captured_s": round(captured_s, 2), "reference_s": round(reference_s, 2)}
+    if reference_s <= 0:
+        return Check("duration-fidelity", Severity.HARD, Status.WARN, "no reference duration", metrics)
+    ratio = captured_s / reference_s
+    metrics["ratio"] = round(ratio, 3)
+    detail = f"captured {captured_s:.1f}s vs source {reference_s:.1f}s (ratio {ratio:.2f})"
+    status = Status.PASS if 0.6 <= ratio <= 1.25 else Status.FAIL
+    return Check("duration-fidelity", Severity.HARD, status, detail, metrics)
+
+
 # ------------------------------------------------------------------------ driver
 
 
-def analyze(ts_path: str, th: Thresholds) -> list[Check]:
-    """Run every check against `ts_path` and return the ordered results."""
+def analyze(ts_path: str, th: Thresholds, reference_seconds: float | None = None) -> list[Check]:
+    """Run every check against `ts_path` and return the ordered results.
+
+    `reference_seconds` (the source's PCR span, round-trip only) enables the
+    duration-fidelity check that pins the exported stream's absolute rate.
+    """
     analysis = run_tsanalyze(ts_path)
     ts = analysis["ts"]
-    total = ts["packets"]["total"]
-    packet_size = round(ts["bytes"] / total) if total and ts["bytes"] // total in (188, 204) else 188
+    packet_size = detect_packet_size(analysis)
 
     scan = scan_packets(ts_path, packet_size)
     clock_by_pid = {pid: PcrClock(samples) for pid, samples in scan.pcr_by_pid.items()}
@@ -661,6 +705,8 @@ def analyze(ts_path: str, th: Thresholds) -> list[Check]:
     checks.append(check_continuity(analysis))
     checks.append(check_pcr_presence(analysis, clock_by_pid))
     checks.append(check_pcr_monotonic(scan))
+    if reference_seconds is not None:
+        checks.append(check_duration_fidelity(span, reference_seconds))
 
     checks.append(check_service_descriptors(analysis))
     checks.append(check_pcr_repetition(scan, th))
@@ -725,6 +771,10 @@ def main() -> int:
     parser.add_argument("--ts", required=True, help="transport stream file to analyze")
     parser.add_argument("--strict", action="store_true", help="also fail on broadcast-shape warnings")
     parser.add_argument("--report-json", help="write the full report as JSON to this path")
+    parser.add_argument(
+        "--reference",
+        help="source TS the capture was muxed from; enables the duration-fidelity check",
+    )
     parser.add_argument("--pcr-repetition-ms", type=float, default=Thresholds.pcr_repetition_ms)
     parser.add_argument("--pcr-jitter-us", type=float, default=Thresholds.pcr_jitter_us)
     parser.add_argument("--null-ratio-max", type=float, default=Thresholds.null_ratio_max)
@@ -737,7 +787,8 @@ def main() -> int:
 
     th = build_thresholds(args)
     try:
-        checks = analyze(args.ts, th)
+        reference_seconds = source_duration(args.reference) if args.reference else None
+        checks = analyze(args.ts, th, reference_seconds)
     except (RuntimeError, FileNotFoundError, json.JSONDecodeError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2

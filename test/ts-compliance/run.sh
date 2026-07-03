@@ -19,24 +19,45 @@ set -euo pipefail
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DIR/../.." && pwd)
 
-SOURCE=""          # real capture to publish instead of a generated clip
-ANALYZE_ONLY=""    # existing TS to analyze without a round-trip
+SOURCE=""       # real capture to publish instead of a generated clip
+ANALYZE_ONLY="" # existing TS to analyze without a round-trip
 DURATION="${TSC_DURATION:-20}"
 BITRATE="${TSC_BITRATE:-10000000}"
 PORT="${TSC_PORT:-4443}"
 PROFILE="${TSC_PROFILE:-debug}"
 STRICT=""
-PASSTHRU=()        # forwarded to compliance.py (thresholds, --report-json, ...)
+PASSTHRU=() # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --source) SOURCE="$2"; shift 2 ;;
-        --analyze-only) ANALYZE_ONLY="$2"; shift 2 ;;
-        --duration) DURATION="$2"; shift 2 ;;
-        --bitrate) BITRATE="$2"; shift 2 ;;
-        --port) PORT="$2"; shift 2 ;;
-        --strict) STRICT="--strict"; shift ;;
-        *) PASSTHRU+=("$1"); shift ;;
+        --source)
+            SOURCE="$2"
+            shift 2
+            ;;
+        --analyze-only)
+            ANALYZE_ONLY="$2"
+            shift 2
+            ;;
+        --duration)
+            DURATION="$2"
+            shift 2
+            ;;
+        --bitrate)
+            BITRATE="$2"
+            shift 2
+            ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
+        --strict)
+            STRICT="--strict"
+            shift
+            ;;
+        *)
+            PASSTHRU+=("$1")
+            shift
+            ;;
     esac
 done
 
@@ -62,15 +83,21 @@ require_tools() {
 
 analyze() {
     # Single source of truth for the verdict: compliance.py runs the TSDuck
-    # tools itself and prints the PASS/WARN/FAIL summary.
-    python3 "$DIR/compliance.py" --ts "$1" $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
+    # tools itself and prints the PASS/WARN/FAIL summary. A second argument is
+    # the source TS, which enables the duration-fidelity check (round-trip only).
+    local ref=()
+    [[ -n "${2:-}" ]] && ref=(--reference "$2")
+    python3 "$DIR/compliance.py" --ts "$1" ${ref[@]+"${ref[@]}"} $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 }
 
 require_tools
 
 # ── analyze-only: no relay, no build ────────────────────────────────────────
 if [[ -n "$ANALYZE_ONLY" ]]; then
-    [[ -f "$ANALYZE_ONLY" ]] || { echo "error: no such file: $ANALYZE_ONLY" >&2; exit 1; }
+    [[ -f "$ANALYZE_ONLY" ]] || {
+        echo "error: no such file: $ANALYZE_ONLY" >&2
+        exit 1
+    }
     analyze "$ANALYZE_ONLY"
     exit $?
 fi
@@ -78,7 +105,10 @@ fi
 # ── round-trip capture ──────────────────────────────────────────────────────
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
-[[ -n "$TARGET_BASE" ]] || { echo "error: could not resolve cargo target directory" >&2; exit 1; }
+[[ -n "$TARGET_BASE" ]] || {
+    echo "error: could not resolve cargo target directory" >&2
+    exit 1
+}
 
 echo "### building moq-relay + moq-cli ($PROFILE)"
 flag=()
@@ -113,9 +143,12 @@ trap cleanup EXIT
 # Source TS: a real capture (preserves all PIDs/PSI) or a generated broadcast-like
 # clip (H.264 + AAC, one-second GOP, per-frame PES so audio interleaves evenly).
 if [[ -n "$SOURCE" ]]; then
-    [[ -f "$SOURCE" ]] || { echo "error: no such source: $SOURCE" >&2; exit 1; }
+    [[ -f "$SOURCE" ]] || {
+        echo "error: no such source: $SOURCE" >&2
+        exit 1
+    }
     echo "### cutting ~${DURATION}s from $SOURCE with TSDuck (all PIDs preserved)"
-    PKTS=$(( DURATION * BITRATE / 8 / 188 ))
+    PKTS=$((DURATION * BITRATE / 8 / 188))
     tsp -I file "$SOURCE" -P until --packets "$PKTS" -O file "$SRC_TS" 2>/dev/null
 else
     echo "### generating ~${DURATION}s broadcast-like clip with ffmpeg"
@@ -147,7 +180,7 @@ fi
 # publisher appears; a live broadcast has no history, so a late joiner would miss
 # the start of the stream (or the whole thing for a short clip).
 echo "### capturing subscriber output (export ts)"
-timeout -k 3 $(( DURATION + 20 )) \
+timeout -k 3 $((DURATION + 20)) \
     "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
 SUB_PID=$!
 sleep 1
@@ -155,8 +188,8 @@ sleep 1
 # Pace on the source PCR (real media time), not a fixed bitrate: a synthetic clip
 # compresses tiny, so bitrate pacing would rush the whole stream out in a blink.
 echo "### publishing PCR-paced TS -> $BROADCAST"
-( tsp -I file "$SRC_TS" -P regulate --pcr-synchronous 2>/dev/null |
-    "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" import ts ) >"$TMP/pub.log" 2>&1 &
+(tsp -I file "$SRC_TS" -P regulate --pcr-synchronous 2>/dev/null |
+    "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" import ts) >"$TMP/pub.log" 2>&1 &
 PUB_PID=$!
 
 wait "$PUB_PID" 2>/dev/null || true
@@ -174,4 +207,5 @@ fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 echo
-analyze "$SUB_TS"
+# Pass the source so duration-fidelity can pin the exported stream's rate.
+analyze "$SUB_TS" "$SRC_TS"

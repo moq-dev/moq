@@ -50,6 +50,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `continuity` | hard | no continuity-counter discontinuities |
 | `pcr-presence` | hard | a PCR PID is declared and carries PCR |
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated) |
+| `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `pcr-repetition` | shape | consecutive PCRs within the limit (default 40 ms) |
 | `pcr-jitter` | shape | per-interval PCR jitter vs the nominal bitrate (pcrverify model) |
 | `null-ratio` | shape | null/stuffing fraction (flags only a pathological excess) |
@@ -59,10 +60,24 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `inter-arrival` | shape | packet inter-arrival spread on the PCR clock (informational) |
 | `tstd` | shape | transport-buffer smoothing (TB fills on arrival, leaks at Rx) |
 
+Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
+clock rate stays internally consistent and passes them all. `duration-fidelity`
+is the exception: it compares the exported PCR span against the source's
+independent duration, which pins the absolute rate. It runs only on a round-trip
+(where a source exists); `run.sh` passes the source automatically, and
+`--analyze-only` skips it.
+
 Thresholds are CLI flags forwarded through `run.sh` (e.g.
 `--pcr-repetition-ms`, `--pcr-jitter-us`, `--bitrate-cov-max`, `--burstiness-max`,
 `--tb-size-bytes`, `--video-leak-bps`, `--audio-leak-bps`). `--report-json <path>`
 writes the full machine-readable report.
+
+## CI
+
+`.github/workflows/smoke.yml` runs `just test ts-compliance` after the interop
+matrix (nightly, on demand, and on PRs touching `test/ts-compliance/`). TSDuck
+comes from the `nix develop` shell, so the run uses the same `tsp`/`tsanalyze` a
+local developer would.
 
 ## Caveats
 
