@@ -49,6 +49,11 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 
+	/// Held until the first media frame, by which point all sequence headers (hence renditions) have
+	/// been declared, so the catalog is withheld until the track set is known (and, when composed with
+	/// other importers, until they finish too).
+	initial_reservation: Option<crate::catalog::Reserved<E>>,
+
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
 	buffer: BytesMut,
@@ -74,10 +79,11 @@ struct AudioStream {
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
-	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			broadcast,
-			catalog,
+			catalog: reserved.producer(),
+			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
 			video: None,
@@ -316,10 +322,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Write one decoded video sample, dropping a leading delta before the first
 	/// keyframe (a mid-GOP join) rather than aborting.
 	fn write_video(&mut self, data: &[u8], dts: u64, composition_time: i32, keyframe: bool) -> anyhow::Result<()> {
-		let Some(stream) = self.video.as_mut() else {
+		if self.video.is_none() {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
-		};
+		}
+		// A media frame means every sequence header has arrived (FLV sends config before data), so
+		// the track set is declared; release the reservation to publish.
+		self.initial_reservation = None;
+		let stream = self.video.as_mut().expect("video stream present");
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
 		if pts_ms < 0 {
@@ -342,10 +352,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
 	fn write_audio(&mut self, data: &[u8], timestamp: u64) -> anyhow::Result<()> {
-		let Some(stream) = self.audio.as_mut() else {
+		if self.audio.is_none() {
 			tracing::debug!("audio frame before config, dropping");
 			return Ok(());
-		};
+		}
+		// A media frame means every sequence header has arrived (FLV sends config before data), so
+		// the track set is declared; release the reservation to publish.
+		self.initial_reservation = None;
+		let stream = self.audio.as_mut().expect("audio stream present");
 		stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(timestamp)?,
 			duration: None,

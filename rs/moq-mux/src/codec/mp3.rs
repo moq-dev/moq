@@ -94,8 +94,8 @@ impl Config {
 /// MP3 importer.
 ///
 /// Publishes raw MP3 frames to a single moq track. Build it with [`new`](Self::new),
-/// passing the track producer and the [`catalog::Producer`](crate::catalog::Producer)
-/// it publishes its rendition into.
+/// passing the track producer and the [`catalog::Reserved`](crate::catalog::Reserved)
+/// it reserves its rendition from.
 ///
 /// Each frame handed to [`decode`](Self::decode) is published in its own group so the
 /// relay can forward it immediately. MP3 carries its config in band, so the rendition
@@ -106,10 +106,10 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	/// Publish on an existing track producer, reserving the rendition from `reserved`.
 	pub fn new(
 		track: moq_net::track::Producer,
-		catalog: crate::catalog::Producer<E>,
+		reserved: crate::catalog::Reserved<E>,
 		config: Config,
 	) -> crate::Result<Self> {
 		let mut audio =
@@ -118,7 +118,7 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
 
-		let mut rendition = catalog.audio_track(track.name());
+		let mut rendition = reserved.audio(track.name());
 		rendition.set(audio);
 
 		Ok(Self {

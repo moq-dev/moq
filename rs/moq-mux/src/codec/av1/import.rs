@@ -24,7 +24,7 @@ use crate::container::jitter::Jitter;
 /// A pure-publisher importer for AV1 with inline sequence headers.
 ///
 /// Build it with [`new`](Self::new), passing the track producer and the
-/// [`catalog::Producer`](crate::catalog::Producer) it publishes into, and feed it
+/// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from, and feed it
 /// frames a [`Split`](super::Split) produced via [`decode`](Self::decode). The
 /// catalog rendition fills in lazily once the config is known.
 pub struct Import<E: CatalogExt = ()> {
@@ -36,9 +36,9 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, registering the rendition in `catalog`.
-	pub fn new(track: moq_net::track::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		let rendition = catalog.video_track(track.name());
+	/// Publish on an existing track producer, reserving the rendition from `reserved`.
+	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		let rendition = reserved.video(track.name());
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,

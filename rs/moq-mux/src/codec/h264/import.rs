@@ -23,7 +23,7 @@ use crate::container::jitter::Jitter;
 /// H.264 importer: a pure frame publisher that resolves the catalog rendition.
 ///
 /// Build it with [`new`](Self::new), passing the track producer and the
-/// [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
+/// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 /// Feed it frames a [`Split`](super::Split) produced via [`decode`](Self::decode).
 /// The catalog rendition fills in lazily once the codec config is known (avcC via
 /// [`initialize`](Self::initialize) for avc1, the first SPS for avc3).
@@ -39,9 +39,9 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, registering the rendition in `catalog`.
-	pub fn new(track: moq_net::track::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		let rendition = catalog.video_track(track.name());
+	/// Publish on an existing track producer, reserving the rendition from `reserved`.
+	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		let rendition = reserved.video(track.name());
 		Self {
 			avc1: false,
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
@@ -276,7 +276,7 @@ mod tests {
 		avcc.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]); // num_pps + pps
 
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.clone());
+		let mut import = Import::new(track, catalog.reserve());
 		// initialize() must not consume the buffer (the split owns the consume).
 		let buf = bytes::BytesMut::from(avcc.as_slice());
 		import.initialize(&buf).expect("initialize avc1");
@@ -312,7 +312,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.clone());
+		let mut import = Import::new(track, catalog.reserve());
 		assert!(
 			catalog.snapshot().video.renditions.is_empty(),
 			"no config before any frame"
@@ -345,7 +345,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog);
+		let mut import = Import::new(track, catalog.reserve());
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
@@ -368,7 +368,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.clone());
+		let mut import = Import::new(track, catalog.reserve());
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split delta");

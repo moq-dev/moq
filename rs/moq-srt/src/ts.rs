@@ -35,7 +35,7 @@ impl Publisher {
 	pub fn new(origin: &origin::Producer, path: &str) -> Result<Self> {
 		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let importer = ts::Import::new(broadcast.clone(), catalog);
+		let importer = ts::Import::new(broadcast.clone(), catalog.reserve());
 
 		let publish = origin.publish_broadcast(path, broadcast.consume())?;
 		tracing::info!(%path, "publishing ingest broadcast");

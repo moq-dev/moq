@@ -10,7 +10,7 @@ fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(data);
 	import.decode(&buf).unwrap();
 	import.finish().unwrap();
@@ -129,7 +129,7 @@ async fn import_opus_frames() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -248,7 +248,7 @@ fn resyncs_across_chunk_boundaries() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	for chunk in misaligned.chunks(100) {
 		import.decode(&BytesMut::from(chunk)).unwrap();
 	}
@@ -275,7 +275,7 @@ async fn import_export_import_roundtrip() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(&data[..]);
 	import.decode(&buf).unwrap();
 	import.finish().unwrap();
@@ -322,7 +322,7 @@ async fn survives_midstream_join() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import
 		.decode(&BytesMut::from(&buf[..]))
 		.expect("a mid-stream join must not abort the demux");
@@ -361,7 +361,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default(),
 	)
 	.unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import
 		.decode(&BytesMut::from(&data[..]))
 		.expect("a dirty mid-stream join must not abort the demux");
@@ -409,7 +409,7 @@ fn import_handles_unaligned_chunks() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
 	for chunk in data.chunks(100) {
 		let buf = BytesMut::from(chunk);

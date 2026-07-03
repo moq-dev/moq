@@ -119,13 +119,13 @@ pub(crate) struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track, registering the rendition in `catalog`. Mint the
+	/// Publish on an existing track, reserving the rendition from `reserved`. Mint the
 	/// track at the descriptor's suffix and the microsecond
 	/// [`hang::container::TIMESCALE`] (e.g. via [`crate::import::unique_track`]).
 	pub fn new(
 		descriptor: &'static Descriptor,
 		track: moq_net::track::Producer,
-		catalog: crate::catalog::Producer<E>,
+		reserved: crate::catalog::Reserved<E>,
 		config: Config,
 	) -> Self {
 		let mut audio_config =
@@ -137,7 +137,7 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
-		let mut rendition = catalog.audio_track(track.name());
+		let mut rendition = reserved.audio(track.name());
 		rendition.set(audio_config);
 
 		Self {

@@ -32,6 +32,11 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The catalog being produced
 	catalog: crate::catalog::Producer<E>,
 
+	/// Held until the moov's track set is declared, so the catalog is withheld from the broadcast
+	/// until every rendition is in (and, when composed with other importers, until they finish too).
+	/// Dropped in [`init`](Self::init).
+	initial_reservation: Option<crate::catalog::Reserved<E>>,
+
 	// Which track roles to publish. `None` imports every supported track.
 	select: Option<crate::select::Broadcast>,
 
@@ -83,9 +88,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
-			catalog,
+			catalog: reserved.producer(),
+			initial_reservation: Some(reserved),
 			select: None,
 			tracks: HashMap::default(),
 			skipped: HashSet::default(),
@@ -241,6 +247,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		drop(catalog);
+
+		// The moov's full track set is declared now; release the reservation so the catalog publishes.
+		self.initial_reservation = None;
 
 		self.moov = Some(moov);
 

@@ -17,7 +17,7 @@ fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
@@ -30,7 +30,7 @@ fn run_fmp4_select(data: &[u8], select: crate::select::Broadcast) -> crate::cata
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone()).with_select(select);
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_select(select);
 
 	// A dropped track's moof fragments must be skipped, not raise `UnknownTrack`.
 	// (The test files end on a malformed fragment, so other decode errors are expected
@@ -201,7 +201,7 @@ async fn test_seek_sets_initial_sequence() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let broadcast_consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
 
@@ -267,7 +267,7 @@ async fn test_msf_catalog_roundtrip() {
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog);
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
 	let buf = bytes::BytesMut::from(&data[..]);

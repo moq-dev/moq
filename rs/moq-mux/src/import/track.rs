@@ -15,10 +15,10 @@ use crate::catalog::hang::CatalogExt;
 /// init buffer are published.
 fn build_h264_avc3<E: CatalogExt>(
 	track: moq_net::track::Producer,
-	catalog: crate::catalog::Producer<E>,
+	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 ) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new(track, catalog);
+	let mut import = crate::codec::h264::Import::new(track, reserved);
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
 	let frames = split.decode(init, None)?;
@@ -31,10 +31,10 @@ fn build_h264_avc3<E: CatalogExt>(
 /// [`crate::codec::h264::avc1_frame`].
 fn build_h264_avc1<E: CatalogExt>(
 	track: moq_net::track::Producer,
-	catalog: crate::catalog::Producer<E>,
+	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 ) -> Result<(usize, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new(track, catalog);
+	let mut import = crate::codec::h264::Import::new(track, reserved);
 	import.initialize(init)?;
 	let length_size = crate::codec::h264::Avcc::parse(init)?.length_size;
 	Ok((length_size, import))
@@ -43,10 +43,10 @@ fn build_h264_avc1<E: CatalogExt>(
 /// Build an H.265 split + import pair, resolving the config from `init`.
 fn build_h265<E: CatalogExt>(
 	track: moq_net::track::Producer,
-	catalog: crate::catalog::Producer<E>,
+	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 ) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
-	let mut import = crate::codec::h265::Import::new(track, catalog);
+	let mut import = crate::codec::h265::Import::new(track, reserved);
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
 	let frames = split.decode(init, None)?;
@@ -57,10 +57,10 @@ fn build_h265<E: CatalogExt>(
 /// Build an AV1 split + import pair, resolving the config from `init`.
 fn build_av1<E: CatalogExt>(
 	track: moq_net::track::Producer,
-	catalog: crate::catalog::Producer<E>,
+	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 ) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
-	let mut import = crate::codec::av1::Import::new(track, catalog);
+	let mut import = crate::codec::av1::Import::new(track, reserved);
 	import.initialize(init)?;
 	let mut split = crate::codec::av1::Split::new();
 	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not an
@@ -123,7 +123,7 @@ impl<E: CatalogExt> Track<E> {
 	/// The catalog rendition is registered once the codec config is resolved.
 	pub fn new(
 		request: moq_net::track::Request,
-		catalog: crate::catalog::Producer<E>,
+		reserved: crate::catalog::Reserved<E>,
 		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
@@ -133,48 +133,48 @@ impl<E: CatalogExt> Track<E> {
 		let track = request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
 		let kind = match format {
 			"avc1" | "avcc" => {
-				let (length_size, import) = build_h264_avc1(track, catalog, init)?;
+				let (length_size, import) = build_h264_avc1(track, reserved, init)?;
 				TrackKind::Avc1 { length_size, import }
 			}
 			"avc3" | "h264" => {
-				let (split, import) = build_h264_avc3(track, catalog, init)?;
+				let (split, import) = build_h264_avc3(track, reserved, init)?;
 				TrackKind::Avc3 { split, import }
 			}
 			"hev1" => {
-				let (split, import) = build_h265(track, catalog, init)?;
+				let (split, import) = build_h265(track, reserved, init)?;
 				TrackKind::Hev1 { split, import }
 			}
 			"av01" | "av1" | "av1c" | "av1C" => {
-				let (split, import) = build_av1(track, catalog, init)?;
+				let (split, import) = build_av1(track, reserved, init)?;
 				TrackKind::Av01 { split, import }
 			}
 			"vp8" | "vp08" => {
-				let mut import = crate::codec::vp8::Import::new(track, catalog);
+				let mut import = crate::codec::vp8::Import::new(track, reserved);
 				import.initialize(init)?;
 				TrackKind::Vp8(import)
 			}
 			"vp9" | "vp09" => {
-				let mut import = crate::codec::vp9::Import::new(track, catalog);
+				let mut import = crate::codec::vp9::Import::new(track, reserved);
 				import.initialize(init)?;
 				TrackKind::Vp9(import)
 			}
 			"aac" => {
 				let mut data = init;
 				let config = crate::codec::aac::Config::parse(&mut data)?;
-				let import = crate::codec::aac::Import::new(track, catalog, config)?;
+				let import = crate::codec::aac::Import::new(track, reserved, config)?;
 				TrackKind::Aac(import)
 			}
 			"opus" => {
 				let mut data = init;
 				let config = crate::codec::opus::Config::parse(&mut data)?;
-				let import = crate::codec::opus::Import::new(track, catalog, config)?;
+				let import = crate::codec::opus::Import::new(track, reserved, config)?;
 				TrackKind::Opus(import)
 			}
 			"flac" => {
 				// `init` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
 				let mut data = init;
 				let config = crate::codec::flac::Config::parse(&mut data)?;
-				let import = crate::codec::flac::Import::new(track, catalog, config)?;
+				let import = crate::codec::flac::Import::new(track, reserved, config)?;
 				TrackKind::Flac(import)
 			}
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
@@ -365,21 +365,21 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
 	/// the importer accepts it here at the legacy microsecond timescale (where a
 	/// codec-specific timescale would be chosen).
-	pub fn new(request: moq_net::track::Request, catalog: crate::catalog::Producer<E>, format: &str) -> Result<Self> {
+	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, format: &str) -> Result<Self> {
 		let track = request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match format {
 			"avc3" | "h264" => TrackStreamKind::Avc3 {
 				split: crate::codec::h264::Split::new(),
-				import: crate::codec::h264::Import::new(track, catalog),
+				import: crate::codec::h264::Import::new(track, reserved),
 			},
 			"hev1" => TrackStreamKind::Hev1 {
 				split: crate::codec::h265::Split::new(),
-				import: crate::codec::h265::Import::new(track, catalog),
+				import: crate::codec::h265::Import::new(track, reserved),
 			},
 			"av01" | "av1" | "av1c" | "av1C" => TrackStreamKind::Av01 {
 				split: crate::codec::av1::Split::new(),
-				import: crate::codec::av1::Import::new(track, catalog),
+				import: crate::codec::av1::Import::new(track, reserved),
 			},
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
@@ -568,7 +568,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		// The importer accepts the reserved track, setting its (microsecond) timescale.
 		let request = broadcast.reserve_track("requested-audio").unwrap();
-		let mut import = Track::new(request, catalog.clone(), "opus", &opus_head()).unwrap();
+		let mut import = Track::new(request, catalog.reserve(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "requested-audio");
 		let snapshot = catalog.snapshot();
@@ -589,7 +589,7 @@ mod tests {
 		// A freshly reserved track attaches its catalog rendition on init.
 		let name = broadcast.unique_name(".opus");
 		let request = broadcast.reserve_track(name).unwrap();
-		let mut import = Track::new(request, catalog.clone(), "opus", &opus_head()).unwrap();
+		let mut import = Track::new(request, catalog.reserve(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "0.opus");
 		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
@@ -619,7 +619,7 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		};
-		let mut import = crate::codec::opus::Import::new(track, catalog.clone(), config).unwrap();
+		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config).unwrap();
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
 		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);
@@ -645,7 +645,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("camera").unwrap();
 
-		let import = Track::new(request, catalog.clone(), "avc3", &h264_init()).unwrap();
+		let import = Track::new(request, catalog.reserve(), "avc3", &h264_init()).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
@@ -661,7 +661,7 @@ mod tests {
 	async fn reconfiguration_updates_in_place() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("video").unwrap();
-		let mut import = Track::new(request, catalog, "vp8", &[]).unwrap();
+		let mut import = Track::new(request, catalog.reserve(), "vp8", &[]).unwrap();
 
 		import
 			.decode(
