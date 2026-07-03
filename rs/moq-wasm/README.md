@@ -13,7 +13,7 @@ Go). Browsers need `wasm-bindgen`, so this is a separate sibling crate. (For
 *React Native* JS, `uniffi-bindgen-react-native` can reuse `moq-ffi` directly;
 that path is unrelated to this crate.)
 
-## Status: compiles and ships a typed JS package; one runtime blocker left
+## Status: compiles and ships a typed JS package
 
 What works today:
 
@@ -54,19 +54,12 @@ What works today:
 
 These touch the wire layer, so the PR should target `dev`.
 
-### Not ported: the wall-clock anchor (and it doesn't need to be)
+### Timestamp fallback
 
-`model/time.rs`'s `TIME_ANCHOR` uses `std::time::Instant::now()` +
-`SystemTime::now()` (both panic on wasm) to map a monotonic instant to a
-jittered wall-clock `Timestamp`. It looks like a wasm hazard, but it's a
-`LazyLock` reached only through `Timestamp::now()` / `From<Instant>`, and
-**nothing in the repo calls those** (frames carry wire timestamps; cache
-eviction uses monotonic `Instant`). So the anchor never initializes and never
-panics on wasm. It's left as an unused public helper.
-
-If a caller ever materializes (e.g. a publish helper that stamps capture time
-locally), porting it would mean a portable `SystemTime` (wasmtimer already has
-`wasmtimer::std::SystemTime`), but that's not needed today.
+`model/time.rs`'s `Timestamp::now()` routes through `web_async::time::Instant`,
+so the receive fallback for protocols that do not carry frame timestamps works
+on wasm too. Native keeps the jittered wall-clock anchor; browser builds use
+`performance.now()` plus a per-process jitter.
 
 ### Out of scope here: moq-mux
 
