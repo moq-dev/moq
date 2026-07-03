@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, task::Poll, time::Duration};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
@@ -554,10 +554,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// immediately otherwise (including an unroutable/dropped error).
 		let broadcast = broadcast.await?;
 		let track_consumer = broadcast.track(&subscribe.track)?;
-		// A second subscriber dedicated to datagrams so they can be served concurrently with
-		// groups (each `recv` borrows `&mut`, so one subscriber can't drive both). Cheap: it
-		// shares the same cached state, just with its own cursor.
-		let datagrams = track_consumer.subscribe(subscription.clone()).await?;
+		// One subscriber for the whole subscription: `run_track` polls its groups and its
+		// best-effort datagrams from this single cursor, so a group-only or datagram-only
+		// track opens exactly one subscription (no duplicate demand).
 		let track = track_consumer.subscribe(subscription).await?;
 
 		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
@@ -605,7 +604,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			version,
 			timescale,
 		};
-		let dg_sub = sub.clone();
 
 		// `end_group` is a serving cap, not a subscription terminator: groups with
 		// sequence > cap are held in the producer's cache until the subscriber raises
@@ -613,20 +611,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// peer FIN actually ends the subscription. This is what lets relays pause an
 		// upstream subscription across consumer churn without tearing it down.
 		//
-		// Groups and datagrams are served concurrently. run_datagrams returns Ok once the
-		// track finishes (or when datagrams aren't supported), so run_track alone decides when
-		// the subscription ends; only a datagram error tears things down.
-		tokio::select! {
-			res = sub.run_track(
-				track,
-				subscribe.start_group,
-				subscribe.end_group,
-				&mut stream.reader,
-				&mut stream.writer,
-				&track_priority_tx,
-			) => res,
-			Err(err) = dg_sub.run_datagrams(datagrams) => Err(err),
-		}?;
+		// run_track serves groups and best-effort datagrams off the one subscriber.
+		sub.run_track(
+			track,
+			subscribe.start_group,
+			subscribe.end_group,
+			&mut stream.reader,
+			&mut stream.writer,
+			&track_priority_tx,
+		)
+		.await?;
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
@@ -779,6 +773,40 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	Ok(())
 }
 
+/// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
+/// best-effort datagram to forward, or the track finishing.
+enum Recv {
+	Group(GroupConsumer),
+	Datagram(crate::Datagram),
+	Finished,
+}
+
+/// Poll a single [`TrackSubscriber`] for the next group (cap-aware) or datagram from one `&mut`
+/// borrow, so groups and datagrams share the same subscription. Groups are polled first so a
+/// datagram burst can't starve them; datagrams are polled only when the transport carries them.
+async fn recv_next(track: &mut TrackSubscriber, datagrams: bool) -> Result<Recv, Error> {
+	kio::wait(|waiter| {
+		// A finished group side ends the whole subscription (datagrams end with the track too).
+		match track.poll_next_group(waiter) {
+			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
+			Poll::Ready(Ok(None)) => return Poll::Ready(Ok(Recv::Finished)),
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			Poll::Pending => {}
+		}
+		if datagrams {
+			match track.poll_recv_datagram(waiter) {
+				Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
+				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
+				Poll::Ready(Ok(None)) => {}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => {}
+			}
+		}
+		Poll::Pending
+	})
+	.await
+}
+
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
 /// field is either small or already Arc-backed) for each spawned serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
@@ -824,6 +852,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let emit_range = self.version.has_timestamps();
 		let mut start_sent = false;
 
+		// Serve datagrams off this same subscriber, but only on lite-05 over a datagram-capable
+		// transport (qmux/WebSocket/TCP/UDS report size 0). No group fallback: otherwise off.
+		let datagrams = self.version.has_datagrams() && self.session.max_datagram_size() > 0;
+
 		loop {
 			tokio::select! {
 				// Drive in-flight group futures; never matches because the inner block returns false.
@@ -832,12 +864,13 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					false
 				} => unreachable!(),
 
-				// next_group respects the cap set via track.end_at and parks
-				// while the next sequence is above the cap. Groups beyond the
-				// cap stay in the producer's cache (bounded by its cache window).
-				res = track.next_group() => {
+				// One cursor drives the whole subscription: poll the cap-aware next group and,
+				// when enabled, the next best-effort datagram. Groups are polled first so a
+				// datagram burst can't starve them; datagrams flow whenever no group is ready
+				// (including while groups are paused above the cap).
+				res = recv_next(&mut track, datagrams) => {
 					match res? {
-						Some(group) => {
+						Recv::Group(group) => {
 							if emit_range && !start_sent {
 								start_sent = true;
 								writer
@@ -846,7 +879,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 							}
 							self.spawn_serve(group, &mut tasks);
 						}
-						None => {
+						Recv::Datagram(datagram) => self.serve_datagram(datagram),
+						Recv::Finished => {
 							// Track finished cleanly. Tell the subscriber no group will
 							// follow, then drain in-flight tasks and exit.
 							if emit_range {
@@ -921,21 +955,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		tracing::debug!(sequence, "finished group");
 
-		Ok(())
-	}
-
-	/// Forward datagrams best-effort until the track finishes.
-	///
-	/// Returns `Ok(())` when datagrams aren't supported (pre-lite-05 or a non-datagram transport)
-	/// or once the track finishes, so the caller's `select!` matches only on the error case and
-	/// lets run_track decide when the subscription ends. Errors only if the track aborts.
-	async fn run_datagrams(self, mut datagrams: TrackSubscriber) -> Result<(), Error> {
-		if !self.version.has_datagrams() || self.session.max_datagram_size() == 0 {
-			return Ok(());
-		}
-		while let Some(datagram) = datagrams.recv_datagram().await? {
-			self.serve_datagram(datagram);
-		}
 		Ok(())
 	}
 

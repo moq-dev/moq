@@ -1417,8 +1417,9 @@ impl TrackSubscriber {
 	/// Receive the next datagram in arrival order.
 	///
 	/// A best-effort channel parallel to [`Self::recv_group`]; the two share only the sequence
-	/// namespace. Because each borrows `&mut self`, drive groups and datagrams from separate
-	/// subscribers (or tasks) to receive both concurrently.
+	/// namespace. To receive both concurrently from one subscriber, poll [`Self::poll_next_group`]
+	/// (or [`Self::poll_recv_group`]) and [`Self::poll_recv_datagram`] together in a single `poll`
+	/// closure (sequential `&mut` borrows), rather than awaiting the two `recv` futures at once.
 	pub async fn recv_datagram(&mut self) -> Result<Option<Datagram>> {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
