@@ -17,12 +17,37 @@ const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
 
 /// Whether a rendition carries video or audio (drives the store's segmenting policy).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// Also the first URL path component of a rendition (`/{broadcast}/{kind}/{name}/...`),
+/// so video and audio renditions that share a name don't collide.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Kind {
 	/// Video: a segment is a GOP, rolling on each independent fragment.
 	Video,
 	/// Audio: segments roll on accumulated duration (no keyframes).
 	Audio,
+}
+
+impl Kind {
+	/// The URL path component for this kind (`"video"` / `"audio"`).
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Kind::Video => "video",
+			Kind::Audio => "audio",
+		}
+	}
+}
+
+impl std::str::FromStr for Kind {
+	type Err = ();
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		match s {
+			"video" => Ok(Kind::Video),
+			"audio" => Ok(Kind::Audio),
+			_ => Err(()),
+		}
+	}
 }
 
 /// Shared context passed to every rendition constructor: the broadcast to pull

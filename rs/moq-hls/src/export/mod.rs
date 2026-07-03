@@ -27,7 +27,11 @@ pub use rendition::{Kind, Rendition};
 const CATALOG_RETRY: Duration = Duration::from_millis(250);
 
 /// Export tuning shared across renditions.
+///
+/// Construct via [`Config::default`] and set the fields you need, so new options
+/// stay additive.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
 	/// LL-HLS part target duration (also the exporter's fragment cap).
 	pub part_target: Duration,
@@ -55,7 +59,9 @@ impl Default for Config {
 /// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
 	broadcast: moq_net::BroadcastConsumer,
-	renditions: Mutex<BTreeMap<String, Arc<Rendition>>>,
+	/// Keyed by `(kind, name)` so a video and an audio rendition can share a name
+	/// without one silently evicting the other.
+	renditions: Mutex<BTreeMap<(Kind, String), Arc<Rendition>>>,
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
@@ -115,9 +121,10 @@ impl Broadcaster {
 		self.broadcast.closed().await;
 	}
 
-	/// Look up a rendition by name.
-	pub fn rendition(&self, name: &str) -> Option<Arc<Rendition>> {
-		self.renditions.lock().unwrap().get(name).cloned()
+	/// Look up a rendition by kind and name. Video and audio are separate axes, so a
+	/// video and an audio rendition may share a name without colliding.
+	pub fn rendition(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
+		self.renditions.lock().unwrap().get(&(kind, name.to_string())).cloned()
 	}
 
 	/// Wait until at least one rendition has been discovered, or `timeout` elapses.
@@ -165,7 +172,7 @@ impl Broadcaster {
 	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
-			renditions.entry(name.clone()).or_insert_with(|| {
+			renditions.entry((Kind::Video, name.clone())).or_insert_with(|| {
 				let ctx = Context {
 					broadcast: broadcast.clone(),
 					cfg: config,
@@ -175,7 +182,7 @@ impl Broadcaster {
 			});
 		}
 		for (name, audio) in &catalog.audio.renditions {
-			renditions.entry(name.clone()).or_insert_with(|| {
+			renditions.entry((Kind::Audio, name.clone())).or_insert_with(|| {
 				let ctx = Context {
 					broadcast: broadcast.clone(),
 					cfg: config,

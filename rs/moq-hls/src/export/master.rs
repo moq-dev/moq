@@ -1,16 +1,18 @@
 //! Hand-written HLS multivariant (master) playlist generation.
 //!
 //! URIs are relative to the master playlist (`/<broadcast>/master.m3u8`), so a
-//! rendition's `<name>/media.m3u8` resolves under the broadcast directory.
+//! rendition's `<kind>/<name>/media.m3u8` resolves under the broadcast directory.
 
 use std::fmt::Write;
+
+use super::Kind;
 
 const VERSION: u32 = 9;
 const AUDIO_GROUP: &str = "aud";
 
 /// A video rendition entry for the master playlist.
 pub struct VideoVariant {
-	/// Rendition name (also its `<name>/media.m3u8` path component).
+	/// Rendition name (the `<name>` in its `<kind>/<name>/media.m3u8` path).
 	pub name: String,
 	/// `BANDWIDTH` attribute, in bits per second.
 	pub bandwidth: u64,
@@ -24,7 +26,7 @@ pub struct VideoVariant {
 
 /// An audio rendition entry for the master playlist.
 pub struct AudioVariant {
-	/// Rendition name (also its `<name>/media.m3u8` path component).
+	/// Rendition name (the `<name>` in its `<kind>/<name>/media.m3u8` path).
 	pub name: String,
 	/// `BANDWIDTH` attribute, in bits per second.
 	pub bandwidth: u64,
@@ -43,8 +45,10 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 		let default = if index == 0 { "YES" } else { "NO" };
 		let _ = writeln!(
 			out,
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{AUDIO_GROUP}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/media.m3u8\"",
-			variant.name, variant.name
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{AUDIO_GROUP}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/{}/media.m3u8\"",
+			variant.name,
+			Kind::Audio.as_str(),
+			variant.name
 		);
 	}
 
@@ -66,7 +70,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 			let _ = write!(line, ",AUDIO=\"{AUDIO_GROUP}\"");
 		}
 		let _ = writeln!(out, "{line}");
-		let _ = writeln!(out, "{}/media.m3u8", variant.name);
+		let _ = writeln!(out, "{}/{}/media.m3u8", Kind::Video.as_str(), variant.name);
 	}
 
 	// Audio-only broadcast: still expose a playable variant per audio rendition.
@@ -77,7 +81,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 				"#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"",
 				variant.bandwidth, variant.codec
 			);
-			let _ = writeln!(out, "{}/media.m3u8", variant.name);
+			let _ = writeln!(out, "{}/{}/media.m3u8", Kind::Audio.as_str(), variant.name);
 		}
 	}
 
@@ -106,12 +110,12 @@ mod tests {
 		let out = render_master(&video, &audio);
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
 		assert!(out.contains(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/media.m3u8\"\n"
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/audio/media.m3u8\"\n"
 		));
 		assert!(out.contains(
 			"#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.42c01f,mp4a.40.2\",AUDIO=\"aud\"\n"
 		));
-		assert!(out.contains("\nvideo/media.m3u8\n"));
+		assert!(out.contains("\nvideo/video/media.m3u8\n"));
 	}
 
 	#[test]
@@ -123,6 +127,6 @@ mod tests {
 		}];
 		let out = render_master(&[], &audio);
 		assert!(out.contains("#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"opus\"\n"));
-		assert!(out.contains("\naudio/media.m3u8\n"));
+		assert!(out.contains("\naudio/audio/media.m3u8\n"));
 	}
 }
