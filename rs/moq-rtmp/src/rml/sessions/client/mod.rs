@@ -211,8 +211,8 @@ impl ClientSession {
 		};
 
 		// Caller-supplied properties (e.g. capsEx) override the built-ins on collision.
-		for (key, value) in self.connect_request_properties.drain() {
-			properties.insert(key, value);
+		for (key, value) in &self.connect_request_properties {
+			properties.insert(key.clone(), value.clone());
 		}
 
 		let message = RtmpMessage::Amf0Command {

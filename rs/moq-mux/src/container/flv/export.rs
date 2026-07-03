@@ -304,8 +304,19 @@ impl Export {
 		// A single-track FLV stream binds only the first rendition of each kind;
 		// multitrack binds them all. Bind newly-seen renditions in name order (the
 		// catalog is a BTreeMap) so each keeps a stable track id.
-		self.bind_video(&catalog)?;
-		self.bind_audio(&catalog)?;
+		//
+		// Only bind before the header is emitted: the sequence-header (config) tags
+		// go out with the header, and there's no in-band way to introduce a new
+		// track's config mid-stream, so a rendition first seen afterward is left
+		// unmuxed rather than emitted as undecodable config-less frames. (This
+		// mirrors the single-track path ignoring extra renditions.)
+		if !self.header_emitted {
+			self.bind_video(&catalog)?;
+			self.bind_audio(&catalog)?;
+		} else if catalog.video.renditions.len() > self.video.len() || catalog.audio.renditions.len() > self.audio.len()
+		{
+			tracing::warn!("ignoring FLV rendition that appeared after the stream header");
+		}
 
 		// A bound track vanishing from the catalog is a layout change FLV can't express.
 		for track in self.tracks() {
