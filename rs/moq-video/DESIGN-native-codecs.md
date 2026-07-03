@@ -42,14 +42,16 @@ capture still pulls in `libav*`. This proposal replaces encode **and** capture.
 | Backend | Crate | Role | Linking model |
 |---|---|---|---|
 | VideoToolbox (macOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
-| NVENC (NVIDIA) | [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) (0.4) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), loaded at runtime. No build-time SDK linking. |
+| NVENC (NVIDIA) | `moq-nvenc` (in-tree `rs/moq-nvenc`; fork of [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) 0.4 trimmed to dlopen-only) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), `dlopen`'d at runtime. No build-time SDK linking. |
 | VAAPI (Intel/AMD) | [`moq-vaapi`](https://crates.io/crates/moq-vaapi) `0.0.2` (published; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | As of 0.0.2 *links* `libva` (`NEEDED libva.so.2`), build needs libva-dev; `dlopen` (no NEEDED, no build dep) is intended but not yet realized, see #1837. |
 | Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
 
 Decisions and rationale:
 
-- **NVENC: buy.** `nvidia-video-codec-sdk` is an independently-maintained safe
-  wrapper. Don't roll our own.
+- **NVENC: buy, then vendor.** `nvidia-video-codec-sdk` is an independently-maintained
+  safe wrapper; don't roll our own. We vendor a fork in-tree as `moq-nvenc`
+  (`rs/moq-nvenc`), trimmed to always dlopen `libnvidia-encode` instead of linking
+  it, so a driverless / GPU-less build still compiles and starts.
 - **VAAPI: buy `cros-codecs`, but expect the heaviest integration.** It is the
   only credible non-ffmpeg VAAPI encode crate, and the H.264 VAAPI encoder is
   real and shipped in the published **0.0.6** (June 2025), not just `main`. See
@@ -224,7 +226,7 @@ objc2-core-video = "..."
 [target.'cfg(target_os = "linux")'.dependencies]
 # Hardware encoders are always-on for Linux (cfg-gated, no feature). Both
 # dlopen their drivers at runtime, so they link on a GPU-less builder.
-nvidia-video-codec-sdk = { version = "0.4", features = ["dynamic-loading"] }
+moq-nvenc = { path = "../moq-nvenc" }  # in-tree fork, dlopen-only
 moq-vaapi = "0.0.2"                 # standalone; vendored cros-libva + cros-codecs
 
 [dependencies]
@@ -351,14 +353,13 @@ Where the implementation differs from the plan above:
 - **Verified on macOS** (real hardware, `just check`): openh264 and VideoToolbox
   encode synthetic frames; a VideoToolbox test asserts the AVCC -> Annex-B IDR
   carries SPS+PPS+slice. moq-cli `--features capture` and moq-boy still build.
-- **NVENC is UNVERIFIED.** Linux + CUDA only, so it doesn't compile on the dev Mac.
-  Written against the real `nvidia-video-codec-sdk` 0.4 API with field/enum names
-  checked against the crate's bindgen output, but needs a Linux+GPU (or CI) pass to
-  confirm: (1) it compiles with the chosen cudarc feature set
-  (`dynamic-loading` + `cuda-12020`) given the SDK's own `cuda-version-from-build-system`
-  default - feature unification here may need tweaking; (2) the flat input-buffer
-  `write` matches NVENC's pitch (safe only for 64-aligned widths; we warn otherwise);
-  (3) forced-IDR via `picture_type` with picture-type-decision enabled.
+- **NVENC compiles everywhere but its runtime is UNVERIFIED.** The `moq-nvenc`
+  crate (nvidia-video-codec-sdk 0.4 fork, dlopen-only) is a workspace member and
+  compile-checks on the dev Mac (nothing links; NVENC is only loaded on Linux).
+  Actually encoding still needs a Linux+GPU (or CI) pass to confirm: (1) the flat
+  input-buffer `write` matches NVENC's pitch (safe only for 64-aligned widths; we
+  warn otherwise); (2) forced-IDR via `picture_type` with picture-type-decision
+  enabled.
 - **Windows Media Foundation capture is UNVERIFIED on hardware.** The `windows`
   0.62 FFI is fully type-checked against the `x86_64-pc-windows-msvc` target (the
   whole crate can't cross-compile from the dev Mac because openh264's vendored C++
@@ -434,18 +435,16 @@ So `nvenc` dlopens everything at runtime, like `cudarc` does for CUDA:
 
 - `cudarc/fallback-dynamic-loading` dlopens `libcuda`; `cudarc/cuda-12020` pins the
   CUDA API version so the build needs no CUDA toolkit.
-- `nvidia-video-codec-sdk/dynamic-loading` dlopens `libnvidia-encode`. This is a
-  small fork feature (see the root `[patch.crates-io]`): the SDK already routes
-  every call through a function table built from two entry points
-  (`NvEncodeAPICreateInstance` / `GetMaxSupportedVersion`); `dynamic-loading`
-  resolves those two via `dlopen` instead of linking them, and `build.rs` skips the
-  link directives.
+- `moq-nvenc` dlopens `libnvidia-encode`. Our in-tree fork (`rs/moq-nvenc`) is
+  trimmed to this one mode: the SDK already routes every call through a function
+  table built from two entry points (`NvEncodeAPICreateInstance` /
+  `GetMaxSupportedVersion`), and the fork resolves those two via `dlopen` instead
+  of linking them (there is no `build.rs`, so nothing links).
 
 Result, verified on a GPU-less Linux box: `--features nvenc` builds, links, and the
 test suite runs and passes (NVENC unavailable -> falls back to openh264), and the
 binary has no `libnvidia-encode` / `libcuda` `DT_NEEDED`. So one portable `moq-cli`
-can carry NVENC and use it only where the driver is present. Upstream the
-`dynamic-loading` feature and drop the patch once merged.
+can carry NVENC and use it only where the driver is present.
 
 ### Follow-ups
 
