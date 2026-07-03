@@ -29,3 +29,8 @@ tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util"
 tracing = "0.1"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
+
+# Timestamp generation on wasm32: std's clock panics (no clock), so route
+# through wasmtimer (performance.now()/Date.now()). See model/time.rs.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasmtimer = "0.4"

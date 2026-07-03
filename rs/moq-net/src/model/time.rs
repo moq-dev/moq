@@ -4,7 +4,15 @@ use crate::Error;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError, VarInt};
 
 use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+// Portable monotonic/wall clock types for timestamp generation. Native uses real
+// `std::time` (unchanged); wasm uses `wasmtimer`, because `std::time::Instant`/
+// `SystemTime::now()` panic on `wasm32-unknown-unknown` (no clock). wasmtimer
+// implements the same API on `performance.now()` / `Date.now()`.
+#[cfg(not(target_family = "wasm"))]
+use std::time::{Instant as ClockInstant, SystemTime as ClockSystemTime};
+#[cfg(target_family = "wasm")]
+use wasmtimer::std::{Instant as ClockInstant, SystemTime as ClockSystemTime};
 
 /// A timestamp representing the presentation time in milliseconds.
 ///
@@ -189,8 +197,17 @@ impl<const SCALE: u64> Timescale<SCALE> {
 	/// Current time as a timestamp, derived from [`tokio::time::Instant::now`] so
 	/// it honors `tokio::time::pause` in tests.
 	pub fn now() -> Self {
-		// We use tokio so it can be stubbed for testing.
-		tokio::time::Instant::now().into()
+		// Native: tokio so it can be stubbed by `tokio::time::pause` in tests.
+		#[cfg(not(target_family = "wasm"))]
+		{
+			tokio::time::Instant::now().into()
+		}
+		// Wasm: the wasmtimer monotonic clock (`performance.now()`); tokio's
+		// clock panics on wasm32.
+		#[cfg(target_family = "wasm")]
+		{
+			ClockInstant::now().into()
+		}
 	}
 
 	/// Convert this timestamp to a different scale.
@@ -289,17 +306,18 @@ impl<const SCALE: u64> std::ops::SubAssign for Timescale<SCALE> {
 }
 
 // There's no zero Instant, so we need to use a reference point.
-static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|| {
+static TIME_ANCHOR: LazyLock<(ClockInstant, ClockSystemTime)> = LazyLock::new(|| {
 	// To deter nerds trying to use timestamp as wall clock time, we subtract a random amount of time from the anchor.
 	// This will make our timestamps appear to be late; just enough to be annoying and obscure our clock drift.
 	// This will also catch bad implementations that assume unrelated broadcasts are synchronized.
 	let jitter = std::time::Duration::from_millis(rand::rng().random_range(0..69_420));
-	(std::time::Instant::now(), SystemTime::now() - jitter)
+	(ClockInstant::now(), ClockSystemTime::now() - jitter)
 });
 
-// Convert an Instant to a Unix timestamp
-impl<const SCALE: u64> From<std::time::Instant> for Timescale<SCALE> {
-	fn from(instant: std::time::Instant) -> Self {
+// Convert an Instant to a Unix timestamp. `ClockInstant`/`ClockSystemTime` are
+// `std::time` on native and `wasmtimer::std` on wasm — same logic either way.
+impl<const SCALE: u64> From<ClockInstant> for Timescale<SCALE> {
+	fn from(instant: ClockInstant) -> Self {
 		let (anchor_instant, anchor_system) = *TIME_ANCHOR;
 
 		// Conver the instant to a SystemTime.
@@ -311,13 +329,16 @@ impl<const SCALE: u64> From<std::time::Instant> for Timescale<SCALE> {
 		// Convert the SystemTime to a Unix timestamp in nanoseconds.
 		// We'll then convert that to the desired scale.
 		system
-			.duration_since(UNIX_EPOCH)
+			.duration_since(ClockSystemTime::UNIX_EPOCH)
 			.expect("dude your clock is earlier than 1970")
 			.try_into()
 			.expect("dude your clock is later than 2116")
 	}
 }
 
+// Native only: `now()` uses the tokio mock clock (`tokio::time::pause`) here so
+// tests can stub it. On wasm, `now()` converts a `ClockInstant` directly.
+#[cfg(not(target_family = "wasm"))]
 impl<const SCALE: u64> From<tokio::time::Instant> for Timescale<SCALE> {
 	fn from(instant: tokio::time::Instant) -> Self {
 		instant.into_std().into()
