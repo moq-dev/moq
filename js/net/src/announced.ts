@@ -12,7 +12,7 @@ export interface AnnouncedEntry {
 }
 
 /** Reactive backing state for an {@link Announced}: the pending queue plus a closed flag. */
-export class AnnouncedState {
+class AnnouncedState {
 	queue = new Signal<AnnouncedEntry[]>([]);
 	closed = new Signal<boolean | Error>(false);
 }
@@ -24,7 +24,7 @@ export class AnnouncedState {
  */
 export class Announced {
 	/** Reactive backing state. */
-	state = new AnnouncedState();
+	#state = new AnnouncedState();
 
 	/** Path prefix this stream is scoped to. */
 	prefix: Path.Valid;
@@ -35,7 +35,7 @@ export class Announced {
 	constructor(prefix = Path.empty()) {
 		this.prefix = prefix;
 		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
+			const dispose = this.#state.closed.subscribe((closed) => {
 				if (!closed) return;
 				resolve(closed instanceof Error ? closed : undefined);
 				dispose();
@@ -48,8 +48,8 @@ export class Announced {
 	 * @param announcement - The announcement to write
 	 */
 	append(announcement: AnnouncedEntry) {
-		if (this.state.closed.peek()) throw new Error("announced is closed");
-		this.state.queue.mutate((queue) => {
+		if (this.#state.closed.peek()) throw new Error("announced is closed");
+		this.#state.queue.mutate((queue) => {
 			queue.push(announcement);
 		});
 	}
@@ -59,8 +59,8 @@ export class Announced {
 	 * @param abort - If provided, throw this exception instead of returning undefined.
 	 */
 	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
-		this.state.queue.mutate((queue) => {
+		this.#state.closed.set(abort ?? true);
+		this.#state.queue.mutate((queue) => {
 			queue.length = 0;
 		});
 	}
@@ -70,14 +70,14 @@ export class Announced {
 	 */
 	async next(): Promise<AnnouncedEntry | undefined> {
 		for (;;) {
-			const announce = this.state.queue.peek().shift();
+			const announce = this.#state.queue.peek().shift();
 			if (announce) return announce;
 
-			const closed = this.state.closed.peek();
+			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			await Signal.race(this.state.queue, this.state.closed);
+			await Signal.race(this.#state.queue, this.#state.closed);
 		}
 	}
 }

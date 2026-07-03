@@ -12,11 +12,13 @@ test("a group caps its frame count, dropping from the front", () => {
 		group.writeFrame({ data: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	}
 
-	const frames = group.state.frames.peek();
+	// Drain the buffered frames: exactly MAX_GROUP_FRAMES remain after eviction.
+	const frames: { sequence: number; data: Uint8Array }[] = [];
+	for (let f = group.tryReadFrameSequence(); f; f = group.tryReadFrameSequence()) frames.push(f);
 	expect(frames.length).toBe(MAX_GROUP_FRAMES);
-	// `total` still counts every frame written, so frame indices stay consistent.
-	expect(group.state.total.peek()).toBe(MAX_GROUP_FRAMES + extra);
-	// The oldest `extra` frames were dropped: the front is now frame `extra`.
+	// Sequence numbers count every frame ever written (evicted included), so the first surviving
+	// frame is index `extra`, not 0: indices stay consistent across eviction.
+	expect(frames[0].sequence).toBe(extra);
 	expect(frames[0].data[0]).toBe(extra & 0xff);
 });
 
@@ -29,8 +31,10 @@ test("a group caps its byte size, dropping from the front", () => {
 		group.writeFrame({ data: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
 	}
 
-	const frames = group.state.frames.peek();
-	const bytes = frames.reduce((sum, f) => sum + f.data.byteLength, 0);
+	// Drain the buffered frames and sum their bytes: the cache stayed under the byte cap.
+	const frames: Uint8Array[] = [];
+	for (let f = group.tryReadFrame(); f; f = group.tryReadFrame()) frames.push(f);
+	const bytes = frames.reduce((sum, f) => sum + f.byteLength, 0);
 	expect(bytes).toBeLessThanOrEqual(MAX_GROUP_CACHE_BYTES);
 	expect(frames.length).toBe(MAX_GROUP_CACHE_BYTES / oneMiB);
 });

@@ -431,10 +431,10 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const current = track.state.priority.peek();
+			const current = track.prioritySignal.peek();
 			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.state.priority.next(), stopped]);
+				const next = await Promise.race([track.prioritySignal.next(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -480,13 +480,13 @@ export class Subscriber {
 			// TRACK_INFO (or implicit defaults) resolves it on the subscribe stream.
 			let scale = timescale.peek();
 			while (scale === undefined) {
-				if (track.state.closed.peek()) {
+				if (track.closedSignal.peek()) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
 					stream.stop(new Error("cancel"));
 					return;
 				}
-				await Signal.race(timescale, track.state.closed);
+				await Signal.race(timescale, track.closedSignal);
 				scale = timescale.peek();
 			}
 

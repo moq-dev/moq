@@ -125,7 +125,7 @@ export class Broadcast {
 			const track = request.accept();
 			effect.cleanup(() => track.close());
 			effect.run((effect) => {
-				if (effect.get(track.state.closed)) return;
+				if (effect.get(track.closedSignal)) return;
 				serve(track, effect);
 			});
 		}
