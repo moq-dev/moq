@@ -53,7 +53,12 @@ export function trackInfoDefaults(info: Partial<TrackInfo> = {}): TrackInfo {
 	};
 }
 
-/** The shared state behind a {@link TrackProducer} / {@link TrackSubscriber} pair. */
+/**
+ * The shared state behind a {@link TrackProducer} / {@link TrackSubscriber} pair.
+ *
+ * @internal Package-internal wiring, not part of the public API. Exported only so other
+ * `@moq/net` modules can construct it; stripped from the published type declarations.
+ */
 export class TrackState {
 	groups = new Signal<Group[]>([]);
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
@@ -71,11 +76,13 @@ type CachedGroup = { group: Group; time: number; mirrors: Map<TrackState, Group>
 /** Shared base for the two ends of a track: name, state, close, and info. */
 abstract class TrackHandle {
 	readonly name: string;
+	/** @internal Package-internal shared state; not part of the public API. */
 	readonly state: TrackState;
 
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
+	/** @internal */
 	constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.state = state;
@@ -143,13 +150,22 @@ export class TrackProducer extends TrackHandle {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	constructor(name: string, sink?: TrackState) {
+	constructor(name: string) {
 		// The producer's own state is the source of truth (info/closed); subscribers
-		// read mirrored sinks, never this state directly. `sink`, when given, is an
-		// already-handed-out subscriber state (the on-demand accept path) adopted as
-		// the first sink.
+		// read mirrored sinks, never this state directly.
 		super(name, new TrackState());
-		if (sink) this.#addSink(sink);
+	}
+
+	/**
+	 * Adopt an already-handed-out subscriber state as the first sink. Used by the
+	 * on-demand accept path (`TrackRequest.accept`), where the request created the
+	 * subscriber state before the producer existed. Returns `this` for chaining.
+	 *
+	 * @internal
+	 */
+	adoptSink(sink: TrackState): this {
+		this.#addSink(sink);
+		return this;
 	}
 
 	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
@@ -367,10 +383,15 @@ export class TrackProducer extends TrackHandle {
  *
  * Obtained from `Broadcast.subscribe` / `TrackConsumer.subscribe`, or from
  * {@link TrackProducer.subscribe} for an in-process track. Reads the groups a
- * {@link TrackProducer} on the same {@link TrackState} writes.
+ * {@link TrackProducer} on the same underlying state writes.
  */
 export class TrackSubscriber extends TrackHandle {
 	#nextSequence = 0;
+
+	/** @internal */
+	constructor(name: string, state: TrackState) {
+		super(name, state);
+	}
 
 	/**
 	 * Receive the next group available on this track, in arrival order.

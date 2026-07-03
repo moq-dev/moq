@@ -17,6 +17,7 @@ export class TrackRequest {
 	// accepting adopts it as the producer's first sink, which the producer fans into.
 	#state: TrackState;
 
+	/** @internal */
 	constructor(name: string, state: TrackState, priority: number) {
 		this.name = name;
 		this.#state = state;
@@ -31,7 +32,7 @@ export class TrackRequest {
 	accept(info: Partial<TrackInfo> = {}): TrackProducer {
 		// The producer adopts the already-handed-out subscriber state as its first
 		// sink, then commits the info (which propagates to that sink).
-		return new TrackProducer(this.name, this.#state).accept(info);
+		return new TrackProducer(this.name).adoptSink(this.#state).accept(info);
 	}
 
 	/** Reject the request, closing the track (optionally with an error). */

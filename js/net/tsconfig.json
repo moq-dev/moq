@@ -3,7 +3,10 @@
 	"compilerOptions": {
 		"outDir": "dist",
 		"rootDir": "./src",
-		"types": ["bun"]
+		"types": ["bun"],
+		// Drop `@internal`-tagged declarations from the emitted .d.ts so package-internal
+		// types (e.g. TrackState) never reach the published API surface.
+		"stripInternal": true
 	},
 	"include": ["src"]
 }
