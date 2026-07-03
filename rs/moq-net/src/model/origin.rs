@@ -16,22 +16,71 @@ use crate::{
 
 /// A relay origin, identified by a 62-bit varint on the wire.
 ///
-/// `id` must be non-zero for a real origin; `id == 0` is reserved as a
-/// placeholder for Lite03-style hops where the actual value isn't carried.
-/// Encoding a value outside the 62-bit range (>= 2^62) will fail at the
-/// varint layer; [`Origin::random`] picks a valid random nonzero id.
+/// Local origins are built with [`Origin::new`] or [`Origin::random`], both of
+/// which guarantee a non-zero id so loop detection can work. Remote peers may
+/// still send `0`; it is legal on the wire but cannot be used for loop detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Origin {
-	/// Non-zero 62-bit identifier. Encoded as a QUIC varint on the wire.
-	pub id: u64,
+	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
+	id: u64,
+}
+
+/// Returned when a local origin id is zero or outside the 62-bit wire range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InvalidOrigin;
+
+impl fmt::Display for InvalidOrigin {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "local origin id must be non-zero and below 2^62")
+	}
+}
+
+impl std::error::Error for InvalidOrigin {}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Origin {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		use serde::ser::SerializeStruct;
+
+		let mut state = serializer.serialize_struct("Origin", 1)?;
+		state.serialize_field("id", &self.id)?;
+		state.end()
+	}
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Origin {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		#[derive(serde::Deserialize)]
+		struct OriginSerde {
+			id: u64,
+		}
+
+		let origin = <OriginSerde as serde::Deserialize>::deserialize(deserializer)?;
+		if origin.id >= 1u64 << 62 {
+			return Err(serde::de::Error::custom("origin id must be below 2^62"));
+		}
+		Ok(Self { id: origin.id })
+	}
 }
 
 impl Origin {
 	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
-	/// `0` is a legal wire value and round-trips through the codec; we reserve it
-	/// as the "unknown" marker rather than hand it to a real origin.
+	/// Also used for remote peers that choose the legal but loop-blind id 0.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
+
+	/// Build an origin from a stable id.
+	///
+	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
+	/// decode accepts remote id 0, but local origins should not use it because
+	/// downstream peers cannot exclude it for loop detection.
+	pub fn new(id: u64) -> Result<Self, InvalidOrigin> {
+		if id == 0 || id >= 1u64 << 62 {
+			return Err(InvalidOrigin);
+		}
+		Ok(Self { id })
+	}
 
 	/// Generate a fresh origin with a random non-zero id. Use this for any
 	/// origin that does not need a stable identity across restarts.
@@ -47,15 +96,22 @@ impl Origin {
 		Self { id }
 	}
 
+	/// Return the origin's wire id.
+	pub fn id(self) -> u64 {
+		self.id
+	}
+
 	/// Consume this [Origin] to create a producer that carries its id.
 	pub fn produce(self) -> OriginProducer {
 		OriginProducer::new(self)
 	}
 }
 
-impl From<u64> for Origin {
-	fn from(id: u64) -> Self {
-		Self { id }
+impl TryFrom<u64> for Origin {
+	type Error = InvalidOrigin;
+
+	fn try_from(id: u64) -> Result<Self, Self::Error> {
+		Self::new(id)
 	}
 }
 
@@ -266,7 +322,7 @@ fn route_key(name: &Path, info: &BroadcastInfo) -> (usize, u64) {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
 	for hop in &info.hops {
-		for &byte in &hop.id.to_le_bytes() {
+		for &byte in &hop.id().to_le_bytes() {
 			hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 		}
 	}
@@ -1695,9 +1751,22 @@ impl OriginProducer {
 
 #[cfg(test)]
 mod tests {
-	use crate::BroadcastInfo;
+	use crate::{BroadcastInfo, coding::Decode};
 
 	use super::*;
+
+	#[test]
+	fn origin_rejects_reserved_ids() {
+		assert!(Origin::new(0).is_err());
+		assert!(Origin::new(1u64 << 62).is_err());
+		assert_eq!(Origin::new(1).unwrap().id(), 1);
+
+		let mut zero = [0u8].as_slice();
+		assert_eq!(
+			Origin::decode(&mut zero, crate::lite::Version::Lite05Wip).unwrap(),
+			Origin::UNKNOWN
+		);
+	}
 
 	#[test]
 	fn origin_list_push_fails_at_limit() {
@@ -1710,19 +1779,6 @@ mod tests {
 	}
 
 	#[test]
-	fn origin_zero_round_trips() {
-		// `0` is the reserved UNKNOWN placeholder; it must stay a legal wire value.
-		let mut buf = bytes::BytesMut::new();
-		Origin::UNKNOWN
-			.encode(&mut buf, crate::lite::Version::Lite05Wip)
-			.unwrap();
-		let mut slice = &buf[..];
-		let got = Origin::decode(&mut slice, crate::lite::Version::Lite05Wip).unwrap();
-		assert!(slice.is_empty());
-		assert_eq!(got, Origin::UNKNOWN);
-	}
-
-	#[test]
 	fn origin_list_replace_first() {
 		let mut list = OriginList::new();
 		for _ in 0..3 {
@@ -1730,11 +1786,14 @@ mod tests {
 		}
 
 		// Rewrites only the first placeholder, keeping the length the same.
-		assert!(list.replace_first(Origin::UNKNOWN, Origin::from(7)));
-		assert_eq!(list.as_slice(), &[Origin::from(7), Origin::UNKNOWN, Origin::UNKNOWN]);
+		assert!(list.replace_first(Origin::UNKNOWN, Origin::new(7).unwrap()));
+		assert_eq!(
+			list.as_slice(),
+			&[Origin::new(7).unwrap(), Origin::UNKNOWN, Origin::UNKNOWN]
+		);
 
 		// No match leaves the list untouched.
-		assert!(!list.replace_first(Origin::from(99), Origin::from(8)));
+		assert!(!list.replace_first(Origin::new(99).unwrap(), Origin::new(8).unwrap()));
 		assert_eq!(list.len(), 3);
 	}
 
@@ -1877,7 +1936,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = BroadcastInfo {
-			hops: OriginList::try_from(vec![Origin::from(1u64)]).unwrap(),
+			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
 		}
 		.produce();
 		let b = BroadcastInfo::new().produce();
@@ -1898,7 +1957,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = BroadcastInfo {
-			hops: OriginList::try_from(vec![Origin::from(1u64)]).unwrap(),
+			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
 		}
 		.produce();
 		let b = BroadcastInfo::new().produce();
@@ -1942,7 +2001,13 @@ mod tests {
 		tokio::time::pause();
 
 		fn route(ids: &[u64]) -> BroadcastProducer {
-			let hops = OriginList::try_from(ids.iter().copied().map(Origin::from).collect::<Vec<_>>()).unwrap();
+			let hops = OriginList::try_from(
+				ids.iter()
+					.copied()
+					.map(|id| Origin::new(id).unwrap())
+					.collect::<Vec<_>>(),
+			)
+			.unwrap();
 			BroadcastInfo { hops }.produce()
 		}
 

@@ -162,9 +162,14 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 
 		let setup: setup::Setup = reader.decode().await?;
 		let mut bytes = setup.parameters;
-		let path = ietf::Parameters::decode(&mut bytes, version)?
-			.get_bytes(ietf::ParameterBytes::Path)
-			.map(|b| String::from_utf8_lossy(b).into_owned());
+		let path = match ietf::Parameters::decode(&mut bytes, version)?.get_bytes(ietf::ParameterBytes::Path) {
+			Some(bytes) => Some(
+				std::str::from_utf8(bytes)
+					.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
+					.to_owned(),
+			),
+			None => None,
+		};
 
 		return Ok((reader, path));
 	}

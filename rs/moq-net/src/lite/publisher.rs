@@ -5,7 +5,7 @@ use web_transport_trait::Stats;
 
 use crate::{
 	AnnounceConsumer, AsPath, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, TrackSubscriber,
-	coding::{Stream, Writer},
+	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
@@ -270,7 +270,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let hops = &info.hops;
 							// Apply the same exclude_hop and reflected-announce skips as the live
 							// loop so the count matches exactly what we send (minus the self push).
-							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+							if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
 								continue;
 							}
 							if hops.contains(&self_origin) {
@@ -297,14 +297,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					origin: self_origin,
 					active: initial.len() as u64,
 				};
-				stream.writer.encode(&ok).await?;
-
-				for (suffix, hops) in initial {
-					stream
-						.writer
-						.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
-						.await?;
+				let mut buf = bytes::BytesMut::new();
+				ok.encode(&mut buf, version)?;
+				for (suffix, hops) in &initial {
+					lite::AnnounceBroadcast::Active {
+						suffix: suffix.as_path(),
+						hops: hops.clone(),
+					}
+					.encode(&mut buf, version)?;
 				}
+				let mut buf = buf.freeze();
+				stream.writer.write_all(&mut buf).await?;
 
 				// Count each initial announce by broadcast name length, mirroring the
 				// live loop below (the name, not the encoded message size).
@@ -412,7 +415,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 		absolute: &crate::Path,
 	) -> Option<OriginList> {
-		if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+		if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
 			tracing::debug!(broadcast = %absolute, %exclude_hop, "skipping announce per peer's exclude_hop");
 			return None;
 		}
@@ -433,7 +436,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub async fn recv_track(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		// The Track Stream is lite-05+ only.
-		if !self.version.has_timestamps() {
+		if !self.version.has_track_stream() {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -559,7 +562,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// every frame with a zigzag-delta timestamp at the track's timescale; older
 		// drafts have no wire field, so `None` here means "don't emit the prefix" (the
 		// frames still carry timestamps in the model, just not on this wire).
-		let timescale = if version.has_timestamps() {
+		let timescale = if version.has_track_stream() {
 			Some(track.info().timescale)
 		} else {
 			None
@@ -572,7 +575,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties live
 		// in TRACK_INFO, and the resolved range arrives as SUBSCRIBE_START/END emitted
 		// from run_track. Older drafts still acknowledge with SUBSCRIBE_OK here.
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			let info = lite::SubscribeOk {
 				priority: subscribe.priority,
 				ordered: false,
@@ -621,8 +624,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn recv_fetch(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
-		// FETCH is lite-05+ only; older drafts have no per-frame timestamp format.
-		if !self.version.has_timestamps() {
+		// FETCH is lite-05+ only; older drafts have no dedicated FETCH stream.
+		if !self.version.has_track_stream() {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -674,9 +677,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			)
 			.await?;
 
-		// FETCH is gated to lite-05+, which always prefixes frames with a timestamp at
-		// the track's timescale.
-		let timescale = if version.has_timestamps() {
+		// FETCH is gated to lite-05+, which learned the track timescale via TRACK_INFO.
+		let timescale = if version.has_track_stream() {
 			Some(group.timescale())
 		} else {
 			None
@@ -780,9 +782,8 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Negotiated timestamp scale for this track. `Some(_)` iff
-	/// [`Version::has_timestamps`] is true for `version` (gated in
-	/// `run_subscribe`); used to validate per-frame timestamps before encoding.
+	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
+	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
 	timescale: Option<crate::Timescale>,
 }
 
@@ -809,7 +810,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
 		// once the first group is known, SUBSCRIBE_END when the track finishes.
-		let emit_range = self.version.has_timestamps();
+		let emit_range = self.version.has_track_stream();
 		let mut start_sent = false;
 
 		loop {
@@ -838,7 +839,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 							// Track finished cleanly. Tell the subscriber no group will
 							// follow, then drain in-flight tasks and exit.
 							if emit_range {
-								let group = track.latest().unwrap_or(0);
+								let group = track
+									.latest()
+									.map(|group| group.checked_add(1).ok_or(crate::coding::BoundsExceeded))
+									.transpose()?
+									.unwrap_or(0);
 								writer
 									.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
 									.await?;

@@ -220,10 +220,6 @@ impl Message for AnnounceOk {
 		}
 
 		let origin = Origin::decode(r, version)?;
-		if origin.id == 0 {
-			// A zero responder id is never legitimate; it would stamp UNKNOWN onto chains.
-			return Err(DecodeError::InvalidValue);
-		}
 		let active = u64::decode(r, version)?;
 		Ok(Self { origin, active })
 	}
@@ -305,7 +301,7 @@ mod tests {
 	#[test]
 	fn announce_ok_round_trip() {
 		let msg = AnnounceOk {
-			origin: Origin { id: 42 },
+			origin: Origin::new(42).unwrap(),
 			active: 3,
 		};
 		assert_eq!(round_trip(&msg), msg);
@@ -314,7 +310,7 @@ mod tests {
 	#[test]
 	fn announce_ok_zero_active() {
 		let msg = AnnounceOk {
-			origin: Origin { id: 7 },
+			origin: Origin::new(7).unwrap(),
 			active: 0,
 		};
 		assert_eq!(round_trip(&msg), msg);
@@ -342,7 +338,7 @@ mod tests {
 	#[test]
 	fn announce_broadcast_round_trip_on_lite05() {
 		let mut hops = OriginList::new();
-		hops.push(Origin { id: 7 }).unwrap();
+		hops.push(Origin::new(7).unwrap()).unwrap();
 		let msg = AnnounceBroadcast::Active {
 			suffix: Path::new("room/cam"),
 			hops: hops.clone(),
@@ -359,7 +355,7 @@ mod tests {
 	#[test]
 	fn announce_ok_rejects_old_versions() {
 		let msg = AnnounceOk {
-			origin: Origin { id: 1 },
+			origin: Origin::new(1).unwrap(),
 			active: 0,
 		};
 		let mut buf = bytes::BytesMut::new();
@@ -370,11 +366,11 @@ mod tests {
 	}
 
 	#[test]
-	fn announce_ok_rejects_zero_origin() {
+	fn announce_ok_accepts_zero_origin() {
 		// Encode a well-formed message then patch the origin to 0 on the wire.
 		let mut buf = bytes::BytesMut::new();
 		AnnounceOk {
-			origin: Origin { id: 1 },
+			origin: Origin::new(1).unwrap(),
 			active: 0,
 		}
 		.encode(&mut buf, Version::Lite05Wip)
@@ -385,9 +381,8 @@ mod tests {
 		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)
 		patched[1] = 0x00;
 		let mut slice = &patched[..];
-		assert!(matches!(
-			AnnounceOk::decode(&mut slice, Version::Lite05Wip),
-			Err(DecodeError::InvalidValue)
-		));
+		let got = AnnounceOk::decode(&mut slice, Version::Lite05Wip).unwrap();
+		assert_eq!(got.origin.id(), 0);
+		assert_eq!(got.active, 0);
 	}
 }

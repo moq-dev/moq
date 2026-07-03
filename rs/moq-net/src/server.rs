@@ -184,9 +184,14 @@ impl Server {
 		let (path, request_id_max) = match version {
 			Version::Ietf(v) => {
 				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
-				let path = params
-					.get_bytes(ietf::ParameterBytes::Path)
-					.map(|b| String::from_utf8_lossy(b).into_owned());
+				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
+					Some(bytes) => Some(
+						std::str::from_utf8(bytes)
+							.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
+							.to_owned(),
+					),
+					None => None,
+				};
 				let request_id_max = params
 					.get_varint(ietf::ParameterVarInt::MaxRequestId)
 					.map(ietf::RequestId);
