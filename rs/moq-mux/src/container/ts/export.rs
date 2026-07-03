@@ -264,7 +264,7 @@ impl<E: catalog::Catalog> Export<E> {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 					Poll::Pending => break,
 				}
 			}
