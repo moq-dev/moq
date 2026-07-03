@@ -4,7 +4,6 @@
 # kt/. Invoked from the repo root as `just kt <recipe>` via the `mod kt`
 # import.
 
-set unstable
 set working-directory := '.'
 
 default:

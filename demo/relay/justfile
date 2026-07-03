@@ -1,5 +1,4 @@
 set fallback
-set unstable
 
 # Run a localhost relay server without authentication.
 default:

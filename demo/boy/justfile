@@ -1,5 +1,4 @@
 set fallback
-set unstable
 
 # Run the GB demo: relay + emulator publisher + web viewer.
 default:

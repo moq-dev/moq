@@ -11,7 +11,6 @@
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
 
 set fallback
-set unstable
 set working-directory := '.'
 
 # Run unit tests for every language (default).

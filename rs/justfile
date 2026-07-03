@@ -7,7 +7,6 @@
 # the repository root, so these recipes run from the repo root rather than
 # from rs/ (cargo resolves paths relative to the workspace root either way).
 
-set unstable
 set working-directory := '..'
 
 default:

@@ -8,7 +8,6 @@
 #   moq-rs/   pure-python ergonomic wrapper depending on moq-ffi (dist `moq-rs`,
 #             import `moq`)
 
-set unstable
 set working-directory := '.'
 
 default:

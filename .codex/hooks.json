@@ -1,0 +1,14 @@
+{
+	"hooks": {
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "bash -lc 'project_dir=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; exec bash \"$project_dir/.codex/hooks/direnv.sh\"'"
+					}
+				]
+			}
+		]
+	}
+}

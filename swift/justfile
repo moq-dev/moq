@@ -3,7 +3,6 @@
 # Language-specific recipes for the Swift package under swift/. Invoked
 # from the repo root as `just swift <recipe>` via the `mod swift` import.
 
-set unstable
 set working-directory := '.'
 
 default:
