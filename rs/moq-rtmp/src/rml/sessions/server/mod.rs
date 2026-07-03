@@ -908,7 +908,9 @@ impl ServerSession {
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
 		if data.len() < 2 {
 			// We are expecting a "onMetaData" value and then a property with the actual metadata.  Since
-			// this wasn't provided we don't know how to deal with this message.
+			// this wasn't provided we don't know how to deal with this message. Returning also avoids the
+			// `data[0]` index panic below on empty untrusted input.
+			return Ok(Vec::new());
 		}
 
 		match data[0] {

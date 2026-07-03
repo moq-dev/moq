@@ -44,6 +44,6 @@ pub enum HandshakeError {
 	InvalidP2Packet,
 
 	/// This occurs when an IO error is encountered while reading the input.
-	#[error("_0")]
+	#[error("{0}")]
 	Io(#[from] io::Error),
 }

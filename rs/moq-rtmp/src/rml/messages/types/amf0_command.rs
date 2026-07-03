@@ -31,6 +31,11 @@ pub fn deserialize(data: Bytes) -> Result<RtmpMessage, MessageDeserializationErr
 	let command_name: String;
 	let transaction_id: f64;
 	let command_object: Amf0Value;
+	// This deserializes untrusted input; a command with fewer than the 3 required
+	// values would panic the drain(..3) below, so reject it first.
+	if arguments.len() < 3 {
+		return Err(MessageDeserializationError::InvalidMessageFormat);
+	}
 	{
 		let mut arg_iterator = arguments.drain(..3);
 
@@ -73,6 +78,16 @@ mod tests {
 	use std::io::Cursor;
 
 	use crate::rml::messages::RtmpMessage;
+
+	#[test]
+	fn short_command_is_rejected_not_panicked() {
+		// A command with fewer than the 3 required values must error, not panic
+		// the drain(..3) (this path deserializes untrusted network input).
+		for values in [vec![], vec![Amf0Value::Utf8String("connect".to_string())]] {
+			let bytes = Bytes::from(rml_amf0::serialize(&values).unwrap());
+			assert!(deserialize(bytes).is_err());
+		}
+	}
 
 	#[test]
 	fn can_serialize_message() {
