@@ -187,7 +187,7 @@ All four carry the same control and data streams defined elsewhere in this docum
 
 For bindings 1 and 2, moq-lite uses the underlying QUIC/WebTransport stream APIs directly.
 QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only.
-Bindings 3 and 4 are reliable byte-stream transports and have no datagram channel; a publisher MUST NOT emit datagrams on those bindings and MUST fall back to Group Streams.
+Bindings 3 and 4 are reliable byte-stream transports and have no datagram channel; a publisher MUST NOT emit datagrams on those bindings. Groups are still delivered normally via Group Streams; there is no conversion of a datagram into a stream.
 
 ### Qmux over TCP/TLS
 A client opens a TCP connection, performs a TLS handshake, and negotiates the ALPN token `moq-lite-05`.
@@ -518,8 +518,8 @@ Any varint value (including 0) is a valid absolute timestamp.
 The frame payload, extending to the end of the datagram.
 The total datagram body (including all header fields above and the payload) MUST NOT exceed 1200 bytes.
 This limit ensures the datagram fits within the minimum QUIC path MTU without IP-layer fragmentation.
-Payloads that would not fit MUST be sent as a Group Stream instead.
-A receiver MUST silently drop any datagram that exceeds this limit.
+A publisher MUST NOT send a datagram whose body exceeds this limit, and a receiver MUST silently drop any datagram that does.
+A group whose frame does not fit is simply not eligible for datagram delivery; it is delivered as a Group Stream like any other group, which is not a conversion of the datagram.
 
 
 
@@ -1054,7 +1054,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Timestamp` to the QUIC datagram body.
 - Moved `Publisher Max Latency` to TRACK_INFO and redefined it as a maximum retention bound: the longest the publisher caches a non-latest group (the inverse of an HTTP `Cache-Control: max-age` guarantee). `Subscriber Max Latency` keeps its name and remains the subscriber's delivery-time expiration preference.
 - Expire a group once **either** its timestamp age or its wall-clock arrival age exceeds Max Latency (the shorter lifetime wins), bounding both manipulated timestamps and delivery bursts.
-- Added QUIC datagram delivery for groups.
+- Added QUIC datagram delivery for groups. Datagrams and Group Streams are independent delivery modes with no conversion between them: an oversized (>1200 byte) datagram MUST NOT be sent and is dropped on receipt, and bindings without a datagram channel do not fall back from datagrams to streams.
 - Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket.
 
 ## moq-lite-04
