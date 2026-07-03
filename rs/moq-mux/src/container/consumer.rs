@@ -547,7 +547,7 @@ impl GroupBuffer {
 		});
 
 		self.max_timestamp = Some(match self.max_timestamp {
-			Some(existing) => existing.max(frame.timestamp),
+			Some(existing) => std::cmp::max(existing, frame.timestamp),
 			None => frame.timestamp,
 		});
 

@@ -699,10 +699,7 @@ impl<E: CatalogExt> Export<E> {
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
 		// Refresh PSI at keyframes or after the interval lapses.
-		let psi_due = match self.last_psi {
-			None => true,
-			Some(last) => frame.timestamp >= last && (frame.timestamp - last) >= psi_interval(),
-		};
+		let psi_due = psi_due(frame.timestamp, self.last_psi);
 		if (is_video && frame.keyframe) || psi_due {
 			let psi = self.psi.as_ref().context("PSI not built")?;
 			let pat = TsPayload::Pat(psi.pat.clone());
@@ -915,8 +912,13 @@ const PES_DTS_LEN: usize = 5;
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
 
-fn psi_interval() -> Timestamp {
-	Timestamp::try_from(PSI_INTERVAL).unwrap_or(Timestamp::ZERO)
+fn psi_due(timestamp: Timestamp, last: Option<Timestamp>) -> bool {
+	let Some(last) = last else {
+		return true;
+	};
+	Duration::from(timestamp)
+		.checked_sub(Duration::from(last))
+		.is_some_and(|elapsed| elapsed >= PSI_INTERVAL)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -1113,7 +1115,12 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 
 #[cfg(test)]
 mod tests {
-	use super::{DEFAULT_DTS_RESERVE, author_dts, is_complete_section};
+	use super::{DEFAULT_DTS_RESERVE, author_dts, is_complete_section, psi_due};
+	use crate::container::Timestamp;
+
+	fn ms(value: u64) -> Timestamp {
+		Timestamp::from_millis(value).unwrap()
+	}
 
 	/// Push a decode-order PTS stream (90 kHz) through the decode clock with a given reserve and
 	/// return the effective DTS per frame (the authored DTS, or the PTS when none is authored).
@@ -1207,6 +1214,14 @@ mod tests {
 		for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
 			assert_eq!(d, p - DEFAULT_DTS_RESERVE, "DTS should trail PTS by the reserve at {i}");
 		}
+	}
+
+	#[test]
+	fn psi_due_uses_elapsed_duration() {
+		assert!(psi_due(ms(1_000), None));
+		assert!(!psi_due(ms(1_250), Some(ms(1_000))));
+		assert!(psi_due(ms(1_500), Some(ms(1_000))));
+		assert!(!psi_due(ms(750), Some(ms(1_000))));
 	}
 
 	#[test]

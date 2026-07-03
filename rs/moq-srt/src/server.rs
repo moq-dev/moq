@@ -385,10 +385,7 @@ fn pace(
 	ts: moq_mux::container::Timestamp,
 	now: Instant,
 ) -> Paced {
-	let send_at = match ts.checked_sub(base) {
-		Ok(offset) => anchor + Duration::from(offset),
-		Err(_) => anchor.checked_sub(Duration::from(base - ts)).unwrap_or(anchor),
-	};
+	let send_at = paced_send_at(anchor, base, ts);
 	if send_at > now {
 		// Media outran wall-clock: re-anchor so this newest frame is the live edge.
 		Paced {
@@ -398,6 +395,15 @@ fn pace(
 		}
 	} else {
 		Paced { send_at, anchor, base }
+	}
+}
+
+fn paced_send_at(anchor: Instant, base: moq_mux::container::Timestamp, ts: moq_mux::container::Timestamp) -> Instant {
+	let base = Duration::from(base);
+	let ts = Duration::from(ts);
+	match ts.checked_sub(base) {
+		Some(offset) => anchor + offset,
+		None => anchor.checked_sub(base - ts).unwrap_or(anchor),
 	}
 }
 
@@ -500,6 +506,20 @@ mod tests {
 			"a reordered frame can pace before the anchor"
 		);
 		assert_eq!(reordered.anchor, edge.anchor, "no re-anchor when media trails the edge");
+	}
+
+	#[test]
+	fn pace_handles_media_before_base() {
+		use moq_mux::container::Timestamp;
+		use std::time::{Duration, Instant};
+		let ms = |m: u64| Timestamp::from_micros(m * 1_000).unwrap();
+
+		let anchor = Instant::now();
+		let paced = pace(anchor, ms(1_000), ms(750), anchor);
+
+		assert_eq!(paced.send_at, anchor - Duration::from_millis(250));
+		assert_eq!(paced.anchor, anchor);
+		assert_eq!(paced.base, ms(1_000));
 	}
 
 	fn sid(s: &str) -> StreamId {
