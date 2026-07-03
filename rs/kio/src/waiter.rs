@@ -42,6 +42,14 @@ impl Waiter {
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
+
+	/// The underlying task [`Waker`], for driving a foreign future inside a `poll_*`
+	/// function. Build a [`Context`] from it and poll the future so that future
+	/// re-wakes this poll when it's ready, without kio itself taking a runtime
+	/// dependency.
+	pub fn waker(&self) -> &Waker {
+		&self.waker
+	}
 }
 
 /// A list of weak wakers waiting for notification.

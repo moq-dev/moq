@@ -15,5 +15,14 @@ categories = ["asynchronous", "concurrency"]
 [lib]
 doctest = false
 
+[features]
+# Opt-in `tokio::time::Sleep`, a poll-driven wall-clock wait backed by tokio. Off by
+# default so kio stays runtime-free. Enable it when driving `poll_*` functions on tokio.
+tokio = ["dep:tokio"]
+
 [dependencies]
 smallvec = "1.15"
+tokio = { workspace = true, features = ["time"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
