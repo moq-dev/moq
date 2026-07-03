@@ -43,7 +43,13 @@ impl Consumer {
 				Poll::Ready(Some(frame)) => {
 					self.group = None;
 					let json = std::str::from_utf8(&frame).map_err(|_| Error::InvalidUtf8)?;
-					let msf = moq_msf::Catalog::from_str(json).map_err(|_| Error::ParseFrame)?;
+					let msf = match moq_msf::Catalog::from_str(json) {
+						Ok(msf) => msf,
+						Err(err) => {
+							tracing::warn!(error = %err, "failed to parse MSF catalog frame");
+							return Poll::Ready(Err(Error::ParseFrame.into()));
+						}
+					};
 					let catalog = from_msf(&msf)?;
 					return Poll::Ready(Ok(Some(catalog)));
 				}
@@ -86,8 +92,9 @@ impl From<moq_net::TrackSubscriber> for Consumer {
 /// [`Container::Legacy`]. [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present
 /// (base64-encoded ftyp+moov); a missing or malformed init segment is an error.
 ///
-/// Fields with no representation in `hang::Catalog` (`is_live`, `render_group`, `alt_group`,
-/// `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are dropped.
+/// Fields with no representation in `hang::Catalog` (`generated_at`, `is_complete`, `is_live`,
+/// `render_group`, `alt_group`, `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are
+/// dropped.
 pub(crate) fn from_msf(msf: &moq_msf::Catalog) -> Result<hang::Catalog> {
 	let mut catalog = hang::Catalog::default();
 
@@ -403,9 +410,7 @@ mod test {
 		let init_b64 = "AAAYZ2Z0eXA=";
 		let expected_init = base64::engine::general_purpose::STANDARD.decode(init_b64).unwrap();
 
-		let msf = moq_msf::Catalog {
-			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))],
-		};
+		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))]);
 
 		let catalog = from_msf(&msf).expect("CMAF video should convert");
 		let video = catalog.video.renditions.get("video0").expect("video0 rendition");
@@ -422,9 +427,7 @@ mod test {
 
 	#[test]
 	fn loc_audio_yields_legacy_container() {
-		let msf = moq_msf::Catalog {
-			tracks: vec![audio_track("audio0", moq_msf::Packaging::Loc)],
-		};
+		let msf = moq_msf::Catalog::new(vec![audio_track("audio0", moq_msf::Packaging::Loc)]);
 
 		let catalog = from_msf(&msf).expect("LOC audio should convert");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
@@ -450,9 +453,7 @@ mod test {
 		let mut audio = audio_track("audio0", moq_msf::Packaging::Loc);
 		audio.init_data = Some(init_b64);
 
-		let msf = moq_msf::Catalog {
-			tracks: vec![video, audio],
-		};
+		let msf = moq_msf::Catalog::new(vec![video, audio]);
 
 		let catalog = from_msf(&msf).expect("legacy tracks should convert");
 		let v = catalog.video.renditions.get("video0").expect("video0 rendition");
@@ -467,9 +468,7 @@ mod test {
 		// CMAF tracks carry their bytes inside Container::Cmaf::init; description
 		// must stay None so downstream code reads the bytes from one place only.
 		let init_b64 = "AAAYZ2Z0eXA=";
-		let msf = moq_msf::Catalog {
-			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))],
-		};
+		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))]);
 		let catalog = from_msf(&msf).unwrap();
 		assert!(catalog.video.renditions["video0"].description.is_none());
 	}
@@ -498,7 +497,7 @@ mod test {
 		audio.channel_config = None;
 		audio.init_data = Some(init_b64);
 
-		let msf = moq_msf::Catalog { tracks: vec![audio] };
+		let msf = moq_msf::Catalog::new(vec![audio]);
 
 		let catalog = from_msf(&msf).expect("flac track should convert");
 		let a = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
@@ -511,7 +510,7 @@ mod test {
 	fn legacy_malformed_init_data_is_error() {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, Some("!!!not-base64!!!"));
 		track.codec = Some("avc1.42c01e".to_string());
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 		let err = from_msf(&msf).expect_err("malformed base64 should error");
 		assert!(
 			err.to_string().contains("malformed init_data"),
@@ -524,7 +523,7 @@ mod test {
 	fn unknown_codec_yields_unknown_variant() {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.codec = Some("weirdcodec".to_string());
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("unknown codec is not an error");
 		let video = catalog.video.renditions.get("video0").expect("video0 rendition");
@@ -533,9 +532,7 @@ mod test {
 
 	#[test]
 	fn cmaf_without_init_data_is_error() {
-		let msf = moq_msf::Catalog {
-			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, None)],
-		};
+		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, None)]);
 
 		let err = from_msf(&msf).expect_err("CMAF without init_data must error");
 		let msg = format!("{err:#}");
@@ -544,7 +541,7 @@ mod test {
 
 	#[test]
 	fn empty_catalog_is_empty_hang_catalog() {
-		let msf = moq_msf::Catalog { tracks: vec![] };
+		let msf = moq_msf::Catalog::new(vec![]);
 
 		let catalog = from_msf(&msf).expect("empty catalog should convert");
 		assert!(catalog.video.renditions.is_empty());
@@ -555,7 +552,7 @@ mod test {
 	fn track_without_role_is_skipped() {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.role = None;
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("no-role track should be skipped, not error");
 		assert!(catalog.video.renditions.is_empty());
@@ -566,7 +563,7 @@ mod test {
 	fn unsupported_role_is_skipped() {
 		let mut track = audio_track("caption0", moq_msf::Packaging::Legacy);
 		track.role = Some(moq_msf::Role::Caption);
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("unsupported role should be skipped, not error");
 		assert!(catalog.audio.renditions.is_empty());
@@ -581,7 +578,7 @@ mod test {
 		track.samplerate = None;
 		track.channel_config = None;
 		track.init_data = None;
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let err = from_msf(&msf).expect_err("missing fields with no init_data should error");
 		assert!(err.to_string().contains("no init_data"), "unexpected error: {}", err);
@@ -605,7 +602,7 @@ mod test {
 		track.samplerate = None;
 		track.channel_config = None;
 		track.init_data = Some(init_b64);
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("Opus OpusHead should parse");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
@@ -629,7 +626,7 @@ mod test {
 		track.samplerate = None;
 		track.channel_config = None;
 		track.init_data = Some(init_b64);
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("AAC AudioSpecificConfig should parse");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
@@ -654,7 +651,7 @@ mod test {
 		track.samplerate = Some(24_000); // explicit, must be preserved
 		track.channel_config = None; // missing, derive from init_data
 		track.init_data = Some(init_b64);
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("partial derivation should succeed");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
@@ -667,9 +664,7 @@ mod test {
 		// MediaTimeline isn't a media payload, so the track must be skipped (not error).
 		let bad = video_track("timeline0", moq_msf::Packaging::MediaTimeline, None);
 		let good = video_track("video0", moq_msf::Packaging::Legacy, None);
-		let msf = moq_msf::Catalog {
-			tracks: vec![bad, good],
-		};
+		let msf = moq_msf::Catalog::new(vec![bad, good]);
 
 		let catalog = from_msf(&msf).expect("unsupported packaging should be skipped, not error");
 		assert!(
@@ -688,9 +683,7 @@ mod test {
 		// Drop the codec so we'd see a hard error if the skip path didn't short-circuit.
 		bad.codec = None;
 		let good = audio_track("audio0", moq_msf::Packaging::Loc);
-		let msf = moq_msf::Catalog {
-			tracks: vec![bad, good],
-		};
+		let msf = moq_msf::Catalog::new(vec![bad, good]);
 
 		let catalog = from_msf(&msf).expect("unsupported packaging should be skipped, not error");
 		assert!(!catalog.audio.renditions.contains_key("event0"));
@@ -700,7 +693,7 @@ mod test {
 	#[test]
 	fn unknown_packaging_variant_is_skipped() {
 		let track = video_track("video0", moq_msf::Packaging::Unknown("custom".to_string()), None);
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf(&msf).expect("unknown packaging should be skipped, not error");
 		assert!(catalog.video.renditions.is_empty());
@@ -710,7 +703,7 @@ mod test {
 	fn missing_video_codec_is_error() {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.codec = None;
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let err = from_msf(&msf).expect_err("missing video codec must error");
 		let msg = format!("{err:#}");
@@ -724,7 +717,7 @@ mod test {
 	fn missing_audio_codec_is_error() {
 		let mut track = audio_track("audio0", moq_msf::Packaging::Legacy);
 		track.codec = None;
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let err = from_msf(&msf).expect_err("missing audio codec must error");
 		let msg = format!("{err:#}");
@@ -739,7 +732,7 @@ mod test {
 		// avc1 with a too-short profile string is a malformed structured codec.
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.codec = Some("avc1.0".to_string());
-		let msf = moq_msf::Catalog { tracks: vec![track] };
+		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let err = from_msf(&msf).expect_err("malformed avc1 codec must error");
 		let msg = format!("{err:#}");

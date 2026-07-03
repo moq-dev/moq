@@ -10,7 +10,8 @@
 //! held in a root `initDataList` and referenced per-track by `initRef`).
 //! Serializing always emits the newest draft, and init data is resolved to
 //! inline [`Track::init_data`] either way, so callers never touch the version
-//! or the init-data indirection.
+//! or the init-data indirection. draft-00's `generatedAt` and `isComplete`
+//! fields stay available as version-neutral catalog fields.
 //!
 //! References:
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.txt>
@@ -33,8 +34,19 @@ pub const DEFAULT_NAME: &str = "catalog";
 /// data) are handled during (de)serialization, so callers only ever see
 /// resolved tracks with inline [`Track::init_data`]. Parsing accepts both
 /// draft-00 and draft-01 catalogs; serializing always emits the newest draft.
+///
+/// Marked `#[non_exhaustive]` because the MSF drafts continue to grow optional
+/// root fields. External callers build a catalog with [`Catalog::new`] or
+/// [`Catalog::default`] and then assign whichever optional fields they need.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Catalog {
+	/// Catalog generation time as Unix epoch milliseconds.
+	pub generated_at: Option<u64>,
+
+	/// Whether the broadcast has finished and no more tracks will appear.
+	pub is_complete: bool,
+
 	/// The tracks in this catalog snapshot.
 	pub tracks: Vec<Track>,
 }
@@ -129,6 +141,15 @@ pub struct Track {
 }
 
 impl Catalog {
+	/// Construct a catalog with tracks and no root-level optional fields.
+	pub fn new(tracks: Vec<Track>) -> Self {
+		Self {
+			generated_at: None,
+			is_complete: false,
+			tracks,
+		}
+	}
+
 	/// Serialize the MSF catalog to a JSON string.
 	pub fn to_string(&self) -> Result<String, serde_json::Error> {
 		serde_json::to_string(self)
@@ -177,6 +198,8 @@ impl Serialize for Catalog {
 
 		Wire {
 			version: WireVersion,
+			generated_at: self.generated_at,
+			is_complete: self.is_complete,
 			tracks,
 			init_data_list: (!init_data_list.is_empty()).then_some(init_data_list),
 		}
@@ -191,32 +214,58 @@ impl<'de> Deserialize<'de> for Catalog {
 		let wire = Wire::deserialize(deserializer)?;
 		let init_data_list = wire.init_data_list.unwrap_or_default();
 
-		// id -> inline payload, built once so resolution is linear in the number
+		// id -> init data entry, built once so resolution is linear in the number
 		// of tracks rather than tracks x entries.
-		let inline: HashMap<&str, &str> = init_data_list
-			.iter()
-			.filter(|e| e.kind == "inline")
-			.map(|e| (e.id.as_str(), e.data.as_str()))
-			.collect();
+		let by_id: HashMap<&str, &InitData> = init_data_list.iter().map(|e| (e.id.as_str(), e)).collect();
 
 		let tracks = wire
 			.tracks
 			.into_iter()
-			.map(|mut track| {
+			.map(|mut track| -> Result<Track, D::Error> {
 				// Resolve draft-01 initRef into inline init_data so callers never
-				// see the indirection. Inline init_data (draft-00) is kept as-is.
-				if track.init_data.is_none() {
-					if let Some(id) = track.init_ref.take() {
-						track.init_data = inline.get(id.as_str()).map(|data| data.to_string());
+				// see the indirection. Inline init_data (draft-00) is kept as-is,
+				// but a catalog that carries both forms must not disagree.
+				if let Some(id) = track.init_ref.take() {
+					let entry = by_id.get(id.as_str()).ok_or_else(|| {
+						serde::de::Error::custom(format!(
+							"MSF track {:?} references missing initData {:?}",
+							track.name, id
+						))
+					})?;
+
+					if entry.kind != "inline" {
+						return Err(serde::de::Error::custom(format!(
+							"MSF track {:?} references initData {:?} with unsupported type {:?}",
+							track.name, id, entry.kind
+						)));
+					}
+
+					match &track.init_data {
+						Some(inline) if inline != &entry.data => {
+							return Err(serde::de::Error::custom(format!(
+								"MSF track {:?} carries conflicting initData and initRef {:?}",
+								track.name, id
+							)));
+						}
+						Some(_) => {}
+						None => track.init_data = Some(entry.data.clone()),
 					}
 				}
 				track.init_ref = None;
-				track
+				Ok(track)
 			})
-			.collect();
+			.collect::<Result<Vec<_>, _>>()?;
 
-		Ok(Catalog { tracks })
+		Ok(Catalog {
+			generated_at: wire.generated_at,
+			is_complete: wire.is_complete,
+			tracks,
+		})
 	}
+}
+
+fn is_false(value: &bool) -> bool {
+	!*value
 }
 
 /// The on-wire catalog shape, carrying the bits [`Catalog`] hides from callers.
@@ -225,6 +274,9 @@ impl<'de> Deserialize<'de> for Catalog {
 #[serde(rename_all = "camelCase")]
 struct Wire {
 	version: WireVersion,
+	generated_at: Option<u64>,
+	#[serde(default, skip_serializing_if = "is_false")]
+	is_complete: bool,
 	#[serde(default)]
 	tracks: Vec<Track>,
 	init_data_list: Option<Vec<InitData>>,
@@ -529,9 +581,7 @@ mod test {
 
 	#[test]
 	fn serialize_video_track() {
-		let catalog = Catalog {
-			tracks: vec![video_track()],
-		};
+		let catalog = Catalog::new(vec![video_track()]);
 
 		let json = catalog.to_string().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
@@ -551,9 +601,7 @@ mod test {
 
 	#[test]
 	fn serialize_audio_track() {
-		let catalog = Catalog {
-			tracks: vec![audio_track()],
-		};
+		let catalog = Catalog::new(vec![audio_track()]);
 
 		let json = catalog.to_string().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
@@ -602,7 +650,7 @@ mod test {
 
 	#[test]
 	fn roundtrip_empty() {
-		let catalog = Catalog { tracks: vec![] };
+		let catalog = Catalog::new(vec![]);
 		let json = catalog.to_string().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
@@ -618,7 +666,7 @@ mod test {
 		track.jitter = None;
 		track.init_data = Some("AQID".to_string());
 
-		let catalog = Catalog { tracks: vec![track] };
+		let catalog = Catalog::new(vec![track]);
 
 		let json = catalog.to_string().unwrap();
 		assert!(json.contains("\"packaging\":\"cmaf\""));
@@ -629,9 +677,7 @@ mod test {
 
 	#[test]
 	fn serialize_sap_fields() {
-		let catalog = Catalog {
-			tracks: vec![track_with_sap_and_jitter()],
-		};
+		let catalog = Catalog::new(vec![track_with_sap_and_jitter()]);
 
 		let json = catalog.to_string().unwrap();
 
@@ -677,9 +723,7 @@ mod test {
 
 	#[test]
 	fn sap_and_jitter_roundtrip() {
-		let original = Catalog {
-			tracks: vec![track_with_sap_and_jitter()],
-		};
+		let original = Catalog::new(vec![track_with_sap_and_jitter()]);
 
 		let json = original.to_string().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
@@ -736,26 +780,75 @@ mod test {
 	}
 
 	#[test]
-	fn unresolved_init_ref_leaves_init_data_none() {
-		// A dangling initRef (no matching entry, or a non-inline type) resolves to
-		// no init data rather than failing the whole catalog. Downstream decides
-		// whether a track without init data is usable.
+	fn dangling_init_ref_errors() {
+		// A dangling initRef would otherwise look like a track with no init_data.
+		// Reject it so publishers do not silently lose decoder setup bytes.
+		let json = r#"{
+			"version": "draft-01",
+			"initDataList": [
+				{ "id": "v0", "type": "inline", "data": "AQID" }
+			],
+			"tracks": [
+				{ "name": "a", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initRef": "missing" }
+			]
+		}"#;
+
+		let err = Catalog::from_str(json).expect_err("dangling initRef must fail");
+		assert!(err.to_string().contains("missing initData"), "unexpected error: {err}");
+	}
+
+	#[test]
+	fn unsupported_init_ref_type_errors() {
+		// Only inline init data can be resolved into Track::init_data. Other
+		// reference types must not become indistinguishable from absent init data.
 		let json = r#"{
 			"version": "draft-01",
 			"initDataList": [
 				{ "id": "v0", "type": "url", "data": "https://example.com/init" }
 			],
 			"tracks": [
-				{ "name": "a", "packaging": "cmaf", "isLive": true, "role": "video",
-				  "codec": "avc1.640028", "initRef": "missing" },
-				{ "name": "b", "packaging": "cmaf", "isLive": true, "role": "video",
+				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
 				  "codec": "avc1.640028", "initRef": "v0" }
 			]
 		}"#;
 
+		let err = Catalog::from_str(json).expect_err("unsupported initRef type must fail");
+		assert!(err.to_string().contains("unsupported type"), "unexpected error: {err}");
+	}
+
+	#[test]
+	fn inline_init_data_and_init_ref_must_agree() {
+		let json = r#"{
+			"version": "draft-01",
+			"initDataList": [
+				{ "id": "v0", "type": "inline", "data": "AQID" }
+			],
+			"tracks": [
+				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initData": "BAUG", "initRef": "v0" }
+			]
+		}"#;
+
+		let err = Catalog::from_str(json).expect_err("conflicting initData/initRef must fail");
+		assert!(err.to_string().contains("conflicting"), "unexpected error: {err}");
+	}
+
+	#[test]
+	fn matching_inline_init_data_and_init_ref_decodes() {
+		let json = r#"{
+			"version": "draft-01",
+			"initDataList": [
+				{ "id": "v0", "type": "inline", "data": "AQID" }
+			],
+			"tracks": [
+				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initData": "AQID", "initRef": "v0" }
+			]
+		}"#;
+
 		let catalog = Catalog::from_str(json).unwrap();
-		assert_eq!(catalog.tracks[0].init_data, None);
-		assert_eq!(catalog.tracks[1].init_data, None);
+		assert_eq!(catalog.tracks[0].init_data.as_deref(), Some("AQID"));
 	}
 
 	#[test]
@@ -789,7 +882,7 @@ mod test {
 		b.name = "b".to_string();
 		b.init_data = Some("AQID".to_string());
 
-		let catalog = Catalog { tracks: vec![a, b] };
+		let catalog = Catalog::new(vec![a, b]);
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
 
 		let list = value["initDataList"].as_array().expect("initDataList present");
@@ -812,8 +905,8 @@ mod test {
 	#[test]
 	fn draft00_example_av_decodes() {
 		// Example 1 from draft-ietf-moq-msf-00: time-aligned audio/video. Exercises the
-		// numeric version, integer framerate into an f64 field, and unmodeled fields
-		// (namespace, targetLatency, generatedAt) which must be ignored, not rejected.
+		// numeric version, integer framerate into an f64 field, preserved generatedAt,
+		// and unmodeled fields (namespace, targetLatency) which must be ignored.
 		let json = r#"{
 			"version": 1,
 			"generatedAt": 1746104606044,
@@ -848,6 +941,7 @@ mod test {
 		}"#;
 
 		let catalog = Catalog::from_str(json).expect("draft-00 AV catalog must decode");
+		assert_eq!(catalog.generated_at, Some(1746104606044));
 		assert_eq!(catalog.tracks.len(), 2);
 		assert_eq!(catalog.tracks[0].framerate, Some(30.0));
 		assert_eq!(catalog.tracks[1].channel_config.as_deref(), Some("2"));
@@ -900,6 +994,19 @@ mod test {
 			"tracks": []
 		}"#;
 		let catalog = Catalog::from_str(json).expect("draft-00 completion catalog must decode");
+		assert_eq!(catalog.generated_at, Some(1746104606044));
+		assert!(catalog.is_complete);
 		assert!(catalog.tracks.is_empty());
+
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		assert_eq!(value["generatedAt"], serde_json::json!(1746104606044u64));
+		assert_eq!(value["isComplete"], serde_json::json!(true));
+	}
+
+	#[test]
+	fn default_catalog_omits_completion_fields() {
+		let value: serde_json::Value = serde_json::from_str(&Catalog::default().to_string().unwrap()).unwrap();
+		assert!(value.get("generatedAt").is_none());
+		assert!(value.get("isComplete").is_none());
 	}
 }
