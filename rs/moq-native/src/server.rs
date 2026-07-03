@@ -402,6 +402,39 @@ impl Server {
 		self
 	}
 
+	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
+	///
+	/// Spawns a task per session and logs (rather than propagates) per-session
+	/// errors, so one bad peer never tears down the listener. Returns when
+	/// interrupted (Ctrl-C) or on a fatal bind failure. For per-session auth or
+	/// routing, drive [`accept`](Self::accept) yourself instead.
+	pub async fn serve_publish(self, origin: moq_net::OriginConsumer) -> crate::Result<()> {
+		self.with_publish(origin).serve().await
+	}
+
+	/// Accept sessions until the listener stops, ingesting each publisher into `origin`.
+	///
+	/// The mirror of [`serve_publish`](Self::serve_publish) for the consume direction.
+	pub async fn serve_consume(self, origin: moq_net::OriginProducer) -> crate::Result<()> {
+		self.with_consume(origin).serve().await
+	}
+
+	/// Shared accept loop for [`serve_publish`](Self::serve_publish) /
+	/// [`serve_consume`](Self::serve_consume); the origin is already attached.
+	async fn serve(mut self) -> crate::Result<()> {
+		if let Ok(addr) = self.local_addr() {
+			tracing::info!(%addr, "listening");
+		}
+		while let Some(request) = self.accept().await {
+			tokio::spawn(async move {
+				if let Err(err) = serve_session(request).await {
+					tracing::warn!(%err, "session ended with error");
+				}
+			});
+		}
+		Ok(())
+	}
+
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		#[cfg(feature = "noq")]
@@ -657,6 +690,13 @@ impl Server {
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
 		unreachable!("no QUIC backend compiled");
 	}
+}
+
+/// Complete one accepted [`Request`] and wait for the session to close.
+async fn serve_session(request: Request) -> crate::Result<()> {
+	let session = request.ok().await?;
+	session.closed().await?;
+	Ok(())
 }
 
 /// The version set offered on stream (`tcp://`/`unix://`) listeners.

@@ -106,6 +106,8 @@ impl Default for ClientConfig {
 pub struct Client {
 	moq: moq_net::Client,
 	versions: moq_net::Versions,
+	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
+	connect: Option<Url>,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
@@ -191,6 +193,7 @@ impl Client {
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
+			connect: config.connect,
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
@@ -246,6 +249,26 @@ impl Client {
 	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
 		Reconnect::new(self.clone(), url, self.backoff.clone())
+	}
+
+	/// Dial the configured [`ClientConfig::connect`] URL, publishing `origin` to it
+	/// and reconnecting with backoff until the returned handle is dropped.
+	///
+	/// Returns `None` when no `--client-connect` URL was configured, so a caller
+	/// that may run server-only doesn't have to branch on the URL itself.
+	pub fn publish(self, origin: moq_net::OriginConsumer) -> Option<Reconnect> {
+		let url = self.connect.clone()?;
+		Some(self.with_publish(origin).reconnect(url))
+	}
+
+	/// Dial the configured [`ClientConfig::connect`] URL, consuming its broadcasts
+	/// into `origin` and reconnecting with backoff until the returned handle is
+	/// dropped.
+	///
+	/// Returns `None` when no `--client-connect` URL was configured.
+	pub fn consume(self, origin: moq_net::OriginProducer) -> Option<Reconnect> {
+		let url = self.connect.clone()?;
+		Some(self.with_consume(origin).reconnect(url))
 	}
 
 	#[cfg(not(any(
