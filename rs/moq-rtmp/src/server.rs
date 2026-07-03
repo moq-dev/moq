@@ -276,12 +276,13 @@ impl Server {
 	}
 }
 
-/// Tune a freshly accepted RTMP socket: Nagle off for latency, keepalive on so a
-/// dead peer is reaped rather than pinning a broadcast forever.
+/// Tune an RTMP TCP socket (accepted by the server or dialed by the client):
+/// Nagle off for latency, keepalive on so a dead peer is reaped rather than
+/// pinning a broadcast forever.
 ///
 /// Both are best-effort: a failure to set either is logged and ignored rather
 /// than dropping an otherwise healthy connection.
-fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
+pub(crate) fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 	// Nagle off: RTMP is latency-sensitive and we write whole packets.
 	if let Err(err) = stream.set_nodelay(true) {
 		tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");

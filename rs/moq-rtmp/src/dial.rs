@@ -78,7 +78,7 @@ impl Client<TcpStream> {
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
 		let stream = TcpStream::connect(addr).await?;
-		stream.set_nodelay(true).ok();
+		crate::server::configure_socket(&stream, addr);
 		// Advertise a tcUrl derived from the dial target: several ingest servers
 		// (YouTube, Twitch, some nginx-rtmp configs) reject a connect without one.
 		Self::with_stream_config(stream, app, Some(format!("rtmp://{addr}/{app}"))).await
