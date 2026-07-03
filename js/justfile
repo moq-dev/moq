@@ -42,7 +42,6 @@ build:
     bun run --filter='*' build
 
 # Remove node_modules and build output. The bun workspace spans the repo
-
 # (deps hoist to the root, not into js/), so sweep from the workspace root.
 clean:
     #!/usr/bin/env bash
@@ -55,7 +54,6 @@ clean:
 
 # Full JS CI: lint + tests + build. Takes a newline-separated list of
 # changed files; skips if FILES is non-empty and none match the JS
-
 # scope. Run `just js ci` (no FILES) to force-run everything.
 ci FILES="":
     #!/usr/bin/env bash

@@ -74,170 +74,118 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
+// FourCcInfoMask bit: the client can decode (render) this codec. We only serve a
+// play FourCC to a client that can decode it; CanForward/CanEncode don't help a
+// terminal player render.
 const FOURCC_CAN_DECODE: u32 = 0x01;
-const FOURCC_CAN_FORWARD: u32 = 0x04;
 
+/// Which enhanced-RTMP FourCC codecs a play client can render, from its `connect`.
+///
+/// Tracked per media kind. A legacy client that sends none of the enhanced
+/// properties supports nothing here, so any enhanced broadcast is rejected on play.
 #[derive(Clone, Debug, Default)]
-struct ClientCapabilities {
-	any_fourcc: bool,
-	fourcc_list: Vec<[u8; 4]>,
-	any_video: bool,
-	video_fourccs: Vec<[u8; 4]>,
-	any_audio: bool,
-	audio_fourccs: Vec<[u8; 4]>,
+struct ClientCodecs {
+	video: Support,
+	audio: Support,
 }
 
-impl ClientCapabilities {
-	fn supports_video(&self, fourcc: [u8; 4]) -> bool {
-		self.any_fourcc || self.any_video || self.fourcc_list.contains(&fourcc) || self.video_fourccs.contains(&fourcc)
-	}
+/// The FourCCs a client can decode for one media kind.
+#[derive(Clone, Debug, Default)]
+enum Support {
+	/// Nothing enhanced advertised (a legacy H.264/AAC-only client).
+	#[default]
+	None,
+	/// The `*` wildcard: every codec.
+	Any,
+	/// An explicit FourCC allow-list.
+	Only(Vec<[u8; 4]>),
+}
 
-	fn supports_audio(&self, fourcc: [u8; 4]) -> bool {
-		self.any_fourcc || self.any_audio || self.fourcc_list.contains(&fourcc) || self.audio_fourccs.contains(&fourcc)
-	}
-
-	fn unsupported_reason(&self, codecs: EnhancedCodecs) -> Option<String> {
-		if codecs.is_empty() {
-			return None;
+impl Support {
+	fn allow(&mut self, fourcc: [u8; 4]) {
+		match self {
+			Support::Any => {}
+			Support::None => *self = Support::Only(vec![fourcc]),
+			Support::Only(list) if !list.contains(&fourcc) => list.push(fourcc),
+			Support::Only(_) => {}
 		}
-		let mut unsupported = Vec::new();
+	}
+
+	fn contains(&self, fourcc: [u8; 4]) -> bool {
+		match self {
+			Support::Any => true,
+			Support::None => false,
+			Support::Only(list) => list.contains(&fourcc),
+		}
+	}
+}
+
+impl ClientCodecs {
+	fn from_connect_object(value: &Amf0Value) -> Self {
+		let mut codecs = Self::default();
+		let Amf0Value::Object(properties) = value else {
+			return codecs;
+		};
+
+		// Legacy combined list: each FourCC (or `*`) applies to both video and audio.
+		if let Some(Amf0Value::StrictArray(list)) = properties.get("fourCcList") {
+			for entry in list {
+				if let Amf0Value::Utf8String(name) = entry {
+					allow(&mut codecs.video, name);
+					allow(&mut codecs.audio, name);
+				}
+			}
+		}
+
+		// v2 per-kind maps: FourCC -> capability mask.
+		if let Some(map) = properties.get("videoFourCcInfoMap") {
+			add_info_map(map, &mut codecs.video);
+		}
+		if let Some(map) = properties.get("audioFourCcInfoMap") {
+			add_info_map(map, &mut codecs.audio);
+		}
+
+		codecs
+	}
+
+	/// The reason to reject a play, or `None` when the client can render the export.
+	fn reject_reason(&self, codecs: EnhancedCodecs) -> Option<String> {
+		let mut missing = Vec::new();
 		if let Some(fourcc) = codecs.video
-			&& !self.supports_video(fourcc)
+			&& !self.video.contains(fourcc)
 		{
-			unsupported.push(format!("video {}", fourcc_name(fourcc)));
+			missing.push(format!("video {}", fourcc_name(fourcc)));
 		}
 		if let Some(fourcc) = codecs.audio
-			&& !self.supports_audio(fourcc)
+			&& !self.audio.contains(fourcc)
 		{
-			unsupported.push(format!("audio {}", fourcc_name(fourcc)));
+			missing.push(format!("audio {}", fourcc_name(fourcc)));
 		}
-		if unsupported.is_empty() {
-			None
-		} else {
-			Some(format!(
-				"unsupported enhanced RTMP codec(s): {}",
-				unsupported.join(", ")
-			))
-		}
+		(!missing.is_empty()).then(|| format!("unsupported enhanced RTMP codec(s): {}", missing.join(", ")))
 	}
 }
 
-struct ConnectCapabilitiesParser {
-	chunks: ChunkDeserializer,
-	done: bool,
-}
-
-impl Default for ConnectCapabilitiesParser {
-	fn default() -> Self {
-		Self {
-			chunks: ChunkDeserializer::new(),
-			done: false,
-		}
-	}
-}
-
-impl ConnectCapabilitiesParser {
-	fn observe(&mut self, bytes: &[u8]) -> Option<ClientCapabilities> {
-		if self.done {
-			return None;
-		}
-
-		let mut input = bytes;
-		loop {
-			let payload = match self.chunks.get_next_message(input) {
-				Ok(Some(payload)) => payload,
-				Ok(None) => return None,
-				Err(err) => {
-					self.done = true;
-					tracing::debug!(%err, "failed to parse RTMP connect capabilities");
-					return None;
-				}
-			};
-			input = &[];
-
-			let message = match payload.to_rtmp_message() {
-				Ok(message) => message,
-				Err(err) => {
-					tracing::trace!(%err, "failed to parse RTMP message while looking for connect capabilities");
-					continue;
-				}
-			};
-			match message {
-				RtmpMessage::SetChunkSize { size } => {
-					if let Err(err) = self.chunks.set_max_chunk_size(size as usize) {
-						self.done = true;
-						tracing::debug!(%err, "failed to update RTMP capability parser chunk size");
-						return None;
-					}
-				}
-				RtmpMessage::Amf0Command {
-					command_name,
-					command_object,
-					..
-				} if command_name == "connect" => {
-					self.done = true;
-					return Some(ClientCapabilities::from_connect_object(&command_object));
-				}
-				_ => {}
-			}
-		}
-	}
-}
-
-impl ClientCapabilities {
-	fn from_connect_object(value: &Amf0Value) -> Self {
-		let mut capabilities = Self::default();
-		let Amf0Value::Object(properties) = value else {
-			return capabilities;
-		};
-
-		if let Some(value) = properties.get("fourCcList") {
-			capabilities.add_fourcc_list(value);
-		}
-		if let Some(value) = properties.get("videoFourCcInfoMap") {
-			add_fourcc_info_map(value, &mut capabilities.any_video, &mut capabilities.video_fourccs);
-		}
-		if let Some(value) = properties.get("audioFourCcInfoMap") {
-			add_fourcc_info_map(value, &mut capabilities.any_audio, &mut capabilities.audio_fourccs);
-		}
-
-		capabilities
-	}
-
-	fn add_fourcc_list(&mut self, value: &Amf0Value) {
-		let Amf0Value::StrictArray(values) = value else {
-			return;
-		};
-		for value in values {
-			let Amf0Value::Utf8String(value) = value else {
-				continue;
-			};
-			if value == "*" {
-				self.any_fourcc = true;
-			} else if let Some(fourcc) = parse_fourcc(value) {
-				push_unique(&mut self.fourcc_list, fourcc);
-			}
-		}
-	}
-}
-
-fn add_fourcc_info_map(value: &Amf0Value, any: &mut bool, fourccs: &mut Vec<[u8; 4]>) {
-	let Amf0Value::Object(properties) = value else {
+/// Fold a `*FourCcInfoMap` (FourCC -> mask) into a [`Support`] set, keeping only
+/// codecs the client advertised it can decode.
+fn add_info_map(value: &Amf0Value, support: &mut Support) {
+	let Amf0Value::Object(entries) = value else {
 		return;
 	};
-	for (name, value) in properties {
-		let Amf0Value::Number(mask) = value else {
-			continue;
-		};
-		let mask = *mask as u32;
-		if mask & (FOURCC_CAN_DECODE | FOURCC_CAN_FORWARD) == 0 {
-			continue;
+	for (name, mask) in entries {
+		if let Amf0Value::Number(mask) = mask
+			&& (*mask as u32) & FOURCC_CAN_DECODE != 0
+		{
+			allow(support, name);
 		}
-		if name == "*" {
-			*any = true;
-		} else if let Some(fourcc) = parse_fourcc(name) {
-			push_unique(fourccs, fourcc);
-		}
+	}
+}
+
+/// Add one advertised FourCC name (or the `*` wildcard) to a [`Support`] set.
+fn allow(support: &mut Support, name: &str) {
+	if name == "*" {
+		*support = Support::Any;
+	} else if let Some(fourcc) = parse_fourcc(name) {
+		support.allow(fourcc);
 	}
 }
 
@@ -245,14 +193,74 @@ fn parse_fourcc(value: &str) -> Option<[u8; 4]> {
 	value.as_bytes().try_into().ok()
 }
 
-fn push_unique(values: &mut Vec<[u8; 4]>, value: [u8; 4]) {
-	if !values.contains(&value) {
-		values.push(value);
+fn fourcc_name(fourcc: [u8; 4]) -> String {
+	String::from_utf8_lossy(&fourcc).into_owned()
+}
+
+/// Recovers the enhanced-RTMP capabilities from the `connect` command.
+///
+/// `rml_rtmp`'s `ServerSession` parses `connect` but keeps only `app`, discarding
+/// the codec-capability properties. So we run a second deserializer over the same
+/// bytes fed to the session and read them ourselves, stopping at the first
+/// `connect`. Feed it every chunk the session sees, in order.
+struct ConnectSniffer {
+	chunks: ChunkDeserializer,
+	codecs: Option<ClientCodecs>,
+}
+
+impl Default for ConnectSniffer {
+	fn default() -> Self {
+		Self {
+			chunks: ChunkDeserializer::new(),
+			codecs: None,
+		}
 	}
 }
 
-fn fourcc_name(fourcc: [u8; 4]) -> String {
-	String::from_utf8_lossy(&fourcc).into_owned()
+impl ConnectSniffer {
+	fn feed(&mut self, mut input: &[u8]) {
+		if self.codecs.is_some() {
+			return;
+		}
+		loop {
+			let payload = match self.chunks.get_next_message(input) {
+				Ok(Some(payload)) => payload,
+				Ok(None) => return,
+				Err(err) => {
+					tracing::debug!(%err, "failed to sniff RTMP connect capabilities");
+					self.codecs = Some(ClientCodecs::default());
+					return;
+				}
+			};
+			input = &[];
+
+			match payload.to_rtmp_message() {
+				// A client may shrink its chunk size before connect; keep in step.
+				Ok(RtmpMessage::SetChunkSize { size }) => {
+					if let Err(err) = self.chunks.set_max_chunk_size(size as usize) {
+						tracing::debug!(%err, "failed to track RTMP chunk size while sniffing connect");
+						self.codecs = Some(ClientCodecs::default());
+						return;
+					}
+				}
+				Ok(RtmpMessage::Amf0Command {
+					command_name,
+					command_object,
+					..
+				}) if command_name == "connect" => {
+					self.codecs = Some(ClientCodecs::from_connect_object(&command_object));
+					return;
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// The advertised codecs, defaulting to legacy if `connect` was malformed or
+	/// carried no enhanced properties.
+	fn codecs(&self) -> ClientCodecs {
+		self.codecs.clone().unwrap_or_default()
+	}
 }
 
 /// A bidirectional byte stream carrying an RTMP session.
@@ -639,7 +647,8 @@ pub struct Play<S = Conn> {
 	app: String,
 	stream_key: String,
 	peer: SocketAddr,
-	capabilities: ClientCapabilities,
+	/// The codecs this client advertised it can render, from its `connect`.
+	client_codecs: ClientCodecs,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
 	/// one. Zero (the default) drops stale groups aggressively; raise it with
 	/// [`with_latency`](Self::with_latency).
@@ -711,34 +720,10 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.with_latency(self.latency);
 
-		let codecs = tokio::select! {
-			biased;
-			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
-				res?;
-				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play codecs resolved");
-				return Ok(());
-			}
-			codecs = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, export.enhanced_codecs()) => {
-				match codecs {
-					Ok(Ok(codecs)) => codecs,
-					Ok(Err(e)) => return Err(e.into()),
-					Err(_) => {
-						tracing::debug!(peer = %self.peer, %path, "play FLV codec resolve timed out");
-						return self.reject("stream not available").await;
-					}
-				}
-			}
-		};
-		if let Some(codecs) = codecs
-			&& let Some(reason) = self.capabilities.unsupported_reason(codecs)
-		{
-			tracing::debug!(peer = %self.peer, %path, %reason, "rtmp play rejected for unsupported codecs");
-			return self.reject(&reason).await;
-		}
-
-		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
+		// Resolve the catalog and codec headers before Play.Start. Otherwise a
 		// broadcast that never produces a playable FLV header looks successful to the
-		// viewer but never emits media.
+		// viewer but never emits media. The first chunk is the FLV header, so once it
+		// lands the export's FourCC codecs are known.
 		let first_chunk = tokio::select! {
 			biased;
 			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
@@ -761,6 +746,15 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
+
+		// The header resolved, so the codecs are known without blocking. Reject a
+		// client that can't render an enhanced FourCC before we send Play.Start.
+		if let Some(codecs) = export.enhanced_codecs().await?
+			&& let Some(reason) = self.client_codecs.reject_reason(codecs)
+		{
+			tracing::debug!(peer = %self.peer, %path, %reason, "rtmp play rejected for unsupported codecs");
+			return self.reject(&reason).await;
+		}
 
 		// Tell the client playback is starting (Play.Reset / Play.Start + StreamBegin).
 		let results = self
@@ -823,14 +817,11 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 	let (mut session, initial) =
 		ServerSession::new(ServerSessionConfig::new()).map_err(|e| anyhow::anyhow!("rtmp session init: {e:?}"))?;
 	let mut work: VecDeque<ServerSessionResult> = VecDeque::from(initial);
-	let mut capabilities = ClientCapabilities::default();
-	let mut capabilities_parser = ConnectCapabilitiesParser::default();
+	let mut sniffer = ConnectSniffer::default();
 
 	// Any RTMP bytes bundled with the final handshake packet.
 	if !remaining.is_empty() {
-		if let Some(parsed) = capabilities_parser.observe(&remaining) {
-			capabilities = parsed;
-		}
+		sniffer.feed(&remaining);
 		let results = session
 			.handle_input(&remaining)
 			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
@@ -887,7 +878,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
-							capabilities,
+							client_codecs: sniffer.codecs(),
 							latency: Duration::ZERO,
 						})));
 					}
@@ -903,9 +894,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 		if n == 0 {
 			return Ok(None);
 		}
-		if let Some(parsed) = capabilities_parser.observe(&buffer[..n]) {
-			capabilities = parsed;
-		}
+		sniffer.feed(&buffer[..n]);
 		let results = session
 			.handle_input(&buffer[..n])
 			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
@@ -1595,12 +1584,16 @@ mod tests {
 
 	#[test]
 	fn parses_connect_fourcc_capabilities() {
+		const FOURCC_CAN_FORWARD: u32 = 0x04;
+
 		let mut properties = HashMap::new();
 		properties.insert("app".to_string(), Amf0Value::Utf8String("live".to_string()));
+		// Legacy combined list applies to both video and audio.
 		properties.insert(
 			"fourCcList".to_string(),
 			Amf0Value::StrictArray(vec![Amf0Value::Utf8String("av01".to_string())]),
 		);
+		// vp09 decodable; hvc1 present but with no capability bits set.
 		properties.insert(
 			"videoFourCcInfoMap".to_string(),
 			Amf0Value::Object(HashMap::from([
@@ -1608,6 +1601,7 @@ mod tests {
 				("hvc1".to_string(), Amf0Value::Number(0.0)),
 			])),
 		);
+		// A forward-only wildcard: nothing here can actually be rendered.
 		properties.insert(
 			"audioFourCcInfoMap".to_string(),
 			Amf0Value::Object(HashMap::from([(
@@ -1624,13 +1618,14 @@ mod tests {
 		let payload = message.into_message_payload(RtmpTimestamp::new(0), 0).unwrap();
 		let packet = ChunkSerializer::new().serialize(&payload, false, false).unwrap();
 
-		let mut parser = ConnectCapabilitiesParser::default();
-		let capabilities = parser.observe(&packet.bytes).expect("connect capabilities");
+		let mut sniffer = ConnectSniffer::default();
+		sniffer.feed(&packet.bytes);
+		let codecs = sniffer.codecs();
 
-		assert!(capabilities.supports_video(*b"av01"));
-		assert!(capabilities.supports_video(*b"vp09"));
-		assert!(!capabilities.supports_video(*b"hvc1"));
-		assert!(capabilities.supports_audio(*b"Opus"));
+		assert!(codecs.video.contains(*b"av01")); // from fourCcList
+		assert!(codecs.video.contains(*b"vp09")); // CanDecode
+		assert!(!codecs.video.contains(*b"hvc1")); // no capability bits
+		assert!(!codecs.audio.contains(*b"Opus")); // only CanForward, can't render
 	}
 
 	#[tokio::test]

@@ -161,8 +161,7 @@ impl Export {
 		kio::wait(|waiter| self.poll_enhanced_codecs(waiter)).await
 	}
 
-	/// Poll for the enhanced RTMP FourCC codecs this export will emit.
-	pub fn poll_enhanced_codecs(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<EnhancedCodecs>>> {
+	fn poll_enhanced_codecs(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<EnhancedCodecs>>> {
 		match ready!(self.poll_header_status(waiter))? {
 			HeaderStatus::Ready => Poll::Ready(Ok(Some(self.enhanced_codecs_now()))),
 			HeaderStatus::Unavailable => Poll::Ready(Ok(None)),
