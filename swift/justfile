@@ -22,7 +22,6 @@ package *args:
     bash scripts/package.sh {{ args }}
 
 # Remove SwiftPM build output plus the XCFramework and generated bindings
-
 # that scripts/check.sh lays down (see swift/.gitignore).
 clean:
     rm -rf .build .swiftpm Package.resolved Sources/MoqFFI/Generated.swift MoqFFI.xcframework

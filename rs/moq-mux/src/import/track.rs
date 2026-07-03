@@ -175,7 +175,7 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// Decode one whole frame.
-	pub fn decode<B: moq_net::AsBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> Result<()> {
+	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.kind {
 			TrackKind::Avc3 {
 				ref mut split,

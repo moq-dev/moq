@@ -42,7 +42,6 @@ build:
     bun run --filter='*' build
 
 # Remove node_modules and build output. The bun workspace spans the repo
-
 # (deps hoist to the root, not into js/), so sweep from the workspace root.
 clean:
     #!/usr/bin/env bash

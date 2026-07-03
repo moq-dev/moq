@@ -11,26 +11,22 @@ default:
 # Build moq-ffi for the host, run uniffi-bindgen-go, stage both the ffi and
 # wrapper modules into dist/ (wiring the wrapper to the local ffi via replace),
 # and run `go build`/`go vet`/`go test`. Skips cleanly if cargo, go, or
-
 # uniffi-bindgen-go is missing.
 check:
     bash scripts/check.sh
 
 # Stage the in-tree go/ffi source + per-target moq-ffi libs + generated
-
 # bindings into the moq-go-ffi module ready for publish.
 package-ffi *args:
     bash scripts/package-ffi.sh {{ args }}
 
 # Stage the in-tree go/wrapper source into the moq-go module, rewriting its
-
 # moq-go-ffi require to the target ffi version, ready for publish.
 package-wrapper *args:
     bash scripts/package-wrapper.sh {{ args }}
 
 # Remove the generated bindings, native libs, and vendoring that
 # scripts/check.sh produces in go/ (see go/.gitignore). The tmp staging
-
 # under the workspace dist/ is swept by `just js clean`.
 clean:
     rm -rf moq/moq.go moq/lib go.sum vendor
@@ -38,7 +34,6 @@ clean:
 # Full Go CI: `check` builds moq-ffi, regenerates bindings, runs go
 # vet/build/test. Takes a newline-separated list of changed files;
 # skips if FILES is non-empty and none match the Go scope. Run
-
 # `just go ci` (no FILES) to force-run.
 ci FILES="":
     #!/usr/bin/env bash

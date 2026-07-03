@@ -9,8 +9,10 @@ mod py
 mod kt
 mod swift
 mod go
+
 # Unit tests per language (`just test`).
 mod test
+
 # Demos and infra.
 mod demo
 mod infra
@@ -138,7 +140,6 @@ build:
 # .cargo/config.toml. The profile already optimizes for size; wasm-opt is
 # skipped since it didn't improve the gzipped (over-the-wire) size here.
 # Resolve the artifact via CARGO_TARGET_DIR so it also works on runners that
-
 # redirect the target directory (it defaults to `target`).
 wasm:
     cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
@@ -148,7 +149,6 @@ wasm:
 # Delete build artifacts and caches to reclaim disk space. Each language
 # owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this
 # orchestrates them, sweeps the caches no language owns, then recurses into
-
 # any agent worktrees under .claude/worktrees/.
 clean:
     #!/usr/bin/env bash

@@ -6,7 +6,7 @@ use std::task::{Poll, ready};
 use bytes::buf::UninitSlice;
 use bytes::{BufMut, Bytes};
 
-use crate::{AsBytes, Error, GroupInfo, Result, Timestamp};
+use crate::{IntoBytes, Error, GroupInfo, Result, Timestamp};
 
 /// Maximum payload size accepted for a single frame.
 ///
@@ -137,14 +137,20 @@ impl FrameBuf {
 			})
 	}
 
-	fn mutable(&self) -> &MutableFrameBuf {
+	/// The mutable buffer for partial and [`BufMut`] writes, lazily allocated.
+	///
+	/// Returns `None` once a whole-frame write has installed shared storage: the
+	/// frame is already complete, so there's no writable region left. A correct
+	/// [`BufMut`] caller never reaches that state (`remaining_mut` is 0), but we
+	/// return `None` rather than panic if one does.
+	fn mutable(&self) -> Option<&MutableFrameBuf> {
 		match self
 			.0
 			.storage
 			.get_or_init(|| FrameStorage::Mutable(MutableFrameBuf::new(self.capacity())))
 		{
-			FrameStorage::Shared(_) => unreachable!("finished shared frame cannot become mutable"),
-			FrameStorage::Mutable(buf) => buf,
+			FrameStorage::Shared(_) => None,
+			FrameStorage::Mutable(buf) => Some(buf),
 		}
 	}
 
@@ -233,7 +239,7 @@ impl FrameProducer {
 	/// Write a chunk of data to the frame.
 	///
 	/// Returns [Error::WrongSize] if the chunk would exceed the remaining bytes.
-	pub fn write<B: AsBytes>(&mut self, chunk: B) -> Result<()> {
+	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		let len = chunk.as_ref().len();
 		if len > self.remaining_mut() {
 			return Err(Error::WrongSize);
@@ -339,7 +345,16 @@ unsafe impl BufMut for FrameProducer {
 	fn chunk_mut(&mut self) -> &mut UninitSlice {
 		let written = self.buf.written(Ordering::Acquire);
 		let cap = self.buf.capacity();
-		let buf = self.buf.mutable();
+		let Some(buf) = self.buf.mutable() else {
+			// A whole-frame write already completed the frame via shared storage,
+			// so there's no writable region. `remaining_mut` is 0 here, so a
+			// well-behaved caller never advances into this empty slice; a misbehaving
+			// one trips the bounds `assert!` in `advance_mut`.
+			//
+			// Safety: a zero-length slice over a dangling-but-aligned pointer is
+			// never dereferenced.
+			return unsafe { UninitSlice::from_raw_parts_mut(std::ptr::NonNull::dangling().as_ptr(), 0) };
+		};
 		// Safety: writes to `[written..cap]` are unaliased — consumers only ever
 		// read `[..written]`, and we hold `&mut self`. The slice's lifetime is
 		// tied to `&mut self` by the function signature.
@@ -544,6 +559,28 @@ mod test {
 		let data = consumer.read_all().now_or_never().unwrap().unwrap();
 		assert_eq!(data, input);
 		assert_eq!(data.as_ptr(), input_ptr);
+	}
+
+	// A whole-frame write installs shared storage and completes the frame. Reaching
+	// for the BufMut region afterwards must not panic: there's simply nothing left
+	// to write.
+	#[test]
+	fn bufmut_after_whole_frame_write_does_not_panic() {
+		let mut producer = FrameInfo {
+			size: 3,
+			timestamp: Timestamp::ZERO,
+		}
+		.produce()
+		.unwrap();
+		producer.write(Bytes::from_static(b"abc")).unwrap();
+
+		assert_eq!(bytes::BufMut::remaining_mut(&producer), 0);
+		assert_eq!(bytes::BufMut::chunk_mut(&mut producer).len(), 0);
+
+		producer.finish().unwrap();
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"abc"));
 	}
 
 	#[test]

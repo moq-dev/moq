@@ -68,7 +68,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Decode a single VP9 frame (or superframe).
-	pub fn decode<B: moq_net::AsBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if frame.as_ref().is_empty() {
 			return Err(super::Error::EmptyFrame.into());
 		}

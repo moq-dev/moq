@@ -12,7 +12,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{AsBytes, Error, Result, Timescale, Timestamp, TrackInfo};
+use crate::{IntoBytes, Error, Result, Timescale, Timestamp, TrackInfo};
 
 use super::{FrameConsumer, FrameInfo, FrameProducer};
 
@@ -193,7 +193,7 @@ impl GroupProducer {
 	///
 	/// `timestamp` is converted into the parent track's timescale. Use
 	/// [Self::write_frame_now] to stamp wall-clock time instead of supplying one.
-	pub fn write_frame<B: AsBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
+	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
 		let mut frame = self.create_frame(FrameInfo {
 			size: data.as_ref().len() as u64,
 			timestamp,
@@ -206,7 +206,7 @@ impl GroupProducer {
 	/// Like [Self::write_frame] but stamps the frame with wall-clock now
 	/// ([`Timestamp::now`]). For data with no real presentation time of its own
 	/// (catalogs, JSON state) or sources whose protocol can't carry one.
-	pub fn write_frame_now<B: AsBytes>(&mut self, data: B) -> Result<()> {
+	pub fn write_frame_now<B: IntoBytes>(&mut self, data: B) -> Result<()> {
 		self.write_frame(Timestamp::now(), data)
 	}
 

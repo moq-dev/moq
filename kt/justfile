@@ -24,7 +24,6 @@ package *args:
     bash scripts/package.sh {{ args }}
 
 # Remove gradle output plus the moq-ffi bindings and native libs that
-
 # scripts/check.sh generates into the source tree (see kt/.gitignore).
 clean:
     #!/usr/bin/env bash
