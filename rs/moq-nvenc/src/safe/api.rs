@@ -2,10 +2,6 @@
 
 use core::ffi::{c_int, c_void};
 
-// The two NVENC entry points are linked directly only when not dynamically
-// loading; under `dynamic-loading` they're resolved via dlopen in `EncodeAPI::new`.
-#[cfg(not(feature = "dynamic-loading"))]
-use crate::sys::nvEncodeAPI::{NvEncodeAPICreateInstance, NvEncodeAPIGetMaxSupportedVersion};
 use crate::sys::nvEncodeAPI::{
 	GUID, NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION, NVENCSTATUS, NV_ENCODE_API_FUNCTION_LIST,
 	NV_ENCODE_API_FUNCTION_LIST_VER, NV_ENC_BUFFER_FORMAT, NV_ENC_CAPS_PARAM, NV_ENC_CREATE_BITSTREAM_BUFFER,
@@ -177,18 +173,12 @@ impl EncodeAPI {
 	fn new() -> Self {
 		const MSG: &str = "The API instance should populate the whole function list.";
 
-		// Resolve the two NVENC entry points. Normally they're linked directly;
-		// under `dynamic-loading` we dlopen libnvidia-encode so the binary works
-		// (and can fall back) on machines without the NVIDIA driver, and so a
-		// GPU-less builder needs no driver lib to link against.
+		// Resolve the two NVENC entry points by dlopen'ing libnvidia-encode, so the
+		// binary links on a GPU-less builder and starts (and can fall back) on
+		// machines without the NVIDIA driver.
 		type GetMaxVersion = unsafe extern "C" fn(*mut u32) -> NVENCSTATUS;
 		type CreateInstance = unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
 
-		#[cfg(not(feature = "dynamic-loading"))]
-		let (get_max_version, create_instance): (GetMaxVersion, CreateInstance) =
-			(NvEncodeAPIGetMaxSupportedVersion, NvEncodeAPICreateInstance);
-
-		#[cfg(feature = "dynamic-loading")]
 		let (get_max_version, create_instance): (GetMaxVersion, CreateInstance) = {
 			// The NVENC entry points live in the NVIDIA driver library, under
 			// different names per platform. `.so.1` is the versioned SONAME present
@@ -198,11 +188,11 @@ impl EncodeAPI {
 			const CANDIDATES: &[&str] = &["libnvidia-encode.so.1", "libnvidia-encode.so"];
 			#[cfg(target_os = "windows")]
 			const CANDIDATES: &[&str] = &["nvEncodeAPI64.dll", "nvEncodeAPI.dll"];
+			// No NVIDIA encode library exists on other platforms (e.g. macOS). The
+			// crate still compiles there (nothing calls this off Linux/Windows); if it
+			// ever were reached, the dlopen below finds nothing and panics clearly.
 			#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-			const CANDIDATES: &[&str] = {
-				compile_error!("the `dynamic-loading` feature is only supported on Linux and Windows");
-				&[]
-			};
+			const CANDIDATES: &[&str] = &[];
 
 			// SAFETY: loading the NVIDIA driver library runs its initializers,
 			// which is sound here. The handle is leaked to `'static` and never
