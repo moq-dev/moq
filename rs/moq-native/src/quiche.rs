@@ -109,7 +109,6 @@ pub(crate) struct QuicheClient {
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	pub max_streams: u64,
-	pub versions: moq_net::Versions,
 }
 
 impl QuicheClient {
@@ -119,11 +118,10 @@ impl QuicheClient {
 			verification: config.tls.verification()?,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
-			versions: config.versions(),
 		})
 	}
 
-	pub async fn connect(&self, url: Url) -> Result<web_transport_quiche::Connection> {
+	pub async fn connect(&self, url: Url, versions: &moq_net::Versions) -> Result<web_transport_quiche::Connection> {
 		use crate::tls::Verification;
 
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
@@ -153,12 +151,7 @@ impl QuicheClient {
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => self
-				.versions
-				.alpns()
-				.iter()
-				.map(|alpn| alpn.as_bytes().to_vec())
-				.collect(),
+			"moqt" | "moql" => versions.alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => return Err(Error::InvalidScheme),
 		};
 
@@ -201,7 +194,7 @@ impl QuicheClient {
 		tracing::debug!(%url, "connecting via quiche");
 
 		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
-		for alpn in self.versions.alpns() {
+		for alpn in versions.alpns() {
 			request = request.with_protocol(alpn.to_string());
 		}
 

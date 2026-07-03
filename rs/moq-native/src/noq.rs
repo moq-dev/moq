@@ -121,7 +121,6 @@ pub(crate) struct NoqClient {
 	pub transport: Arc<noq::TransportConfig>,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
-	pub versions: moq_net::Versions,
 }
 
 impl NoqClient {
@@ -152,11 +151,15 @@ impl NoqClient {
 			quic,
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
-			versions: config.versions(),
 		})
 	}
 
-	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> Result<web_transport_noq::Session> {
+	pub async fn connect(
+		&self,
+		tls: &rustls::ClientConfig,
+		url: Url,
+		versions: &moq_net::Versions,
+	) -> Result<web_transport_noq::Session> {
 		let mut url = url;
 		let mut config = tls.clone();
 
@@ -209,12 +212,7 @@ impl NoqClient {
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_noq::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => self
-				.versions
-				.alpns()
-				.iter()
-				.map(|alpn| alpn.as_bytes().to_vec())
-				.collect(),
+			"moqt" | "moql" => versions.alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => return Err(Error::InvalidScheme),
 		};
 
@@ -231,7 +229,7 @@ impl NoqClient {
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_noq::proto::ConnectRequest::new(url.clone());
-		for alpn in self.versions.alpns() {
+		for alpn in versions.alpns() {
 			request = request.with_protocol(alpn.to_string());
 		}
 

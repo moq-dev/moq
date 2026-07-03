@@ -105,6 +105,10 @@ impl Default for ClientConfig {
 #[derive(Clone)]
 pub struct Client {
 	moq: moq_net::Client,
+	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
+	/// every transport (passed into the QUIC backends' `connect` and used directly for
+	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
+	/// can't diverge between transports.
 	versions: moq_net::Versions,
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -367,7 +371,7 @@ impl Client {
 		if let Some(noq) = self.noq.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { noq.connect(&tls, quic_url).await.map_err(Error::from) };
+			let quic_handle = async { noq.connect(&tls, quic_url, &self.versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
@@ -385,7 +389,7 @@ impl Client {
 		if let Some(quinn) = self.quinn.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { quinn.connect(&tls, quic_url).await.map_err(Error::from) };
+			let quic_handle = async { quinn.connect(&tls, quic_url, &self.versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
@@ -402,7 +406,7 @@ impl Client {
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
 			let quic_url = url.clone();
-			let quic_handle = async { quiche.connect(quic_url).await.map_err(Error::from) };
+			let quic_handle = async { quiche.connect(quic_url, &self.versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
