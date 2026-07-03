@@ -243,11 +243,12 @@ mod tests {
 			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
 			payload.extend_from_slice(nal);
 		}
-		let frame = crate::container::Frame::new(
-			moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
-			payload.freeze(),
-			false,
-		);
+		let frame = crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+			duration: None,
+			payload: payload.freeze(),
+			keyframe: false,
+		};
 		<crate::catalog::hang::Container as crate::container::Container>::write(
 			&crate::catalog::hang::Container::Legacy,
 			group,

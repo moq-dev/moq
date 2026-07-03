@@ -71,18 +71,6 @@ pub struct Frame {
 	pub keyframe: bool,
 }
 
-impl Frame {
-	/// Build a frame with no explicit duration.
-	pub fn new(timestamp: moq_net::Timestamp, payload: Bytes, keyframe: bool) -> Self {
-		Self {
-			timestamp,
-			duration: None,
-			payload,
-			keyframe,
-		}
-	}
-}
-
 /// A non-keyframe frame arrived with no open group.
 ///
 /// A track must open with a keyframe (and so must the frame after
