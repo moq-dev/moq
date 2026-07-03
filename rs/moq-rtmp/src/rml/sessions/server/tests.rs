@@ -106,6 +106,7 @@ fn can_accept_connection_request() {
 		ServerSessionEvent::ConnectionRequested {
 			ref app_name,
 			request_id,
+			..
 		} if app_name == "some_app" => request_id,
 		_ => panic!("First event was not as expected: {:?}", events[0]),
 	};
@@ -189,6 +190,7 @@ fn connect_request_strips_trailing_slash() {
 		ServerSessionEvent::ConnectionRequested {
 			ref app_name,
 			request_id: _,
+			..
 		} => assert_eq!(app_name, "some_app", "Unexpected app name"),
 		_ => panic!("First event was not as expected: {:?}", events[0]),
 	};
@@ -214,6 +216,7 @@ fn accepted_connection_responds_with_same_object_encoding_value_as_connection_re
 		ServerSessionEvent::ConnectionRequested {
 			ref app_name,
 			request_id,
+			..
 		} if app_name == "some_app" => request_id,
 		_ => panic!("First event was not as expected: {:?}", events[0]),
 	};
@@ -1368,6 +1371,7 @@ fn perform_connection(
 		ServerSessionEvent::ConnectionRequested {
 			ref app_name,
 			request_id,
+			..
 		} if app_name == "some_app" => request_id,
 		_ => panic!("First event was not as expected: {:?}", events[0]),
 	};

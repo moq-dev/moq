@@ -260,6 +260,128 @@ async fn import_legacy_mp3() {
 	assert!(a.description.is_none(), "MP3 config is in band");
 }
 
+/// A minimal avcC like [`avcc`], but with a caller-chosen level byte so two video
+/// renditions carry distinct codec configs.
+fn avcc_level(level: u8) -> Vec<u8> {
+	let sps = [0x67u8, 0x42, 0xc0, level];
+	let mut out = vec![0x01, 0x42, 0xc0, level, 0xff, 0xe1, 0x00, sps.len() as u8];
+	out.extend_from_slice(&sps);
+	out.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+	out
+}
+
+/// Build one enhanced-RTMP multitrack video tag body: the ex-header + framing
+/// byte, the shared FourCC (unless per-track), then each track's optional FourCC,
+/// one-byte id, UI24 size (omitted for `OneTrack`), and payload.
+fn multitrack_video_body(
+	frame_type: u8,
+	multitrack_type: u8,
+	packet_type: u8,
+	shared_fourcc: Option<&[u8; 4]>,
+	tracks: &[(u8, [u8; 4], Vec<u8>)],
+) -> Vec<u8> {
+	let mut body = vec![super::VIDEO_EX_HEADER | (frame_type << 4) | super::VIDEO_PACKET_MULTITRACK];
+	body.push((multitrack_type << 4) | packet_type);
+	if let Some(fourcc) = shared_fourcc {
+		body.extend_from_slice(fourcc);
+	}
+	for (track_id, fourcc, payload) in tracks {
+		if shared_fourcc.is_none() {
+			body.extend_from_slice(fourcc);
+		}
+		body.push(*track_id);
+		if multitrack_type != super::MULTITRACK_ONE_TRACK {
+			body.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]); // UI24 size
+		}
+		body.extend_from_slice(payload);
+	}
+	body
+}
+
+/// A `ManyTracks` multitrack tag (several length-prefixed tracks sharing one
+/// codec in a single tag) demuxes into one rendition per track id.
+#[tokio::test(start_paused = true)]
+async fn import_multitrack_video_many_tracks() {
+	let (avcc0, avcc1) = (avcc_level(0x1f), avcc_level(0x1e));
+
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x01); // video only
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	// Two-track SequenceStart sharing the avc1 codec.
+	let seq = multitrack_video_body(
+		super::FRAME_TYPE_KEY,
+		super::MULTITRACK_MANY_TRACKS,
+		super::VIDEO_PACKET_SEQUENCE_START,
+		Some(b"avc1"),
+		&[(0, *b"avc1", avcc0.clone()), (1, *b"avc1", avcc1.clone())],
+	);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+
+	// Two-track CodedFrames: avc1 prefixes a 3-byte composition time (zero here).
+	let nalu0 = vec![0, 0, 0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let nalu1 = vec![0, 0, 0, 0, 0, 5, 0x65, 0x11, 0x22, 0x33, 0x44];
+	let frames = multitrack_video_body(
+		super::FRAME_TYPE_KEY,
+		super::MULTITRACK_MANY_TRACKS,
+		super::VIDEO_PACKET_CODED_FRAMES,
+		Some(b"avc1"),
+		&[(0, *b"avc1", nalu0), (1, *b"avc1", nalu1)],
+	);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frames);
+
+	let mut producer = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.clone());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	assert_eq!(snap.video.renditions.len(), 2, "one rendition per multitrack track id");
+	let mut descriptions: Vec<Vec<u8>> = snap
+		.video
+		.renditions
+		.values()
+		.filter_map(|c| c.description.as_ref().map(|b| b.to_vec()))
+		.collect();
+	descriptions.sort();
+	let mut want = vec![avcc0, avcc1];
+	want.sort();
+	assert_eq!(descriptions, want, "each track keeps its own avcC");
+}
+
+/// A `ManyTracksManyCodecs` tag carries a FourCC per track; both are demuxed.
+#[tokio::test(start_paused = true)]
+async fn import_multitrack_video_many_codecs() {
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x01);
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	// Two tracks, each carrying its own FourCC (both avc1 here for a simple config).
+	let seq = multitrack_video_body(
+		super::FRAME_TYPE_KEY,
+		super::MULTITRACK_MANY_TRACKS_MANY_CODECS,
+		super::VIDEO_PACKET_SEQUENCE_START,
+		None,
+		&[(0, *b"avc1", avcc_level(0x1f)), (1, *b"avc1", avcc_level(0x1e))],
+	);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+
+	let mut producer = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.clone());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_rejects_non_flv() {
 	let mut producer = moq_net::Broadcast::new().produce();

@@ -503,6 +503,13 @@ impl ServerSession {
 			None => 0.0,
 		};
 
+		// Enhanced-RTMP capsEx: a numeric capability bitmask. Absent (or a
+		// non-number) means a legacy client with no advertised capabilities.
+		let caps_ex = match properties.remove("capsEx") {
+			Some(Amf0Value::Number(number)) if number >= 0.0 => number as u32,
+			_ => 0,
+		};
+
 		let request = OutstandingRequest::ConnectionRequest {
 			app_name: app_name.clone(),
 			transaction_id,
@@ -515,6 +522,7 @@ impl ServerSession {
 		let event = ServerSessionEvent::ConnectionRequested {
 			app_name: app_name,
 			request_id: request_number,
+			caps_ex,
 		};
 
 		Ok(vec![ServerSessionResult::RaisedEvent(event)])

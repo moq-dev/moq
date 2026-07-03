@@ -328,6 +328,200 @@ async fn export_roundtrips_mp3() {
 	assert_eq!(a.channel_count, 2);
 }
 
+/// A minimal avcC like [`avcc`], but with a caller-chosen level byte so two video
+/// renditions carry distinct codec configs.
+fn avcc_level(level: u8) -> Vec<u8> {
+	let sps = [0x67u8, 0x42, 0xc0, level];
+	let mut out = vec![0x01, 0x42, 0xc0, level, 0xff, 0xe1, 0x00, sps.len() as u8];
+	out.extend_from_slice(&sps);
+	out.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+	out
+}
+
+/// Producer handles that keep a built broadcast open (and its finished tracks
+/// subscribable) until dropped, which then lets the exporter reach end-of-stream.
+type Keepalive = (
+	moq_net::BroadcastProducer,
+	crate::catalog::Producer,
+	Vec<crate::container::Producer<crate::catalog::hang::Container>>,
+);
+
+/// Build a broadcast with two H.264 video renditions plus one AAC audio rendition,
+/// each with a single keyframe, so multitrack export has several tracks to mux.
+fn build_multitrack_broadcast() -> (moq_net::BroadcastConsumer, Vec<Vec<u8>>, Keepalive) {
+	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+
+	use crate::container::{Producer, Timestamp};
+
+	let mut producer = moq_net::Broadcast::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	// A finished track stays subscribable only while its producer is alive, so keep
+	// each one until the exporter has drained.
+	let mut tracks = Vec::new();
+
+	let descriptions: Vec<Vec<u8>> = vec![avcc_level(0x1f), avcc_level(0x1e)];
+	for description in &descriptions {
+		let track = producer
+			.create_track(moq_net::Track::new(producer.unique_name(".avc1")))
+			.unwrap();
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: description[3],
+			inline: false,
+		});
+		config.container = Container::Legacy;
+		config.description = Some(Bytes::from(description.clone()));
+		catalog.lock().video.renditions.insert(track.name().to_string(), config);
+
+		let mut video = Producer::new(track, crate::catalog::hang::Container::Legacy);
+		video
+			.write(crate::container::Frame {
+				timestamp: Timestamp::from_millis(0).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
+				keyframe: true,
+			})
+			.unwrap();
+		video.finish().unwrap();
+		tracks.push(video);
+	}
+
+	let audio_track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".aac")))
+		.unwrap();
+	let mut audio_config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	audio_config.container = Container::Legacy;
+	audio_config.description = Some(Bytes::from_static(&ASC));
+	catalog
+		.lock()
+		.audio
+		.renditions
+		.insert(audio_track.name().to_string(), audio_config);
+	let mut audio = crate::container::Producer::new(audio_track, crate::catalog::hang::Container::Legacy);
+	audio
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0xde, 0xad]),
+			keyframe: true,
+		})
+		.unwrap();
+	audio.finish().unwrap();
+	tracks.push(audio);
+	catalog.finish().unwrap();
+
+	// Keep the broadcast, catalog, and track producers alive so the exporter can
+	// subscribe; the caller drops them mid-drain to signal end-of-stream.
+	(consumer, descriptions, (producer, catalog, tracks))
+}
+
+/// Drive the exporter to completion, dropping the producer handles on the first
+/// stall so it can reach end-of-stream (the already-published groups stay readable).
+async fn drain_to_end(mut exporter: Export, keepalive: Keepalive) -> Vec<u8> {
+	let mut exported = Vec::new();
+	let mut keepalive = Some(keepalive);
+	for _ in 0..64 {
+		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
+			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
+			Ok(Ok(None)) => break,
+			Ok(Err(e)) => panic!("exporter error: {e}"),
+			Err(_) => keepalive = None, // close the broadcast so the exporter can EOS
+		}
+	}
+	drop(keepalive);
+	exported
+}
+
+/// With multitrack enabled, every rendition is muxed as an enhanced-RTMP
+/// multitrack track and survives an export -> import round trip. Without it, only
+/// the first video rendition is muxed.
+#[tokio::test(start_paused = true)]
+async fn export_multitrack_roundtrips_all_renditions() {
+	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
+
+	let exporter = Export::new(consumer).unwrap().with_multitrack(true);
+	let exported = drain_to_end(exporter, keepalive).await;
+
+	assert_eq!(&exported[0..3], b"FLV");
+
+	// Every video media tag uses the multitrack framing (packet type 5, OneTrack),
+	// and both track ids show up.
+	let tags = parse_tags(&exported);
+	let mut video_track_ids: Vec<u8> = tags
+		.iter()
+		.filter(|t| {
+			t.tag_type == super::TAG_VIDEO
+				&& t.body[0] & super::VIDEO_EX_HEADER != 0
+				&& t.body[0] & 0x0f == super::VIDEO_PACKET_MULTITRACK
+				&& t.body[1] & 0x0f == super::VIDEO_PACKET_CODED_FRAMES
+				&& &t.body[2..6] == b"avc1"
+		})
+		.map(|t| t.body[6])
+		.collect();
+	video_track_ids.sort_unstable();
+	video_track_ids.dedup();
+	assert_eq!(video_track_ids, vec![0, 1], "expected two multitrack video track ids");
+
+	// Re-import and confirm both video renditions plus the audio rebuild.
+	let mut bcast2 = moq_net::Broadcast::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.clone());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	let snap = cat2.snapshot();
+	assert_eq!(
+		snap.video.renditions.len(),
+		2,
+		"both video renditions should round-trip"
+	);
+	assert_eq!(snap.audio.renditions.len(), 1);
+
+	// Both distinct avcC descriptions survive.
+	let mut got: Vec<Vec<u8>> = snap
+		.video
+		.renditions
+		.values()
+		.filter_map(|c| c.description.as_ref().map(|b| b.to_vec()))
+		.collect();
+	got.sort();
+	let mut want = descriptions.clone();
+	want.sort();
+	assert_eq!(got, want, "each rendition should keep its own avcC");
+}
+
+/// Without multitrack, a multi-rendition broadcast exports only the first video
+/// rendition (the single-track fallback for a legacy player).
+#[tokio::test(start_paused = true)]
+async fn export_without_multitrack_keeps_first_rendition() {
+	let (consumer, _, keepalive) = build_multitrack_broadcast();
+
+	let exporter = Export::new(consumer).unwrap();
+	let exported = drain_to_end(exporter, keepalive).await;
+
+	// No multitrack framing: the single video track is a legacy AVC tag.
+	let tags = parse_tags(&exported);
+	assert!(
+		tags.iter()
+			.all(|t| !(t.tag_type == super::TAG_VIDEO && t.body[0] & 0x0f == super::VIDEO_PACKET_MULTITRACK)),
+		"single-track export must not use multitrack framing"
+	);
+
+	let mut bcast2 = moq_net::Broadcast::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.clone());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	assert_eq!(
+		cat2.snapshot().video.renditions.len(),
+		1,
+		"only one rendition without multitrack"
+	);
+}
+
 struct ParsedTag {
 	tag_type: u8,
 	timestamp: u32,

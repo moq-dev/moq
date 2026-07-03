@@ -24,8 +24,14 @@ pub enum ServerSessionEvent {
 	/// The client is changing the maximum size of the RTMP chunks they will be sending
 	ClientChunkSizeChanged { new_chunk_size: u32 },
 
-	/// The client is requesting a connection on the specified RTMP application name
-	ConnectionRequested { request_id: u32, app_name: String },
+	/// The client is requesting a connection on the specified RTMP application name.
+	/// `caps_ex` is the enhanced-RTMP `capsEx` capability bitmask the client
+	/// advertised in its `connect` command object (0 if absent).
+	ConnectionRequested {
+		request_id: u32,
+		app_name: String,
+		caps_ex: u32,
+	},
 
 	/// The client is requesting a stream key be released for use.
 	ReleaseStreamRequested {

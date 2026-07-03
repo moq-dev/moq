@@ -62,6 +62,7 @@ pub struct ClientSession {
 	peer_window_ack_size: Option<u32>,
 	bytes_received: u64,
 	bytes_received_since_last_ack: u32,
+	connect_request_properties: HashMap<String, Amf0Value>,
 }
 
 impl ClientSession {
@@ -82,6 +83,7 @@ impl ClientSession {
 			peer_window_ack_size: None,
 			bytes_received: 0,
 			bytes_received_since_last_ack: 0,
+			connect_request_properties: HashMap::new(),
 			config,
 		};
 
@@ -166,6 +168,16 @@ impl ClientSession {
 		Ok(results)
 	}
 
+	/// Sets extra name-value pairs to include in the `connect` command object,
+	/// alongside `app` / `flashVer` / `objectEncoding`. This lets a client
+	/// advertise enhanced-RTMP capabilities (e.g. `capsEx`) to the server.
+	///
+	/// Must be called before `request_connection`. Keys here override the built-in
+	/// properties if they collide.
+	pub fn set_connect_request_properties(&mut self, properties: HashMap<String, Amf0Value>) {
+		self.connect_request_properties = properties;
+	}
+
 	/// Forms an RTMP message requesting a connection to the specified application on the server.
 	/// An event will be raised when the request is accepted or rejected.
 	pub fn request_connection(&mut self, app_name: String) -> Result<ClientSessionResult, ClientSessionError> {
@@ -197,6 +209,11 @@ impl ClientSession {
 			}
 			None => (),
 		};
+
+		// Caller-supplied properties (e.g. capsEx) override the built-ins on collision.
+		for (key, value) in self.connect_request_properties.drain() {
+			properties.insert(key, value);
+		}
 
 		let message = RtmpMessage::Amf0Command {
 			command_name: "connect".to_string(),
