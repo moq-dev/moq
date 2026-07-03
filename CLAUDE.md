@@ -72,9 +72,7 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 ## Development Tips
 
 1. The project uses `just` as the task runner - check `justfile` for all available commands
-2. For Rust development, the workspace is configured in the root `Cargo.toml`
-3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
-4. Consult `doc/` for documentation and the [IETF datatracker](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for specification drafts when working on protocol-level code
+2. Consult `doc/` for documentation and the [IETF datatracker](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for specification drafts when working on protocol-level code
 
 ## Writing Style
 
@@ -91,8 +89,7 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 
 Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `--help`, and doc comments should describe only the current/canonical surface, so a reader is steered to the right thing and never learns the dead one. Keep the deprecated path *working* but invisible:
 
-- A deprecated CLI flag stays a hidden alias (clap `alias = "..."`, or a separate `#[arg(..., hide = true)]` when it needs its own deprecation warning). No `--help` entry, no "deprecated, use X" note in the doc comment.
-- A deprecated public item gets `#[doc(hidden)]` (Rust) / `@internal` or omission (JS) so it drops off the published docs.
+- Hide the deprecated symbol from every published surface: no `--help` entry, no "deprecated, use X" note in its doc comment, and drop it from the generated API docs. The per-language mechanics (clap hidden aliases, `#[doc(hidden)]`, `@internal`) live in [`rs/CLAUDE.md`](rs/CLAUDE.md) and [`js/CLAUDE.md`](js/CLAUDE.md).
 - Remove the example invocations and prose that mention it from `/doc`.
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. A runtime warning when someone *uses* the deprecated path is fine (it fires on use, it isn't documentation); a standing note that advertises the dead name is not.
@@ -115,21 +112,15 @@ Favor composable building blocks over one-off functions. A handful of orthogonal
 
 **Let the type system do the heavy lifting; make misuse unrepresentable rather than merely documented.** A compile error beats a runtime check beats a doc-comment warning. Encode the rules in types so the wrong call simply doesn't compile:
 
-- **Make terminal operations consume `self`** (e.g. `fn close(self)`) so use-after-close can't be expressed, rather than taking `&mut self` and tracking a `closed` flag.
 - Prefer enums/newtypes over stringly-typed or primitive args so invalid combinations don't typecheck.
 - Use the typestate / builder pattern when an object is only valid in certain states, so a half-built or out-of-order call is a compile error.
-- Return owned handles whose `Drop` does the cleanup instead of asking callers to remember a teardown call.
 
 Then future-proof what you do expose so additions don't force a breaking change:
 
-- **Config structs consumers construct with `pub` fields**: add `#[non_exhaustive]` and a `Default` or constructor. New optional fields then stay additive (callers build via `default()`/`new()` + field set, not struct literals). Prefer adding a field to an existing `#[non_exhaustive]` config over adding a function parameter. This applies only when the struct exposes `pub` fields, since `#[non_exhaustive]` is what blocks the struct-literal path. A struct with all-private fields built through a builder (`default()` + chained `.with_x()` methods) already prevents struct literals, so `#[non_exhaustive]` is redundant there; don't add it.
-- **Take an options struct/object, not positional parameters, whenever a function or constructor could plausibly gain more knobs later.** A single `Config`/options bag (Rust struct, TS interface) lets you add fields without changing the signature; positional params force a breaking change (or an awkward `(track, undefined, opts)` call) the moment a second option shows up. Reach for it even when there's only one option today: a lone `compression: bool` arg is a future breaking change waiting to happen, whereas `Config { compression }` absorbs the next field for free. This applies in both languages, not just where `#[non_exhaustive]` does.
-- **Public enums that may gain variants**: add `#[non_exhaustive]` so external `match`es keep compiling.
-- **Name by role, not by today's only implementation** (`capture::Config`, `publish_capture`, not `CameraConfig`/`publish_camera`) so a second implementation slots in without a rename. Don't bundle generic options under a specific-case name.
-- **Namespace with modules; keep type names short.** Split a growing crate into role modules (`capture`, `encode`, `decode`) and let each own short, unprefixed names. The module already supplies the prefix, so `encode::Config` beats `EncoderConfig` and `encode::Producer` beats `VideoProducer`. But don't nest a module whose name echoes its main type: `encode::encoder::Encoder` stutters; re-export the type flat so it reads `encode::Encoder`. Re-export the public types at the role-module level (`pub use encoder::{Encoder, Config}`) and keep the file-level module (`mod encoder`) private.
+- **Take an options struct/object, not positional parameters, whenever a function or constructor could plausibly gain more knobs later.** A single `Config`/options bag (Rust struct, TS interface) lets you add fields without changing the signature; positional params force a breaking change (or an awkward `(track, undefined, opts)` call) the moment a second option shows up. Reach for it even when there's only one option today: a lone `compression: bool` arg is a future breaking change waiting to happen, whereas `Config { compression }` absorbs the next field for free. This applies in both languages. In Rust, `#[non_exhaustive]` is what keeps those additions non-breaking; see the [`rs/CLAUDE.md`](rs/CLAUDE.md) Rust conventions for when to reach for it (and for enum variants and builders).
 - **Don't leak a third-party type** (`ffmpeg_next`, etc.) in a signature unless the crate is explicitly a thin wrapper. If you must, re-export the dependency and document that a major bump is a breaking change; keep the recommended high-level path free of it.
 
-This applies whenever you add or widen a `pub` item, especially in library crates (`rs/moq-*`, `js/*`) with the [Branch Targeting](#branch-targeting) breaking-change rules.
+This applies whenever you add or widen a `pub` item, especially in library crates (`rs/moq-*`, `js/*`) with the [Branch Targeting](#branch-targeting) breaking-change rules. Language-specific encodings of these rules (Rust `self`-consuming terminal methods, `Drop` cleanup handles, role-based module namespacing) live in the per-directory guides.
 
 ## Tooling
 
@@ -144,8 +135,6 @@ Language-specific tooling (TypeScript/`bun`/Biome, JS async patterns, Web Compon
 
 - Run `just check` to execute all tests and linting.
 - Run `just fix` to automatically fix formating and easy things.
-- Rust tests are integrated within source files
-- Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
 
 ## Cross-Package Sync
 

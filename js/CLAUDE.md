@@ -68,6 +68,7 @@ Plain custom elements built directly on `@moq/signals`, no framework (except moq
 
 - ESM only (`"type": "module"`). Relative imports include the `.ts`/`.tsx` extension in the lower-level packages (`net`, `signals`, `hang`); `rewriteRelativeImportExtensions` in `tsconfig.json` rewrites them to `.js` on build. Some higher-level packages (watch/publish) still omit extensions, so match the file you are editing.
 - Document every exported symbol and add a top-of-file `@module` doc block to each entrypoint (root convention; the published JSR/`.d.ts` docs render these). Use `@public` on the load-bearing classes.
+- **Deprecation mechanics** (root Deprecation explains the why): mark a deprecated export `@internal` or drop it from the entrypoint re-exports so it falls off the published JSR/`.d.ts` docs. No "deprecated, use X" note in its doc comment.
 - Build is per-package: `tsc -b` (or `vite build` for the bundled UI/web-component packages) then `bun ../common/package.ts`, which rewrites `package.json` exports from `./src/*.ts` to built `./*.js`/`.d.ts` and runs `publint`. Release via `bun ../common/release.ts`.
 
 ## Tooling and testing
