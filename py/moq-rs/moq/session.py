@@ -1,4 +1,4 @@
-"""Session wrapper — an established MoQ connection."""
+"""Session wrapper for an established MoQ connection."""
 
 from __future__ import annotations
 

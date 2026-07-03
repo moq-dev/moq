@@ -410,6 +410,13 @@ def test_public_api_exports():
     assert hasattr(moq.Error, "Cancelled")
     assert callable(moq.log_level)
     assert isinstance(moq.connect("https://example.com"), moq.Client)
+    client = moq.connect(
+        "https://example.com",
+        tls_roots=["root.pem"],
+        tls_fingerprints=["abc123"],
+    )
+    assert client._tls_roots == ["root.pem"]
+    assert client._tls_fingerprints == ["abc123"]
 
 
 async def test_subscribe_media_default_latency_and_context_manager():

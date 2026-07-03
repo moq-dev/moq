@@ -1,4 +1,4 @@
-"""Server wrapper — accept incoming sessions with automatic origin wiring."""
+"""Server wrapper for accepting incoming sessions with automatic origin wiring."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ Transport = Literal["quic", "iroh", "websocket"]
 
 
 class Request:
-    """Wraps MoqRequest — an incoming session that can be accepted or rejected.
+    """Wraps MoqRequest, an incoming session that can be accepted or rejected.
 
     Use `await request.ok()` to complete the handshake, or
     `await request.close(code)` to reject with an HTTP status code.

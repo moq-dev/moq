@@ -1,4 +1,4 @@
-"""Consumer wrappers — subscribe to broadcasts, catalogs, and media tracks."""
+"""Consumer wrappers for broadcasts, catalogs, and media tracks."""
 
 from __future__ import annotations
 
@@ -194,7 +194,7 @@ class BroadcastConsumer:
         return CatalogConsumer(await self._inner.subscribe_catalog())
 
     async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:
-        """Subscribe to a track — receive arbitrary byte payloads.
+        """Subscribe to a track and receive arbitrary byte payloads.
 
         ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
         """
@@ -231,7 +231,7 @@ class BroadcastConsumer:
         ``catalog_audio`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by
         ``catalog.audio[name]``). Use ``output.latency_max_ms`` to
-        control how aggressively stalled groups get skipped — that's
+        control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)
         """

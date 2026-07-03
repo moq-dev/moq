@@ -1,4 +1,4 @@
-"""Origin wrappers — manage announcements and broadcast discovery."""
+"""Origin wrappers for announcements and broadcast discovery."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .subscribe import BroadcastConsumer
 
 
 class Announcement:
-    """Wraps MoqAnnouncement — a discovered broadcast."""
+    """Wraps MoqAnnouncement, a discovered broadcast."""
 
     def __init__(self, inner: MoqAnnouncement) -> None:
         self._inner = inner
@@ -54,7 +54,7 @@ class Announced:
 
 
 class AnnouncedBroadcast:
-    """Wraps MoqAnnouncedBroadcast — awaitable for a specific broadcast."""
+    """Wraps MoqAnnouncedBroadcast, awaitable for a specific broadcast."""
 
     def __init__(self, inner: MoqAnnouncedBroadcast) -> None:
         self._inner = inner
