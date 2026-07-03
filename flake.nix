@@ -87,6 +87,8 @@
             libressl
             ffmpeg
             curl
+            # MPEG-TS validation (tsp, tsanalyze) for the ts-compliance harness.
+            tsduck
             cargo-sort
             cargo-shear
             cargo-edit
