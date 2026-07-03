@@ -39,6 +39,8 @@ const trackShape = {
 	initData: z.optional(z.string()),
 	renderGroup: z.optional(z.number()),
 	altGroup: z.optional(z.number()),
+	maxGrpSapStartingType: z.optional(z.number()),
+	maxObjSapStartingType: z.optional(z.number()),
 
 	// Non-standard: maximum delay (ms) between consecutive frames on this track.
 	// The player's buffer must be at least this large to avoid underruns.
@@ -96,7 +98,8 @@ export function encode(catalog: Catalog): Uint8Array {
 
 	const tracks = catalog.tracks.map((track) => {
 		const { initData, ...rest } = track;
-		if (initData === undefined) return rest;
+		const wireTrack = { ...rest, isLive: rest.isLive ?? false };
+		if (initData === undefined) return wireTrack;
 
 		let id = ids.get(initData);
 		if (id === undefined) {
@@ -104,7 +107,7 @@ export function encode(catalog: Catalog): Uint8Array {
 			initDataList.push({ id, type: "inline", data: initData });
 			ids.set(initData, id);
 		}
-		return { ...rest, initRef: id };
+		return { ...wireTrack, initRef: id };
 	});
 
 	const wire: Record<string, unknown> = { version: VERSION, tracks };
@@ -124,6 +127,8 @@ export function decode(raw: Uint8Array): Catalog {
 		const inline = new Map((wire.initDataList ?? []).filter((e) => e.type === "inline").map((e) => [e.id, e.data]));
 
 		const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
+			track.isLive ??= false;
+
 			// Resolve draft-01 initRef into inline initData so callers never see
 			// the indirection. Inline initData (draft-00) is left untouched.
 			if (track.initData === undefined && initRef !== undefined) {

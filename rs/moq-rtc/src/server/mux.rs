@@ -28,7 +28,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::Result;
-use crate::session::{Packet, SESSION_INBOX};
+use crate::session::{Packet, SESSION_INBOX, advertised_candidates};
 
 /// Per-session routing table, shared between the demux task and the accept path.
 #[derive(Default)]
@@ -75,20 +75,11 @@ impl Drop for Registration {
 impl Mux {
 	/// Bind the shared socket to `udp_bind` and spawn the demux task. The
 	/// advertised candidates are `ice_candidates` (each reusing the socket's
-	/// real port), or the bound address itself when none are configured.
+	/// real port), or the bound address when none are configured. An unspecified
+	/// bind falls back to loopback for local testing.
 	pub(crate) async fn bind(udp_bind: SocketAddr, ice_candidates: &[SocketAddr]) -> Result<Self> {
 		let socket = Arc::new(UdpSocket::bind(udp_bind).await?);
-		let port = socket.local_addr()?.port();
-		let candidates = if ice_candidates.is_empty() {
-			vec![socket.local_addr()?]
-		} else {
-			// str0m's ICE agent sends to the candidate's port, so reuse the one
-			// real bound port across each advertised IP.
-			ice_candidates
-				.iter()
-				.map(|addr| SocketAddr::new(addr.ip(), port))
-				.collect()
-		};
+		let candidates = advertised_candidates(ice_candidates, socket.local_addr()?)?;
 
 		let registry = Arc::new(Mutex::new(Registry::default()));
 		tokio::spawn(demux(socket.clone(), registry.clone()));
@@ -123,7 +114,7 @@ impl Mux {
 
 	/// ICE host candidates to advertise in the SDP answer. The session tags each
 	/// inbound datagram with the family-matching candidate; never empty (falls
-	/// back to the bound address).
+	/// back to the bound address or loopback).
 	pub(crate) fn candidates(&self) -> &[SocketAddr] {
 		&self.candidates
 	}

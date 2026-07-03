@@ -62,7 +62,7 @@ test("decodes a draft-00 catalog whose timeline tracks omit isLive", () => {
 	);
 
 	expect(catalog.tracks).toHaveLength(2);
-	expect(catalog.tracks[0].isLive).toBeUndefined();
+	expect(catalog.tracks[0].isLive).toBe(false);
 	expect(catalog.tracks[0].packaging).toBe("mediatimeline");
 });
 
@@ -135,4 +135,52 @@ test("encode hoists and dedups init data, then round-trips", () => {
 	const parsed = decode(encode(catalog));
 	expect(parsed.tracks[0].initData).toBe("AQID");
 	expect(parsed.tracks[1].initData).toBe("AQID");
+});
+
+test("encode emits isLive when omitted", () => {
+	const wire = decodeJson(
+		encode({
+			tracks: [{ name: "history", packaging: "mediatimeline" }],
+		}),
+	);
+
+	const wireTracks = wire.tracks as { isLive?: boolean }[];
+	expect(wireTracks[0].isLive).toBe(false);
+
+	const parsed = decode(encodeJson(wire));
+	expect(parsed.tracks[0].isLive).toBe(false);
+});
+
+test("preserves SAP fields through decode and encode", () => {
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			tracks: [
+				{
+					name: "video0",
+					packaging: "cmaf",
+					isLive: true,
+					role: "video",
+					codec: "avc1.640028",
+					maxGrpSapStartingType: 1,
+					maxObjSapStartingType: 2,
+					jitter: 15.0,
+				},
+			],
+		}),
+	);
+
+	expect(catalog.tracks[0].maxGrpSapStartingType).toBe(1);
+	expect(catalog.tracks[0].maxObjSapStartingType).toBe(2);
+	expect(catalog.tracks[0].jitter).toBe(15);
+
+	const wire = decodeJson(encode(catalog));
+	const wireTracks = wire.tracks as {
+		maxGrpSapStartingType?: number;
+		maxObjSapStartingType?: number;
+		jitter?: number;
+	}[];
+	expect(wireTracks[0].maxGrpSapStartingType).toBe(1);
+	expect(wireTracks[0].maxObjSapStartingType).toBe(2);
+	expect(wireTracks[0].jitter).toBe(15);
 });

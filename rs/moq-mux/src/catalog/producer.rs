@@ -303,7 +303,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		tracks.push(track);
 	}
 
-	moq_msf::Catalog { tracks }
+	moq_msf::Catalog::new(tracks)
 }
 
 #[cfg(test)]

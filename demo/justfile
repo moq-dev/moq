@@ -1,4 +1,5 @@
 set fallback
+set unstable
 
 mod boy
 mod pub
@@ -10,6 +11,7 @@ mod web
 #
 # Picks the first free port at/after 4443 (both UDP for QUIC and TCP for HTTP)
 # so multiple worktrees can run `just dev` without colliding. The relay reads
+
 # the port from MOQ_SERVER_BIND/MOQ_WEB_HTTP_LISTEN, overriding localhost.toml.
 default:
     #!/usr/bin/env bash
@@ -34,6 +36,7 @@ default:
 # Find the first free port at/after `start` (checked on both TCP and UDP).
 # `lsof` isn't available everywhere (e.g. Git Bash on Windows); without it we
 # can't probe, so fall back to `start` and let the relay surface a bind error if
+
 # it's actually taken.
 [private]
 port start="4443":

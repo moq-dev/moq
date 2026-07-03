@@ -66,7 +66,7 @@ Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` wor
 
 ## Local development
 
-`swift/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Invoked by `just check-ffi`; skips cleanly on non-macOS hosts.
+`swift/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Run via `just swift check`; skips cleanly on non-macOS hosts.
 
 Local development uses one **monolithic** `Package.swift` containing both the `Moq` and `MoqFFI` targets plus the path-based XCFramework, so `swift test` and Xcode work against a single package. The split into two packages exists only in the released artifacts, assembled from the two templates below at release time. Because the FFI module is named `MoqFFI` in both layouts, the wrapper sources (`import MoqFFI`) compile identically either way.
 

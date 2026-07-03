@@ -12,6 +12,7 @@ use super::{OriginList, TrackInfo};
 ///
 /// Create via [`BroadcastInfo::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct BroadcastInfo {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
 	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and

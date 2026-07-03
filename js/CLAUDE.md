@@ -68,6 +68,7 @@ Plain custom elements built directly on `@moq/signals`, no framework (except moq
 
 - ESM only (`"type": "module"`). Relative imports include the `.ts`/`.tsx` extension in the lower-level packages (`net`, `signals`, `hang`); `rewriteRelativeImportExtensions` in `tsconfig.json` rewrites them to `.js` on build. Some higher-level packages (watch/publish) still omit extensions, so match the file you are editing.
 - Document every exported symbol and add a top-of-file `@module` doc block to each entrypoint (root convention; the published JSR/`.d.ts` docs render these). Use `@public` on the load-bearing classes.
+- **Deprecation mechanics** (root Deprecation explains the why): mark a deprecated export `@internal` or drop it from the entrypoint re-exports so it falls off the published JSR/`.d.ts` docs. No "deprecated, use X" note in its doc comment.
 - Build is per-package: `tsc -b` (or `vite build` for the bundled UI/web-component packages) then `bun ../common/package.ts`, which rewrites `package.json` exports from `./src/*.ts` to built `./*.js`/`.d.ts` and runs `publint`. Release via `bun ../common/release.ts`.
 
 ## Tooling and testing
@@ -76,3 +77,5 @@ Plain custom elements built directly on `@moq/signals`, no framework (except moq
 - Biome handles formatting and linting; config is the repo-root `biome.jsonc` (tabs, width 4, line length 120). `just fix` runs `bun biome check --write`.
 - Tests are `*.test.ts` run by `bun test`. Add tests where easy (signals, varint, path, ring buffers, sync all have them).
 - `just js check` type-checks + biome-checks every package; `just js test` runs all unit tests; `just js build` builds all. From repo root these are `just check` / `just fix` / `just build`.
+- For UI / web changes (`watch`, `publish`, `demo/web`, anything touching playback or the `<moq-watch>`/`<moq-publish>` components), don't stop at unit tests: run `just dev` and exercise the change in a real browser via the Claude-in-Chrome plugin (if installed), since WebTransport + WebCodecs playback only surfaces at runtime.
+  - `<moq-watch>` gates video download/render on `intersecting && !document.hidden`, so a tab that isn't the frontmost visible one renders black at 0 fps even while bytes download (the Claude-in-Chrome tab often reports `document.hidden`). Set `visible="always"` on the element to bypass the gate (it forces download regardless of viewport or tab visibility), or bring the browser window frontmost so `visibilityState` flips to `visible`.

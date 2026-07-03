@@ -78,3 +78,43 @@ impl Jitter {
 		Some(jitter)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn micros(value: u64) -> Timestamp {
+		Timestamp::from_micros(value).unwrap()
+	}
+
+	#[test]
+	fn reports_min_frame_spacing_once_it_changes() {
+		let mut jitter = Jitter::new();
+
+		assert_eq!(jitter.observe(micros(1_000)), None);
+		assert_eq!(jitter.observe(micros(41_000)), Some(Duration::from_millis(40)));
+		assert_eq!(jitter.observe(micros(81_000)), None);
+		assert_eq!(jitter.observe(micros(101_000)), Some(Duration::from_millis(20)));
+		assert_eq!(jitter.current(), Some(Duration::from_millis(20)));
+	}
+
+	#[test]
+	fn reorder_delay_wins_over_frame_spacing() {
+		let mut jitter = Jitter::new();
+
+		assert_eq!(jitter.observe(micros(0)), None);
+		assert_eq!(jitter.observe(micros(16_000)), Some(Duration::from_millis(16)));
+		assert_eq!(jitter.observe_reorder(micros(48_000)), Some(Duration::from_millis(48)));
+		assert_eq!(jitter.observe(micros(32_000)), None);
+		assert_eq!(jitter.current(), Some(Duration::from_millis(48)));
+	}
+
+	#[test]
+	fn ignores_non_monotonic_presentation_spacing() {
+		let mut jitter = Jitter::new();
+
+		assert_eq!(jitter.observe(micros(100_000)), None);
+		assert_eq!(jitter.observe(micros(80_000)), None);
+		assert_eq!(jitter.observe(micros(120_000)), Some(Duration::from_millis(40)));
+	}
+}

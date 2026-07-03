@@ -317,7 +317,9 @@ const setMeta = (value: unknown) => {
 	activeMeta?.update(value);
 };
 
-new Signals.Effect().run((effect) => {
+const meta = new Signals.Effect();
+
+meta.run((effect) => {
 	const net = effect.get(publish.broadcast.net);
 	if (!net) return;
 
@@ -397,6 +399,6 @@ viz.interval(() => {
 // collected unclosed (which the signals library warns about).
 if (import.meta.hot) {
 	import.meta.hot.dispose(() => {
-		for (const effect of [ui, viz]) effect.close();
+		for (const effect of [ui, meta, viz]) effect.close();
 	});
 }

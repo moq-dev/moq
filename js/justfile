@@ -4,6 +4,7 @@
 # js/. Invoked from the repo root as `just js <recipe>` via the `mod js`
 # import in the root justfile.
 
+set unstable
 set working-directory := '.'
 
 # Run all checks by default.
@@ -42,6 +43,7 @@ build:
     bun run --filter='*' build
 
 # Remove node_modules and build output. The bun workspace spans the repo
+
 # (deps hoist to the root, not into js/), so sweep from the workspace root.
 clean:
     #!/usr/bin/env bash

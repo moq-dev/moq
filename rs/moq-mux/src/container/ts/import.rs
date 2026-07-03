@@ -1447,9 +1447,6 @@ fn pes_data_len(header: &PesHeader, pes_packet_len: u16) -> Option<usize> {
 	pes_packet_len.checked_sub(optional).map(|n| n as usize)
 }
 
-/// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
-/// 33-bit field. Returns `None` when the PES carried no PTS (the codec layer
-/// then falls back to a wall-clock timestamp).
 /// Swallow a [`MissingKeyframe`](crate::container::MissingKeyframe) from a video
 /// decode: a TS capture can join mid-GOP, so the deltas before the first keyframe
 /// have no group to anchor and are simply dropped rather than aborting the demux.
@@ -1460,6 +1457,8 @@ fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<()> {
 	}
 }
 
+/// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
+/// 33-bit field. Returns `None` when the PES carried no PTS.
 fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);

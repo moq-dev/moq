@@ -9,6 +9,17 @@ use url::Url;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct ClientConfig {
+	/// The URL to dial.
+	///
+	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
+	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
+	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
+	/// self-signed fingerprint; `https://` connects directly.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-connect", long = "client-connect", env = "MOQ_CLIENT_CONNECT")]
+	pub connect: Option<Url>,
+
 	/// Listen for UDP packets on the given address.
 	#[arg(
 		id = "client-bind",
@@ -75,6 +86,7 @@ impl ClientConfig {
 impl Default for ClientConfig {
 	fn default() -> Self {
 		Self {
+			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
 			max_streams: None,
@@ -94,6 +106,8 @@ impl Default for ClientConfig {
 pub struct Client {
 	moq: moq_net::Client,
 	versions: moq_net::Versions,
+	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
+	connect: Option<Url>,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
@@ -179,6 +193,7 @@ impl Client {
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
+			connect: config.connect,
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
@@ -222,13 +237,13 @@ impl Client {
 		self
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
 	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
 	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
 		self.with_subscriber(subscribe)
@@ -246,6 +261,26 @@ impl Client {
 	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
 		Reconnect::new(self.clone(), url, self.backoff.clone())
+	}
+
+	/// Dial the configured [`ClientConfig::connect`] URL, publishing `origin` to it
+	/// and reconnecting with backoff until the returned handle is dropped.
+	///
+	/// Returns `None` when no `--client-connect` URL was configured, so a caller
+	/// that may run server-only doesn't have to branch on the URL itself.
+	pub fn publish(self, origin: moq_net::OriginConsumer) -> Option<Reconnect> {
+		let url = self.connect.clone()?;
+		Some(self.with_publisher(origin).reconnect(url))
+	}
+
+	/// Dial the configured [`ClientConfig::connect`] URL, consuming its broadcasts
+	/// into `origin` and reconnecting with backoff until the returned handle is
+	/// dropped.
+	///
+	/// Returns `None` when no `--client-connect` URL was configured.
+	pub fn consume(self, origin: moq_net::OriginProducer) -> Option<Reconnect> {
+		let url = self.connect.clone()?;
+		Some(self.with_subscriber(origin).reconnect(url))
 	}
 
 	#[cfg(not(any(
@@ -618,6 +653,35 @@ mod tests {
 	fn test_cli_version() {
 		let config = ClientConfig::parse_from(["test", "--client-version", "moq-lite-03"]);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
+	}
+
+	#[test]
+	fn test_toml_connect_survives_update_from() {
+		let toml = r#"
+			connect = "https://relay.example.com/anon"
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(
+			config.connect.as_ref().unwrap().as_str(),
+			"https://relay.example.com/anon"
+		);
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-connect flag).
+		config.update_from(["test"]);
+		assert_eq!(
+			config.connect.as_ref().unwrap().as_str(),
+			"https://relay.example.com/anon"
+		);
+	}
+
+	#[test]
+	fn test_cli_connect() {
+		let config = ClientConfig::parse_from(["test", "--client-connect", "https://relay.example.com/anon"]);
+		assert_eq!(
+			config.connect.as_ref().unwrap().as_str(),
+			"https://relay.example.com/anon"
+		);
 	}
 
 	#[test]

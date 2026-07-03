@@ -47,8 +47,7 @@ pub struct Frame {
 	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: moq_net::Timestamp,
 
-	/// How long this frame occupies the presentation timeline, in the frame's
-	/// own scale, when the container reports it.
+	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration); containers
 	/// that don't (Legacy, LOC) leave this `None`. The [`Consumer`] adds it to

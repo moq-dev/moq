@@ -15,30 +15,22 @@ const VERSION: u32 = 9;
 
 /// Render a media playlist for one rendition from a [`Snapshot`].
 pub fn render_media(snapshot: &Snapshot) -> String {
-	// TARGETDURATION must be >= the longest *complete* segment (rounded up), and
-	// at least the part target so a part-only edge still produces a sane value.
-	let max_segment = snapshot
-		.segments
-		.iter()
-		.filter(|s| s.complete)
-		.map(|s| s.duration)
-		.fold(0.0_f64, f64::max)
-		.max(snapshot.part_target);
-	let target_duration = max_segment.ceil().max(1.0) as u64;
-
 	// PART-HOLD-BACK must be at least 3x the part target (HLS spec).
 	let part_hold_back = snapshot.part_target * 3.0;
 
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
-	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{target_duration}");
+	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
 	let _ = writeln!(
 		out,
 		"#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={part_hold_back:.3}"
 	);
 	let _ = writeln!(out, "#EXT-X-PART-INF:PART-TARGET={:.3}", snapshot.part_target);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
+	if snapshot.discontinuity_sequence > 0 {
+		let _ = writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{}", snapshot.discontinuity_sequence);
+	}
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
 
 	for segment in &snapshot.segments {
@@ -87,7 +79,9 @@ mod tests {
 		let snapshot = Snapshot {
 			init_ready: true,
 			part_target: 0.5,
+			target_duration: 1,
 			media_sequence: 10,
+			discontinuity_sequence: 0,
 			next_sequence: 12,
 			segments: vec![
 				SegmentMeta {
@@ -135,7 +129,9 @@ mod tests {
 		let snapshot = Snapshot {
 			init_ready: true,
 			part_target: 1.0,
+			target_duration: 1,
 			media_sequence: 0,
+			discontinuity_sequence: 0,
 			next_sequence: 1,
 			segments: vec![SegmentMeta {
 				sequence: 0,
@@ -157,7 +153,9 @@ mod tests {
 		let snapshot = Snapshot {
 			init_ready: true,
 			part_target: 1.0,
+			target_duration: 1,
 			media_sequence: 0,
+			discontinuity_sequence: 0,
 			next_sequence: 2,
 			segments: vec![
 				SegmentMeta {
@@ -188,5 +186,30 @@ mod tests {
 			seg0 < disc && disc < seg1,
 			"discontinuity must sit between seg 0 and seg 1"
 		);
+	}
+
+	#[test]
+	fn emits_discontinuity_sequence_when_nonzero() {
+		let snapshot = Snapshot {
+			init_ready: true,
+			part_target: 1.0,
+			target_duration: 6,
+			media_sequence: 8,
+			discontinuity_sequence: 2,
+			next_sequence: 9,
+			segments: vec![SegmentMeta {
+				sequence: 8,
+				parts: vec![part(1.0, true)],
+				duration: 1.0,
+				complete: true,
+				discontinuity: false,
+			}],
+			finished: false,
+		};
+
+		let out = render_media(&snapshot);
+
+		assert!(out.contains("#EXT-X-TARGETDURATION:6\n"));
+		assert!(out.contains("#EXT-X-DISCONTINUITY-SEQUENCE:2\n"));
 	}
 }

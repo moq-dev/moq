@@ -88,10 +88,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Append `buf` to the internal scratch and demux every whole tag it now
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.
-	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
 		self.buffer.extend_from_slice(data);
 
-		self.drain()
+		match self.drain() {
+			Ok(()) => Ok(()),
+			Err(err) => match err.downcast::<crate::Error>() {
+				Ok(err) => Err(err),
+				Err(err) => Err(err.into()),
+			},
+		}
 	}
 
 	fn drain(&mut self) -> anyhow::Result<()> {
@@ -316,7 +322,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		};
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
-		anyhow::ensure!(pts_ms >= 0, "negative video presentation timestamp");
+		if pts_ms < 0 {
+			return Err(crate::Error::NegativeFlvPts {
+				dts_ms: dts,
+				composition_time_ms: composition_time,
+			}
+			.into());
+		}
 		match stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(pts_ms as u64)?,
 			duration: None,
@@ -411,7 +423,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		if let Some(stream) = self.video.as_mut() {
 			stream.track.seek(sequence)?;
 		}
@@ -422,7 +434,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Finish every track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		if let Some(stream) = self.video.as_mut() {
 			stream.track.finish()?;
 		}

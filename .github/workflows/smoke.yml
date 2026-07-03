@@ -2,7 +2,8 @@ name: Smoke
 
 # Cross-language interop smoke test built from THIS checkout (not the published
 # packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
-# publish x subscribe matrix across rust / python / browser / native-js / c.
+# publish x subscribe matrix across rust / python / browser / native-js / c,
+# then the TS/IRD compliance harness over the exporter's output.
 on:
   # Manual on-demand runs.
   workflow_dispatch:
@@ -14,6 +15,8 @@ on:
   pull_request:
     paths:
       - "test/smoke/**"
+      # The TS/IRD compliance harness runs in the same job (see below).
+      - "test/ts/**"
       # The smoke job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
@@ -72,4 +75,10 @@ jobs:
 
       - name: Negative control
         run: nix develop --command just test smoke-negative
+        shell: bash -leo pipefail {0}
+
+      # Round-trips a PCR-paced TS through a relay and checks the subscriber's
+      # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
+      - name: TS compliance
+        run: nix develop --command just test ts
         shell: bash -leo pipefail {0}

@@ -19,7 +19,7 @@ pub struct Track<'a> {
 
 impl Message for Track<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 
@@ -30,7 +30,7 @@ impl Message for Track<'_> {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
 
@@ -61,7 +61,7 @@ pub struct TrackInfo {
 
 impl Message for TrackInfo {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 
@@ -79,7 +79,7 @@ impl Message for TrackInfo {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
 

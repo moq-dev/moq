@@ -75,7 +75,7 @@ let transport = web_transport::ClientBuilder::new()
 let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
 let session = moq_net::Client::new()
-    .with_consume(origin)
+    .with_subscriber(origin)
     .connect(transport)
     .await?;
 

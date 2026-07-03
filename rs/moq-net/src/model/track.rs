@@ -42,6 +42,7 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct TrackInfo {
 	/// Units per second for per-frame timestamps on this track.
 	///
@@ -1536,7 +1537,12 @@ impl TrackSubscriber {
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
-	/// Poll for the group with the given sequence, without blocking.
+	/// Poll for the group with the given sequence.
+	///
+	/// This waits for live arrival, not on-demand retrieval. If the sequence is
+	/// below the final sequence but was already evicted from the cache, this parks
+	/// until the track closes. Use [`TrackConsumer::fetch_group`] for a past group that a
+	/// [`TrackDynamic`] can serve on demand.
 	pub fn poll_get_group(&self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		self.poll(waiter, |state| state.poll_get_group(sequence))
 	}
@@ -1547,7 +1553,9 @@ impl TrackSubscriber {
 	/// Resolves to `None` only when `sequence` is at or past the track's
 	/// `final_sequence` (set by `finish()` / `finish_at()`), since such a
 	/// group can never be produced. Sequences below `final_sequence` still
-	/// wait, since older groups may still arrive out of order.
+	/// wait, since older groups may still arrive out of order. If the sequence
+	/// was already evicted, this waits until the track closes; use
+	/// [`TrackConsumer::fetch_group`] for on-demand retrieval of past groups.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
 		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}

@@ -19,7 +19,7 @@
 import "./highlight";
 import "@moq/watch/element"; // defines <moq-watch>
 import "@moq/watch/ui"; // defines <moq-watch-ui>
-import { Json, Net, Signals } from "@moq/watch";
+import { Hang, Json, Net, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";
@@ -399,7 +399,7 @@ ui.run((effect) => {
 		return;
 	}
 
-	const track = broadcast.track(trackName).subscribe();
+	const track = broadcast.track(trackName).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
 	effect.cleanup(() => track.close());
 	const consumer = new Json.Consumer<unknown>(track);
 

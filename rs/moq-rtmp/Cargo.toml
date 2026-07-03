@@ -40,7 +40,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"],
 # stream-key slot forever.
 socket2 = "0.6"
 thiserror = "2"
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
 # RTMPS: TLS-terminate accepted connections. Mirrors moq-relay's pinning so the
 # workspace shares one tokio-rustls; the crypto provider comes from the supplied
 # `rustls::ServerConfig`, so no default crypto feature is needed here.
@@ -51,3 +51,4 @@ tracing = "0.1"
 # The RTMPS test borrows moq-native's self-signed cert generation to build a
 # `rustls::ServerConfig`; `quinn` pulls in a backend so `tls::Server` is built.
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "quinn"] }
+tokio = { workspace = true, features = ["test-util"] }

@@ -20,7 +20,7 @@ export type Visible = "never" | "always" | (string & {});
 type RendererInput = {
 	canvas: Getter<HTMLCanvasElement | undefined>;
 
-	// When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to "0px".
+	// When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to "20%".
 	visible: Getter<Visible>;
 };
 
@@ -56,7 +56,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.input = {
 			canvas: getter(props?.canvas),
-			visible: getter(props?.visible ?? "0px"),
+			visible: getter(props?.visible ?? "20%"),
 		};
 
 		this.#signals.run((effect) => {

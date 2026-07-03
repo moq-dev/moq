@@ -7,7 +7,7 @@ set -euo pipefail
 # layout of the :moq-ffi KMP module, regenerates the bindings, and runs
 # `:moq-ffi:jvmTest` (raw bindings) + `:moq:jvmTest` (the wrapper, which
 # resolves :moq-ffi via the sibling-project substitution). Intended for
-# `just check-ffi`.
+# `just kt check`.
 #
 # Skipped cleanly on hosts without `java` or `cargo`.
 
