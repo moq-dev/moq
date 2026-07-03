@@ -1,8 +1,4 @@
 use std::num::NonZero;
-use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use rand::RngExt;
 
 use crate::coding::VarInt;
 
@@ -302,15 +298,15 @@ impl Timestamp {
 		}
 	}
 
-	/// Wall-clock now, expressed in the default timescale ([`Timescale::MILLI`]).
+	/// Current time, expressed in the default timescale ([`Timescale::MILLI`]).
 	///
-	/// This is the one-way bridge from wall-clock time to a track timestamp: there is
+	/// This is the one-way bridge from a local clock to a track timestamp: there is
 	/// deliberately no inverse (a [`Timestamp`] is relative and jittered, never a clock).
 	/// Used to stamp frames that arrive without one, e.g. on protocols whose wire can't
-	/// carry a timestamp. Uses [`tokio::time::Instant::now`] so it honors
+	/// carry a timestamp. Uses [`web_async::time::Instant::now`] so it works on wasm and honors
 	/// `tokio::time::pause` in tests.
 	pub fn now() -> Self {
-		tokio::time::Instant::now().into()
+		clock::now()
 	}
 }
 
@@ -409,29 +405,37 @@ impl std::ops::SubAssign for Timestamp {
 	}
 }
 
-/// Epoch the wall-clock timestamps are measured from: 2020-01-01T00:00:00Z.
-///
-/// A [`Timestamp`] isn't a real clock, it just needs to be non-negative and roughly
-/// monotonic with wall time. Anchoring 50 years after the Unix epoch keeps the value
-/// ~1.5e12 ms smaller, trimming a byte or two off the first frame's varint.
-const ANCHOR_EPOCH_SECS: u64 = 1_577_836_800;
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+mod clock {
+	use std::sync::LazyLock;
+	use std::time::{SystemTime, UNIX_EPOCH};
 
-// There's no zero Instant, so we need to use a reference point.
-static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|| {
-	// To deter nerds trying to use timestamp as wall clock time, we subtract a random amount of time from the anchor.
-	// This will make our timestamps appear to be late; just enough to be annoying and obscure our clock drift.
-	// This will also catch bad implementations that assume unrelated broadcasts are synchronized.
-	let jitter = std::time::Duration::from_millis(rand::rng().random_range(0..69_420));
-	(std::time::Instant::now(), SystemTime::now() - jitter)
-});
+	use rand::RngExt;
 
-impl From<std::time::Instant> for Timestamp {
-	/// Convert an [`std::time::Instant`] into a millisecond-scale timestamp (the default
-	/// timescale), anchored at 2020-01-01 plus a per-process jitter (see `TIME_ANCHOR`).
+	use super::Timestamp;
+
+	/// Epoch the wall-clock timestamps are measured from: 2020-01-01T00:00:00Z.
 	///
-	/// One-way only: there is no inverse, since the anchor is jittered to keep a
-	/// [`Timestamp`] from being read back as a clock.
-	fn from(instant: std::time::Instant) -> Self {
+	/// A [`Timestamp`] isn't a real clock, it just needs to be non-negative and roughly
+	/// monotonic with wall time. Anchoring 50 years after the Unix epoch keeps the value
+	/// ~1.5e12 ms smaller, trimming a byte or two off the first frame's varint.
+	const ANCHOR_EPOCH_SECS: u64 = 1_577_836_800;
+
+	// There's no zero Instant, so we need to use a reference point.
+	static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|| {
+		// To deter nerds trying to use timestamp as wall clock time, we subtract a random amount of time from the anchor.
+		// This will make our timestamps appear to be late; just enough to be annoying and obscure our clock drift.
+		// This will also catch bad implementations that assume unrelated broadcasts are synchronized.
+		let jitter = std::time::Duration::from_millis(rand::rng().random_range(0..69_420));
+		(std::time::Instant::now(), SystemTime::now() - jitter)
+	});
+
+	pub(super) fn now() -> Timestamp {
+		let instant: std::time::Instant = web_async::time::Instant::now().into();
+		from_std_instant(instant)
+	}
+
+	fn from_std_instant(instant: std::time::Instant) -> Timestamp {
 		let (anchor_instant, anchor_system) = *TIME_ANCHOR;
 
 		let system = match instant.checked_duration_since(anchor_instant) {
@@ -444,13 +448,51 @@ impl From<std::time::Instant> for Timestamp {
 		// clock on a peer-driven path), since the only requirement is a non-negative start.
 		let duration = system.duration_since(epoch).unwrap_or(std::time::Duration::ZERO);
 
-		Self::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
+		Timestamp::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
+	}
+
+	impl From<std::time::Instant> for Timestamp {
+		/// Convert an [`std::time::Instant`] into a millisecond-scale timestamp (the default
+		/// timescale), anchored at 2020-01-01 plus a per-process jitter (see `TIME_ANCHOR`).
+		///
+		/// One-way only: there is no inverse, since the anchor is jittered to keep a
+		/// [`Timestamp`] from being read back as a clock.
+		fn from(instant: std::time::Instant) -> Self {
+			from_std_instant(instant)
+		}
+	}
+
+	impl From<tokio::time::Instant> for Timestamp {
+		fn from(instant: tokio::time::Instant) -> Self {
+			from_std_instant(instant.into_std())
+		}
 	}
 }
 
-impl From<tokio::time::Instant> for Timestamp {
-	fn from(instant: tokio::time::Instant) -> Self {
-		instant.into_std().into()
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+mod clock {
+	use std::sync::LazyLock;
+
+	use rand::RngExt;
+
+	use super::Timestamp;
+
+	static TIME_ANCHOR: LazyLock<(web_async::time::Instant, std::time::Duration)> = LazyLock::new(|| {
+		let jitter = std::time::Duration::from_millis(rand::rng().random_range(1..69_420));
+		(web_async::time::Instant::now(), jitter)
+	});
+
+	pub(super) fn now() -> Timestamp {
+		let (anchor_instant, anchor_duration) = *TIME_ANCHOR;
+		let instant = web_async::time::Instant::now();
+		let duration = match instant.checked_duration_since(anchor_instant) {
+			Some(forward) => anchor_duration + forward,
+			None => anchor_duration
+				.checked_sub(anchor_instant.duration_since(instant))
+				.unwrap_or(std::time::Duration::ZERO),
+		};
+
+		Timestamp::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
 	}
 }
 
