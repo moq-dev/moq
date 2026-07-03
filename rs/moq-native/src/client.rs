@@ -227,25 +227,25 @@ impl Client {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
+	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_subscriber(mut self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
 		self
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 
@@ -268,7 +268,7 @@ impl Client {
 	///
 	/// Returns `None` when no `--client-connect` URL was configured, so a caller
 	/// that may run server-only doesn't have to branch on the URL itself.
-	pub fn publish(self, origin: moq_net::OriginConsumer) -> Option<Reconnect> {
+	pub fn publish(self, origin: moq_net::origin::Consumer) -> Option<Reconnect> {
 		let url = self.connect.clone()?;
 		Some(self.with_publisher(origin).reconnect(url))
 	}
@@ -278,7 +278,7 @@ impl Client {
 	/// dropped.
 	///
 	/// Returns `None` when no `--client-connect` URL was configured.
-	pub fn consume(self, origin: moq_net::OriginProducer) -> Option<Reconnect> {
+	pub fn consume(self, origin: moq_net::origin::Producer) -> Option<Reconnect> {
 		let url = self.connect.clone()?;
 		Some(self.with_subscriber(origin).reconnect(url))
 	}

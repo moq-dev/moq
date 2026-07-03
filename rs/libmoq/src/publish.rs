@@ -15,21 +15,21 @@ enum Media {
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
-	broadcasts: NonZeroSlab<(moq_net::BroadcastProducer, moq_mux::catalog::Producer<Extra>)>,
+	broadcasts: NonZeroSlab<(moq_net::broadcast::Producer, moq_mux::catalog::Producer<Extra>)>,
 
 	/// Active media encoders/decoders for publishing.
 	media: NonZeroSlab<Media>,
 
 	/// Raw track producers (no media/container/catalog framing).
-	tracks: NonZeroSlab<moq_net::TrackProducer>,
+	tracks: NonZeroSlab<moq_net::track::Producer>,
 
 	/// Raw group producers, created from a raw track producer.
-	groups: NonZeroSlab<moq_net::GroupProducer>,
+	groups: NonZeroSlab<moq_net::group::Producer>,
 }
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 
@@ -37,7 +37,7 @@ impl Publish {
 		Ok(id)
 	}
 
-	pub fn get(&self, id: Id) -> Result<&moq_net::BroadcastProducer, Error> {
+	pub fn get(&self, id: Id) -> Result<&moq_net::broadcast::Producer, Error> {
 		self.broadcasts
 			.get(id)
 			.ok_or(Error::BroadcastNotFound)
@@ -50,7 +50,13 @@ impl Publish {
 	pub fn pair_mut(
 		&mut self,
 		id: Id,
-	) -> Result<(&mut moq_net::BroadcastProducer, &mut moq_mux::catalog::Producer<Extra>), Error> {
+	) -> Result<
+		(
+			&mut moq_net::broadcast::Producer,
+			&mut moq_mux::catalog::Producer<Extra>,
+		),
+		Error,
+	> {
 		let (broadcast, catalog) = self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?;
 		Ok((broadcast, catalog))
 	}

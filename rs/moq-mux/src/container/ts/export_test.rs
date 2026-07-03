@@ -59,7 +59,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// finished, retained tracks; that means it never reaches a hard end-of-stream,
 /// so we pull until a `next()` blocks (`Pending`, surfaced as a timeout under
 /// paused time) or the stream ends.
-async fn drain(consumer: moq_net::BroadcastConsumer) -> BytesMut {
+async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 	drain_with(Export::new(consumer).await.unwrap()).await
 }
 
@@ -87,14 +87,14 @@ fn assert_packet_aligned(ts: &[u8]) {
 
 #[tokio::test(start_paused = true)]
 async fn export_aac_roundtrip() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
 		.create_track(
 			broadcast.unique_name(".aac"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let name = track.name().to_string();
@@ -202,7 +202,7 @@ fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {
 /// mid-stream tune-in produces: the audio source is cached further back than the oldest
 /// retained video keyframe), then export it to TS.
 async fn export_lead_audio() -> BytesMut {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -210,7 +210,7 @@ async fn export_lead_audio() -> BytesMut {
 	let vtrack = broadcast
 		.create_track(
 			broadcast.unique_name(".avc3"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	{
@@ -228,7 +228,7 @@ async fn export_lead_audio() -> BytesMut {
 	let atrack = broadcast
 		.create_track(
 			broadcast.unique_name(".aac"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	{
@@ -342,14 +342,14 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 /// into a synthesized avcC, and the muxer re-injects them on the keyframe.
 #[tokio::test(start_paused = true)]
 async fn export_avc3_in_band_reassembles() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
 		.create_track(
 			broadcast.unique_name(".avc3"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let name = track.name().to_string();
@@ -393,14 +393,14 @@ async fn export_avc3_in_band_reassembles() {
 /// (regression for non-existing PPS 0 referenced).
 #[tokio::test(start_paused = true)]
 async fn export_avc3_preserves_multiple_pps() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
 		.create_track(
 			broadcast.unique_name(".avc3"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let name = track.name().to_string();
@@ -444,7 +444,7 @@ async fn export_avc3_preserves_multiple_pps() {
 /// length prefixes to start codes.
 #[tokio::test(start_paused = true)]
 async fn export_avc1_out_of_band_reassembles() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -453,7 +453,7 @@ async fn export_avc1_out_of_band_reassembles() {
 	let track = broadcast
 		.create_track(
 			broadcast.unique_name(".avc1"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let name = track.name().to_string();
@@ -502,7 +502,7 @@ async fn export_avc1_out_of_band_reassembles() {
 async fn export_bframe_video_authors_dts() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -570,7 +570,7 @@ async fn export_bframe_video_authors_dts() {
 async fn export_scte35_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
 		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
@@ -582,7 +582,7 @@ async fn export_scte35_roundtrip() {
 	let scte = broadcast
 		.unique_track(
 			".scte35",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let scte_name = scte.name().to_string();
@@ -646,7 +646,7 @@ async fn export_scte35_roundtrip() {
 	assert!(saw_cuei, "PMT missing the program-level CUEI registration descriptor");
 
 	// Re-import the exported TS and read the .scte35 frame back.
-	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 =
 		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
@@ -687,7 +687,7 @@ async fn export_pes_verbatim_roundtrip() {
 
 	let data = include_bytes!("test_data/bbb.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
 		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
@@ -698,7 +698,7 @@ async fn export_pes_verbatim_roundtrip() {
 	let data_track = broadcast
 		.unique_track(
 			".data",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let data_name = data_track.name().to_string();
@@ -738,7 +738,7 @@ async fn export_pes_verbatim_roundtrip() {
 	assert_packet_aligned(&ts);
 
 	// Re-import the exported TS and recover the verbatim PES stream.
-	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 =
 		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
@@ -778,7 +778,7 @@ async fn export_pes_verbatim_roundtrip() {
 // track rather than emitting cues pinned to zero.
 #[tokio::test(start_paused = true)]
 async fn scte35_without_video_export_is_rejected() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
 		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
@@ -788,7 +788,7 @@ async fn scte35_without_video_export_is_rejected() {
 	let scte = broadcast
 		.unique_track(
 			".scte35",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let scte_name = scte.name().to_string();
@@ -830,7 +830,7 @@ async fn scte35_without_video_export_is_rejected() {
 }
 
 /// Subscribe to a track and read every retained frame payload it holds.
-async fn read_frames(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<Vec<u8>> {
+async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<u8>> {
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut frames = Vec::new();
@@ -850,7 +850,7 @@ async fn read_frames(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<V
 async fn mp2_kyrion_roundtrip_byte_exact() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -886,7 +886,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 		}
 	}
 
-	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
@@ -919,7 +919,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 async fn ac3_roundtrip_byte_exact() {
 	let data = include_bytes!("test_data/ac3.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -963,7 +963,7 @@ async fn ac3_roundtrip_byte_exact() {
 	}
 	assert!(checked_pmt, "missing PMT");
 
-	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
@@ -989,7 +989,7 @@ async fn ac3_roundtrip_byte_exact() {
 async fn eac3_roundtrip_byte_exact() {
 	let data = include_bytes!("test_data/eac3.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -1036,7 +1036,7 @@ async fn eac3_roundtrip_byte_exact() {
 	}
 	assert!(checked_pmt, "missing PMT");
 
-	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
@@ -1057,7 +1057,7 @@ async fn eac3_roundtrip_byte_exact() {
 
 /// Read every audio rendition's retained frames, keyed by codec string.
 async fn read_audio_by_codec(
-	consumer: &moq_net::BroadcastConsumer,
+	consumer: &moq_net::broadcast::Consumer,
 	catalog: &crate::catalog::Producer,
 ) -> std::collections::BTreeMap<String, Vec<Vec<u8>>> {
 	let mut out = std::collections::BTreeMap::new();
@@ -1076,7 +1076,7 @@ async fn read_audio_by_codec(
 async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let data = include_bytes!("test_data/kyrion_mpeg2av_ac3.ts");
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -1124,7 +1124,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 		}
 	}
 
-	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
@@ -1146,7 +1146,7 @@ fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String
 }
 
 /// Subscribe to a cue track and read every retained `splice_info_section` it holds.
-async fn read_cues(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
+async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut cues = Vec::new();
@@ -1213,7 +1213,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 
 	for (source, total, distinct, command_types, data) in fixtures {
 		// Ingest the fixture.
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(
 			&mut broadcast,
@@ -1269,7 +1269,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		.await;
 		assert_packet_aligned(&ts);
 
-		let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 		let consumer2 = broadcast2.consume();
 		let catalog2 = crate::catalog::Producer::with_catalog(
 			&mut broadcast2,
@@ -1328,14 +1328,14 @@ fn strip_opus_control(mut data: &[u8]) -> Vec<Vec<u8>> {
 /// the control-header-wrapped PES recovers the raw Opus packets with the right PTS.
 #[tokio::test(start_paused = true)]
 async fn export_opus_roundtrip() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
 		.create_track(
 			broadcast.unique_name(".opus"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let name = track.name().to_string();
@@ -1408,14 +1408,14 @@ async fn export_opus_roundtrip() {
 /// catalog surfaces one 48 kHz Opus track whose frames recover the original packets.
 #[tokio::test(start_paused = true)]
 async fn opus_export_import_roundtrip() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
 		.create_track(
 			broadcast.unique_name(".opus"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)
 		.unwrap();
 	let name = track.name().to_string();
@@ -1443,7 +1443,7 @@ async fn opus_export_import_roundtrip() {
 	let ts = drain(consumer).await;
 
 	// Re-import the TS we just produced.
-	let mut imported = moq_net::BroadcastInfo::new().produce();
+	let mut imported = moq_net::broadcast::Info::new().produce();
 	let imported_consumer = imported.consume();
 	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
 	let mut import = crate::container::ts::Import::new(imported, import_catalog.clone());

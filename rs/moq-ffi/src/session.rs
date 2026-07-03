@@ -245,8 +245,8 @@ pub struct MoqSession {
 impl MoqSession {
 	pub(crate) fn new(
 		session: moq_net::Session,
-		publish: moq_net::OriginProducer,
-		subscribe: moq_net::OriginProducer,
+		publish: moq_net::origin::Producer,
+		subscribe: moq_net::origin::Producer,
 	) -> Self {
 		// Eagerly wrap the wired origin sides so each publisher()/consumer()
 		// call hands back the same Arc. `publish` is published into; `subscribe`

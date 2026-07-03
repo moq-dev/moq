@@ -7,12 +7,12 @@ use crate::producer::MoqBroadcastProducer;
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
-	inner: moq_net::OriginProducer,
+	inner: moq_net::origin::Producer,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginConsumer {
-	inner: moq_net::OriginConsumer,
+	inner: moq_net::origin::Consumer,
 }
 
 #[derive(uniffi::Object)]
@@ -21,7 +21,7 @@ pub struct MoqAnnounced {
 }
 
 struct Announced {
-	inner: moq_net::AnnounceConsumer,
+	inner: moq_net::announce::Consumer,
 }
 
 impl Announced {
@@ -74,19 +74,19 @@ pub struct MoqAnnouncedBroadcast {
 }
 
 impl MoqOriginProducer {
-	pub(crate) fn inner(&self) -> &moq_net::OriginProducer {
+	pub(crate) fn inner(&self) -> &moq_net::origin::Producer {
 		&self.inner
 	}
 
-	/// Wrap an existing `moq_net::OriginProducer` (e.g. one auto-created
+	/// Wrap an existing `moq_net::origin::Producer` (e.g. one auto-created
 	/// during `MoqClient::connect`) so it can cross the FFI boundary.
-	pub(crate) fn from_inner(inner: moq_net::OriginProducer) -> Self {
+	pub(crate) fn from_inner(inner: moq_net::origin::Producer) -> Self {
 		Self { inner }
 	}
 }
 
 impl MoqOriginConsumer {
-	pub(crate) fn from_inner(inner: moq_net::OriginConsumer) -> Self {
+	pub(crate) fn from_inner(inner: moq_net::origin::Consumer) -> Self {
 		Self { inner }
 	}
 }

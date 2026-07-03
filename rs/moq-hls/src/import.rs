@@ -79,7 +79,7 @@ struct StepOutcome {
 /// to run the continuous import loop.
 pub struct Import {
 	/// Broadcast that all CMAF importers write into.
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 
 	/// The catalog being produced.
 	catalog: CatalogProducer,
@@ -147,7 +147,7 @@ fn select_audio_only() -> select::Broadcast {
 
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = match cfg.client {
 			Some(client) => client,
@@ -747,7 +747,7 @@ mod tests {
 
 	#[test]
 	fn hls_import_starts_without_importers() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = Config::new(url);
@@ -768,7 +768,7 @@ mod tests {
 		let path = dir.join("master.m3u8");
 		std::fs::write(&path, master_body).unwrap();
 
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
 		// `Config` takes a filesystem path for non-http inputs.
 		let cfg = Config::new(path.to_str().unwrap().to_string());

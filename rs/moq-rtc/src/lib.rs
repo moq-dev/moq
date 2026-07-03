@@ -17,8 +17,8 @@
 //! ## Embedding
 //!
 //! Build a [`Server`] over your own
-//! [`OriginProducer`](moq_net::OriginProducer) /
-//! [`OriginConsumer`](moq_net::OriginConsumer) and merge
+//! [`OriginProducer`](moq_net::origin::Producer) /
+//! [`OriginConsumer`](moq_net::origin::Consumer) and merge
 //! [`Server::publish_router`] / [`Server::subscribe_router`] into your own axum
 //! app, or dial out with [`Client`]. A command-line interface is provided by the
 //! `moq-cli` binary, on top of this library.

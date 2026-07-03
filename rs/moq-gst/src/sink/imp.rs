@@ -47,7 +47,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// finalize. Per-pad media lives in `pads`; `ended` tracks EOS for element-level EOS aggregation.
 struct State {
 	session: Session,
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
 	pads: HashMap<String, Pad>,
 	ended: HashSet<String>,

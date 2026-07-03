@@ -6,7 +6,7 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, M
 use crate::error::MoqError;
 use crate::ffi::Task;
 
-/// Publisher-side track properties, mirroring [`moq_net::TrackInfo`].
+/// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
 /// (priority 0, ordered, default cache, millisecond timescale).
@@ -28,11 +28,11 @@ pub struct MoqTrackInfo {
 	pub timescale: Option<u64>,
 }
 
-impl TryFrom<MoqTrackInfo> for moq_net::TrackInfo {
+impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	type Error = MoqError;
 
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
-		let mut out = moq_net::TrackInfo::default()
+		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
 		if let Some(ms) = info.cache_ms {
@@ -50,7 +50,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::TrackInfo {
 // ---- UniFFI Objects ----
 
 pub(crate) struct BroadcastProducer {
-	pub(crate) broadcast: moq_net::BroadcastProducer,
+	pub(crate) broadcast: moq_net::broadcast::Producer,
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
@@ -85,7 +85,7 @@ struct MediaProducer {
 	decoder: MediaDecoder,
 	/// `Some` for a single codec track, whose subscriber demand (name/used/unused)
 	/// is observable; `None` for a container that may publish several tracks.
-	demand: Option<moq_net::TrackDemand>,
+	demand: Option<moq_net::track::Demand>,
 }
 
 /// A byte-stream importer: a single codec track or a container that may publish
@@ -130,12 +130,12 @@ pub struct MoqBroadcastDynamic {
 }
 
 struct DynamicProducer {
-	inner: moq_net::BroadcastDynamic,
+	inner: moq_net::broadcast::Dynamic,
 }
 
 impl DynamicProducer {
 	async fn requested_track(&mut self) -> Result<Arc<MoqTrackRequest>, MoqError> {
-		// Hand back the un-accepted request, mirroring `moq_net::BroadcastDynamic`: the caller
+		// Hand back the un-accepted request, mirroring `moq_net::broadcast::Dynamic`: the caller
 		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
 		// The subscriber's subscribe stays pending until then.
 		let request = self.inner.requested_track().await?;
@@ -144,7 +144,7 @@ impl DynamicProducer {
 }
 
 impl MoqBroadcastProducer {
-	pub(crate) fn consume_inner(&self) -> Result<moq_net::BroadcastConsumer, MoqError> {
+	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		Ok(state.broadcast.consume())
@@ -202,7 +202,7 @@ impl MoqBroadcastProducer {
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 		Ok(Arc::new(Self {
@@ -352,7 +352,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let info = info.map(moq_net::TrackInfo::try_from).transpose()?;
+		let info = info.map(moq_net::track::Info::try_from).transpose()?;
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(name, info)?;
@@ -399,16 +399,16 @@ impl MoqBroadcastDynamic {
 
 /// A track requested by a subscriber that hasn't been accepted yet.
 ///
-/// Mirrors [`moq_net::TrackRequest`]: [`accept`](Self::accept) it to start producing raw
+/// Mirrors [`moq_net::track::Request`]: [`accept`](Self::accept) it to start producing raw
 /// frames, hand it to [`MoqBroadcastProducer::publish_media_on_track`] to publish media,
 /// or [`abort`](Self::abort) it to reject the waiting subscriber.
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
-	inner: std::sync::Mutex<Option<moq_net::TrackRequest>>,
+	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
 }
 
 impl MoqTrackRequest {
-	pub(crate) fn new(request: moq_net::TrackRequest) -> Self {
+	pub(crate) fn new(request: moq_net::track::Request) -> Self {
 		Self {
 			inner: std::sync::Mutex::new(Some(request)),
 		}
@@ -416,7 +416,7 @@ impl MoqTrackRequest {
 
 	/// Take the inner request so an importer can accept it (setting the timescale). Used by
 	/// [`MoqBroadcastProducer::publish_media_on_track`].
-	pub(crate) fn take(&self) -> Result<moq_net::TrackRequest, MoqError> {
+	pub(crate) fn take(&self) -> Result<moq_net::track::Request, MoqError> {
 		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
 	}
 }
@@ -436,7 +436,7 @@ impl MoqTrackRequest {
 	/// the importer pick the timescale.
 	pub fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let info = info.map(moq_net::TrackInfo::try_from).transpose()?;
+		let info = info.map(moq_net::track::Info::try_from).transpose()?;
 		let request = self.take()?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(request.accept(info))),
@@ -457,7 +457,7 @@ impl MoqTrackRequest {
 
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
-	inner: std::sync::Mutex<Option<moq_net::TrackProducer>>,
+	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
 }
 
 #[uniffi::export]
@@ -546,7 +546,7 @@ impl MoqTrackProducer {
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
-	inner: std::sync::Mutex<Option<moq_net::GroupProducer>>,
+	inner: std::sync::Mutex<Option<moq_net::group::Producer>>,
 }
 
 #[uniffi::export]

@@ -19,7 +19,7 @@ pub struct Import<E: CatalogExt = ()> {
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, registering the rendition in `catalog`.
 	pub fn new(
-		track: moq_net::TrackProducer,
+		track: moq_net::track::Producer,
 		catalog: crate::catalog::Producer<E>,
 		config: Config,
 	) -> crate::Result<Self> {
@@ -47,7 +47,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
-	pub fn demand(&self) -> moq_net::TrackDemand {
+	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
 	}
 

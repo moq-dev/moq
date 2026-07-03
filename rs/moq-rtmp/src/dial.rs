@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
-use moq_net::{BroadcastConsumer, BroadcastInfo, OriginProducer, OriginPublish};
+use moq_net::{broadcast, origin};
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use rml_rtmp::sessions::{
 	ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
@@ -164,7 +164,7 @@ impl<S: Stream> Client<S> {
 	/// `broadcast` is the read side of whatever you want restreamed (e.g. from
 	/// `origin.consume().announced_broadcast(path)`). This future resolves when the
 	/// broadcast ends, so callers usually run it on its own task.
-	pub async fn publish(mut self, stream_key: &str, broadcast: BroadcastConsumer) -> Result<()> {
+	pub async fn publish(mut self, stream_key: &str, broadcast: broadcast::Consumer) -> Result<()> {
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -232,7 +232,7 @@ impl<S: Stream> Client<S> {
 	///
 	/// This future resolves when the remote stream ends, so callers usually run it
 	/// on its own task.
-	pub async fn pull(mut self, stream_key: &str, origin: &OriginProducer, path: &str) -> Result<()> {
+	pub async fn pull(mut self, stream_key: &str, origin: &origin::Producer, path: &str) -> Result<()> {
 		let request = self
 			.session
 			.request_playback(stream_key.to_string())
@@ -415,13 +415,13 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 /// server's publisher; dropping it unannounces the broadcast.
 struct Publisher {
 	/// Held to keep the broadcast announced for the publisher's lifetime.
-	_publish: OriginPublish,
+	_publish: origin::Publish,
 	importer: FlvImport,
 }
 
 impl Publisher {
-	fn new(origin: &OriginProducer, path: &str) -> anyhow::Result<Self> {
-		let mut broadcast = BroadcastInfo::new().produce();
+	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
+		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let mut importer = FlvImport::new(broadcast.clone(), catalog);
 
@@ -479,7 +479,7 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_net::Origin::random().produce();
-		let mut broadcast = BroadcastInfo::new().produce();
+		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog);
 		let _publish = server_origin

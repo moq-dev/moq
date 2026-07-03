@@ -1,7 +1,7 @@
 //! Per-broadcast egress source for the RTP-out paths.
 //!
 //! Counterpart to [`crate::ingest::IngestSink`]. Holds a
-//! [`moq_net::BroadcastConsumer`] and a cached catalog snapshot; on each
+//! [`moq_net::broadcast::Consumer`] and a cached catalog snapshot; on each
 //! `MediaAdded` event the session loop calls [`EgressSource::on_track`]
 //! which picks a matching rendition, subscribes to it, and spawns a pump
 //! task that feeds RTP-ready frames back to the session loop via an mpsc
@@ -35,7 +35,7 @@ pub struct WriteRequest {
 
 /// Holds the broadcast + catalog and spawns per-rendition pump tasks.
 pub struct EgressSource {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	/// Snapshot of the catalog at session start. Sufficient for v1: SDP
 	/// negotiation happens once and the codec list is fixed for the
 	/// lifetime of the session.
@@ -50,7 +50,7 @@ impl EgressSource {
 	/// The session loop drives the pumps via the returned channel; the
 	/// caller hands `EgressSource` to [`Session::egress`](crate::session::Session::egress)
 	/// which takes the receiver via [`Self::take_writes`].
-	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self> {
+	pub async fn new(broadcast: moq_net::broadcast::Consumer) -> Result<Self> {
 		let catalog_track = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)?
 			.subscribe(hang::Catalog::default_subscription())
@@ -141,7 +141,7 @@ impl EgressSource {
 /// Find the first catalog rendition for the given codec and build a
 /// [`codec::Track`] subscribed to it. Returns `None` if no rendition matches.
 async fn pick_track(
-	broadcast: &moq_net::BroadcastConsumer,
+	broadcast: &moq_net::broadcast::Consumer,
 	catalog: &Catalog,
 	codec: Codec,
 ) -> Result<Option<codec::Track>> {

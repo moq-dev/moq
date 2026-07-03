@@ -44,7 +44,7 @@ pub fn setup() {
 pub struct Session {
 	inner: moq_net::Session,
 	// The origin remote broadcasts are announced into; read via `consume`.
-	consumer: moq_net::OriginConsumer,
+	consumer: moq_net::origin::Consumer,
 }
 
 #[wasm_bindgen]
@@ -95,7 +95,7 @@ impl Session {
 /// A consumer handle for a single broadcast.
 #[wasm_bindgen]
 pub struct Broadcast {
-	inner: moq_net::BroadcastConsumer,
+	inner: moq_net::broadcast::Consumer,
 }
 
 #[wasm_bindgen]
@@ -118,7 +118,7 @@ pub struct Track {
 	// the cell for the duration of the await rather than holding a borrow across
 	// it (which would make the future self-referential). One in-flight call at a
 	// time; a re-entrant call while one is pending errors instead of aliasing.
-	inner: Rc<RefCell<Option<moq_net::TrackSubscriber>>>,
+	inner: Rc<RefCell<Option<moq_net::track::Subscriber>>>,
 }
 
 #[wasm_bindgen]
@@ -146,7 +146,7 @@ impl Track {
 #[wasm_bindgen]
 pub struct Group {
 	sequence: u64,
-	inner: Rc<RefCell<Option<moq_net::GroupConsumer>>>,
+	inner: Rc<RefCell<Option<moq_net::group::Consumer>>>,
 }
 
 #[wasm_bindgen]

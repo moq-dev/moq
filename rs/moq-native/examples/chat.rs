@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // Connect to the server and publish our origin of broadcasts.
-async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -36,10 +36,10 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 }
 
 // Produce a broadcast and publish it to the origin.
-async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
+async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin..
 	// A broadcast is a collection of tracks, but in this example we'll only create one.
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.

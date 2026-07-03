@@ -46,7 +46,7 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 /// and dropped. A single FLV stream carries at most one video and one audio
 /// track; a new sequence header replaces the previous configuration.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
@@ -74,7 +74,7 @@ struct AudioStream {
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -398,27 +398,27 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Drop any existing video track (finishing it and clearing its catalog
 	/// rendition) and allocate a fresh one.
-	fn replace_video(&mut self) -> anyhow::Result<moq_net::TrackProducer> {
+	fn replace_video(&mut self) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.video.take() {
 			old.track.finish()?;
 			self.catalog.lock().video.renditions.remove(old.track.name());
 		}
 		Ok(self.broadcast.unique_track(
 			".flv-v",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?)
 	}
 
 	/// Drop any existing audio track (finishing it and clearing its catalog
 	/// rendition) and allocate a fresh one.
-	fn replace_audio(&mut self) -> anyhow::Result<moq_net::TrackProducer> {
+	fn replace_audio(&mut self) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.audio.take() {
 			old.track.finish()?;
 			self.catalog.lock().audio.renditions.remove(old.track.name());
 		}
 		Ok(self.broadcast.unique_track(
 			".flv-a",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?)
 	}
 

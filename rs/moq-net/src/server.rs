@@ -1,6 +1,7 @@
+use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Consume,
-	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream},
 	ietf, lite, setup,
 };
@@ -8,8 +9,8 @@ use crate::{
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
-	publish: Option<OriginConsumer>,
-	subscribe: Option<OriginProducer>,
+	publish: Option<origin::Consumer>,
+	subscribe: Option<origin::Producer>,
 	stats: StatsHandle,
 	versions: Versions,
 }
@@ -20,30 +21,30 @@ impl Server {
 	}
 
 	/// Publish to the connected client: the session reads from the given origin
-	/// (pass an [`OriginProducer`] or [`OriginConsumer`] by reference) and forwards
+	/// (pass an [`origin::Producer`] or [`origin::Consumer`] by reference) and forwards
 	/// its announcements. Omit to publish nothing. Pre-scoped via
-	/// [`OriginProducer::scope`] for token-gated relays.
-	pub fn with_publisher(mut self, publish: impl Consume<OriginConsumer>) -> Self {
+	/// [`origin::Producer::scope`] for token-gated relays.
+	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
 		self.publish = Some(publish.consume());
 		self
 	}
 
 	/// Subscribe to the connected client: the session writes the broadcasts the
-	/// client announces into this [`OriginProducer`]. Omit to subscribe to nothing.
-	pub fn with_subscriber(mut self, subscribe: OriginProducer) -> Self {
+	/// client announces into this [`origin::Producer`]. Omit to subscribe to nothing.
+	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
 		self.subscribe = Some(subscribe);
 		self
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 
@@ -55,8 +56,8 @@ impl Server {
 		self
 	}
 
-	/// Set both publish and subscribe from one shared [`OriginProducer`].
-	pub fn with_origin(self, origin: OriginProducer) -> Self {
+	/// Set both publish and subscribe from one shared [`origin::Producer`].
+	pub fn with_origin(self, origin: origin::Producer) -> Self {
 		self.with_publisher(&origin).with_subscriber(origin)
 	}
 
@@ -283,13 +284,13 @@ impl<S: web_transport_trait::Session> Request<S> {
 
 	/// Publish to the connected client. Overrides any value from the [`Server`]
 	/// builder; typically set after inspecting [`path`](Self::path).
-	pub fn with_publisher(mut self, publish: impl Consume<OriginConsumer>) -> Self {
+	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
 		self.server.publish = Some(publish.consume());
 		self
 	}
 
 	/// Subscribe to the connected client. Overrides any value from the [`Server`] builder.
-	pub fn with_subscriber(mut self, subscribe: OriginProducer) -> Self {
+	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
 		self.server.subscribe = Some(subscribe);
 		self
 	}

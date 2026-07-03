@@ -183,14 +183,14 @@ impl SubscribeArgs {
 
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
 }
 
 impl Subscribe {
 	/// Wrap the broadcast + resolved settings; [`run`](Self::run) drives it.
-	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Consumer, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
 		Self {
 			broadcast,
 			catalog,

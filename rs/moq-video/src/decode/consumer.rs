@@ -26,7 +26,7 @@ impl Consumer {
 	/// Subscribe to `name` in `broadcast`, decoding it per the catalog entry.
 	/// Errors if the rendition isn't H.264 or H.265.
 	pub async fn new(
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
 		name: impl Into<String>,
 		config: Config,

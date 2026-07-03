@@ -262,7 +262,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 }
 
 /// Subscribe to `name` from the Origin and write it to stdout.
-async fn run_stdout(consumer: moq_net::OriginConsumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 	let broadcast = consumer
 		.announced_broadcast(&name)

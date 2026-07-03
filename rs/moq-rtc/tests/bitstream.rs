@@ -32,7 +32,7 @@ async fn h264_annexb_frame_publishes_catalog_entry() {
 
 	let frame = annexb(&[sps, pps, idr]);
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
@@ -62,7 +62,7 @@ async fn h264_annexb_frame_publishes_catalog_entry() {
 
 #[tokio::test(start_paused = true)]
 async fn opus_frame_publishes_catalog_entry() {
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
@@ -85,7 +85,7 @@ async fn opus_frame_publishes_catalog_entry() {
 
 #[tokio::test(start_paused = true)]
 async fn vp9_keyframe_flag_from_uncompressed_header() {
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
@@ -136,7 +136,7 @@ async fn vp9_keyframe_flag_from_uncompressed_header() {
 #[tokio::test(start_paused = true)]
 async fn egress_opus_passthrough() {
 	// Build an opus broadcast via the ingest bridge.
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 	let mut bridge = moq_rtc::codec::opus::Bridge::new(producer.clone(), catalog.clone(), 48_000, 2).expect("bridge");
@@ -172,7 +172,7 @@ async fn egress_h264_avc3_passthrough() {
 	let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 	let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 

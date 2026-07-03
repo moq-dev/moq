@@ -27,9 +27,9 @@ use super::{Container, Frame};
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container> {
-	inner: moq_net::TrackProducer,
+	inner: moq_net::track::Producer,
 	container: C,
-	group: Option<moq_net::GroupProducer>,
+	group: Option<moq_net::group::Producer>,
 	buffer: Vec<Frame>,
 
 	latency: std::time::Duration,
@@ -41,7 +41,7 @@ pub struct Producer<C: Container> {
 
 impl<C: Container> Producer<C> {
 	/// Create a new Producer wrapping the given moq-lite producer.
-	pub fn new(track: moq_net::TrackProducer, container: C) -> Self {
+	pub fn new(track: moq_net::track::Producer, container: C) -> Self {
 		Self {
 			inner: track,
 			container,
@@ -54,7 +54,7 @@ impl<C: Container> Producer<C> {
 
 	/// The underlying moq-lite track producer. Read-only; mutating it directly
 	/// would sidestep group/keyframe invariants.
-	pub fn track(&self) -> &moq_net::TrackProducer {
+	pub fn track(&self) -> &moq_net::track::Producer {
 		&self.inner
 	}
 
@@ -90,7 +90,7 @@ impl<C: Container> Producer<C> {
 				return Err(super::MissingKeyframe.into());
 			}
 			self.group = Some(match self.pending_sequence.take() {
-				Some(sequence) => self.inner.create_group(moq_net::GroupInfo { sequence })?,
+				Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 				None => self.inner.append_group()?,
 			});
 		}
@@ -195,13 +195,13 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Create a consumer for this track.
-	pub fn consume(&self) -> moq_net::TrackSubscriber {
+	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.subscribe(None)
 	}
 }
 
 impl<C: Container> std::ops::Deref for Producer<C> {
-	type Target = moq_net::TrackProducer;
+	type Target = moq_net::track::Producer;
 
 	fn deref(&self) -> &Self::Target {
 		&self.inner
@@ -220,9 +220,9 @@ mod tests {
 	/// born from their broadcast (no public `TrackProducer::new`).
 	fn track_producer(
 		name: impl Into<std::sync::Arc<str>>,
-		info: impl Into<Option<moq_net::TrackInfo>>,
-	) -> moq_net::TrackProducer {
-		moq_net::BroadcastInfo::new()
+		info: impl Into<Option<moq_net::track::Info>>,
+	) -> moq_net::track::Producer {
+		moq_net::broadcast::Info::new()
 			.produce()
 			.create_track(name, info)
 			.unwrap()
@@ -238,7 +238,7 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their frame counts.
-	async fn collect_groups(mut consumer: moq_net::TrackSubscriber) -> Vec<usize> {
+	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
 		let mut groups = Vec::new();
 		while let Some(mut group) = consumer.recv_group().await.unwrap() {
 			let mut count = 0;
@@ -255,7 +255,7 @@ mod tests {
 	async fn keyframe_closes_group_immediately() {
 		let track = track_producer(
 			"test",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
@@ -274,7 +274,7 @@ mod tests {
 	async fn finish_group_closes_immediately() {
 		let track = track_producer(
 			"test",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
@@ -293,7 +293,7 @@ mod tests {
 	fn first_frame_must_be_keyframe() {
 		let track = track_producer(
 			"test",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -302,7 +302,7 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their sequence numbers.
-	async fn collect_sequences(mut consumer: moq_net::TrackSubscriber) -> Vec<u64> {
+	async fn collect_sequences(mut consumer: moq_net::track::Subscriber) -> Vec<u64> {
 		let mut sequences = Vec::new();
 		while let Some(group) = consumer.recv_group().await.unwrap() {
 			sequences.push(group.sequence);
@@ -315,7 +315,7 @@ mod tests {
 	async fn seek_uses_explicit_sequence() {
 		let track = track_producer(
 			"test",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
@@ -333,7 +333,7 @@ mod tests {
 	async fn seek_clears_pending_after_use() {
 		let track = track_producer(
 			"test",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
@@ -354,14 +354,14 @@ mod tests {
 	impl super::Container for Recording {
 		type Error = crate::Error;
 
-		fn write(&self, _group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+		fn write(&self, _group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 			self.0.borrow_mut().push(frames.to_vec());
 			Ok(())
 		}
 
 		fn poll_read(
 			&self,
-			_group: &mut moq_net::GroupConsumer,
+			_group: &mut moq_net::group::Consumer,
 			_waiter: &kio::Waiter,
 		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 			unreachable!("Recording is write-only")
@@ -374,7 +374,7 @@ mod tests {
 	async fn keyframe_backfills_batched_durations() {
 		let track = track_producer(
 			"test",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let recording = Recording::default();
 		let mut producer = Producer::new(track, recording.clone()).with_latency(std::time::Duration::from_secs(10));

@@ -49,7 +49,7 @@ impl Rendition {
 	pub fn video(
 		name: String,
 		config: &VideoConfig,
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
@@ -70,7 +70,7 @@ impl Rendition {
 	pub fn audio(
 		name: String,
 		config: &AudioConfig,
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
@@ -89,7 +89,7 @@ impl Rendition {
 }
 
 fn spawn_pump(
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	name: String,
 	kind: Kind,
 	store: Arc<SegmentStore>,
@@ -106,7 +106,7 @@ fn spawn_pump(
 }
 
 async fn run_pump(
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	name: &str,
 	kind: Kind,
 	store: &SegmentStore,

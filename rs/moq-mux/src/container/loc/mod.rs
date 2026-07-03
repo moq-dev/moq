@@ -22,7 +22,7 @@ pub struct Wire;
 impl Container for Wire {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			// LOC's wire format omits per-frame timescale by convention; the catalog
 			// default is microseconds, so convert at the boundary.
@@ -31,7 +31,7 @@ impl Container for Wire {
 
 			// Carry the timestamp on the net frame too (converted to the track's
 			// timescale), so a relay sees it without parsing the LOC payload.
-			let mut chunked = group.create_frame(moq_net::FrameInfo {
+			let mut chunked = group.create_frame(moq_net::frame::Info {
 				size: data.len() as u64,
 				timestamp: frame.timestamp,
 			})?;
@@ -43,7 +43,7 @@ impl Container for Wire {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_net::GroupConsumer,
+		group: &mut moq_net::group::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;

@@ -51,13 +51,13 @@ impl Client {
 	/// `client subscribe`: pull a remote WHEP feed and publish it as
 	/// `broadcast` on the local origin. Returns once the session is
 	/// running in the background.
-	pub async fn subscribe(&self, url: Url, broadcast: moq_net::BroadcastProducer) -> crate::Result<()> {
+	pub async fn subscribe(&self, url: Url, broadcast: moq_net::broadcast::Producer) -> crate::Result<()> {
 		whep::dial(self, url, broadcast).await
 	}
 
 	/// `client publish`: pull a local broadcast and push it to a remote
 	/// WHIP endpoint. Gated on the per-codec re-packetizer.
-	pub async fn publish(&self, url: Url, broadcast: moq_net::BroadcastConsumer) -> crate::Result<()> {
+	pub async fn publish(&self, url: Url, broadcast: moq_net::broadcast::Consumer) -> crate::Result<()> {
 		whip::dial(self, url, broadcast).await
 	}
 }

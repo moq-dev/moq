@@ -42,7 +42,7 @@ pub struct ExportArgs {
 }
 
 /// Accept incoming RTMP publishes into the Origin as `name`; reject plays (import).
-pub async fn listen_import(origin: moq_net::OriginProducer, addr: SocketAddr, name: String) -> anyhow::Result<()> {
+pub async fn listen_import(origin: moq_net::origin::Producer, addr: SocketAddr, name: String) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (import)");
 	notify_ready();
@@ -72,7 +72,7 @@ pub async fn listen_import(origin: moq_net::OriginProducer, addr: SocketAddr, na
 
 /// Serve RTMP plays of `name` from the Origin; reject publishes (export).
 pub async fn listen_export(
-	origin: moq_net::OriginConsumer,
+	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
 	latency: Duration,
@@ -107,7 +107,7 @@ pub async fn listen_export(
 }
 
 /// Dial a remote RTMP server and pull its play into the Origin under `name` (import).
-pub async fn connect_import(origin: moq_net::OriginProducer, url: Url, name: String) -> anyhow::Result<()> {
+pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
 	tracing::info!(%url, %name, "RTMP client pulling");
 	notify_ready();
@@ -118,7 +118,7 @@ pub async fn connect_import(origin: moq_net::OriginProducer, url: Url, name: Str
 
 /// Push a broadcast from the Origin to a remote RTMP server (export).
 pub async fn connect_export(
-	origin: moq_net::OriginConsumer,
+	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
 	latency: Duration,

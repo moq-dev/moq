@@ -1,5 +1,6 @@
+use crate::origin;
 use crate::{
-	Error, Origin, OriginConsumer, OriginProducer, StatsHandle,
+	Error, Origin, StatsHandle,
 	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
@@ -15,8 +16,8 @@ pub fn start<S: web_transport_trait::Session>(
 	setup: Option<Stream<S, Version>>,
 	request_id_max: Option<RequestId>,
 	client: bool,
-	publish: Option<OriginConsumer>,
-	subscribe: Option<OriginProducer>,
+	publish: Option<origin::Consumer>,
+	subscribe: Option<origin::Producer>,
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	version: Version,
@@ -32,8 +33,8 @@ pub fn start<S: web_transport_trait::Session>(
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| OriginProducer::empty(Origin::random()).consume());
-		let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
+		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
+		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {

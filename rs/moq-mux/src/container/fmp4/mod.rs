@@ -187,7 +187,7 @@ impl Wire {
 impl Container for Wire {
 	type Error = Error;
 
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
 		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
@@ -195,7 +195,7 @@ impl Container for Wire {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_net::GroupConsumer,
+		group: &mut moq_net::group::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
@@ -297,7 +297,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 }
 
 pub(crate) fn encode(
-	group: &mut moq_net::GroupProducer,
+	group: &mut moq_net::group::Producer,
 	frames: &[Frame],
 	timescale: moq_net::Timescale,
 	track_id: u32,
@@ -310,7 +310,7 @@ pub(crate) fn encode(
 	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
 	// The fragment may carry several samples; the net frame's timestamp is the
 	// fragment's earliest presentation time so a relay can order it.
-	let mut writer = group.create_frame(moq_net::FrameInfo {
+	let mut writer = group.create_frame(moq_net::frame::Info {
 		size: bytes.len() as u64,
 		timestamp: frames[0].timestamp,
 	})?;

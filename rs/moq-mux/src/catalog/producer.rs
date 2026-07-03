@@ -23,7 +23,7 @@ use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 pub struct Producer<E: CatalogExt = ()> {
 	hang: moq_json::Producer<Catalog<E>>,
 	hangz: moq_json::Producer<Catalog<E>>,
-	msf_track: moq_net::TrackProducer,
+	msf_track: moq_net::track::Producer,
 
 	current: Arc<Mutex<Catalog<E>>>,
 
@@ -52,7 +52,7 @@ impl Producer<()> {
 	/// For an extended catalog, use [`with_catalog`](Self::with_catalog) with a
 	/// `Catalog<E>` (e.g. the untyped [`Extra`] for the by-name / FFI path). Set
 	/// application sections through [`lock`](Self::lock).
-	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
+	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, Catalog::default())
 	}
 }
@@ -60,7 +60,7 @@ impl Producer<()> {
 impl<E: CatalogExt> Producer<E> {
 	/// Create a new catalog producer with the given initial catalog.
 	pub fn with_catalog(
-		broadcast: &mut moq_net::BroadcastProducer,
+		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: Catalog<E>,
 	) -> Result<Self, moq_net::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
@@ -153,7 +153,7 @@ pub struct Guard<'a, E: CatalogExt = ()> {
 	catalog: MutexGuard<'a, Catalog<E>>,
 	hang: &'a mut moq_json::Producer<Catalog<E>>,
 	hangz: &'a mut moq_json::Producer<Catalog<E>>,
-	msf_track: &'a mut moq_net::TrackProducer,
+	msf_track: &'a mut moq_net::track::Producer,
 	updated: bool,
 }
 
@@ -319,7 +319,7 @@ mod test {
 
 	#[test]
 	fn publishes_plain_and_compressed_tracks() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast).unwrap();
 
 		let mut plain = Consumer::new(catalog.hang.consume());

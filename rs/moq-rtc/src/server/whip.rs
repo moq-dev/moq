@@ -89,7 +89,7 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// outside `publisher`'s scope.
 pub async fn accept(
 	server: &Server,
-	publisher: &moq_net::OriginProducer,
+	publisher: &moq_net::origin::Producer,
 	broadcast: impl moq_net::AsPath,
 	offer: &str,
 ) -> Result<Response> {
@@ -98,7 +98,7 @@ pub async fn accept(
 	// Register the broadcast on the publish origin before negotiating, so a
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
-	let producer = moq_net::BroadcastInfo::new().produce();
+	let producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let publish = publisher
 		.publish_broadcast(broadcast, &consumer)

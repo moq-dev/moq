@@ -90,8 +90,8 @@ pub struct Config {
 /// track monitors, and async tasks.
 struct Session {
 	video_encoder: video::VideoEncoder,
-	video_track: moq_net::TrackDemand,
-	audio_track: moq_net::TrackDemand,
+	video_track: moq_net::track::Demand,
+	audio_track: moq_net::track::Demand,
 
 	/// Whether anyone is subscribed to the video/audio tracks.
 	video_active: AtomicBool,
@@ -109,7 +109,7 @@ struct Session {
 impl Session {
 	/// Monitor a single track's subscription state.
 	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
-	async fn run_track_monitor(&self, name: &str, track: &moq_net::TrackDemand, flag: &AtomicBool) {
+	async fn run_track_monitor(&self, name: &str, track: &moq_net::track::Demand, flag: &AtomicBool) {
 		loop {
 			if track.used().await.is_err() {
 				break;
@@ -209,7 +209,7 @@ async fn run(config: &Config) -> Result<()> {
 	let client = config.client.clone().init()?;
 
 	// Create the broadcast producer.
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
