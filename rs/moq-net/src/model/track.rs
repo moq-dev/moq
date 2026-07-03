@@ -29,6 +29,7 @@ const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 /// A track is a collection of groups, delivered out-of-order until expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct Track {
 	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
 	pub name: String,
@@ -43,6 +44,12 @@ impl Track {
 			name: name.into(),
 			priority: 0,
 		}
+	}
+
+	/// Set the delivery priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.

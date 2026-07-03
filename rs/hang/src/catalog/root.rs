@@ -76,18 +76,12 @@ impl Catalog {
 	}
 
 	pub fn default_track() -> moq_net::Track {
-		moq_net::Track {
-			name: Catalog::DEFAULT_NAME.to_string(),
-			priority: 100,
-		}
+		moq_net::Track::new(Catalog::DEFAULT_NAME).with_priority(100)
 	}
 
 	/// The track carrying the DEFLATE-compressed catalog ([`COMPRESSED_NAME`](Self::COMPRESSED_NAME)).
 	pub fn compressed_track() -> moq_net::Track {
-		moq_net::Track {
-			name: Catalog::COMPRESSED_NAME.to_string(),
-			priority: 100,
-		}
+		moq_net::Track::new(Catalog::COMPRESSED_NAME).with_priority(100)
 	}
 }
 

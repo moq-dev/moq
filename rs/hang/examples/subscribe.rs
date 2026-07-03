@@ -72,10 +72,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 	);
 
 	// Subscribe to the video track.
-	let track = moq_net::Track {
-		name: name.clone(),
-		priority: 1,
-	};
+	let track = moq_net::Track::new(name.clone()).with_priority(1);
 
 	let track_consumer = broadcast.subscribe_track(&track)?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
