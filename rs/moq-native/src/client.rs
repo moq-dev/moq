@@ -749,6 +749,26 @@ mod tests {
 	}
 
 	#[test]
+	fn test_toml_connect_survives_update_from() {
+		let toml = r#"
+			connect = "https://relay.example.com/anon"
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.connect.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-connect flag).
+		config.update_from(["test"]);
+		assert_eq!(config.connect.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
+	}
+
+	#[test]
+	fn test_cli_connect() {
+		let config = ClientConfig::parse_from(["test", "--client-connect", "https://relay.example.com/anon"]);
+		assert_eq!(config.connect.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
+	}
+
+	#[test]
 	fn test_cli_no_version_defaults_to_all() {
 		let config = ClientConfig::parse_from(["test"]);
 		assert!(config.version.is_empty());

@@ -65,7 +65,7 @@ time = "0.3"
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = "2"
+url = { version = "2", features = ["serde"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
