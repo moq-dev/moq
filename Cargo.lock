@@ -4015,7 +4015,6 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -4036,7 +4035,6 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
- "url",
 ]
 
 [[package]]
