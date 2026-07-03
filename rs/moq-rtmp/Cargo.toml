@@ -3,6 +3,9 @@ name = "moq-rtmp"
 description = "RTMP / enhanced-RTMP contribution ingest gateway for Media over QUIC"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
+# Our own code is MIT OR Apache-2.0. The vendored `src/rml/` module is a fork of
+# rml_rtmp (MIT only, Copyright (c) 2017 Matthew Shapiro); its notice ships in
+# src/rml/LICENSE and applies to that module regardless of which option you pick.
 license = "MIT OR Apache-2.0"
 
 version = "0.0.1"
@@ -27,14 +30,19 @@ tls = ["dep:rustls", "dep:tokio-rustls"]
 # origin. Only rustls + tokio-rustls (RTMPS, the `tls` feature) are optional.
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
+# Deps of the vendored `rml` module (our fork of the unmaintained rml_rtmp 0.8):
+# the RTMP handshake + chunk/message codec + session state machine, so no
+# librtmp / ffmpeg. RTMP carries FLV, demuxed by moq-mux.
+byteorder = "1"
 bytes = "1"
 futures = "0.3"
+hmac = "0.10"
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# Pure-Rust RTMP (no librtmp / ffmpeg): handshake + chunk codec + the
-# server-session state machine. RTMP carries FLV, demuxed by moq-mux.
-rml_rtmp = "0.8"
+rand = "0.8"
+rml_amf0 = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }
+sha2 = "0.9"
 # TCP keepalive on accepted sockets, so a half-open connection (a peer that
 # vanished without a FIN/RST) is reaped instead of pinning a broadcast and its
 # stream-key slot forever.

@@ -24,21 +24,22 @@
 //! the established stream to [`accept_stream`]; everything here is generic over
 //! the [`Stream`] trait.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::rml::handshake::{Handshake, HandshakeProcessResult, PeerType};
+use crate::rml::rml_amf0::Amf0Value;
+use crate::rml::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
+use crate::rml::time::RtmpTimestamp;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
 use moq_net::{Broadcast, OriginConsumer, OriginProducer};
-use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
-use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
-use rml_rtmp::time::RtmpTimestamp;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -70,6 +71,39 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// momentarily quiet connection.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+// Enhanced-RTMP FourCcInfoMask bit: this gateway forwards the codec. We demux FLV
+// into MoQ without decoding, so `CanForward` (not `CanDecode`) is the honest bit.
+const FOURCC_CAN_FORWARD: f64 = 0x04 as f64;
+
+// Enhanced-RTMP FourCC codecs the FLV importer accepts on ingest. Keep in sync
+// with `moq_mux::container::flv::Import`; an encoder that reads our advertised
+// support may gate whether it sends these.
+const INGEST_VIDEO_FOURCCS: [&[u8; 4]; 4] = [b"avc1", b"hvc1", b"av01", b"vp09"];
+const INGEST_AUDIO_FOURCCS: [&[u8; 4]; 5] = [b"Opus", b"mp4a", b".mp3", b"ac-3", b"ec-3"];
+
+/// Enhanced-RTMP capabilities to echo in the connect `_result` command object, so
+/// an enhanced encoder knows it may send these FourCC codecs on ingest.
+fn advertised_connect_properties() -> HashMap<String, Amf0Value> {
+	fn info_map(fourccs: &[&[u8; 4]]) -> Amf0Value {
+		Amf0Value::Object(
+			fourccs
+				.iter()
+				.map(|fourcc| {
+					(
+						String::from_utf8_lossy(*fourcc).into_owned(),
+						Amf0Value::Number(FOURCC_CAN_FORWARD),
+					)
+				})
+				.collect(),
+		)
+	}
+
+	HashMap::from([
+		("videoFourCcInfoMap".to_string(), info_map(&INGEST_VIDEO_FOURCCS)),
+		("audioFourCcInfoMap".to_string(), info_map(&INGEST_AUDIO_FOURCCS)),
+	])
+}
 
 /// A bidirectional byte stream carrying an RTMP session.
 ///
@@ -633,6 +667,8 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 					// Accept every connect; authorization happens at publish/play time.
 					ServerSessionEvent::ConnectionRequested { request_id, app_name } => {
 						tracing::debug!(%peer, %app_name, "rtmp connect");
+						// Advertise the enhanced-RTMP codecs we ingest in the connect _result.
+						session.set_connect_response_properties(advertised_connect_properties());
 						let results = session
 							.accept_request(request_id)
 							.map_err(|e| anyhow::anyhow!("rtmp accept connect: {e:?}"))?;
@@ -992,7 +1028,7 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use rml_rtmp::sessions::{
+	use crate::rml::sessions::{
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};
 
@@ -1274,6 +1310,111 @@ mod tests {
 		};
 		publish.reject("test rejection").await.unwrap();
 		client.abort();
+	}
+
+	/// The connect `_result` should advertise the enhanced-RTMP codecs we ingest,
+	/// so an enhanced encoder knows it may send them. Drives a raw client through
+	/// the handshake, sends `connect`, and deserializes the server's `_result` to
+	/// read the command object (rml's ClientSession discards those properties).
+	#[tokio::test]
+	async fn connect_result_advertises_ingest_codecs() {
+		use crate::rml::chunk_io::{ChunkDeserializer, ChunkSerializer};
+		use crate::rml::messages::RtmpMessage;
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+
+		// The server processes the connect while parked in accept() awaiting a
+		// publish/play that never comes; abort it once we've read the _result.
+		let server_task = tokio::spawn(async move {
+			let _ = server.accept().await;
+		});
+
+		let mut stream = TcpStream::connect(addr).await.unwrap();
+
+		// Client handshake.
+		let mut handshake = Handshake::new(PeerType::Client);
+		stream
+			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0u8; 4096];
+		let remaining = loop {
+			let n = stream.read(&mut buffer).await.unwrap();
+			match handshake.process_bytes(&buffer[..n]).unwrap() {
+				HandshakeProcessResult::InProgress { response_bytes } => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+				}
+				HandshakeProcessResult::Completed {
+					response_bytes,
+					remaining_bytes,
+				} => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+					break remaining_bytes;
+				}
+			}
+		};
+
+		// Send a minimal `connect`.
+		let connect = RtmpMessage::Amf0Command {
+			command_name: "connect".to_string(),
+			transaction_id: 1.0,
+			command_object: Amf0Value::Object(HashMap::from([(
+				"app".to_string(),
+				Amf0Value::Utf8String("live".to_string()),
+			)])),
+			additional_arguments: Vec::new(),
+		};
+		let payload = connect.into_message_payload(RtmpTimestamp::new(0), 0).unwrap();
+		let packet = ChunkSerializer::new().serialize(&payload, false, false).unwrap();
+		stream.write_all(&packet.bytes).await.unwrap();
+
+		// Read inbound and pull out the `_result` command object. Track SetChunkSize
+		// so the multi-chunk _result reassembles correctly.
+		let mut deserializer = ChunkDeserializer::new();
+		let mut pending = remaining;
+		let command_object = 'outer: loop {
+			let mut input: &[u8] = &pending;
+			while let Some(payload) = deserializer.get_next_message(input).unwrap() {
+				input = &[];
+				match payload.to_rtmp_message() {
+					Ok(RtmpMessage::SetChunkSize { size }) => {
+						deserializer.set_max_chunk_size(size as usize).unwrap();
+					}
+					Ok(RtmpMessage::Amf0Command {
+						command_name,
+						command_object,
+						..
+					}) if command_name == "_result" => break 'outer command_object,
+					_ => {}
+				}
+			}
+			let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+				.await
+				.expect("timed out awaiting connect _result")
+				.unwrap();
+			assert!(n > 0, "server closed before sending connect _result");
+			pending = buffer[..n].to_vec();
+		};
+
+		let Amf0Value::Object(properties) = command_object else {
+			panic!("connect _result command object was not an AMF0 object");
+		};
+		let Some(Amf0Value::Object(video)) = properties.get("videoFourCcInfoMap") else {
+			panic!("connect _result did not advertise videoFourCcInfoMap");
+		};
+		assert!(video.contains_key("hvc1"), "expected hvc1 in videoFourCcInfoMap");
+		assert!(video.contains_key("av01"), "expected av01 in videoFourCcInfoMap");
+		let Some(Amf0Value::Object(audio)) = properties.get("audioFourCcInfoMap") else {
+			panic!("connect _result did not advertise audioFourCcInfoMap");
+		};
+		assert!(audio.contains_key("Opus"), "expected Opus in audioFourCcInfoMap");
+
+		server_task.abort();
 	}
 
 	#[tokio::test]

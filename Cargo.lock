@@ -4322,13 +4322,17 @@ name = "moq-rtmp"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "byteorder",
  "bytes",
  "futures",
+ "hmac 0.10.1",
  "moq-mux",
  "moq-native",
  "moq-net",
- "rml_rtmp",
+ "rand 0.8.6",
+ "rml_amf0",
  "rustls",
+ "sha2 0.9.9",
  "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
@@ -6288,21 +6292,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63551cfcd4d1f42733c190e4b58dd268b1eacb73410d9afbf62784aa12cac240"
 dependencies = [
  "byteorder",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "rml_rtmp"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a354e80eb7aa2a6fed09b3bd25c19bcfd32cf51f81f1219f4ec04f34519989da"
-dependencies = [
- "byteorder",
- "bytes",
- "hmac 0.10.1",
- "rand 0.8.6",
- "rml_amf0",
- "sha2 0.9.9",
  "thiserror 1.0.69",
 ]
 
