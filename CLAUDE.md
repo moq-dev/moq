@@ -146,7 +146,8 @@ Language-specific tooling (TypeScript/`bun`/Biome, JS async patterns, Web Compon
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
-- For UI / web changes (`js/watch`, `js/publish`, `demo/web`, anything touching playback or the `<moq-watch>`/`<moq-publish>` components), don't stop at unit tests: run `just dev` and exercise the change in a real browser via the Claude-in-Chrome plugin (if installed), since WebTransport + WebCodecs playback only surfaces at runtime. The Chrome plugin drives a real visible tab, so it avoids the headless-preview gotcha where `<moq-watch>` gates video download on a `hidden` tab.
+- For UI / web changes (`js/watch`, `js/publish`, `demo/web`, anything touching playback or the `<moq-watch>`/`<moq-publish>` components), don't stop at unit tests: run `just dev` and exercise the change in a real browser via the Claude-in-Chrome plugin (if installed), since WebTransport + WebCodecs playback only surfaces at runtime.
+  - `<moq-watch>` gates video download/render on `intersecting && !document.hidden`, so a tab that isn't the frontmost visible one renders black at 0 fps even while bytes download (the Claude-in-Chrome tab often reports `document.hidden`). Set `visible="always"` on the element to bypass the gate (it forces download regardless of viewport or tab visibility), or bring the browser window frontmost so `visibilityState` flips to `visible`.
 
 ## Cross-Package Sync
 

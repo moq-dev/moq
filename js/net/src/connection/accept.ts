@@ -1,8 +1,15 @@
+import Session from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
 import { exchangeSetup } from "./handshake.ts";
+
+// QUIC datagrams only work on a real WebTransport, not a qmux Session (WebSocket fallback),
+// whose datagram streams are inert stubs. Gate on the transport type, mirroring connect().
+function datagramsUsable(transport: WebTransport): boolean {
+	return !(transport instanceof Session);
+}
 
 /** Options for {@link accept}. */
 export interface AcceptProps {
@@ -31,11 +38,11 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		return acceptSetup(transport, url, Ietf.Version.DRAFT_15);
 	} else if (protocol === Lite.ALPN_05_WIP) {
-		return new Lite.Connection(url, transport, Lite.Version.DRAFT_05_WIP, undefined);
+		return new Lite.Connection(url, transport, Lite.Version.DRAFT_05_WIP, undefined, datagramsUsable(transport));
 	} else if (protocol === Lite.ALPN_04) {
-		return new Lite.Connection(url, transport, Lite.Version.DRAFT_04, undefined);
+		return new Lite.Connection(url, transport, Lite.Version.DRAFT_04, undefined, datagramsUsable(transport));
 	} else if (protocol === Lite.ALPN_03) {
-		return new Lite.Connection(url, transport, Lite.Version.DRAFT_03, undefined);
+		return new Lite.Connection(url, transport, Lite.Version.DRAFT_03, undefined, datagramsUsable(transport));
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		return acceptNegotiated(transport, url, props);
 	} else {
@@ -136,7 +143,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	await server.encode(stream.writer, setupVersion);
 
 	if (Object.values(Lite.Version).includes(selectedVersion as Lite.Version)) {
-		return new Lite.Connection(url, transport, selectedVersion as Lite.Version, stream);
+		return new Lite.Connection(url, transport, selectedVersion as Lite.Version, stream, datagramsUsable(transport));
 	} else if (Object.values(Ietf.Version).includes(selectedVersion as Ietf.Version)) {
 		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({

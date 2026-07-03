@@ -127,6 +127,10 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 				session.protocol;
 	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
 
+	// QUIC datagrams only work on a real WebTransport; a qmux Session (WebSocket fallback)
+	// advertises a datagram size but its datagram streams are inert, so gate on the type.
+	const datagramsUsable = !(session instanceof Session);
+
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
 	const modernVersion =
@@ -143,13 +147,13 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_15;
 	} else if (protocol === Lite.ALPN_05_WIP) {
 		// moq-lite draft-05 (WIP) doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined, datagramsUsable);
 	} else if (protocol === Lite.ALPN_04) {
 		// moq-lite draft-04 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined, datagramsUsable);
 	} else if (protocol === Lite.ALPN_03) {
 		// moq-lite draft-03 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined, datagramsUsable);
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		// moq-lite ALPN (or no protocol) uses Draft14 encoding for SETUP,
 		// then negotiates the actual version via the SETUP message.
@@ -193,7 +197,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	console.debug(url.toString(), "received server setup", server);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+		return new Lite.Connection(url, session, server.version as Lite.Version, stream, datagramsUsable);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
@@ -212,6 +216,9 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = session.protocol;
 
+	// QUIC datagrams only work on a real WebTransport, not a qmux Session (see connect()).
+	const datagramsUsable = !(session instanceof Session);
+
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
 	const modernVersion =
@@ -227,11 +234,11 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
 	} else if (protocol === Lite.ALPN_05_WIP) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined, datagramsUsable);
 	} else if (protocol === Lite.ALPN_04) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined, datagramsUsable);
 	} else if (protocol === Lite.ALPN_03) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined, datagramsUsable);
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		setupVersion = Ietf.Version.DRAFT_14;
 	} else {
@@ -266,7 +273,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+		return new Lite.Connection(url, session, server.version as Lite.Version, stream, datagramsUsable);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
