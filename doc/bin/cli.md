@@ -134,7 +134,7 @@ default features:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
-    --features "iroh quinn websocket capture"
+    --features "iroh noq websocket capture"
 ```
 
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
@@ -199,6 +199,8 @@ Export formats:
 - `mkv` - Matroska / WebM
 - `ts` - MPEG-TS
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
+- `h264` - raw H.264 Annex-B
+- `h265` - raw H.265 Annex-B
 
 `export` also takes `--catalog-format` to pick which catalog track to read for track
 discovery. When omitted, it's auto-detected from the broadcast name suffix
@@ -207,6 +209,24 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hang` - the `catalog.json` JSON catalog (default)
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
+
+Stdout exports can also select one rendition per media role before the sink
+subcommand:
+
+```bash
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+    export --video-name 720p --audio-codec opus fmp4 | ffplay -
+```
+
+- `--video-name <name>` picks the video rendition with that exact catalog name.
+- `--video-codec <h264|h265|vp8|vp9|av1>` keeps only matching video renditions.
+- `--audio-name <name>` picks the audio rendition with that exact catalog name.
+- `--audio-codec <aac|opus>` keeps only matching audio renditions.
+
+With no selection flags, every matching rendition is kept. The `h264` and `h265`
+export sinks force the matching video codec, so use `export h264` / `export h265`
+for raw elementary streams instead of combining those sinks with a contradictory
+`--video-codec`.
 
 Every export sink caps how long a stalled group is waited on before the muxer
 skips to a newer one. Each owns the knob so its default fits the transport: the

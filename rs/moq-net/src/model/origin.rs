@@ -492,7 +492,7 @@ impl OriginNode {
 			//
 			// Drop duplicates (same underlying broadcast delivered via multiple links) so the
 			// backup queue can't accumulate clones of the active entry and trigger redundant
-			// restartments when a peer churns.
+			// re-announces when a peer churns.
 			if existing.active.is_clone(broadcast) || existing.backup.iter().any(|b| b.is_clone(broadcast)) {
 				return;
 			}

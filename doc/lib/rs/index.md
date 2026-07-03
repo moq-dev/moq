@@ -243,7 +243,7 @@ into the session before connecting:
 // Subscribe: wait for broadcasts to be announced.
 let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
-let session = client.with_consume(origin).connect(url).await?;
+let session = client.with_subscriber(origin).connect(url).await?;
 
 while let Some((path, broadcast)) = consumer.announced().await {
     // ... subscribe to tracks on each broadcast ...

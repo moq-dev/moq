@@ -82,8 +82,10 @@ pub struct MoqSide {
 #[derive(Subcommand, Clone)]
 pub enum Direction {
 	/// Route media INTO MoQ from one source.
+	#[command(alias = "publish")]
 	Import(Import),
 	/// Route media OUT OF MoQ to one sink.
+	#[command(alias = "subscribe")]
 	Export(Export),
 }
 

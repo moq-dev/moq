@@ -12,13 +12,7 @@ deploy:
     bun install
     bun wrangler deploy
 
-# Upload a single file to R2.
-# NOTE: Videos should be fragmented to minimize latency when streaming.
-# Use ffmpeg to fragment before uploading:
-#	 ffmpeg -i input.mp4 -c copy -f mp4 \
-#		 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-
-# output.mp4
+# Upload a single file to R2. Fragment videos first, e.g. `ffmpeg -i input.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame output.mp4`.
 upload file:
     bun install
     bun wrangler r2 object put "video-moq-dev/{{ file }}" --file "media/{{ file }}" --remote
@@ -54,24 +48,18 @@ tos url='http://localhost:4443' *args:
 # Publish a video using ffmpeg (CMAF / fMP4) to a relay server.
 cmaf name url='http://localhost:4443' *args:
     cargo build --bin moq
-    just ffmpeg-cmaf "media/{{ name }}.mp4" |\
-    cargo run --bin moq -- \
-    	{{ args }} --client-connect "{{ url }}" --broadcast "{{ name }}.hang" import fmp4
+    just ffmpeg-cmaf "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --client-connect "{{ url }}" --broadcast "{{ name }}.hang" import fmp4
 
 # Publish a video using ffmpeg (MPEG-TS) to a relay server.
 ts name url='http://localhost:4443' *args:
     cargo build --bin moq
-    just ffmpeg-ts "media/{{ name }}.mp4" |\
-    cargo run --bin moq -- \
-    	{{ args }} --client-connect "{{ url }}" --broadcast "{{ name }}.hang" import ts
+    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --client-connect "{{ url }}" --broadcast "{{ name }}.hang" import ts
 
 # Publish a video via iroh.
 iroh name url prefix="":
     just download "{{ name }}"
     cargo build --bin moq
-    just ffmpeg-cmaf "media/{{ name }}.mp4" |\
-    cargo run --bin moq -- \
-    	--iroh-enabled --client-connect "{{ url }}" --broadcast "{{ prefix }}{{ name }}.hang" import fmp4
+    just ffmpeg-cmaf "media/{{ name }}.mp4" | cargo run --bin moq -- --iroh-enabled --client-connect "{{ url }}" --broadcast "{{ prefix }}{{ name }}.hang" import fmp4
 
 # Generate and ingest an HLS stream from a video file.
 hls name relay="http://localhost:4443":
@@ -166,10 +154,7 @@ h264 name url="http://localhost:4443" *args:
 serve name *args:
     just download "{{ name }}"
     cargo build --bin moq
-    just ffmpeg-cmaf "media/{{ name }}.mp4" |\
-    cargo run --bin moq -- \
-    	{{ args }} --server-bind "[::]:4443" --tls-generate "localhost" \
-    	--broadcast "{{ name }}.hang" import fmp4
+    just ffmpeg-cmaf "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --server-bind "[::]:4443" --tls-generate "localhost" --broadcast "{{ name }}.hang" import fmp4
 
 # Generate and serve an HLS stream from a video for testing.
 serve-hls name port="8000":
@@ -254,11 +239,7 @@ ffmpeg-cmaf input output='-' *args:
     	-c copy \
     	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{ args }} {{ output }}
 
-# Convert an h264 input file to MPEG-TS format to stdout.
-#
-# `-pes_payload_size 0` flushes one PES per audio frame instead of batching ~8
-# (the default 2930-byte minimum), so audio interleaves evenly with video rather
-# than arriving in ~185ms bursts. Without it the player must buffer a whole burst.
+# Convert an h264 input file to MPEG-TS format to stdout, with one PES per audio frame.
 [private]
 ffmpeg-ts input output='-' *args:
     ffmpeg -hide_banner -v quiet \

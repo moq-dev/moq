@@ -1,21 +1,17 @@
 #!/usr/bin/env just --justfile
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
-# Per-language modules. Anything that's specific to one language lives in
 
-# its own justfile; the recipes below orchestrate across them.
+# Per-language modules. Language-specific recipes live in their own justfiles.
 mod js
 mod rs
 mod py
 mod kt
 mod swift
 mod go
-
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
-
 # Unit tests per language (`just test`).
 mod test
-
 # Demos and infra.
 mod demo
 mod infra
@@ -36,18 +32,12 @@ default:
 dev:
     just demo
 
-# Install repo-wide tooling. Per-language deps install on first invocation
-
-# of `just <lang> check`.
+# Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install
     cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
 
-# Fast inner-loop checks. Runs JS, Rust, and Markdown lints.
-# Shell + workflow + TOML + Nix + justfile lints skip silently if their
-# binaries aren't on $PATH; `nix develop` provides them, and `just ci`
-
-# requires them.
+# Fast inner-loop checks. Optional shell, workflow, TOML, Nix, and justfile lints skip if missing.
 check *args:
     just js check
     just rs check {{ args }}
@@ -58,10 +48,7 @@ check *args:
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --check --justfile "$f"; done
     just gh check
 
-# Run every per-language `ci` with the diff vs BASE; each greps for its
-# own scope and skips when nothing relevant changed. Pass BASE="" to
-
-# default to $GITHUB_BASE_REF (CI) or origin/main (local).
+# Run per-language CI against BASE, skipping scopes with no relevant diff.
 ci BASE="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -116,9 +103,7 @@ ci BASE="":
     for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --check --justfile "$f"; done
     just gh ci
 
-# Auto-fix linting/formatting issues across all languages.
-
-# shfmt / taplo / nixfmt / just --fmt skipped silently if missing locally.
+# Auto-fix linting/formatting issues; optional tools skip if missing locally.
 fix:
     just js fix
     just rs fix
@@ -136,23 +121,13 @@ build:
     if command -v uv &> /dev/null; then just py build; fi
     if command -v wasm-bindgen &> /dev/null; then just wasm; fi
 
-# Build the browser/WASM bindings (rs/moq-wasm) into the @moq/wasm package.
-# wasm-bindgen comes from the Nix dev shell (its version must match the pinned
-# wasm-bindgen crate); the wasm32 target, the size-optimized `wasm-release`
-# profile, and cfg flags (getrandom, web-sys unstable) live in Cargo.toml and
-# .cargo/config.toml. The profile already optimizes for size; wasm-opt is
-# skipped since it didn't improve the gzipped (over-the-wire) size here.
-# Resolve the artifact via CARGO_TARGET_DIR so it also works on runners that
-# redirect the target directory (it defaults to `target`).
+# Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
     cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 
-# Delete build artifacts and caches to reclaim disk space. Each language
-# owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this
-# orchestrates them, sweeps the caches no language owns, then recurses into
-# any agent worktrees under .claude/worktrees/.
+# Delete build artifacts and caches, including per-language outputs and agent worktrees.
 clean:
     #!/usr/bin/env bash
     set -euo pipefail

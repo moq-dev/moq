@@ -396,13 +396,13 @@ impl Server {
 		self
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
 	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
 	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
 		self.with_subscriber(subscribe)
@@ -982,13 +982,13 @@ impl Request {
 		}
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
 	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
 	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
 		self.with_subscriber(subscribe)

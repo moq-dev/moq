@@ -21,8 +21,9 @@ const MESH_PREFIX: &str = ".internal/origins";
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a peer must stay unannounced before we abort the dial. Must clear the
-/// "prefer shorter hop" restart flap (which arrives as unannounce-then-announce
-/// within sub-milliseconds) plus reasonable churn from a peer restart.
+/// "prefer shorter hop" re-announce flap (which arrives as
+/// unannounce-then-announce within sub-milliseconds) plus reasonable churn from
+/// a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// How often the relay re-checks an http(s) `--cluster-connect-api` endpoint. The
@@ -594,7 +595,7 @@ impl Cluster {
 	/// instead of two. Unannounces don't abort immediately. They just mark the
 	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
 	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
-	/// shorter hop" path in OriginProducer delivers restartments as
+	/// shorter hop" path in OriginProducer delivers re-announces as
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
 	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
@@ -1002,7 +1003,7 @@ mod tests {
 		assert!(dialed.contains("healthy:4443"));
 	}
 
-	/// A restart after an unannounce clears the pending-sweep timestamp, so
+	/// A re-announce after an unannounce clears the pending-sweep timestamp, so
 	/// the entry survives even if the original unannounce was old enough to
 	/// otherwise trigger eviction.
 	#[tokio::test]
