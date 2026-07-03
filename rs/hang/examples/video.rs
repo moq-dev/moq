@@ -41,10 +41,7 @@ async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
 fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<moq_net::TrackProducer> {
 	// Basic information about the video track.
-	let video_track = moq_net::Track {
-		name: "video".to_string(),
-		priority: 1, // Video typically has lower priority than audio
-	};
+	let video_track = moq_net::Track::new("video").with_priority(1);
 
 	// Example video configuration
 	// In a real application, you would get this from the encoder

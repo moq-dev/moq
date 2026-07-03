@@ -260,10 +260,9 @@ impl Consume {
 		// (e.g. ffmpeg moqenc, browser @moq/publish) are misread as raw frames.
 		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-		})?;
+		let track = consume
+			.broadcast
+			.subscribe_track(&moq_net::Track::new(rendition.clone()).with_priority(1))?;
 		let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 
 		let channel = oneshot::channel();
@@ -305,10 +304,9 @@ impl Consume {
 
 		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-		})?;
+		let track = consume
+			.broadcast
+			.subscribe_track(&moq_net::Track::new(rendition.clone()).with_priority(2))?;
 		let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 
 		let channel = oneshot::channel();
@@ -402,10 +400,7 @@ impl Consume {
 	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
 	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.subscribe_track(&moq_net::Track {
-			name: name.to_string(),
-			priority: 0,
-		})?;
+		let track = broadcast.subscribe_track(&moq_net::Track::new(name))?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {

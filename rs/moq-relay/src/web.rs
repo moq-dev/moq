@@ -563,10 +563,7 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_net::Track {
-		name: track,
-		priority: 0,
-	};
+	let track = moq_net::Track::new(track);
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 

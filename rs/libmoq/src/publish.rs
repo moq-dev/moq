@@ -171,10 +171,7 @@ impl Publish {
 	/// if you want to describe the track in the catalog as well.
 	pub fn track(&mut self, broadcast: Id, name: &str) -> Result<Id, Error> {
 		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.create_track(moq_net::Track {
-			name: name.to_string(),
-			priority: 0,
-		})?;
+		let track = broadcast.create_track(moq_net::Track::new(name))?;
 		self.tracks.insert(track)
 	}
 

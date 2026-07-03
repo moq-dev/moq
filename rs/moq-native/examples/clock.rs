@@ -54,10 +54,7 @@ async fn main() -> anyhow::Result<()> {
 	tracing::info!(url = ?config.client.connect, "connecting to server");
 	let client = config.client.init()?;
 
-	let track = Track {
-		name: config.track,
-		priority: 0,
-	};
+	let track = Track::new(config.track);
 
 	let origin = moq_net::Origin::random().produce();
 

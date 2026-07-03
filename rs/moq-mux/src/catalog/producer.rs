@@ -63,15 +63,9 @@ impl<E: CatalogExt> Producer<E> {
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: Catalog<E>,
 	) -> Result<Self, moq_net::Error> {
-		let hang_track = broadcast.create_track(moq_net::Track {
-			name: hang::Catalog::DEFAULT_NAME.to_string(),
-			priority: 0,
-		})?;
+		let hang_track = broadcast.create_track(moq_net::Track::new(hang::Catalog::DEFAULT_NAME))?;
 		let hangz_track = broadcast.create_track(hang::Catalog::compressed_track())?;
-		let msf_track = broadcast.create_track(moq_net::Track {
-			name: moq_msf::DEFAULT_NAME.to_string(),
-			priority: 0,
-		})?;
+		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let mut json_config = moq_json::ProducerConfig::default();
