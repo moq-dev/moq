@@ -4248,6 +4248,7 @@ version = "0.1.14"
 dependencies = [
  "bytes",
  "futures",
+ "getrandom 0.3.4",
  "kio",
  "num_enum",
  "rand 0.10.2",

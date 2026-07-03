@@ -60,7 +60,7 @@ impl Track {
 #[derive(Default)]
 struct State {
 	/// Groups in arrival order. `None` entries are tombstones for evicted groups.
-	groups: VecDeque<Option<(GroupProducer, tokio::time::Instant)>>,
+	groups: VecDeque<Option<(GroupProducer, web_async::time::Instant)>>,
 	duplicates: HashSet<u64>,
 	offset: usize,
 	max_sequence: Option<u64>,
@@ -174,7 +174,7 @@ impl State {
 	/// non-max_sequence group (everything after it arrived even later).
 	/// When max_sequence is at the front, we skip past it and tombstone expired groups
 	/// behind it.
-	fn evict_expired(&mut self, now: tokio::time::Instant) {
+	fn evict_expired(&mut self, now: web_async::time::Instant) {
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
@@ -246,7 +246,7 @@ impl TrackProducer {
 			return Err(Error::Duplicate);
 		}
 
-		let now = tokio::time::Instant::now();
+		let now = web_async::time::Instant::now();
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.evict_expired(now);
@@ -269,7 +269,7 @@ impl TrackProducer {
 
 		let group = Group { sequence }.produce();
 
-		let now = tokio::time::Instant::now();
+		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));

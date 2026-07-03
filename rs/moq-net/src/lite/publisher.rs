@@ -110,8 +110,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 		const PROBE_MAX_DELTA: f64 = 0.25;
 
-		let mut last_sent: Option<(u64, tokio::time::Instant)> = None;
-		let mut interval = tokio::time::interval(PROBE_INTERVAL);
+		let mut last_sent: Option<(u64, web_async::time::Instant)> = None;
+		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
 			tokio::select! {
@@ -139,7 +139,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if should_send {
 				let rtt = session.stats().rtt().map(|d| d.as_millis() as u64);
 				stream.writer.encode(&lite::Probe { bitrate, rtt }).await?;
-				last_sent = Some((bitrate, tokio::time::Instant::now()));
+				last_sent = Some((bitrate, web_async::time::Instant::now()));
 			}
 		}
 	}
