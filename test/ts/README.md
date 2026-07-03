@@ -14,10 +14,10 @@ and by how much.
 ## Running
 
 ```bash
-just test ts-compliance                    # generate a clip, round-trip, analyze
-just test ts-compliance --source cap.ts    # round-trip a real capture instead
-just test ts-compliance --analyze-only x.ts # skip the round-trip, analyze a file
-just test ts-compliance --strict           # also fail on broadcast-shape warnings
+just test ts                    # generate a clip, round-trip, analyze
+just test ts --source cap.ts    # round-trip a real capture instead
+just test ts --analyze-only x.ts # skip the round-trip, analyze a file
+just test ts --strict           # also fail on broadcast-shape warnings
 ```
 
 `--analyze-only` needs only TSDuck + Python, so you can point it at any captured
@@ -74,8 +74,8 @@ writes the full machine-readable report.
 
 ## CI
 
-`.github/workflows/smoke.yml` runs `just test ts-compliance` after the interop
-matrix (nightly, on demand, and on PRs touching `test/ts-compliance/`). TSDuck
+`.github/workflows/smoke.yml` runs `just test ts` after the interop
+matrix (nightly, on demand, and on PRs touching `test/ts/`). TSDuck
 comes from the `nix develop` shell, so the run uses the same `tsp`/`tsanalyze` a
 local developer would.
 

@@ -816,9 +816,9 @@ def main() -> int:
             json.dump(report, handle, indent=2)
 
     if code == 0:
-        print("ts-compliance: PASS" + (" (strict)" if args.strict else ""))
+        print("ts: PASS" + (" (strict)" if args.strict else ""))
     else:
-        print("ts-compliance: FAIL", file=sys.stderr)
+        print("ts: FAIL", file=sys.stderr)
     return code
 
 

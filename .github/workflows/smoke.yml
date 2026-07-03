@@ -16,7 +16,7 @@ on:
     paths:
       - "test/smoke/**"
       # The TS/IRD compliance harness runs in the same job (see below).
-      - "test/ts-compliance/**"
+      - "test/ts/**"
       # The smoke job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
@@ -80,5 +80,5 @@ jobs:
       # Round-trips a PCR-paced TS through a relay and checks the subscriber's
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance
-        run: nix develop --command just test ts-compliance
+        run: nix develop --command just test ts
         shell: bash -leo pipefail {0}
