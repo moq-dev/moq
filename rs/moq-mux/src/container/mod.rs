@@ -36,6 +36,7 @@ pub(crate) use source::ExportSource;
 /// The exact shape depends on the codec (Annex B for H.264/H.265, OBU for
 /// AV1, and so on).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Frame {
 	/// Presentation timestamp.
 	///
@@ -68,6 +69,18 @@ pub struct Frame {
 	/// "first frame in a group is a keyframe" as a fallback, so the
 	/// Legacy/LOC case lands correctly without anyone having to know.
 	pub keyframe: bool,
+}
+
+impl Frame {
+	/// Build a frame with no explicit duration.
+	pub fn new(timestamp: moq_net::Timestamp, payload: Bytes, keyframe: bool) -> Self {
+		Self {
+			timestamp,
+			duration: None,
+			payload,
+			keyframe,
+		}
+	}
 }
 
 /// A non-keyframe frame arrived with no open group.

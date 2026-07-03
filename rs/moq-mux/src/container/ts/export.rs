@@ -13,7 +13,7 @@
 //! length-prefixed -> Annex-B conversion, re-injecting the parameter sets as
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -214,11 +214,11 @@ impl<E: catalog::Catalog> Export<E> {
 	/// on the first frame (inheriting its timestamp), and is re-emitted at video
 	/// keyframes and periodically for mid-stream tune-in. Returns `None` when the
 	/// broadcast ends. `duration` is always `None`: the muxer has no use for it.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
+	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -335,7 +335,7 @@ impl<E: catalog::Catalog> Export<E> {
 		self.program_descriptors = mpegts.program_descriptors.clone();
 
 		// The desired track set: media renditions plus the verbatim streams.
-		let mut active: HashMap<String, ()> = HashMap::new();
+		let mut active: BTreeMap<String, ()> = BTreeMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
@@ -371,7 +371,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// runs every snapshot until the PMT is built and the tracks below are
 		// *refreshed*, not latched from the first (partial) snapshot.
 		let mut used: Vec<u16> = vec![0x0000, PMT_PID, 0x1FFF];
-		let mut pids: HashMap<String, u16> = HashMap::new();
+		let mut pids: BTreeMap<String, u16> = BTreeMap::new();
 		for name in active.keys() {
 			if let Some(pid) = mpegts.tracks.get(name).map(|t| t.pid)
 				&& !used.contains(&pid)
@@ -642,9 +642,9 @@ impl<E: catalog::Catalog> Export<E> {
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (n.clone(), f.timestamp)))
-			.min_by_key(|(_, ts)| *ts)
-			.map(|(n, _)| n)
+			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (f.timestamp, t.pid, n)))
+			.min_by_key(|(timestamp, pid, name)| (*timestamp, *pid, *name))
+			.map(|(_, _, name)| name.clone())
 	}
 
 	/// Packetize one media frame into an output [`Frame`], re-emitting PAT/PMT
