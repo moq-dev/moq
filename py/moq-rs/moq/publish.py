@@ -153,9 +153,12 @@ class TrackRequest:
         """The requested track name."""
         return self._inner.name()
 
-    def accept(self) -> TrackProducer:
-        """Accept the request as a raw track."""
-        return TrackProducer(self._inner.accept(None))
+    def accept(self, info: TrackInfo | None = None) -> TrackProducer:
+        """Accept the request as a raw track.
+
+        ``info`` fixes the track's timescale, priority, ordering, and cache; omit for defaults.
+        """
+        return TrackProducer(self._inner.accept(info))
 
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""

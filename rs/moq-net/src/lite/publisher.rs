@@ -251,7 +251,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						.publisher_announced_bytes(absolute.as_str().len() as u64);
 				}
 			}
-			Version::Lite05Wip => {
+			_ if version.has_announce_ok() => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
@@ -424,7 +424,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
 		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
 		// chain is full.
-		if !matches!(version, Version::Lite05Wip) && hops.push(self_origin).is_err() {
+		if !version.has_announce_ok() && hops.push(self_origin).is_err() {
 			tracing::warn!(broadcast = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
 			return None;
 		}

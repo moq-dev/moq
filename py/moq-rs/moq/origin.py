@@ -114,5 +114,10 @@ class OriginProducer:
     def consume(self) -> OriginConsumer:
         return OriginConsumer(self._inner.consume())
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
+        """Advertise ``broadcast`` at ``path`` so subscribers can discover it."""
         self._inner.announce(path, broadcast._inner)
+
+    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+        # Deprecated alias for announce(); kept for back-compat.
+        self.announce(path, broadcast)

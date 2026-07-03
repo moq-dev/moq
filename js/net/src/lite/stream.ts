@@ -21,7 +21,7 @@ export const StreamId = {
 } as const;
 
 /**
- * The type prefix on a unidirectional data stream, read/written as a single byte.
+ * The varint type prefix on a unidirectional data stream.
  *
  * `Group` is the per-group frame stream. `Setup` (lite-05+) carries the single SETUP
  * message advertising this endpoint's capabilities.

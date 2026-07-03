@@ -100,20 +100,23 @@ try broadcast.finish()
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
 
 ```swift
-let broadcast = try MoqBroadcastProducer()
+let broadcast = try BroadcastProducer()
 let dynamic = try broadcast.dynamic()
 
-try origin.publish(path: "events", broadcast: broadcast)
+try session.publisher.announce(path: "events", broadcast: broadcast)
 
-for try await track in dynamic.requestedTracks {
-    if try track.name() == "alerts" {
-        try track.writeFrame(payload: Data("ready".utf8))
+for try await request in dynamic {
+    if try request.name == "alerts" {
+        let track = try request.accept()
+        try track.writeFrame(Data("ready".utf8))
         try track.finish()
     } else {
-        try track.abort(errorCode: 404)
+        try request.abort(errorCode: 404)
     }
 }
 ```
+
+Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber.
 
 ## Cancellation
 

@@ -51,13 +51,11 @@ allow = [
     "BSD-3-Clause",
     "CC0-1.0",
     "CDLA-Permissive-2.0", # webpki-roots cert bundle
-    "IJG", # mozjpeg-sys (MJPEG decode via nokhwa in moq-video)
     "ISC",
     "MIT",
     "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
-    "WTFPL", # ffmpeg-next, ffmpeg-sys-next
     "Zlib",
 ]
 
@@ -71,7 +69,3 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# moq-video patches nvidia-video-codec-sdk to a fork that adds dlopen
-# (`dynamic-loading`); see the root Cargo.toml [patch.crates-io]. Drop this once
-# the feature is upstreamed and the patch is removed.
-allow-git = ["https://github.com/kixelated/nvidia-video-codec-sdk"]

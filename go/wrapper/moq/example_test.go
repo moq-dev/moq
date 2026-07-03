@@ -57,7 +57,7 @@ func ExampleClient_Publish() {
 		log.Fatal(err)
 	}
 
-	if err := client.Publish("me/mic", broadcast); err != nil {
+	if err := client.Announce("me/mic", broadcast); err != nil {
 		log.Fatal(err)
 	}
 	if err := media.WriteFrame([]byte("opus frame"), 0); err != nil {

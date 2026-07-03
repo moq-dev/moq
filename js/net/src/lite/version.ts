@@ -42,6 +42,20 @@ export function hasDatagrams(version: Version): boolean {
 	}
 }
 
+/** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
+export function hasAnnounceOk(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

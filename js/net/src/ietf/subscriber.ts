@@ -485,10 +485,10 @@ export class Subscriber {
 				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
 
-				const frame = await Frame.decode(stream, group.flags);
+				const frame = await Frame.decode(stream, group.flags, this.#session.version);
 				if (frame.payload === undefined) break;
 
-				producer.writeFrame({ data: frame.payload, timestamp: Timestamp.now() });
+				producer.writeFrame({ data: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
 			}
 
 			producer.close();

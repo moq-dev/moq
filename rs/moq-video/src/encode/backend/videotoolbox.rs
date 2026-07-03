@@ -8,8 +8,10 @@
 //! format description.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
-//! higher-level crate we trust. Used only from the single capture/encode thread,
-//! so the `!Send` CoreFoundation handles are wrapped in a thread-confined type.
+//! higher-level crate we trust. The capture loop drives it inline and always
+//! sequentially, so the `!Send` CoreFoundation handles are wrapped in a `Send`
+//! type (safe to move between tokio workers between frames, never used
+//! concurrently).
 
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
@@ -61,8 +63,10 @@ pub(crate) struct VideoToolbox {
 	frame_index: i64,
 }
 
-// The session and its CoreFoundation handles are only ever touched from the one
-// capture/encode thread (see `publish_capture`'s `spawn_blocking`).
+// The capture loop drives this inline (macOS skips the dedicated encode thread),
+// always sequentially. Core Foundation handles are safe to use from a different
+// thread as long as never concurrently, so `Send` (which just lets the encoder
+// move between tokio workers between frames) is sound.
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {

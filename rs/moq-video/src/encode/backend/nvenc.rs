@@ -1,5 +1,4 @@
-//! Hardware H.264 / H.265 backend via NVIDIA NVENC (`nvidia-video-codec-sdk` +
-//! cudarc).
+//! Hardware H.264 / H.265 backend via NVIDIA NVENC (`moq-nvenc` + cudarc).
 //!
 //! Linux only, always-on (cfg-gated). The NVENC API lives in the driver
 //! (`libnvidia-encode.so`) and cudarc loads CUDA dynamically, so this is not a
@@ -26,11 +25,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cudarc::driver::CudaContext;
-use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
+use moq_nvenc::sys::nvEncodeAPI::{
 	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_PARAMS_RC_MODE,
 	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
 };
-use nvidia_video_codec_sdk::{Encoder, EncoderInitParams, Session};
+use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Codec, Config};
 use super::Backend;
@@ -181,7 +180,7 @@ impl Backend for Nvenc {
 		}
 		drop(lock);
 
-		let params = nvidia_video_codec_sdk::EncodePictureParams {
+		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
 			force_idr: keyframe,
 			..Default::default()
