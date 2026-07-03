@@ -219,7 +219,7 @@ clock action url="http://localhost:4443" *args:
     	exit 1; \
     fi
 
-    cargo run -p moq-native --example clock -- --url "{{ url }}" --broadcast "clock" {{ args }} {{ action }}
+    cargo run -p moq-native --example clock -- --client-connect "{{ url }}" --broadcast "clock" {{ args }} {{ action }}
 
 # --- GStreamer ---
 

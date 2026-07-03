@@ -75,7 +75,7 @@ pub async fn run(ctx: Connection) {
 		stats,
 	} = ctx;
 
-	let url = config.url.clone().expect("url required");
+	let url = config.client.connect.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
 	let publish = Origin::random().produce();

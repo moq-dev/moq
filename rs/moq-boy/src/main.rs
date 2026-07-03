@@ -31,7 +31,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use url::Url;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -46,10 +45,6 @@ mod video;
 
 #[derive(Parser, Clone)]
 pub struct Config {
-	/// Connect to the given relay URL.
-	#[arg(long)]
-	pub url: Url,
-
 	/// Path to the Game Boy ROM file.
 	#[arg(long)]
 	pub rom: PathBuf,
@@ -207,6 +202,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
 	let client = config.client.clone().init()?;
+	let url = config.client.connect.clone().context("--client-connect is required")?;
 
 	// Create the broadcast producer.
 	let mut broadcast = moq_net::Broadcast::new().produce();
@@ -230,12 +226,12 @@ async fn run(config: &Config) -> Result<()> {
 		.expect("viewer prefix should be valid")
 		.consume();
 
-	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
+	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
 		.with_publish(publish_origin.consume())
 		.with_consume(consume_origin)
-		.reconnect(config.url.clone());
+		.reconnect(url);
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;

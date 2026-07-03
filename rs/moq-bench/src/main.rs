@@ -22,7 +22,10 @@ async fn main() -> anyhow::Result<()> {
 		.expect("failed to install default crypto provider");
 
 	let config = Config::load()?;
-	anyhow::ensure!(config.url.is_some(), "--url is required (or set it in the TOML file)");
+	anyhow::ensure!(
+		config.client.connect.is_some(),
+		"--client-connect is required (or set it in the TOML file)"
+	);
 
 	let config = Arc::new(config);
 	let client = config.client.clone().init()?;
@@ -42,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
 	let run_id = rng.random_range(0..=u64::MAX);
 	let startup = config.startup();
 
-	tracing::info!(connections = count, url = %config.url.as_ref().unwrap(), "starting benchmark");
+	tracing::info!(connections = count, url = %config.client.connect.as_ref().unwrap(), "starting benchmark");
 
 	let mut tasks = tokio::task::JoinSet::new();
 	for i in 0..count {

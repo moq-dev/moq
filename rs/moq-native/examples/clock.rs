@@ -8,22 +8,17 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run -p moq-native --example clock -- --url https://relay.example.com/anon --broadcast clock publish
-//! cargo run -p moq-native --example clock -- --url https://relay.example.com/anon --broadcast clock subscribe
+//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock publish
+//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock subscribe
 //! ```
 
 use anyhow::Context;
 use chrono::prelude::*;
 use clap::Parser;
 use moq_net::*;
-use url::Url;
 
 #[derive(Parser, Clone)]
 struct Config {
-	/// Connect to the given URL starting with https://
-	#[arg(long)]
-	url: Url,
-
 	/// The name of the broadcast to publish or subscribe to.
 	#[arg(long)]
 	broadcast: String,
@@ -56,9 +51,8 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 
+	tracing::info!(url = ?config.client.connect, "connecting to server");
 	let client = config.client.init()?;
-
-	tracing::info!(url = ?config.url, "connecting to server");
 
 	let track = Track {
 		name: config.track,
@@ -75,7 +69,9 @@ async fn main() -> anyhow::Result<()> {
 
 			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
-			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
+			let reconnect = client
+				.publish(origin.consume())
+				.context("--client-connect is required")?;
 
 			tokio::select! {
 				res = reconnect.closed() => Ok(res?),
@@ -83,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Subscribe => {
-			let reconnect = client.with_consume(origin.clone()).reconnect(config.url);
+			let reconnect = client.consume(origin.clone()).context("--client-connect is required")?;
 
 			// IETF MoQ + the current OriginConsumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces
