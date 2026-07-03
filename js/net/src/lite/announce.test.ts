@@ -45,3 +45,23 @@ test("AnnounceBroadcast round-trips on draft-05", async () => {
 	expect(gotEnded.active).toBe(false);
 	expect(gotEnded.suffix).toBe(Path.from("room/cam"));
 });
+
+test("AnnounceBroadcast accepts explicit restart status on draft-05", async () => {
+	const wire = await bytes((w) =>
+		new AnnounceBroadcast({ suffix: Path.from("room/cam"), active: true }).encode(w, Version.DRAFT_05_WIP),
+	);
+	wire[1] = 2;
+
+	const got = await AnnounceBroadcast.decode(new Reader(undefined, wire), Version.DRAFT_05_WIP);
+	expect(got.active).toBe(true);
+	expect(got.suffix).toBe(Path.from("room/cam"));
+});
+
+test("AnnounceBroadcast rejects explicit restart status before draft-05", async () => {
+	const wire = await bytes((w) =>
+		new AnnounceBroadcast({ suffix: Path.from("room/cam"), active: true }).encode(w, Version.DRAFT_04),
+	);
+	wire[1] = 2;
+
+	await expect(AnnounceBroadcast.decode(new Reader(undefined, wire), Version.DRAFT_04)).rejects.toThrow();
+});

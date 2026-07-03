@@ -183,7 +183,7 @@ export class Connection implements Established {
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic);
 		try {
-			await writer.u8(DataType.Setup);
+			await writer.u53(DataType.Setup);
 			await new Setup(ProbeLevel.Report).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
@@ -249,7 +249,7 @@ export class Connection implements Established {
 	}
 
 	async #runUni(stream: Reader) {
-		const typ = await stream.u8();
+		const typ = await stream.u53();
 		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream);
 			await this.#subscriber.runGroup(msg, stream);

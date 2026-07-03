@@ -201,12 +201,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Lite05+: the publisher reports its own origin id (which we stamp onto every
 		// received Announce's hop chain, since it no longer does so itself) plus the
 		// count of initial active announces that follow immediately.
-		let (responder_origin, initial_count) = match self.version {
-			Version::Lite05Wip => {
-				let ok: lite::AnnounceOk = stream.reader.decode().await?;
-				(Some(ok.origin), ok.active)
-			}
-			_ => (None, 0),
+		let (responder_origin, initial_count) = if self.version.has_announce_ok() {
+			let ok: lite::AnnounceOk = stream.reader.decode().await?;
+			(Some(ok.origin), ok.active)
+		} else {
+			(None, 0)
 		};
 
 		let mut producers = HashMap::new();
@@ -256,7 +255,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				connecting.take();
 				0
 			}
-			Version::Lite05Wip => {
+			_ if self.version.has_announce_ok() => {
 				if initial_count == 0 {
 					connecting.take();
 				}

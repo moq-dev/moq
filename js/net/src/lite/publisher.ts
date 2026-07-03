@@ -19,7 +19,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { Version } from "./version.ts";
+import { hasAnnounceOk, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -133,7 +133,16 @@ export class Publisher {
 				await init.encode(stream.writer, this.version);
 				break;
 			}
-			case Version.DRAFT_05_WIP: {
+			default: {
+				if (!hasAnnounceOk(this.version)) {
+					// Draft03/04: send individual Announce messages, stamping our origin as a hop.
+					for (const suffix of active) {
+						const wire = new AnnounceBroadcast({ suffix, active: true, hops: [this.origin] });
+						await wire.encode(stream.writer, this.version);
+					}
+					break;
+				}
+
 				// Report our origin id once via AnnounceOk and the count of initial announces
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
 				const ok = new AnnounceOk(this.origin, active.size);
@@ -144,13 +153,6 @@ export class Publisher {
 				}
 				break;
 			}
-			default:
-				// Draft03/04: send individual Announce messages, stamping our origin as a hop.
-				for (const suffix of active) {
-					const wire = new AnnounceBroadcast({ suffix, active: true, hops: [this.origin] });
-					await wire.encode(stream.writer, this.version);
-				}
-				break;
 		}
 
 		// Wait for updates to the broadcasts.
@@ -179,7 +181,7 @@ export class Publisher {
 			// the subscriber stamps it onto each hop chain; older versions stamp it here.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const hops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
+				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
 				const wire = new AnnounceBroadcast({ suffix: added, active: true, hops });
 				await wire.encode(stream.writer, this.version);
 			}
@@ -376,7 +378,7 @@ export class Publisher {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			const stream = await Writer.open(this.#quic);
-			await stream.u8(0); // stream type
+			await stream.u53(0); // stream type
 			await msg.encode(stream);
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
