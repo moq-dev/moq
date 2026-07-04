@@ -1,4 +1,4 @@
-import { Signal } from "@moq/signals";
+import { type GetPromise, Once, Signal } from "@moq/signals";
 import { Timestamp } from "./time.ts";
 
 /** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
@@ -39,7 +39,7 @@ export class CacheFull extends Error {
 /** Reactive backing state for a {@link Group}: buffered frames, a closed flag, and the running frame count. */
 export class GroupState {
 	frames = new Signal<Frame[]>([]);
-	closed = new Signal<boolean | Error>(false);
+	closed = new Once<true | Error>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Frames evicted from the front by the cache cap. A reader that had not consumed
@@ -55,9 +55,6 @@ export class Group {
 	/** Reactive backing state. */
 	state = new GroupState();
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
 	// Downstream copies that receive every frame written here, synchronously. Used by
 	// TrackProducer to fan one source group out to per-subscriber groups.
 	#mirrors?: Set<Group>;
@@ -67,15 +64,14 @@ export class Group {
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
+	}
 
-		// Cache the closed promise to avoid recreating it every time.
-		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
-				if (!closed) return;
-				resolve(closed instanceof Error ? closed : undefined);
-				dispose();
-			});
-		});
+	/**
+	 * Settles once the group closes: `true` on a clean close, or the abort {@link Error}.
+	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
+	 */
+	get closed(): GetPromise<true | Error> {
+		return this.state.closed;
 	}
 
 	/** Writes a frame to the group. */
@@ -160,7 +156,7 @@ export class Group {
 
 	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
 	get done(): boolean {
-		return this.state.frames.peek().length === 0 && this.state.closed.peek() !== false;
+		return this.state.frames.peek().length === 0 && this.state.closed.peek() !== undefined;
 	}
 
 	/**
@@ -258,8 +254,9 @@ export class Group {
 		return frame ? frame.data[0] === 1 : undefined;
 	}
 
-	/** Closes the group, optionally with an error to abort readers. */
+	/** Closes the group, optionally with an error to abort readers. Idempotent. */
 	close(abort?: Error) {
+		if (this.state.closed.peek() !== undefined) return; // already closed
 		this.state.closed.set(abort ?? true);
 
 		if (this.#mirrors) {
