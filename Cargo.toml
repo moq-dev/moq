@@ -58,6 +58,8 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 flate2 = "1"
+
+getrandom = "0.4"
 hang = { version = "0.19", path = "rs/hang" }
 kio = { version = "0.4", path = "rs/kio" }
 moq-audio = { version = "0.0.7", path = "rs/moq-audio" }
@@ -75,8 +77,6 @@ moq-srt = { version = "0.1.0", path = "rs/moq-srt" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 moq-video = { version = "0.0.6", path = "rs/moq-video" }
 qmux = { version = "0.2", default-features = false }
-
-getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 wasm-bindgen-test = "0.3"

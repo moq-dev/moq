@@ -34,5 +34,5 @@ web-transport-trait = { workspace = true }
 # only here (dev), so it isn't forced on downstream consumers. They select
 # their own backend in the leaf binary.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
-wasm-bindgen-test = { workspace = true }
 getrandom = { workspace = true, features = ["wasm_js"] }
+wasm-bindgen-test = { workspace = true }
