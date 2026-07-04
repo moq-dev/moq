@@ -709,6 +709,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 }
 
+#[cfg(test)]
+mod test {
+	use super::*;
+	use crate::{Timestamp, broadcast};
+
+	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
+		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+	}
+
+	#[tokio::test]
+	async fn recv_next_drains_datagram_before_finished() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		producer
+			.append_datagram(Timestamp::from_millis(1).unwrap(), &b"last"[..])
+			.unwrap();
+		producer.finish().unwrap();
+
+		match recv_next(&mut subscriber, true).await.unwrap() {
+			Recv::Datagram(datagram) => assert_eq!(&datagram.payload[..], b"last"),
+			_ => panic!("expected datagram before finished"),
+		}
+
+		match recv_next(&mut subscriber, true).await.unwrap() {
+			Recv::Finished => {}
+			_ => panic!("expected finished after datagram"),
+		}
+	}
+}
+
 /// Encode the per-frame timing prefix when the track advertises a timescale:
 /// `[zigzag-delta timestamp]` (the lite-05 FRAME format). With `None` the field is
 /// omitted entirely, saving the bytes on tracks where timing isn't meaningful
@@ -788,10 +819,10 @@ enum Recv {
 /// datagram burst can't starve them; datagrams are polled only when the transport carries them.
 async fn recv_next(track: &mut track::Subscriber, datagrams: bool) -> Result<Recv, Error> {
 	kio::wait(|waiter| {
-		// A finished group side ends the whole subscription (datagrams end with the track too).
+		let mut groups_finished = false;
 		match track.poll_next_group(waiter) {
 			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
-			Poll::Ready(Ok(None)) => return Poll::Ready(Ok(Recv::Finished)),
+			Poll::Ready(Ok(None)) => groups_finished = true,
 			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 			Poll::Pending => {}
 		}
@@ -803,6 +834,9 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool) -> Result<Rec
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => {}
 			}
+		}
+		if groups_finished {
+			return Poll::Ready(Ok(Recv::Finished));
 		}
 		Poll::Pending
 	})

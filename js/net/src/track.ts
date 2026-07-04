@@ -453,7 +453,8 @@ export class TrackSubscriber {
 	 * Datagrams are a separate best-effort channel from groups (see
 	 * {@link TrackProducer.appendDatagram}); they share only the sequence namespace. A consumer
 	 * that falls too far behind silently loses the oldest datagrams. Read this alongside
-	 * {@link recvGroup} (e.g. in a separate loop) to receive both channels concurrently.
+	 * {@link recvGroup} (e.g. in a separate loop) to receive both channels concurrently. Returning
+	 * a datagram advances {@link nextGroup} past that sequence.
 	 */
 	async recvDatagram(): Promise<Datagram | undefined> {
 		for (;;) {
@@ -465,7 +466,11 @@ export class TrackSubscriber {
 			while (datagrams.length > 0 && datagrams[0].time < cutoff) datagrams.shift();
 
 			if (datagrams.length > 0) {
-				return datagrams.shift()?.datagram;
+				const datagram = datagrams.shift()?.datagram;
+				if (datagram) {
+					this.#nextSequence = Math.max(this.#nextSequence, datagram.sequence + 1);
+				}
+				return datagram;
 			}
 
 			const closed = this.#state.closed.peek();

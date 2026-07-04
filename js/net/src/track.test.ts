@@ -42,6 +42,19 @@ test("writeDatagram preserves an explicit sequence", async () => {
 	expect(producer.appendGroup().sequence).toBe(101);
 });
 
+test("recvDatagram advances the ordered group cursor", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	producer.writeDatagram({ sequence: 5, timestamp: Timestamp.fromMillis(5), payload: enc.encode("x") });
+	expect((await track.recvDatagram())?.sequence).toBe(5);
+
+	// Ordered group reads treat lower sequences as late once a datagram used sequence 5.
+	producer.writeGroup(new Group(3));
+	producer.writeGroup(new Group(6));
+	expect((await track.nextGroup())?.sequence).toBe(6);
+});
+
 test("appendDatagram rejects an oversized payload", () => {
 	const producer = new TrackProducer("test");
 	expect(() => producer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1))).toThrow();

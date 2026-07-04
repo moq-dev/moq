@@ -1468,6 +1468,7 @@ impl Subscriber {
 	/// Datagrams are a separate best-effort channel from groups (see
 	/// [`Producer::append_datagram`]); they share only the sequence namespace. A consumer
 	/// that falls too far behind silently loses the oldest datagrams.
+	/// Returning a datagram advances [`Self::poll_next_group`] past that sequence.
 	///
 	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
@@ -1480,6 +1481,7 @@ impl Subscriber {
 		};
 
 		self.datagram_index = found_index + 1;
+		self.next_sequence = self.next_sequence.max(datagram.sequence.saturating_add(1));
 		Poll::Ready(Ok(Some(datagram)))
 	}
 
@@ -1870,6 +1872,33 @@ mod test {
 		assert_eq!(recv_datagram(&mut dg).sequence, 100);
 		// max_sequence advanced, so the next appended group/datagram continues past it.
 		assert_eq!(producer.append_group().unwrap().sequence, 101);
+	}
+
+	#[tokio::test]
+	async fn recv_datagram_advances_ordered_group_cursor() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let ts = Timestamp::from_millis(5).unwrap();
+
+		producer
+			.write_datagram(Datagram {
+				sequence: 5,
+				timestamp: ts,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 5);
+
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 6 }).unwrap();
+
+		let group = subscriber
+			.next_group()
+			.now_or_never()
+			.expect("group would have blocked")
+			.expect("would have errored")
+			.expect("track was closed");
+		assert_eq!(group.sequence, 6);
 	}
 
 	#[tokio::test]
