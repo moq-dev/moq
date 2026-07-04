@@ -2,9 +2,8 @@
 //!
 //! Counterpart to [`crate::server`]. Whereas the server accepts POSTed
 //! offers, the client mints the offer with `str0m::Rtc::sdp_api` and POSTs
-//! it to the remote URL. Once the answer arrives the same
-//! [`crate::session::Session`] driver takes over, so the per-codec bridges
-//! and UDP socket loop are shared.
+//! it to the remote URL. Once the answer arrives the same internal session
+//! driver takes over, so the per-codec bridges and UDP socket loop are shared.
 
 pub mod whep;
 pub mod whip;
@@ -51,13 +50,13 @@ impl Client {
 	/// `client subscribe`: pull a remote WHEP feed and publish it as
 	/// `broadcast` on the local origin. Returns once the session is
 	/// running in the background.
-	pub async fn subscribe(&self, url: Url, broadcast: moq_net::BroadcastProducer) -> crate::Result<()> {
+	pub async fn subscribe(&self, url: Url, broadcast: moq_net::broadcast::Producer) -> crate::Result<()> {
 		whep::dial(self, url, broadcast).await
 	}
 
 	/// `client publish`: pull a local broadcast and push it to a remote
 	/// WHIP endpoint. Gated on the per-codec re-packetizer.
-	pub async fn publish(&self, url: Url, broadcast: moq_net::BroadcastConsumer) -> crate::Result<()> {
+	pub async fn publish(&self, url: Url, broadcast: moq_net::broadcast::Consumer) -> crate::Result<()> {
 		whip::dial(self, url, broadcast).await
 	}
 }

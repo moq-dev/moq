@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
-use moq_net::{OriginConsumer, OriginProducer};
+use moq_net::origin;
 use srt_tokio::access::{
 	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
 };
@@ -198,7 +198,7 @@ impl Publish {
 	/// relay's shared origin, optionally scoped per the authenticated token). This
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(self, origin: &OriginProducer, path: &str) -> Result<()> {
+	pub async fn accept(self, origin: &origin::Producer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
 		serve_publish(origin, path, socket).await
@@ -248,7 +248,7 @@ impl Subscribe {
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &OriginConsumer, path: &str) -> Result<()> {
+	pub async fn accept(self, origin: &origin::Consumer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
 		serve_subscribe(origin, path, socket, self.0.latency).await
@@ -273,7 +273,7 @@ async fn reject_log(request: ConnectionRequest, reason: ServerRejectReason, peer
 }
 
 /// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
-pub(crate) async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocket) -> Result<()> {
+pub(crate) async fn serve_publish(origin: &origin::Producer, path: &str, mut socket: SrtSocket) -> Result<()> {
 	use futures::TryStreamExt;
 
 	let mut publisher = crate::ts::Publisher::new(origin, path)?;
@@ -291,7 +291,7 @@ pub(crate) async fn serve_publish(origin: &OriginProducer, path: &str, mut socke
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
 pub(crate) async fn serve_subscribe(
-	origin: &OriginConsumer,
+	origin: &origin::Consumer,
 	path: &str,
 	mut socket: SrtSocket,
 	latency: Duration,

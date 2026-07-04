@@ -24,7 +24,7 @@ impl AudioConsumer {
 	/// Subscribe to `name` in `broadcast` using the catalog entry to
 	/// pick the codec.
 	pub async fn new(
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: impl Into<String>,
 		output: DecoderOutput,

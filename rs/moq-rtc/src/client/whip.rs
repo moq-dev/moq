@@ -3,9 +3,9 @@
 //!
 //! Mints an SDP offer with `sendonly` audio + video, POSTs it to the WHIP
 //! resource URL, parses the returned answer, and hands the resulting
-//! `str0m::Rtc` to a `crate::session::Session` running in egress mode. The
+//! `str0m::Rtc` to the internal session driver running in egress mode. The
 //! bitstream / RTP packetization is identical to the WHEP server path, so
-//! most of the work lives in [`crate::egress`].
+//! most of the work lives in the crate-private egress source.
 
 use str0m::{
 	Candidate,
@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::{Error, Result, client::Client, egress::EgressSource, session};
 
-pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::BroadcastConsumer) -> Result<()> {
+pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcast::Consumer) -> Result<()> {
 	let source = EgressSource::new(broadcast).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {

@@ -29,7 +29,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_net::OriginProducer;
+use moq_net::origin;
 
 use crate::Result;
 use crate::server::{Request, Server};
@@ -79,7 +79,7 @@ impl Default for Config {
 /// Stays pending forever (rather than resolving) when SRT is disabled, so it
 /// composes cleanly inside a `tokio::select!` alongside a relay's other
 /// long-running tasks.
-pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
+pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	let Some(listen) = config.listen else {
 		tracing::info!("SRT gateway disabled (no listen address)");
 		std::future::pending::<()>().await;

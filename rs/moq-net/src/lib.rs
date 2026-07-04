@@ -7,11 +7,14 @@
 //!
 //! ## API
 //! The API is built around Producer/Consumer pairs, with the hierarchy:
-//! - [Origin]: A collection of [BroadcastConsumer]s, produced by one or more [Session]s.
-//! - [BroadcastConsumer]: A collection of [TrackConsumer]s, produced by a single publisher.
-//! - [TrackConsumer]: A collection of [GroupInfo]s, delivered out-of-order until expired.
-//! - [GroupInfo]: A collection of [FrameInfo]s, delivered in order until cancelled.
-//! - [FrameInfo]: Chunks of data with an upfront size.
+//! - [origin::Consumer]: A collection of [broadcast::Consumer]s, produced by one or more [Session]s.
+//! - [broadcast::Consumer]: A collection of [track::Consumer]s, produced by a single publisher.
+//! - [track::Consumer]: A collection of [group::Info]s, delivered out-of-order until expired.
+//! - [group::Info]: A collection of [frame::Info]s, delivered in order until cancelled.
+//! - [frame::Info]: Chunks of data with an upfront size.
+//!
+//! Each level lives in its own module (`broadcast`, `track`, `group`, `frame`, `origin`,
+//! `announce`) that owns the short `Producer` / `Consumer` / `Info` names.
 //!
 //! ## Compatibility
 //! The API exposes the intersection of features supported by both protocols, intentionally

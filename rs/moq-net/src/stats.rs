@@ -131,6 +131,7 @@
 //! the feedback loop where serving a `<top-prefix>/...` broadcast would
 //! itself generate more stats traffic.
 
+use crate::{broadcast, origin, track};
 use std::{
 	collections::{BTreeMap, HashMap},
 	fmt,
@@ -144,7 +145,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, BroadcastInfo, BroadcastProducer, OriginProducer, Path, PathOwned, TrackProducer};
+use crate::{AsPath, Path, PathOwned};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -313,7 +314,7 @@ impl fmt::Display for Tier {
 pub struct StatsConfig {
 	/// Origin that receives the stats broadcast's `publish_broadcast` calls.
 	/// When `None`, [`Stats::new`] spawns no task and publishes nothing.
-	pub origin: Option<OriginProducer>,
+	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
 	/// `node` is unset).
@@ -343,7 +344,7 @@ impl StatsConfig {
 
 	/// Set the origin to publish the stats broadcast on. Without this the
 	/// aggregator is a no-op.
-	pub fn with_origin(mut self, origin: impl Into<Option<OriginProducer>>) -> Self {
+	pub fn with_origin(mut self, origin: impl Into<Option<origin::Producer>>) -> Self {
 		self.origin = origin.into();
 		self
 	}
@@ -387,7 +388,7 @@ pub struct Stats {
 /// Runtime state shared by every clone of a [`Stats`] and held by the
 /// snapshot task through a `Weak`. Only allocated when an origin is set.
 struct StatsShared {
-	origin: OriginProducer,
+	origin: origin::Producer,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	/// Connected-session gauges keyed by `(tier, auth root)`. Independent of any
 	/// broadcast; surfaced on the per-tier session tracks. A tier's inner map is
@@ -1064,7 +1065,7 @@ fn process_session_slot(
 /// Serialize `frame` and write it to `track` unless it's byte-identical to
 /// `last` (idle-frame skipping). On success `last` is updated; on a serialize
 /// or write error it's left untouched so the next tick retries.
-fn flush_track<T: Serialize>(track: &mut TrackProducer, frame: &T, last: &mut Vec<u8>, name: &str) {
+fn flush_track<T: Serialize>(track: &mut track::Producer, frame: &T, last: &mut Vec<u8>, name: &str) {
 	let json = match serde_json::to_vec(frame) {
 		Ok(b) => b,
 		Err(err) => {
@@ -1096,8 +1097,8 @@ type TierSessions = (Tier, Vec<(PathOwned, Arc<SessionCounters>)>);
 /// frame for late subscribers. New tier tracks appear lazily the first tick
 /// traffic routes to their label.
 fn flush_dynamic<T: Serialize>(
-	broadcast: &mut BroadcastProducer,
-	tracks: &mut HashMap<String, TrackProducer>,
+	broadcast: &mut broadcast::Producer,
+	tracks: &mut HashMap<String, track::Producer>,
 	last: &mut HashMap<String, Vec<u8>>,
 	frames: &HashMap<String, BTreeMap<String, T>>,
 ) {
@@ -1128,13 +1129,13 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		return;
 	};
 
-	let mut broadcast = BroadcastInfo::new().produce();
+	let mut broadcast = broadcast::Info::new().produce();
 
 	// Pre-create the default tier's tracks so they always exist and emit `{}`
 	// while idle. Named-tier tracks are created lazily (see `flush_dynamic`) the
 	// first tick traffic routes to that label.
-	let mut broadcast_tracks: HashMap<String, TrackProducer> = HashMap::new();
-	let mut session_tracks: HashMap<String, TrackProducer> = HashMap::new();
+	let mut broadcast_tracks: HashMap<String, track::Producer> = HashMap::new();
+	let mut session_tracks: HashMap<String, track::Producer> = HashMap::new();
 	for name in [PUBLISHER_TRACK, SUBSCRIBER_TRACK] {
 		match broadcast.create_track(name, None) {
 			Ok(track) => {
@@ -1384,7 +1385,7 @@ mod tests {
 			.is_some_and(|roots| roots.contains_key(&PathOwned::from(root.to_string())))
 	}
 
-	fn test_stats(node: Option<&str>) -> (Stats, OriginProducer) {
+	fn test_stats(node: Option<&str>) -> (Stats, origin::Producer) {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
 			StatsConfig::new()
@@ -1991,12 +1992,12 @@ mod tests {
 		assert!(closed_pos < open_pos, "sessions_closed must be loaded before sessions",);
 	}
 
-	async fn read_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, Snapshot> {
+	async fn read_frame(mut track: track::Subscriber) -> BTreeMap<String, Snapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}
 
-	async fn read_session_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, SessionSnapshot> {
+	async fn read_session_frame(mut track: track::Subscriber) -> BTreeMap<String, SessionSnapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}

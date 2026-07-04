@@ -39,9 +39,9 @@ impl Session {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{
 	/// #         NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
 	/// #         NV_ENC_CODEC_H264_GUID,
@@ -99,9 +99,9 @@ impl Session {
 	///
 	/// # Examples
 	///
-	/// ```
+	/// ```no_run
 	/// # use cudarc::driver::CudaContext;
-	/// # use nvidia_video_codec_sdk::{
+	/// # use moq_nvenc::{
 	/// #     sys::nvEncodeAPI::{
 	/// #         NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
 	/// #         NV_ENC_CODEC_H264_GUID,

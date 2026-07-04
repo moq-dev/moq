@@ -30,11 +30,14 @@ One server is path-based, so it can expose many broadcasts at once:
 
 ```text
 GET /{broadcast}/master.m3u8
-GET /{broadcast}/{rendition}/media.m3u8   # LL-HLS blocking reload via ?_HLS_msn=&_HLS_part=
-GET /{broadcast}/{rendition}/init.mp4
-GET /{broadcast}/{rendition}/seg/{seq}.m4s
-GET /{broadcast}/{rendition}/part/{seq}/{idx}.m4s
+GET /{broadcast}/{kind}/{rendition}/media.m3u8   # LL-HLS blocking reload via ?_HLS_msn=&_HLS_part=
+GET /{broadcast}/{kind}/{rendition}/init.mp4
+GET /{broadcast}/{kind}/{rendition}/seg/{seq}.m4s
+GET /{broadcast}/{kind}/{rendition}/part/{seq}/{idx}.m4s
 ```
+
+`{kind}` is `video` or `audio`, so a video and an audio rendition that share a
+name address distinct resources.
 
 The media playlist advertises `EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES`,
 `EXT-X-PART-INF`, per-part `EXT-X-PART`, and an `EXT-X-PRELOAD-HINT` for the

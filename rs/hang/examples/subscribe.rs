@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
 // Connect to the server and subscribe to broadcasts.
 // Automatically reconnects if the connection drops.
-async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -40,7 +40,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 }
 
 // Subscribe to a broadcast and read media frames.
-async fn run_subscribe(consumer: moq_net::OriginConsumer) -> anyhow::Result<()> {
+async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
 	let (path, broadcast) = consumer.announced().next().await.context("origin closed")?;
 

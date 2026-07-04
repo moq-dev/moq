@@ -86,7 +86,8 @@ while let Some(request) = server.accept().await {
             tokio::spawn(subscribe.accept(&consumer, "live/cam0"));
         }
     }
-    // ...or `request`'s `reject()` to deny it.
+    // ...or call `.reject()` on the `Publish` / `Subscribe` instead of `.accept()`
+    // to deny it.
 }
 ```
 

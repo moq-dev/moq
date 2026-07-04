@@ -34,7 +34,7 @@ impl TryFrom<&hang::catalog::Container> for Container {
 impl ContainerTrait for Container {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy => legacy::Wire.write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
@@ -44,7 +44,7 @@ impl ContainerTrait for Container {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_net::GroupConsumer,
+		group: &mut moq_net::group::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {

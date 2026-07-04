@@ -18,7 +18,7 @@ use crate::container::ExportSource;
 
 /// Single-rendition H.265 Annex-B exporter.
 pub struct Export<S: Stream> {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	catalog: Option<S>,
 	latency: Duration,
 	track: Option<H265Track>,
@@ -49,7 +49,7 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is expected to be narrowed to a single H.265 rendition. If
 	/// multiple H.265 renditions appear in a snapshot, the first by BTreeMap
 	/// order wins and a warning is logged.
-	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Consumer, catalog: S) -> Self {
 		Self {
 			broadcast,
 			catalog: Some(catalog),
@@ -237,7 +237,7 @@ mod tests {
 		out.freeze()
 	}
 
-	fn write_length_prefixed(group: &mut moq_net::GroupProducer, timestamp_us: u64, nals: &[&[u8]]) {
+	fn write_length_prefixed(group: &mut moq_net::group::Producer, timestamp_us: u64, nals: &[&[u8]]) {
 		let mut payload = BytesMut::new();
 		for nal in nals {
 			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
@@ -266,19 +266,19 @@ mod tests {
 		let trail = &[0x02, 0x01, 0xe0, 0x12][..];
 
 		let catalog = hvc1_catalog("video.hvc1", hvcc(vps, sps, pps));
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
 			.create_track(
 				"video.hvc1",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
 
-		let mut g0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write_length_prefixed(&mut g0, 0, &[idr]);
 		g0.finish().unwrap();
 
-		let mut g1 = track.create_group(moq_net::GroupInfo { sequence: 1 }).unwrap();
+		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[trail]);
 		g1.finish().unwrap();
 		track.finish().unwrap();

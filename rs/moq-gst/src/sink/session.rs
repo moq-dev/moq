@@ -101,12 +101,12 @@ impl Session {
 	pub fn start(
 		settings: ResolvedSettings,
 		element: glib::WeakRef<Element>,
-	) -> Result<(Self, moq_net::BroadcastProducer, moq_mux::catalog::Producer)> {
+	) -> Result<(Self, moq_net::broadcast::Producer, moq_mux::catalog::Producer)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let broadcast_consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		// The returned guard unannounces the broadcast when dropped, so it is held by the session task for
@@ -142,8 +142,8 @@ impl Session {
 /// element error on the bus; [`Session::stop`] aborts this task instead, which is quiet.
 async fn run(
 	settings: ResolvedSettings,
-	origin: moq_net::OriginProducer,
-	publish: moq_net::OriginPublish,
+	origin: moq_net::origin::Producer,
+	publish: moq_net::origin::Publish,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,
 	element: glib::WeakRef<Element>,
@@ -168,7 +168,7 @@ async fn run(
 
 async fn connect_and_run(
 	settings: &ResolvedSettings,
-	origin: &moq_net::OriginProducer,
+	origin: &moq_net::origin::Producer,
 	status: &Status,
 	element: &glib::WeakRef<Element>,
 ) -> Result<()> {

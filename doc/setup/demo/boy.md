@@ -92,7 +92,7 @@ The emulator and viewer use configurable path prefixes to separate authenticated
 ### Discovery
 
 - **Viewers discover sessions** — subscribe to announcements with the game prefix, filter to single-component suffixes
-- **Emulator discovers viewers** — subscribes to the viewer prefix using `OriginProducer::with_root()`
+- **Emulator discovers viewers** — subscribes to the viewer prefix using `origin::Producer::with_root()`
 
 ### Auto-Pause
 

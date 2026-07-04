@@ -386,25 +386,25 @@ impl Server {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
+	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_subscriber(mut self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
 		self
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 
@@ -420,14 +420,14 @@ impl Server {
 	/// errors, so one bad peer never tears down the listener. Returns when
 	/// interrupted (Ctrl-C) or on a fatal bind failure. For per-session auth or
 	/// routing, drive [`accept`](Self::accept) yourself instead.
-	pub async fn serve_publish(self, origin: moq_net::OriginConsumer) -> crate::Result<()> {
+	pub async fn serve_publish(self, origin: moq_net::origin::Consumer) -> crate::Result<()> {
 		self.with_publisher(origin).serve().await
 	}
 
 	/// Accept sessions until the listener stops, ingesting each publisher into `origin`.
 	///
 	/// The mirror of [`serve_publish`](Self::serve_publish) for the consume direction.
-	pub async fn serve_consume(self, origin: moq_net::OriginProducer) -> crate::Result<()> {
+	pub async fn serve_consume(self, origin: moq_net::origin::Producer) -> crate::Result<()> {
 		self.with_subscriber(origin).serve().await
 	}
 
@@ -979,7 +979,7 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
+	pub fn with_publisher(self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		let Request { server, kind } = self;
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -1001,7 +1001,7 @@ impl Request {
 	}
 
 	/// Subscribe to the given origin from the session.
-	pub fn with_subscriber(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self {
 		let Request { server, kind } = self;
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -1024,13 +1024,13 @@ impl Request {
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
 	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 

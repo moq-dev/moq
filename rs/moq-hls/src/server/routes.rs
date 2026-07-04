@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
 
 use super::Server;
+use crate::export::Kind;
 use crate::export::store::SegmentStore;
 
 const M3U8: &str = "application/vnd.apple.mpegurl";
@@ -23,14 +24,17 @@ const BLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn router(server: Server) -> Router {
 	Router::new()
 		.route("/{broadcast}/master.m3u8", get(master))
-		.route("/{broadcast}/{rendition}/media.m3u8", get(media))
-		.route("/{broadcast}/{rendition}/init.mp4", get(init))
-		.route("/{broadcast}/{rendition}/seg/{file}", get(segment))
-		.route("/{broadcast}/{rendition}/part/{seq}/{file}", get(part))
+		.route("/{broadcast}/{kind}/{rendition}/media.m3u8", get(media))
+		.route("/{broadcast}/{kind}/{rendition}/init.mp4", get(init))
+		.route("/{broadcast}/{kind}/{rendition}/seg/{file}", get(segment))
+		.route("/{broadcast}/{kind}/{rendition}/part/{seq}/{file}", get(part))
 		.with_state(server)
 }
 
-async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> Response {
+async fn master(State(server): State<Server>, Path(broadcast): Path<String>, headers: HeaderMap) -> Response {
+	if let Err(status) = server.authorize(&broadcast, &headers, None) {
+		return status.into_response();
+	}
 	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
 		return not_found();
 	};
@@ -40,19 +44,47 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> 
 
 async fn media(
 	State(server): State<Server>,
-	Path((broadcast, rendition)): Path<(String, String)>,
+	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
 	RawQuery(query): RawQuery,
+	headers: HeaderMap,
 ) -> Response {
-	let Some(store) = store(&server, &broadcast, &rendition).await else {
+	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
+		return status.into_response();
+	}
+	let Ok(kind) = kind.parse::<Kind>() else {
+		return not_found();
+	};
+	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
 		return not_found();
 	};
 
 	// LL-HLS blocking reload: wait until the requested (msn, part) lands.
 	if let Some(msn) = query_param(query.as_deref(), "_HLS_msn").and_then(|v| v.parse::<u64>().ok()) {
-		let part = query_param(query.as_deref(), "_HLS_part")
-			.and_then(|v| v.parse::<usize>().ok())
-			.unwrap_or(0);
-		block_until(&store, msn, part).await;
+		let part = query_param(query.as_deref(), "_HLS_part").and_then(|v| v.parse::<usize>().ok());
+
+		// RFC 8216bis: a request more than the last media sequence + 2 in the future
+		// (or, when a part is given, beyond the last part of that segment + the
+		// PART-TARGET headroom of one extra part) is a spec 400, not something to
+		// block on for the full timeout.
+		let version = store.version();
+		if !version.finished {
+			let too_far = if msn > version.last_sequence.saturating_add(2) {
+				true
+			} else if msn == version.last_sequence.saturating_add(1) {
+				// A part index on the not-yet-started next segment may only reach one
+				// past its expected first part.
+				part.is_some_and(|part| part > 0)
+			} else if msn == version.last_sequence {
+				part.is_some_and(|part| part > version.last_parts)
+			} else {
+				false
+			};
+			if too_far {
+				return bad_request();
+			}
+		}
+
+		block_until(&store, msn, part.unwrap_or(0)).await;
 	}
 
 	let snapshot = store.snapshot();
@@ -66,8 +98,19 @@ async fn media(
 	m3u8(crate::export::render_media(&snapshot))
 }
 
-async fn init(State(server): State<Server>, Path((broadcast, rendition)): Path<(String, String)>) -> Response {
-	let Some(store) = store(&server, &broadcast, &rendition).await else {
+async fn init(
+	State(server): State<Server>,
+	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
+	RawQuery(query): RawQuery,
+	headers: HeaderMap,
+) -> Response {
+	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
+		return status.into_response();
+	}
+	let Ok(kind) = kind.parse::<Kind>() else {
+		return not_found();
+	};
+	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
 		return not_found();
 	};
 	match store.init() {
@@ -78,12 +121,20 @@ async fn init(State(server): State<Server>, Path((broadcast, rendition)): Path<(
 
 async fn segment(
 	State(server): State<Server>,
-	Path((broadcast, rendition, file)): Path<(String, String, String)>,
+	Path((broadcast, kind, rendition, file)): Path<(String, String, String, String)>,
+	RawQuery(query): RawQuery,
+	headers: HeaderMap,
 ) -> Response {
+	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
+		return status.into_response();
+	}
+	let Ok(kind) = kind.parse::<Kind>() else {
+		return not_found();
+	};
 	let Some(sequence) = strip_m4s(&file).and_then(|s| s.parse::<u64>().ok()) else {
 		return not_found();
 	};
-	let Some(store) = store(&server, &broadcast, &rendition).await else {
+	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
 		return not_found();
 	};
 	match store.segment(sequence) {
@@ -94,12 +145,20 @@ async fn segment(
 
 async fn part(
 	State(server): State<Server>,
-	Path((broadcast, rendition, sequence, file)): Path<(String, String, u64, String)>,
+	Path((broadcast, kind, rendition, sequence, file)): Path<(String, String, String, u64, String)>,
+	RawQuery(query): RawQuery,
+	headers: HeaderMap,
 ) -> Response {
+	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
+		return status.into_response();
+	}
+	let Ok(kind) = kind.parse::<Kind>() else {
+		return not_found();
+	};
 	let Some(index) = strip_m4s(&file).and_then(|s| s.parse::<usize>().ok()) else {
 		return not_found();
 	};
-	let Some(store) = store(&server, &broadcast, &rendition).await else {
+	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
 		return not_found();
 	};
 
@@ -121,10 +180,10 @@ async fn part(
 }
 
 /// Resolve a rendition's store, waiting for the catalog to populate.
-async fn store(server: &Server, broadcast: &str, rendition: &str) -> Option<std::sync::Arc<SegmentStore>> {
+async fn store(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<std::sync::Arc<SegmentStore>> {
 	let broadcaster = server.broadcaster(broadcast).await?;
 	broadcaster.wait_ready(READY_TIMEOUT).await;
-	broadcaster.rendition(rendition).map(|r| r.store.clone())
+	broadcaster.rendition(kind, rendition).map(|r| r.store.clone())
 }
 
 /// Block until the store holds `(msn, part)`, the window passed it, or the track
@@ -160,13 +219,32 @@ fn strip_m4s(file: &str) -> Option<&str> {
 }
 
 fn m3u8(body: String) -> Response {
-	([(header::CONTENT_TYPE, M3U8)], body).into_response()
+	// Playlists mutate as the live edge advances, so they must not be cached.
+	(
+		[(header::CONTENT_TYPE, M3U8), (header::CACHE_CONTROL, "no-cache")],
+		body,
+	)
+		.into_response()
 }
 
 fn media_bytes(body: Bytes) -> Response {
-	([(header::CONTENT_TYPE, MP4)], body).into_response()
+	// Init/segment/part bytes are content-addressed and immutable once produced.
+	(
+		[
+			(header::CONTENT_TYPE, MP4),
+			(header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+		],
+		body,
+	)
+		.into_response()
 }
 
 fn not_found() -> Response {
-	StatusCode::NOT_FOUND.into_response()
+	// The resource may appear later (a segment not yet produced), so don't let a
+	// CDN pin the 404.
+	(StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
+fn bad_request() -> Response {
+	(StatusCode::BAD_REQUEST, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }

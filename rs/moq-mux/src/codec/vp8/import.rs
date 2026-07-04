@@ -29,7 +29,7 @@ pub struct Import<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, registering the rendition in `catalog`.
-	pub fn new(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(track: moq_net::track::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		let rendition = catalog.video_track(track.name());
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
@@ -97,7 +97,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
-	pub fn demand(&self) -> moq_net::TrackDemand {
+	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
 	}
 
@@ -120,13 +120,13 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	fn setup() -> (moq_net::TrackProducer, crate::catalog::Producer) {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	fn setup() -> (moq_net::track::Producer, crate::catalog::Producer) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let track = broadcast
 			.create_track(
 				"0.vp8",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
 		(track, catalog)

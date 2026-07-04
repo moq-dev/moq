@@ -27,7 +27,7 @@ use crate::Result;
 /// - FLAC
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 
 	/// The catalog being produced
 	catalog: crate::catalog::Producer<E>,
@@ -63,8 +63,8 @@ enum TrackKind {
 struct Fmp4Track {
 	kind: TrackKind,
 
-	track: moq_net::TrackProducer,
-	group: Option<moq_net::GroupProducer>,
+	track: moq_net::track::Producer,
+	group: Option<moq_net::group::Producer>,
 
 	// The minimum buffer required for the track.
 	jitter: Option<Timestamp>,
@@ -83,7 +83,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			catalog,
 			select: None,
@@ -212,7 +212,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let track = self.broadcast.create_track(
 				self.broadcast.unique_name(suffix),
-				moq_net::TrackInfo::default().with_timescale(timescale),
+				moq_net::track::Info::default().with_timescale(timescale),
 			)?;
 
 			match kind {
@@ -712,7 +712,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					prev.finish()?;
 				}
 				match track.pending_sequence.take() {
-					Some(sequence) => track.track.create_group(moq_net::GroupInfo { sequence })?,
+					Some(sequence) => track.track.create_group(moq_net::group::Info { sequence })?,
 					None => track.track.append_group()?,
 				}
 			} else {
@@ -723,7 +723,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			let mut frame = g.create_frame(moq_net::FrameInfo {
+			let mut frame = g.create_frame(moq_net::frame::Info {
 				size: fragment_bytes.len() as u64,
 				timestamp,
 			})?;

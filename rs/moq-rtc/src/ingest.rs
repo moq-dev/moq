@@ -2,20 +2,20 @@
 //! RTP-in flow (`server publish` / WHIP server, `client subscribe` / WHEP
 //! client).
 //!
-//! Holds the [`moq_net::BroadcastProducer`] and per-track codec bridges.
+//! Holds the [`moq_net::broadcast::Producer`] and per-track codec bridges.
 //! On `MediaAdded`, it inspects the negotiated codec and instantiates the
 //! matching bridge; on each `MediaData`, it forwards into the bridge.
 
 use crate::{Error, Result, codec, session};
 
 pub struct IngestSink {
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	bridges: session::Bridges,
 }
 
 impl IngestSink {
-	pub fn new(mut broadcast: moq_net::BroadcastProducer) -> Result<Self> {
+	pub fn new(mut broadcast: moq_net::broadcast::Producer) -> Result<Self> {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Self {
 			broadcast,

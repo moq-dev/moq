@@ -88,7 +88,7 @@ fn synth_flv() -> Vec<u8> {
 
 #[tokio::test(start_paused = true)]
 async fn import_populates_catalog() {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
@@ -113,7 +113,7 @@ async fn import_populates_catalog() {
 
 #[tokio::test(start_paused = true)]
 async fn import_emits_frames() {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
@@ -143,7 +143,7 @@ async fn import_handles_split_input() {
 	let flv = synth_flv();
 	let (head, tail) = flv.split_at(flv.len() / 2);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
@@ -177,7 +177,7 @@ async fn import_enhanced_vp9() {
 	body.extend_from_slice(VP9_KEYFRAME_320X240);
 	write_tag(&mut out, super::TAG_VIDEO, 0, &body);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
@@ -221,7 +221,7 @@ async fn import_enhanced_opus() {
 	frame.extend_from_slice(&[0xfc, 0xff, 0xfe]);
 	write_tag(&mut out, super::TAG_AUDIO, 20, &frame);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
@@ -256,7 +256,7 @@ async fn import_legacy_mp3() {
 	tag.extend_from_slice(&mp3);
 	write_tag(&mut out, super::TAG_AUDIO, 0, &tag);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
@@ -286,7 +286,7 @@ async fn import_enhanced_av1() {
 	frame.extend_from_slice(&payload);
 	write_tag(&mut out, super::TAG_VIDEO, 33, &frame);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
@@ -314,7 +314,7 @@ async fn import_enhanced_ac3() {
 	frame.extend_from_slice(&AC3_FRAME);
 	write_tag(&mut out, super::TAG_AUDIO, 0, &frame);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
@@ -336,7 +336,7 @@ async fn import_enhanced_eac3() {
 	frame.extend_from_slice(&EAC3_FRAME);
 	write_tag(&mut out, super::TAG_AUDIO, 0, &frame);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
@@ -384,7 +384,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 	good.extend_from_slice(&[0, 0, 0, 1, 0x65]);
 	write_tag(&mut out, super::TAG_VIDEO, 10, &good);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
@@ -425,7 +425,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	coded.extend_from_slice(&[0, 0, 0, 1, 0x65]);
 	write_tag(&mut out, super::TAG_VIDEO, 10, &coded);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = Import::new(producer, catalog.clone());
@@ -443,7 +443,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 
 #[tokio::test(start_paused = true)]
 async fn import_rejects_non_flv() {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog);

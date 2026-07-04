@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_net::BroadcastInfo::new().produce();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 		Command::Subscribe => {
 			let reconnect = client.with_subscriber(origin.clone()).reconnect(config.url);
 
-			// IETF MoQ + the current OriginConsumer API don't let us call
+			// IETF MoQ + the current origin::Consumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces
 			// instead. This also makes the subscriber reconnect-aware.
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
@@ -121,11 +121,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 struct Publisher {
-	track: TrackProducer,
+	track: track::Producer,
 }
 
 impl Publisher {
-	fn new(track: TrackProducer) -> Self {
+	fn new(track: track::Producer) -> Self {
 		Self { track }
 	}
 
@@ -157,7 +157,7 @@ impl Publisher {
 		}
 	}
 
-	async fn send_segment(mut segment: GroupProducer, mut now: DateTime<Utc>) -> anyhow::Result<()> {
+	async fn send_segment(mut segment: group::Producer, mut now: DateTime<Utc>) -> anyhow::Result<()> {
 		// Everything but the second.
 		let base = now.format("%Y-%m-%d %H:%M:").to_string();
 
@@ -189,11 +189,11 @@ impl Publisher {
 }
 
 struct Subscriber {
-	track: TrackSubscriber,
+	track: track::Subscriber,
 }
 
 impl Subscriber {
-	fn new(track: TrackSubscriber) -> Self {
+	fn new(track: track::Subscriber) -> Self {
 		Self { track }
 	}
 

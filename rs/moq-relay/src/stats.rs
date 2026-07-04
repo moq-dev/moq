@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use clap::Args;
-use moq_net::{OriginProducer, PathOwned, Stats};
+use moq_net::origin;
+use moq_net::{PathOwned, Stats};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the relay's stats publishing.
@@ -70,7 +71,7 @@ impl StatsConfig {
 	///
 	/// Returns a no-op aggregator ([`Stats::default`]) when [`Self::enabled`]
 	/// is false, so the relay can attach the result unconditionally.
-	pub fn build(&self, origin: OriginProducer) -> Stats {
+	pub fn build(&self, origin: origin::Producer) -> Stats {
 		if !self.enabled.unwrap_or(false) {
 			return Stats::default();
 		}

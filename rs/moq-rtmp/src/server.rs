@@ -35,7 +35,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
-use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
+use moq_net::{broadcast, origin};
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
 use rml_rtmp::time::RtmpTimestamp;
@@ -379,7 +379,7 @@ impl<S: Stream> Publish<S> {
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
-	pub async fn accept(mut self, origin: &OriginProducer, path: &str) -> Result<()> {
+	pub async fn accept(mut self, origin: &origin::Producer, path: &str) -> Result<()> {
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -506,7 +506,7 @@ impl<S: Stream> Play<S> {
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &OriginConsumer, path: &str) -> Result<()> {
+	pub async fn accept(mut self, origin: &origin::Consumer, path: &str) -> Result<()> {
 		// Wait for the broadcast before telling the client playback started. Feed the
 		// client's bytes through the session (not discard them) so its deserializer
 		// stays in sync for everything `play_pump` parses next.
@@ -958,19 +958,19 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 }
 
 /// An active publish: the moq-mux FLV importer (which owns the
-/// [`BroadcastProducer`](moq_net::BroadcastProducer) it publishes into) plus the
+/// [`BroadcastProducer`](moq_net::broadcast::Producer) it publishes into) plus the
 /// origin announcement. Dropping it closes and unannounces the broadcast.
 struct Publisher {
 	/// Held to keep the broadcast announced for the publisher's lifetime.
-	_publish: OriginPublish,
+	_publish: origin::Publish,
 	importer: FlvImport,
 }
 
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
-	fn new(origin: &OriginProducer, path: &str) -> anyhow::Result<Self> {
-		let mut broadcast = BroadcastInfo::new().produce();
+	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
+		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let mut importer = FlvImport::new(broadcast.clone(), catalog);
 
@@ -1182,7 +1182,7 @@ mod tests {
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = BroadcastInfo::new().produce();
+		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog);
 		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();

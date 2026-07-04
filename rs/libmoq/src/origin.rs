@@ -23,11 +23,11 @@ struct TaskEntry {
 #[derive(Default)]
 pub struct Origin {
 	/// Active origin producers for publishing and consuming broadcasts.
-	active: NonZeroSlab<moq_net::OriginProducer>,
+	active: NonZeroSlab<moq_net::origin::Producer>,
 
 	/// Announcement guards from `publish`. Removing an entry (via `unpublish`) drops the
 	/// guard, which unannounces the broadcast.
-	published: NonZeroSlab<moq_net::OriginPublish>,
+	published: NonZeroSlab<moq_net::origin::Publish>,
 
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
@@ -44,7 +44,7 @@ impl Origin {
 		self.active.insert(moq_net::Origin::random().produce())
 	}
 
-	pub fn get(&self, id: Id) -> Result<&moq_net::OriginProducer, Error> {
+	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {
 		self.active.get(id).ok_or(Error::OriginNotFound)
 	}
 
@@ -75,7 +75,7 @@ impl Origin {
 
 	async fn run_announced(
 		callback: OnStatus,
-		mut consumer: moq_net::AnnounceConsumer,
+		mut consumer: moq_net::announce::Consumer,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -165,7 +165,7 @@ impl Origin {
 
 	async fn run_consume_announced(
 		callback: OnStatus,
-		consumer: moq_net::OriginConsumer,
+		consumer: moq_net::origin::Consumer,
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -216,7 +216,7 @@ impl Origin {
 
 	async fn run_request(
 		callback: OnStatus,
-		consumer: moq_net::OriginConsumer,
+		consumer: moq_net::origin::Consumer,
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -256,7 +256,7 @@ impl Origin {
 		&mut self,
 		origin: Id,
 		path: P,
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		let publish = origin.publish_broadcast(path, &broadcast)?;
