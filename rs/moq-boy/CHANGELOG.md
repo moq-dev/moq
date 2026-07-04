@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.23](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.22...moq-boy-v0.2.23) - 2026-07-04
+
+### Other
+
+- Move the connect URL and connect/serve loops into moq-native ([#2048](https://github.com/moq-dev/moq/pull/2048))
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+
 ## [0.2.22](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.21...moq-boy-v0.2.22) - 2026-06-30
 
 ### Added

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.35...moq-cli-v0.8.0) - 2026-07-04
+
+### Added
+
+- *(moq-cli)* per-sink frame-drop latency for the export gateways ([#1998](https://github.com/moq-dev/moq/pull/1998))
+
+### Other
+
+- Move the connect URL and connect/serve loops into moq-native ([#2048](https://github.com/moq-dev/moq/pull/2048))
+- [codex] configure moq-cli CORS origins ([#1996](https://github.com/moq-dev/moq/pull/1996))
+- unified endpoint grammar (binary renamed to `moq`) ([#1985](https://github.com/moq-dev/moq/pull/1985))
+- Add "--tls-generate" flag to examples ([#1959](https://github.com/moq-dev/moq/pull/1959))
+
 ## [0.7.35](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.34...moq-cli-v0.7.35) - 2026-06-30
 
 ### Added

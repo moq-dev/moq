@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.6](https://github.com/moq-dev/moq/compare/moq-native-v0.17.5...moq-native-v0.17.6) - 2026-07-04
+
+### Added
+
+- *(moq-mux)* Opus audio over MPEG-TS (import + export) ([#1965](https://github.com/moq-dev/moq/pull/1965))
+- *(moq-net)* moq-lite-05 SETUP message + PATH parameter ([#1954](https://github.com/moq-dev/moq/pull/1954))
+
+### Fixed
+
+- *(moq-native)* verify server certs with the OS platform verifier ([#1968](https://github.com/moq-dev/moq/pull/1968))
+
+### Other
+
+- resolve client protocol versions once, thread into QUIC backends ([#2065](https://github.com/moq-dev/moq/pull/2065))
+- Enable TCP keepalive on the HTTP/WebSocket listener and RTMP client ([#2069](https://github.com/moq-dev/moq/pull/2069))
+- Move the connect URL and connect/serve loops into moq-native ([#2048](https://github.com/moq-dev/moq/pull/2048))
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+- Fold the internal listener into --server-bind (one authenticated accept path) ([#1974](https://github.com/moq-dev/moq/pull/1974))
+- *(rs)* upgrade reqwest 0.12 -> 0.13 across the workspace ([#1972](https://github.com/moq-dev/moq/pull/1972))
+
 ## [0.17.5](https://github.com/moq-dev/moq/compare/moq-native-v0.17.4...moq-native-v0.17.5) - 2026-06-30
 
 ### Added

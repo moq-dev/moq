@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/moq-dev/moq/compare/moq-srt-v0.0.1...moq-srt-v0.1.0) - 2026-07-04
+
+### Added
+
+- *(moq-cli)* per-sink frame-drop latency for the export gateways ([#1998](https://github.com/moq-dev/moq/pull/1998))
+
+### Other
+
+- *(release)* bump moq-rtmp/srt/rtc/hls to 0.1.0 ([#2035](https://github.com/moq-dev/moq/pull/2035))
+- [codex] fix timestamp elapsed arithmetic ([#2051](https://github.com/moq-dev/moq/pull/2051))
+- unified endpoint grammar (binary renamed to `moq`) ([#1985](https://github.com/moq-dev/moq/pull/1985))
+- add client (dial-out) role ([#1982](https://github.com/moq-dev/moq/pull/1982))
+- convert to library-only crates ([#1975](https://github.com/moq-dev/moq/pull/1975))
+
 ## [0.0.1](https://github.com/moq-dev/moq/releases/tag/moq-srt-v0.0.1) - 2026-06-30
 
 ### Added
