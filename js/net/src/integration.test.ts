@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Broadcast } from "./broadcast.ts";
+import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
@@ -20,7 +20,7 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	]);
 
 	// Server publishes a broadcast
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	server.publish(Path.from("test"), broadcast);
 
 	// Serve every requested "video" track. On lite-05+ a subscribe is preceded by
@@ -91,7 +91,7 @@ test("integration: lite draft-05-wip datagram delivery", async () => {
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	// A static track fans datagrams out to whoever subscribes.
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -130,7 +130,7 @@ test("integration: lite draft-05-wip datagrams not sent on a non-datagram transp
 
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 

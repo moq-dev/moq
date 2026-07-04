@@ -1,10 +1,10 @@
 import { type Dispose, Signal } from "@moq/signals";
-import type { Broadcast } from "../broadcast.ts";
-import type { Group } from "../group.ts";
+import type * as broadcast from "../broadcast.ts";
+import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { TrackSubscriber } from "../track.ts";
+import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -70,7 +70,7 @@ export class Publisher {
 
 	// Our published broadcasts.
 	// It's a signal so we can live update any announce streams.
-	#broadcasts = new Signal<Map<Path.Valid, Broadcast> | undefined>(new Map());
+	#broadcasts = new Signal<Map<Path.Valid, broadcast.Producer> | undefined>(new Map());
 
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
@@ -102,7 +102,7 @@ export class Publisher {
 	 * Publishes a broadcast with any associated tracks.
 	 * @param name - The broadcast to publish
 	 */
-	publish(path: Path.Valid, broadcast: Broadcast) {
+	publish(path: Path.Valid, broadcast: broadcast.Producer) {
 		this.#broadcasts.mutate((broadcasts) => {
 			if (!broadcasts) throw new Error("closed");
 			broadcasts.set(path, broadcast);
@@ -172,7 +172,7 @@ export class Publisher {
 		for (;;) {
 			// TODO Make a better helper within Signals.
 			let dispose!: Dispose;
-			const changed = new Promise<Map<Path.Valid, Broadcast> | undefined>((resolve) => {
+			const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
 				dispose = this.#broadcasts.changed(resolve);
 			});
 
@@ -304,7 +304,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runTrack(sub: bigint, broadcast: Path.Valid, track: TrackSubscriber, stream: Writer, timescale: Timescale) {
+	async #runTrack(sub: bigint, broadcast: Path.Valid, track: track.Subscriber, stream: Writer, timescale: Timescale) {
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -402,7 +402,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: TrackSubscriber, timescale: Timescale) {
+	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = this.#quic.datagrams.maxDatagramSize;
@@ -435,7 +435,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: Group, timescale: Timescale) {
+	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			const stream = await Writer.open(this.#quic);

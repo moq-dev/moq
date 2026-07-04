@@ -1,7 +1,7 @@
 import type { Signal } from "@moq/signals";
-import type { Announced } from "../announced.ts";
+import type * as announce from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
-import type { Broadcast } from "../broadcast.ts";
+import type * as broadcast from "../broadcast.ts";
 import type * as Path from "../path.ts";
 import type * as Time from "../time.ts";
 
@@ -23,13 +23,13 @@ export interface Established {
 	readonly rtt?: Signal<Time.Milli | undefined>;
 
 	/** Subscribe to broadcast announcements under an optional path prefix. */
-	announced(prefix?: Path.Valid): Announced;
+	announced(prefix?: Path.Valid): announce.Consumer;
 
 	/** Publish a broadcast at the given path. */
-	publish(path: Path.Valid, broadcast: Broadcast): void;
+	publish(path: Path.Valid, broadcast: broadcast.Producer): void;
 
 	/** Consume the broadcast at the given path. */
-	consume(broadcast: Path.Valid): Broadcast;
+	consume(broadcast: Path.Valid): broadcast.Consumer;
 
 	/** Close the session. */
 	close(): void;

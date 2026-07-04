@@ -76,7 +76,7 @@ async function publish(config: Config) {
 	console.log("✅ Connected to relay:", config.url);
 
 	// Create a new "broadcast", which is a collection of tracks.
-	const broadcast = new Moq.Broadcast();
+	const broadcast = new Moq.broadcast.Producer();
 	connection.publish(Moq.Path.from(config.broadcast), broadcast);
 
 	console.log("✅ Published broadcast:", config.broadcast);
@@ -96,7 +96,7 @@ async function publish(config: Config) {
 	}
 }
 
-async function publishTrack(track: Moq.TrackProducer) {
+async function publishTrack(track: Moq.track.Producer) {
 	// Send timestamps over the wire, matching the Rust implementation format
 	console.log("✅ Publishing clock data on track:", track.name);
 

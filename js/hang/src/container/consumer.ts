@@ -15,7 +15,7 @@ export interface ConsumerProps {
 }
 
 interface Group {
-	consumer: Moq.Group;
+	consumer: Moq.group.Consumer;
 	frames: Frame[]; // decode order
 	latest?: Time.Micro; // The timestamp of the latest known frame
 	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
@@ -76,7 +76,7 @@ class Rewind {
 
 /** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
 export class Consumer {
-	#track: Moq.TrackSubscriber;
+	#track: Moq.track.Subscriber;
 	#format: Format;
 	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
@@ -93,7 +93,7 @@ export class Consumer {
 	#signals = new Effect();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
-	constructor(track: Moq.TrackSubscriber, props: ConsumerProps) {
+	constructor(track: Moq.track.Subscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);

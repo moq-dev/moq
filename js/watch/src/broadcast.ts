@@ -51,7 +51,7 @@ type BroadcastInput = {
 
 type BroadcastOutput = {
 	status: Signal<Status>;
-	active: Signal<Moq.Broadcast | undefined>;
+	active: Signal<Moq.broadcast.Consumer | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode.
 	catalog: Signal<Catalog.Root | undefined>;
@@ -63,7 +63,7 @@ export class Broadcast {
 
 	readonly #output: BroadcastOutput = {
 		status: new Signal<Status>("offline"),
-		active: new Signal<Moq.Broadcast | undefined>(undefined),
+		active: new Signal<Moq.broadcast.Consumer | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
 	readonly output = readonlys(this.#output);

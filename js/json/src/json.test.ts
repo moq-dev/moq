@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { TrackProducer, type TrackSubscriber } from "@moq/net";
+import { track as NetTrack } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
 
 // Reconstruct every value a consumer yields, in order.
-async function drain(track: TrackSubscriber): Promise<Value[]> {
+async function drain(track: NetTrack.Subscriber): Promise<Value[]> {
 	const out: Value[] = [];
 	for await (const value of new Consumer<Value>(track)) out.push(value);
 	return out;
@@ -14,7 +14,7 @@ async function drain(track: TrackSubscriber): Promise<Value[]> {
 
 // Inspect the published layout via the public API: the frame count of each group, in order.
 // The track must be finished first so group/frame reads terminate.
-async function structure(track: TrackSubscriber): Promise<number[]> {
+async function structure(track: NetTrack.Subscriber): Promise<number[]> {
 	const counts: number[] = [];
 	for (;;) {
 		const group = await track.nextGroup();
@@ -28,7 +28,7 @@ async function structure(track: TrackSubscriber): Promise<number[]> {
 }
 
 test("deltas off: a snapshot group per change", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 0 });
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
@@ -39,7 +39,7 @@ test("deltas off: a snapshot group per change", async () => {
 });
 
 test("deltaRatio 0 disables deltas, like off", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 0 });
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
@@ -51,7 +51,7 @@ test("deltaRatio 0 disables deltas, like off", async () => {
 });
 
 test("live consumer sees each update", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track);
 	const consumer = new Consumer<Value>(track.subscribe());
 
@@ -62,7 +62,7 @@ test("live consumer sees each update", async () => {
 });
 
 test("unchanged value writes nothing", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track);
 	producer.update({ a: 1 });
 	producer.update({ a: 1 });
@@ -72,7 +72,7 @@ test("unchanged value writes nothing", async () => {
 });
 
 test("deltas share one group", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100 });
 	producer.update({ a: 1, b: 1 });
 	producer.update({ a: 1, b: 2 });
@@ -84,7 +84,7 @@ test("deltas share one group", async () => {
 });
 
 test("deltas reconstruct to the final value", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100 });
 	producer.update({ a: 1, b: 1 });
 	producer.update({ a: 1, b: 2 });
@@ -98,7 +98,7 @@ test("deltas reconstruct to the final value", async () => {
 // keys, and each call publishes. This is how the catalog producer is extended (e.g. an scte35
 // section) without a single owner having to rebuild the whole document.
 test("mutate composes independent owners", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { initial: {} });
 	const consumer = new Consumer<Value>(track.subscribe());
 
@@ -115,7 +115,7 @@ test("mutate composes independent owners", async () => {
 });
 
 test("mutate starts from the configured initial value", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { initial: {} });
 	const consumer = new Consumer<Value>(track.subscribe());
 
@@ -126,14 +126,14 @@ test("mutate starts from the configured initial value", async () => {
 });
 
 test("mutate without a prior value or initial throws", () => {
-	const producer = new Producer<Value>(new TrackProducer("test"));
+	const producer = new Producer<Value>(new NetTrack.Producer("test"));
 	expect(() => producer.mutate(() => {})).toThrow();
 });
 
 // Removing a section drops it from the reconstructed value, so a consumer detects the removal.
 // Exercised with deltas on to cover the merge-patch null-deletion path.
 test("mutate removes a section", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100, initial: {} });
 	const consumer = new Consumer<Value>(track.subscribe());
 
@@ -150,7 +150,7 @@ test("mutate removes a section", async () => {
 });
 
 test("tight ratio rolls snapshots", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	// A ratio of 1 budgets deltas up to one snapshot (equal 7-byte frames => 7 bytes). The gate checks
 	// the deltas already written, so the delta that tips the group over budget still lands (a one-frame
 	// overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls group 1.
@@ -165,7 +165,7 @@ test("tight ratio rolls snapshots", async () => {
 });
 
 test("deltas stay within ratio times snapshot", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	// The budget covers only the deltas, not the snapshot frame, measured against the group's snapshot
 	// size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a ratio of 8
 	// budgets 56 bytes of deltas. The gate checks the deltas already written, so the group keeps filling
@@ -179,7 +179,7 @@ test("deltas stay within ratio times snapshot", async () => {
 });
 
 test("array change is a wholesale delta", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100 });
 	producer.update({ list: [1, 2] });
 	producer.update({ list: [1, 2, 3] });
@@ -190,7 +190,7 @@ test("array change is a wholesale delta", async () => {
 });
 
 test("late joiner collapses a buffered backlog to the latest value", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100 });
 	const subscriber = track.subscribe();
 	for (let n = 0; n <= 20; n++) {
@@ -204,7 +204,7 @@ test("late joiner collapses a buffered backlog to the latest value", async () =>
 });
 
 test("frame cap rolls snapshot", async () => {
-	const track = new TrackProducer("test");
+	const track = new NetTrack.Producer("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 1_000_000 });
 	// First update is the snapshot; deltas fill the group until the frame cap forces a roll.
 	for (let i = 0; i <= 256; i++) {

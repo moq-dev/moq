@@ -1,6 +1,6 @@
-import { Announced } from "../announced.ts";
-import type { Broadcast } from "../broadcast.ts";
-import type { Group } from "../group.ts";
+import * as announce from "../announced.ts";
+import type * as broadcast from "../broadcast.ts";
+import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { error } from "../util/error.ts";
@@ -30,10 +30,10 @@ export class Publisher {
 	#session: Session;
 
 	// Our published broadcasts.
-	#broadcasts: Map<Path.Valid, Broadcast> = new Map();
+	#broadcasts: Map<Path.Valid, broadcast.Producer> = new Map();
 
 	// Any consumers that want each new announcement.
-	#announcedConsumers = new Set<Announced>();
+	#announcedConsumers = new Set<announce.Producer>();
 
 	/**
 	 * Creates a new Publisher instance.
@@ -51,13 +51,13 @@ export class Publisher {
 	 * Publishes a broadcast with any associated tracks.
 	 * Opens a bidi stream to send PublishNamespace and waits for response.
 	 */
-	publish(path: Path.Valid, broadcast: Broadcast) {
+	publish(path: Path.Valid, broadcast: broadcast.Producer) {
 		this.#broadcasts.set(path, broadcast);
 		this.#notifyConsumers(path, true);
 		void this.#runPublish(path, broadcast);
 	}
 
-	async #runPublish(path: Path.Valid, broadcast: Broadcast) {
+	async #runPublish(path: Path.Valid, broadcast: broadcast.Producer) {
 		try {
 			const requestId = await this.#session.nextRequestId();
 			if (requestId === undefined) return;
@@ -206,7 +206,7 @@ export class Publisher {
 	/**
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
-	async #runGroup(requestId: bigint, group: Group) {
+	async #runGroup(requestId: bigint, group: group.Consumer) {
 		try {
 			const stream = await Writer.open(this.#quic, this.#session.version);
 
@@ -268,14 +268,14 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			// Create an Announced consumer and seed it with current broadcasts
-			const announced = new Announced(prefix);
+			const announced = new announce.Producer(prefix);
 			for (const name of this.#broadcasts.keys()) {
 				const suffix = Path.stripPrefix(prefix, name);
 				if (suffix === null) continue;
 				announced.append({ path: suffix, active: true });
 			}
 			this.#announcedConsumers.add(announced);
+			const consumer = announced.consume();
 
 			// Close the consumer when the stream closes
 			stream.reader.closed.then(
@@ -285,7 +285,7 @@ export class Publisher {
 
 			try {
 				for (;;) {
-					const entry = await announced.next();
+					const entry = await consumer.next();
 					if (!entry) break;
 
 					if (entry.active) {

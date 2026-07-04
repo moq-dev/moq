@@ -12,18 +12,18 @@ import type { Config } from "./producer.ts";
  * collapses the buffered backlog and yields only the latest value. See {@link next}.
  */
 export class Consumer<T> {
-	#track: Moq.TrackSubscriber;
+	#track: Moq.track.Subscriber;
 	#schema?: z.ZodMiniType<T>;
 	// Whether frames are `deflate-raw` compressed. Must match the producer's {@link Config.compression}.
 	#decompress: boolean;
 
-	#group?: Moq.Group;
+	#group?: Moq.group.Consumer;
 	// Per-group DEFLATE decoder, built lazily on the first frame of a group and reset at each boundary.
 	#decoder?: Decoder;
 	#current?: unknown;
 	#framesRead = 0;
 
-	constructor(track: Moq.TrackSubscriber, config: Config<T> = {}) {
+	constructor(track: Moq.track.Subscriber, config: Config<T> = {}) {
 		this.#track = track;
 		this.#schema = config.schema;
 		this.#decompress = config.compression ?? false;
@@ -61,7 +61,7 @@ export class Consumer<T> {
 			if (advanced) return value;
 
 			// Nothing buffered: block for the next frame (or the group's end).
-			let frame: Moq.Frame | undefined;
+			let frame: Moq.group.Frame | undefined;
 			try {
 				frame = await this.#group.readFrame();
 			} catch {

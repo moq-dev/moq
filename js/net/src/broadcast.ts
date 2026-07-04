@@ -1,118 +1,97 @@
 import { Signal } from "@moq/signals";
-import { type TrackInfo, TrackProducer, type TrackSubscriber } from "./track.ts";
+import * as track from "./track.ts";
 
-/**
- * A request for a track the peer wants, yielded by {@link Broadcast.requested}.
- *
- * The producer answers it with {@link accept}, declaring the track's immutable
- * publisher properties and receiving a {@link TrackProducer} to write groups into,
- * or {@link reject} to refuse it. The properties must be declared up front so the
- * wire layer can answer a TRACK request (lite-05+) and pick the frame codec before
- * any group is served. Mirrors the Rust `TrackRequest`.
- */
-export class TrackRequest {
-	readonly name: string;
-	readonly priority: number;
-	// The producer feeding the TrackSubscriber handed to the caller of Broadcast.subscribe.
-	#producer: TrackProducer;
-
-	constructor(name: string, producer: TrackProducer, priority: number) {
-		this.name = name;
-		this.#producer = producer;
-		this.priority = priority;
-	}
-
-	/**
-	 * Accept the request, committing the track's immutable {@link TrackInfo} and
-	 * returning a {@link TrackProducer} to write groups into. Any field left unset
-	 * keeps its default. Mirrors the Rust `TrackRequest::accept`.
-	 */
-	accept(info: Partial<TrackInfo> = {}): TrackProducer {
-		return this.#producer.accept(info);
-	}
-
-	/** Reject the request, closing the track (optionally with an error). */
-	reject(err?: Error): void {
-		this.#producer.close(err);
-	}
-}
-
-/**
- * A lazy handle to a track on a consumed broadcast, mirroring the Rust
- * `TrackConsumer`. Holding it sends nothing over the network; call {@link subscribe}
- * to open a live subscription or {@link info} to fetch the immutable publisher
- * properties (lite-05+).
- */
-export class TrackConsumer {
-	readonly name: string;
-	#broadcast: Broadcast;
-
-	constructor(broadcast: Broadcast, name: string) {
-		this.#broadcast = broadcast;
-		this.name = name;
-	}
-
-	/**
-	 * Open a live subscription, returning a {@link TrackSubscriber} streaming the
-	 * track's groups. `priority` defaults to `0`.
-	 */
-	subscribe(options?: { priority?: number }): TrackSubscriber {
-		return this.#broadcast.subscribe(this.name, options?.priority ?? 0);
-	}
-
-	/**
-	 * Fetch the track's immutable publisher properties without subscribing, via a
-	 * TRACK stream. Lite-05+ only; rejects on older drafts (which carry no TRACK
-	 * stream) and if the track does not exist.
-	 */
-	info(): Promise<TrackInfo> {
-		return this.#broadcast.resolveTrackInfo(this.name);
-	}
-}
-
-/** Reactive backing state for a {@link Broadcast}: requested tracks plus a closed flag. */
+/** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
-	requested = new Signal<TrackRequest[]>([]);
+	requested = new Signal<track.Request[]>([]);
 	closed = new Signal<boolean | Error>(false);
-	// Statically inserted tracks, keyed by name. A subscribe for one of these fans out
-	// from the producer directly, skipping the on-demand request path.
-	tracks = new Map<string, TrackProducer>();
+	tracks = new Map<string, track.Producer>();
+	infoResolver?: (name: string) => Promise<track.Info>;
+}
+
+function closedPromise(state: BroadcastState): Promise<Error | undefined> {
+	return new Promise((resolve) => {
+		const dispose = state.closed.subscribe((closed) => {
+			if (!closed) return;
+			resolve(closed instanceof Error ? closed : undefined);
+			dispose();
+		});
+	});
+}
+
+function subscribe(state: BroadcastState, name: string, priority: number): track.Subscriber {
+	if (state.closed.peek()) {
+		throw new Error(`broadcast is closed: ${state.closed.peek()}`);
+	}
+
+	const existing = state.tracks.get(name);
+	if (existing) {
+		if (!existing.closedSignal.peek()) return existing.subscribe();
+		state.tracks.delete(name);
+	}
+
+	const producer = new track.Producer(name);
+	const subscriber = producer.subscribe();
+	state.requested.mutate((requested) => {
+		requested.push(new track.Request(name, producer, priority));
+		requested.sort((a, b) => a.priority - b.priority);
+	});
+
+	return subscriber;
+}
+
+async function resolveTrackInfo(state: BroadcastState, name: string): Promise<track.Info> {
+	if (state.infoResolver) {
+		return state.infoResolver(name);
+	}
+
+	const existing = state.tracks.get(name);
+	if (existing && !existing.closedSignal.peek()) {
+		return existing.info();
+	}
+
+	if (state.closed.peek()) {
+		return Promise.reject(new Error(`broadcast is closed: ${state.closed.peek()}`));
+	}
+
+	const producer = new track.Producer(name);
+	state.requested.mutate((requested) => {
+		requested.push(new track.Request(name, producer, 0));
+		requested.sort((a, b) => a.priority - b.priority);
+	});
+
+	try {
+		return await producer.info();
+	} finally {
+		producer.close();
+	}
 }
 
 /**
- * Handles writing and managing tracks in a broadcast.
+ * The write side of a broadcast.
  *
  * @public
  */
-export class Broadcast {
+export class Producer {
 	#state = new BroadcastState();
 
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
-	// Consume-side hook installed by the wire layer (Subscriber.consume) to resolve
-	// a track's immutable TRACK_INFO over a Track stream. Undefined on a published
-	// broadcast, where info comes from the producer's accept() instead.
-	#infoResolver?: (name: string) => Promise<TrackInfo>;
-
 	constructor() {
-		this.closed = new Promise((resolve) => {
-			const dispose = this.#state.closed.subscribe((closed) => {
-				if (!closed) return;
-				resolve(closed instanceof Error ? closed : undefined);
-				dispose();
-			});
-		});
+		this.closed = closedPromise(this.#state);
 	}
 
-	/**
-	 * A track requested over the network.
-	 */
-	async requested(): Promise<TrackRequest | undefined> {
+	/** A read handle for this broadcast. */
+	consume(): Consumer {
+		return new Consumer(this.#state as never);
+	}
+
+	/** Return the next track requested by a peer. */
+	async requested(): Promise<track.Request | undefined> {
 		for (;;) {
-			// We use pop instead of shift because it's slightly more efficient.
-			const track = this.#state.requested.peek().pop();
-			if (track) return track;
+			const request = this.#state.requested.peek().pop();
+			if (request) return request;
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -122,31 +101,8 @@ export class Broadcast {
 		}
 	}
 
-	/**
-	 * Get a lazy {@link TrackConsumer} handle for a track on this broadcast.
-	 *
-	 * Sends nothing over the network until you call {@link TrackConsumer.subscribe}
-	 * or {@link TrackConsumer.info}. Mirrors the Rust `BroadcastConsumer::track`.
-	 */
-	track(name: string): TrackConsumer {
-		return new TrackConsumer(this, name);
-	}
-
-	/**
-	 * Insert a track that is served directly, without an on-demand {@link requested}
-	 * round-trip.
-	 *
-	 * Each {@link subscribe} for this name fans out from the producer, so a publisher
-	 * can push tracks proactively instead of waiting to be asked. The caller owns the
-	 * {@link TrackProducer} and writes its groups; when that producer closes, the entry
-	 * is removed automatically. Throws on a duplicate live name. Mirrors the Rust
-	 * `BroadcastProducer::insert_track`.
-	 *
-	 * The producer must commit its {@link TrackInfo} via `accept()` (or use
-	 * {@link createTrack}, which does it for you); otherwise a subscriber's
-	 * `info()` never resolves and the wire layer stalls before serving.
-	 */
-	insertTrack(track: TrackProducer): void {
+	/** Insert a track that is served directly, without an on-demand request round-trip. */
+	insertTrack(track: track.Producer): void {
 		if (this.#state.closed.peek()) {
 			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
 		}
@@ -158,7 +114,6 @@ export class Broadcast {
 
 		this.#state.tracks.set(track.name, track);
 
-		// Evict the entry once the track closes, unless it has since been replaced.
 		void track.closed.finally(() => {
 			if (this.#state.tracks.get(track.name) === track) {
 				this.#state.tracks.delete(track.name);
@@ -166,112 +121,106 @@ export class Broadcast {
 		});
 	}
 
-	/**
-	 * Create a track, insert it into the broadcast, and return its {@link TrackProducer}.
-	 *
-	 * Commits the immutable {@link TrackInfo} up front, so a subscriber resolves
-	 * {@link TrackConsumer.info} without an on-demand round-trip. Mirrors the Rust
-	 * `BroadcastProducer::create_track`.
-	 */
-	createTrack(name: string, info: Partial<TrackInfo> = {}): TrackProducer {
-		const track = new TrackProducer(name).accept(info);
-		this.insertTrack(track);
-		return track;
+	/** Create a track, insert it into the broadcast, and return its producer. */
+	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
+		const producer = new track.Producer(name).accept(info);
+		this.insertTrack(producer);
+		return producer;
 	}
 
-	/** Remove a statically inserted track by name. Mirrors the Rust `BroadcastProducer::remove_track`. */
+	/** Remove a statically inserted track by name. */
 	removeTrack(name: string): void {
 		this.#state.tracks.delete(name);
 	}
 
-	/**
-	 * Open a live subscription to a track, returning the {@link TrackSubscriber} the
-	 * groups stream into. Called by the consuming application (usually via
-	 * {@link TrackConsumer.subscribe}) and by the publishing wire layer to ask the
-	 * application for a track to serve.
-	 */
-	subscribe(name: string, priority: number): TrackSubscriber {
-		if (this.#state.closed.peek()) {
-			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
-		}
-
-		// Fast path: a statically inserted track fans out a fresh subscriber, no
-		// request. A stale (closed) entry is evicted and falls through to on-demand.
-		const existing = this.#state.tracks.get(name);
-		if (existing) {
-			if (!existing.closedSignal.peek()) return existing.subscribe();
-			this.#state.tracks.delete(name);
-		}
-
-		// The request carries the producer (write side); the caller reads the
-		// subscriber it fans out. Accepting the request commits the info and starts
-		// serving groups.
-		const producer = new TrackProducer(name);
-		const subscriber = producer.subscribe();
-		this.#state.requested.mutate((requested) => {
-			requested.push(new TrackRequest(name, producer, priority));
-			// Sort the tracks by priority in ascending order (we will pop)
-			requested.sort((a, b) => a.priority - b.priority);
-		});
-
-		return subscriber;
+	/** Open a live subscription to a track. Used by the publishing wire layer. */
+	subscribe(name: string, priority: number): track.Subscriber {
+		return subscribe(this.#state, name, priority);
 	}
 
-	/**
-	 * Install the consume-side TRACK_INFO resolver (used by {@link TrackConsumer.info}).
-	 * Called once by the wire layer when this broadcast is consumed. Internal.
-	 */
-	onTrackInfo(resolver: (name: string) => Promise<TrackInfo>): void {
-		this.#infoResolver = resolver;
+	/** Resolve a track's immutable info. Used by the publishing wire layer. */
+	resolveTrackInfo(name: string): Promise<track.Info> {
+		return resolveTrackInfo(this.#state, name);
 	}
 
-	/** Resolve a track's immutable info, used by {@link TrackConsumer.info}. Internal. */
-	resolveTrackInfo(name: string): Promise<TrackInfo> {
-		// Consume side: a TRACK stream (lite-05+) answers it.
-		if (this.#infoResolver) {
-			return this.#infoResolver(name);
-		}
-
-		// A statically inserted track already committed its info; serve it directly.
-		const existing = this.#state.tracks.get(name);
-		if (existing && !existing.closedSignal.peek()) {
-			return existing.info();
-		}
-
-		// Publish side: ask the application by triggering a TrackRequest it answers
-		// with accept(TrackInfo); only the immutable properties are needed, so close
-		// the request once they're known rather than serving any groups.
-		if (this.#state.closed.peek()) {
-			return Promise.reject(new Error(`broadcast is closed: ${this.#state.closed.peek()}`));
-		}
-
-		const producer = new TrackProducer(name);
-		this.#state.requested.mutate((requested) => {
-			requested.push(new TrackRequest(name, producer, 0));
-			requested.sort((a, b) => a.priority - b.priority);
-		});
-
-		return (async () => {
-			try {
-				return await producer.info();
-			} finally {
-				producer.close();
-			}
-		})();
+	/** A lazy read handle for a track on this broadcast. */
+	track(name: string): track.Consumer {
+		return new track.Consumer(
+			name,
+			(priority) => subscribe(this.#state, name, priority),
+			() => resolveTrackInfo(this.#state, name),
+		);
 	}
 
-	/**
-	 * Closes the writer and all associated tracks.
-	 *
-	 * @param abort - If provided, throw this exception instead of returning undefined.
-	 */
+	/** Close the broadcast, optionally with an error to abort waiters. */
 	close(abort?: Error) {
 		this.#state.closed.set(abort ?? true);
-		for (const req of this.#state.requested.peek()) {
-			req.reject(abort);
+		this.#state.requested.mutate((requests) => {
+			requests.length = 0;
+		});
+	}
+}
+
+/**
+ * The read side of a broadcast.
+ *
+ * @public
+ */
+export class Consumer {
+	#state: BroadcastState;
+
+	/** Resolves with the abort error (or undefined) once closed. */
+	readonly closed: Promise<Error | undefined>;
+
+	constructor(state?: never);
+	constructor(state?: BroadcastState) {
+		this.#state = state ?? new BroadcastState();
+		this.closed = closedPromise(this.#state);
+	}
+
+	/** Get a lazy handle for a track on this broadcast. */
+	track(name: string): track.Consumer {
+		return new track.Consumer(
+			name,
+			(priority) => subscribe(this.#state, name, priority),
+			() => resolveTrackInfo(this.#state, name),
+		);
+	}
+
+	/** Open a live subscription to a track. Used by the subscribing wire layer. */
+	subscribe(name: string, priority: number): track.Subscriber {
+		return subscribe(this.#state, name, priority);
+	}
+
+	/** Return the next track requested by the local consumer. Used by the subscribing wire layer. */
+	async requested(): Promise<track.Request | undefined> {
+		for (;;) {
+			const request = this.#state.requested.peek().pop();
+			if (request) return request;
+
+			const closed = this.#state.closed.peek();
+			if (closed instanceof Error) throw closed;
+			if (closed) return undefined;
+
+			await Signal.race(this.#state.requested, this.#state.closed);
 		}
-		this.#state.requested.mutate((requested) => {
-			requested.length = 0;
+	}
+
+	/** Install the read-side TRACK_INFO resolver. Used by the wire layer. */
+	onTrackInfo(resolver: (name: string) => Promise<track.Info>): void {
+		this.#state.infoResolver = resolver;
+	}
+
+	/** Resolve a track's immutable info. Used by track handles. */
+	resolveTrackInfo(name: string): Promise<track.Info> {
+		return resolveTrackInfo(this.#state, name);
+	}
+
+	/** Close the broadcast, optionally with an error to abort waiters. */
+	close(abort?: Error) {
+		this.#state.closed.set(abort ?? true);
+		this.#state.requested.mutate((requests) => {
+			requests.length = 0;
 		});
 	}
 }

@@ -6,69 +6,93 @@ import * as Path from "./path.js";
  *
  * @public
  */
-export interface AnnouncedEntry {
+export interface Event {
+	/** Broadcast path. */
 	path: Path.Valid;
+	/** True when the broadcast is available. */
 	active: boolean;
 }
 
-/** Reactive backing state for an {@link Announced}: the pending queue plus a closed flag. */
-class AnnouncedState {
-	queue = new Signal<AnnouncedEntry[]>([]);
+/** Reactive backing state shared by announcement producers and consumers. */
+class AnnounceState {
+	queue = new Signal<Event[]>([]);
 	closed = new Signal<boolean | Error>(false);
 }
 
+function closedPromise(state: AnnounceState): Promise<Error | undefined> {
+	return new Promise((resolve) => {
+		const dispose = state.closed.subscribe((closed) => {
+			if (!closed) return;
+			resolve(closed instanceof Error ? closed : undefined);
+			dispose();
+		});
+	});
+}
+
 /**
- * Handles writing announcements to the announcement queue.
+ * The write side of an announcement stream.
  *
  * @public
  */
-export class Announced {
-	/** Reactive backing state. */
-	#state = new AnnouncedState();
-
+export class Producer {
 	/** Path prefix this stream is scoped to. */
 	prefix: Path.Valid;
+
+	#state = new AnnounceState();
 
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
 	constructor(prefix = Path.empty()) {
 		this.prefix = prefix;
-		this.closed = new Promise((resolve) => {
-			const dispose = this.#state.closed.subscribe((closed) => {
-				if (!closed) return;
-				resolve(closed instanceof Error ? closed : undefined);
-				dispose();
-			});
-		});
+		this.closed = closedPromise(this.#state);
 	}
 
-	/**
-	 * Writes an announcement to the queue.
-	 * @param announcement - The announcement to write
-	 */
-	append(announcement: AnnouncedEntry) {
-		if (this.#state.closed.peek()) throw new Error("announced is closed");
+	/** A read handle for this announcement stream. */
+	consume(): Consumer {
+		return new Consumer(this.prefix, this.#state as never);
+	}
+
+	/** Writes an announcement to the queue. */
+	append(event: Event) {
+		if (this.#state.closed.peek()) throw new Error("announcements are closed");
 		this.#state.queue.mutate((queue) => {
-			queue.push(announcement);
+			queue.push(event);
 		});
 	}
 
-	/**
-	 * Closes the writer.
-	 * @param abort - If provided, throw this exception instead of returning undefined.
-	 */
+	/** Closes the writer. */
 	close(abort?: Error) {
 		this.#state.closed.set(abort ?? true);
 		this.#state.queue.mutate((queue) => {
 			queue.length = 0;
 		});
 	}
+}
 
-	/**
-	 * Returns the next announcement.
-	 */
-	async next(): Promise<AnnouncedEntry | undefined> {
+/**
+ * The read side of an announcement stream.
+ *
+ * @public
+ */
+export class Consumer {
+	/** Path prefix this stream is scoped to. */
+	prefix: Path.Valid;
+
+	#state: AnnounceState;
+
+	/** Resolves with the abort error (or undefined) once closed. */
+	readonly closed: Promise<Error | undefined>;
+
+	constructor(prefix?: Path.Valid, state?: never);
+	constructor(prefix = Path.empty(), state?: AnnounceState) {
+		this.prefix = prefix;
+		this.#state = state ?? new AnnounceState();
+		this.closed = closedPromise(this.#state);
+	}
+
+	/** Returns the next announcement. */
+	async next(): Promise<Event | undefined> {
 		for (;;) {
 			const announce = this.#state.queue.peek().shift();
 			if (announce) return announce;
@@ -79,5 +103,13 @@ export class Announced {
 
 			await Signal.race(this.#state.queue, this.#state.closed);
 		}
+	}
+
+	/** Closes the reader. */
+	close(abort?: Error) {
+		this.#state.closed.set(abort ?? true);
+		this.#state.queue.mutate((queue) => {
+			queue.length = 0;
+		});
 	}
 }

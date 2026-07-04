@@ -1,19 +1,20 @@
 import { expect, setSystemTime, test } from "bun:test";
-import { Broadcast, type TrackRequest } from "./broadcast.ts";
+import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { CacheFull, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
-import { TrackProducer } from "./track.ts";
+import type { Request as TrackRequest } from "./track.ts";
+import { Producer as TrackProducer } from "./track.ts";
 
 // Observe whether an on-demand track request is pending without blocking: returns the
 // next request if one has already been emitted, or undefined if none is (yet) waiting.
-async function pendingRequest(broadcast: Broadcast): Promise<TrackRequest | undefined> {
+async function pendingRequest(broadcast: BroadcastProducer): Promise<TrackRequest | undefined> {
 	const none = Symbol("none");
 	const result = await Promise.race([broadcast.requested(), Promise.resolve(none)]);
 	return result === none ? undefined : (result as TrackRequest | undefined);
 }
 
 test("subscribe serves a statically inserted track without a request", async () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 
 	const track1 = new TrackProducer("track1").accept();
 	broadcast.insertTrack(track1);
@@ -36,7 +37,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 });
 
 test("two subscribers to one inserted track each get a full copy", async () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 
 	const a = broadcast.track("video").subscribe();
@@ -53,7 +54,7 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 });
 
 test("a late subscriber replays the cached window", async () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 
 	// Written before anyone subscribes; retained in the cache for replay.
@@ -67,7 +68,7 @@ test("a late subscriber replays the cached window", async () => {
 });
 
 test("a read throws CacheFull on a gap, then resyncs to the next group", async () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 	const sub = broadcast.track("video").subscribe();
 
@@ -92,7 +93,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 	try {
 		setSystemTime(new Date(10_000));
 
-		const broadcast = new Broadcast();
+		const broadcast = new BroadcastProducer();
 		const producer = broadcast.createTrack("video", { cache: 1000 });
 
 		// A subscriber that never reads. Its sink must not grow without bound.
@@ -120,7 +121,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 });
 
 test("createTrack commits info up front", async () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 
 	const producer = broadcast.createTrack("video", { cache: 2000, priority: 3 });
 	expect(producer.name).toBe("video");
@@ -131,13 +132,13 @@ test("createTrack commits info up front", async () => {
 });
 
 test("insertTrack rejects a duplicate live name", () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("dup");
 	expect(() => broadcast.insertTrack(new TrackProducer("dup").accept())).toThrow();
 });
 
 test("a closed track is evicted and re-subscribing falls through to a request", async () => {
-	const broadcast = new Broadcast();
+	const broadcast = new BroadcastProducer();
 
 	const track1 = broadcast.createTrack("track1");
 	track1.close();
@@ -153,13 +154,13 @@ test("a closed track is evicted and re-subscribing falls through to a request", 
 
 test("removeTrack drops the static entry", async () => {
 	// While the static entry exists, subscribing takes the fast path: no on-demand request.
-	const kept = new Broadcast();
+	const kept = new BroadcastProducer();
 	kept.createTrack("track1");
 	kept.track("track1").subscribe();
 	expect(await pendingRequest(kept)).toBeUndefined();
 
 	// With the entry removed, subscribing falls through to an on-demand request.
-	const removed = new Broadcast();
+	const removed = new BroadcastProducer();
 	removed.createTrack("track1");
 	removed.removeTrack("track1");
 	removed.track("track1").subscribe();
