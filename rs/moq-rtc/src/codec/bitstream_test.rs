@@ -41,7 +41,7 @@ async fn h264_annexb_frame_publishes_catalog_entry() {
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = codec::h264::Bridge::new(producer, catalog.clone()).expect("bridge");
+	let mut bridge = codec::h264::Bridge::new(producer, catalog.reserve()).expect("bridge");
 
 	let codec_frame = Frame {
 		timestamp_us: 0,
@@ -71,7 +71,7 @@ async fn opus_frame_publishes_catalog_entry() {
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = codec::opus::Bridge::new(producer, catalog.clone(), 48_000, 2).expect("bridge");
+	let mut bridge = codec::opus::Bridge::new(producer, catalog.reserve(), 48_000, 2).expect("bridge");
 
 	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]); // arbitrary 3-byte Opus packet
 	let codec_frame = Frame {
@@ -94,7 +94,7 @@ async fn vp9_keyframe_flag_from_uncompressed_header() {
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = codec::vp9::Bridge::new(producer, catalog.clone()).expect("bridge");
+	let mut bridge = codec::vp9::Bridge::new(producer, catalog.reserve()).expect("bridge");
 
 	// VP9 uncompressed header: frame_type is bit 2. 0 = keyframe, 1 = inter.
 	// Byte with bit 2 cleared is a keyframe; with bit 2 set is an inter frame.
@@ -144,7 +144,7 @@ async fn egress_opus_passthrough() {
 	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
-	let mut bridge = codec::opus::Bridge::new(producer.clone(), catalog.clone(), 48_000, 2).expect("bridge");
+	let mut bridge = codec::opus::Bridge::new(producer.clone(), catalog.reserve(), 48_000, 2).expect("bridge");
 
 	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]);
 	Bridge::push(
@@ -181,7 +181,7 @@ async fn egress_h264_avc3_passthrough() {
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = codec::h264::Bridge::new(producer.clone(), catalog.clone()).expect("bridge");
+	let mut bridge = codec::h264::Bridge::new(producer.clone(), catalog.reserve()).expect("bridge");
 	Bridge::push(
 		&mut bridge,
 		Frame {

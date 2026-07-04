@@ -34,4 +34,5 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+kio = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

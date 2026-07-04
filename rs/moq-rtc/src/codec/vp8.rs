@@ -9,20 +9,23 @@ use crate::{Result, codec};
 /// Forwards str0m's VP8 frames to a `.vp8` track, detecting keyframes inline.
 pub struct Bridge {
 	catalog: moq_mux::catalog::Producer,
+	reserved: Option<moq_mux::catalog::Reserved>,
 	track: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	announced: bool,
 }
 
 impl Bridge {
 	/// Publish a `.vp8` track on `broadcast`; the catalog rendition is added on the first frame.
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
+	pub fn new(mut broadcast: moq_net::broadcast::Producer, reserved: moq_mux::catalog::Reserved) -> Result<Self> {
 		let track = broadcast.create_track(
 			broadcast.unique_name(".vp8"),
 			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 		let producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let catalog = reserved.producer();
 		Ok(Self {
 			catalog,
+			reserved: Some(reserved),
 			track: producer,
 			announced: false,
 		})
@@ -34,11 +37,14 @@ impl Bridge {
 		}
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;
-		self.catalog
-			.lock()
-			.video
-			.renditions
-			.insert(self.track.track().name().to_string(), config);
+		{
+			self.catalog
+				.lock()
+				.video
+				.renditions
+				.insert(self.track.track().name().to_string(), config);
+		}
+		self.reserved = None;
 		self.announced = true;
 	}
 }

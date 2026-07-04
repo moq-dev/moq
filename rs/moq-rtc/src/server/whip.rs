@@ -104,8 +104,6 @@ pub async fn accept(
 		.publish_broadcast(broadcast, &consumer)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to publish broadcast: {err}")))?;
 
-	let sink = Box::new(IngestSink::new(producer)?);
-
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
 	// and a guard the session task holds for its lifetime (unregisters on exit).
@@ -120,6 +118,8 @@ pub async fn accept(
 	}
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
+	let answer = sdp::render_answer(&answer);
+	let sink = Box::new(IngestSink::new(producer, sdp::count_local_recv(&answer))?);
 	let resource_id = sdp::new_resource_id();
 	let session = session::Session::ingest(rtc, mux.socket(), mux.candidates().to_vec(), inbound, sink);
 
@@ -129,7 +129,7 @@ pub async fn accept(
 
 	Ok(Response {
 		resource_id: resource_id.clone(),
-		answer: sdp::render_answer(&answer),
+		answer,
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,

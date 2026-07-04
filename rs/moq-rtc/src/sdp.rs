@@ -37,6 +37,96 @@ pub fn render_answer(answer: &str0m::change::SdpAnswer) -> String {
 		.join("\r\n")
 }
 
+/// Count accepted audio/video m-lines where this endpoint receives RTP.
+pub fn count_local_recv(sdp: &str) -> usize {
+	count_media(sdp, Direction::receives)
+}
+
+/// Count accepted audio/video m-lines where the remote endpoint sends RTP.
+pub fn count_remote_send(sdp: &str) -> usize {
+	count_media(sdp, Direction::sends)
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+	SendOnly,
+	RecvOnly,
+	SendRecv,
+	Inactive,
+}
+
+impl Direction {
+	fn parse(line: &str) -> Option<Self> {
+		match line {
+			"a=sendonly" => Some(Self::SendOnly),
+			"a=recvonly" => Some(Self::RecvOnly),
+			"a=sendrecv" => Some(Self::SendRecv),
+			"a=inactive" => Some(Self::Inactive),
+			_ => None,
+		}
+	}
+
+	fn sends(self) -> bool {
+		matches!(self, Self::SendOnly | Self::SendRecv)
+	}
+
+	fn receives(self) -> bool {
+		matches!(self, Self::RecvOnly | Self::SendRecv)
+	}
+}
+
+struct Media {
+	audio_or_video: bool,
+	accepted: bool,
+	direction: Direction,
+}
+
+fn count_media(sdp: &str, matches_direction: fn(Direction) -> bool) -> usize {
+	let mut count = 0;
+	let mut session_direction = Direction::SendRecv;
+	let mut media = None;
+
+	for line in sdp.lines() {
+		let line = line.trim();
+		if line.starts_with("m=") {
+			finish_media(&mut count, media.take(), matches_direction);
+			media = Some(parse_media(line, session_direction));
+			continue;
+		}
+
+		let Some(direction) = Direction::parse(line) else {
+			continue;
+		};
+		match &mut media {
+			Some(media) => media.direction = direction,
+			None => session_direction = direction,
+		}
+	}
+
+	finish_media(&mut count, media, matches_direction);
+	count
+}
+
+fn parse_media(line: &str, direction: Direction) -> Media {
+	let mut parts = line.split_whitespace();
+	let kind = parts.next().unwrap_or_default().trim_start_matches("m=");
+	let port = parts.next().unwrap_or_default();
+	Media {
+		audio_or_video: matches!(kind, "audio" | "video"),
+		accepted: !port.is_empty() && port != "0",
+		direction,
+	}
+}
+
+fn finish_media(count: &mut usize, media: Option<Media>, matches_direction: fn(Direction) -> bool) {
+	let Some(media) = media else {
+		return;
+	};
+	if media.audio_or_video && media.accepted && matches_direction(media.direction) {
+		*count += 1;
+	}
+}
+
 /// Give an `m=` line a placeholder format payload when it has none (see
 /// [`render_answer`]); every other line passes through untouched.
 fn ensure_media_format(line: &str) -> Cow<'_, str> {
@@ -69,7 +159,7 @@ pub fn parse_resource_id(path: &str) -> Result<uuid::Uuid> {
 
 #[cfg(test)]
 mod tests {
-	use super::ensure_media_format;
+	use super::{count_local_recv, count_remote_send, ensure_media_format};
 
 	#[test]
 	fn rejected_mline_with_no_format_gets_placeholder() {
@@ -90,5 +180,23 @@ mod tests {
 		assert_eq!(ensure_media_format(video), video);
 		let attr = "a=ice-ufrag:abcd";
 		assert_eq!(ensure_media_format(attr), attr);
+	}
+
+	#[test]
+	fn counts_only_accepted_receiving_media() {
+		let sdp = concat!(
+			"v=0\r\n",
+			"a=sendrecv\r\n",
+			"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+			"a=recvonly\r\n",
+			"m=video 0 UDP/TLS/RTP/SAVPF 96\r\n",
+			"a=recvonly\r\n",
+			"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n",
+			"a=sendrecv\r\n",
+			"m=video 9 UDP/TLS/RTP/SAVPF 97\r\n",
+			"a=sendonly\r\n",
+		);
+		assert_eq!(count_local_recv(sdp), 1);
+		assert_eq!(count_remote_send(sdp), 1);
 	}
 }

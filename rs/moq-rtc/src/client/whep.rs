@@ -18,8 +18,6 @@ use url::Url;
 use crate::{Error, Result, client::Client, ingest::IngestSink, session};
 
 pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcast::Producer) -> Result<()> {
-	let sink = Box::new(IngestSink::new(broadcast)?);
-
 	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;
 	let mut rtc = Rtc::new(Instant::now());
 	for addr in &candidates {
@@ -57,6 +55,7 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcas
 	let answer = SdpAnswer::from_sdp_string(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 
 	rtc.sdp_api().accept_answer(pending, answer).map_err(Error::Rtc)?;
+	let sink = Box::new(IngestSink::new(broadcast, crate::sdp::count_remote_send(&body))?);
 	tracing::info!(%url, "whep client connected");
 
 	// 1:1 socket (no demux on the client): pump its datagrams into the session.

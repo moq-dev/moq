@@ -12,7 +12,7 @@ pub struct Bridge {
 impl Bridge {
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		reserved: moq_mux::catalog::Reserved,
 		sample_rate: u32,
 		channel_count: u32,
 	) -> Result<Self> {
@@ -21,7 +21,7 @@ impl Bridge {
 			channel_count,
 		};
 		let track = moq_mux::import::unique_track(&mut broadcast, ".opus")?;
-		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config)?;
+		let import = moq_mux::codec::opus::Import::new(track, reserved, config)?;
 		Ok(Self { import })
 	}
 }
