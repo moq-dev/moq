@@ -12,6 +12,9 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.cargo-shear]
+ignored = ["getrandom"]
+
 [features]
 # Legacy no-op: serde is now unconditional (stats publishing requires it).
 serde = []
