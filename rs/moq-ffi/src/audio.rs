@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::producer::MoqBroadcastProducer;
+use crate::producer::{BroadcastOwner, MoqBroadcastProducer};
 
 /// Raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 ///
@@ -138,6 +138,7 @@ impl From<MoqAudioFrame> for moq_audio::Frame {
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::AudioProducer<moq_mux::catalog::hang::Extra>>>,
+	_owner: BroadcastOwner,
 }
 
 #[uniffi::export]
@@ -191,9 +192,15 @@ impl MoqBroadcastProducer {
 			)
 			.map_err(Into::into)
 		})?;
+		let owner = self.with_state(|state| {
+			Ok(BroadcastOwner {
+				_inner: state.broadcast.clone(),
+			})
+		})?;
 
 		Ok(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
+			_owner: owner,
 		}))
 	}
 }
@@ -214,6 +221,7 @@ impl ConsumerInner {
 #[derive(uniffi::Object)]
 pub struct MoqAudioConsumer {
 	task: Task<ConsumerInner>,
+	_owner: MoqBroadcastConsumer,
 }
 
 #[uniffi::export]
@@ -264,6 +272,7 @@ impl MoqBroadcastConsumer {
 
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),
+			_owner: self.clone(),
 		}))
 	}
 }

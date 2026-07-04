@@ -8,6 +8,11 @@ use crate::ffi::Task;
 
 // ---- UniFFI Objects ----
 
+#[derive(Clone)]
+pub(crate) struct BroadcastOwner {
+	pub(crate) _inner: moq_net::BroadcastProducer,
+}
+
 pub(crate) struct BroadcastProducer {
 	pub(crate) broadcast: moq_net::BroadcastProducer,
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
@@ -85,15 +90,26 @@ pub struct MoqBroadcastDynamic {
 }
 
 struct DynamicProducer {
-	inner: moq_net::BroadcastDynamic,
+	inner: Option<moq_net::BroadcastDynamic>,
+	owner: moq_net::BroadcastProducer,
 }
 
 impl DynamicProducer {
 	async fn requested_track(&mut self) -> Result<Arc<MoqTrackProducer>, MoqError> {
-		let track = self.inner.requested_track().await?;
+		let mut inner = self.inner.take().ok_or(MoqError::Closed)?;
+		let track = inner.requested_track().await;
+		self.inner = Some(inner);
+		let track = track?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(track)),
+			_owner: Some(BroadcastOwner {
+				_inner: self.owner.clone(),
+			}),
 		}))
+	}
+
+	fn close(&mut self) {
+		self.inner.take();
 	}
 }
 
@@ -120,11 +136,13 @@ impl MoqBroadcastProducer {
 #[derive(uniffi::Object)]
 pub struct MoqMediaProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
+	_owner: BroadcastOwner,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqMediaStreamProducer {
 	inner: std::sync::Mutex<Option<MediaStreamProducer>>,
+	_owner: BroadcastOwner,
 }
 
 #[uniffi::export]
@@ -132,7 +150,14 @@ impl MoqBroadcastProducer {
 	/// Create a consumer that reads from this broadcast's tracks.
 	pub fn consume(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		Ok(Arc::new(MoqBroadcastConsumer::new(self.consume_inner()?)))
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		Ok(Arc::new(MoqBroadcastConsumer::new_with_owner(
+			state.broadcast.consume(),
+			BroadcastOwner {
+				_inner: state.broadcast.clone(),
+			},
+		)))
 	}
 
 	/// Create a dynamic producer that yields tracks requested by subscribers.
@@ -145,7 +170,8 @@ impl MoqBroadcastProducer {
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		Ok(Arc::new(MoqBroadcastDynamic {
 			task: Task::new(DynamicProducer {
-				inner: state.broadcast.dynamic(),
+				inner: Some(state.broadcast.dynamic()),
+				owner: state.broadcast.clone(),
 			}),
 		}))
 	}
@@ -174,6 +200,9 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let owner = BroadcastOwner {
+			_inner: state.broadcast.clone(),
+		};
 		// A container may publish several tracks; a single codec fills one minted
 		// track. Try the container first so a codec format doesn't mint a stray
 		// track on the way to being recognized.
@@ -200,6 +229,7 @@ impl MoqBroadcastProducer {
 
 		Ok(Arc::new(MoqMediaProducer {
 			inner: std::sync::Mutex::new(Some(MediaProducer { decoder, demand })),
+			_owner: owner,
 		}))
 	}
 
@@ -217,6 +247,9 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let owner = BroadcastOwner {
+			_inner: state.broadcast.clone(),
+		};
 		let track_clone = {
 			let guard = track.inner.lock().unwrap();
 			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
@@ -234,6 +267,7 @@ impl MoqBroadcastProducer {
 				decoder: MediaDecoder::Track(Box::new(import)),
 				demand: Some(demand),
 			})),
+			_owner: owner,
 		}))
 	}
 
@@ -247,6 +281,9 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let owner = BroadcastOwner {
+			_inner: state.broadcast.clone(),
+		};
 		// A container stream may publish several tracks; a single codec fills one
 		// minted track. Try the container first so a codec format doesn't mint a
 		// stray track on the way to being recognized.
@@ -270,6 +307,7 @@ impl MoqBroadcastProducer {
 
 		Ok(Arc::new(MoqMediaStreamProducer {
 			inner: std::sync::Mutex::new(Some(MediaStreamProducer { decoder })),
+			_owner: owner,
 		}))
 	}
 
@@ -287,6 +325,9 @@ impl MoqBroadcastProducer {
 		let producer = broadcast.create_track(track)?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
+			_owner: Some(BroadcastOwner {
+				_inner: state.broadcast.clone(),
+			}),
 		}))
 	}
 
@@ -335,16 +376,25 @@ impl MoqBroadcastProducer {
 impl MoqBroadcastDynamic {
 	/// Wait for the next subscriber-requested track.
 	///
-	/// Returns an error once the broadcast is closed or aborted.
+	/// Returns an error once the broadcast is closed, aborted, or the dynamic
+	/// producer is closed.
 	pub async fn requested_track(&self) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		self.task
 			.run(|mut state| async move { state.requested_track().await })
 			.await
 	}
 
+	/// Close the dynamic producer and cancel all current and future `requested_track()` calls.
+	pub fn close(&self) {
+		self.task.cancel();
+		if let Some(mut state) = self.task.lock() {
+			state.close();
+		}
+	}
+
 	/// Cancel all current and future `requested_track()` calls.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.close();
 	}
 }
 
@@ -353,6 +403,7 @@ impl MoqBroadcastDynamic {
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::TrackProducer>>,
+	_owner: Option<BroadcastOwner>,
 }
 
 #[uniffi::export]
@@ -392,7 +443,11 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackConsumer::new(track.consume())))
+		Ok(Arc::new(MoqTrackConsumer::new_with_track_owner(
+			track.consume(),
+			track.clone(),
+			self._owner.clone(),
+		)))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
@@ -403,6 +458,8 @@ impl MoqTrackProducer {
 		let group = track.append_group()?;
 		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.sequence,
+			_track_owner: track.clone(),
+			_broadcast_owner: self._owner.clone(),
 			inner: std::sync::Mutex::new(Some(group)),
 		}))
 	}
@@ -439,6 +496,8 @@ impl MoqTrackProducer {
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
+	_track_owner: moq_net::TrackProducer,
+	_broadcast_owner: Option<BroadcastOwner>,
 	inner: std::sync::Mutex<Option<moq_net::GroupProducer>>,
 }
 
@@ -454,7 +513,10 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let group = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqGroupConsumer::new(group.consume())))
+		Ok(Arc::new(MoqGroupConsumer::new_with_owner(
+			group.consume(),
+			group.clone(),
+		)))
 	}
 
 	/// Write a frame into this group.

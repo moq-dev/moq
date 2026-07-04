@@ -115,6 +115,21 @@ async fn dynamic_track_request_can_abort() {
 }
 
 #[tokio::test]
+async fn dynamic_close_rejects_unknown_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	dynamic.close();
+
+	let err = consumer
+		.subscribe_track("unknown".into())
+		.err()
+		.expect("unknown track should be rejected after dynamic close");
+	assert!(matches!(err, MoqError::Protocol(moq_net::Error::NotFound)));
+}
+
+#[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
@@ -256,6 +271,102 @@ async fn local_publish_consume_audio() {
 
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
+}
+
+#[tokio::test]
+async fn published_media_keeps_catalog_available_after_broadcast_drop() {
+	let origin = MoqOriginProducer::new();
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let media = broadcast.publish_media("opus".into(), opus_head()).unwrap();
+	origin.publish("live".into(), &broadcast).unwrap();
+	drop(broadcast);
+
+	let consumer = origin.consume();
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	let broadcast_consumer = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for announcement")
+		.unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+
+	assert_eq!(catalog.audio.len(), 1);
+	let (track_name, audio) = catalog.audio.iter().next().unwrap();
+	let media_consumer = broadcast_consumer
+		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000)
+		.unwrap();
+
+	let payload = b"opus audio payload data".to_vec();
+	media.write_frame(payload.clone(), 2_000_000).unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+		.await
+		.expect("timed out waiting for frame")
+		.unwrap()
+		.expect("expected a frame");
+
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 2_000_000);
+}
+
+#[tokio::test]
+async fn published_track_stays_subscribable_after_broadcast_drop() {
+	let origin = MoqOriginProducer::new();
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into()).unwrap();
+	origin.publish("live".into(), &broadcast).unwrap();
+	drop(broadcast);
+
+	let consumer = origin.consume();
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	let broadcast_consumer = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for announcement")
+		.unwrap();
+	let track_consumer = broadcast_consumer.subscribe_track("status".into()).unwrap();
+
+	let payload = b"online".to_vec();
+	track.write_frame(payload.clone()).unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
+		.await
+		.expect("timed out waiting for frame")
+		.unwrap()
+		.expect("expected a frame");
+
+	assert_eq!(frame, payload);
+}
+
+#[tokio::test]
+async fn appended_group_keeps_track_subscribable_after_parent_drops() {
+	let origin = MoqOriginProducer::new();
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into()).unwrap();
+	let group = track.append_group().unwrap();
+	origin.publish("live".into(), &broadcast).unwrap();
+	drop(track);
+	drop(broadcast);
+
+	let consumer = origin.consume();
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	let broadcast_consumer = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for announcement")
+		.unwrap();
+	let track_consumer = broadcast_consumer.subscribe_track("status".into()).unwrap();
+
+	let payload = b"online".to_vec();
+	group.write_frame(payload.clone()).unwrap();
+	group.finish().unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
+		.await
+		.expect("timed out waiting for frame")
+		.unwrap()
+		.expect("expected a frame");
+
+	assert_eq!(frame, payload);
 }
 
 #[tokio::test]

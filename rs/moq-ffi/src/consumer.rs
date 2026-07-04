@@ -5,15 +5,24 @@ use bytes::Buf;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
+use crate::producer::BroadcastOwner;
 
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	inner: moq_net::BroadcastConsumer,
+	_owner: Option<BroadcastOwner>,
 }
 
 impl MoqBroadcastConsumer {
 	pub(crate) fn new(inner: moq_net::BroadcastConsumer) -> Self {
-		Self { inner }
+		Self { inner, _owner: None }
+	}
+
+	pub(crate) fn new_with_owner(inner: moq_net::BroadcastConsumer, owner: BroadcastOwner) -> Self {
+		Self {
+			inner,
+			_owner: Some(owner),
+		}
 	}
 
 	/// Access the underlying `moq_net::BroadcastConsumer` for sibling
@@ -26,6 +35,7 @@ impl MoqBroadcastConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqCatalogConsumer {
 	task: Task<Catalog>,
+	_owner: MoqBroadcastConsumer,
 }
 
 struct Catalog {
@@ -45,6 +55,7 @@ impl Catalog {
 #[derive(uniffi::Object)]
 pub struct MoqMediaConsumer {
 	task: Task<Media>,
+	_owner: MoqBroadcastConsumer,
 }
 
 struct Media {
@@ -87,6 +98,7 @@ impl MoqBroadcastConsumer {
 		let consumer = moq_mux::catalog::hang::Consumer::<moq_mux::catalog::hang::Extra>::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
+			_owner: self.clone(),
 		}))
 	}
 
@@ -96,7 +108,10 @@ impl MoqBroadcastConsumer {
 	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_net::Track::new(name))?;
-		Ok(Arc::new(MoqTrackConsumer::new(track)))
+		Ok(Arc::new(MoqTrackConsumer::new_with_broadcast_owner(
+			track,
+			self.clone(),
+		)))
 	}
 
 	/// Subscribe to a track by name, delivering frames in decode order.
@@ -121,6 +136,7 @@ impl MoqBroadcastConsumer {
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
+			_owner: self.clone(),
 		}))
 	}
 }
@@ -148,12 +164,31 @@ impl TrackInner {
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
 	task: Task<TrackInner>,
+	_broadcast_consumer_owner: Option<MoqBroadcastConsumer>,
+	_broadcast_owner: Option<BroadcastOwner>,
+	_track_owner: Option<moq_net::TrackProducer>,
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_net::TrackConsumer) -> Self {
+	pub(crate) fn new_with_broadcast_owner(track: moq_net::TrackConsumer, owner: MoqBroadcastConsumer) -> Self {
 		Self {
 			task: Task::new(TrackInner { track }),
+			_broadcast_consumer_owner: Some(owner),
+			_broadcast_owner: None,
+			_track_owner: None,
+		}
+	}
+
+	pub(crate) fn new_with_track_owner(
+		track: moq_net::TrackConsumer,
+		track_owner: moq_net::TrackProducer,
+		broadcast_owner: Option<BroadcastOwner>,
+	) -> Self {
+		Self {
+			task: Task::new(TrackInner { track }),
+			_broadcast_consumer_owner: None,
+			_broadcast_owner: broadcast_owner,
+			_track_owner: Some(track_owner),
 		}
 	}
 }
@@ -171,6 +206,7 @@ impl MoqTrackConsumer {
 					Arc::new(MoqGroupConsumer {
 						sequence: group.sequence,
 						task: Task::new(GroupInner { group }),
+						_owner: None,
 					})
 				}))
 			})
@@ -186,6 +222,7 @@ impl MoqTrackConsumer {
 					Arc::new(MoqGroupConsumer {
 						sequence: group.sequence,
 						task: Task::new(GroupInner { group }),
+						_owner: None,
 					})
 				}))
 			})
@@ -219,13 +256,15 @@ impl GroupInner {
 pub struct MoqGroupConsumer {
 	sequence: u64,
 	task: Task<GroupInner>,
+	_owner: Option<moq_net::GroupProducer>,
 }
 
 impl MoqGroupConsumer {
-	pub(crate) fn new(group: moq_net::GroupConsumer) -> Self {
+	pub(crate) fn new_with_owner(group: moq_net::GroupConsumer, owner: moq_net::GroupProducer) -> Self {
 		Self {
 			sequence: group.sequence,
 			task: Task::new(GroupInner { group }),
+			_owner: Some(owner),
 		}
 	}
 }
