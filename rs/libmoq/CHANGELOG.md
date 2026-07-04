@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/moq-dev/moq/compare/libmoq-v0.3.9...libmoq-v0.3.10) - 2026-07-04
+
+### Other
+
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+- allowing container be probed and select depending on the what on wire ([#2040](https://github.com/moq-dev/moq/pull/2040))
+
 ## [0.3.9](https://github.com/moq-dev/moq/compare/libmoq-v0.3.8...libmoq-v0.3.9) - 2026-06-30
 
 ### Other

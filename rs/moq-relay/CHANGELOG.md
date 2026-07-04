@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.13.0...moq-relay-v0.13.1) - 2026-07-04
+
+### Added
+
+- *(moq-net)* moq-lite-05 SETUP message + PATH parameter ([#1954](https://github.com/moq-dev/moq/pull/1954))
+
+### Other
+
+- check token root against the connection path, route to the pid alias ([#2079](https://github.com/moq-dev/moq/pull/2079))
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+- Fold the internal listener into --server-bind (one authenticated accept path) ([#1974](https://github.com/moq-dev/moq/pull/1974))
+- *(rs)* upgrade reqwest 0.12 -> 0.13 across the workspace ([#1972](https://github.com/moq-dev/moq/pull/1972))
+
 ## [0.13.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.13...moq-relay-v0.13.0) - 2026-06-30
 
 ### Added
