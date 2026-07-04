@@ -1,5 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
+use web_async::MaybeSendBoxFuture;
 use web_transport_trait::Stats;
 
 use crate::{BandwidthConsumer, BandwidthProducer, Error, Version};
@@ -136,41 +137,17 @@ async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, 
 }
 
 // We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
-//
-// Native keeps the `Send + Sync` bounds; wasm drops them so a browser
-// `web_sys::WebTransport`-backed session (`!Sync`, with `!Send` futures) can
-// satisfy the bound. `MaybeSend`/`MaybeSync` aren't auto-traits and can't appear
-// in a `dyn` bound, hence the cfg split.
-#[cfg(not(target_family = "wasm"))]
-trait SessionInner: Send + Sync {
+trait SessionInner: web_transport_trait::MaybeSend + web_transport_trait::MaybeSync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>>;
+	fn closed(&self) -> MaybeSendBoxFuture<'_, String>;
 }
 
-#[cfg(target_family = "wasm")]
-trait SessionInner {
-	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + '_>>;
-}
-
-#[cfg(not(target_family = "wasm"))]
 impl<S: web_transport_trait::Session> SessionInner for S {
 	fn close(&self, code: u32, reason: &str) {
 		S::close(self, code, reason);
 	}
 
-	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>> {
-		Box::pin(async move { S::closed(self).await.to_string() })
-	}
-}
-
-#[cfg(target_family = "wasm")]
-impl<S: web_transport_trait::Session> SessionInner for S {
-	fn close(&self, code: u32, reason: &str) {
-		S::close(self, code, reason);
-	}
-
-	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + '_>> {
+	fn closed(&self) -> MaybeSendBoxFuture<'_, String> {
 		Box::pin(async move { S::closed(self).await.to_string() })
 	}
 }

@@ -80,8 +80,7 @@ getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 wasm-bindgen-test = "0.3"
-wasmtimer = "0.4"
-web-async = { version = "0.1.4", features = ["tracing"] }
+web-async = { git = "https://github.com/kixelated/web-rs", rev = "3ef469078a50a3417ecd921cda6d7a27de7f98ff", package = "web-async", features = ["tracing"] }
 web-transport-iroh = "0.6"
 web-transport-noq = "0.2.0"
 web-transport-proto = "0.6"

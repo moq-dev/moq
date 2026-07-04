@@ -4268,7 +4268,6 @@ dependencies = [
  "tokio",
  "tracing",
  "wasm-bindgen-test",
- "wasmtimer",
  "web-async",
  "web-transport-trait",
 ]
@@ -8619,15 +8618,13 @@ dependencies = [
  "js-sys",
  "parking_lot",
  "pin-utils",
- "slab",
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "web-async"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16f56ac33e792583916a8021e43e8a7e0987f5df7abc8f8afd72fcc361048755"
+source = "git+https://github.com/kixelated/web-rs?rev=3ef469078a50a3417ecd921cda6d7a27de7f98ff#3ef469078a50a3417ecd921cda6d7a27de7f98ff"
 dependencies = [
  "tokio",
  "tracing",
