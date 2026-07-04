@@ -31,18 +31,17 @@ What works today:
 - Scope is the consume path (connect -> broadcast -> track -> group -> frame),
   the `@moq/watch` use case. The publish path follows the same shape.
 
-### Three moq-net changes this required (all landed here)
+### Three moq-net changes this requires
 
 1. tokio's `test-util` feature moved from moq-net's main deps to dev-deps
    (it is test-only and unsupported on wasm).
 2. `Send`/`Sync` assumptions relaxed to `MaybeSend`/`MaybeSync`: the browser
-   transport is `!Send`, but `SessionInner` hard-coded `Send`. A cfg-gated
-   `MaybeSendBox` helper (`rs/moq-net/src/util.rs`) picks `BoxFuture` on native
-   and `LocalBoxFuture` on wasm. Native behavior is unchanged
-   (`MaybeSend`/`MaybeSync` *are* `Send`/`Sync` there).
+   transport is `!Send`, but `SessionInner` used to hard-code `Send`.
+   `web_async::MaybeSendBoxFuture` picks a `Send` boxed future on native and a
+   local boxed future on wasm. Native behavior is unchanged.
 3. Timers and `Instant` routed through `web_async::time` instead of
    `tokio::time` (session poll interval, subscriber linger, probe interval,
-   track-cache eviction). `web-async` 0.1.4 re-exports `tokio::time` on native
+   track-cache eviction). `web-async` re-exports `tokio::time` on native
    and `wasmtimer` (a `performance.now()` + `setTimeout` shim) on wasm, so the
    same code runs on both. tokio's clock is `std::time::Instant::now()`, which
    *panics* on wasm (no clock) under `spawn_local` (no time driver); wasmtimer
@@ -52,10 +51,10 @@ What works today:
 
 ### Timestamp fallback
 
-`model/time.rs` has target-specific clock paths. Native keeps the Tokio-backed
-timestamp clock so paused-time tests still work. Browser wasm uses
-`web_async::time::Instant`, avoiding the `std::time` and Tokio clock paths that
-panic or lack a driver on `wasm32-unknown-unknown`.
+`model/time.rs` uses `web_async::time::{Instant, SystemTime}` for timestamp
+generation. Native keeps the Tokio-backed instant so paused-time tests still
+work; browser wasm uses wasmtimer-backed clocks, avoiding the `std::time` and
+Tokio paths that panic or lack a driver on `wasm32-unknown-unknown`.
 
 ### Out of scope here: moq-mux
 
