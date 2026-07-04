@@ -137,13 +137,10 @@ async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, 
 
 // We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
 //
-// hyprstream fork (#484): on native we keep the original `Send + Sync` bounds; on
-// wasm we drop them so a browser `web_sys::WebTransport`-backed Session (which is
-// `!Sync`, and whose futures are `!Send`) can satisfy the bound. web-transport-trait's
-// own `Session` trait is already `MaybeSend + MaybeSync` (empty on wasm), so this only
-// relaxes moq-net's over-tight dyn-erasure wrapper — it does not weaken anything native.
-// `MaybeSend`/`MaybeSync` aren't auto-traits, so they can't appear in a `dyn` bound;
-// hence the cfg split rather than a single `MaybeSend`-bounded declaration.
+// Native keeps the `Send + Sync` bounds; wasm drops them so a browser
+// `web_sys::WebTransport`-backed session (`!Sync`, with `!Send` futures) can
+// satisfy the bound. `MaybeSend`/`MaybeSync` aren't auto-traits and can't appear
+// in a `dyn` bound, hence the cfg split.
 #[cfg(not(target_family = "wasm"))]
 trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);
