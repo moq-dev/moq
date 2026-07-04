@@ -126,7 +126,7 @@
 //! itself generate more stats traffic.
 
 use std::{
-	collections::{BTreeMap, HashMap},
+	collections::{BTreeMap, HashMap, HashSet},
 	sync::{
 		Arc, Weak,
 		atomic::{AtomicU64, Ordering},
@@ -286,6 +286,16 @@ pub struct StatsConfig {
 	pub node: Option<PathOwned>,
 	/// How long the snapshot task waits between publishes. Default 1s.
 	pub interval: Duration,
+	/// How many leading path segments of each broadcast to use as a grouping
+	/// key, splitting the output into one broadcast per group at
+	/// `<prefix>/<group>/node/<node>`. Default `0`: a single
+	/// `<prefix>/node/<node>` broadcast carrying every path (the historical
+	/// behavior). `1` buckets by the first segment (e.g. a per-tenant broadcast),
+	/// so a consumer can announce-scope to just that group instead of slurping
+	/// every node's full stats. A group broadcast is announced while its group
+	/// has live traffic and unannounced once it drains; at depth `0` the single
+	/// broadcast stays announced for the aggregator's life even while idle.
+	pub group_depth: usize,
 }
 
 impl StatsConfig {
@@ -298,6 +308,7 @@ impl StatsConfig {
 			prefix: PathOwned::from(".stats"),
 			node: None,
 			interval: Duration::from_secs(1),
+			group_depth: 0,
 		}
 	}
 
@@ -323,6 +334,13 @@ impl StatsConfig {
 	/// Set the node suffix (default none). An empty path is treated as unset.
 	pub fn with_node(mut self, node: impl Into<Option<PathOwned>>) -> Self {
 		self.node = node.into();
+		self
+	}
+
+	/// Set the grouping depth (default 0, a single broadcast). See
+	/// [`Self::group_depth`].
+	pub fn with_group_depth(mut self, depth: usize) -> Self {
+		self.group_depth = depth;
 		self
 	}
 }
@@ -451,6 +469,7 @@ impl Stats {
 			prefix,
 			node,
 			interval,
+			group_depth,
 		} = config;
 		// An empty path after normalization is indistinguishable from "no node
 		// set"; collapse it so downstream code only sees a single representation.
@@ -464,8 +483,13 @@ impl Stats {
 				entries: Lock::default(),
 				sessions: Default::default(),
 			});
-			let advertised = advertised_path(&prefix, node.as_ref().map(|p| p.as_str()));
-			spawn(run_publisher(Arc::downgrade(&shared), advertised, interval));
+			spawn(run_publisher(
+				Arc::downgrade(&shared),
+				prefix.clone(),
+				node.clone(),
+				group_depth,
+				interval,
+			));
 			shared
 		});
 
@@ -1096,53 +1120,119 @@ fn flush_track<T: Serialize>(track: &mut TrackProducer, frame: &T, last: &mut Ve
 /// Publishes the stats broadcast and writes a frame per tick. Spawned once by
 /// [`Stats::new`] when an origin is set; runs until every [`Stats`] clone is
 /// dropped (`weak.upgrade()` returns `None`).
-async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval: Duration) {
-	let Some(shared) = weak.upgrade() else {
-		return;
-	};
+/// Per-group publisher: one announced `<prefix>/<group>/node/<node>` broadcast
+/// plus the change-detection state for its six tracks. Created when a group
+/// first has traffic and dropped (unannouncing the broadcast) once it drains.
+struct GroupPublisher {
+	// Held to keep the broadcast announced; dropping it unannounces the group.
+	// Never read: the track handles below carry the writes.
+	_broadcast: crate::BroadcastProducer,
+	tracks: Vec<TrackProducer>,
+	session_tracks: Vec<TrackProducer>,
+	/// Per-path snapshot state (the diff source for change detection) for the
+	/// entries in this group.
+	local: HashMap<PathOwned, EntrySnapState>,
+	last_payload: [Vec<u8>; NUM_SLOTS],
+	/// Per-tier, per-root snapshot state for the session tracks.
+	session_local: [HashMap<PathOwned, SessionSlotState>; 2],
+	session_last_payload: [Vec<u8>; 2],
+}
 
-	let mut broadcast = Broadcast::new().produce();
+impl GroupPublisher {
+	/// Build + publish the broadcast for `group` on `origin`. Returns `None`
+	/// (with a warning) if track creation or the publish is rejected, so one bad
+	/// group doesn't tear down the whole aggregator.
+	fn create(origin: &OriginProducer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
+		let mut broadcast = Broadcast::new().produce();
 
-	// Create the four per-broadcast tracks and the two session tracks up front.
-	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(Track {
-		name: name.into(),
-		priority: 0,
-	}) {
-		Ok(t) => Some(t),
-		Err(err) => {
-			tracing::warn!(?err, name, "stats: failed to create track");
-			None
+		// Create the four per-broadcast tracks and the two session tracks up front.
+		let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(Track {
+			name: name.into(),
+			priority: 0,
+		}) {
+			Ok(t) => Some(t),
+			Err(err) => {
+				tracing::warn!(?err, name, "stats: failed to create track");
+				None
+			}
+		};
+
+		let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
+		for name in TRACK_ORDER {
+			tracks.push(create(&mut broadcast, name)?);
 		}
-	};
+		let mut session_tracks: Vec<TrackProducer> = Vec::with_capacity(SESSION_TRACK_ORDER.len());
+		for name in SESSION_TRACK_ORDER {
+			session_tracks.push(create(&mut broadcast, name)?);
+		}
 
-	let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
-	for name in TRACK_ORDER {
-		let Some(t) = create(&mut broadcast, name) else {
+		let advertised = advertised_path(prefix, group, node);
+		if !origin.publish_broadcast(&advertised, broadcast.consume()) {
+			tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
+			return None;
+		}
+		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
+
+		Some(Self {
+			_broadcast: broadcast,
+			tracks,
+			session_tracks,
+			local: HashMap::new(),
+			last_payload: Default::default(),
+			session_local: Default::default(),
+			session_last_payload: Default::default(),
+		})
+	}
+}
+
+/// The grouping key for `path`: its first `depth` `/`-separated segments (or the
+/// whole path if it has fewer). `depth == 0` yields the empty path, i.e. a
+/// single group carrying every broadcast.
+fn group_key(path: &str, depth: usize) -> PathOwned {
+	if depth == 0 {
+		return Path::empty().to_owned();
+	}
+	// Cut before the `depth`-th separator; fewer separators means take it all.
+	let mut seen = 0;
+	let mut end = path.len();
+	for (i, b) in path.bytes().enumerate() {
+		if b == b'/' {
+			seen += 1;
+			if seen == depth {
+				end = i;
+				break;
+			}
+		}
+	}
+	Path::new(&path[..end]).to_owned()
+}
+
+async fn run_publisher(
+	weak: Weak<StatsShared>,
+	prefix: PathOwned,
+	node: Option<PathOwned>,
+	group_depth: usize,
+	interval: Duration,
+) {
+	let node = node.as_ref().map(|p| p.as_str());
+
+	// One publisher per active group key. At depth 0 the sole (empty-key) group
+	// is created eagerly and never dropped, preserving the historical "single
+	// broadcast, announced for the aggregator's life even while idle" behavior;
+	// at depth >= 1 group broadcasts come and go with their group's traffic.
+	let mut groups: HashMap<PathOwned, GroupPublisher> = HashMap::new();
+	if group_depth == 0 {
+		let Some(shared) = weak.upgrade() else {
 			return;
 		};
-		tracks.push(t);
+		match GroupPublisher::create(&shared.origin, &prefix, &Path::empty(), node) {
+			Some(gp) => {
+				groups.insert(Path::empty().to_owned(), gp);
+			}
+			None => return,
+		}
+		drop(shared);
 	}
-	let mut session_tracks: Vec<TrackProducer> = Vec::with_capacity(SESSION_TRACK_ORDER.len());
-	for name in SESSION_TRACK_ORDER {
-		let Some(t) = create(&mut broadcast, name) else {
-			return;
-		};
-		session_tracks.push(t);
-	}
-
-	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
-		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
-		return;
-	}
-	drop(shared);
-
-	// Per-path snapshot state owned by this task. Mirrors the global entries
-	// and serves as the diff source for change detection across ticks.
-	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
-	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
-	// Same, for the session tracks: per-tier root -> change-detection state.
-	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
-	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
 
 	let mut ticker = tokio::time::interval(interval);
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1154,69 +1244,134 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			return;
 		};
 
-		// Clone the current entries map into a Vec so we can drop the
-		// global lock before the change-detection pass.
+		// Snapshot the global maps under their locks, then release so the
+		// change-detection + flush pass runs lock-free.
 		let entries: Vec<(PathOwned, Arc<BroadcastEntry>)> = {
 			let map = shared.entries.lock();
 			map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 		};
+		let session_roots: [Vec<(PathOwned, Arc<SessionCounters>)>; 2] = [
+			{
+				let map = shared.sessions[0].lock();
+				map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+			},
+			{
+				let map = shared.sessions[1].lock();
+				map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+			},
+		];
 
-		let mut frames: [BTreeMap<String, Snapshot>; NUM_SLOTS] = Default::default();
+		// Bucket entries + session roots by group key. Values borrow the
+		// snapshots above (no extra strong count), so the GC pass below still
+		// sees `strong_count == 1` for drained entries once the snapshots drop.
+		let mut entries_by_group: HashMap<PathOwned, Vec<(&PathOwned, &Arc<BroadcastEntry>)>> = HashMap::new();
 		for (path, entry) in &entries {
-			let snap_state = local.entry(path.clone()).or_default();
-			for (i, (_track_name, counters, slot_state)) in snap_state.zip_slots(entry).into_iter().enumerate() {
-				process_slot(counters, slot_state, |snap| {
-					frames[i].insert(path.as_str().to_string(), snap);
-				});
+			entries_by_group
+				.entry(group_key(path.as_str(), group_depth))
+				.or_default()
+				.push((path, entry));
+		}
+		let mut roots_by_group: [HashMap<PathOwned, Vec<(&PathOwned, &Arc<SessionCounters>)>>; 2] = Default::default();
+		for tier_idx in 0..2 {
+			for (root, counters) in &session_roots[tier_idx] {
+				roots_by_group[tier_idx]
+					.entry(group_key(root.as_str(), group_depth))
+					.or_default()
+					.push((root, counters));
 			}
 		}
-		drop(entries);
 
-		// GC global entries: keep only those an external guard still holds.
-		// `strong_count == 1` (just the map's own `Arc`) means no live
-		// publisher/subscriber/track guard remains, so every open counter
-		// has caught up to its `*_closed` counterpart and no traffic can
-		// flow. We can't key this on the counters directly: a held but idle
-		// `BroadcastStats` (all counters equal) must stay so a later bump
-		// isn't lost on an orphaned `Arc`. Then drop local state for any
-		// path that left the map. We already emitted each removed entry's
-		// final snapshot above, so nothing is lost.
+		// The groups live this tick: any with an entry or a session root, plus
+		// the always-on empty group at depth 0.
+		let mut active: HashSet<PathOwned> = HashSet::new();
+		active.extend(entries_by_group.keys().cloned());
+		for tier_idx in 0..2 {
+			active.extend(roots_by_group[tier_idx].keys().cloned());
+		}
+		if group_depth == 0 {
+			active.insert(Path::empty().to_owned());
+		}
+
+		for group in &active {
+			// Ensure a publisher exists (skip the group this tick if create fails).
+			if !groups.contains_key(group) {
+				match GroupPublisher::create(&shared.origin, &prefix, group, node) {
+					Some(gp) => {
+						groups.insert(group.clone(), gp);
+					}
+					None => continue,
+				}
+			}
+			let gp = groups.get_mut(group).expect("just inserted");
+
+			// Per-(tier, role) frames for this group's broadcast.
+			let mut frames: [BTreeMap<String, Snapshot>; NUM_SLOTS] = Default::default();
+			if let Some(group_entries) = entries_by_group.get(group) {
+				for &(path, entry) in group_entries {
+					let snap_state = gp.local.entry(path.clone()).or_default();
+					for (i, (_track_name, counters, slot_state)) in snap_state.zip_slots(entry).into_iter().enumerate()
+					{
+						process_slot(counters, slot_state, |snap| {
+							frames[i].insert(path.as_str().to_string(), snap);
+						});
+					}
+				}
+			}
+			for (i, (frame, last)) in frames.iter().zip(gp.last_payload.iter_mut()).enumerate() {
+				flush_track(&mut gp.tracks[i], frame, last, TRACK_ORDER[i]);
+			}
+
+			// Session frames, one per tier.
+			let mut session_frames: [BTreeMap<String, SessionSnapshot>; 2] = Default::default();
+			for tier_idx in 0..2 {
+				if let Some(group_roots) = roots_by_group[tier_idx].get(group) {
+					for &(root, counters) in group_roots {
+						let state = gp.session_local[tier_idx].entry(root.clone()).or_default();
+						process_session_slot(counters, state, |snap| {
+							session_frames[tier_idx].insert(root.as_str().to_string(), snap);
+						});
+					}
+				}
+			}
+			for (i, (frame, last)) in session_frames
+				.iter()
+				.zip(gp.session_last_payload.iter_mut())
+				.enumerate()
+			{
+				flush_track(&mut gp.session_tracks[i], frame, last, SESSION_TRACK_ORDER[i]);
+			}
+		}
+
+		// Release the snapshot clones before the GC pass so drained entries/roots
+		// hit `strong_count == 1` (just the map's own `Arc`).
+		drop(entries_by_group);
+		drop(roots_by_group);
+		drop(entries);
+		drop(session_roots);
+
+		// GC global entries + roots whose last external guard has dropped, then
+		// forget the matching per-group change-detection state. Each removed
+		// entry's final snapshot was already emitted above. We can't key this on
+		// the counters directly: a held but idle guard (all counters equal) must
+		// stay so a later bump isn't lost on an orphaned `Arc`.
 		{
 			let mut map = shared.entries.lock();
 			map.retain(|_, entry| Arc::strong_count(entry) > 1);
-			local.retain(|path, _| map.contains_key(path));
-		}
-
-		// Session tracks: one frame per tier, keyed by auth root.
-		let mut session_frames: [BTreeMap<String, SessionSnapshot>; 2] = Default::default();
-		for tier_idx in 0..2 {
-			let roots: Vec<(PathOwned, Arc<SessionCounters>)> = {
-				let map = shared.sessions[tier_idx].lock();
-				map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-			};
-			let states = &mut session_local[tier_idx];
-			for (root, counters) in &roots {
-				let state = states.entry(root.clone()).or_default();
-				process_session_slot(counters, state, |snap| {
-					session_frames[tier_idx].insert(root.as_str().to_string(), snap);
-				});
+			for gp in groups.values_mut() {
+				gp.local.retain(|path, _| map.contains_key(path));
 			}
-			drop(roots);
-
-			// GC roots whose last session guard has dropped (`strong_count == 1`
-			// is just the map's own `Arc`), then forget their local state. The
-			// final snapshot was already emitted above.
+		}
+		for tier_idx in 0..2 {
 			let mut map = shared.sessions[tier_idx].lock();
 			map.retain(|_, counters| Arc::strong_count(counters) > 1);
-			states.retain(|root, _| map.contains_key(root));
+			for gp in groups.values_mut() {
+				gp.session_local[tier_idx].retain(|root, _| map.contains_key(root));
+			}
 		}
 
-		for (i, (frame, last)) in frames.iter().zip(last_payload.iter_mut()).enumerate() {
-			flush_track(&mut tracks[i], frame, last, TRACK_ORDER[i]);
-		}
-		for (i, (frame, last)) in session_frames.iter().zip(session_last_payload.iter_mut()).enumerate() {
-			flush_track(&mut session_tracks[i], frame, last, SESSION_TRACK_ORDER[i]);
-		}
+		// Drop drained groups, unannouncing their broadcasts. The depth-0 empty
+		// group stays in `active`, so it's retained.
+		groups.retain(|group, _| active.contains(group));
 
 		drop(shared);
 	}
@@ -1250,10 +1405,17 @@ struct SessionSnapshot {
 	sessions_closed: u64,
 }
 
-fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
-	// The fixed `node` category leaves room for sibling categories (e.g.
-	// `<top-prefix>/cluster` for relay-mesh stats) under the same prefix.
-	let mut out = format!("{}/node", prefix.as_str());
+fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
+	// `<prefix>/<group>/node/<node>`. The `group` segment (empty at depth 0)
+	// buckets the output into one broadcast per group; the fixed `node` category
+	// leaves room for sibling categories (e.g. `<prefix>/<group>/cluster` for
+	// relay-mesh stats) under the same prefix.
+	let mut out = prefix.as_str().to_string();
+	if !group.is_empty() {
+		out.push('/');
+		out.push_str(group.as_str());
+	}
+	out.push_str("/node");
 	if let Some(node) = node {
 		out.push('/');
 		out.push_str(node);
@@ -1282,12 +1444,43 @@ mod tests {
 	#[test]
 	fn advertised_path_with_and_without_node() {
 		let prefix = Path::new(".stats");
-		assert_eq!(advertised_path(&prefix, Some("sjc")).as_str(), ".stats/node/sjc");
-		assert_eq!(advertised_path(&prefix, Some("sjc/1")).as_str(), ".stats/node/sjc/1");
-		assert_eq!(advertised_path(&prefix, None).as_str(), ".stats/node");
+		let none = Path::empty();
+		// Depth 0 (empty group) is byte-for-byte the historical layout.
+		assert_eq!(advertised_path(&prefix, &none, Some("sjc")).as_str(), ".stats/node/sjc");
+		assert_eq!(
+			advertised_path(&prefix, &none, Some("sjc/1")).as_str(),
+			".stats/node/sjc/1"
+		);
+		assert_eq!(advertised_path(&prefix, &none, None).as_str(), ".stats/node");
 
 		let prefix = Path::new("metrics");
-		assert_eq!(advertised_path(&prefix, Some("lon")).as_str(), "metrics/node/lon");
+		assert_eq!(
+			advertised_path(&prefix, &none, Some("lon")).as_str(),
+			"metrics/node/lon"
+		);
+
+		// A non-empty group nests between the prefix and the `node` category.
+		let prefix = Path::new(".stats");
+		let group = Path::new("acme");
+		assert_eq!(
+			advertised_path(&prefix, &group, Some("sjc")).as_str(),
+			".stats/acme/node/sjc"
+		);
+		assert_eq!(advertised_path(&prefix, &group, None).as_str(), ".stats/acme/node");
+	}
+
+	#[test]
+	fn group_key_takes_leading_segments() {
+		// Depth 0: everything shares the empty group.
+		assert_eq!(group_key("acme/foo/bar", 0).as_str(), "");
+		assert_eq!(group_key("", 0).as_str(), "");
+		// Depth 1: the first segment (the tenant/project).
+		assert_eq!(group_key("acme/foo/bar", 1).as_str(), "acme");
+		assert_eq!(group_key("acme", 1).as_str(), "acme");
+		// Depth 2: the first two segments.
+		assert_eq!(group_key("acme/foo/bar", 2).as_str(), "acme/foo");
+		// Fewer segments than the depth: take the whole path.
+		assert_eq!(group_key("acme", 2).as_str(), "acme");
 	}
 
 	/// The advertised path normalizes a messy node suffix and drops an
@@ -1395,6 +1588,48 @@ mod tests {
 		let (path, broadcast) = consumer.announced().await.expect("expected announce");
 		assert!(broadcast.is_some());
 		assert_eq!(path.as_str(), ".stats/node/sjc/1");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn group_depth_splits_broadcasts_per_group() {
+		// At depth 1 each first-segment group gets its OWN broadcast at
+		// `.stats/<group>/node/<node>`, so a consumer can announce-scope to a
+		// single group instead of slurping the whole node's stats.
+		let origin = Origin::random().produce();
+		let stats = Stats::new(
+			StatsConfig::new()
+				.with_origin(origin.clone())
+				.with_node(PathOwned::from("sjc".to_string()))
+				.with_group_depth(1),
+		);
+		let mut consumer = origin.consume();
+
+		let _t1 = stats
+			.tier(Tier::External)
+			.broadcast("acme/foo")
+			.publisher()
+			.track("video");
+		let _t2 = stats
+			.tier(Tier::External)
+			.broadcast("globex/bar")
+			.publisher()
+			.track("video");
+
+		// A publish tick (unlike depth 0, groups aren't created until traffic
+		// appears) spawns one broadcast per group.
+		tokio::time::advance(Duration::from_secs(1)).await;
+
+		let mut announced = Vec::new();
+		for _ in 0..2 {
+			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			assert!(broadcast.is_some());
+			announced.push(path.as_str().to_string());
+		}
+		announced.sort();
+		assert_eq!(
+			announced,
+			vec![".stats/acme/node/sjc".to_string(), ".stats/globex/node/sjc".to_string()]
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
