@@ -8623,8 +8623,9 @@ dependencies = [
 
 [[package]]
 name = "web-async"
-version = "0.1.4"
-source = "git+https://github.com/kixelated/web-rs?rev=3ef469078a50a3417ecd921cda6d7a27de7f98ff#3ef469078a50a3417ecd921cda6d7a27de7f98ff"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ba1426dcf56093a94d9415ba4c016e45c1323679501e7309f1919ab32f08206"
 dependencies = [
  "tokio",
  "tracing",
