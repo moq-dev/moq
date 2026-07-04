@@ -1,6 +1,7 @@
 use crate::{announce, frame, group, origin, track};
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, task::Poll, time::Duration};
 
+use bytes::Buf;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
@@ -556,7 +557,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
 		// immediately otherwise (including an unroutable/dropped error).
 		let broadcast = broadcast.await?;
-		let track = broadcast.track(&subscribe.track)?.subscribe(subscription).await?;
+		let track_consumer = broadcast.track(&subscribe.track)?;
+		// One subscriber for the whole subscription: `run_track` polls its groups and its
+		// best-effort datagrams from this single cursor, so a group-only or datagram-only
+		// track opens exactly one subscription (no duplicate demand).
+		let track = track_consumer.subscribe(subscription).await?;
 
 		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
 		// every frame with a zigzag-delta timestamp at the track's timescale; older
@@ -609,6 +614,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
 		// peer FIN actually ends the subscription. This is what lets relays pause an
 		// upstream subscription across consumer churn without tearing it down.
+		//
+		// run_track serves groups and best-effort datagrams off the one subscriber.
 		sub.run_track(
 			track,
 			subscribe.start_group,
@@ -703,6 +710,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 }
 
+#[cfg(test)]
+mod test {
+	use super::*;
+	use crate::{Timestamp, broadcast};
+
+	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
+		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+	}
+
+	#[tokio::test]
+	async fn recv_next_drains_datagram_before_finished() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		producer
+			.append_datagram(Timestamp::from_millis(1).unwrap(), &b"last"[..])
+			.unwrap();
+		producer.finish().unwrap();
+
+		match recv_next(&mut subscriber, true).await.unwrap() {
+			Recv::Datagram(datagram) => assert_eq!(&datagram.payload[..], b"last"),
+			_ => panic!("expected datagram before finished"),
+		}
+
+		match recv_next(&mut subscriber, true).await.unwrap() {
+			Recv::Finished => {}
+			_ => panic!("expected finished after datagram"),
+		}
+	}
+}
+
 /// Encode the per-frame timing prefix when the track advertises a timescale:
 /// `[zigzag-delta timestamp]` (the lite-05 FRAME format). With `None` the field is
 /// omitted entirely, saving the bytes on tracks where timing isn't meaningful
@@ -760,13 +798,50 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 
 	writer.encode(&frame.size).await?;
 	track_stats.frame();
-	while let Some(mut chunk) = frame.read_chunk().await? {
+	while let Some(chunk) = frame.read_chunk().await? {
 		let n = chunk.len() as u64;
-		writer.write_all(&mut chunk).await?;
+		writer.write_chunk(chunk).await?;
 		track_stats.bytes(n);
 	}
 
 	Ok(())
+}
+
+/// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
+/// best-effort datagram to forward, or the track finishing.
+enum Recv {
+	Group(group::Consumer),
+	Datagram(crate::Datagram),
+	Finished,
+}
+
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware) or datagram from one `&mut`
+/// borrow, so groups and datagrams share the same subscription. Groups are polled first so a
+/// datagram burst can't starve them; datagrams are polled only when the transport carries them.
+async fn recv_next(track: &mut track::Subscriber, datagrams: bool) -> Result<Recv, Error> {
+	kio::wait(|waiter| {
+		let mut groups_finished = false;
+		match track.poll_next_group(waiter) {
+			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
+			Poll::Ready(Ok(None)) => groups_finished = true,
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			Poll::Pending => {}
+		}
+		if datagrams {
+			match track.poll_recv_datagram(waiter) {
+				Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
+				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
+				Poll::Ready(Ok(None)) => {}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => {}
+			}
+		}
+		if groups_finished {
+			return Poll::Ready(Ok(Recv::Finished));
+		}
+		Poll::Pending
+	})
+	.await
 }
 
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
@@ -813,6 +888,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let emit_range = self.version.has_track_stream();
 		let mut start_sent = false;
 
+		// Serve datagrams off this same subscriber, but only on lite-05 over a datagram-capable
+		// transport (qmux/WebSocket/TCP/UDS report size 0). No group fallback: otherwise off.
+		let datagrams = self.version.has_datagrams() && self.session.max_datagram_size() > 0;
+
 		loop {
 			tokio::select! {
 				// Drive in-flight group futures; never matches because the inner block returns false.
@@ -821,12 +900,13 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					false
 				} => unreachable!(),
 
-				// next_group respects the cap set via track.end_at and parks
-				// while the next sequence is above the cap. Groups beyond the
-				// cap stay in the producer's cache (bounded by its cache window).
-				res = track.next_group() => {
+				// One cursor drives the whole subscription: poll the cap-aware next group and,
+				// when enabled, the next best-effort datagram. Groups are polled first so a
+				// datagram burst can't starve them; datagrams flow whenever no group is ready
+				// (including while groups are paused above the cap).
+				res = recv_next(&mut track, datagrams) => {
 					match res? {
-						Some(group) => {
+						Recv::Group(group) => {
 							if emit_range && !start_sent {
 								start_sent = true;
 								writer
@@ -835,7 +915,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 							}
 							self.spawn_serve(group, &mut tasks);
 						}
-						None => {
+						Recv::Datagram(datagram) => self.serve_datagram(datagram),
+						Recv::Finished => {
 							// Track finished cleanly. Tell the subscriber no group will
 							// follow, then drain in-flight tasks and exit.
 							if emit_range {
@@ -917,6 +998,28 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
+	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
+	///
+	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
+	/// transport's datagram limit or the send fails (congestion / no capacity right now).
+	fn serve_datagram(&self, datagram: crate::Datagram) {
+		let body = lite::Datagram {
+			subscribe: self.id,
+			sequence: datagram.sequence,
+			// Already at the track timescale (normalized by the model producer).
+			timestamp: datagram.timestamp.value(),
+			payload: datagram.payload,
+		};
+		// has_datagrams is checked before this runs, so encoding never hits the version guard.
+		let Ok(body) = body.encode_bytes(self.version) else {
+			return;
+		};
+
+		if body.len() <= self.session.max_datagram_size() && self.session.send_datagram(body).is_ok() {
+			self.track_stats.group();
+		}
+	}
+
 	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we
 	/// never buffer the whole thing.
 	async fn serve_frame(
@@ -984,18 +1087,16 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
 		let n = chunk.len() as u64;
-		loop {
-			tokio::select! {
-				biased;
-				result = stream.write_all(&mut chunk) => {
-					result?;
-					break;
-				}
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
-			}
+		while chunk.has_remaining() {
+			self.apply_priority(stream, priority);
+			stream.write(&mut chunk).await?;
 		}
 		self.track_stats.bytes(n);
 		Ok(())
+	}
+
+	fn apply_priority(&mut self, stream: &mut Writer<S::SendStream, Version>, priority: &mut PriorityHandle) {
+		priority.set_track(*self.track_priority.borrow_and_update());
+		stream.set_priority(priority.current());
 	}
 }

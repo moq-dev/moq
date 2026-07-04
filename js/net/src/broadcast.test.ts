@@ -1,8 +1,16 @@
 import { expect, setSystemTime, test } from "bun:test";
-import { Broadcast } from "./broadcast.ts";
+import { Broadcast, type TrackRequest } from "./broadcast.ts";
 import { CacheFull, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import { TrackProducer } from "./track.ts";
+
+// Observe whether an on-demand track request is pending without blocking: returns the
+// next request if one has already been emitted, or undefined if none is (yet) waiting.
+async function pendingRequest(broadcast: Broadcast): Promise<TrackRequest | undefined> {
+	const none = Symbol("none");
+	const result = await Promise.race([broadcast.requested(), Promise.resolve(none)]);
+	return result === none ? undefined : (result as TrackRequest | undefined);
+}
 
 test("subscribe serves a statically inserted track without a request", async () => {
 	const broadcast = new Broadcast();
@@ -16,7 +24,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	expect((await sub1.nextGroup())?.sequence).toBe(0);
 
 	// No on-demand request was emitted for it.
-	expect(broadcast.state.requested.peek().length).toBe(0);
+	expect(await pendingRequest(broadcast)).toBeUndefined();
 
 	// A second static track behaves the same.
 	const track2 = new TrackProducer("track2").accept();
@@ -80,7 +88,7 @@ test("a read throws CacheFull on a gap, then resyncs to the next group", async (
 	expect(await sub.readString()).toBe("ok");
 });
 
-test("a stalled consumer does not pin evicted groups", () => {
+test("a stalled consumer does not pin evicted groups", async () => {
 	try {
 		setSystemTime(new Date(10_000));
 
@@ -91,16 +99,21 @@ test("a stalled consumer does not pin evicted groups", () => {
 		const stalled = broadcast.track("video").subscribe();
 
 		producer.writeString("old");
-		expect(stalled.state.groups.peek().length).toBe(1);
 
 		// Advance past the cache window and write again to trigger a prune. The old
 		// (closed, aged-out) group is dropped from the stalled sink, not retained.
 		setSystemTime(new Date(12_000));
 		producer.writeString("fresh");
 
-		const groups = stalled.state.groups.peek();
-		expect(groups.length).toBe(1);
-		expect(groups[0].sequence).toBe(1);
+		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
+		// was evicted, not still buffered ahead of it.
+		expect((await stalled.recvGroup())?.sequence).toBe(1);
+
+		// Nothing else is buffered: a second recvGroup stays pending (the track is open),
+		// proving exactly one group remained in the sink rather than two.
+		const pending = Symbol("pending");
+		const next = await Promise.race([stalled.recvGroup(), Promise.resolve(pending)]);
+		expect(next).toBe(pending);
 	} finally {
 		setSystemTime();
 	}
@@ -132,17 +145,23 @@ test("a closed track is evicted and re-subscribing falls through to a request", 
 	// The stale entry is gone, so subscribe creates an on-demand request instead.
 	const pending = broadcast.track("track1").subscribe();
 	expect(pending).toBeDefined();
-	expect(broadcast.state.requested.peek().length).toBe(1);
 
+	// That on-demand request is now waiting to be answered.
 	const request = await broadcast.requested();
 	expect(request?.name).toBe("track1");
 });
 
-test("removeTrack drops the static entry", () => {
-	const broadcast = new Broadcast();
-	broadcast.createTrack("track1");
-	expect(broadcast.state.tracks.has("track1")).toBe(true);
+test("removeTrack drops the static entry", async () => {
+	// While the static entry exists, subscribing takes the fast path: no on-demand request.
+	const kept = new Broadcast();
+	kept.createTrack("track1");
+	kept.track("track1").subscribe();
+	expect(await pendingRequest(kept)).toBeUndefined();
 
-	broadcast.removeTrack("track1");
-	expect(broadcast.state.tracks.has("track1")).toBe(false);
+	// With the entry removed, subscribing falls through to an on-demand request.
+	const removed = new Broadcast();
+	removed.createTrack("track1");
+	removed.removeTrack("track1");
+	removed.track("track1").subscribe();
+	expect((await pendingRequest(removed))?.name).toBe("track1");
 });

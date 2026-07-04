@@ -19,20 +19,20 @@ enum ContainerImpl<E: crate::container::ts::catalog::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
-	fn fmp4(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
+	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, reserved)))
 	}
 
-	fn mkv(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog)))
+	fn mkv(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, reserved)))
 	}
 
-	fn ts(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog)))
+	fn ts(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, reserved)))
 	}
 
-	fn flv(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, catalog)))
+	fn flv(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, reserved)))
 	}
 
 	fn decode(&mut self, data: &[u8]) -> Result<()> {
@@ -75,15 +75,15 @@ impl<E: crate::container::ts::catalog::Catalog> Container<E> {
 	/// Create a new container importer, decoding the initial chunk.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
-		catalog: crate::catalog::Producer<E>,
+		reserved: crate::catalog::Reserved<E>,
 		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
 		let mut inner = match format {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, catalog),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, catalog),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, catalog),
-			"flv" => ContainerImpl::flv(broadcast, catalog),
+			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
+			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
+			"flv" => ContainerImpl::flv(broadcast, reserved),
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 		inner.decode(init)?;
@@ -118,7 +118,7 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerStream<E> {
 	/// Create a new container stream importer.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
-		catalog: crate::catalog::Producer<E>,
+		reserved: crate::catalog::Reserved<E>,
 		format: &str,
 	) -> Result<Self> {
 		// A separate list from [`Container::new`]: only containers that can be
@@ -126,10 +126,10 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerStream<E> {
 		// but a non-streamable container (e.g. RTP) would be added to `Container`
 		// alone.
 		let inner = match format {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, catalog),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, catalog),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, catalog),
-			"flv" => ContainerImpl::flv(broadcast, catalog),
+			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
+			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
+			"flv" => ContainerImpl::flv(broadcast, reserved),
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 		Ok(Self { inner })

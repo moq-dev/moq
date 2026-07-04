@@ -32,14 +32,15 @@ const NAL_TYPE_PPS: u8 = 8;
 /// `length_size` known out-of-band from the avcC (`super::Avcc::parse(avcc).length_size`).
 /// The payload is passed through verbatim.
 pub(crate) fn avc1_frame(
-	data: &[u8],
+	data: impl moq_net::IntoBytes,
 	length_size: usize,
 	pts: moq_net::Timestamp,
 ) -> crate::Result<crate::container::Frame> {
+	let keyframe = avc1_is_keyframe(data.as_ref(), length_size);
 	Ok(crate::container::Frame {
 		timestamp: pts,
-		payload: data.to_vec().into(),
-		keyframe: avc1_is_keyframe(data, length_size),
+		payload: data.into_bytes(),
+		keyframe,
 		duration: None,
 	})
 }

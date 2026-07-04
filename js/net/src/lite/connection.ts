@@ -17,7 +17,7 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasSetupStream, Version, versionName } from "./version.ts";
+import { hasDatagrams, hasSetupStream, Version, versionName } from "./version.ts";
 
 const SEND_BW_POLL_INTERVAL = 100; // ms
 
@@ -138,6 +138,12 @@ export class Connection implements Established {
 
 		if (this.recvBandwidth) {
 			tasks.push(this.#subscriber.runProbe());
+		}
+
+		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams
+		// no-ops on a transport that doesn't carry them).
+		if (hasDatagrams(this.#version)) {
+			tasks.push(this.#subscriber.runDatagrams());
 		}
 
 		try {

@@ -119,7 +119,7 @@ impl Pad {
 				let request = broadcast.reserve_track(name)?;
 				let producer =
 					request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
-				moq_mux::codec::mp3::Import::new(producer, catalog, config)?.into()
+				moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config)?.into()
 			}
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
@@ -151,7 +151,7 @@ impl Pad {
 				let request = broadcast.reserve_track(name)?;
 				let producer =
 					request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
-				moq_mux::codec::opus::Import::new(producer, catalog, config)?.into()
+				moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config)?.into()
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
@@ -171,7 +171,7 @@ impl Pad {
 	) -> Result<import::Track> {
 		let name = broadcast.unique_name(suffix);
 		let request = broadcast.reserve_track(name)?;
-		Ok(import::Track::new(request, catalog, format, init)?)
+		Ok(import::Track::new(request, catalog.reserve(), format, init)?)
 	}
 
 	/// Drops the producer (closing its track) and marks the pad failed so further buffers are dropped.

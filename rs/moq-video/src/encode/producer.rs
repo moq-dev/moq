@@ -55,14 +55,14 @@ impl Producer {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog),
+					import: moq_mux::codec::h264::Import::new(track, catalog.reserve()),
 				}
 			}
 			Codec::H265 => {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".hev1")?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog),
+					import: moq_mux::codec::h265::Import::new(track, catalog.reserve()),
 				}
 			}
 		};

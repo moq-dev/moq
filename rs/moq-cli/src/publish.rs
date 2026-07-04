@@ -182,7 +182,7 @@ impl Publish {
 				&mut broadcast,
 				moq_mux::catalog::hang::Catalog::<ts::catalog::Ext>::default(),
 			)?;
-			let ts = ts::Import::new(broadcast.clone(), catalog);
+			let ts = ts::Import::new(broadcast.clone(), catalog.reserve());
 			return Ok(Self {
 				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
 				broadcast,
@@ -193,7 +193,7 @@ impl Publish {
 		let source = match format {
 			PublishFormat::Avc3 => {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-				let import = moq_mux::codec::h264::Import::new(track, catalog.clone());
+				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve());
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
 					split,
@@ -201,12 +201,12 @@ impl Publish {
 				})
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone());
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve());
 				Source::Stream(PublishDecoder::Fmp4(Box::new(fmp4)))
 			}
 			PublishFormat::Ts => unreachable!("TS is handled above with the mpegts catalog extension"),
 			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
+				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
 				Source::Stream(PublishDecoder::Flv(Box::new(flv)))
 			}
 		};
@@ -451,7 +451,7 @@ mod tests {
 		pes_producer.finish().unwrap();
 
 		// Add the real video/audio (moves `broadcast` into the importer).
-		let mut import = Import::new(broadcast, catalog.clone());
+		let mut import = Import::new(broadcast, catalog.reserve());
 		import.decode(&BytesMut::from(BBB)).unwrap();
 		import.finish().unwrap();
 
@@ -502,7 +502,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
-		let mut import = Import::new(broadcast, catalog.clone());
+		let mut import = Import::new(broadcast, catalog.reserve());
 		import.decode(&BytesMut::from(&output[..])).unwrap();
 		import.finish().unwrap();
 		let snapshot = catalog.snapshot();

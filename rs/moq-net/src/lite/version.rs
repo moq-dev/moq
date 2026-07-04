@@ -42,6 +42,19 @@ impl Version {
 		}
 	}
 
+	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
+	/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload`
+	/// and is routed over the existing subscription. Added in lite-05; older versions never
+	/// send or accept datagram bodies.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_datagrams(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin
 	/// from each announcement's hop chain. Added in lite-05.
 	#[allow(clippy::match_like_matches_macro)]

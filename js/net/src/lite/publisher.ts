@@ -7,6 +7,7 @@ import { Timescale } from "../time.ts";
 import type { TrackSubscriber } from "../track.ts";
 import { error } from "../util/error.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -19,7 +20,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceOk, Version } from "./version.ts";
+import { hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -61,6 +62,12 @@ export class Publisher {
 
 	#quic: WebTransport;
 
+	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
+	// construction when this version + transport carry datagrams, released in close(). Its
+	// presence is the gate: undefined means datagrams aren't served on this connection. All
+	// subscriptions share it, since a second getWriter on the same stream would throw.
+	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
+
 	// Our published broadcasts.
 	// It's a signal so we can live update any announce streams.
 	#broadcasts = new Signal<Map<Path.Valid, Broadcast> | undefined>(new Map());
@@ -83,6 +90,12 @@ export class Publisher {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
+
+		// Grab the datagram writer up front when the transport carries datagrams (no group
+		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
+		if (hasDatagrams(version) && quic.datagrams.maxDatagramSize > 0) {
+			this.#datagramWriter = quic.datagrams.writable.getWriter();
+		}
 	}
 
 	/**
@@ -218,6 +231,11 @@ export class Publisher {
 
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
+		// The best-effort datagram loop, started once serving begins. It parks when the
+		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
+		// subscription; awaited during teardown so it doesn't outlive the subscription.
+		let datagrams: Promise<void> | undefined;
+
 		try {
 			let timescale: Timescale = Timescale.MILLI;
 
@@ -243,6 +261,12 @@ export class Publisher {
 
 			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale);
 
+			// Serve datagrams concurrently with groups whenever the transport carries them
+			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
+			if (this.#datagramWriter) {
+				datagrams = this.#runDatagrams(msg.id, track, timescale);
+			}
+
 			for (;;) {
 				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
 
@@ -260,11 +284,14 @@ export class Publisher {
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
 			stream.close();
 			track.close();
+			// track.close ends the datagram loop; wait so it doesn't leak past teardown.
+			await datagrams;
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`);
 			track.close(e);
 			stream.abort(e);
+			await datagrams;
 		}
 	}
 
@@ -365,6 +392,40 @@ export class Publisher {
 		pending.catch(() => this.#trackInfo.delete(key));
 		this.#trackInfo.set(key, pending);
 		return pending;
+	}
+
+	/**
+	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
+	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
+	 * doesn't fit the transport's datagram limit or the send fails. Returns once the track
+	 * finishes; a failure never tears down the subscription.
+	 *
+	 * @internal
+	 */
+	async #runDatagrams(sub: bigint, track: TrackSubscriber, timescale: Timescale) {
+		const writer = this.#datagramWriter;
+		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
+		const maxSize = this.#quic.datagrams.maxDatagramSize;
+
+		try {
+			for (;;) {
+				const datagram = await track.recvDatagram();
+				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
+
+				// Convert the timestamp to the track's advertised timescale, matching #runGroup.
+				const ts = Math.round(datagram.timestamp.as(timescale));
+				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
+
+				// No group fallback: drop anything that doesn't fit a single datagram.
+				if (body.byteLength > maxSize) continue;
+
+				await writer.ready;
+				await writer.write(body);
+			}
+		} catch (err: unknown) {
+			// Best-effort: a datagram send failure stops sending but never fails the subscription.
+			console.debug(`datagram send stopped: sub=${sub} error=${error(err).message}`);
+		}
 	}
 
 	/**
@@ -481,5 +542,9 @@ export class Publisher {
 			}
 			return undefined;
 		});
+
+		// Release the datagram writer's lock so the stream can be torn down.
+		this.#datagramWriter?.releaseLock();
+		this.#datagramWriter = undefined;
 	}
 }

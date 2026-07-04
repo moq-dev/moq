@@ -10,6 +10,7 @@ import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -17,7 +18,7 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceOk, Version } from "./version.ts";
+import { hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
@@ -430,10 +431,10 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const current = track.state.priority.peek();
+			const current = track.prioritySignal.peek();
 			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.state.priority.next(), stopped]);
+				const next = await Promise.race([track.prioritySignal.next(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -479,13 +480,13 @@ export class Subscriber {
 			// TRACK_INFO (or implicit defaults) resolves it on the subscribe stream.
 			let scale = timescale.peek();
 			while (scale === undefined) {
-				if (track.state.closed.peek()) {
+				if (track.closedSignal.peek()) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
 					stream.stop(new Error("cancel"));
 					return;
 				}
-				await Signal.race(timescale, track.state.closed);
+				await Signal.race(timescale, track.closedSignal);
 				scale = timescale.peek();
 			}
 
@@ -520,6 +521,61 @@ export class Subscriber {
 			producer.close(e);
 			stream.stop(e);
 		}
+	}
+
+	/**
+	 * Receives QUIC datagrams and routes each to its subscription's track producer (lite-05 §6.4).
+	 *
+	 * Returns immediately on a non-datagram transport or pre-lite-05 version. A decode error or an
+	 * unknown subscribe id drops that datagram without tearing down the session (best-effort); the
+	 * loop ends only when the datagram stream closes.
+	 *
+	 * @internal
+	 */
+	async runDatagrams(): Promise<void> {
+		if (!hasDatagrams(this.version) || this.#quic.datagrams.maxDatagramSize === 0) {
+			return;
+		}
+
+		// Never reject: this loop is awaited alongside the connection's other tasks, so a
+		// datagram-stream failure must not tear the whole session down (it's best-effort).
+		try {
+			const reader = this.#quic.datagrams.readable.getReader();
+			try {
+				for (;;) {
+					const { value, done } = await reader.read();
+					if (done) break;
+					if (!value) continue;
+
+					try {
+						await this.#routeDatagram(value);
+					} catch (err: unknown) {
+						console.debug(`dropping datagram: ${error(err).message}`);
+					}
+				}
+			} finally {
+				reader.releaseLock();
+			}
+		} catch (err: unknown) {
+			console.warn("datagram stream error", err);
+		}
+	}
+
+	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
+	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
+	async #routeDatagram(payload: Uint8Array): Promise<void> {
+		const dg = await DatagramMessage.decode(payload);
+
+		const entry = this.#subscribes.get(dg.subscribe);
+		if (!entry) return; // Unknown or already-closed subscription.
+
+		// Datagrams are lite-05+, which always negotiates a timescale; if it hasn't resolved
+		// yet (the datagram raced ahead of TRACK_INFO), drop rather than guess.
+		const scale = entry.timescale.peek();
+		if (!scale) return;
+
+		const timestamp = new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
+		entry.track.writeDatagram({ sequence: dg.sequence, timestamp, payload: dg.payload });
 	}
 
 	/**

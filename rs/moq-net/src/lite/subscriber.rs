@@ -14,7 +14,7 @@ use crate::util::{MaybeBoxedExt, MaybeSendBox};
 use crate::{
 	AsPath, BandwidthProducer, Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Subscription,
 	Timescale, Timestamp,
-	coding::{Reader, Stream},
+	coding::{Decode, Reader, Stream},
 	lite,
 };
 
@@ -112,10 +112,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// open and hang `connect()`.
 	pub async fn run(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
 		let bw = self.clone();
+		let dg = self.clone();
 		tokio::select! {
 			Err(err) = self.clone().run_announce(connecting) => Err(err),
 			res = self.run_uni() => res,
 			Err(err) = bw.run_recv_bandwidth() => Err(err),
+			Err(err) = dg.run_datagrams() => Err(err),
 		}
 	}
 
@@ -551,6 +553,50 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
+	/// Receive QUIC datagrams and route each to its subscription's track producer (lite-05 §6.4).
+	///
+	/// Returns `Ok(())` on a non-datagram transport or pre-lite-05 version, so the caller's
+	/// `select!` matches only on the error case and lets the other arms drive the session. A
+	/// decode error or an unknown subscribe id drops that datagram without tearing down the
+	/// session (best-effort); only a transport-level failure ends the loop.
+	async fn run_datagrams(self) -> Result<(), Error> {
+		if !self.version.has_datagrams() || self.session.max_datagram_size() == 0 {
+			return Ok(());
+		}
+
+		loop {
+			let payload = self.session.recv_datagram().await.map_err(Error::from_transport)?;
+			if let Err(err) = self.route_datagram(payload) {
+				tracing::debug!(%err, "dropping datagram");
+			}
+		}
+	}
+
+	/// Decode one datagram body and hand it to the matching subscription's producer.
+	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
+		let mut buf = payload;
+		let dg = lite::Datagram::decode(&mut buf, self.version)?;
+
+		let mut entry = match self.subscribes.lock().get(&dg.subscribe) {
+			Some(entry) => entry.clone(),
+			// Unknown or already-closed subscription: drop the datagram.
+			None => return Ok(()),
+		};
+
+		// Datagrams are lite-05+, which always negotiates a timescale; default defensively.
+		let scale = entry.timescale.unwrap_or_default();
+		let timestamp =
+			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+
+		entry.producer.write_datagram(crate::Datagram {
+			sequence: dg.sequence,
+			timestamp,
+			payload: dg.payload,
+		})?;
+		entry.stats.group();
+		Ok(())
+	}
+
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
@@ -651,14 +697,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		frame: &mut frame::Producer,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
-		// frame::Producer impls BufMut over its pre-allocated per-frame buffer, so
-		// read_buf writes QUIC stream bytes directly into the frame. No
-		// intermediate Bytes allocations, and quinn's reassembly arena is freed
-		// as we drain it.
-		while bytes::BufMut::has_remaining_mut(frame) {
-			match stream.read_buf(frame).await? {
-				Some(n) if n > 0 => {
-					track_stats.bytes(n as u64);
+		while frame.remaining() > 0 {
+			match stream.read_chunk(frame.remaining()).await? {
+				Some(chunk) if !chunk.is_empty() => {
+					track_stats.bytes(chunk.len() as u64);
+					frame.write(chunk)?;
 				}
 				_ => return Err(Error::WrongSize),
 			}

@@ -21,7 +21,7 @@ impl Bridge {
 			channel_count,
 		};
 		let track = moq_mux::import::unique_track(&mut broadcast, ".opus")?;
-		let import = moq_mux::codec::opus::Import::new(track, catalog, config)?;
+		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config)?;
 		Ok(Self { import })
 	}
 }

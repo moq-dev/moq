@@ -5,6 +5,24 @@ use base64::Engine;
 
 use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 
+/// Reservation bookkeeping shared across a producer's clones and its
+/// [`Reserved`](super::Reserved) handles.
+///
+/// The initial catalog snapshot is withheld from the broadcast until `reservers == 0`. A live
+/// `Reserved` counts as one reserver; a [`Rendition`](super::Rendition) holds its own `Reserved`
+/// clone until it's fulfilled (or dropped), so an unresolved rendition keeps the gate shut too. See
+/// [`Reserved`](super::Reserved).
+#[derive(Default)]
+struct Reservations {
+	/// Live `Reserved` handles (including the one each unfulfilled `Rendition` holds).
+	reservers: usize,
+	/// A catalog change was made while buffering and is awaiting the initial publish. Without this
+	/// we'd emit an empty snapshot when the gate opens on a catalog nobody ever touched.
+	pending: bool,
+	/// Whether the initial snapshot has been published (buffering is over).
+	published: bool,
+}
+
 /// Produces both a hang and MSF catalog track for a broadcast.
 ///
 /// Generic over the application extension `E` (defaulting to `()` for none). The catalog is a
@@ -27,6 +45,9 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	current: Arc<Mutex<Catalog<E>>>,
 
+	/// Gates the initial catalog publish until all reservations resolve (see [`reserve`](Self::reserve)).
+	reservations: Arc<Mutex<Reservations>>,
+
 	/// Shared wall clock for the broadcast's tracks. Every importer on this catalog
 	/// gets a clone (a `Copy` of the same epoch), so timestamps they synthesize when
 	/// a caller has none land on one timeline and audio/video stay in sync.
@@ -41,6 +62,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			hangz: self.hangz.clone(),
 			msf_track: self.msf_track.clone(),
 			current: self.current.clone(),
+			reservations: self.reservations.clone(),
 			clock: self.clock,
 		}
 	}
@@ -83,6 +105,7 @@ impl<E: CatalogExt> Producer<E> {
 			hangz,
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
+			reservations: Arc::new(Mutex::new(Reservations::default())),
 			clock: crate::Clock::new(),
 		})
 	}
@@ -106,6 +129,7 @@ impl<E: CatalogExt> Producer<E> {
 			hang: &mut self.hang,
 			hangz: &mut self.hangz,
 			msf_track: &mut self.msf_track,
+			reservations: &self.reservations,
 			updated: false,
 		}
 	}
@@ -115,18 +139,50 @@ impl<E: CatalogExt> Producer<E> {
 		self.current.lock().unwrap().clone()
 	}
 
-	/// A handle for one importer to publish a video rendition, retired on drop.
+	/// Begin reserving the initial track set, returning a clonable [`Reserved`](super::Reserved).
 	///
-	/// See [`VideoTrack`](super::VideoTrack).
-	pub fn video_track(&self, name: impl Into<String>) -> super::VideoTrack<E> {
-		super::VideoTrack::new(self.clone(), name)
+	/// Hand it (or clones) to importers; each reserves its rendition via
+	/// [`Reserved::init`](super::Reserved::init). The catalog is withheld from the broadcast until
+	/// every `Reserved` is dropped, counting both the ones importers hold and the one each unfulfilled
+	/// [`Rendition`](super::Rendition) holds until its config resolves. So a one-shot muxer (fMP4,
+	/// MPEG-TS) sees the complete track list in the first snapshot instead of a half-converged one.
+	/// Producers that don't reserve publish incrementally as before.
+	pub fn reserve(&self) -> super::Reserved<E> {
+		super::Reserved::new(self.clone())
 	}
 
-	/// A handle for one importer to publish an audio rendition, retired on drop.
-	///
-	/// See [`AudioTrack`](super::AudioTrack).
-	pub fn audio_track(&self, name: impl Into<String>) -> super::AudioTrack<E> {
-		super::AudioTrack::new(self.clone(), name)
+	/// Register a live [`Reserved`](super::Reserved) handle.
+	pub(super) fn add_reserver(&self) {
+		self.reservations.lock().unwrap().reservers += 1;
+	}
+
+	/// Drop a [`Reserved`](super::Reserved) handle, flushing the initial snapshot if that was the
+	/// last thing gating it.
+	pub(super) fn release_reserver(&mut self) {
+		{
+			let mut r = self.reservations.lock().unwrap();
+			r.reservers = r.reservers.saturating_sub(1);
+		}
+		self.flush_if_ready();
+	}
+
+	/// Publish the buffered snapshot once, if buffering has just finished with a change staged.
+	pub(super) fn flush_if_ready(&mut self) {
+		{
+			let mut r = self.reservations.lock().unwrap();
+			if r.published || r.reservers != 0 {
+				return;
+			}
+			// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
+			// still triggers the first emit, rather than publishing an empty catalog now.
+			if !r.pending {
+				return;
+			}
+			r.pending = false;
+			r.published = true;
+		}
+		let catalog = self.current.lock().unwrap().clone();
+		emit(&mut self.hang, &mut self.hangz, &mut self.msf_track, &catalog);
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
@@ -154,6 +210,7 @@ pub struct Guard<'a, E: CatalogExt = ()> {
 	hang: &'a mut moq_json::Producer<Catalog<E>>,
 	hangz: &'a mut moq_json::Producer<Catalog<E>>,
 	msf_track: &'a mut moq_net::track::Producer,
+	reservations: &'a Mutex<Reservations>,
 	updated: bool,
 }
 
@@ -200,18 +257,38 @@ impl<E: CatalogExt> Drop for Guard<'_, E> {
 			return;
 		}
 
-		// Publish the hang catalog (one snapshot per group while deltas are disabled), plus its
-		// DEFLATE-compressed `.z` sibling carrying the identical catalog.
-		let catalog: &Catalog<E> = &self.catalog;
-		let _ = self.hang.update(catalog);
-		let _ = self.hangz.update(catalog);
-
-		// Publish the MSF catalog, derived from the base media sections.
-		let msf = to_msf(&self.catalog.media());
-		if let Ok(mut group) = self.msf_track.append_group() {
-			let _ = group.write_frame_now(msf.to_string().expect("invalid MSF catalog"));
-			let _ = group.finish();
+		{
+			let mut r = self.reservations.lock().unwrap();
+			// Withhold every emit while still buffering the initial reserved set; the mutation stays
+			// in `current` and `pending` marks it for the flush once the gate opens.
+			if !r.published && r.reservers != 0 {
+				r.pending = true;
+				return;
+			}
+			r.pending = false;
+			r.published = true;
 		}
+
+		emit(self.hang, self.hangz, self.msf_track, &self.catalog);
+	}
+}
+
+/// Emit the catalog to all tracks: hang (`catalog.json`), its DEFLATE-compressed `.z` sibling, and
+/// the MSF catalog (`catalog`) derived from the base media sections.
+fn emit<E: CatalogExt>(
+	hang: &mut moq_json::Producer<Catalog<E>>,
+	hangz: &mut moq_json::Producer<Catalog<E>>,
+	msf_track: &mut moq_net::track::Producer,
+	catalog: &Catalog<E>,
+) {
+	// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
+	let _ = hang.update(catalog);
+	let _ = hangz.update(catalog);
+
+	let msf = to_msf(&catalog.media());
+	if let Ok(mut group) = msf_track.append_group() {
+		let _ = group.write_frame_now(msf.to_string().expect("invalid MSF catalog"));
+		let _ = group.finish();
 	}
 }
 
@@ -346,6 +423,122 @@ mod test {
 
 		assert_eq!(got_plain, expected);
 		assert_eq!(got_compressed, expected);
+	}
+
+	fn h264_config() -> VideoConfig {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: true,
+		});
+		config.container = Container::Legacy;
+		config
+	}
+
+	// A reserved audio rendition that resolves before a reserved video rendition must not publish an
+	// audio-only catalog; the first snapshot a consumer sees carries the complete track set. This is
+	// the moq-dev/moq#1979 convergence race.
+	#[test]
+	fn reservation_gates_until_all_renditions_resolve() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		let mut consumer: Consumer = Consumer::new(catalog.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let reserved = catalog.reserve();
+		let mut audio = reserved.audio("audio0");
+		let mut video = reserved.video("video0");
+		drop(reserved); // done reserving; both renditions still outstanding
+
+		// Audio resolves first: withheld, because video is still outstanding.
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"an audio-only catalog must not publish while video is unresolved"
+		);
+
+		// Video resolves: the complete catalog publishes now, in one snapshot.
+		video.set(h264_config());
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected the complete catalog, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+		assert!(snapshot.video.renditions.contains_key("video0"));
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"only the one complete snapshot should be published"
+		);
+	}
+
+	// Dropping a reservation without fulfilling it (a stream that never produced a config) still opens
+	// the gate, publishing whatever did resolve.
+	#[test]
+	fn reservation_gate_opens_when_unresolved_reservation_is_dropped() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		let mut consumer: Consumer = Consumer::new(catalog.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let reserved = catalog.reserve();
+		let mut audio = reserved.audio("audio0");
+		let video = reserved.video("video0");
+		drop(reserved);
+
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
+
+		// The video stream never resolves and is cancelled; the audio-only catalog publishes.
+		drop(video);
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected the audio catalog, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+		assert!(!snapshot.video.renditions.contains_key("video0"));
+	}
+
+	// A change staged while a deferred importer still holds a reservation (mimicking a TS stream whose
+	// config resolves late, e.g. AAC) must not publish until that rendition resolves, so no incomplete
+	// intermediate snapshot leaks out.
+	#[test]
+	fn staged_change_waits_for_a_held_reservation() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		let mut consumer: Consumer = Consumer::new(catalog.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		// A deferred importer grabs a reservation up front and holds it until it can resolve.
+		let deferred = catalog.reserve();
+
+		// Meanwhile an eager rendition resolves and stages a catalog change. The importer keeps its
+		// rendition alive (dropping it would retire the track), so bind it.
+		let early = catalog.reserve();
+		let mut a0 = early.audio("audio0");
+		a0.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		drop(early);
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"the staged rendition must wait for the deferred importer's held reservation"
+		);
+
+		// The deferred importer finally builds its rendition and resolves it.
+		let mut late = deferred.audio("audio1");
+		drop(deferred); // the importer releases its own hold; only the rendition's remains
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
+		late.set(AudioConfig::new(AudioCodec::Opus, 48_000, 1));
+
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected one complete catalog, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+		assert!(snapshot.audio.renditions.contains_key("audio1"));
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"only the one complete snapshot should be published"
+		);
 	}
 
 	#[test]

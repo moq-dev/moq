@@ -9,17 +9,17 @@ use crate::container::Frame;
 /// [`decode`](Self::decode) is published as one hang frame in its own group, so the relay can
 /// forward each frame without waiting for a group boundary. The codec's packet loss
 /// concealment handles drops. Build it with [`new`](Self::new), passing the track producer
-/// and the [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
+/// and the [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	/// Publish on an existing track producer, reserving the rendition from `reserved`.
 	pub fn new(
 		track: moq_net::track::Producer,
-		catalog: crate::catalog::Producer<E>,
+		reserved: crate::catalog::Reserved<E>,
 		config: Config,
 	) -> crate::Result<Self> {
 		let mut audio_config = hang::catalog::AudioConfig::new(
@@ -33,7 +33,7 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
-		let mut rendition = catalog.audio_track(track.name());
+		let mut rendition = reserved.audio(track.name());
 		rendition.set(audio_config);
 
 		Ok(Self {
@@ -73,11 +73,11 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp,
-			payload: bytes::Bytes::copy_from_slice(frame),
+			payload: frame.into_bytes(),
 			keyframe: true,
 			duration: None,
 		})?;

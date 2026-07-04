@@ -42,6 +42,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 
+	/// Held until the Tracks element is processed, so the catalog is withheld from the broadcast
+	/// until every rendition is in (and, when composed with other importers, until they finish too).
+	initial_reservation: Option<crate::catalog::Reserved<E>>,
+
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
 	/// Whether the Tracks element has been processed.
@@ -72,10 +76,11 @@ struct MkvTrack {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
-	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			broadcast,
-			catalog,
+			catalog: reserved.producer(),
+			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
@@ -184,6 +189,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
 				self.handle_tracks(children)?;
 				self.tracks_seen = true;
+				// The full track set is declared now; release the reservation so the catalog publishes.
+				self.initial_reservation = None;
 			}
 			MatroskaSpec::Cluster(Master::Start) => {
 				self.cluster_timestamp = 0;

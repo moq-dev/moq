@@ -15,7 +15,7 @@ pub struct Bridge {
 impl Bridge {
 	pub fn new(mut broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-		let import = moq_mux::codec::h264::Import::new(track, catalog);
+		let import = moq_mux::codec::h264::Import::new(track, catalog.reserve());
 		let split = moq_mux::codec::h264::Split::new();
 		Ok(Self { split, import })
 	}

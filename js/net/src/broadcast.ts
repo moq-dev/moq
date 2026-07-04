@@ -1,5 +1,5 @@
 import { Signal } from "@moq/signals";
-import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber } from "./track.ts";
+import { type TrackInfo, TrackProducer, type TrackSubscriber } from "./track.ts";
 
 /**
  * A request for a track the peer wants, yielded by {@link Broadcast.requested}.
@@ -13,13 +13,12 @@ import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber } from "./tr
 export class TrackRequest {
 	readonly name: string;
 	readonly priority: number;
-	// The state behind the TrackSubscriber handed to the caller of Broadcast.subscribe;
-	// accepting adopts it as the producer's first sink, which the producer fans into.
-	#state: TrackState;
+	// The producer feeding the TrackSubscriber handed to the caller of Broadcast.subscribe.
+	#producer: TrackProducer;
 
-	constructor(name: string, state: TrackState, priority: number) {
+	constructor(name: string, producer: TrackProducer, priority: number) {
 		this.name = name;
-		this.#state = state;
+		this.#producer = producer;
 		this.priority = priority;
 	}
 
@@ -29,14 +28,12 @@ export class TrackRequest {
 	 * keeps its default. Mirrors the Rust `TrackRequest::accept`.
 	 */
 	accept(info: Partial<TrackInfo> = {}): TrackProducer {
-		// The producer adopts the already-handed-out subscriber state as its first
-		// sink, then commits the info (which propagates to that sink).
-		return new TrackProducer(this.name, this.#state).accept(info);
+		return this.#producer.accept(info);
 	}
 
 	/** Reject the request, closing the track (optionally with an error). */
 	reject(err?: Error): void {
-		this.#state.closed.set(err ?? true);
+		this.#producer.close(err);
 	}
 }
 
@@ -74,7 +71,7 @@ export class TrackConsumer {
 }
 
 /** Reactive backing state for a {@link Broadcast}: requested tracks plus a closed flag. */
-export class BroadcastState {
+class BroadcastState {
 	requested = new Signal<TrackRequest[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	// Statically inserted tracks, keyed by name. A subscribe for one of these fans out
@@ -88,8 +85,7 @@ export class BroadcastState {
  * @public
  */
 export class Broadcast {
-	/** Reactive backing state. */
-	state = new BroadcastState();
+	#state = new BroadcastState();
 
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
@@ -101,7 +97,7 @@ export class Broadcast {
 
 	constructor() {
 		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
+			const dispose = this.#state.closed.subscribe((closed) => {
 				if (!closed) return;
 				resolve(closed instanceof Error ? closed : undefined);
 				dispose();
@@ -115,14 +111,14 @@ export class Broadcast {
 	async requested(): Promise<TrackRequest | undefined> {
 		for (;;) {
 			// We use pop instead of shift because it's slightly more efficient.
-			const track = this.state.requested.peek().pop();
+			const track = this.#state.requested.peek().pop();
 			if (track) return track;
 
-			const closed = this.state.closed.peek();
+			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			await Signal.race(this.state.requested, this.state.closed);
+			await Signal.race(this.#state.requested, this.#state.closed);
 		}
 	}
 
@@ -151,24 +147,22 @@ export class Broadcast {
 	 * `info()` never resolves and the wire layer stalls before serving.
 	 */
 	insertTrack(track: TrackProducer): void {
-		if (this.state.closed.peek()) {
-			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
+		if (this.#state.closed.peek()) {
+			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
 		}
 
-		const existing = this.state.tracks.get(track.name);
-		if (existing && !existing.state.closed.peek()) {
+		const existing = this.#state.tracks.get(track.name);
+		if (existing && !existing.closedSignal.peek()) {
 			throw new Error(`duplicate track: ${track.name}`);
 		}
 
-		this.state.tracks.set(track.name, track);
+		this.#state.tracks.set(track.name, track);
 
 		// Evict the entry once the track closes, unless it has since been replaced.
-		const dispose = track.state.closed.subscribe((closed) => {
-			if (!closed) return;
-			if (this.state.tracks.get(track.name) === track) {
-				this.state.tracks.delete(track.name);
+		void track.closed.finally(() => {
+			if (this.#state.tracks.get(track.name) === track) {
+				this.#state.tracks.delete(track.name);
 			}
-			dispose();
 		});
 	}
 
@@ -187,7 +181,7 @@ export class Broadcast {
 
 	/** Remove a statically inserted track by name. Mirrors the Rust `BroadcastProducer::remove_track`. */
 	removeTrack(name: string): void {
-		this.state.tracks.delete(name);
+		this.#state.tracks.delete(name);
 	}
 
 	/**
@@ -197,28 +191,30 @@ export class Broadcast {
 	 * application for a track to serve.
 	 */
 	subscribe(name: string, priority: number): TrackSubscriber {
-		if (this.state.closed.peek()) {
-			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
+		if (this.#state.closed.peek()) {
+			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
 		}
 
 		// Fast path: a statically inserted track fans out a fresh subscriber, no
 		// request. A stale (closed) entry is evicted and falls through to on-demand.
-		const existing = this.state.tracks.get(name);
+		const existing = this.#state.tracks.get(name);
 		if (existing) {
-			if (!existing.state.closed.peek()) return existing.subscribe();
-			this.state.tracks.delete(name);
+			if (!existing.closedSignal.peek()) return existing.subscribe();
+			this.#state.tracks.delete(name);
 		}
 
-		// The subscriber (caller, reads) and the request's producer (other side,
-		// writes) share one state.
-		const state = new TrackState();
-		this.state.requested.mutate((requested) => {
-			requested.push(new TrackRequest(name, state, priority));
+		// The request carries the producer (write side); the caller reads the
+		// subscriber it fans out. Accepting the request commits the info and starts
+		// serving groups.
+		const producer = new TrackProducer(name);
+		const subscriber = producer.subscribe();
+		this.#state.requested.mutate((requested) => {
+			requested.push(new TrackRequest(name, producer, priority));
 			// Sort the tracks by priority in ascending order (we will pop)
 			requested.sort((a, b) => a.priority - b.priority);
 		});
 
-		return new TrackSubscriber(name, state);
+		return subscriber;
 	}
 
 	/**
@@ -237,38 +233,29 @@ export class Broadcast {
 		}
 
 		// A statically inserted track already committed its info; serve it directly.
-		const existing = this.state.tracks.get(name);
-		if (existing && !existing.state.closed.peek()) {
+		const existing = this.#state.tracks.get(name);
+		if (existing && !existing.closedSignal.peek()) {
 			return existing.info();
 		}
 
 		// Publish side: ask the application by triggering a TrackRequest it answers
 		// with accept(TrackInfo); only the immutable properties are needed, so close
 		// the request once they're known rather than serving any groups.
-		if (this.state.closed.peek()) {
-			return Promise.reject(new Error(`broadcast is closed: ${this.state.closed.peek()}`));
+		if (this.#state.closed.peek()) {
+			return Promise.reject(new Error(`broadcast is closed: ${this.#state.closed.peek()}`));
 		}
 
-		const state = new TrackState();
-		this.state.requested.mutate((requested) => {
-			requested.push(new TrackRequest(name, state, 0));
+		const producer = new TrackProducer(name);
+		this.#state.requested.mutate((requested) => {
+			requested.push(new TrackRequest(name, producer, 0));
 			requested.sort((a, b) => a.priority - b.priority);
 		});
 
 		return (async () => {
 			try {
-				for (;;) {
-					const info = state.info.peek();
-					if (info) return info;
-
-					const closed = state.closed.peek();
-					if (closed instanceof Error) throw closed;
-					if (closed) throw new Error(`track rejected: ${name}`);
-
-					await Signal.race(state.info, state.closed);
-				}
+				return await producer.info();
 			} finally {
-				state.closed.set(true);
+				producer.close();
 			}
 		})();
 	}
@@ -279,11 +266,11 @@ export class Broadcast {
 	 * @param abort - If provided, throw this exception instead of returning undefined.
 	 */
 	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
-		for (const req of this.state.requested.peek()) {
+		this.#state.closed.set(abort ?? true);
+		for (const req of this.#state.requested.peek()) {
 			req.reject(abort);
 		}
-		this.state.requested.mutate((requested) => {
+		this.#state.requested.mutate((requested) => {
 			requested.length = 0;
 		});
 	}

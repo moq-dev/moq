@@ -181,7 +181,7 @@ fn track_entry_video_vp9(number: u64, width: u64, height: u64) -> MatroskaSpec {
 fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(data);
 	mkv.decode(&buf).expect("decode");
 	mkv.finish().expect("finish");
@@ -312,7 +312,7 @@ fn test_chunked_decode_dedup() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
 	// Feed in 16-byte chunks to stress the chunked-restart code path.
 	for chunk in data.chunks(16) {

@@ -972,7 +972,7 @@ impl Publisher {
 	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
 		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let mut importer = FlvImport::new(broadcast.clone(), catalog);
+		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
 
 		let publish = origin.publish_broadcast(path, broadcast.consume())?;
 
@@ -1184,7 +1184,7 @@ mod tests {
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut importer = FlvImport::new(broadcast.clone(), catalog);
+		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
 		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();

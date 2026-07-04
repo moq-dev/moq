@@ -212,6 +212,23 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 		Ok(len)
 	}
 
+	async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), Self::Error> {
+		if let Some(pending) = &mut self.pending {
+			pending.buf.extend_from_slice(&chunk);
+
+			if let Some(request_id) = pending.try_parse()? {
+				let mut pending = self.pending.take().unwrap();
+				let buf = std::mem::take(&mut pending.buf).freeze();
+				pending.register(request_id);
+				self.control_tx.send(buf).map_err(|_| crate::Error::Closed)?;
+			}
+		} else {
+			self.control_tx.send(chunk).map_err(|_| crate::Error::Closed)?;
+		}
+
+		Ok(())
+	}
+
 	fn set_priority(&mut self, _order: u8) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
@@ -245,6 +262,20 @@ impl<S: web_transport_trait::Session> web_transport_trait::SendStream for Adapte
 		match self {
 			Self::Real(s) => s.write(buf).await.map_err(|_| crate::Error::Closed),
 			Self::Virtual(s) => s.write(buf).await,
+		}
+	}
+
+	async fn write_buf<B: Buf + web_transport_trait::MaybeSend>(&mut self, buf: &mut B) -> Result<usize, Self::Error> {
+		match self {
+			Self::Real(s) => s.write_buf(buf).await.map_err(|_| crate::Error::Closed),
+			Self::Virtual(s) => s.write_buf(buf).await,
+		}
+	}
+
+	async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), Self::Error> {
+		match self {
+			Self::Real(s) => s.write_chunk(chunk).await.map_err(|_| crate::Error::Closed),
+			Self::Virtual(s) => s.write_chunk(chunk).await,
 		}
 	}
 

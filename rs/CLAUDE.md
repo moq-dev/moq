@@ -56,7 +56,7 @@ Each level is a role module (`broadcast`, `track`, `group`, `frame`, `origin`, `
 - Broadcast: `broadcast::{Producer, Consumer, Dynamic}` (`model/broadcast.rs`).
 - Track: `track::{Producer, Consumer, Subscriber, ...}` plus the `pub(crate)` `track::TrackWeak` (`model/track.rs`).
 - Group: `group::{Producer, Consumer, Info}` (`model/group.rs`). Consumers `clone()` for fanout.
-- Frame: `frame::Producer` (impls `BufMut`) / `frame::Consumer` (`model/frame.rs`).
+- Frame: `frame::Producer` / `frame::Consumer` (`model/frame.rs`).
 - Origin: `origin::{Producer, Consumer}` for the broadcast set; `announce::{Producer, Consumer}` for (un)announce events. Both share the private `origin.rs` implementation (`mod origin_impl`), surfaced via `model/mod.rs`.
 
 ## Async / poll plumbing

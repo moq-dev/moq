@@ -44,6 +44,12 @@ pub struct Import<E: catalog::Catalog = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 
+	/// Held while the first PMT is parsed so the catalog is withheld from the broadcast until every
+	/// stream in the initial program has reserved its rendition. Dropped once the PMT is fully
+	/// processed, so a one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
+	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
+	initial_reservation: Option<crate::catalog::Reserved<E>>,
+
 	/// Shared, refillable byte source the persistent reader pulls whole packets
 	/// from. Kept beside the reader so [`decode`](Self::decode) can append bytes
 	/// between reads without recreating the reader (which holds PAT/PMT state).
@@ -100,8 +106,11 @@ pub struct Import<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Import<E> {
-	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let feed = Feed::default();
+		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed
+		// reservation gates the initial publish and is dropped once the first PMT is parsed.
+		let catalog = reserved.producer();
 		// Sample the real catalog once at construction, not E::default(): an extension
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
@@ -109,6 +118,7 @@ impl<E: catalog::Catalog> Import<E> {
 		Self {
 			broadcast,
 			catalog,
+			initial_reservation: Some(reserved),
 			reader: TsPacketReader::new(feed.clone()),
 			feed,
 			pmt_pids: HashSet::new(),
@@ -260,6 +270,10 @@ impl<E: catalog::Catalog> Import<E> {
 						self.ensure_stream(es.elementary_pid, es.stream_type, &es.descriptors)?;
 					}
 				}
+
+				// Every stream in the initial program is registered now; release the reservation
+				// so the catalog publishes once each rendition's config resolves, not before.
+				self.initial_reservation = None;
 			}
 			Some(TsPayload::PesStart(pes)) => self.handle_pes_start(pid, pes)?,
 			Some(TsPayload::PesContinuation(bytes)) => self.handle_pes_continuation(pid, &bytes)?,
@@ -297,7 +311,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(h264::Import::new(track, self.catalog.clone())),
+					import: Box::new(h264::Import::new(track, self.catalog.reserve())),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -305,7 +319,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(h265::Import::new(track, self.catalog.clone())),
+					import: Box::new(h265::Import::new(track, self.catalog.reserve())),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -314,7 +328,7 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::AdtsAac => Stream::Aac(Box::new(AacStream {
 				import: None,
 				broadcast: self.broadcast.clone(),
-				catalog: self.catalog.clone(),
+				reserved: Some(self.catalog.reserve()),
 				unwrap: PtsUnwrap::default(),
 				jitter: None,
 			})),
@@ -335,7 +349,7 @@ impl<E: catalog::Catalog> Import<E> {
 					channel_count,
 				};
 				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.catalog.clone(), config)?,
+					import: opus::Import::new(track, self.catalog.reserve(), config)?,
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
@@ -380,7 +394,7 @@ impl<E: catalog::Catalog> Import<E> {
 			descriptor,
 			import: None,
 			broadcast: self.broadcast.clone(),
-			catalog: self.catalog.clone(),
+			reserved: Some(self.catalog.reserve()),
 			unwrap: PtsUnwrap::default(),
 			tail: Vec::new(),
 			tail_pts: None,
@@ -1077,7 +1091,10 @@ impl<E: catalog::Catalog> Stream<E> {
 struct AacStream<E: CatalogExt = ()> {
 	import: Option<aac::Import<E>>,
 	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer<E>,
+	/// Reservation held from the PMT until the first frame builds the importer, so the catalog stays
+	/// withheld until this deferred rendition resolves (config comes from the first ADTS header).
+	/// Consumed when `import` is built.
+	reserved: Option<crate::catalog::Reserved<E>>,
 	unwrap: PtsUnwrap,
 	/// Largest audio burst span seen, published as the catalog jitter.
 	jitter: Option<Timestamp>,
@@ -1111,7 +1128,9 @@ impl<E: CatalogExt> AacStream<E> {
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
 					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
-					let mut aac = aac::Import::new(track, self.catalog.clone(), config)?;
+					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					let reserved = self.reserved.take().expect("aac reservation already consumed");
+					let mut aac = aac::Import::new(track, reserved, config)?;
 					aac.update_rendition(|rendition| rendition.description = Some(description));
 					self.import.insert(aac)
 				}
@@ -1319,7 +1338,10 @@ struct LegacyStream<E: CatalogExt = ()> {
 	descriptor: &'static legacy::Descriptor,
 	import: Option<legacy::Import<E>>,
 	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer<E>,
+	/// Reservation held from the PMT until the first frame builds the importer, so the catalog stays
+	/// withheld until this deferred rendition resolves (config comes from the first frame header).
+	/// Consumed when `import` is built.
+	reserved: Option<crate::catalog::Reserved<E>>,
 	unwrap: PtsUnwrap,
 	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't
 	/// require audio frames to align with PES boundaries, so a legitimate mux can
@@ -1377,7 +1399,9 @@ impl<E: CatalogExt> LegacyStream<E> {
 						channel_count: header.channel_count,
 					};
 					let track = crate::import::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
-					let legacy = legacy::Import::new(self.descriptor, track, self.catalog.clone(), config);
+					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					let reserved = self.reserved.take().expect("legacy reservation already consumed");
+					let legacy = legacy::Import::new(self.descriptor, track, reserved, config);
 					self.import.insert(legacy)
 				}
 			};
@@ -1773,7 +1797,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, 0x21)], true));
@@ -1796,7 +1820,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut updates = catalog.consume().unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, 0x21)], true));
@@ -1840,7 +1864,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		// First PMT lacks CUEI: the 0x86 PID is ambiguous and routes to Ignored.
 		let mut bytes = bytes::BytesMut::new();
@@ -1922,7 +1946,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut import = super::Import::new(broadcast, catalog);
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(
@@ -1997,7 +2021,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(
@@ -2067,7 +2091,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
 		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
@@ -2113,7 +2137,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
 		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
@@ -2161,7 +2185,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(
@@ -2212,7 +2236,7 @@ mod test {
 		// catalog::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		// PMT WITHOUT CUEI: the 0x86 PID must not be recognized as SCTE-35.
@@ -2283,7 +2307,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.clone());
+		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(

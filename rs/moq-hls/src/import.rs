@@ -550,7 +550,7 @@ impl Import {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize, select: &select::Broadcast) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone()).with_select(select.clone());
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.reserve()).with_select(select.clone());
 			self.video_importers.push(importer);
 		}
 
@@ -563,7 +563,7 @@ impl Import {
 		let catalog = self.catalog.clone();
 		let select = select.clone();
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(broadcast, catalog).with_select(select))
+			.get_or_insert_with(|| Fmp4::new(broadcast, catalog.reserve()).with_select(select))
 	}
 
 	#[cfg(test)]
