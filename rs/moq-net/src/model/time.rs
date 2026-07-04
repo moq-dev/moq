@@ -194,8 +194,10 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		self.0.into_inner() == 0
 	}
 
-	/// Current time as a timestamp, derived from [`tokio::time::Instant::now`] so
-	/// it honors `tokio::time::pause` in tests.
+	/// Current time as a timestamp. On native targets it is derived from
+	/// [`tokio::time::Instant::now`] so it honors `tokio::time::pause` in tests;
+	/// on wasm it uses the wasmtimer-backed monotonic clock, which has no
+	/// `tokio::time::pause` support.
 	pub fn now() -> Self {
 		// Native: tokio so it can be stubbed by `tokio::time::pause` in tests.
 		#[cfg(not(target_family = "wasm"))]

@@ -33,11 +33,11 @@ web-transport-trait = { workspace = true }
 # Timestamp generation on wasm32: std's clock panics (no clock), so route
 # through wasmtimer (performance.now()/Date.now()). See model/time.rs.
 [target.'cfg(target_family = "wasm")'.dependencies]
-wasmtimer = "0.4"
+wasmtimer = { workspace = true }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers — they select
 # their own backend in the leaf binary.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
-wasm-bindgen-test = "0.3"
-getrandom = { version = "0.4", features = ["wasm_js"] }
+wasm-bindgen-test = { workspace = true }
+getrandom = { workspace = true, features = ["wasm_js"] }

@@ -76,8 +76,11 @@ moq-token = { version = "0.6", path = "rs/moq-token" }
 moq-video = { version = "0.0.6", path = "rs/moq-video" }
 qmux = { version = "0.2", default-features = false }
 
+getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
+wasm-bindgen-test = "0.3"
+wasmtimer = "0.4"
 web-async = { version = "0.1.4", features = ["tracing"] }
 web-transport-iroh = "0.6"
 web-transport-noq = "0.2.0"
