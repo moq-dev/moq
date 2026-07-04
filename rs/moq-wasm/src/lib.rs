@@ -10,9 +10,7 @@
 //! path follows the same shape and is left as the obvious next step.
 //!
 //! moq-net's timers and `Instant` go through `web_async::time` (tokio on native,
-//! wasmtimer on wasm), so the consume path runs in the browser. (`model/time.rs`
-//! has an unused wall-clock helper that isn't wasm-portable, but nothing calls
-//! it, so it never runs. See README.md.)
+//! wasmtimer on wasm), so the consume path runs in the browser.
 
 // Browser-only crate. Empty on native so `cargo check --workspace` stays green.
 #![cfg(target_arch = "wasm32")]
