@@ -62,9 +62,9 @@ pub enum AudioCodec {
 pub enum AudioCodecKind {
 	AAC,
 	Opus,
+	Unknown,
 	Flac,
 	Mp3,
-	Unknown,
 }
 
 impl AudioCodec {
