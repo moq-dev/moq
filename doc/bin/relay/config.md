@@ -189,10 +189,12 @@ tls.disable_verify = true
 
 ### \[stats]
 
-Per-node stats publishing. When enabled, the relay publishes a single
-`<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset)
+Per-node stats publishing. When enabled, the relay publishes stats broadcasts
 carrying JSON snapshots of the broadcasts it's currently serving and of the
-sessions currently connected to it.
+sessions currently connected to it. By default, it publishes a single
+`<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset).
+Set `depth` to bucket stats by the first N broadcast path segments and publish
+one broadcast per bucket at `<prefix>/<bucket>/node/<node>`.
 
 ```toml
 [stats]
@@ -210,6 +212,10 @@ interval = 1
 # "sjc/1" / "sjc/2" for two hosts nested under a shared region key.
 # Single-relay deployments can omit this.
 node = "sjc/1"
+
+# Number of leading broadcast path segments to bucket stats by (defaults to 0).
+# Set to 1 for one stats broadcast per first path segment, e.g. per tenant.
+depth = 1
 ```
 
 Each stats broadcast carries four per-broadcast tracks, one per
@@ -304,9 +310,9 @@ byte-identical to the last emitted frame; new subscribers still pick up
 a baseline immediately via track-latest semantics.
 
 Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
-`--stats-prefix`, `--stats-interval`, `--stats-node`) and environment
-variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`, `MOQ_STATS_INTERVAL`,
-`MOQ_STATS_NODE`).
+`--stats-prefix`, `--stats-interval`, `--stats-node`, `--stats-depth`) and
+environment variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`,
+`MOQ_STATS_INTERVAL`, `MOQ_STATS_NODE`, `MOQ_STATS_DEPTH`).
 
 ### \[iroh]
 

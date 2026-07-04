@@ -295,7 +295,7 @@ pub struct StatsConfig {
 	/// every node's full stats. A group broadcast is announced while its group
 	/// has live traffic and unannounced once it drains; at depth `0` the single
 	/// broadcast stays announced for the aggregator's life even while idle.
-	pub group_depth: usize,
+	pub depth: usize,
 }
 
 impl StatsConfig {
@@ -308,7 +308,7 @@ impl StatsConfig {
 			prefix: PathOwned::from(".stats"),
 			node: None,
 			interval: Duration::from_secs(1),
-			group_depth: 0,
+			depth: 0,
 		}
 	}
 
@@ -338,9 +338,9 @@ impl StatsConfig {
 	}
 
 	/// Set the grouping depth (default 0, a single broadcast). See
-	/// [`Self::group_depth`].
-	pub fn with_group_depth(mut self, depth: usize) -> Self {
-		self.group_depth = depth;
+	/// [`Self::depth`].
+	pub fn with_depth(mut self, depth: usize) -> Self {
+		self.depth = depth;
 		self
 	}
 }
@@ -469,7 +469,7 @@ impl Stats {
 			prefix,
 			node,
 			interval,
-			group_depth,
+			depth,
 		} = config;
 		// An empty path after normalization is indistinguishable from "no node
 		// set"; collapse it so downstream code only sees a single representation.
@@ -487,7 +487,7 @@ impl Stats {
 				Arc::downgrade(&shared),
 				prefix.clone(),
 				node.clone(),
-				group_depth,
+				depth,
 				interval,
 			));
 			shared
@@ -1211,7 +1211,7 @@ async fn run_publisher(
 	weak: Weak<StatsShared>,
 	prefix: PathOwned,
 	node: Option<PathOwned>,
-	group_depth: usize,
+	depth: usize,
 	interval: Duration,
 ) {
 	let node = node.as_ref().map(|p| p.as_str());
@@ -1221,16 +1221,14 @@ async fn run_publisher(
 	// broadcast, announced for the aggregator's life even while idle" behavior;
 	// at depth >= 1 group broadcasts come and go with their group's traffic.
 	let mut groups: HashMap<PathOwned, GroupPublisher> = HashMap::new();
-	if group_depth == 0 {
+	if depth == 0 {
 		let Some(shared) = weak.upgrade() else {
 			return;
 		};
-		match GroupPublisher::create(&shared.origin, &prefix, &Path::empty(), node) {
-			Some(gp) => {
-				groups.insert(Path::empty().to_owned(), gp);
-			}
-			None => return,
-		}
+		let Some(gp) = GroupPublisher::create(&shared.origin, &prefix, &Path::empty(), node) else {
+			return;
+		};
+		groups.insert(Path::empty().to_owned(), gp);
 		drop(shared);
 	}
 
@@ -1267,7 +1265,7 @@ async fn run_publisher(
 		let mut entries_by_group: HashMap<PathOwned, Vec<(&PathOwned, &Arc<BroadcastEntry>)>> = HashMap::new();
 		for (path, entry) in &entries {
 			entries_by_group
-				.entry(group_key(path.as_str(), group_depth))
+				.entry(group_key(path.as_str(), depth))
 				.or_default()
 				.push((path, entry));
 		}
@@ -1275,7 +1273,7 @@ async fn run_publisher(
 		for tier_idx in 0..2 {
 			for (root, counters) in &session_roots[tier_idx] {
 				roots_by_group[tier_idx]
-					.entry(group_key(root.as_str(), group_depth))
+					.entry(group_key(root.as_str(), depth))
 					.or_default()
 					.push((root, counters));
 			}
@@ -1288,19 +1286,17 @@ async fn run_publisher(
 		for tier_idx in 0..2 {
 			active.extend(roots_by_group[tier_idx].keys().cloned());
 		}
-		if group_depth == 0 {
+		if depth == 0 {
 			active.insert(Path::empty().to_owned());
 		}
 
 		for group in &active {
 			// Ensure a publisher exists (skip the group this tick if create fails).
 			if !groups.contains_key(group) {
-				match GroupPublisher::create(&shared.origin, &prefix, group, node) {
-					Some(gp) => {
-						groups.insert(group.clone(), gp);
-					}
-					None => continue,
-				}
+				let Some(gp) = GroupPublisher::create(&shared.origin, &prefix, group, node) else {
+					continue;
+				};
+				groups.insert(group.clone(), gp);
 			}
 			let gp = groups.get_mut(group).expect("just inserted");
 
@@ -1591,7 +1587,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn group_depth_splits_broadcasts_per_group() {
+	async fn depth_splits_broadcasts_per_group() {
 		// At depth 1 each first-segment group gets its OWN broadcast at
 		// `.stats/<group>/node/<node>`, so a consumer can announce-scope to a
 		// single group instead of slurping the whole node's stats.
@@ -1600,7 +1596,7 @@ mod tests {
 			StatsConfig::new()
 				.with_origin(origin.clone())
 				.with_node(PathOwned::from("sjc".to_string()))
-				.with_group_depth(1),
+				.with_depth(1),
 		);
 		let mut consumer = origin.consume();
 
