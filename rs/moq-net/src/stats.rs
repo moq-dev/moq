@@ -1138,6 +1138,9 @@ struct GroupPublisher {
 	session_last_payload: [Vec<u8>; 2],
 }
 
+type GroupedEntries<'a> = HashMap<PathOwned, Vec<(&'a PathOwned, &'a Arc<BroadcastEntry>)>>;
+type GroupedSessions<'a> = HashMap<PathOwned, Vec<(&'a PathOwned, &'a Arc<SessionCounters>)>>;
+
 impl GroupPublisher {
 	/// Build + publish the broadcast for `group` on `origin`. Returns `None`
 	/// (with a warning) if track creation or the publish is rejected, so one bad
@@ -1262,14 +1265,14 @@ async fn run_publisher(
 		// Bucket entries + session roots by group key. Values borrow the
 		// snapshots above (no extra strong count), so the GC pass below still
 		// sees `strong_count == 1` for drained entries once the snapshots drop.
-		let mut entries_by_group: HashMap<PathOwned, Vec<(&PathOwned, &Arc<BroadcastEntry>)>> = HashMap::new();
+		let mut entries_by_group: GroupedEntries<'_> = HashMap::new();
 		for (path, entry) in &entries {
 			entries_by_group
 				.entry(group_key(path.as_str(), depth))
 				.or_default()
 				.push((path, entry));
 		}
-		let mut roots_by_group: [HashMap<PathOwned, Vec<(&PathOwned, &Arc<SessionCounters>)>>; 2] = Default::default();
+		let mut roots_by_group: [GroupedSessions<'_>; 2] = Default::default();
 		for tier_idx in 0..2 {
 			for (root, counters) in &session_roots[tier_idx] {
 				roots_by_group[tier_idx]
@@ -1283,8 +1286,8 @@ async fn run_publisher(
 		// the always-on empty group at depth 0.
 		let mut active: HashSet<PathOwned> = HashSet::new();
 		active.extend(entries_by_group.keys().cloned());
-		for tier_idx in 0..2 {
-			active.extend(roots_by_group[tier_idx].keys().cloned());
+		for group_roots in &roots_by_group {
+			active.extend(group_roots.keys().cloned());
 		}
 		if depth == 0 {
 			active.insert(Path::empty().to_owned());
