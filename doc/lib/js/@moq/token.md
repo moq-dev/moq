@@ -13,7 +13,7 @@ JWT token generation and verification for MoQ in browsers.
 
 - Generate signing keys (HMAC, RSA, ECDSA, EdDSA)
 - Sign and verify JWT tokens
-- Compatible with moq-relay authentication and `moq-token-cli`
+- Compatible with moq-relay authentication and `moq-token`
 
 ## Installation
 

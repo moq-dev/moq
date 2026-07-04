@@ -64,8 +64,11 @@ let
   moqTokenCliArgs = crateInfo ../rs/moq-token-cli/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
     cargoExtraArgs = "-p moq-token-cli";
-    meta.mainProgram = "moq-token-cli";
+    # The crate is `moq-token-cli`, but its `[[bin]]` ships as `moq-token`.
+    meta.mainProgram = "moq-token";
   };
+  moqTokenPackage = craneLib.buildPackage moqTokenCliArgs;
+  moqTokenX86DarwinPackage = craneLib.buildPackage (crossX86Darwin moqTokenCliArgs);
 
   libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
   libmoqArgs = libmoqInfo // {
@@ -224,8 +227,10 @@ in
   moq-cli = craneLib.buildPackage moqCliArgs;
   moq-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqCliArgs);
 
-  moq-token-cli = craneLib.buildPackage moqTokenCliArgs;
-  moq-token-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqTokenCliArgs);
+  moq-token = moqTokenPackage;
+  moq-token-cli = moqTokenPackage;
+  moq-token-x86_64-apple-darwin = moqTokenX86DarwinPackage;
+  moq-token-cli-x86_64-apple-darwin = moqTokenX86DarwinPackage;
 
   moq-boy = craneLib.buildPackage (
     crateInfo ../rs/moq-boy/Cargo.toml

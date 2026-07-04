@@ -19,7 +19,7 @@ license: MIT OR Apache-2.0
 
 contents:
   - src: ${BINARY_PATH}
-    dst: /usr/bin/moq-token-cli
+    dst: /usr/bin/moq-token
     file_info:
       mode: 0755
 

@@ -33,16 +33,16 @@ Using the Rust CLI:
 
 ```bash
 # Symmetric key (simpler, key must stay secret)
-moq-token-cli generate --out my-key.jwk
+moq-token generate --out my-key.jwk
 
 # Save to a directory as {kid}.jwk
-moq-token-cli generate --out-dir ./keys/
+moq-token generate --out-dir ./keys/
 
 # Asymmetric key (private signs, public verifies)
-moq-token-cli generate --algorithm ES256 --out private.jwk --public public.jwk
+moq-token generate --algorithm ES256 --out private.jwk --public public.jwk
 
 # Asymmetric key, both saved to directories as {kid}.jwk
-moq-token-cli generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
+moq-token generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
 ```
 
 A random key ID is generated if `--id` is not specified.
@@ -76,7 +76,7 @@ key_dir = "https://api.example.com/keys"
 
 ```bash
 # Allow publishing to demo/my-stream and subscribing to anything under demo/
-moq-token-cli sign --key my-key.jwk --root demo --publish my-stream --subscribe ""
+moq-token sign --key my-key.jwk --root demo --publish my-stream --subscribe ""
 ```
 
 The client connects with the token. The connection path can be the root or any parent:

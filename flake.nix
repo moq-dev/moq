@@ -196,7 +196,7 @@
             paths = [
               moq-relay
               moq-cli
-              moq-token-cli
+              moq-token
             ];
           };
 
@@ -204,6 +204,7 @@
           inherit (overlayPkgs)
             moq-relay
             moq-cli
+            moq-token
             moq-token-cli
             moq-boy
             libmoq
@@ -226,6 +227,7 @@
           inherit (overlayPkgs)
             moq-relay-x86_64-apple-darwin
             moq-cli-x86_64-apple-darwin
+            moq-token-x86_64-apple-darwin
             moq-token-cli-x86_64-apple-darwin
             libmoq-x86_64-apple-darwin
             moq-gst-plugin-x86_64-apple-darwin

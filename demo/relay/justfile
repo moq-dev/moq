@@ -72,7 +72,7 @@ key:
 
     [ -f root.jwk ] && exit 0
     rm -f *.jwt
-    cargo run --bin moq-token-cli -- generate --out root.jwk
+    cargo run --bin moq-token -- generate --out root.jwk
 
 # Generate authentication tokens for local development.
 token: key
@@ -81,13 +81,13 @@ token: key
     umask 077
 
     if [ ! -f demo-web.jwt ]; then
-    	cargo run --quiet --bin moq-token-cli -- sign --key root.jwk \
+        cargo run --quiet --bin moq-token -- sign --key root.jwk \
     		--root demo --subscribe "" --publish me \
     		> demo-web.jwt
     fi
 
     if [ ! -f demo-cli.jwt ]; then
-    	cargo run --quiet --bin moq-token-cli -- sign --key root.jwk \
+        cargo run --quiet --bin moq-token -- sign --key root.jwk \
     		--root demo --publish "" \
     		> demo-cli.jwt
     fi

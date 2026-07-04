@@ -9,6 +9,11 @@ version = "0.5.32"
 edition = "2024"
 rust-version.workspace = true
 
+# The package is `moq-token-cli`, but the binary it ships is `moq-token`.
+[[bin]]
+name = "moq-token"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

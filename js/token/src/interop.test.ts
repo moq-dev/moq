@@ -6,7 +6,7 @@ import { load, loadPublic, sign, verify } from "./key.ts";
 // moq-token crate and verify tokens signed by Rust, and vice versa.
 
 describe("Rust-generated fixtures", () => {
-	// cargo run -p moq-token-cli -- generate --out /tmp/rust-hs256.jwk
+	// cargo run --bin moq-token -- generate --out /tmp/rust-hs256.jwk
 	const RUST_HS256_KEY = JSON.stringify({
 		alg: "HS256",
 		key_ops: ["verify", "sign"],
@@ -15,11 +15,11 @@ describe("Rust-generated fixtures", () => {
 		kid: "d55b1f13e6bda281",
 	});
 
-	// cargo run -p moq-token-cli -- sign --key /tmp/rust-hs256.jwk --root demo --publish alice --subscribe bob
+	// cargo run --bin moq-token -- sign --key /tmp/rust-hs256.jwk --root demo --publish alice --subscribe bob
 	const RUST_HS256_TOKEN =
 		"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1dCI6WyJhbGljZSJdLCJnZXQiOlsiYm9iIl19.eyOkZtTtj_MDkLF4Eu11cygb7B_6DyP-6e0TtwVE4UE";
 
-	// cargo run -p moq-token-cli -- generate --algorithm EdDSA --out /tmp/rust-eddsa-private.jwk --public /tmp/rust-eddsa-public.jwk
+	// cargo run --bin moq-token -- generate --algorithm EdDSA --out /tmp/rust-eddsa-private.jwk --public /tmp/rust-eddsa-public.jwk
 	const RUST_EDDSA_PRIVATE_KEY = JSON.stringify({
 		alg: "EdDSA",
 		key_ops: ["sign", "verify"],
@@ -39,7 +39,7 @@ describe("Rust-generated fixtures", () => {
 		kid: "dfab9113ea85dc27",
 	});
 
-	// cargo run -p moq-token-cli -- sign --key /tmp/rust-eddsa-private.jwk --root room --publish stream1 --publish stream2 --subscribe feed1
+	// cargo run --bin moq-token -- sign --key /tmp/rust-eddsa-private.jwk --root room --publish stream1 --publish stream2 --subscribe feed1
 	const RUST_EDDSA_TOKEN =
 		"eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1dCI6WyJzdHJlYW0xIiwic3RyZWFtMiJdLCJnZXQiOlsiZmVlZDEiXX0.jezhAgTHQHdYkc15CBZP8zPKKJ0z5oVRwON4wPHeQ6xvIhoM5IkCs_4YRCEoG74t99pdVTQrwAMNrlfKm2O6DA";
 
@@ -96,7 +96,7 @@ describe("Rust-generated fixtures", () => {
 });
 
 describe("wrong key rejects token", () => {
-	// cargo run -p moq-token-cli -- generate --out /tmp/rust-hs256.jwk
+	// cargo run --bin moq-token -- generate --out /tmp/rust-hs256.jwk
 	const RUST_HS256_KEY = JSON.stringify({
 		alg: "HS256",
 		key_ops: ["verify", "sign"],
@@ -105,7 +105,7 @@ describe("wrong key rejects token", () => {
 		kid: "d55b1f13e6bda281",
 	});
 
-	// cargo run -p moq-token-cli -- sign --key /tmp/rust-hs256.jwk --root demo --publish alice --subscribe bob
+	// cargo run --bin moq-token -- sign --key /tmp/rust-hs256.jwk --root demo --publish alice --subscribe bob
 	const RUST_HS256_TOKEN =
 		"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1dCI6WyJhbGljZSJdLCJnZXQiOlsiYm9iIl19.eyOkZtTtj_MDkLF4Eu11cygb7B_6DyP-6e0TtwVE4UE";
 
@@ -128,7 +128,7 @@ describe("wrong key rejects token", () => {
 
 	test("EdDSA token rejected by HS256 key", async () => {
 		const key = load(RUST_HS256_KEY);
-		// cargo run -p moq-token-cli -- sign --key /tmp/rust-eddsa-private.jwk --root room --publish stream1 --publish stream2 --subscribe feed1
+		// cargo run --bin moq-token -- sign --key /tmp/rust-eddsa-private.jwk --root room --publish stream1 --publish stream2 --subscribe feed1
 		const eddsaToken =
 			"eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1dCI6WyJzdHJlYW0xIiwic3RyZWFtMiJdLCJnZXQiOlsiZmVlZDEiXX0.jezhAgTHQHdYkc15CBZP8zPKKJ0z5oVRwON4wPHeQ6xvIhoM5IkCs_4YRCEoG74t99pdVTQrwAMNrlfKm2O6DA";
 		await expect(verify(key, eddsaToken, "room")).rejects.toThrow();

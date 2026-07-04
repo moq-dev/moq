@@ -153,7 +153,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 
-**When a command-line tool's interface changes (a flag, argument, subcommand, or positional renamed/added/removed/reordered), update every doc that shows an example invocation, not just the tool's primary page.** Sample commands for `moq-cli`, `moq-relay`, and `moq-token-cli` are scattered across `doc/bin/`, `doc/lib/`, `doc/setup/`, and `doc/concept/`, plus the `justfile`s under `demo/`. Grep the whole repo for the binary name and reconcile each hit against the binary's `--help`. A stale example that no longer parses is worse than no example.
+**When a command-line tool's interface changes (a flag, argument, subcommand, or positional renamed/added/removed/reordered), update every doc that shows an example invocation, not just the tool's primary page.** Sample commands for `moq-cli`, `moq-relay`, and `moq-token` are scattered across `doc/bin/`, `doc/lib/`, `doc/setup/`, and `doc/concept/`, plus the `justfile`s under `demo/`. Grep the whole repo for the binary name and reconcile each hit against the binary's `--help`. A stale example that no longer parses is worse than no example.
 
 ## Branch Targeting
 
