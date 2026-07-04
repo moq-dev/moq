@@ -1,9 +1,27 @@
 import { expect, test } from "bun:test";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { TrackProducer } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "./catalog.ts";
+
+const videoConfig: Catalog.VideoConfig = {
+	codec: "vp8",
+	container: { kind: "legacy" },
+	codedWidth: Catalog.u53(1280),
+	codedHeight: Catalog.u53(720),
+};
+
+const audioConfig: Catalog.AudioConfig = {
+	codec: "opus",
+	container: { kind: "legacy" },
+	sampleRate: Catalog.u53(48_000),
+	numberOfChannels: Catalog.u53(2),
+};
+
+async function settled<T>(promise: Promise<T>): Promise<"pending" | T> {
+	return await Promise.race([promise, new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0))]);
+}
 
 test("catalog producer seeds subscribers and fans out edits", async () => {
 	const catalog = new CatalogProducer();
@@ -28,6 +46,81 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	const update = await consumer.next();
 	expect(update?.video).toEqual({ renditions: {} });
 	expect(update?.scte35).toEqual({ splices: [] });
+
+	effect.close();
+});
+
+test("catalog reservation withholds the first snapshot", async () => {
+	const catalog = new CatalogProducer();
+	const reserved = catalog.reserve();
+
+	const effect = new Effect();
+	const track = new TrackProducer("catalog.json");
+	catalog.serve(track, effect);
+	const consumer = new Json.Consumer<Catalog.Root>(track.subscribe());
+	const next = consumer.next();
+
+	catalog.mutate((c) => {
+		c.video = { renditions: { "video/hd": videoConfig } };
+	});
+	expect(await settled(next)).toBe("pending");
+
+	reserved.close();
+	expect((await next)?.video).toEqual({ renditions: { "video/hd": videoConfig } });
+
+	effect.close();
+});
+
+test("reserved renditions publish one complete first snapshot", async () => {
+	const catalog = new CatalogProducer();
+	const reserved = catalog.reserve();
+	const video = reserved.video("video/hd");
+	const audio = reserved.audio("audio/data");
+	reserved.close();
+
+	const effect = new Effect();
+	const track = new TrackProducer("catalog.json");
+	catalog.serve(track, effect);
+	const consumer = new Json.Consumer<Catalog.Root>(track.subscribe());
+	const next = consumer.next();
+
+	video.set(videoConfig);
+	expect(await settled(next)).toBe("pending");
+
+	audio.set(audioConfig);
+	const first = await next;
+	expect(first?.video).toEqual({ renditions: { "video/hd": videoConfig } });
+	expect(first?.audio).toEqual({ renditions: { "audio/data": audioConfig } });
+
+	video.update((config) => {
+		config.bitrate = Catalog.u53(1_000_000);
+	});
+	expect((await consumer.next())?.video?.renditions["video/hd"]?.bitrate).toBe(Catalog.u53(1_000_000));
+
+	audio.close();
+	expect((await consumer.next())?.audio).toBeUndefined();
+
+	video.close();
+	effect.close();
+});
+
+test("untouched reservations do not publish an empty catalog", async () => {
+	const catalog = new CatalogProducer();
+	const reserved = catalog.reserve();
+
+	const effect = new Effect();
+	const track = new TrackProducer("catalog.json");
+	catalog.serve(track, effect);
+	const consumer = new Json.Consumer<Catalog.Root>(track.subscribe());
+	const next = consumer.next();
+
+	reserved.close();
+	expect(await settled(next)).toBe("pending");
+
+	catalog.mutate((c) => {
+		c.scte35 = { splices: [] };
+	});
+	expect(await next).toEqual({ scte35: { splices: [] } });
 
 	effect.close();
 });
