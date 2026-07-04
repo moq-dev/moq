@@ -367,7 +367,7 @@ async fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
 	pumps: &mut tokio::task::JoinSet<()>,
-	broadcast: &moq_net::BroadcastConsumer,
+	broadcast: &moq_net::broadcast::Consumer,
 	element: &glib::WeakRef<super::MoqSrc>,
 ) -> Result<()> {
 	struct Desired {

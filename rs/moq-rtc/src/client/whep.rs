@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::{Error, Result, client::Client, ingest::IngestSink, session};
 
-pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::BroadcastProducer) -> Result<()> {
+pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcast::Producer) -> Result<()> {
 	let sink = Box::new(IngestSink::new(broadcast)?);
 
 	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;

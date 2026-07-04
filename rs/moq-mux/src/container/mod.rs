@@ -91,7 +91,7 @@ pub trait Container {
 	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error> + From<MissingKeyframe>;
 
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;
+	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error>;
 
 	/// Poll the next moq-lite frame from `group` and decode it into media
 	/// frames. Returns `Ok(None)` when the group has ended. A single call
@@ -99,14 +99,14 @@ pub trait Container {
 	/// fragment).
 	fn poll_read(
 		&self,
-		group: &mut moq_net::GroupConsumer,
+		group: &mut moq_net::group::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
 	/// Async wrapper around [`Self::poll_read`].
 	fn read(
 		&self,
-		group: &mut moq_net::GroupConsumer,
+		group: &mut moq_net::group::Consumer,
 	) -> impl std::future::Future<Output = Result<Option<Vec<Frame>>, Self::Error>>
 	where
 		Self: Sync,

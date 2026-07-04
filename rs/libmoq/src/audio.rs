@@ -144,7 +144,7 @@ struct AudioTaskEntry {
 impl Audio {
 	pub fn publish(
 		&mut self,
-		broadcast: &mut moq_net::BroadcastProducer,
+		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
 		name: &str,
 		input: moq_audio::EncoderInput,
@@ -168,7 +168,7 @@ impl Audio {
 
 	pub fn consume(
 		&mut self,
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: &str,
 		output: moq_audio::DecoderOutput,

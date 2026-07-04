@@ -1,13 +1,12 @@
+use crate::{broadcast, frame, group, origin, track};
 use std::collections::{HashMap, hash_map::Entry};
 
 use std::sync::Arc;
 
 use crate::{
-	BroadcastDynamic, BroadcastInfo, Error, FrameInfo, FrameProducer, GroupInfo, GroupProducer, OriginProducer,
-	OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
+	Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
-	model::BroadcastProducer,
 };
 
 use super::{Message, Version};
@@ -30,7 +29,7 @@ struct State {
 }
 
 struct TrackState {
-	producer: TrackProducer,
+	producer: track::Producer,
 	alias: Option<u64>,
 	/// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
 	/// Dropping on subscription end records `subscriptions_closed`.
@@ -38,7 +37,7 @@ struct TrackState {
 }
 
 struct BroadcastState {
-	producer: BroadcastProducer,
+	producer: broadcast::Producer,
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -46,7 +45,7 @@ struct BroadcastState {
 	/// Announcement guard into our origin. Dropped when the entry is removed,
 	/// which unannounces the broadcast.
 	#[allow(dead_code)]
-	publish: OriginPublish,
+	publish: origin::Publish,
 
 	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
 	/// held for as long as the broadcast is announced into our origin.
@@ -56,7 +55,7 @@ struct BroadcastState {
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
-	origin: OriginProducer,
+	origin: origin::Producer,
 	control: Control,
 	stats: StatsHandle,
 	/// Per-session ingress broadcast-subscription tracker. Each upstream
@@ -74,7 +73,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: OriginProducer, control: Control, stats: StatsHandle, version: Version) -> Self {
+	pub fn new(session: S, origin: origin::Producer, control: Control, stats: StatsHandle, version: Version) -> Self {
 		let broadcasts = stats.subscriber_broadcasts();
 		Self {
 			session,
@@ -447,7 +446,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
+	fn start_announce(&mut self, path: PathOwned) -> Result<broadcast::Producer, Error> {
 		let abs = self.origin.absolute(&path).to_owned();
 		// Count the broadcast name length per announce (not the encoded message
 		// size, so framing overhead isn't charged), keyed by path so it's
@@ -469,7 +468,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let broadcast = BroadcastInfo { hops }.produce();
+				let broadcast = broadcast::Info { hops }.produce();
 
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a
@@ -538,7 +537,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let namespace = msg.track_namespace.to_owned();
 
 		// Announce the broadcast first so the track is born from it (inheriting the
-		// broadcast's Arc<BroadcastInfo>). Undo the announce on any error path below.
+		// broadcast's Arc<broadcast::Info>). Undo the announce on any error path below.
 		let mut broadcast = self.start_announce(namespace.clone())?;
 		let track = match broadcast.create_track(msg.track_name.to_string(), None) {
 			Ok(track) => track,
@@ -584,7 +583,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
+	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
 		loop {
 			let request = tokio::select! {
 				request = broadcast.requested_track() => match request {
@@ -609,7 +608,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, request: TrackRequest) {
+	async fn run_subscribe(
+		&mut self,
+		broadcast_path: Path<'_>,
+		broadcast: broadcast::Dynamic,
+		request: track::Request,
+	) {
 		// Accept right away: IETF group data can arrive before SubscribeOk, so we
 		// need the producer in place to route it. This also unblocks the
 		// downstream subscriber's `consume_track`.
@@ -617,7 +621,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Set the track timescale to microseconds: IETF object timestamps default to
 		// microseconds, and `create_frame` normalizes each frame into the track scale.
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
-		let info = crate::TrackInfo::default().with_timescale(crate::Timescale::MICRO);
+		let info = track::Info::default().with_timescale(crate::Timescale::MICRO);
 		let mut track = request.accept(info);
 
 		let request_id = match self.control.next_request_id().await {
@@ -730,7 +734,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		track: &TrackProducer,
+		track: &track::Producer,
 	) -> Result<(), Error> {
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
@@ -792,7 +796,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
-			let group_info = GroupInfo {
+			let group_info = group::Info {
 				sequence: group.group_id,
 			};
 			let producer = track.producer.create_group(group_info)?;
@@ -828,7 +832,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
-		mut producer: GroupProducer,
+		mut producer: group::Producer,
 		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
@@ -852,7 +856,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					let mut frame = match timestamp {
-						Some(ts) => producer.create_frame(FrameInfo { size: 0, timestamp: ts })?,
+						Some(ts) => producer.create_frame(frame::Info { size: 0, timestamp: ts })?,
 						None => producer.create_frame_now(0)?,
 					};
 					track_stats.frame();
@@ -866,7 +870,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `create_frame*` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
 				let mut frame = match timestamp {
-					Some(ts) => producer.create_frame(FrameInfo { size, timestamp: ts })?,
+					Some(ts) => producer.create_frame(frame::Info { size, timestamp: ts })?,
 					None => producer.create_frame_now(size)?,
 				};
 				track_stats.frame();
@@ -886,7 +890,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_frame(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		mut frame: FrameProducer,
+		mut frame: frame::Producer,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {

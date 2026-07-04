@@ -43,17 +43,17 @@ impl From<MoqSubscription> for moq_net::Subscription {
 
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
-	inner: moq_net::BroadcastConsumer,
+	inner: moq_net::broadcast::Consumer,
 }
 
 impl MoqBroadcastConsumer {
-	pub(crate) fn new(inner: moq_net::BroadcastConsumer) -> Self {
+	pub(crate) fn new(inner: moq_net::broadcast::Consumer) -> Self {
 		Self { inner }
 	}
 
-	/// Access the underlying `moq_net::BroadcastConsumer` for sibling
+	/// Access the underlying `moq_net::broadcast::Consumer` for sibling
 	/// modules (e.g. `audio`) that need to subscribe a typed track.
-	pub(crate) fn inner(&self) -> &moq_net::BroadcastConsumer {
+	pub(crate) fn inner(&self) -> &moq_net::broadcast::Consumer {
 		&self.inner
 	}
 }
@@ -175,15 +175,15 @@ impl MoqBroadcastConsumer {
 // ---- Track Consumer ----
 
 struct TrackInner {
-	track: moq_net::TrackSubscriber,
+	track: moq_net::track::Subscriber,
 }
 
 impl TrackInner {
-	async fn recv_group(&mut self) -> Result<Option<moq_net::GroupConsumer>, MoqError> {
+	async fn recv_group(&mut self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
 		Ok(self.track.recv_group().await?)
 	}
 
-	async fn next_group(&mut self) -> Result<Option<moq_net::GroupConsumer>, MoqError> {
+	async fn next_group(&mut self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
 		Ok(self.track.next_group().await?)
 	}
 
@@ -198,7 +198,7 @@ pub struct MoqTrackConsumer {
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_net::TrackSubscriber) -> Self {
+	pub(crate) fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
 			task: Task::new(TrackInner { track }),
 		}
@@ -253,7 +253,7 @@ impl MoqTrackConsumer {
 }
 
 struct GroupInner {
-	group: moq_net::GroupConsumer,
+	group: moq_net::group::Consumer,
 }
 
 impl GroupInner {
@@ -269,7 +269,7 @@ pub struct MoqGroupConsumer {
 }
 
 impl MoqGroupConsumer {
-	pub(crate) fn new(group: moq_net::GroupConsumer) -> Self {
+	pub(crate) fn new(group: moq_net::group::Consumer) -> Self {
 		Self {
 			sequence: group.sequence,
 			task: Task::new(GroupInner { group }),

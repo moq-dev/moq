@@ -16,7 +16,7 @@ pub struct Consumer<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
-	pub fn new(track: moq_net::TrackSubscriber) -> Self {
+	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
 			inner: moq_json::Consumer::new(track, moq_json::ConsumerConfig::default()),
 		}
@@ -25,7 +25,7 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Create a consumer for the DEFLATE-compressed catalog track (`catalog.json.z`).
 	///
 	/// The track must be the compressed one (see [`hang::Catalog::COMPRESSED_NAME`]).
-	pub fn compressed(track: moq_net::TrackSubscriber) -> Self {
+	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
 		let mut config = moq_json::ConsumerConfig::default();
 		config.compression = true;
 		Self {
@@ -51,8 +51,8 @@ impl<E: CatalogExt> Consumer<E> {
 	}
 }
 
-impl<E: CatalogExt> From<moq_net::TrackSubscriber> for Consumer<E> {
-	fn from(inner: moq_net::TrackSubscriber) -> Self {
+impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
+	fn from(inner: moq_net::track::Subscriber) -> Self {
 		Self::new(inner)
 	}
 }
@@ -67,9 +67,9 @@ mod test {
 	/// born from their broadcast (no public `TrackProducer::new`).
 	fn track_producer(
 		name: impl Into<std::sync::Arc<str>>,
-		info: impl Into<Option<moq_net::TrackInfo>>,
-	) -> moq_net::TrackProducer {
-		moq_net::BroadcastInfo::new()
+		info: impl Into<Option<moq_net::track::Info>>,
+	) -> moq_net::track::Producer {
+		moq_net::broadcast::Info::new()
 			.produce()
 			.create_track(name, info)
 			.unwrap()

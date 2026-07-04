@@ -1,3 +1,4 @@
+use crate::{announce, frame, group, origin, track};
 use std::{sync::Arc, time::Duration};
 
 use bytes::Buf;
@@ -5,13 +6,12 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, TrackSubscriber,
+	AsPath, Error, Origin, OriginList, StatsHandle as MoqStats,
 	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	model::{FrameConsumer, GroupConsumer},
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -20,7 +20,7 @@ use super::Version;
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin we read local broadcasts from.
-	pub origin: OriginConsumer,
+	pub origin: origin::Consumer,
 	/// Stats aggregator for this session's egress. Use [`MoqStats::default`]
 	/// to opt out.
 	pub stats: MoqStats,
@@ -29,7 +29,7 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
-	origin: OriginConsumer,
+	origin: origin::Consumer,
 	stats: MoqStats,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
@@ -59,7 +59,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
-		// `OriginConsumer` and friends are cheap to clone (shared handles), so each control
+		// `origin::Consumer` and friends are cheap to clone (shared handles), so each control
 		// stream gets its own task and they all make progress independently.
 		let this = Arc::new(self);
 
@@ -191,8 +191,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	#[allow(clippy::too_many_arguments)]
 	async fn run_announce(
 		stream: &mut Stream<S, Version>,
-		origin: &OriginConsumer,
-		announced: &mut AnnounceConsumer,
+		origin: &origin::Consumer,
+		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
 		// Peer's session-level origin id, sent in AnnounceInterest. We skip
@@ -338,7 +338,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let absolute = origin.absolute(&path).to_owned();
 
 						match event {
-							crate::Announced::Active(active) => {
+							announce::Event::Active(active) => {
 								let info = active.info();
 								let Some(hops) = Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
@@ -352,7 +352,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 							}
-							crate::Announced::Restart(active) => {
+							announce::Event::Restart(active) => {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
 								// `Active` for an already-announced path). Older versions never defined
 								// that, so split it into an unannounce followed by a fresh announce.
@@ -389,7 +389,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									}
 								}
 							}
-							crate::Announced::Ended => {
+							announce::Event::Ended => {
 								tracing::debug!(broadcast = %absolute, "unannounce");
 								// Count the name length whether or not a guard is held: the Ended
 								// message is sent even for announces we filtered out above.
@@ -462,7 +462,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track_info(&self, stream: &mut Stream<S, Version>, request: &lite::Track<'_>) -> Result<(), Error> {
 		// The peer requested this exact path, so it has already seen an announcement for it.
-		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
+		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&request.broadcast).await?;
 		let info = broadcast.track(&request.track)?.info().await?;
@@ -495,7 +495,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// We just received a subscribe for this exact path, so by definition the peer has
 		// already seen an announcement for it. `request_broadcast` resolves an announced
-		// broadcast immediately; if it isn't announced it falls back to an `OriginDynamic`
+		// broadcast immediately; if it isn't announced it falls back to an `origin::Dynamic`
 		// handler (or resolves to an error when there is none).
 		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
@@ -537,7 +537,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		broadcast: kio::Pending<crate::BroadcastRequested>,
+		broadcast: kio::Pending<origin::Requested>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -639,7 +639,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(broadcast = %absolute, %track, %group, "fetch started");
 
 		// The peer fetched this exact path, so it has already seen an announcement for it.
-		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
+		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
@@ -662,7 +662,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch(
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
-		broadcast: kio::Pending<crate::BroadcastRequested>,
+		broadcast: kio::Pending<origin::Requested>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
@@ -672,7 +672,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let group = track
 			.fetch_group(
 				fetch.group,
-				crate::Fetch {
+				group::Fetch {
 					priority: fetch.priority,
 				},
 			)
@@ -710,12 +710,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 /// (catalogs, control channels, IETF transport).
 ///
 /// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
-/// model layer (`GroupProducer::create_frame`) already converted the timestamp
+/// model layer (`group::Producer::create_frame`) already converted the timestamp
 /// into the track timescale, so its raw value goes straight onto the wire. Mirrors
 /// the decode in the subscriber's `run_group`.
 async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
-	frame: &FrameConsumer,
+	frame: &frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 ) -> Result<(), Error> {
@@ -752,7 +752,7 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 /// stream up front.
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
-	frame: &mut FrameConsumer,
+	frame: &mut frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 	track_stats: &crate::PublisherTrack,
@@ -791,7 +791,7 @@ struct Subscription<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
-		mut track: TrackSubscriber,
+		mut track: track::Subscriber,
 		start_group: Option<u64>,
 		initial_end_group: Option<u64>,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
@@ -872,7 +872,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	fn spawn_serve(&mut self, group: GroupConsumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
+	fn spawn_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
@@ -887,7 +887,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut self,
 		sequence: u64,
 		mut priority: PriorityHandle,
-		mut group: GroupConsumer,
+		mut group: group::Consumer,
 	) -> Result<(), Error> {
 		let msg = lite::Group {
 			subscribe: self.id,
@@ -924,7 +924,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		mut frame: FrameConsumer,
+		mut frame: frame::Consumer,
 		prev_ts: &mut u64,
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
@@ -945,8 +945,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		group: &mut GroupConsumer,
-	) -> Result<Option<FrameConsumer>, Error> {
+		group: &mut group::Consumer,
+	) -> Result<Option<frame::Consumer>, Error> {
 		loop {
 			tokio::select! {
 				biased;
@@ -963,7 +963,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		frame: &mut FrameConsumer,
+		frame: &mut frame::Consumer,
 	) -> Result<Option<bytes::Bytes>, Error> {
 		loop {
 			tokio::select! {

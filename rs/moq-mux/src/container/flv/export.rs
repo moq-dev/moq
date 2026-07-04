@@ -77,7 +77,7 @@ impl Flavor {
 /// keyframe). Only Legacy and LOC container tracks (raw codec payloads) are
 /// supported; CMAF tracks are rejected.
 pub struct Export {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
 
@@ -121,14 +121,14 @@ impl FlvTrack {
 impl Export {
 	/// Subscribe to `broadcast` and produce FLV byte chunks, using the default
 	/// catalog format ([`CatalogFormat::Hang`]).
-	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+	pub async fn new(broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
 		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `broadcast` and produce FLV byte chunks, selecting an explicit
 	/// `catalog_format` for track discovery.
 	pub async fn with_catalog_format(
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
 		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;

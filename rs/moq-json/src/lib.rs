@@ -130,14 +130,14 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Producer<T> {
 	/// Create a subscriber for the underlying track.
-	pub fn consume(&self) -> moq_net::TrackSubscriber {
+	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.lock().unwrap().track.subscribe(None)
 	}
 }
 
 impl<T: Serialize> Producer<T> {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::TrackProducer, config: ProducerConfig) -> Self {
+	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
@@ -232,8 +232,8 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
 struct Inner {
-	track: moq_net::TrackProducer,
-	group: Option<moq_net::GroupProducer>,
+	track: moq_net::track::Producer,
+	group: Option<moq_net::group::Producer>,
 	// Per-group DEFLATE encoder, `Some` while a compressed group is open (recreated per group).
 	encoder: Option<Encoder>,
 	last: Option<Value>,
@@ -356,8 +356,8 @@ impl Inner {
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
 pub struct Consumer<T> {
-	track: moq_net::TrackSubscriber,
-	group: Option<moq_net::GroupConsumer>,
+	track: moq_net::track::Subscriber,
+	group: Option<moq_net::group::Consumer>,
 	// Whether frames are DEFLATE-compressed, matching the producer's [`ProducerConfig::compression`].
 	compressed: bool,
 	// Per-group DEFLATE decoder, built lazily on the first compressed frame of a group.
@@ -372,7 +372,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	///
 	/// Set [`ConsumerConfig::compression`] to read a track written by a producer with
 	/// [`ProducerConfig::compression`] on.
-	pub fn new(track: moq_net::TrackSubscriber, config: ConsumerConfig) -> Self {
+	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
 		Self {
 			track,
 			group: None,
@@ -521,12 +521,12 @@ mod test {
 	}
 
 	/// A consumer reading compressed frames.
-	fn deflate_consumer(track: moq_net::TrackSubscriber) -> Consumer<Value> {
+	fn deflate_consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
 		Consumer::new(track, ConsumerConfig { compression: true })
 	}
 
-	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::TrackSubscriber) {
-		let track = moq_net::BroadcastInfo::new()
+	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
@@ -535,7 +535,7 @@ mod test {
 	}
 
 	/// Drain every value currently available from a plaintext consumer without blocking.
-	fn drain(track: moq_net::TrackSubscriber) -> Vec<Value> {
+	fn drain(track: moq_net::track::Subscriber) -> Vec<Value> {
 		drain_with(Consumer::<Value>::new(track, ConsumerConfig::default()))
 	}
 
@@ -691,7 +691,7 @@ mod test {
 			scte35: Option<u32>,
 		}
 
-		let track = moq_net::BroadcastInfo::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
@@ -758,7 +758,7 @@ mod test {
 	fn open_group_pends_after_track_finish() {
 		// A group appended before the track finishes may still deliver frames, so the consumer must
 		// keep waiting on it rather than ending the stream. Regression for the backlog-collapse poll.
-		let mut track = moq_net::BroadcastInfo::new()
+		let mut track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();

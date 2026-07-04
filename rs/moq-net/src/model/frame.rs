@@ -1,3 +1,4 @@
+use crate::group;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5,13 +6,13 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, GroupInfo, IntoBytes, Result, Timestamp};
+use crate::{Error, IntoBytes, Result, Timestamp};
 
 /// Maximum payload size accepted for a single frame.
 ///
 /// The receive path trusts the declared frame size when storing the payload, so an
 /// untrusted peer could otherwise request a multi-gigabyte allocation with a
-/// single varint. [`FrameProducer::new`] enforces this for every frame and
+/// single varint. [`Producer::new`] enforces this for every frame and
 /// rejects an oversized declared size with [`Error::FrameTooLarge`] before the
 /// payload is stored.
 ///
@@ -23,37 +24,37 @@ pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 /// A chunk of data with an upfront size and a presentation timestamp.
 ///
 /// Note that this is just the header.
-/// You use [FrameProducer] and [FrameConsumer] to deal with the frame payload, potentially chunked.
+/// You use [Producer] and [Consumer] to deal with the frame payload, potentially chunked.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FrameInfo {
+pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
 	/// Presentation timestamp.
 	///
-	/// [`crate::GroupProducer::create_frame`] converts it into the parent track's
+	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// Use [`crate::GroupProducer::create_frame_now`] /
-	/// [`crate::GroupProducer::write_frame_now`] to stamp wall-clock time instead of
+	/// Use [`group::Producer::create_frame_now`] /
+	/// [`group::Producer::write_frame_now`] to stamp wall-clock time instead of
 	/// supplying one explicitly.
 	pub timestamp: Timestamp,
 }
 
-impl FrameInfo {
+impl Info {
 	/// Create an unparented producer for the frame.
 	///
 	/// Test-only: real frames are constructed via
-	/// [`crate::GroupProducer::create_frame`], which threads the parent
-	/// [`GroupInfo`] down and validates the timestamp against the track's
+	/// [`group::Producer::create_frame`], which threads the parent
+	/// [`group::Info`] down and validates the timestamp against the track's
 	/// timescale. This helper defaults the parent group for in-crate tests. Returns
-	/// [`Error::FrameTooLarge`] if [`FrameInfo::size`] exceeds [`MAX_FRAME_SIZE`].
+	/// [`Error::FrameTooLarge`] if [`Info::size`] exceeds [`MAX_FRAME_SIZE`].
 	#[cfg(test)]
-	pub(crate) fn produce(self) -> Result<FrameProducer> {
-		FrameProducer::new(self, GroupInfo { sequence: 0 })
+	pub(crate) fn produce(self) -> Result<Producer> {
+		Producer::new(self, group::Info { sequence: 0 })
 	}
 }
 
-/// Payload storage shared between a [FrameProducer] and many [FrameConsumer]s.
+/// Payload storage shared between a [Producer] and many [Consumer]s.
 ///
 /// A whole-frame [`Bytes`] write is stored directly. Chunked writes fall back to
 /// one mutable heap allocation sized to the declared frame.
@@ -186,36 +187,36 @@ struct FrameState {
 
 /// Writes a frame's payload in one or more chunks.
 ///
-/// The total bytes written must exactly match [FrameInfo::size].
+/// The total bytes written must exactly match [Info::size].
 /// Call [Self::finish] after writing all bytes to verify correctness.
 ///
 /// A single whole-frame [`write`](Self::write) keeps the caller's allocation
 /// (zero-copy); chunked writes copy into one buffer sized to the declared frame.
-pub struct FrameProducer {
-	info: FrameInfo,
-	// The parent group's info, inherited from [`crate::GroupProducer::create_frame`]
+pub struct Producer {
+	info: Info,
+	// The parent group's info, inherited from [`group::Producer::create_frame`]
 	// so the ownership chain reaches the leaf. A small `Copy` value; carried for
 	// identity/debugging (the timestamp-vs-timescale check lives on the group).
-	group: GroupInfo,
+	group: group::Info,
 	state: kio::Producer<FrameState>,
 	buf: FrameBuf,
 }
 
-impl std::ops::Deref for FrameProducer {
-	type Target = FrameInfo;
+impl std::ops::Deref for Producer {
+	type Target = Info;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
 	}
 }
 
-impl FrameProducer {
+impl Producer {
 	/// Create a new frame producer for the given frame header.
 	///
 	/// The payload storage chokepoint: rejects a frame whose declared
-	/// [`FrameInfo::size`] exceeds [`MAX_FRAME_SIZE`] with [`Error::FrameTooLarge`]
+	/// [`Info::size`] exceeds [`MAX_FRAME_SIZE`] with [`Error::FrameTooLarge`]
 	/// before storing the untrusted payload.
-	pub(crate) fn new(info: FrameInfo, group: GroupInfo) -> Result<Self> {
+	pub(crate) fn new(info: Info, group: group::Info) -> Result<Self> {
 		if info.size > MAX_FRAME_SIZE {
 			return Err(Error::FrameTooLarge);
 		}
@@ -229,7 +230,7 @@ impl FrameProducer {
 	}
 
 	/// The parent group this frame belongs to.
-	pub fn group(&self) -> &GroupInfo {
+	pub fn group(&self) -> &group::Info {
 		&self.group
 	}
 
@@ -292,7 +293,7 @@ impl FrameProducer {
 
 	/// Verify that all bytes have been written.
 	///
-	/// Returns [Error::WrongSize] if the bytes written don't match [FrameInfo::size].
+	/// Returns [Error::WrongSize] if the bytes written don't match [Info::size].
 	pub fn finish(&mut self) -> Result<()> {
 		let written = self.buf.written(Ordering::Acquire);
 		if written != self.buf.capacity() {
@@ -313,8 +314,8 @@ impl FrameProducer {
 	}
 
 	/// Create a new consumer for the frame.
-	pub fn consume(&self) -> FrameConsumer {
-		FrameConsumer {
+	pub fn consume(&self) -> Consumer {
+		Consumer {
 			info: self.info,
 			state: self.state.consume(),
 			buf: self.buf.clone(),
@@ -355,7 +356,7 @@ impl FrameProducer {
 	}
 }
 
-impl Clone for FrameProducer {
+impl Clone for Producer {
 	fn clone(&self) -> Self {
 		Self {
 			info: self.info,
@@ -368,8 +369,8 @@ impl Clone for FrameProducer {
 
 /// Used to consume a frame's worth of data, streaming as bytes arrive.
 #[derive(Clone)]
-pub struct FrameConsumer {
-	info: FrameInfo,
+pub struct Consumer {
+	info: Info,
 	state: kio::Consumer<FrameState>,
 	buf: FrameBuf,
 	// Byte offset into the buffer; cloned consumers inherit this offset and
@@ -377,15 +378,15 @@ pub struct FrameConsumer {
 	read_idx: usize,
 }
 
-impl std::ops::Deref for FrameConsumer {
-	type Target = FrameInfo;
+impl std::ops::Deref for Consumer {
+	type Target = Info;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
 	}
 }
 
-impl FrameConsumer {
+impl Consumer {
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -506,7 +507,7 @@ mod test {
 
 	#[test]
 	fn single_chunk_roundtrip() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 5,
 			timestamp: Timestamp::ZERO,
 		}
@@ -524,7 +525,7 @@ mod test {
 	fn whole_bytes_write_reuses_allocation() {
 		let input = Bytes::from(vec![1, 2, 3, 4, 5]);
 		let input_ptr = input.as_ptr();
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: input.len() as u64,
 			timestamp: Timestamp::ZERO,
 		}
@@ -543,7 +544,7 @@ mod test {
 	// non-empty write overruns it and must error cleanly rather than panic.
 	#[test]
 	fn write_after_whole_frame_is_rejected() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 3,
 			timestamp: Timestamp::ZERO,
 		}
@@ -552,7 +553,10 @@ mod test {
 		producer.write(Bytes::from_static(b"abc")).unwrap();
 
 		assert_eq!(producer.remaining(), 0);
-		assert!(matches!(producer.write(Bytes::from_static(b"x")), Err(Error::WrongSize)));
+		assert!(matches!(
+			producer.write(Bytes::from_static(b"x")),
+			Err(Error::WrongSize)
+		));
 
 		producer.finish().unwrap();
 		let mut consumer = producer.consume();
@@ -562,7 +566,7 @@ mod test {
 
 	#[test]
 	fn multi_chunk_read_all() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 10,
 			timestamp: Timestamp::ZERO,
 		}
@@ -579,7 +583,7 @@ mod test {
 
 	#[test]
 	fn read_chunk_sequential() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 10,
 			timestamp: Timestamp::ZERO,
 		}
@@ -603,7 +607,7 @@ mod test {
 
 	#[test]
 	fn read_all_chunks() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 10,
 			timestamp: Timestamp::ZERO,
 		}
@@ -621,7 +625,7 @@ mod test {
 
 	#[test]
 	fn finish_checks_remaining() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 5,
 			timestamp: Timestamp::ZERO,
 		}
@@ -634,7 +638,7 @@ mod test {
 
 	#[test]
 	fn write_too_many_bytes() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 3,
 			timestamp: Timestamp::ZERO,
 		}
@@ -648,7 +652,7 @@ mod test {
 	fn rejects_oversized_frame() {
 		// The allocation chokepoint refuses an oversized declared size before any
 		// buffer is allocated, so a single varint can't request a huge allocation.
-		let result = FrameInfo {
+		let result = Info {
 			size: MAX_FRAME_SIZE + 1,
 			timestamp: Timestamp::ZERO,
 		}
@@ -658,7 +662,7 @@ mod test {
 
 	#[test]
 	fn abort_propagates() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 5,
 			timestamp: Timestamp::ZERO,
 		}
@@ -673,7 +677,7 @@ mod test {
 
 	#[test]
 	fn empty_frame() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 0,
 			timestamp: Timestamp::ZERO,
 		}
@@ -688,7 +692,7 @@ mod test {
 
 	#[tokio::test]
 	async fn pending_then_ready() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 5,
 			timestamp: Timestamp::ZERO,
 		}
@@ -710,7 +714,7 @@ mod test {
 	fn multi_chunk_write_roundtrip() {
 		// A frame arriving as several chunks copies into the mutable buffer, with
 		// `remaining` tracking progress the way the receive loop drives it.
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 12,
 			timestamp: Timestamp::ZERO,
 		}
@@ -730,7 +734,7 @@ mod test {
 
 	#[test]
 	fn read_chunk_streams_partial_writes() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 6,
 			timestamp: Timestamp::ZERO,
 		}
@@ -755,7 +759,7 @@ mod test {
 
 	#[test]
 	fn cloned_consumer_independent_cursor() {
-		let mut producer = FrameInfo {
+		let mut producer = Info {
 			size: 10,
 			timestamp: Timestamp::ZERO,
 		}

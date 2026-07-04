@@ -41,7 +41,7 @@ impl Frame {
 	/// The timestamp is normalized to [`TIMESCALE`] (microseconds) on the wire so
 	/// peers using a different source scale (e.g. nanoseconds from MKV) can decode
 	/// without knowing the producer's internal scale.
-	pub fn encode(&self, group: &mut moq_net::GroupProducer) -> Result<(), Error> {
+	pub fn encode(&self, group: &mut moq_net::group::Producer) -> Result<(), Error> {
 		let timestamp = self.timestamp.convert(TIMESCALE)?;
 		let value = VarInt::try_from(timestamp.value()).map_err(moq_net::Error::from)?;
 
@@ -53,7 +53,7 @@ impl Frame {
 		// Stamp the moq-net frame timestamp too so Lite05+ can delta-encode it on the
 		// wire independently of the container-level prefix. `create_frame` converts it
 		// into the track's timescale; older drafts simply don't put it on the wire.
-		let net_frame = moq_net::FrameInfo {
+		let net_frame = moq_net::frame::Info {
 			size,
 			timestamp: self.timestamp,
 		};

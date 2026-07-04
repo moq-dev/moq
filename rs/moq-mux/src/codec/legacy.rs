@@ -124,7 +124,7 @@ impl<E: CatalogExt> Import<E> {
 	/// [`hang::container::TIMESCALE`] (e.g. via [`crate::import::unique_track`]).
 	pub fn new(
 		descriptor: &'static Descriptor,
-		track: moq_net::TrackProducer,
+		track: moq_net::track::Producer,
 		catalog: crate::catalog::Producer<E>,
 		config: Config,
 	) -> Self {

@@ -49,7 +49,7 @@ impl VideoTransform {
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
-	Subscribing(kio::Pending<moq_net::TrackSubscribe>),
+	Subscribing(kio::Pending<moq_net::track::Subscribe>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
 	/// the `Subscribing` variant (clippy `large_enum_variant`).
 	Active(Box<Consumer<HangContainer>>),
@@ -73,7 +73,7 @@ pub(crate) struct ExportSource {
 impl ExportSource {
 	/// Subscribe to a video rendition and build an `ExportSource`.
 	pub fn for_video(
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
 		config: &VideoConfig,
 		latency: Duration,
@@ -96,7 +96,7 @@ impl ExportSource {
 	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
 	pub fn for_video_raw(
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
 		config: &VideoConfig,
 		latency: Duration,
@@ -116,7 +116,7 @@ impl ExportSource {
 	/// Subscribe to an audio rendition. Audio has no codec-shape transform;
 	/// `description` is taken straight from the catalog.
 	pub fn for_audio(
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
 		config: &AudioConfig,
 		latency: Duration,
@@ -137,7 +137,7 @@ impl ExportSource {
 	/// No codec-shape transform and no description: the frames are Legacy-framed
 	/// verbatim bytes the muxer writes back out as PES or private sections.
 	pub fn for_stream(
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {

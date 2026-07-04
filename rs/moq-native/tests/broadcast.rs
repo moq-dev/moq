@@ -126,7 +126,10 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 
 	// Track with an explicit microsecond timescale (the default is milliseconds).
 	let mut track = broadcast
-		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
+		.create_track(
+			"video",
+			moq_net::track::Info::default().with_timescale(Timescale::MICRO),
+		)
 		.expect("failed to create track");
 
 	// Three frames where the middle PTS goes backwards (B-frame decode order) so the
@@ -135,7 +138,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let mut group = track.append_group().expect("failed to append group");
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_native::moq_net::FrameInfo {
+		let frame = moq_native::moq_net::frame::Info {
 			size: payload.len() as u64,
 			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
 		};
@@ -237,7 +240,10 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
-		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
+		.create_track(
+			"video",
+			moq_net::track::Info::default().with_timescale(Timescale::MICRO),
+		)
 		.expect("failed to create track");
 
 	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch
@@ -246,7 +252,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	let mut group = track.append_group().expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_native::moq_net::FrameInfo {
+		let frame = moq_native::moq_net::frame::Info {
 			size: payload.len() as u64,
 			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
 		};
@@ -349,8 +355,8 @@ async fn broadcast_moq_lite_05_fetch_webtransport() {
 async fn lite05_fetch_during_subscribe(scheme: &str) {
 	use moq_native::moq_net::{Timescale, Timestamp};
 
-	fn timestamped_frame(us: u64, payload: &str) -> moq_net::FrameInfo {
-		moq_net::FrameInfo {
+	fn timestamped_frame(us: u64, payload: &str) -> moq_net::frame::Info {
+		moq_net::frame::Info {
 			size: payload.len() as u64,
 			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
 		}
@@ -359,7 +365,10 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
-		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
+		.create_track(
+			"video",
+			moq_net::track::Info::default().with_timescale(Timescale::MICRO),
+		)
 		.expect("failed to create track");
 
 	// Group 0 is the "past" group only reachable via FETCH; group 1 is the latest,

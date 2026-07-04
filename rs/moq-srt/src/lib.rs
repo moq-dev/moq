@@ -2,7 +2,7 @@
 //!
 //! Runs an [SRT](https://www.haivision.com/products/srt-secure-reliable-transport/)
 //! listener and routes each connection by its stream-id `m=` mode against a
-//! [`moq_net::OriginProducer`]:
+//! [`moq_net::origin::Producer`]:
 //!
 //! - `m=publish` (the default): demux the MPEG-TS the connection carries with
 //!   [`moq_mux`] and publish it into the origin as an ordinary broadcast. The

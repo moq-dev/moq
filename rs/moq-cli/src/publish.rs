@@ -165,13 +165,13 @@ enum Source {
 /// a broadcast that the MoQ side announces.
 pub struct Publish {
 	source: Source,
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 }
 
 impl Publish {
 	/// Build a publisher decoding the given container format from stdin.
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
@@ -217,7 +217,7 @@ impl Publish {
 	/// Build a publisher capturing local devices (camera/screen and microphone).
 	#[cfg(feature = "capture")]
 	pub fn capture(args: &CaptureArgs) -> anyhow::Result<Self> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode()));
@@ -231,7 +231,7 @@ impl Publish {
 	}
 
 	/// A consumer of the broadcast being published, for announcing it on an Origin.
-	pub fn consume(&self) -> moq_net::BroadcastConsumer {
+	pub fn consume(&self) -> moq_net::broadcast::Consumer {
 		self.broadcast.consume()
 	}
 
@@ -391,7 +391,7 @@ mod tests {
 	/// `bbb.ts` into a broadcast that also holds the two ancillary tracks and
 	/// re-exporting with the `mpegts` catalog extension.
 	async fn manufacture_input() -> Vec<u8> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
@@ -400,7 +400,7 @@ mod tests {
 		let section = broadcast
 			.unique_track(
 				".scte35",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
 		let mut section_track = tscat::Track::new(SECTION_PID);
@@ -430,7 +430,7 @@ mod tests {
 		let pes = broadcast
 			.unique_track(
 				".data",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
 		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
@@ -498,7 +498,7 @@ mod tests {
 		.await;
 
 		// Re-import the round-tripped TS and inspect the recovered `mpegts` section.
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
@@ -550,7 +550,7 @@ mod tests {
 	}
 
 	/// Read the first frame of a verbatim track back as raw bytes.
-	async fn read_frame(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<u8> {
+	async fn read_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u8> {
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Duration::ZERO);
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())

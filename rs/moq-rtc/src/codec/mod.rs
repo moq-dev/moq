@@ -81,7 +81,7 @@ enum TrackConvert {
 
 impl Track {
 	/// Audio track for an Opus rendition.
-	pub async fn opus(broadcast: &moq_net::BroadcastConsumer, name: &str) -> Result<Self> {
+	pub async fn opus(broadcast: &moq_net::broadcast::Consumer, name: &str) -> Result<Self> {
 		let container = moq_mux::catalog::hang::Container::Legacy;
 		// `None` subscription => start at the latest (in-progress) group. Groups
 		// begin at a keyframe, so a late joiner gets a decodable start immediately
@@ -97,7 +97,7 @@ impl Track {
 	/// Video track. Codec inferred from `config.codec`; for H.264 / H.265 the
 	/// bitstream shape (inline vs out-of-band parameter sets) is inferred from
 	/// `config.description` (avc1/hvc1 vs avc3/hev1).
-	pub async fn video(broadcast: &moq_net::BroadcastConsumer, name: &str, config: &VideoConfig) -> Result<Self> {
+	pub async fn video(broadcast: &moq_net::broadcast::Consumer, name: &str, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
 		// `None` subscription => start at the latest (in-progress) group, which
 		// begins at a keyframe, so a late-joining peer gets a decodable start.

@@ -1,3 +1,4 @@
+use crate::{announce, group, origin, track};
 use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -5,10 +6,9 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, OriginConsumer, StatsHandle, Subscription, TrackSubscriber,
+	AsPath, Error, StatsHandle, Subscription,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
-	model::GroupConsumer,
 };
 
 use super::{Message, Version};
@@ -16,7 +16,7 @@ use super::{Message, Version};
 #[derive(Clone)]
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
-	origin: OriginConsumer,
+	origin: origin::Consumer,
 	control: Control,
 	stats: StatsHandle,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
@@ -27,7 +27,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: OriginConsumer, control: Control, stats: StatsHandle, version: Version) -> Self {
+	pub fn new(session: S, origin: origin::Consumer, control: Control, stats: StatsHandle, version: Version) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
 		Self {
 			session,
@@ -132,7 +132,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
-		// an `OriginDynamic` handler if one is registered.
+		// an `origin::Dynamic` handler if one is registered.
 		let broadcast = match self.origin.request_broadcast(&msg.track_namespace).await {
 			Ok(broadcast) => broadcast,
 			Err(_) => {
@@ -252,7 +252,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
 	async fn run_track(
 		&self,
-		mut track: TrackSubscriber,
+		mut track: track::Subscriber,
 		request_id: RequestId,
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
 	) -> Result<(), Error> {
@@ -304,7 +304,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		msg: ietf::GroupHeader,
 		priority: u8,
-		mut group: GroupConsumer,
+		mut group: group::Consumer,
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
@@ -521,15 +521,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let suffix = path.to_owned();
 
 			match event {
-				crate::Announced::Active(_) => {
+				announce::Event::Active(_) => {
 					self.announce_namespace(suffix, &mut namespace_streams).await?;
 				}
-				crate::Announced::Restart(_) => {
+				announce::Event::Restart(_) => {
 					// moq-transport has no RESTART; fall back to done + re-announce.
 					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
 					self.announce_namespace(suffix, &mut namespace_streams).await?;
 				}
-				crate::Announced::Ended => {
+				announce::Event::Ended => {
 					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
 				}
 			}
@@ -719,12 +719,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let absolute = origin.absolute(&path).to_owned();
 
 						match event {
-							crate::Announced::Active(_) => {
+							announce::Event::Active(_) => {
 								tracing::debug!(broadcast = %absolute, "namespace");
 								stream.writer.encode(&ietf::Namespace::ID).await?;
 								stream.writer.encode(&ietf::Namespace { suffix }).await?;
 							}
-							crate::Announced::Restart(_) => {
+							announce::Event::Restart(_) => {
 								// moq-transport has no RESTART; fall back to namespace_done + namespace.
 								tracing::debug!(broadcast = %absolute, "namespace_done");
 								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
@@ -733,7 +733,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								stream.writer.encode(&ietf::Namespace::ID).await?;
 								stream.writer.encode(&ietf::Namespace { suffix }).await?;
 							}
-							crate::Announced::Ended => {
+							announce::Event::Ended => {
 								tracing::debug!(broadcast = %absolute, "namespace_done");
 								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
 								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;

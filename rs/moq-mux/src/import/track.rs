@@ -14,7 +14,7 @@ use crate::catalog::hang::CatalogExt;
 /// leading bytes of the stream (caching any inline SPS/PPS). Any frames in the
 /// init buffer are published.
 fn build_h264_avc3<E: CatalogExt>(
-	track: moq_net::TrackProducer,
+	track: moq_net::track::Producer,
 	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
 ) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
@@ -30,7 +30,7 @@ fn build_h264_avc3<E: CatalogExt>(
 /// the avcC. avc1 has no splitter: each access unit is wrapped directly via
 /// [`crate::codec::h264::avc1_frame`].
 fn build_h264_avc1<E: CatalogExt>(
-	track: moq_net::TrackProducer,
+	track: moq_net::track::Producer,
 	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
 ) -> Result<(usize, crate::codec::h264::Import<E>)> {
@@ -42,7 +42,7 @@ fn build_h264_avc1<E: CatalogExt>(
 
 /// Build an H.265 split + import pair, resolving the config from `init`.
 fn build_h265<E: CatalogExt>(
-	track: moq_net::TrackProducer,
+	track: moq_net::track::Producer,
 	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
 ) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
@@ -56,7 +56,7 @@ fn build_h265<E: CatalogExt>(
 
 /// Build an AV1 split + import pair, resolving the config from `init`.
 fn build_av1<E: CatalogExt>(
-	track: moq_net::TrackProducer,
+	track: moq_net::track::Producer,
 	catalog: crate::catalog::Producer<E>,
 	init: &[u8],
 ) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
@@ -118,11 +118,11 @@ impl<E: CatalogExt> Track<E> {
 	/// Create an importer that publishes a single codec onto a reserved track.
 	///
 	/// The caller reserves the track (by name) with
-	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
+	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
 	/// the importer accepts it here, which is where the track's timescale is set.
 	/// The catalog rendition is registered once the codec config is resolved.
 	pub fn new(
-		request: moq_net::TrackRequest,
+		request: moq_net::track::Request,
 		catalog: crate::catalog::Producer<E>,
 		format: &str,
 		init: &[u8],
@@ -130,7 +130,7 @@ impl<E: CatalogExt> Track<E> {
 		// Accept at the legacy microsecond timescale, matching the frame timestamps
 		// the container stamps. A codec-specific timescale (e.g. the opus sample
 		// rate) would be chosen here instead.
-		let track = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
+		let track = request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
 		let kind = match format {
 			"avc1" | "avcc" => {
 				let (length_size, import) = build_h264_avc1(track, catalog, init)?;
@@ -282,7 +282,7 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
-	pub fn demand(&self) -> moq_net::TrackDemand {
+	pub fn demand(&self) -> moq_net::track::Demand {
 		match self.kind {
 			TrackKind::Avc3 { ref import, .. } => import.demand(),
 			TrackKind::Avc1 { ref import, .. } => import.demand(),
@@ -362,11 +362,11 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// Create an importer that publishes a single codec onto a reserved track.
 	///
 	/// The caller reserves the track with
-	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
+	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
 	/// the importer accepts it here at the legacy microsecond timescale (where a
 	/// codec-specific timescale would be chosen).
-	pub fn new(request: moq_net::TrackRequest, catalog: crate::catalog::Producer<E>, format: &str) -> Result<Self> {
-		let track = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
+	pub fn new(request: moq_net::track::Request, catalog: crate::catalog::Producer<E>, format: &str) -> Result<Self> {
+		let track = request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match format {
 			"avc3" | "h264" => TrackStreamKind::Avc3 {
@@ -512,7 +512,7 @@ impl<E: CatalogExt> TrackStream<E> {
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
-	pub fn demand(&self) -> moq_net::TrackDemand {
+	pub fn demand(&self) -> moq_net::track::Demand {
 		match self.kind {
 			TrackStreamKind::Avc3 { ref import, .. } => import.demand(),
 			TrackStreamKind::Hev1 { ref import, .. } => import.demand(),
@@ -557,8 +557,8 @@ mod tests {
 		init
 	}
 
-	fn new_broadcast() -> (moq_net::BroadcastProducer, crate::catalog::Producer) {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	fn new_broadcast() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		(broadcast, catalog)
 	}
@@ -610,7 +610,7 @@ mod tests {
 		let track = broadcast
 			.create_track(
 				"audio",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
 		let subscriber = track.subscribe(None);

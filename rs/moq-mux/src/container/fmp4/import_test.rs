@@ -5,7 +5,7 @@ use mp4_atom::{Decode, Encode};
 /// Drain every group currently buffered on the consumer without waiting for new ones.
 /// Used in tests where the producer is still alive after writing.
 #[cfg(test)]
-fn drain_group_sequences(consumer: &mut moq_net::TrackSubscriber) -> Vec<u64> {
+fn drain_group_sequences(consumer: &mut moq_net::track::Subscriber) -> Vec<u64> {
 	let mut sequences = Vec::new();
 	while let Some(group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
 		sequences.push(group.sequence);
@@ -14,7 +14,7 @@ fn drain_group_sequences(consumer: &mut moq_net::TrackSubscriber) -> Vec<u64> {
 }
 
 fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
@@ -27,7 +27,7 @@ fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 }
 
 fn run_fmp4_select(data: &[u8], select: crate::select::Broadcast) -> crate::catalog::hang::Catalog {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone()).with_select(select);
@@ -198,7 +198,7 @@ fn test_vp9_catalog() {
 async fn test_seek_sets_initial_sequence() {
 	use mp4_atom::{Any, DecodeMaybe};
 
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let broadcast_consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
@@ -262,7 +262,7 @@ async fn test_seek_sets_initial_sequence() {
 /// exercises the full unified pipeline (hang -> MSF JSON on the wire -> hang).
 #[tokio::test]
 async fn test_msf_catalog_roundtrip() {
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	// Take the consumer before adding tracks; track() is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();

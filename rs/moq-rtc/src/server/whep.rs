@@ -96,7 +96,7 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// `subscriber`'s scope) as [`Error::Other`].
 pub async fn accept(
 	server: &Server,
-	subscriber: &moq_net::OriginConsumer,
+	subscriber: &moq_net::origin::Consumer,
 	broadcast: impl moq_net::AsPath,
 	offer: &str,
 ) -> Result<Response> {

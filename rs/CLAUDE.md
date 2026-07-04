@@ -10,7 +10,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 
 **Transport / protocol**
 
-- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. Owns the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session` (no concrete QUIC dep). Submodules are private; the public surface is re-exported flat from the crate root.
+- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. Owns the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session` (no concrete QUIC dep). Each level of the hierarchy is a public role module that owns short names (`broadcast::Consumer`, `track::Producer`, `group::Info`, `frame::Producer`, `origin::Consumer`, `announce::Consumer`); origin + announce share one private implementation surfaced as two curated modules.
 - `moq-native` (lib): native connection helpers. `ClientConfig`/`ServerConfig` wrap QUIC backends (Quinn/Quiche/Noq/Iroh), WebTransport, WebSocket, TCP (qmux), Unix sockets, TLS, cert hot-reload, logging, jemalloc. Re-exports `moq_net`. Example: `examples/clock.rs`.
 - `kio` (lib): "easy async". `Producer<T>`/`Consumer<T>` shared-state channels with `Waiter`-based notification, built on `std::task::Waker`, no runtime dependency. Underpins all the `poll_*` plumbing in moq-net and moq-mux. `src/producer.rs`, `src/consumer.rs`, `src/waiter.rs`.
 
@@ -51,18 +51,20 @@ When you change `moq-ffi`'s surface, mirror it in `libmoq` and the language wrap
 
 The whole stack is built on a split-handle pattern: a `Producer` writes, one or more `Consumer`s read, state is shared via `kio`. This recurs in moq-net, moq-mux, moq-json.
 
-- Broadcast: `BroadcastProducer` / `BroadcastConsumer` / `BroadcastDynamic` (`model/broadcast.rs:74,370,216`).
-- Track: `TrackProducer` / `TrackConsumer` / `TrackWeak` (`model/track.rs:206,459,425`).
-- Group: `GroupProducer` / `GroupConsumer` (`model/group.rs:140,286`). Consumers `clone()` for fanout.
-- Frame: `FrameProducer` / `FrameConsumer` (`model/frame.rs`).
-- Origin: `OriginProducer` / `OriginConsumer` (`model/origin.rs`).
+Each level is a role module (`broadcast`, `track`, `group`, `frame`, `origin`, `announce`) owning short `Producer`/`Consumer` names:
+
+- Broadcast: `broadcast::{Producer, Consumer, Dynamic}` (`model/broadcast.rs`).
+- Track: `track::{Producer, Consumer, Subscriber, ...}` plus the `pub(crate)` `track::TrackWeak` (`model/track.rs`).
+- Group: `group::{Producer, Consumer, Info}` (`model/group.rs`). Consumers `clone()` for fanout.
+- Frame: `frame::Producer` / `frame::Consumer` (`model/frame.rs`).
+- Origin: `origin::{Producer, Consumer}` for the broadcast set; `announce::{Producer, Consumer}` for (un)announce events. Both share the private `origin.rs` implementation (`mod origin_impl`), surfaced via `model/mod.rs`.
 
 ## Async / poll plumbing
 
 Two ways to drive things, both backed by `kio`:
 
 - `async fn` (requires an active tokio runtime; awaiting outside one may panic, see `moq-net/src/lib.rs:42`).
-- `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `TrackConsumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs:502,518`).
+- `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `track::Consumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs`).
 
 Follow the root `poll_*` conventions: collapse `Poll::Pending => Poll::Pending` with `ready!(...)`, and prefer `Ok(x?)` over `.map_err(Into::into)` so a fallible poll reads `let v = ready!(inner.poll_next(cx))?;`. Representative `ready!` sites: `moq-mux/src/container/consumer.rs:201`, `moq-net/src/model/group.rs`.
 

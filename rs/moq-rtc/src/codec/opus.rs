@@ -11,7 +11,7 @@ pub struct Bridge {
 
 impl Bridge {
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
+		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		sample_rate: u32,
 		channel_count: u32,

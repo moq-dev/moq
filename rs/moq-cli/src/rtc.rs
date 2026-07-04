@@ -41,7 +41,7 @@ pub struct Args {
 
 /// WHIP server: accept incoming WebRTC publishes into the Origin as `name` (import).
 pub async fn listen_import(
-	origin: moq_net::OriginProducer,
+	origin: moq_net::origin::Producer,
 	listen: SocketAddr,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
@@ -55,7 +55,7 @@ pub async fn listen_import(
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
 pub async fn listen_export(
-	origin: moq_net::OriginConsumer,
+	origin: moq_net::origin::Consumer,
 	listen: SocketAddr,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
@@ -73,15 +73,15 @@ pub async fn listen_export(
 }
 
 /// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.
-fn scope_producer(origin: &moq_net::OriginProducer, name: &str) -> anyhow::Result<moq_net::OriginProducer> {
+fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Result<moq_net::origin::Producer> {
 	origin
 		.scope(&[name.as_path()])
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `name` (import).
-pub async fn connect_import(origin: moq_net::OriginProducer, url: Url, name: String) -> anyhow::Result<()> {
-	let producer = moq_net::BroadcastInfo::new().produce();
+pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
+	let producer = moq_net::broadcast::Info::new().produce();
 	// Hold the RAII announcement for the lifetime of the pull.
 	let _announce = origin
 		.publish_broadcast(&name, producer.consume())
@@ -95,7 +95,7 @@ pub async fn connect_import(origin: moq_net::OriginProducer, url: Url, name: Str
 }
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
-pub async fn connect_export(origin: moq_net::OriginConsumer, url: Url, name: String) -> anyhow::Result<()> {
+pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: String) -> anyhow::Result<()> {
 	let broadcast = origin
 		.announced_broadcast(&name)
 		.await
@@ -109,8 +109,8 @@ pub async fn connect_export(origin: moq_net::OriginConsumer, url: Url, name: Str
 }
 
 fn server(
-	publisher: moq_net::OriginProducer,
-	subscriber: moq_net::OriginConsumer,
+	publisher: moq_net::origin::Producer,
+	subscriber: moq_net::origin::Consumer,
 	udp_bind: SocketAddr,
 	public_addr: Vec<SocketAddr>,
 ) -> moq_rtc::Server {

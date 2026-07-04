@@ -62,7 +62,7 @@ The `status` and `command` tracks bypass the container format — they're raw UT
 | `status` | Server → viewers | `{"buttons": ["up", "a"], "latency": {"abc123": 42}}` |
 | `command` | Viewer → server | `{"type": "buttons", "buttons": ["left"]}` or `{"type": "reset"}` |
 
-Every viewer subscribes to the server's `status` track so they see shared input. The server subscribes to the viewer prefix via `OriginProducer::with_root()` and fans in all `command` tracks, so adding a new viewer is just a new announcement.
+Every viewer subscribes to the server's `status` track so they see shared input. The server subscribes to the viewer prefix via `origin::Producer::with_root()` and fans in all `command` tracks, so adding a new viewer is just a new announcement.
 
 ## Auto-pause
 

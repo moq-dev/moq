@@ -627,8 +627,8 @@ async fn serve_fetch(
 }
 
 struct ServeGroup {
-	group: Option<moq_net::GroupConsumer>,
-	frame: Option<moq_net::FrameConsumer>,
+	group: Option<moq_net::group::Consumer>,
+	frame: Option<moq_net::frame::Consumer>,
 	deadline: tokio::time::Instant,
 }
 

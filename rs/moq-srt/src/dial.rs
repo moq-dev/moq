@@ -20,7 +20,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use moq_net::{OriginConsumer, OriginProducer};
+use moq_net::origin;
 use srt_tokio::SrtSocket;
 
 use crate::Result;
@@ -37,7 +37,7 @@ pub async fn publish(
 	addr: SocketAddr,
 	resource: &str,
 	latency: impl Into<Option<Duration>>,
-	origin: &OriginConsumer,
+	origin: &origin::Consumer,
 	path: &str,
 ) -> Result<()> {
 	let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
@@ -56,7 +56,7 @@ pub async fn pull(
 	addr: SocketAddr,
 	resource: &str,
 	latency: impl Into<Option<Duration>>,
-	origin: &OriginProducer,
+	origin: &origin::Producer,
 	path: &str,
 ) -> Result<()> {
 	let socket = call(addr, resource, Mode::Request, latency).await?;

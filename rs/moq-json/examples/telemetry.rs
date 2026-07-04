@@ -76,7 +76,7 @@ fn telemetry(tick: u64) -> Value {
 
 /// Total wire bytes of every frame across every group for a full run under `config`.
 fn wire_bytes(config: ProducerConfig, ticks: u64) -> usize {
-	let track = moq_net::BroadcastInfo::new()
+	let track = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", None)
 		.unwrap();
@@ -103,7 +103,7 @@ fn wire_bytes(config: ProducerConfig, ticks: u64) -> usize {
 /// Drive a producer and a live consumer in lockstep, asserting that EVERY tick reconstructs to the
 /// exact input value after decompression and delta application (not just the final one).
 fn verify(producer_config: ProducerConfig, ticks: u64) {
-	let track = moq_net::BroadcastInfo::new()
+	let track = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", None)
 		.unwrap();
@@ -141,7 +141,7 @@ fn verify(producer_config: ProducerConfig, ticks: u64) {
 /// Returns how many values the late joiner surfaced to the application: with backlog collapsing this
 /// is far below `ticks`, since stale intermediate reconstructions are applied internally but skipped.
 fn verify_late_joiner(producer_config: ProducerConfig, ticks: u64) -> usize {
-	let track = moq_net::BroadcastInfo::new()
+	let track = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", None)
 		.unwrap();

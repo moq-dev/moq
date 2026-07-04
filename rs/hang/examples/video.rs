@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
 // Connect to the server and publish our origin of broadcasts.
 // Automatically reconnects if the connection drops.
-async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -41,7 +41,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 
 // Create a video track with a catalog that describes it.
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<moq_net::TrackProducer> {
+fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<moq_net::track::Producer> {
 	// Basic information about the video track.
 	let video_track = "video";
 
@@ -88,9 +88,9 @@ fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<mo
 }
 
 // Produce a broadcast and publish it to the origin.
-async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
+async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let track = create_track(&mut broadcast)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.

@@ -61,7 +61,7 @@ See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
 
-The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`OriginProducer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginProducer.html) you publish broadcasts into:
+The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) you publish broadcasts into:
 
 ```rust
 let session = client.connect(url).await?;
@@ -77,7 +77,7 @@ See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 
 The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) demonstrates subscribing end-to-end.
 
-The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`OriginConsumer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginConsumer.html) for receiving announcements:
+The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`origin::Consumer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Consumer.html) for receiving announcements:
 
 ```rust
 let session = client.connect(url).await?;

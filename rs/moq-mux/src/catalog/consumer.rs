@@ -9,7 +9,7 @@ use std::task::{Poll, ready};
 use super::hang::{Catalog, CatalogExt};
 use super::{CatalogFormat, Stream};
 
-/// A catalog stream sourced from a [`moq_net::BroadcastConsumer`].
+/// A catalog stream sourced from a [`moq_net::broadcast::Consumer`].
 ///
 /// Both variants emit [`Catalog<E>`](super::hang::Catalog); the MSF variant is
 /// media-only, so its extension is always the default. Wrap with
@@ -28,7 +28,7 @@ pub enum Consumer<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Consumer<E> {
 	/// Subscribe to the catalog track advertised by `format`.
-	pub async fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
+	pub async fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(match format {
 			CatalogFormat::Hang => {
 				let track = broadcast

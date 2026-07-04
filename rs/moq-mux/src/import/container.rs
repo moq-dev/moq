@@ -19,19 +19,19 @@ enum ContainerImpl<E: crate::container::ts::catalog::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
-	fn fmp4(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	fn fmp4(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
 	}
 
-	fn mkv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	fn mkv(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog)))
 	}
 
-	fn ts(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	fn ts(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog)))
 	}
 
-	fn flv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	fn flv(broadcast: moq_net::broadcast::Producer, catalog: crate::catalog::Producer<E>) -> Self {
 		ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, catalog)))
 	}
 
@@ -74,7 +74,7 @@ pub struct Container<E: crate::container::ts::catalog::Catalog = ()> {
 impl<E: crate::container::ts::catalog::Catalog> Container<E> {
 	/// Create a new container importer, decoding the initial chunk.
 	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
+		broadcast: moq_net::broadcast::Producer,
 		catalog: crate::catalog::Producer<E>,
 		format: &str,
 		init: &[u8],
@@ -117,7 +117,7 @@ pub struct ContainerStream<E: crate::container::ts::catalog::Catalog = ()> {
 impl<E: crate::container::ts::catalog::Catalog> ContainerStream<E> {
 	/// Create a new container stream importer.
 	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
+		broadcast: moq_net::broadcast::Producer,
 		catalog: crate::catalog::Producer<E>,
 		format: &str,
 	) -> Result<Self> {

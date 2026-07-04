@@ -54,7 +54,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// timestamp), and is re-emitted at video keyframes and periodically for
 /// mid-stream tune-in. Returns `None` when the broadcast ends.
 pub struct Export<E: catalog::Catalog = ()> {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
 
@@ -155,14 +155,14 @@ struct PesUnit {
 
 impl Export {
 	/// Subscribe to `broadcast`, using the default catalog format.
-	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+	pub async fn new(broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
 		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
 	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
 	pub async fn with_catalog_format(
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
 		Self::build(broadcast, catalog_format).await
@@ -175,7 +175,7 @@ impl Export<catalog::Ext> {
 	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
 	/// plain constructors are media-only).
 	pub async fn with_ts(
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
 		Self::build(broadcast, catalog_format).await
@@ -185,7 +185,10 @@ impl Export<catalog::Ext> {
 impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
-	async fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+	async fn build(
+		broadcast: moq_net::broadcast::Consumer,
+		catalog_format: CatalogFormat,
+	) -> Result<Self, crate::Error> {
 		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
 		Ok(Self {
 			broadcast,
