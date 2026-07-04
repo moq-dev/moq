@@ -38,4 +38,5 @@ web-transport-trait = { workspace = true }
 # their own backend in the leaf binary.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
-wasm-bindgen-test = "0.3"
+# Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
+wasm-bindgen-test = "=0.3.71"

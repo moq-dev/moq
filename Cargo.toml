@@ -24,6 +24,7 @@ members = [
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-video",
+    "rs/moq-wasm",
 ]
 default-members = [
     "rs/kio",
@@ -50,6 +51,7 @@ default-members = [
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-video",
+    # "rs/moq-wasm",  # wasm32-unknown-unknown target only
 ]
 resolver = "2"
 
@@ -74,6 +76,7 @@ moq-rtmp = { version = "0.1.0", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.1.0", path = "rs/moq-srt" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 moq-video = { version = "0.0.6", path = "rs/moq-video" }
+moq-wasm = { version = "0.0.0", path = "rs/moq-wasm" }
 qmux = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
@@ -99,3 +102,13 @@ debug = "line-tables-only"
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+# Size-optimized build for the browser/WASM bindings (rs/moq-wasm). Shipping over
+# the wire, so optimize for size, not speed. `just wasm` builds with
+# `--profile wasm-release`.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
