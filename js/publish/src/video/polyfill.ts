@@ -1,34 +1,88 @@
+import * as Util from "@moq/hang/util";
 import { Time } from "@moq/net";
 import type { StreamTrack } from "./types";
 
-// Firefox doesn't support MediaStreamTrackProcessor so we need to use a polyfill.
-// Based on: https://jan-ivar.github.io/polyfills/mediastreamtrackprocessor.js
-// Thanks Jan-Ivar
+/**
+ * A ReadableStream of camera VideoFrames, with timestamps rewritten onto our wall clock.
+ *
+ * Prefers MediaStreamTrackProcessor: on the main thread in Chrome, and in a Worker on Safari (which
+ * only exposes it there). The Worker path keeps capturing while the publish window is occluded; the
+ * requestAnimationFrame fallback (last resort) freezes in that case because the browser suspends rAF.
+ */
 export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
-	// @ts-expect-error No typescript types yet.
+	// Chrome exposes MediaStreamTrackProcessor on the main thread.
+	// @ts-expect-error MediaStreamTrackProcessor has no TypeScript types yet.
 	if (self.MediaStreamTrackProcessor) {
-		// Rewrite timestamps onto our wall clock so audio and video share one epoch.
-		let base: number | undefined;
-		let zero = 0;
-
-		const rewrite = new TransformStream<VideoFrame>({
-			transform(frame, controller) {
-				if (base === undefined) {
-					base = frame.timestamp;
-					zero = performance.now() * 1000;
-				}
-				const rewrite = new VideoFrame(frame, { timestamp: frame.timestamp - base + zero });
-				frame.close();
-				controller.enqueue(rewrite);
-			},
-		});
-
-		// @ts-expect-error No typescript types yet.
+		// @ts-expect-error MediaStreamTrackProcessor has no TypeScript types yet.
 		const input: ReadableStream<VideoFrame> = new self.MediaStreamTrackProcessor({ track }).readable;
-		return input.pipeThrough(rewrite);
+		return input.pipeThrough(rewriteTimestamps());
 	}
 
-	// TODO Firefox supports this in a background worker.
+	// Safari only exposes MediaStreamTrackProcessor inside a Worker, whose capture loop is not gated
+	// on the main-thread render loop, so it survives window occlusion (unlike the rAF fallback below).
+	// Firefox also supports Worker MediaStreamTrackProcessor and could move here later.
+	if (Util.Hacks.isSafari) {
+		return workerTrackProcessor(track).pipeThrough(rewriteTimestamps());
+	}
+
+	return rafTrackProcessor(track);
+}
+
+/** Rewrite frame timestamps onto our wall clock so audio and video share one epoch. */
+function rewriteTimestamps(): TransformStream<VideoFrame, VideoFrame> {
+	let base: number | undefined;
+	let zero = 0;
+
+	return new TransformStream<VideoFrame, VideoFrame>({
+		transform(frame, controller) {
+			if (base === undefined) {
+				base = frame.timestamp;
+				zero = performance.now() * 1000;
+			}
+			const rewritten = new VideoFrame(frame, { timestamp: frame.timestamp - base + zero });
+			frame.close();
+			controller.enqueue(rewritten);
+		},
+	});
+}
+
+/** Capture VideoFrames via MediaStreamTrackProcessor running in a Worker (Safari). */
+function workerTrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
+	let worker: Worker | undefined;
+
+	return new ReadableStream<VideoFrame>({
+		async start(controller) {
+			// Load the worker lazily. A static import would pull the ?worklet module into the eager
+			// capture graph, which breaks non-Vite loaders like `bun test` that lack the plugin.
+			const { default: workerUrl } = await import("./capture-worker.ts?worklet");
+			worker = new Worker(workerUrl, { type: "module" });
+
+			worker.onmessage = (event: MessageEvent<{ frame?: VideoFrame; error?: string }>) => {
+				if (event.data.frame) {
+					controller.enqueue(event.data.frame);
+				} else if (event.data.error) {
+					controller.error(new Error(`capture worker: ${event.data.error}`));
+				}
+			};
+			worker.onerror = () => controller.error(new Error("capture worker crashed"));
+
+			// Clone so transferring into the Worker never neuters the caller's track; the clone shares
+			// the same camera source, so there is no second capture.
+			const clone = track.clone();
+			worker.postMessage({ track: clone }, [clone as unknown as Transferable]);
+		},
+		cancel() {
+			worker?.terminate();
+		},
+	});
+}
+
+/**
+ * Last-resort capture for engines with no MediaStreamTrackProcessor: an HTMLVideoElement paced by
+ * requestAnimationFrame. The browser suspends rAF when the page is hidden or occluded, so this
+ * freezes in the background; prefer the Worker path above wherever possible.
+ */
+function rafTrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	console.warn("Using MediaStreamTrackProcessor polyfill; performance might suffer.");
 
 	const settings = track.getSettings();

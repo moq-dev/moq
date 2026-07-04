@@ -1,5 +1,4 @@
-// https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
-const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
+import * as Util from "@moq/hang/util";
 
 export type Partial = "full" | "partial" | "none";
 
@@ -73,7 +72,18 @@ async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 		hardwareAcceleration: "prefer-hardware",
 	});
 
-	const unknown = isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+	// On Apple Silicon Safari, VideoToolbox hardware-encodes only H.264 and HEVC; Safari reports the
+	// others as prefer-hardware supported even though they run on software libvpx, so key off the
+	// codec rather than the echoed (and unreliable) hint.
+	if (Util.Hacks.isSafari) {
+		const hardwareCapable = codec === "h264" || codec === "h265";
+		return {
+			hardware: hardwareCapable && hardware.supported === true,
+			software: software.supported === true,
+		};
+	}
+
+	const unknown = Util.Hacks.isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
 
 	return {
 		hardware: unknown ? undefined : hardware.supported === true,
@@ -85,7 +95,7 @@ export async function isSupported(): Promise<Full> {
 	return {
 		// Firefox's WebTransport drops server-initiated bidi streams, so we force the
 		// WebSocket fallback. Report "partial" to surface the degraded path in UI.
-		webtransport: typeof WebTransport !== "undefined" ? (isFirefox ? "partial" : "full") : "partial",
+		webtransport: typeof WebTransport !== "undefined" ? (Util.Hacks.isFirefox ? "partial" : "full") : "partial",
 		audio: {
 			capture: typeof AudioWorkletNode !== "undefined",
 			encoding: {
@@ -95,9 +105,10 @@ export async function isSupported(): Promise<Full> {
 		},
 		video: {
 			capture:
-				// We have a fallback for MediaStreamTrackProcessor, but it's pretty gross so no full points.
+				// Chrome exposes MediaStreamTrackProcessor on the main thread; Safari uses it in a Worker
+				// (see video/polyfill.ts). Either way capture is real MediaStreamTrackProcessor, not a polyfill.
 				// @ts-expect-error No typescript types yet.
-				typeof MediaStreamTrackProcessor !== "undefined"
+				typeof MediaStreamTrackProcessor !== "undefined" || Util.Hacks.isSafari
 					? "full"
 					: typeof OffscreenCanvas !== "undefined"
 						? "partial"

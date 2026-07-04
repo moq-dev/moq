@@ -4,6 +4,7 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { hardwareCodecOrder, softwareCodecOrder } from "./codecs";
 import type { Source } from "./types";
 
 export interface EncoderProps {
@@ -312,62 +313,11 @@ export class Encoder {
 		const dimensions = effect.get(this.#dimensions);
 		if (!dimensions) return;
 
-		// A list of codecs to try, in order of preference.
-		const HARDWARE_CODECS = [
-			// VP9
-			// More likely to have hardware decoding, but hardware encoding is less likely.
-			"vp09.00.10.08",
-			"vp09", // Browser's choice
-
-			// H.264
-			// Almost always has hardware encoding and decoding.
-			"avc1.640028",
-			"avc1.4D401F",
-			"avc1.42E01E",
-			"avc1",
-
-			// AV1
-			// One day will get moved higher up the list, but hardware decoding is rare.
-			"av01.0.08M.08",
-			"av01",
-
-			// HEVC (aka h.265)
-			// More likely to have hardware encoding, but less likely to be supported (licensing issues).
-			// Unfortunately, Firefox doesn't support decoding so it's down here at the bottom.
-			"hev1.1.6.L93.B0",
-			"hev1", // Browser's choice
-
-			// VP8
-			// A terrible codec but it's easy.
-			"vp8",
-		];
-
-		const SOFTWARE_CODECS = [
-			// Now try software encoding for simple enough codecs.
-			// H.264
-			"avc1.640028", // High
-			"avc1.4D401F", // Main
-			"avc1.42E01E", // Baseline
-			"avc1",
-
-			// VP8
-			"vp8",
-
-			// VP9
-			// It's a bit more expensive to encode so we shy away from it.
-			"vp09.00.10.08",
-			"vp09",
-
-			// HEVC (aka h.265)
-			// This likely won't work because of licensing issues.
-			"hev1.1.6.L93.B0",
-			"hev1", // Browser's choice
-
-			// AV1
-			// Super expensive to encode so it's our last choice.
-			"av01.0.08M.08",
-			"av01",
-		];
+		// Codec preference lists live in ./codecs. Safari uses a different hardware order because it
+		// reports its software VP9 encoder as hardware-supported, which would hide the real hardware
+		// codecs (H.264/HEVC) behind a CPU-bound one.
+		const HARDWARE_CODECS = hardwareCodecOrder(Util.Hacks.isSafari);
+		const SOFTWARE_CODECS = softwareCodecOrder();
 
 		// Try hardware encoding first.
 		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
