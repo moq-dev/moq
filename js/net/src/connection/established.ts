@@ -22,7 +22,7 @@ export interface Established {
 	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
 	readonly rtt?: Signal<Time.Milli | undefined>;
 
-	/** Subscribe to broadcast announcements under an optional path prefix. */
+	/** Subscribe to broadcast announcements under an optional path prefix, returning paths relative to that prefix. */
 	announced(prefix?: Path.Valid): Announced;
 
 	/** Publish a broadcast at the given path. */

@@ -22,6 +22,8 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	// Server publishes a broadcast
 	const broadcast = new Broadcast();
 	server.publish(Path.from("test"), broadcast);
+	const prefixedBroadcast = new Broadcast();
+	server.publish(Path.from("root/child"), prefixedBroadcast);
 
 	// Serve every requested "video" track. On lite-05+ a subscribe is preceded by
 	// a TRACK info lookup, which the publisher answers by requesting the track too,
@@ -47,6 +49,13 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	expect(entry.path).toBe("test" as Path.Valid);
 	expect(entry.active).toBe(true);
 
+	// Prefix-scoped discovery returns paths relative to the requested prefix.
+	const prefixed = client.announced(Path.from("root"));
+	const prefixedEntry = await prefixed.next();
+	if (!prefixedEntry) throw new Error("expected prefixed entry");
+	expect(prefixedEntry.path).toBe("child" as Path.Valid);
+	expect(prefixedEntry.active).toBe(true);
+
 	// Client consumes the broadcast and subscribes to a track
 	const remote = client.consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
@@ -58,8 +67,10 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 
 	// Cleanup
 	broadcast.close();
+	prefixedBroadcast.close();
 	await serving;
 	announced.close();
+	prefixed.close();
 	remote.close();
 	client.close();
 	server.close();

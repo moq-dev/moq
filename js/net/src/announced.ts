@@ -7,7 +7,9 @@ import * as Path from "./path.js";
  * @public
  */
 export interface AnnouncedEntry {
+	/** Broadcast path relative to the prefix passed to `announced()`. */
 	path: Path.Valid;
+	/** True when the broadcast is available, false when it was removed. */
 	active: boolean;
 }
 
