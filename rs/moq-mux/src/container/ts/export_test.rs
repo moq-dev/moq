@@ -505,7 +505,7 @@ async fn export_bframe_video_authors_dts() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -609,7 +609,7 @@ async fn export_scte35_roundtrip() {
 	scte_producer.finish().unwrap();
 
 	// Now add the real video/audio by importing bbb.ts (this moves `broadcast`).
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -651,7 +651,7 @@ async fn export_scte35_roundtrip() {
 	let catalog2 =
 		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
-	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
@@ -724,7 +724,7 @@ async fn export_pes_verbatim_roundtrip() {
 	data_producer.finish().unwrap();
 
 	// Real video/audio supplies the media clock (moves `broadcast`).
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -743,7 +743,7 @@ async fn export_pes_verbatim_roundtrip() {
 	let catalog2 =
 		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
-	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
@@ -853,7 +853,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -889,7 +889,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
-	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
@@ -922,7 +922,7 @@ async fn ac3_roundtrip_byte_exact() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -966,7 +966,7 @@ async fn ac3_roundtrip_byte_exact() {
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
-	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
@@ -992,7 +992,7 @@ async fn eac3_roundtrip_byte_exact() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -1039,7 +1039,7 @@ async fn eac3_roundtrip_byte_exact() {
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
-	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
@@ -1079,7 +1079,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -1127,7 +1127,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
-	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
@@ -1220,7 +1220,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 			crate::catalog::hang::Catalog::<tscat::Ext>::default(),
 		)
 		.unwrap();
-		let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 		import.decode(&BytesMut::from(&data[..])).unwrap();
 		import.finish().unwrap();
 
@@ -1276,7 +1276,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 			crate::catalog::hang::Catalog::<tscat::Ext>::default(),
 		)
 		.unwrap();
-		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 		import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 		import2.finish().unwrap();
 		let name2 = scte_track(&catalog2.snapshot()).expect("a scte35 track");
@@ -1446,7 +1446,7 @@ async fn opus_export_import_roundtrip() {
 	let mut imported = moq_net::broadcast::Info::new().produce();
 	let imported_consumer = imported.consume();
 	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
-	let mut import = crate::container::ts::Import::new(imported, import_catalog.clone());
+	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
 	import.decode(&ts).unwrap();
 	import.finish().unwrap();
 

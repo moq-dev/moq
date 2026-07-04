@@ -1,21 +1,20 @@
 use crate::group;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Poll, ready};
 
-use bytes::buf::UninitSlice;
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 
-use crate::{Error, Result, Timestamp};
+use crate::{Error, IntoBytes, Result, Timestamp};
 
 /// Maximum payload size accepted for a single frame.
 ///
-/// The receive path preallocates a buffer from the declared frame size, so an
+/// The receive path trusts the declared frame size when storing the payload, so an
 /// untrusted peer could otherwise request a multi-gigabyte allocation with a
-/// single varint. [`Producer::new`] enforces this for every frame: it's the
-/// sole allocation chokepoint (reached via [`Info::produce`] and
-/// [`group::Producer::create_frame`]) and rejects an oversized declared size
-/// with [`Error::FrameTooLarge`] before allocating.
+/// single varint. [`Producer::new`] enforces this for every frame and
+/// rejects an oversized declared size with [`Error::FrameTooLarge`] before the
+/// payload is stored.
 ///
 /// Matches the per-group cache cap (`MAX_GROUP_CACHE`), so a single frame may fill
 /// a group. 16 MiB was too tight for a high-bitrate CMAF fragment carried as one
@@ -55,11 +54,10 @@ impl Info {
 	}
 }
 
-/// Single-allocation buffer shared between a [Producer] and many [Consumer]s.
+/// Payload storage shared between a [Producer] and many [Consumer]s.
 ///
-/// Internally an [Arc] over a thin pointer + length owning a heap allocation. The
-/// data pointer is stable for the life of any clone, so [Bytes] views taken via
-/// [Bytes::from_owner] remain valid. [Clone] is cheap (one atomic increment).
+/// A whole-frame [`Bytes`] write is stored directly. Chunked writes fall back to
+/// one mutable heap allocation sized to the declared frame.
 ///
 /// The producer writes through the raw pointer (sole writer); `written` provides
 /// happens-before for cross-thread reads. Implements [AsRef]<[u8]> directly so it
@@ -68,19 +66,28 @@ impl Info {
 struct FrameBuf(Arc<FrameBufInner>);
 
 struct FrameBufInner {
+	capacity: usize,
+	written: AtomicUsize,
+	storage: OnceLock<FrameStorage>,
+}
+
+enum FrameStorage {
+	Shared(Bytes),
+	Mutable(MutableFrameBuf),
+}
+
+struct MutableFrameBuf {
 	// Owned heap allocation of `capacity` bytes (zero-initialized).
 	data: *mut u8,
 	capacity: usize,
-	written: AtomicUsize,
 }
 
-// Safety: `data` is owned (Box-allocated, freed in Drop); the producer is the
-// sole writer; consumers only read bytes `< written`, which was set via Release
-// after the corresponding writes completed (Acquire pairs on the consumer side).
-unsafe impl Send for FrameBufInner {}
-unsafe impl Sync for FrameBufInner {}
+// Safety: `data` is owned (Box-allocated, freed in Drop). The producer is the
+// sole writer and consumers only read bytes `< written`.
+unsafe impl Send for MutableFrameBuf {}
+unsafe impl Sync for MutableFrameBuf {}
 
-impl Drop for FrameBufInner {
+impl Drop for MutableFrameBuf {
 	fn drop(&mut self) {
 		// Safety: data was obtained from `Box::into_raw` of a `Box<[u8]>` of
 		// length `capacity` and is not aliased at drop (Arc refcount hit 0).
@@ -91,15 +98,21 @@ impl Drop for FrameBufInner {
 	}
 }
 
-impl FrameBuf {
+impl MutableFrameBuf {
 	fn new(size: usize) -> Self {
 		let boxed: Box<[u8]> = vec![0u8; size].into_boxed_slice();
 		let capacity = boxed.len();
 		let data = Box::into_raw(boxed) as *mut u8;
+		Self { data, capacity }
+	}
+}
+
+impl FrameBuf {
+	fn new(size: usize) -> Self {
 		Self(Arc::new(FrameBufInner {
-			data,
-			capacity,
+			capacity: size,
 			written: AtomicUsize::new(0),
+			storage: OnceLock::new(),
 		}))
 	}
 
@@ -111,12 +124,35 @@ impl FrameBuf {
 		self.0.written.load(ord)
 	}
 
-	/// Safety: caller must be the sole producer (Producer-as-BufMut invariant).
-	unsafe fn data_ptr(&self) -> *mut u8 {
-		self.0.data
+	fn try_set_bytes(&self, bytes: Bytes) -> std::result::Result<(), Bytes> {
+		if bytes.len() != self.capacity() || self.written(Ordering::Acquire) != 0 {
+			return Err(bytes);
+		}
+		self.0
+			.storage
+			.set(FrameStorage::Shared(bytes))
+			.map_err(|storage| match storage {
+				FrameStorage::Shared(bytes) => bytes,
+				FrameStorage::Mutable(_) => unreachable!("try_set_bytes only installs shared storage"),
+			})
 	}
 
-	/// Safety: caller must be the sole producer; `new_written` must be `<= capacity`.
+	/// The mutable buffer for multi-chunk writes, lazily allocated.
+	///
+	/// Returns `None` once a whole-frame write has installed shared storage: the
+	/// frame is already complete, so there's no writable region left.
+	fn mutable(&self) -> Option<&MutableFrameBuf> {
+		match self
+			.0
+			.storage
+			.get_or_init(|| FrameStorage::Mutable(MutableFrameBuf::new(self.capacity())))
+		{
+			FrameStorage::Shared(_) => None,
+			FrameStorage::Mutable(buf) => Some(buf),
+		}
+	}
+
+	/// Safety: caller must be the sole producer and `new_written` must be `<= capacity`.
 	unsafe fn store_written(&self, new_written: usize) {
 		// Release pairs with consumers' Acquire load to publish prior writes.
 		self.0.written.store(new_written, Ordering::Release);
@@ -128,10 +164,16 @@ impl AsRef<[u8]> for FrameBuf {
 		// Snapshot the initialized region (bytes the producer has written so far).
 		// Acquire pairs with the producer's Release on `written`.
 		let written = self.0.written.load(Ordering::Acquire);
-		// Safety: data..data+written is initialized (zero-init at alloc + producer
-		// writes up to `written`). The Arc keeps the allocation alive while any
-		// reference to the slice lives.
-		unsafe { std::slice::from_raw_parts(self.0.data, written) }
+		match self.0.storage.get() {
+			Some(FrameStorage::Shared(bytes)) => &bytes[..written],
+			Some(FrameStorage::Mutable(buf)) => {
+				// Safety: data..data+written is initialized (zero-init at alloc +
+				// producer writes up to `written`). The Arc keeps the allocation alive
+				// while any reference to the slice lives.
+				unsafe { std::slice::from_raw_parts(buf.data, written) }
+			}
+			None => &[],
+		}
 	}
 }
 
@@ -148,8 +190,8 @@ struct FrameState {
 /// The total bytes written must exactly match [Info::size].
 /// Call [Self::finish] after writing all bytes to verify correctness.
 ///
-/// Implements [BufMut] so the receive path can write directly into the
-/// pre-allocated buffer (e.g. via `tokio::io::AsyncReadExt::read_buf`).
+/// A single whole-frame [`write`](Self::write) keeps the caller's allocation
+/// (zero-copy); chunked writes copy into one buffer sized to the declared frame.
 pub struct Producer {
 	info: Info,
 	// The parent group's info, inherited from [`group::Producer::create_frame`]
@@ -171,9 +213,9 @@ impl std::ops::Deref for Producer {
 impl Producer {
 	/// Create a new frame producer for the given frame header.
 	///
-	/// The single allocation chokepoint: rejects a frame whose declared
+	/// The payload storage chokepoint: rejects a frame whose declared
 	/// [`Info::size`] exceeds [`MAX_FRAME_SIZE`] with [`Error::FrameTooLarge`]
-	/// before allocating the (untrusted) buffer.
+	/// before storing the untrusted payload.
 	pub(crate) fn new(info: Info, group: group::Info) -> Result<Self> {
 		if info.size > MAX_FRAME_SIZE {
 			return Err(Error::FrameTooLarge);
@@ -192,18 +234,61 @@ impl Producer {
 		&self.group
 	}
 
+	/// Bytes still needed to complete the frame.
+	pub fn remaining(&self) -> usize {
+		self.buf.capacity() - self.buf.written(Ordering::Acquire)
+	}
+
 	/// Write a chunk of data to the frame.
 	///
 	/// Returns [Error::WrongSize] if the chunk would exceed the remaining bytes.
-	pub fn write<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
-		let chunk = chunk.into();
-		if chunk.len() > self.remaining_mut() {
+	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+		let len = chunk.as_ref().len();
+		if len > self.remaining() {
 			return Err(Error::WrongSize);
 		}
 		// Surface aborts before writing.
 		self.bail_if_aborted()?;
-		self.put_slice(&chunk);
+		// Fast path: a single whole-frame write keeps the caller's allocation.
+		if len == self.buf.capacity() && self.buf.written(Ordering::Acquire) == 0 {
+			match self.buf.try_set_bytes(chunk.into_bytes()) {
+				Ok(()) => {
+					let cap = self.buf.capacity();
+					// Safety: `try_set_bytes` checked that the buffer exactly matches
+					// the declared size, so publishing all bytes is within bounds.
+					unsafe { self.buf.store_written(cap) };
+					self.notify_written(cap);
+					return Ok(());
+				}
+				// Lost the race to install shared storage; copy instead.
+				Err(chunk) => {
+					self.append(&chunk);
+					return Ok(());
+				}
+			}
+		}
+		self.append(chunk.as_ref());
 		Ok(())
+	}
+
+	/// Copy a chunk into the mutable buffer at the current offset and publish it.
+	fn append(&mut self, src: &[u8]) {
+		if src.is_empty() {
+			return;
+		}
+		let prev = self.buf.written(Ordering::Relaxed);
+		let Some(buf) = self.buf.mutable() else {
+			// Only reachable if the frame is already complete, which `write` rejects
+			// for a non-empty chunk. Nothing to copy.
+			return;
+		};
+		// Safety: sole writer (`&mut self`); `write` bounds-checked `src` against the
+		// remaining capacity, and consumers only read `[..written]`.
+		unsafe {
+			std::ptr::copy_nonoverlapping(src.as_ptr(), buf.data.add(prev), src.len());
+			self.buf.store_written(prev + src.len());
+		}
+		self.notify_written(prev + src.len());
 	}
 
 	/// Verify that all bytes have been written.
@@ -214,7 +299,7 @@ impl Producer {
 		if written != self.buf.capacity() {
 			return Err(Error::WrongSize);
 		}
-		// Mark fin (idempotent if `advance_mut` already set it on the last byte).
+		// Mark fin (idempotent if the last write already set it on the final byte).
 		let mut state = self.modify()?;
 		state.fin = true;
 		Ok(())
@@ -259,47 +344,14 @@ impl Producer {
 		}
 		Ok(())
 	}
-}
 
-// Safety: `chunk_mut` returns a slice into the producer-private region of the
-// buffer (`[written..capacity]`). Sole-writer invariant: even though
-// `Producer` is `Clone`, the API exposes BufMut only via `&mut self`,
-// and existing callers never share a single producer between concurrent writers
-// (group.rs clones a handle for `abort` / `consume` only). The defensive
-// `assert!` in `advance_mut` panics loudly if that invariant is ever violated.
-unsafe impl BufMut for Producer {
-	fn remaining_mut(&self) -> usize {
-		self.buf.capacity() - self.buf.written(Ordering::Acquire)
-	}
-
-	fn chunk_mut(&mut self) -> &mut UninitSlice {
-		let written = self.buf.written(Ordering::Acquire);
-		let cap = self.buf.capacity();
-		// Safety: writes to `[written..cap]` are unaliased — consumers only ever
-		// read `[..written]`, and we hold `&mut self`. The slice's lifetime is
-		// tied to `&mut self` by the function signature.
-		unsafe {
-			let ptr = self.buf.data_ptr().add(written);
-			UninitSlice::from_raw_parts_mut(ptr, cap - written)
-		}
-	}
-
-	unsafe fn advance_mut(&mut self, cnt: usize) {
-		let cap = self.buf.capacity();
-		let prev = self.buf.written(Ordering::Relaxed);
-		assert!(
-			prev + cnt <= cap,
-			"advance_mut past frame.size: prev={prev} cnt={cnt} cap={cap}"
-		);
-		// Safety: sole-writer invariant + bounds-checked above.
-		unsafe { self.buf.store_written(prev + cnt) };
-
-		// Briefly take the kio write lock to wake waiters; drop of `Mut`
-		// triggers kio's notify. Also flip `fin` if we just filled the buffer.
-		if let Ok(mut state) = self.state.write() {
-			if prev + cnt == cap {
-				state.fin = true;
-			}
+	fn notify_written(&mut self, written: usize) {
+		// Briefly take the kio write lock to wake waiters; drop of `Mut` triggers
+		// kio's notify. Also flip `fin` if we just filled the buffer.
+		if let Ok(mut state) = self.state.write()
+			&& written == self.buf.capacity()
+		{
+			state.fin = true;
 		}
 	}
 }
@@ -470,6 +522,49 @@ mod test {
 	}
 
 	#[test]
+	fn whole_bytes_write_reuses_allocation() {
+		let input = Bytes::from(vec![1, 2, 3, 4, 5]);
+		let input_ptr = input.as_ptr();
+		let mut producer = Info {
+			size: input.len() as u64,
+			timestamp: Timestamp::ZERO,
+		}
+		.produce()
+		.unwrap();
+		producer.write(input.clone()).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, input);
+		assert_eq!(data.as_ptr(), input_ptr);
+	}
+
+	// A whole-frame write installs shared storage and completes the frame. A further
+	// non-empty write overruns it and must error cleanly rather than panic.
+	#[test]
+	fn write_after_whole_frame_is_rejected() {
+		let mut producer = Info {
+			size: 3,
+			timestamp: Timestamp::ZERO,
+		}
+		.produce()
+		.unwrap();
+		producer.write(Bytes::from_static(b"abc")).unwrap();
+
+		assert_eq!(producer.remaining(), 0);
+		assert!(matches!(
+			producer.write(Bytes::from_static(b"x")),
+			Err(Error::WrongSize)
+		));
+
+		producer.finish().unwrap();
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"abc"));
+	}
+
+	#[test]
 	fn multi_chunk_read_all() {
 		let mut producer = Info {
 			size: 10,
@@ -616,37 +711,25 @@ mod test {
 	}
 
 	#[test]
-	fn buf_mut_roundtrip() {
-		// Exercise the BufMut path that the receive loop uses via `read_buf`.
+	fn multi_chunk_write_roundtrip() {
+		// A frame arriving as several chunks copies into the mutable buffer, with
+		// `remaining` tracking progress the way the receive loop drives it.
 		let mut producer = Info {
 			size: 12,
 			timestamp: Timestamp::ZERO,
 		}
 		.produce()
 		.unwrap();
-		assert_eq!(producer.remaining_mut(), 12);
-		producer.put_slice(b"hello");
-		assert_eq!(producer.remaining_mut(), 7);
-		producer.put_slice(b" world!");
-		assert_eq!(producer.remaining_mut(), 0);
+		assert_eq!(producer.remaining(), 12);
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		assert_eq!(producer.remaining(), 7);
+		producer.write(Bytes::from_static(b" world!")).unwrap();
+		assert_eq!(producer.remaining(), 0);
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
 		let data = consumer.read_all().now_or_never().unwrap().unwrap();
 		assert_eq!(data, Bytes::from_static(b"hello world!"));
-	}
-
-	#[test]
-	#[should_panic(expected = "advance_mut past frame.size")]
-	fn buf_mut_advance_past_capacity_panics() {
-		let mut producer = Info {
-			size: 4,
-			timestamp: Timestamp::ZERO,
-		}
-		.produce()
-		.unwrap();
-		// Safety violation on purpose: cnt > remaining_mut().
-		unsafe { producer.advance_mut(5) };
 	}
 
 	#[test]

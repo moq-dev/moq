@@ -91,7 +91,7 @@ async fn import_populates_catalog() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
@@ -117,7 +117,7 @@ async fn import_emits_frames() {
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
@@ -146,7 +146,7 @@ async fn import_handles_split_input() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(head)).unwrap();
 	importer.decode(&bytes::BytesMut::from(tail)).unwrap();
 	importer.finish().unwrap();
@@ -179,7 +179,7 @@ async fn import_enhanced_vp9() {
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -223,7 +223,7 @@ async fn import_enhanced_opus() {
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -258,7 +258,7 @@ async fn import_legacy_mp3() {
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -289,7 +289,7 @@ async fn import_enhanced_av1() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -316,7 +316,7 @@ async fn import_enhanced_ac3() {
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -338,7 +338,7 @@ async fn import_enhanced_eac3() {
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -387,7 +387,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	let err = importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap_err();
 	assert!(matches!(
 		err,
@@ -428,7 +428,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -446,7 +446,7 @@ async fn import_rejects_non_flv() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog);
+	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(&b"NOTFLV\x00\x00\x00"[..]);
 	assert!(importer.decode(&buf).is_err());
 }

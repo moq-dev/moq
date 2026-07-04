@@ -245,7 +245,7 @@ impl MoqBroadcastProducer {
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track on the way to being recognized.
 		let (decoder, demand) =
-			match moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.clone(), &format, &init) {
+			match moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.reserve(), &format, &init) {
 				Ok(container) => (MediaDecoder::Container(container), None),
 				Err(moq_mux::Error::UnknownFormat(_)) => {
 					let mut broadcast = state.broadcast.clone();
@@ -253,7 +253,7 @@ impl MoqBroadcastProducer {
 					let request = broadcast
 						.reserve_track(name)
 						.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-					match moq_mux::import::Track::new(request, state.catalog.clone(), &format, &init) {
+					match moq_mux::import::Track::new(request, state.catalog.reserve(), &format, &init) {
 						Ok(import) => {
 							let demand = import.demand();
 							(MediaDecoder::Track(Box::new(import)), Some(demand))
@@ -291,7 +291,7 @@ impl MoqBroadcastProducer {
 		// The importer accepts the request itself, which is where the track's timescale is set.
 		let request = request.take()?;
 
-		let import = moq_mux::import::Track::new(request, state.catalog.clone(), &format, &init)
+		let import = moq_mux::import::Track::new(request, state.catalog.reserve(), &format, &init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		let demand = import.demand();
@@ -319,7 +319,7 @@ impl MoqBroadcastProducer {
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track before being recognized.
 		let decoder =
-			match moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.clone(), &format) {
+			match moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), &format) {
 				Ok(container) => StreamDecoder::Container(container),
 				Err(moq_mux::Error::UnknownFormat(_)) => {
 					let mut broadcast = state.broadcast.clone();
@@ -327,7 +327,7 @@ impl MoqBroadcastProducer {
 					let request = broadcast
 						.reserve_track(name)
 						.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-					match moq_mux::import::TrackStream::new(request, state.catalog.clone(), &format) {
+					match moq_mux::import::TrackStream::new(request, state.catalog.reserve(), &format) {
 						Ok(import) => StreamDecoder::Track(Box::new(import)),
 						Err(moq_mux::Error::UnknownFormat(_)) => {
 							return Err(MoqError::Codec(format!("unknown stream format: {format}")));

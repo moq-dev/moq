@@ -72,13 +72,13 @@ impl Publish {
 		// A container may publish several tracks; a single codec fills one reserved
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track on the way to being recognized.
-		let media = match import::Container::new(broadcast.clone(), catalog.clone(), format, init) {
+		let media = match import::Container::new(broadcast.clone(), catalog.reserve(), format, init) {
 			Ok(container) => Media::Container(container),
 			Err(moq_mux::Error::UnknownFormat(_)) => {
 				let mut broadcast = broadcast.clone();
 				let name = broadcast.unique_name(&format!(".{format}"));
 				let request = broadcast.reserve_track(name)?;
-				match import::Track::new(request, catalog.clone(), format, init) {
+				match import::Track::new(request, catalog.reserve(), format, init) {
 					Ok(track) => Media::Track(Box::new(track)),
 					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
 					Err(err) => return Err(err.into()),

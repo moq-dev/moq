@@ -893,12 +893,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut frame: frame::Producer,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
-		// frame::Producer impls BufMut; read_buf writes stream bytes directly into
-		// the per-frame buffer (see lite/subscriber.rs run_frame for rationale).
-		while bytes::BufMut::has_remaining_mut(&frame) {
-			match stream.read_buf(&mut frame).await? {
-				Some(n) if n > 0 => {
-					track_stats.bytes(n as u64);
+		while frame.remaining() > 0 {
+			match stream.read_chunk(frame.remaining()).await? {
+				Some(chunk) if !chunk.is_empty() => {
+					track_stats.bytes(chunk.len() as u64);
+					frame.write(chunk)?;
 				}
 				_ => return Err(Error::WrongSize),
 			}

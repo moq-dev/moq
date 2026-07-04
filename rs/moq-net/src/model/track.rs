@@ -691,18 +691,18 @@ impl Producer {
 	///
 	/// The timestamp is converted into the track's timescale. Use
 	/// [`Self::write_frame_now`] to stamp wall-clock time instead.
-	pub fn write_frame<B: Into<bytes::Bytes>>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
+	pub fn write_frame<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
 		let mut group = self.append_group()?;
-		group.write_frame(timestamp, frame.into())?;
+		group.write_frame(timestamp, frame)?;
 		group.finish()?;
 		Ok(())
 	}
 
 	/// Like [`Self::write_frame`] but stamps the frame with wall-clock now
 	/// ([`Timestamp::now`]).
-	pub fn write_frame_now<B: Into<bytes::Bytes>>(&mut self, frame: B) -> Result<()> {
+	pub fn write_frame_now<B: crate::IntoBytes>(&mut self, frame: B) -> Result<()> {
 		let mut group = self.append_group()?;
-		group.write_frame_now(frame.into())?;
+		group.write_frame_now(frame)?;
 		group.finish()?;
 		Ok(())
 	}

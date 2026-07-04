@@ -10,11 +10,13 @@ pub mod track;
 mod origin_impl;
 
 mod bandwidth;
+mod bytes;
 mod datagram;
 mod subscription;
 mod time;
 
 pub use bandwidth::*;
+pub use bytes::*;
 // Datagram + MAX_DATAGRAM_PAYLOAD stay flat at the crate root (a small track-adjacent
 // wire type), not under a role module.
 pub use datagram::*;

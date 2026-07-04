@@ -336,8 +336,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let mut ext = bytes::BytesMut::new();
 				ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
 				stream.encode(&(ext.len() as u64)).await?;
-				let mut ext = ext.freeze();
-				stream.write_all(&mut ext).await?;
+				stream.write_chunk(ext.freeze()).await?;
 			}
 
 			// Write the size of the frame.
@@ -357,9 +356,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					};
 
 					match chunk? {
-						Some(mut chunk) => {
+						Some(chunk) => {
 							let n = chunk.len() as u64;
-							stream.write_all(&mut chunk).await?;
+							stream.write_chunk(chunk).await?;
 							track_stats.bytes(n);
 						}
 						None => break,

@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
 use crate::container::jitter::Jitter;
@@ -12,7 +10,7 @@ use super::FrameHeader;
 /// frames, one per [`decode`](Self::decode). The first key frame's header supplies
 /// the catalog dimensions, so the rendition isn't published until then. Build it
 /// with [`new`](Self::new), passing the track producer and the
-/// [`catalog::Producer`](crate::catalog::Producer) it publishes into.
+/// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 pub struct Import<E: CatalogExt = ()> {
 	// The track being produced.
 	track: crate::container::Producer<crate::catalog::hang::Container>,
@@ -28,9 +26,9 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, registering the rendition in `catalog`.
-	pub fn new(track: moq_net::track::Producer, catalog: crate::catalog::Producer<E>) -> Self {
-		let rendition = catalog.video_track(track.name());
+	/// Publish on an existing track producer, reserving the rendition from `reserved`.
+	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		let rendition = reserved.video(track.name());
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
@@ -70,13 +68,12 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Decode a single VP8 frame.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		if frame.is_empty() {
+	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		if frame.as_ref().is_empty() {
 			return Err(super::Error::EmptyFrame.into());
 		}
-		let payload = Bytes::copy_from_slice(frame);
 
-		let header = FrameHeader::parse(&payload)?;
+		let header = FrameHeader::parse(frame.as_ref())?;
 		if let Some((width, height)) = header.dimensions {
 			self.init(width, height)?;
 		}
@@ -84,7 +81,7 @@ impl<E: CatalogExt> Import<E> {
 		let pts = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp: pts,
-			payload,
+			payload: frame.into_bytes(),
 			keyframe: header.keyframe,
 			duration: None,
 		})?;
@@ -137,7 +134,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.clone());
+		let mut import = super::Import::new(track, catalog.reserve());
 
 		// Empty init buffer: the catalog is filled on the first key frame.
 		import.initialize(&[]).unwrap();
@@ -168,7 +165,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog);
+		let mut import = super::Import::new(track, catalog.reserve());
 
 		let interframe = Bytes::from_static(&[0x31, 0x00, 0x00, 0xaa, 0xbb]);
 		assert!(

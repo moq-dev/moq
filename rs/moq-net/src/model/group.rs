@@ -13,7 +13,7 @@ use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale, Timestamp};
+use crate::{Error, IntoBytes, Result, Timescale, Timestamp};
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
 ///
@@ -192,10 +192,9 @@ impl Producer {
 	///
 	/// `timestamp` is converted into the parent track's timescale. Use
 	/// [Self::write_frame_now] to stamp wall-clock time instead of supplying one.
-	pub fn write_frame<B: Into<Bytes>>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
-		let data = data.into();
+	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
 		let mut frame = self.create_frame(frame::Info {
-			size: data.len() as u64,
+			size: data.as_ref().len() as u64,
 			timestamp,
 		})?;
 		frame.write(data)?;
@@ -206,7 +205,7 @@ impl Producer {
 	/// Like [Self::write_frame] but stamps the frame with wall-clock now
 	/// ([`Timestamp::now`]). For data with no real presentation time of its own
 	/// (catalogs, JSON state) or sources whose protocol can't carry one.
-	pub fn write_frame_now<B: Into<Bytes>>(&mut self, data: B) -> Result<()> {
+	pub fn write_frame_now<B: IntoBytes>(&mut self, data: B) -> Result<()> {
 		self.write_frame(Timestamp::now(), data)
 	}
 
