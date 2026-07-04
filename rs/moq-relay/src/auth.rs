@@ -1025,7 +1025,7 @@ impl Auth {
 			// Verify the token with the resolved key
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
 		} else if !self.public.is_empty() {
-			// No JWT — use public access (static prefixes + optional API).
+			// No JWT. Use public access (static prefixes + optional API).
 			let root = Path::new(&params.path);
 
 			// Use static config if any static prefix overlaps the request path in either
@@ -1039,7 +1039,7 @@ impl Auth {
 					..Default::default()
 				}
 			} else if let Some((base, client)) = &self.public.api {
-				// No static overlap — fetch from API. Response paths are relative to the namespace.
+				// No static overlap. Response paths are relative to the namespace.
 				let namespace = root.to_string();
 				let url = base.join(&namespace)?;
 				let response = Self::fetch_public_response(client, &url).await?;
@@ -1072,11 +1072,23 @@ impl Auth {
 	/// for both (no alias). Shared by the standalone and `--auth-api` paths.
 	fn finalize(check_root: &str, route_root: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
 		let root = Path::new(check_root);
+		let route_root = Path::new(route_root);
 		let claims_root = Path::new(&claims.root);
+		let depth = |path: &Path<'_>| {
+			if path.is_empty() {
+				0
+			} else {
+				path.as_str().split('/').count()
+			}
+		};
+
+		if depth(&root) != depth(&route_root) {
+			return Err(AuthError::IncorrectRoot);
+		}
 
 		// The URL path and the token root must overlap:
-		// - URL extends root (e.g. URL="/demo/room", root="demo") → suffix narrows permissions
-		// - URL is parent of root (e.g. URL="/", root="demo") → prefix widens permission paths
+		// - URL extends root (e.g. URL="/demo/room", root="demo") so suffix narrows permissions
+		// - URL is parent of root (e.g. URL="/", root="demo") so prefix widens permission paths
 		let (suffix, prefix) = if let Some(suffix) = root.strip_prefix(&claims_root) {
 			(suffix, Path::new(""))
 		} else if let Some(prefix) = claims_root.strip_prefix(&root) {
@@ -1113,7 +1125,7 @@ impl Auth {
 		}
 
 		Ok(AuthToken {
-			root: Path::new(route_root).to_owned(),
+			root: route_root.to_owned(),
 			subscribe,
 			publish,
 			internal: false,
@@ -3089,6 +3101,25 @@ api = "https://api.example.com/access"
 		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
 		assert_eq!(verified.publish, vec![]);
 		assert!(!verified.internal);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_alias_depth_mismatch_fails_closed() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(r#"{"alias":"x7k2qp/room/extra","public":{"subscribe":[""]}}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let result = auth.verify(&AuthParams::new("/demo/room")).await;
+		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
 		Ok(())
 	}
 
