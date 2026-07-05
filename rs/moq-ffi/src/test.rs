@@ -193,6 +193,33 @@ async fn media_track_activity_and_name() {
 		.unwrap();
 }
 
+#[tokio::test]
+async fn publish_media_aac_populates_description() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = moq_mux::codec::aac::Config {
+		profile: 2,
+		sample_rate: 44_100,
+		channel_count: 2,
+	};
+	let init = config.encode();
+	let _media = broadcast.publish_media("aac".into(), init.to_vec()).unwrap();
+
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+
+	assert_eq!(catalog.audio.len(), 1);
+	let audio = catalog.audio.values().next().unwrap();
+	assert_eq!(audio.codec, "mp4a.40.2");
+	assert_eq!(audio.sample_rate, config.sample_rate);
+	assert_eq!(audio.channel_count, config.channel_count);
+	assert_eq!(audio.description.as_deref(), Some(init.as_ref()));
+}
+
 #[test]
 fn unknown_format() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

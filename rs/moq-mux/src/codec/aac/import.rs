@@ -30,6 +30,7 @@ impl<E: CatalogExt> Import<E> {
 			config.channel_count,
 		);
 		audio_config.container = hang::catalog::Container::Legacy;
+		audio_config.description = Some(config.encode());
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 

@@ -543,6 +543,28 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn aac_import_attaches_audio_specific_config() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let config = crate::codec::aac::Config {
+			profile: 2,
+			sample_rate: 44_100,
+			channel_count: 2,
+		};
+		let init = config.encode();
+		let request = broadcast.create_track(moq_net::Track::new("audio")).unwrap();
+
+		let import = Track::new(request, catalog.clone(), "aac", init.as_ref()).unwrap();
+
+		assert_eq!(import.name(), "audio");
+		let snapshot = catalog.snapshot();
+		let audio = snapshot.audio.renditions.get("audio").unwrap();
+		assert_eq!(audio.codec.to_string(), "mp4a.40.2");
+		assert_eq!(audio.sample_rate, config.sample_rate);
+		assert_eq!(audio.channel_count, config.channel_count);
+		assert_eq!(audio.description.as_deref(), Some(init.as_ref()));
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn unique_track_opus_attaches_catalog_and_retires_on_drop() {
 		let (mut broadcast, catalog) = new_broadcast();
 

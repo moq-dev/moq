@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
+	AsPath, BroadcastRequested, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
 	TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
@@ -110,8 +110,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 		const PROBE_MAX_DELTA: f64 = 0.25;
 
-		let mut last_sent: Option<(u64, tokio::time::Instant)> = None;
-		let mut interval = tokio::time::interval(PROBE_INTERVAL);
+		let mut last_sent: Option<(u64, web_async::time::Instant)> = None;
+		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
 			tokio::select! {
@@ -139,7 +139,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if should_send {
 				let rtt = session.stats().rtt().map(|d| d.as_millis() as u64);
 				stream.writer.encode(&lite::Probe { bitrate, rtt }).await?;
-				last_sent = Some((bitrate, tokio::time::Instant::now()));
+				last_sent = Some((bitrate, web_async::time::Instant::now()));
 			}
 		}
 	}
@@ -355,9 +355,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
-		// We just received a subscribe for this exact path, so by definition the peer has
-		// already seen an announcement for it — synchronous lookup is appropriate here.
-		let broadcast = self.origin.get_broadcast(&subscribe.broadcast);
+		// Prefer an announced broadcast, but allow a dynamic origin to serve
+		// unannounced paths such as edge-local dashboard stats.
+		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
 
@@ -407,7 +407,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let name = msg.track.to_string();
 		tracing::debug!(broadcast = %absolute, track = %name, "track info requested");
 
-		let broadcast = self.origin.get_broadcast(&msg.broadcast);
+		let broadcast = self.origin.request_broadcast(&msg.broadcast);
 
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_track_info(&mut stream, broadcast, name).await {
@@ -421,10 +421,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track_info(
 		stream: &mut Stream<S, Version>,
-		consumer: Option<BroadcastConsumer>,
+		consumer: kio::Pending<BroadcastRequested>,
 		name: String,
 	) -> Result<(), Error> {
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let broadcast = consumer.await?;
 		// Resolve the track to read its publisher properties. The query carries no
 		// priority; a reused producer reports its own authored value.
 		let track = broadcast.subscribe_track(&Track { name, priority: 0 })?;
@@ -447,7 +447,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		consumer: Option<BroadcastConsumer>,
+		consumer: kio::Pending<BroadcastRequested>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -461,7 +461,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: subscribe.priority,
 		};
 
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let broadcast = consumer.await?;
 		let mut track = broadcast.subscribe_track(&track)?;
 
 		// Subscription is now active: count this session as a viewer of the

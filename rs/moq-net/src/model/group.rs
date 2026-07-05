@@ -106,6 +106,26 @@ impl GroupState {
 		}
 	}
 
+	/// Poll for the full payload of the frame at `index`, reading it in place.
+	///
+	/// Unlike [`Self::poll_get_frame`] this never mints a [`FrameConsumer`] (which
+	/// would churn the frame's consumer count and wake its waiters every poll); it
+	/// reads the cached [`FrameProducer`] directly. `waiter` is registered on the
+	/// frame's state so the reader wakes when it finishes.
+	fn poll_frame_read_all(&self, index: usize, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		if index < self.offset {
+			return Poll::Ready(Err(Error::CacheFull));
+		}
+		match self.frames.get(index - self.offset) {
+			Some(frame) => Poll::Ready(Ok(Some(ready!(frame.poll_read_all(waiter))?))),
+			None if self.fin => Poll::Ready(Ok(None)),
+			None => match &self.abort {
+				Some(err) => Poll::Ready(Err(err.clone())),
+				None => Poll::Pending,
+			},
+		}
+	}
+
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if self.fin {
 			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
@@ -359,13 +379,12 @@ impl GroupConsumer {
 
 	/// Read the next frame's data all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+		let index = self.index;
+		let Some(data) = ready!(self.poll(waiter, |state| state.poll_frame_read_all(index, waiter))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
-		let data = ready!(frame.poll_read_all(waiter))?;
 		self.index += 1;
-
 		Poll::Ready(Ok(Some(data)))
 	}
 
@@ -376,14 +395,15 @@ impl GroupConsumer {
 
 	/// Read all of the chunks of the next frame, without blocking.
 	pub fn poll_read_frame_chunks(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
-		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+		let index = self.index;
+		let Some(data) = ready!(self.poll(waiter, |state| state.poll_frame_read_all(index, waiter))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
-		let data = ready!(frame.poll_read_all_chunks(waiter))?;
 		self.index += 1;
-
-		Poll::Ready(Ok(Some(data)))
+		// In-place reads return the whole frame as one slice; keep the chunked API
+		// shape (empty payload -> no chunks).
+		Poll::Ready(Ok(Some(if data.is_empty() { Vec::new() } else { vec![data] })))
 	}
 
 	/// Read all of the chunks of the next frame.

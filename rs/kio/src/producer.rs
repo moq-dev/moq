@@ -104,6 +104,31 @@ impl<T> Producer<T> {
 		}
 	}
 
+	/// Poll read-only access with waker registration.
+	///
+	/// Like [`Self::poll`] but hands `f` a [`Ref`] instead of returning a
+	/// [`Mut`], so it never flags the state modified and never wakes consumers.
+	/// Use it to wait on a read condition from the producer side without creating
+	/// a [`Consumer`].
+	pub fn poll_ref<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	where
+		F: FnMut(&Ref<'_, T>) -> Poll<R>,
+	{
+		let state = self.state.lock();
+		let mut guard = Ref { state };
+
+		if let Poll::Ready(res) = f(&guard) {
+			return Poll::Ready(Ok(res));
+		}
+
+		if guard.state.closed {
+			return Poll::Ready(Err(guard));
+		}
+
+		waiter.register(&mut guard.state.waiters_value);
+		Poll::Pending
+	}
+
 	/// Wait until the read-only predicate holds, then acquire write access.
 	///
 	/// The async sibling of [`poll`](Self::poll): returns `Ok(Mut)` once `f`

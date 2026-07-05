@@ -1,0 +1,4 @@
+# Browser/WASM (moq-wasm). getrandom needs its wasm_js backend, and web-sys's
+# WebTransport bindings are behind the unstable cfg.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\"", "--cfg=web_sys_unstable_apis"]
