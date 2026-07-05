@@ -18,5 +18,7 @@ export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
 export * as Time from "./time.ts";
 export * from "./track.ts";
+/** Classify an error as a routine stream teardown vs a client-actionable fault (for log-level decisions). */
+export { isStreamAbort } from "./util/error.ts";
 /** QUIC variable-length integer encoding and decoding. */
 export * as Varint from "./varint.ts";
