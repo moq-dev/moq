@@ -424,7 +424,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		consumer: kio::Pending<BroadcastRequested>,
 		name: String,
 	) -> Result<(), Error> {
-		let consumer = std::pin::pin!(consumer);
 		let broadcast = consumer.await?;
 		// Resolve the track to read its publisher properties. The query carries no
 		// priority; a reused producer reports its own authored value.
@@ -462,7 +461,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: subscribe.priority,
 		};
 
-		let consumer = std::pin::pin!(consumer);
 		let broadcast = consumer.await?;
 		let mut track = broadcast.subscribe_track(&track)?;
 
