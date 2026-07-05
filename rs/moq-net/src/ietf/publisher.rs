@@ -139,13 +139,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Prefer an announced broadcast, but allow a dynamic origin to serve
 		// unannounced namespaces such as edge-local dashboard stats.
-		let broadcast = match self.origin.request_broadcast(&msg.track_namespace).await {
-			Ok(broadcast) => broadcast,
-			Err(err) => {
-				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
-					.await?;
-				return Ok(());
-			}
+		let Ok(broadcast) = self.origin.request_broadcast(&msg.track_namespace).await else {
+			self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
+				.await?;
+			return Ok(());
 		};
 
 		let track = Track {
