@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/moq-dev/moq/compare/moq-net-v0.1.14...moq-net-v0.1.15) - 2026-07-05
+
+### Fixed
+
+- moq-net wasm compatibility ([#2085](https://github.com/moq-dev/moq/pull/2085))
+
+### Other
+
+- Route subscribes through dynamic origins ([#2094](https://github.com/moq-dev/moq/pull/2094))
+- [codex] backport moq-wasm to main ([#2086](https://github.com/moq-dev/moq/pull/2086))
+
 ## [0.1.14](https://github.com/moq-dev/moq/compare/moq-net-v0.1.13...moq-net-v0.1.14) - 2026-07-04
 
 ### Added

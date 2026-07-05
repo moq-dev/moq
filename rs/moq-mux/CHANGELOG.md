@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.1...moq-mux-v0.7.2) - 2026-07-05
+
+### Other
+
+- *(deps)* bump the cargo group with 9 updates ([#2098](https://github.com/moq-dev/moq/pull/2098))
+- [codex] fix AAC catalog description ([#2093](https://github.com/moq-dev/moq/pull/2093))
+
 ## [0.7.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.0...moq-mux-v0.7.1) - 2026-07-04
 
 ### Added
