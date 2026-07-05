@@ -19,7 +19,7 @@ tokio = ["dep:tokio"]
 [dependencies]
 aws-lc-rs = "1"
 base64 = "0.22"
-elliptic-curve = "0.13.8"
+elliptic-curve = "0.14.0"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = "0.13.2"
 p384 = "0.13.1"
