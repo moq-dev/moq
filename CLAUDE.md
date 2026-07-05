@@ -10,12 +10,12 @@ MoQ (Media over QUIC) is a next-generation live media delivery protocol providin
 
 ```bash
 # Code quality and testing
-just check        # Run all tests and linting
-just fix          # Auto-fix linting issues
-just build        # Build all packages
+nix develop --command just check        # Run all tests and linting
+nix develop --command just fix          # Auto-fix linting issues
+nix develop --command just build        # Build all packages
 ```
 
-If `just` is unavailable, use `cargo` or `bun` directly.
+Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
 ## Architecture
 

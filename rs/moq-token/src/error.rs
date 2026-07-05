@@ -72,10 +72,10 @@ pub enum Error {
 	Jwt(#[from] jsonwebtoken::errors::Error),
 
 	#[error(transparent)]
-	Pkcs8(#[from] elliptic_curve::pkcs8::Error),
+	Pkcs8(#[from] p256::elliptic_curve::pkcs8::Error),
 
 	#[error(transparent)]
-	EllipticCurve(#[from] elliptic_curve::Error),
+	EllipticCurve(#[from] p256::elliptic_curve::Error),
 
 	#[error(transparent)]
 	Rsa(#[from] rsa::Error),
