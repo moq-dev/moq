@@ -355,9 +355,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
-		// We just received a subscribe for this exact path, so by definition the peer has
-		// already seen an announcement for it — synchronous lookup is appropriate here.
-		let broadcast = self.origin.get_broadcast(&subscribe.broadcast);
+		// Prefer an announced broadcast, but allow a dynamic origin to serve
+		// unannounced paths such as edge-local dashboard stats.
+		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
 
@@ -374,7 +374,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				session,
 				&mut stream,
 				&subscribe,
-				broadcast,
+				broadcast.await,
 				priority,
 				(track_stats, broadcasts, absolute.clone()),
 				version,
@@ -407,10 +407,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let name = msg.track.to_string();
 		tracing::debug!(broadcast = %absolute, track = %name, "track info requested");
 
-		let broadcast = self.origin.get_broadcast(&msg.broadcast);
+		let broadcast = self.origin.request_broadcast(&msg.broadcast);
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_track_info(&mut stream, broadcast, name).await {
+			if let Err(err) = Self::run_track_info(&mut stream, broadcast.await, name).await {
 				tracing::debug!(broadcast = %absolute, %err, "track info error");
 				stream.writer.abort(&err);
 			}
@@ -421,10 +421,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track_info(
 		stream: &mut Stream<S, Version>,
-		consumer: Option<BroadcastConsumer>,
+		consumer: Result<BroadcastConsumer, Error>,
 		name: String,
 	) -> Result<(), Error> {
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let broadcast = consumer?;
 		// Resolve the track to read its publisher properties. The query carries no
 		// priority; a reused producer reports its own authored value.
 		let track = broadcast.subscribe_track(&Track { name, priority: 0 })?;
@@ -447,7 +447,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		consumer: Option<BroadcastConsumer>,
+		consumer: Result<BroadcastConsumer, Error>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -461,7 +461,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: subscribe.priority,
 		};
 
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let broadcast = consumer?;
 		let mut track = broadcast.subscribe_track(&track)?;
 
 		// Subscription is now active: count this session as a viewer of the
