@@ -2,10 +2,10 @@ use crate::error::KeyError;
 use crate::{Algorithm, EllipticCurve, Key, KeyOperation, KeyType, RsaPublicKey};
 use aws_lc_rs::encoding::AsBigEndian;
 use aws_lc_rs::signature::KeyPair;
-use elliptic_curve::generic_array::typenum::Unsigned;
-use elliptic_curve::point::PointCompression;
-use elliptic_curve::sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint};
-use elliptic_curve::{Curve, CurveArithmetic, SecretKey};
+use p256::elliptic_curve::generic_array::typenum::Unsigned;
+use p256::elliptic_curve::point::PointCompression;
+use p256::elliptic_curve::sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint};
+use p256::elliptic_curve::{Curve, CurveArithmetic, SecretKey};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.

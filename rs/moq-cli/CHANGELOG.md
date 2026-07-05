@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.0...moq-cli-v0.8.1) - 2026-07-05
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.8.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.35...moq-cli-v0.8.0) - 2026-07-04
 
 ### Added

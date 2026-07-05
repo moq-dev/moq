@@ -28,9 +28,8 @@ mod errors;
 
 pub use self::errors::HandshakeError;
 
-use hmac::{Hmac, Mac, NewMac};
-use rand;
-use rand::Rng;
+use hmac::{Hmac, KeyInit, Mac};
+use rand::RngExt;
 use sha2::Sha256;
 
 const RTMP_PACKET_SIZE: usize = 1536;
@@ -479,7 +478,7 @@ fn calc_hmac_from_parts(part1: &[u8], part2: &[u8], key: &[u8]) -> [u8; SHA256_D
 }
 
 fn calc_hmac(input: &[u8], key: &[u8]) -> [u8; SHA256_DIGEST_LENGTH] {
-	let mut mac = Hmac::<Sha256>::new_varkey(key).unwrap();
+	let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
 	mac.update(input);
 
 	let result = mac.finalize();
@@ -501,10 +500,9 @@ fn calc_hmac(input: &[u8], key: &[u8]) -> [u8; SHA256_DIGEST_LENGTH] {
 }
 
 fn fill_with_random_data(buffer: &mut [u8]) {
-	let mut rng = rand::thread_rng();
-	for x in 0..buffer.len() {
-		let value = rng.r#gen(); // `gen` is a reserved keyword in edition 2024
-		buffer[x] = value;
+	let mut rng = rand::rng();
+	for byte in buffer {
+		*byte = rng.random();
 	}
 }
 
@@ -833,7 +831,7 @@ mod tests {
 
 	#[test]
 	fn hmac_test3() {
-		let mut mac = Hmac::<Sha256>::new_varkey(&[0x0b; 20]).unwrap();
+		let mut mac = Hmac::<Sha256>::new_from_slice(&[0x0b; 20]).unwrap();
 		mac.update(b"Hi There");
 
 		let expected = [

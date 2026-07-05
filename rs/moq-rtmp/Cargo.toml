@@ -8,7 +8,7 @@ repository = "https://github.com/moq-dev/moq"
 # src/rml/LICENSE and applies to that module regardless of which option you pick.
 license = "MIT OR Apache-2.0"
 
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -36,13 +36,13 @@ anyhow = { version = "1", features = ["backtrace"] }
 byteorder = "1"
 bytes = "1"
 futures = "0.3"
-hmac = "0.10"
+hmac = "0.13"
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-rand = "0.8"
+rand = "0.10"
 rml_amf0 = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }
-sha2 = "0.9"
+sha2 = "0.11"
 # TCP keepalive on accepted sockets, so a half-open connection (a peer that
 # vanished without a FIN/RST) is reaped instead of pinning a broadcast and its
 # stream-key slot forever.

@@ -73,6 +73,13 @@
           gst_all_1.gst-plugins-bad
         ];
 
+        tsduck = pkgs.tsduck.overrideAttrs (
+          old:
+          pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+            makeFlags = old.makeFlags ++ [ "CXXFLAGS_WARNINGS=" ];
+          }
+        );
+
         # Rust dependencies
         rustDeps =
           with pkgs;

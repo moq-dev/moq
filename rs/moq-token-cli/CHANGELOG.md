@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.33](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.32...moq-token-cli-v0.5.33) - 2026-07-05
+
+### Other
+
+- [codex] rename moq token binary ([#2082](https://github.com/moq-dev/moq/pull/2082))
+
 ## [0.5.32](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.31...moq-token-cli-v0.5.32) - 2026-06-30
 
 ### Other
