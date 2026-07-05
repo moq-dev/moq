@@ -7,7 +7,7 @@ import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, isStreamAbort } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
@@ -215,7 +215,8 @@ export class Subscriber {
 		} catch (err) {
 			const e = error(err);
 			request.track.close(e);
-			console.warn(
+			// A publisher handover/unsubscribe resets the stream; that is expected teardown, not a fault.
+			console[isStreamAbort(e) ? "debug" : "warn"](
 				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
 			);
 			stream.abort(e);
@@ -361,7 +362,9 @@ export class Subscriber {
 				}
 			}
 		} catch (err: unknown) {
-			console.warn("probe stream error", err);
+			// Best-effort bandwidth/RTT side channel: an error here just means no estimate right now (the
+			// stream closes on every reconnect/teardown). The finally resets state, so log at debug.
+			console.debug("probe stream error", err);
 		} finally {
 			this.#recvBandwidth.set(undefined);
 			this.#rtt?.set(undefined);

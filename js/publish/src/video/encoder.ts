@@ -156,10 +156,18 @@ export class Encoder {
 				},
 			});
 
-			effect.cleanup(() => encoder.close());
+			// Guard against double-close: a fatal encoder error auto-transitions the encoder to "closed", and
+			// close() on a closed encoder throws InvalidStateError, which would abort the signals dispose loop
+			// and leak the sibling effects. Matches the guarded close in preview.ts and the decoders.
+			effect.cleanup(() => {
+				if (encoder.state !== "closed") encoder.close();
+			});
 
-			effect.run(() => {
-				const config = effect.get(this.#config);
+			// Reconfigure on the INNER effect. Subscribing via the outer `effect` would attach the #config
+			// dependency to serve()'s effect and tear down + rebuild the whole encoder + producer on every
+			// bitrate change, instead of reconfiguring the live encoder in place (the audio encoder does this).
+			effect.run((inner) => {
+				const config = inner.get(this.#config);
 				if (!config) return;
 
 				encoder.configure(config);
@@ -268,7 +276,9 @@ export class Encoder {
 				// Worse than H.264 but it's a backup plan.
 				bitrate *= 1.1;
 			} else {
-				throw new Error(`unknown codec: ${codec}`);
+				// Unknown codec (e.g. a caller-forced string outside our efficiency table): don't throw out
+				// of the config effect; skip the efficiency scaling (1.0) so the encoder still configures.
+				console.warn(`unknown codec for bitrate scaling: ${codec} (using 1.0)`);
 			}
 
 			bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
@@ -349,15 +359,19 @@ export class Encoder {
 		const HARDWARE_CODECS = hardwareCodecOrder(Util.Hacks.isSafari);
 		const SOFTWARE_CODECS = softwareCodecOrder();
 
-		// Try hardware encoding first.
-		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-		if (!Util.Hacks.isFirefox) {
-			for (const codec of HARDWARE_CODECS) {
-				if (!codec.startsWith(required)) continue;
+		// Candidates for a preference order: entries matching the requested prefix, or the requested string
+		// itself when the caller forced an exact codec our lists don't enumerate (e.g. "av01.0.04M.08"). An
+		// empty `required` (auto) prefix-matches everything, so this returns the whole ordered list.
+		const candidates = (order: readonly string[]): string[] => {
+			const matched = order.filter((codec) => codec.startsWith(required));
+			return matched.length > 0 ? matched : [required];
+		};
 
-				const hardwareAcceleration: HardwareAcceleration = "prefer-hardware";
-
-				const hardware: VideoEncoderConfig = {
+		// Probe one codec. isConfigSupported rejects (TypeError) on some malformed/unknown codec strings
+		// instead of resolving { supported: false }, so treat a throw as "not supported, try the next".
+		const probe = async (codec: string, hardwareAcceleration: HardwareAcceleration): Promise<boolean> => {
+			try {
+				const { supported } = await VideoEncoder.isConfigSupported({
 					codec,
 					width: dimensions.width,
 					height: dimensions.height,
@@ -366,35 +380,32 @@ export class Encoder {
 					avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
 					// @ts-expect-error Typescript needs to be updated.
 					hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
-				};
+				});
+				return supported === true;
+			} catch {
+				return false;
+			}
+		};
 
-				const { supported } = await VideoEncoder.isConfigSupported(hardware);
-				if (supported) return { codec, hardwareAcceleration };
+		// Try hardware encoding first.
+		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
+		if (!Util.Hacks.isFirefox) {
+			for (const codec of candidates(HARDWARE_CODECS)) {
+				if (await probe(codec, "prefer-hardware")) return { codec, hardwareAcceleration: "prefer-hardware" };
 			}
 		}
 
-		// Try software encoding.
-		for (const codec of SOFTWARE_CODECS) {
-			if (!codec.startsWith(required)) continue;
-
-			const hardwareAcceleration: HardwareAcceleration = "prefer-software";
-
-			const software: VideoEncoderConfig = {
-				codec,
-				width: dimensions.width,
-				height: dimensions.height,
-				latencyMode: "realtime",
-				hardwareAcceleration,
-				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-				// @ts-expect-error Typescript needs to be updated.
-				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
-			};
-
-			const { supported } = await VideoEncoder.isConfigSupported(software);
-			if (supported) return { codec, hardwareAcceleration };
+		// Then software encoding.
+		for (const codec of candidates(SOFTWARE_CODECS)) {
+			if (await probe(codec, "prefer-software")) return { codec, hardwareAcceleration: "prefer-software" };
 		}
 
-		throw new Error("no supported codec");
+		// Nothing encoded: skip this rendition instead of throwing out of the config effect (the caller
+		// early-returns on undefined), so a forced-but-unsupported codec just drops the rendition.
+		console.warn(
+			`no supported video encoder: codec=${required || "auto"} ${dimensions.width}x${dimensions.height}`,
+		);
+		return undefined;
 	}
 
 	close() {

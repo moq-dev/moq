@@ -203,17 +203,20 @@ export class Reload {
 						}
 					});
 
-					// Bump the generation on each (re-)announce so a same-name republish is observable even
-					// when the presence Set never flips; delete on unannounce so the map can't grow unbounded
-					// over a long high-churn connection (safe: an unannounce is observed as #announcedNow=0
-					// before any re-announce, so a re-announce still registers as a change).
-					this.#announcedGen.mutate((gens) => {
-						if (entry.active) {
+					// Bump a MONOTONIC per-path generation on each active announce so a same-name republish
+					// is always observable, even when the unannounce+announce coalesce and the presence Set
+					// never visibly flips (the watcher re-consumes on any generation change). Never delete on
+					// unannounce: resetting a path back to 1 would make a coalesced republish look unchanged
+					// (1 -> 1), so the watcher would stay bound to the dead route. The map therefore grows by
+					// one entry per DISTINCT path ever announced on this connection (cumulative, not just the
+					// active set), freed only by the wholesale reset on reconnect above. Pruning inactive paths
+					// here is unsafe (a pending coalesced re-announce could reset the counter), so the growth is
+					// an accepted tradeoff; a very-high-churn relay may want an epoch-based redesign instead.
+					if (entry.active) {
+						this.#announcedGen.mutate((gens) => {
 							gens.set(entry.path, (gens.get(entry.path) ?? 0) + 1);
-						} else {
-							gens.delete(entry.path);
-						}
-					});
+						});
+					}
 				}
 			} catch (err) {
 				this.#announced.set(new Set());

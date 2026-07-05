@@ -262,7 +262,19 @@ export class Source {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, config] of Object.entries(renditions)) {
-				const isSupported = await supported(config);
+				// supported() can THROW (malformed description hex, or a codec string that makes
+				// isConfigSupported reject). A throw must not abort the loop: that would drop every rendition
+				// (including decodable ones) and leave #unsupported/#available unset, so the unsupported
+				// indicator never shows and the viewer spins forever. Treat a throw as unsupported.
+				let isSupported = false;
+				try {
+					isSupported = await supported(config);
+				} catch (err) {
+					console.warn(
+						`[Source] video rendition ${name} (${config.codec}) probe threw; treating as unsupported`,
+						err,
+					);
+				}
 				if (isSupported) available[name] = config;
 			}
 

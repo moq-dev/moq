@@ -71,6 +71,13 @@ export default class MoqWatch extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
+	// Set by the pagehide hook when the tab is torn down/frozen, so the connection closes immediately
+	// (freeing the relay's egress to this viewer) instead of lingering until the transport idle timeout.
+	#suspended = new Signal(false);
+
+	// The effective gate: connected to the DOM AND not page-suspended.
+	#active = new Signal(false);
+
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
 
@@ -82,8 +89,13 @@ export default class MoqWatch extends HTMLElement {
 
 		cleanup.register(this, this.signals);
 
+		// #active = connected AND not page-suspended; gates both the connection and the subscription.
+		this.signals.run((effect) => {
+			this.#active.set(effect.get(this.#enabled) && !effect.get(this.#suspended));
+		});
+
 		this.connection = new Moq.Connection.Reload({
-			enabled: this.#enabled,
+			enabled: this.#active,
 		});
 		this.signals.cleanup(() => this.connection.close());
 
@@ -91,7 +103,7 @@ export default class MoqWatch extends HTMLElement {
 			connection: this.connection.established,
 			announced: this.connection.announced,
 			announcedGenerations: this.connection.announcedGenerations,
-			enabled: this.#enabled,
+			enabled: this.#active,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -101,11 +113,26 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.backend.close());
 
+		// Close the connection eagerly when the tab is torn down or frozen, so the relay stops forwarding
+		// media to this dead viewer immediately instead of at the transport idle timeout (and so the page
+		// stays bfcache-eligible). Gated on #enabled so the window listeners drop on DOM disconnect.
+		this.signals.run((effect) => {
+			if (!effect.get(this.#enabled)) return;
+			effect.event(window, "pagehide", () => {
+				this.connection.established.peek()?.close();
+				this.#suspended.set(true);
+			});
+			effect.event(window, "pageshow", (event) => {
+				if ((event as PageTransitionEvent).persisted) this.#suspended.set(false);
+			});
+		});
+
 		// Recover from a silently-wedged connection (see STALL_RECOVERY_MS). Safari-only: the wedge is
 		// a Safari WebTransport bug, and reconnecting on any >10s stall would destabilize healthy
 		// Chrome/Firefox sessions that recover on their own.
 		if (Util.Hacks.isSafari) {
 			this.signals.run(this.#runStallRecovery.bind(this));
+			this.signals.run(this.#runVisibilityRecovery.bind(this));
 		}
 
 		// Watch to see if the canvas element is added or removed.
@@ -240,6 +267,24 @@ export default class MoqWatch extends HTMLElement {
 			this.connection.reconnect();
 			this.#stallDelay = Math.min(this.#stallDelay * 2, STALL_RECOVERY_MAX_MS);
 		}, this.#stallDelay);
+	}
+
+	// Fast path for the Safari tab-switch wedge: returning to a hidden tab often leaves playback stalled
+	// against a suspended WebTransport session. On becoming visible, if we're stalled while still live,
+	// reconnect immediately instead of waiting out the stall-recovery timer.
+	#runVisibilityRecovery(effect: Effect): void {
+		// Subscribe to #enabled so this effect only listens while connected AND subscribes to a signal,
+		// which avoids the "will never rerun" warning for an otherwise listener-only effect.
+		if (!effect.get(this.#enabled)) return;
+
+		effect.event(document, "visibilitychange", () => {
+			if (document.hidden) return;
+			if (!this.backend.video.stalled.peek()) return;
+			if (this.broadcast.status.peek() !== "live") return;
+
+			this.connection.reconnect();
+			this.#stallDelay = STALL_RECOVERY_MS;
+		});
 	}
 
 	// Parse a single latency bound: absent or "real-time" is adaptive, otherwise a fixed ms value.

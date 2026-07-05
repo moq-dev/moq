@@ -48,6 +48,9 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
+	// True once close() has been called, so #run can treat its unwinding as expected teardown, not a fault.
+	#closing = false;
+
 	/** Estimated send bitrate from the congestion controller. */
 	readonly sendBandwidth?: Bandwidth;
 
@@ -102,14 +105,16 @@ export class Connection implements Established {
 	 * Closes the connection.
 	 */
 	close() {
-		this.#publisher.close();
-		this.#subscriber.close();
+		this.#closing = true;
 
 		try {
-			// TODO: For whatever reason, this try/catch doesn't seem to work..?
+			this.#publisher.close();
+			this.#subscriber.close();
 			this.#quic.close();
 		} catch {
-			// ignore
+			// Teardown races (already-closed transport, etc.) are expected. The abnormal-close signal that
+			// drives reconnect comes from `closed` rejecting, not from a synchronous throw here. (The old
+			// try/catch "didn't work" because the escaping error was a promise rejection, handled elsewhere.)
 		}
 	}
 
@@ -132,7 +137,9 @@ export class Connection implements Established {
 		try {
 			await Promise.all(tasks);
 		} catch (err) {
-			console.error("fatal error running connection", err);
+			// On a deliberate close the loop's streams reject; that is expected teardown, not a fault.
+			if (this.#closing) console.debug("connection run loop stopped while closing", err);
+			else console.error("fatal error running connection", err);
 		} finally {
 			this.close();
 		}
@@ -264,10 +271,14 @@ export class Connection implements Established {
 				}
 			}, SEND_BW_POLL_INTERVAL);
 
-			void this.closed.then(() => {
-				clearInterval(id);
-				resolve();
-			});
+			// `closed` rejects on abnormal termination (that rejection is what drives Reload's reconnect);
+			// here we only need it as a stop signal, so swallow the rejection to avoid an unhandled rejection.
+			void this.closed
+				.catch(() => {})
+				.then(() => {
+					clearInterval(id);
+					resolve();
+				});
 		});
 	}
 

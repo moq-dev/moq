@@ -1,3 +1,4 @@
+import * as Util from "@moq/hang/util";
 import { Effect, Signal } from "@moq/signals";
 import type * as Video from "../video";
 import { Device, type DeviceProps } from "./device";
@@ -85,6 +86,23 @@ export class Camera {
 				console.warn("camera track ended; re-acquiring");
 				this.#retry.update((n) => n + 1);
 			});
+
+			// Safari mutes (does not end) the track when the tab is backgrounded and doesn't reliably
+			// unmute it on return, leaving a frozen source. On return to the foreground, give Safari a
+			// moment to auto-unmute; if the track is still muted, re-acquire. Safari-only: desktop
+			// Chrome/Firefox don't mute on background, and mobile Chrome/Firefox auto-unmute reliably, so
+			// re-acquiring there would only glitch a stream that was about to recover on its own.
+			if (Util.Hacks.isSafari) {
+				effect.event(document, "visibilitychange", () => {
+					if (document.hidden || !source.muted) return;
+					effect.timer(() => {
+						if (!document.hidden && source.muted) {
+							console.warn("camera track stuck muted after returning to foreground; re-acquiring");
+							this.#retry.update((n) => n + 1);
+						}
+					}, 500);
+				});
+			}
 
 			effect.set(this.device.active, settings.deviceId);
 			effect.set(this.source, source);

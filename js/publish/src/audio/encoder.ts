@@ -323,7 +323,11 @@ export class Encoder {
 					track.close(err);
 				},
 			});
-			effect.cleanup(() => encoder.close());
+			// Guard against double-close: a fatal error auto-closes the encoder, and close() on a closed
+			// encoder throws InvalidStateError, aborting the signals dispose loop and leaking the sibling effects.
+			effect.cleanup(() => {
+				if (encoder.state !== "closed") encoder.close();
+			});
 
 			let config: Catalog.AudioConfig | undefined;
 			effect.run((effect: Effect) => {

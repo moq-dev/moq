@@ -204,6 +204,10 @@ interface DecoderTrackProps {
 	stats: Signal<Stats | undefined>;
 }
 
+// Max in-place decoder rebuilds (see the DecoderTrack error callback) before giving up, so a config that
+// configures cleanly but always fails to decode can't restart-loop forever. Reset on a successful decode.
+const MAX_DECODER_RESTARTS = 5;
+
 class DecoderTrack {
 	source: Source;
 	broadcast: Moq.Broadcast;
@@ -224,6 +228,12 @@ class DecoderTrack {
 	// so in-flight decodes from before a rewind can be dropped on output.
 	#discontinuity = 0;
 
+	// Bumped by the decoder's error callback to rebuild the decoder in place (re-run #run) instead of
+	// permanently closing the track. Capped by #restartCount (reset on a successful decode) so a config
+	// that configures cleanly but always fails to decode can't loop forever.
+	#restart = new Signal(0);
+	#restartCount = 0;
+
 	signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -240,6 +250,9 @@ class DecoderTrack {
 	}
 
 	#run(effect: Effect): void {
+		// Re-run (rebuild subscription + decoder) when the error callback bumps #restart.
+		effect.get(this.#restart);
+
 		const sub = this.broadcast.subscribe(this.track, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
 
@@ -274,6 +287,9 @@ class DecoderTrack {
 
 					this.timestamp.set(timestamp);
 
+					// A frame rendered, so the decoder is healthy: reset the restart budget.
+					this.#restartCount = 0;
+
 					// Trim the decode buffer as frames are rendered
 					this.#trimBuffered(timestamp);
 
@@ -285,10 +301,18 @@ class DecoderTrack {
 					frame.close();
 				}
 			},
-			// TODO bubble up error
 			error: (error) => {
-				console.error(error);
-				effect.close();
+				// Rebuild the decoder in place rather than permanently closing the track. WebCodecs has
+				// already closed the decoder here, so recovery needs a fresh one via a #run re-run. Cap the
+				// restarts so a config that always fails to decode can't loop forever.
+				if (this.#restartCount < MAX_DECODER_RESTARTS) {
+					this.#restartCount++;
+					console.warn("video decoder error; restarting", error);
+					this.#restart.update((n) => n + 1);
+				} else {
+					console.error("video decoder error; restart budget exhausted", error);
+					effect.close();
+				}
 			},
 		});
 		effect.cleanup(() => {
@@ -329,6 +353,7 @@ class DecoderTrack {
 		});
 
 		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
+		let resyncing = false;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -336,7 +361,10 @@ class DecoderTrack {
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
+				if (this.#onDiscontinuity(next.discontinuity)) {
+					previous = undefined;
+					resyncing = false;
+				}
 
 				const { frame, group } = next;
 
@@ -346,6 +374,13 @@ class DecoderTrack {
 					}
 					// The group is done
 					continue;
+				}
+
+				// While resyncing after a decode error, wait for the next keyframe (group start) before
+				// decoding again; group index 0 is always a keyframe, so this resyncs within one group.
+				if (resyncing) {
+					if (!frame.keyframe) continue;
+					resyncing = false;
 				}
 
 				// Mark that we received this frame right now.
@@ -378,7 +413,22 @@ class DecoderTrack {
 					final: false,
 				};
 
-				decoder.decode(chunk);
+				if (decoder.state === "closed") break;
+				try {
+					decoder.decode(chunk);
+				} catch (err) {
+					// Wrong-codec bytes (e.g. a mid-stream codec switch landing on the tail of the old
+					// codec's group) make decode() throw DataError synchronously. Skip to the next keyframe
+					// group and resync there instead of letting this spawn die and freezing until the next
+					// catalog round-trip. Any other error (closed/invalid state) stops the loop.
+					if (err instanceof DOMException && err.name === "DataError") {
+						console.debug("video decode error; resyncing at next keyframe", err);
+						resyncing = true;
+						previous = undefined;
+					} else {
+						break;
+					}
+				}
 			}
 		});
 	}
@@ -413,6 +463,7 @@ class DecoderTrack {
 		});
 
 		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
+		let resyncing = false;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -420,7 +471,10 @@ class DecoderTrack {
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
+				if (this.#onDiscontinuity(next.discontinuity)) {
+					previous = undefined;
+					resyncing = false;
+				}
 
 				const { frame, group } = next;
 
@@ -429,6 +483,13 @@ class DecoderTrack {
 						previous.final = true;
 					}
 					continue;
+				}
+
+				// While resyncing after a decode error, wait for the next keyframe (group start) before
+				// decoding again; group index 0 is always a keyframe, so this resyncs within one group.
+				if (resyncing) {
+					if (!frame.keyframe) continue;
+					resyncing = false;
 				}
 
 				// Mark that we received this frame right now.
@@ -456,13 +517,24 @@ class DecoderTrack {
 				};
 
 				if (decoder.state === "closed") break;
-				decoder.decode(
-					new EncodedVideoChunk({
-						type: frame.keyframe ? "key" : "delta",
-						data: frame.data,
-						timestamp: frame.timestamp,
-					}),
-				);
+				try {
+					decoder.decode(
+						new EncodedVideoChunk({
+							type: frame.keyframe ? "key" : "delta",
+							data: frame.data,
+							timestamp: frame.timestamp,
+						}),
+					);
+				} catch (err) {
+					// See #runLegacy: skip to the next keyframe on a wrong-codec DataError instead of dying.
+					if (err instanceof DOMException && err.name === "DataError") {
+						console.debug("video decode error; resyncing at next keyframe", err);
+						resyncing = true;
+						previous = undefined;
+					} else {
+						break;
+					}
+				}
 			}
 		});
 	}

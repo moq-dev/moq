@@ -217,7 +217,14 @@ export class Broadcast {
 					this.status.set("live");
 				}
 			} catch (err) {
-				console.warn("error fetching catalog", this.name.peek(), err);
+				// A transport reset during a publisher handover is expected; only a real fetch/parse
+				// failure (schema validation, protocol) warrants a warning. (Duck-typed rather than
+				// importing @moq/net's internal isStreamAbort, to avoid widening its public API.)
+				const abort =
+					err instanceof Error &&
+					((err.name === "WebTransportError" && (err as { source?: string }).source === "stream") ||
+						/^(RESET_STREAM|STOP_SENDING)/.test(err.message));
+				console[abort ? "debug" : "warn"]("error fetching catalog", this.name.peek(), err);
 			} finally {
 				this.catalog.set(undefined);
 				this.status.set("offline");

@@ -62,6 +62,11 @@ export class Decoder {
 	// one wrong-rate pipeline before self-healing on the following frame).
 	#decodedRate = new Signal<{ config: Catalog.AudioConfig; rate: number } | undefined>(undefined);
 
+	// The rate the decoder is expected to output (the pipeline's SOURCE rate), set when the ring is built.
+	// #emit resamples from this to the ring's actual context rate, and treats a sample at a DIFFERENT rate
+	// as a real decoder-rate change (-> #decodedRate rebuild) rather than something to resample.
+	#ringSourceRate: number | undefined;
+
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<BufferedRanges>([]);
 
@@ -135,6 +140,15 @@ export class Decoder {
 
 		effect.cleanup(() => context.close());
 
+		// Safari (and possibly others) ignore the requested sampleRate and run the context at the hardware
+		// rate. The worklet + ring run at the context's ACTUAL rate; #emit resamples the decoder's output
+		// (sampleRate) to it. `sampleRate` stays the SOURCE rate that #emit compares against to tell a real
+		// decoder-rate change apart from this deliberate resample.
+		const ringRate = context.sampleRate;
+		if (ringRate !== sampleRate) {
+			console.debug(`audio: requested ${sampleRate} Hz context, got ${ringRate} Hz; resampling to match`);
+		}
+
 		// Safari (and Chrome's autoplay policy) create the AudioContext suspended and only resume it
 		// inside a user gesture; a reactive resume() is ignored. Resume on the first interaction, from
 		// context creation (not gated on playback). The Emitter (re)builds the graph once the context
@@ -168,17 +182,19 @@ export class Decoder {
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			// Initial target latency in samples.
+			// Initial target latency in samples (at the ring's actual rate).
 			const latency = this.source.sync.buffer.peek();
-			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
+			const latencySamples = Math.ceil(ringRate * Time.Second.fromMilli(latency));
 			const buffered = this.source.sync.buffered.peek();
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
+			const ring = createAudioBuffer(worklet, channelCount, ringRate, latencySamples, buffered);
 			this.#ring = ring;
+			this.#ringSourceRate = sampleRate;
 			effect.cleanup(() => {
 				ring.close();
 				this.#ring = undefined;
+				this.#ringSourceRate = undefined;
 			});
 
 			// Mirror ring state (timestamp/stalled) onto our public signals.
@@ -412,13 +428,18 @@ export class Decoder {
 		// The ring copies samples verbatim, so a decoder outputting a different rate than the ring was
 		// built at would garble the audio (e.g. HE-AAC emitting 2x the advertised rate). Rebuild the
 		// pipeline at the real rate and drop frames until it's up.
-		if (sample.sampleRate !== ring.rate) {
+		// If the decoder output an UNEXPECTED rate (not what the pipeline was built for, e.g. HE-AAC
+		// emitting 2x the advertised rate), rebuild the pipeline at the real rate and drop until it's up.
+		// Compared to the SOURCE rate (not ring.rate) so the deliberate resample-to-context-rate below is
+		// not mistaken for a decoder-rate change, which would thrash the rebuild and silence Safari.
+		const sourceRate = this.#ringSourceRate;
+		if (sourceRate !== undefined && sample.sampleRate !== sourceRate) {
 			const config = this.source.config.peek();
 			const prev = this.#decodedRate.peek();
 			// Skip the set when this config already has this rate recorded (the rebuild is just in
 			// flight), but always record it for a new config even at a rate a prior stream used.
 			if (config && (prev?.config !== config || prev.rate !== sample.sampleRate)) {
-				console.warn(`audio decoder outputs ${sample.sampleRate} Hz, pipeline is ${ring.rate} Hz; rebuilding`);
+				console.warn(`audio decoder outputs ${sample.sampleRate} Hz, expected ${sourceRate} Hz; rebuilding`);
 				this.#decodedRate.set({ config, rate: sample.sampleRate });
 			}
 			sample.close();
@@ -436,11 +457,22 @@ export class Decoder {
 		// Firefox's Opus decoder sometimes outputs more channels than requested
 		// (e.g. 6 for stereo). Clamp to the ring's channel count.
 		const channels = Math.min(sample.numberOfChannels, ring.channels);
-		const channelData: Float32Array[] = [];
+		let channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
 			const data = new Float32Array(sample.numberOfFrames);
 			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
 			channelData.push(data);
+		}
+
+		// Resample to the ring's rate when the context runs at a different rate than the decoder outputs
+		// (Safari pins ~44100 while Opus decodes 48000). outLen comes from the ring's own index rounding so
+		// consecutive frames stay exactly contiguous (no zero-fill gap / "floating point inaccuracy" warn).
+		// A no-op when the rates match (Chrome/Firefox honor the requested rate).
+		if (sample.sampleRate !== ring.rate) {
+			const startIndex = Math.round(Time.Second.fromMicro(timestamp) * ring.rate);
+			const endMicro = (timestamp + durationMicro) as Time.Micro;
+			const outLen = Math.max(0, Math.round(Time.Second.fromMicro(endMicro) * ring.rate) - startIndex);
+			channelData = channelData.map((data) => resampleLinear(data, outLen));
 		}
 
 		// Hand off to the ring. Shared transport writes directly; post transport
@@ -500,6 +532,29 @@ export class Decoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+// Linear-resample one channel of PCM to `outLen` samples. The caller derives `outLen` from the ring's
+// index rounding so consecutive frames stay contiguous; this just maps the input samples across it.
+// Bypassed (returns the input) when no rate change is needed.
+function resampleLinear(input: Float32Array, outLen: number): Float32Array {
+	const inLen = input.length;
+	if (outLen === inLen) return input;
+	const out = new Float32Array(outLen);
+	if (outLen === 0 || inLen === 0) return out;
+	if (inLen === 1) {
+		out.fill(input[0]);
+		return out;
+	}
+	const step = inLen / outLen;
+	for (let j = 0; j < outLen; j++) {
+		const pos = j * step;
+		const i0 = Math.floor(pos);
+		const i1 = Math.min(i0 + 1, inLen - 1);
+		const frac = pos - i0;
+		out[j] = input[i0] * (1 - frac) + input[i1] * frac;
+	}
+	return out;
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {

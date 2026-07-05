@@ -3,7 +3,7 @@ import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import { error } from "../util/error.ts";
+import { error, isStreamAbort } from "../util/error.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -196,7 +196,10 @@ export class Publisher {
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${name} track=${track.name} error=${e.message}`);
+			// A downstream unsubscribe/handover aborts the stream; that is expected teardown, not a fault.
+			console[isStreamAbort(e) ? "debug" : "warn"](
+				`publish error: broadcast=${name} track=${track.name} error=${e.message}`,
+			);
 			stream.abort(e);
 		} finally {
 			track.close();

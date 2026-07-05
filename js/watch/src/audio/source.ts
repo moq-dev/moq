@@ -79,7 +79,14 @@ export class Source {
 			const available: Record<string, Catalog.AudioConfig> = {};
 
 			for (const [name, config] of Object.entries(renditions)) {
-				const isSupported = await supported(config);
+				// A throwing probe (bad description hex / rejecting isConfigSupported) must not abort the loop
+				// and drop every audio rendition; treat this one as unsupported and continue.
+				let isSupported = false;
+				try {
+					isSupported = await supported(config);
+				} catch (err) {
+					console.warn(`audio rendition ${name} (${config.codec}) probe threw; treating as unsupported`, err);
+				}
 				if (isSupported) available[name] = config;
 			}
 

@@ -4,7 +4,7 @@ import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, isStreamAbort } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
@@ -202,7 +202,10 @@ export class Publisher {
 			track.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`);
+			// A downstream unsubscribe/handover aborts the stream; that is expected teardown, not a fault.
+			console[isStreamAbort(e) ? "debug" : "warn"](
+				`publish error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`,
+			);
 			track.close(e);
 			stream.abort(e);
 		}
@@ -269,7 +272,10 @@ export class Publisher {
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${e.message}`);
+			// A downstream unsubscribe/handover resets the stream; that is expected teardown, not a fault.
+			console[isStreamAbort(e) ? "debug" : "warn"](
+				`publish error: broadcast=${broadcast} track=${track.name} error=${e.message}`,
+			);
 			track.close(e);
 			stream.reset(e);
 		}
@@ -376,7 +382,9 @@ export class Publisher {
 				}
 			}
 		} catch (err: unknown) {
-			console.warn("probe stream error", err);
+			// Best-effort bandwidth side channel: errors here are expected on every reconnect/teardown and
+			// never actionable, so log at debug rather than warn.
+			console.debug("probe stream error", err);
 			stream.close();
 		}
 	}
