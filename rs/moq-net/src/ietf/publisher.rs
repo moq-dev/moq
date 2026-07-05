@@ -139,7 +139,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Prefer an announced broadcast, but allow a dynamic origin to serve
 		// unannounced namespaces such as edge-local dashboard stats.
-		let broadcast = match self.origin.request_broadcast(&msg.track_namespace).await {
+		let broadcast = self.origin.request_broadcast(&msg.track_namespace);
+		let broadcast = std::pin::pin!(broadcast);
+		let broadcast = match broadcast.await {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

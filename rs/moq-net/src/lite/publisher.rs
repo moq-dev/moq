@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
+	AsPath, BroadcastRequested, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
 	TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
@@ -374,7 +374,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				session,
 				&mut stream,
 				&subscribe,
-				broadcast.await,
+				broadcast,
 				priority,
 				(track_stats, broadcasts, absolute.clone()),
 				version,
@@ -410,7 +410,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.request_broadcast(&msg.broadcast);
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_track_info(&mut stream, broadcast.await, name).await {
+			if let Err(err) = Self::run_track_info(&mut stream, broadcast, name).await {
 				tracing::debug!(broadcast = %absolute, %err, "track info error");
 				stream.writer.abort(&err);
 			}
@@ -421,10 +421,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track_info(
 		stream: &mut Stream<S, Version>,
-		consumer: Result<BroadcastConsumer, Error>,
+		consumer: kio::Pending<BroadcastRequested>,
 		name: String,
 	) -> Result<(), Error> {
-		let broadcast = consumer?;
+		let consumer = std::pin::pin!(consumer);
+		let broadcast = consumer.await?;
 		// Resolve the track to read its publisher properties. The query carries no
 		// priority; a reused producer reports its own authored value.
 		let track = broadcast.subscribe_track(&Track { name, priority: 0 })?;
@@ -447,7 +448,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		consumer: Result<BroadcastConsumer, Error>,
+		consumer: kio::Pending<BroadcastRequested>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -461,7 +462,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: subscribe.priority,
 		};
 
-		let broadcast = consumer?;
+		let consumer = std::pin::pin!(consumer);
+		let broadcast = consumer.await?;
 		let mut track = broadcast.subscribe_track(&track)?;
 
 		// Subscription is now active: count this session as a viewer of the
