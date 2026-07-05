@@ -91,6 +91,12 @@ const volume = new Signals.Signal(1);
 const sampleRate = new Signals.Signal<number | undefined>(undefined);
 const channelCount = new Signals.Signal<number | undefined>(undefined);
 
+// Mic processing constraints; undefined means "browser default". macOS defaults these on, which
+// engages voice processing: auto gain can slowly pull the level down and other audio gets ducked.
+const echoCancellation = new Signals.Signal<boolean | undefined>(undefined);
+const autoGainControl = new Signals.Signal<boolean | undefined>(undefined);
+const noiseSuppression = new Signals.Signal<boolean | undefined>(undefined);
+
 // Opus-specific knobs (the "Opus options" panel), mapping 1:1 onto OpusConfig.
 const opusBitrateKbps = new Signals.Signal<number | undefined>(undefined);
 const opusFrameDuration = new Signals.Signal<number | undefined>(undefined); // ms (2.5 to 60)
@@ -117,11 +123,39 @@ ui.run((effect) => {
 	});
 });
 
+// Request the selected resolution from the camera itself, not just cap the encoder. publish.video
+// holds the active Camera source (undefined for screen/file); its constraints re-acquire the track
+// on change. getUserMedia uses `ideal`, so a camera that can't reach the target falls back to its
+// best (the green "actual" readout shows what it gave).
+ui.run((effect) => {
+	const source = effect.get(publish.video);
+	if (!source || !("constraints" in source)) return;
+
+	const res = effect.get(resolution);
+	const [w, h] = res ? res.split("x").map(Number) : [undefined, undefined];
+	source.constraints.set(w && h ? { width: { ideal: w }, height: { ideal: h } } : undefined);
+});
+
 // Audio general settings (volume gain, output sample rate, channel mix).
 ui.run((effect) => {
 	publish.broadcast.audio.volume.set(effect.get(volume));
 	publish.broadcast.audio.sampleRate.set(effect.get(sampleRate));
 	publish.broadcast.audio.channelCount.set(effect.get(channelCount));
+});
+
+// Mic processing constraints go to the capture itself (getUserMedia re-acquires the track on
+// change). publish.audio holds the active Microphone source (undefined for screen/file).
+ui.run((effect) => {
+	const source = effect.get(publish.audio);
+	if (!source || !("constraints" in source)) return;
+
+	const constraints = {
+		echoCancellation: effect.get(echoCancellation),
+		autoGainControl: effect.get(autoGainControl),
+		noiseSuppression: effect.get(noiseSuppression),
+	};
+	const any = Object.values(constraints).some((v) => v !== undefined);
+	source.constraints.set(any ? constraints : undefined);
 });
 
 // Compose the structured audio codec config; today only Opus. Undefined knobs
@@ -180,6 +214,14 @@ const bindOptionalSelect = (id: string, signal: Signals.Signal<number | undefine
 	el.addEventListener("change", sync);
 };
 
+// An optional on/off select where the empty value ("Auto") means undefined (browser default).
+const bindOptionalBoolean = (id: string, signal: Signals.Signal<boolean | undefined>) => {
+	const el = $<HTMLSelectElement>(id);
+	const sync = () => signal.set(el.value === "" ? undefined : el.value === "on");
+	sync();
+	el.addEventListener("change", sync);
+};
+
 const bindCheckbox = (id: string, signal: Signals.Signal<boolean>) => {
 	const el = $<HTMLInputElement>(id);
 	signal.set(el.checked);
@@ -196,6 +238,9 @@ bindOptionalNumber("keyframe", keyframeMs);
 bindNumber("volume", volume);
 bindOptionalSelect("samplerate", sampleRate);
 bindOptionalSelect("channels", channelCount);
+bindOptionalBoolean("echo-cancellation", echoCancellation);
+bindOptionalBoolean("auto-gain-control", autoGainControl);
+bindOptionalBoolean("noise-suppression", noiseSuppression);
 bindOptionalNumber("opus-bitrate", opusBitrateKbps);
 bindOptionalSelect("opus-frame-duration", opusFrameDuration);
 bindOptionalNumber("opus-complexity", opusComplexity);

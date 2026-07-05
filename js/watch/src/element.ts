@@ -1,4 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
+import * as Util from "@moq/hang/util";
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -47,6 +48,13 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
+// If the video stays stalled while the broadcast is still "live" for this long, the WebTransport
+// session has likely wedged silently (seen on Safari, where it stops delivering incoming streams
+// without settling `WebTransport.closed`), so force a reconnect. Backs off up to the max on repeats
+// so a genuinely idle-but-live broadcast doesn't reconnect in a tight loop.
+const STALL_RECOVERY_MS = 10_000;
+const STALL_RECOVERY_MAX_MS = 60_000;
+
 // An optional web component that wraps a <canvas>
 export default class MoqWatch extends HTMLElement {
 	static observedAttributes = OBSERVED;
@@ -66,6 +74,9 @@ export default class MoqWatch extends HTMLElement {
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
 
+	// Current stall-recovery delay; grows on repeated forced reconnects, resets when frames flow.
+	#stallDelay = STALL_RECOVERY_MS;
+
 	constructor() {
 		super();
 
@@ -79,6 +90,7 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			announced: this.connection.announced,
+			announcedGenerations: this.connection.announcedGenerations,
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
@@ -88,6 +100,13 @@ export default class MoqWatch extends HTMLElement {
 			connection: this.connection.established,
 		});
 		this.signals.cleanup(() => this.backend.close());
+
+		// Recover from a silently-wedged connection (see STALL_RECOVERY_MS). Safari-only: the wedge is
+		// a Safari WebTransport bug, and reconnecting on any >10s stall would destabilize healthy
+		// Chrome/Firefox sessions that recover on their own.
+		if (Util.Hacks.isSafari) {
+			this.signals.run(this.#runStallRecovery.bind(this));
+		}
 
 		// Watch to see if the canvas element is added or removed.
 		const setElement = () => {
@@ -201,6 +220,26 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
+	}
+
+	// Force a reconnect if playback stalls while the broadcast is still live: the WebTransport session
+	// can wedge silently (Safari) so `connection.closed` never rejects and the reconnect loop never
+	// fires. A new frame re-runs this effect and cancels the timer, so it only fires on a real stall.
+	#runStallRecovery(effect: Effect): void {
+		const stalled = effect.get(this.backend.video.stalled);
+		if (!stalled) {
+			// Healthy (or nothing playing): reset the backoff.
+			this.#stallDelay = STALL_RECOVERY_MS;
+			return;
+		}
+
+		// Only act while live; "loading"/"offline" recovery is owned by the normal connect path.
+		if (effect.get(this.broadcast.status) !== "live") return;
+
+		effect.timer(() => {
+			this.connection.reconnect();
+			this.#stallDelay = Math.min(this.#stallDelay * 2, STALL_RECOVERY_MAX_MS);
+		}, this.#stallDelay);
 	}
 
 	// Parse a single latency bound: absent or "real-time" is adaptive, otherwise a fixed ms value.

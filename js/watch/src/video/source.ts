@@ -197,6 +197,13 @@ export class Source {
 	#available = new Signal<Record<string, Catalog.VideoConfig>>({});
 	readonly available: Getter<Record<string, Catalog.VideoConfig>> = this.#available;
 
+	// True once we've probed the catalog's renditions and this browser/hardware can decode none of
+	// them. Distinct from "still probing" (both leave `available` empty), so the UI can show an
+	// "unsupported codec" notice instead of an indefinite spinner. Expected on some hardware, since
+	// codec support varies, so it is not necessarily a bug.
+	#unsupported = new Signal<boolean>(false);
+	readonly unsupported: Getter<boolean> = this.#unsupported;
+
 	// The name of the active rendition.
 	#track = new Signal<string | undefined>(undefined);
 	readonly track: Getter<string | undefined> = this.#track;
@@ -231,6 +238,26 @@ export class Source {
 
 		const renditions = effect.get(this.catalog)?.renditions ?? {};
 
+		// Synchronously drop any already-available rendition whose CODEC or container no longer matches the
+		// new catalog, BEFORE the async probe below. The Source and its Decoder are long-lived (per element,
+		// not per broadcast), and #config only updates after the async `supported()` probe finishes. Without
+		// this prune, during that window a publisher/codec switch on the same broadcast (e.g. Safari HEVC ->
+		// Chrome VP9 on "me.hang") leaves #config on the previous codec, so the decoder decodes the new
+		// stream with the wrong codec and floods "key frame required / fill out the description field". We do
+		// NOT prune on a description-only change (same codec): that is handled by the normal decoder
+		// reconfigure (description is a reload field), and pruning on it would needlessly yank the HD
+		// rendition down to SD when the encoder briefly republishes a description. Renditions that still
+		// match keep their identical value, so this dedupes to a no-op and benign catalog updates cause no
+		// decoder churn.
+		const stillValid: Record<string, Catalog.VideoConfig> = {};
+		for (const [name, cfg] of Object.entries(this.#available.peek())) {
+			const next = renditions[name];
+			if (next && next.codec === cfg.codec && next.container?.kind === cfg.container?.kind) {
+				stillValid[name] = cfg;
+			}
+		}
+		this.#available.set(stillValid);
+
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
@@ -239,10 +266,12 @@ export class Source {
 				if (isSupported) available[name] = config;
 			}
 
-			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
+			const unsupported = Object.keys(available).length === 0 && Object.keys(renditions).length > 0;
+			if (unsupported) {
 				console.warn("[Source] No supported video renditions found:", renditions);
 			}
 
+			this.#unsupported.set(unsupported);
 			this.#available.set(available);
 		});
 	}

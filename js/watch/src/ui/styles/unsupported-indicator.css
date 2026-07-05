@@ -1,0 +1,29 @@
+.watch-ui__unsupported-indicator {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	max-width: 80%;
+	padding: 0.75rem 1.25rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	background-color: rgba(0, 0, 0, 0.8);
+	z-index: 4;
+	pointer-events: auto;
+	border-radius: 0.25rem;
+}
+
+.watch-ui__unsupported-text {
+	font-size: 0.875rem;
+	font-weight: 600;
+	color: #ffffff;
+	line-height: 1.4;
+}
+
+@media (max-width: 480px) {
+	.watch-ui__unsupported-text {
+		font-size: 0.75rem;
+	}
+}

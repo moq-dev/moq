@@ -21,7 +21,7 @@ test("non-Safari hardware order keeps the decode-friendly VP9-first preference",
 	const order = hardwareCodecOrder(false);
 
 	expect(order[0]).toBe("vp09.00.10.08");
-	// VP9 stays ahead of H.264, unchanged from the original behavior (Chrome et al).
+	// VP9 stays ahead of H.264 in the generic (non-Safari) order used by Chrome et al.
 	expect(order.indexOf("vp09.00.10.08")).toBeLessThan(order.indexOf("avc1.640028"));
 	// The full generic set is still offered.
 	for (const family of ["vp09", "avc1", "av01", "hev1", "vp8"]) {

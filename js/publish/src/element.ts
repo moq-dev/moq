@@ -1,3 +1,4 @@
+import * as Util from "@moq/hang/util";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
@@ -17,6 +18,15 @@ type AnnounceMode = "always" | "source" | "never";
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
+
+// If the broadcast is announced but the session never receives a single subscribe request, the
+// WebTransport session has likely wedged silently (seen on Safari, which stops delivering
+// server-initiated streams without settling `WebTransport.closed`), so force a reconnect. Relays
+// subscribe to the catalog within ~100ms of an announce, so prolonged zero-request silence is a
+// strong wedge signal. Backs off so a legitimately unwatched broadcast re-announces at most once
+// per minute, which is harmless.
+const STARVATION_RECOVERY_MS = 10_000;
+const STARVATION_RECOVERY_MAX_MS = 60_000;
 
 export default class MoqPublish extends HTMLElement {
 	static observedAttributes = OBSERVED;
@@ -57,6 +67,9 @@ export default class MoqPublish extends HTMLElement {
 
 	// Whether to actually publish the broadcast: connected to the DOM and allowed by the `announce` mode.
 	#publishEnabled = new Signal(false);
+
+	// Current starvation-recovery delay; grows on repeated forced reconnects, resets on activity.
+	#starvationDelay = STARVATION_RECOVERY_MS;
 
 	signals = new Effect();
 
@@ -112,6 +125,13 @@ export default class MoqPublish extends HTMLElement {
 			},
 		});
 		this.signals.cleanup(() => this.broadcast.close());
+
+		// Recover from a silently-wedged connection (see STARVATION_RECOVERY_MS). Safari-only: the
+		// "no request yet" trigger false-fires on a normal lazy-pull relay, so arming it on
+		// Chrome/Firefox would drop healthy sessions in a reconnect loop.
+		if (Util.Hacks.isSafari) {
+			this.signals.run(this.#runStarvationRecovery.bind(this));
+		}
 
 		// Watch to see if the preview element is added or removed.
 		const setPreview = () => {
@@ -175,6 +195,29 @@ export default class MoqPublish extends HTMLElement {
 
 	disconnectedCallback() {
 		this.#enabled.set(false);
+	}
+
+	// Force a reconnect if the announced broadcast never receives a subscribe request: the
+	// WebTransport session can wedge silently (Safari) so requests never arrive and watchers
+	// buffer forever against a zombie announcement. Any request disarms the timer.
+	#runStarvationRecovery(effect: Effect): void {
+		if (!effect.get(this.#publishEnabled)) return;
+		if (!effect.get(this.connection.established)) return;
+
+		if (effect.get(this.broadcast.requestCount) > 0) {
+			// This session received a server-initiated stream, so it is not wedged. Note the backoff
+			// resets ONLY here: every reconnect flaps `established` through undefined and re-runs this
+			// effect disarmed, so resetting on disarm would turn an unwatched broadcast into a tight
+			// reconnect loop.
+			this.#starvationDelay = STARVATION_RECOVERY_MS;
+			return;
+		}
+
+		effect.timer(() => {
+			console.warn(`no subscribe request within ${this.#starvationDelay / 1000}s; reconnecting`);
+			this.connection.reconnect();
+			this.#starvationDelay = Math.min(this.#starvationDelay * 2, STARVATION_RECOVERY_MAX_MS);
+		}, this.#starvationDelay);
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {

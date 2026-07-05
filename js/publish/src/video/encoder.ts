@@ -1,9 +1,10 @@
-import * as Catalog from "@moq/hang/catalog";
+import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { videoCatalog } from "./catalog";
 import { hardwareCodecOrder, softwareCodecOrder } from "./codecs";
 import type { Source } from "./types";
 
@@ -50,6 +51,20 @@ export class Encoder {
 
 	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
+
+	// The decoder init the encoder actually produced (authoritative codec + hvcC/av1C description),
+	// captured from keyframe metadata in serve(), tagged with the requested codec + dimensions it was
+	// measured against. #runCatalog (via videoCatalog) folds it into the catalog only while that tag still
+	// matches, so it survives the bitrate churn that rebuilds #config ~10x/s (bandwidth adaptation) without
+	// flapping the description, yet a real codec/resolution change invalidates it until the next keyframe.
+	#decoderConfig = new Signal<
+		{ reqCodec: string; width: number; height: number; codec: string; description?: string } | undefined
+	>(undefined);
+
+	// Cumulative encoded bytes, for a measured (transport-agnostic) upload bitrate in the stats UI.
+	// Monotonic; the reader diffs it per tick. Grows only while a subscriber is being served.
+	#bytesEncoded = new Signal(0);
+	readonly bytesEncoded: Getter<number> = this.#bytesEncoded;
 
 	#signals = new Effect();
 
@@ -102,9 +117,36 @@ export class Encoder {
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
-				output: (frame: EncodedVideoChunk) => {
+				output: (frame: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata) => {
 					if (frame.type === "key") {
 						lastKeyframe = frame.timestamp as Time.Micro;
+					}
+
+					this.#bytesEncoded.update((n) => n + frame.byteLength);
+
+					// Capture the decoder init the encoder actually produced (present on keyframes), tagged
+					// with the config it was measured against. For hvc1/av1 this carries the out-of-band
+					// parameter sets (hvcC/av1C) the watcher's decoder needs; without it Chrome can't init HEVC.
+					// Mirrors the AAC path in audio/encoder.ts. Stored as hex so an identical value each
+					// keyframe compares equal and doesn't re-publish the catalog.
+					const decoderConfig = metadata?.decoderConfig;
+					const config = this.#config.peek();
+					if (decoderConfig && config) {
+						const desc = decoderConfig.description;
+						const description = desc
+							? Util.Hex.fromBytes(
+									ArrayBuffer.isView(desc)
+										? new Uint8Array(desc.buffer, desc.byteOffset, desc.byteLength)
+										: new Uint8Array(desc),
+								)
+							: undefined;
+						this.#decoderConfig.set({
+							reqCodec: config.codec,
+							width: config.width,
+							height: config.height,
+							codec: decoderConfig.codec,
+							description,
+						});
 					}
 
 					producer.encode(frame, frame.timestamp as Time.Micro, frame.type === "key");
@@ -161,19 +203,9 @@ export class Encoder {
 		if (!values) return;
 		const [_, config] = values;
 
-		const catalog: Catalog.VideoConfig = {
-			codec: config.codec,
-			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
-			framerate: config.framerate,
-			codedWidth: Catalog.u53(config.width),
-			codedHeight: Catalog.u53(config.height),
-			optimizeForLatency: true,
-			container: { kind: "legacy" } as const,
-			// Each frame is flushed immediately, so the jitter is one frame duration.
-			jitter: config.framerate ? Catalog.u53(Math.ceil(1000 / config.framerate)) : undefined,
-		};
-
-		effect.set(this.#catalog, catalog);
+		// Fold in the decoder config the encoder actually produced (authoritative codec + hvcC/av1C
+		// description), available after the first keyframe. See videoCatalog.
+		effect.set(this.#catalog, videoCatalog(config, effect.get(this.#decoderConfig)));
 	}
 
 	#runConfig(effect: Effect): void {
@@ -313,9 +345,7 @@ export class Encoder {
 		const dimensions = effect.get(this.#dimensions);
 		if (!dimensions) return;
 
-		// Codec preference lists live in ./codecs. Safari uses a different hardware order because it
-		// reports its software VP9 encoder as hardware-supported, which would hide the real hardware
-		// codecs (H.264/HEVC) behind a CPU-bound one.
+		// Codec preference lists, including why Safari needs its own hardware order, live in ./codecs.
 		const HARDWARE_CODECS = hardwareCodecOrder(Util.Hacks.isSafari);
 		const SOFTWARE_CODECS = softwareCodecOrder();
 

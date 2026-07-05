@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import * as Video from "./video";
 
@@ -40,6 +40,15 @@ export class Broadcast {
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.
 	#tracks = new Map<string, ServeTrack>();
+
+	#requestCount = new Signal(0);
+
+	/**
+	 * Number of track requests received on the current session, resetting to 0 on reconnect.
+	 * Relays subscribe to the catalog almost immediately after an announce, so a session that
+	 * stays at 0 has likely wedged; the `<moq-publish>` element uses this to force a reconnect.
+	 */
+	readonly requestCount: Getter<number> = this.#requestCount;
 
 	// Built-in track names handled before `#tracks`, so a custom handler registered under one of
 	// these would never run. `publishTrack` rejects them to fail fast.
@@ -95,6 +104,7 @@ export class Broadcast {
 		const broadcast = new Moq.Broadcast();
 		effect.cleanup(() => broadcast.close());
 
+		this.#requestCount.set(0);
 		connection.publish(name, broadcast);
 
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
@@ -104,6 +114,9 @@ export class Broadcast {
 		for (;;) {
 			const request = await broadcast.requested();
 			if (!request) break;
+
+			// Any request proves the session delivers incoming streams, i.e. it is not wedged.
+			this.#requestCount.update((n) => n + 1);
 
 			effect.cleanup(() => request.track.close());
 

@@ -35,6 +35,12 @@ export interface BroadcastProps {
 	// announcement gate and subscribes immediately.
 	announced?: Getter<Set<Moq.Path.Valid>>;
 
+	// Per-path announce generation from the connection (see Reload.announcedGenerations). When provided,
+	// the broadcast re-consumes if the SAME name is re-announced by a new publisher instance (the
+	// generation bumps) even when the presence Set never observably flips. Optional; presence alone is
+	// used without it.
+	announcedGenerations?: Getter<ReadonlyMap<Moq.Path.Valid, number>>;
+
 	// Whether to start downloading the broadcast.
 	// Defaults to false so you can make sure everything is ready before starting.
 	enabled?: boolean | Signal<boolean>;
@@ -83,10 +89,14 @@ export class Broadcast {
 	// All actively announced broadcast paths from the connection.
 	#announced?: Getter<Set<Moq.Path.Valid>>;
 
-	// Whether `name` is currently in the announced set (or skipping the check).
-	// Derived in its own effect so that flaps for unrelated broadcasts don't
-	// retrigger the broadcast/catalog subscriptions.
-	#announcedNow = new Signal(false);
+	// Per-path announce generation from the connection (optional; see BroadcastProps).
+	#announcedGenerations?: Getter<ReadonlyMap<Moq.Path.Valid, number>>;
+
+	// The announce generation of `name`: 0 when not announced, else the connection's generation for it (or
+	// 1 when generations aren't provided). A NUMBER rather than a boolean so a same-name republish by a new
+	// publisher (generation bump) re-runs #runBroadcast and re-consumes against the new instance. Derived
+	// in its own effect so flaps for unrelated broadcasts don't retrigger the broadcast/catalog subs.
+	#announcedNow = new Signal(0);
 
 	signals = new Effect();
 
@@ -99,6 +109,7 @@ export class Broadcast {
 		this.catalog = Signal.from(props?.catalog);
 
 		this.#announced = props?.announced;
+		this.#announcedGenerations = props?.announcedGenerations;
 
 		this.signals.run(this.#runAnnouncedNow.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
@@ -108,12 +119,12 @@ export class Broadcast {
 	#runAnnouncedNow(effect: Effect): void {
 		const reload = effect.get(this.reload);
 		if (!reload) {
-			this.#announcedNow.set(true);
+			this.#announcedNow.set(1);
 			return;
 		}
 
 		if (!this.#announced) {
-			this.#announcedNow.set(true);
+			this.#announcedNow.set(1);
 			return;
 		}
 
@@ -121,13 +132,21 @@ export class Broadcast {
 		// so default to subscribing immediately instead of waiting forever.
 		const conn = effect.get(this.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
-			this.#announcedNow.set(true);
+			this.#announcedNow.set(1);
 			return;
 		}
 
 		const name = effect.get(this.name);
 		const announced = effect.get(this.#announced);
-		this.#announcedNow.set(announced.has(name));
+		if (!announced.has(name)) {
+			this.#announcedNow.set(0);
+			return;
+		}
+
+		// Announced: track the per-path generation so a same-name republish (a new publisher instance)
+		// re-runs #runBroadcast and re-consumes, even if the presence Set didn't observably flip.
+		const gen = this.#announcedGenerations ? effect.get(this.#announcedGenerations).get(name) : undefined;
+		this.#announcedNow.set(gen ?? 1);
 	}
 
 	#runBroadcast(effect: Effect): void {

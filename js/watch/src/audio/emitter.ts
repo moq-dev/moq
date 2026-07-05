@@ -59,20 +59,42 @@ export class Emitter {
 		this.#signals.run((effect) => {
 			const root = effect.get(this.source.root);
 			if (!root) return;
+			const context = root.context;
 
-			const gain = new GainNode(root.context, { gain: effect.get(this.volume) });
-			root.connect(gain);
-
-			effect.set(this.#gain, gain);
+			// Safari starts the AudioContext suspended and will NOT render a source->destination edge
+			// that was wired while suspended, even after a later resume(). So build the graph only once
+			// the context is actually running: the first gesture-driven resume (see decoder.ts) flips
+			// this, and the edge is then wired live, exactly like the working mute->unmute path.
+			const running = new Signal(context.state === "running");
+			effect.event(context, "statechange", () => running.set(context.state === "running"));
 
 			effect.run((inner) => {
-				// We only connect/disconnect when enabled to save power.
-				// Otherwise the worklet keeps running in the background returning 0s.
-				const enabled = inner.get(this.source.enabled);
-				if (!enabled) return;
+				if (!inner.get(running)) return;
 
-				gain.connect(root.context.destination); // speakers
-				inner.cleanup(() => gain.disconnect());
+				// peek (not get) the volume: the fade effect below owns volume changes. Subscribing here
+				// would rebuild the whole graph on every change and cut the fade short with a click.
+				const gain = new GainNode(context, { gain: this.volume.peek() });
+				root.connect(gain);
+				inner.cleanup(() => {
+					// The decoder can tear down its worklet first, dropping the root->gain edge; a
+					// disconnect of an already-disconnected node throws InvalidAccessError. Swallow it:
+					// this cleanup runs inside the signals dispose loop, where a throw would wedge the
+					// effect and leave audio permanently silent.
+					try {
+						root.disconnect(gain);
+					} catch {}
+				});
+
+				inner.set(this.#gain, gain);
+
+				inner.run((leaf) => {
+					// We only connect/disconnect when enabled to save power.
+					// Otherwise the worklet keeps running in the background returning 0s.
+					if (!leaf.get(this.source.enabled)) return;
+
+					gain.connect(context.destination); // speakers
+					leaf.cleanup(() => gain.disconnect());
+				});
 			});
 		});
 

@@ -3,8 +3,8 @@
 // Intentionally not re-exported from ./index (video/index.ts), so the ordering stays an internal
 // detail that unit tests can pin without widening the package's public API.
 
-// Codec families, most-preferred profile first within each. "" entries let the browser pick a
-// profile/level when a specific one isn't required.
+// Codec families, most-preferred profile first within each. The bare-family entries ("avc1",
+// "hev1", "vp09", "av01") let the browser pick a profile/level when a specific one isn't required.
 const H264 = ["avc1.640028", "avc1.4D401F", "avc1.42E01E", "avc1"]; // Almost always hardware.
 const HEVC = ["hev1.1.6.L93.B0", "hev1"]; // Often hardware, but licensing limits support (no Firefox decode).
 const VP9 = ["vp09.00.10.08", "vp09"]; // Broadly hardware-*decodable*; hardware *encode* is rare.

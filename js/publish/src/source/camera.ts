@@ -22,6 +22,11 @@ export class Camera {
 	constraints: Signal<Video.Constraints | undefined>;
 
 	source = new Signal<Video.Source | undefined>(undefined);
+
+	// Bumped when the captured track ends underneath us (e.g. the webcam is unplugged),
+	// so #run re-acquires instead of leaving a frozen source forever.
+	#retry = new Signal(0);
+
 	signals = new Effect();
 
 	constructor(props?: CameraProps) {
@@ -36,6 +41,7 @@ export class Camera {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
+		effect.get(this.#retry);
 		const device = effect.get(this.device.requested);
 		const constraints = effect.get(this.constraints) ?? {};
 
@@ -47,7 +53,12 @@ export class Camera {
 		};
 
 		effect.spawn(async () => {
-			const media = navigator.mediaDevices.getUserMedia({ video: finalConstraints }).catch(() => undefined);
+			// A denied/cancelled permission prompt must not take down the effect, but stay visible:
+			// the broadcast still announces, so watchers would otherwise buffer forever with no clue why.
+			const media = navigator.mediaDevices.getUserMedia({ video: finalConstraints }).catch((err) => {
+				console.warn("camera capture failed:", err);
+				return undefined;
+			});
 
 			// If the effect is cancelled for any reason (ex. cancel), stop any media that we got.
 			effect.cleanup(() =>
@@ -67,6 +78,13 @@ export class Camera {
 			if (!source) return;
 
 			const settings = source.getSettings();
+
+			// The track can end underneath us (device unplugged, OS revoked). Re-acquire so
+			// capture moves to whatever device is now available.
+			effect.event(source, "ended", () => {
+				console.warn("camera track ended; re-acquiring");
+				this.#retry.update((n) => n + 1);
+			});
 
 			effect.set(this.device.active, settings.deviceId);
 			effect.set(this.source, source);

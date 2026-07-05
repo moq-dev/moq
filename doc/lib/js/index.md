@@ -165,7 +165,7 @@ Requires modern browser features:
 **Experimental support:**
 
 - Firefox (behind flag)
-- Safari (future support planned)
+- Safari 18+ (publishing: hardware H.264/HEVC encode, Worker capture; older Safari falls back to a degraded capture that pauses while the tab is hidden). Opus audio uses the native WebCodecs codec on Safari 26+ and a WebAssembly polyfill on Safari 16.4 through 18.7, which ship no WebCodecs audio API.
 
 ## Framework Integration
 

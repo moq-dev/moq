@@ -16,6 +16,10 @@ export type DecoderProps = {
 	enabled?: boolean | Signal<boolean>;
 };
 
+// Opus decoders always emit 48 kHz PCM (RFC 6716) no matter what rate the catalog advertises, so
+// build the render pipeline at that rate up front instead of discovering it on the first frame.
+const OPUS_OUTPUT_RATE = 48000;
+
 export interface AudioStats {
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
@@ -51,6 +55,12 @@ export class Decoder {
 	// Whether the audio buffer is stalled (waiting to fill)
 	#stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
+
+	// The decoder's real output rate paired with the config it was measured against. #emit sets this
+	// on a mismatch; #runWorklet then rebuilds the AudioContext/worklet/ring at the true rate. The
+	// config tag means a rate measured for one stream is never applied to the next (which would build
+	// one wrong-rate pipeline before self-healing on the following frame).
+	#decodedRate = new Signal<{ config: Catalog.AudioConfig; rate: number } | undefined>(undefined);
 
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<BufferedRanges>([]);
@@ -91,7 +101,6 @@ export class Decoder {
 		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
-		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
 	}
@@ -106,7 +115,13 @@ export class Decoder {
 		const config = effect.get(this.source.config);
 		if (!config) return;
 
-		const sampleRate = config.sampleRate;
+		// The pipeline must run at the rate the decoder actually OUTPUTS, which is not always the
+		// catalog rate: Opus always emits 48 kHz, and #emit corrects any other divergence after the
+		// first decoded frame (e.g. a catalog written from a 16 kHz capture context). A rate measured
+		// against a different config is ignored, so switching streams starts from the catalog rate.
+		const measured = effect.get(this.#decodedRate);
+		const decodedRate = measured?.config === config ? measured.rate : undefined;
+		const sampleRate = decodedRate ?? (config.codec === "opus" ? OPUS_OUTPUT_RATE : config.sampleRate);
 		const channelCount = config.numberOfChannels;
 
 		// NOTE: We still create an AudioContext even when muted.
@@ -120,11 +135,27 @@ export class Decoder {
 
 		effect.cleanup(() => context.close());
 
+		// Safari (and Chrome's autoplay policy) create the AudioContext suspended and only resume it
+		// inside a user gesture; a reactive resume() is ignored. Resume on the first interaction, from
+		// context creation (not gated on playback). The Emitter (re)builds the graph once the context
+		// actually reaches "running" (see emitter.ts), which is what makes Safari start rendering.
+		const resume = () => {
+			if (context.state === "suspended") void context.resume().catch(() => {});
+		};
+		resume();
+		// pointerdown/keydown cover desktop; iOS Safari has historically only unlocked audio on a
+		// click-class gesture (fired at touchend), so listen for that too. resume() is idempotent.
+		effect.event(document, "pointerdown", resume);
+		effect.event(document, "click", resume);
+		effect.event(document, "keydown", resume);
+
 		effect.spawn(async () => {
 			// Register the AudioWorklet processor
 			await context.audioWorklet.addModule(RenderWorklet);
 
-			// Ensure the context is running before creating the worklet
+			// The context may have been closed while addModule awaited (effect torn down); bail if so.
+			// A suspended context is expected here and fine: the worklet is created now and renders
+			// once a gesture resumes the context (see the resume handler above).
 			if (context.state === "closed") return;
 
 			// Create the worklet node. outputChannelCount must be set explicitly
@@ -162,16 +193,6 @@ export class Decoder {
 
 			effect.set(this.#worklet, worklet);
 		});
-	}
-
-	#runEnabled(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#context]);
-		if (!values) return;
-		const [_, context] = values;
-
-		context.resume();
-
-		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
 	}
 
 	#runLatency(effect: Effect): void {
@@ -388,6 +409,22 @@ export class Decoder {
 			return;
 		}
 
+		// The ring copies samples verbatim, so a decoder outputting a different rate than the ring was
+		// built at would garble the audio (e.g. HE-AAC emitting 2x the advertised rate). Rebuild the
+		// pipeline at the real rate and drop frames until it's up.
+		if (sample.sampleRate !== ring.rate) {
+			const config = this.source.config.peek();
+			const prev = this.#decodedRate.peek();
+			// Skip the set when this config already has this rate recorded (the rebuild is just in
+			// flight), but always record it for a new config even at a rate a prior stream used.
+			if (config && (prev?.config !== config || prev.rate !== sample.sampleRate)) {
+				console.warn(`audio decoder outputs ${sample.sampleRate} Hz, pipeline is ${ring.rate} Hz; rebuilding`);
+				this.#decodedRate.set({ config, rate: sample.sampleRate });
+			}
+			sample.close();
+			return;
+		}
+
 		// Calculate end time from sample duration
 		const durationMicro = ((sample.numberOfFrames / sample.sampleRate) * 1_000_000) as Time.Micro;
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
@@ -466,6 +503,11 @@ export class Decoder {
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
+	// Load the Opus polyfill first. Safari 16.4-18.7 ships no WebCodecs audio API at all, so a bare
+	// AudioDecoder.isConfigSupported would throw ReferenceError and drop every rendition. polyfill()
+	// returns immediately when a native AudioDecoder already exists (Chrome, Firefox, Safari 26+).
+	await Util.Libav.polyfill();
+
 	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
 	let description: Uint8Array | undefined;
 	if (config.codec !== "opus") {
