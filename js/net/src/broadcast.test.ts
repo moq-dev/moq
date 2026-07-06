@@ -1,5 +1,5 @@
 import { expect, setSystemTime, test } from "bun:test";
-import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { CacheFull, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
@@ -165,4 +165,20 @@ test("removeTrack drops the static entry", async () => {
 	removed.removeTrack("track1");
 	removed.track("track1").subscribe();
 	expect((await pendingRequest(removed))?.name).toBe("track1");
+});
+
+test("close rejects a still-pending track request so its subscriber unblocks", async () => {
+	const broadcast = new BroadcastConsumer();
+
+	// Subscribing with no static entry queues an on-demand request; the subscriber
+	// blocks on info() until that request is answered.
+	const subscriber = broadcast.track("video").subscribe();
+	const info = subscriber.info();
+
+	// Closing must reject the still-queued request rather than silently dropping it,
+	// so the awaiting subscriber rejects instead of hanging on a producer that will
+	// never be served.
+	broadcast.close();
+
+	await expect(info).rejects.toThrow();
 });

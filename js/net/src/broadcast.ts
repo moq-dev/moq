@@ -19,6 +19,17 @@ function closedPromise(state: BroadcastState): Promise<Error | undefined> {
 	});
 }
 
+// Close the broadcast and reject any requests still pending in the queue, so a
+// subscriber blocked on the track's info() or group reads is unblocked rather
+// than left waiting on a producer that will never be served.
+function closeState(state: BroadcastState, abort?: Error) {
+	state.closed.set(abort ?? true);
+	state.requested.mutate((requests) => {
+		for (const request of requests) request.reject(abort);
+		requests.length = 0;
+	});
+}
+
 function subscribe(state: BroadcastState, name: string, priority: number): track.Subscriber {
 	if (state.closed.peek()) {
 		throw new Error(`broadcast is closed: ${state.closed.peek()}`);
@@ -154,10 +165,7 @@ export class Producer {
 
 	/** Close the broadcast, optionally with an error to abort waiters. */
 	close(abort?: Error) {
-		this.#state.closed.set(abort ?? true);
-		this.#state.requested.mutate((requests) => {
-			requests.length = 0;
-		});
+		closeState(this.#state, abort);
 	}
 }
 
@@ -218,9 +226,6 @@ export class Consumer {
 
 	/** Close the broadcast, optionally with an error to abort waiters. */
 	close(abort?: Error) {
-		this.#state.closed.set(abort ?? true);
-		this.#state.requested.mutate((requests) => {
-			requests.length = 0;
-		});
+		closeState(this.#state, abort);
 	}
 }
