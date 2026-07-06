@@ -55,16 +55,7 @@ impl<E: CatalogExt> VideoTrack<E> {
 	}
 
 	pub(crate) fn update_metrics(&mut self, update: Update) {
-		self.update(|config| {
-			if let Some(latency_min) = update.latency_min {
-				config.set_latency_min(moq_net::Time::try_from(latency_min).ok());
-			}
-			if let Some(bitrate) = update.bitrate
-				&& config.bitrate.is_none_or(|current| bitrate > current)
-			{
-				config.bitrate = Some(bitrate);
-			}
-		});
+		self.update(|config| update.apply(config));
 	}
 }
 
@@ -123,16 +114,7 @@ impl<E: CatalogExt> AudioTrack<E> {
 	}
 
 	pub(crate) fn update_metrics(&mut self, update: Update) {
-		self.update(|config| {
-			if let Some(latency_min) = update.latency_min {
-				config.set_latency_min(moq_net::Time::try_from(latency_min).ok());
-			}
-			if let Some(bitrate) = update.bitrate
-				&& config.bitrate.is_none_or(|current| bitrate > current)
-			{
-				config.bitrate = Some(bitrate);
-			}
-		});
+		self.update(|config| update.apply(config));
 	}
 }
 

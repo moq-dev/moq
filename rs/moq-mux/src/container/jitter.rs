@@ -27,6 +27,63 @@ impl Update {
 			bitrate,
 		}
 	}
+
+	/// Apply the detected latency and bitrate to a catalog config in place.
+	pub(crate) fn apply(&self, config: &mut impl MetricsTarget) {
+		if let Some(latency_min) = self.latency_min {
+			config.set_latency_min(moq_net::Time::try_from(latency_min).ok());
+		}
+		self.apply_bitrate(config);
+	}
+
+	/// Apply only the detected bitrate, keeping the maximum seen.
+	pub(crate) fn apply_bitrate(&self, config: &mut impl MetricsTarget) {
+		if let Some(bitrate) = self.bitrate
+			&& config.bitrate().is_none_or(|current| bitrate > current)
+		{
+			config.set_bitrate(bitrate);
+		}
+	}
+}
+
+/// A catalog rendition config the metrics detector refines in place.
+///
+/// Implemented for the video and audio configs so [`Update::apply`] works on either.
+pub(crate) trait MetricsTarget {
+	/// Set the minimum additional latency required by this track.
+	fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>);
+	/// The current bitrate in bits per second, if known.
+	fn bitrate(&self) -> Option<u64>;
+	/// Set the bitrate in bits per second.
+	fn set_bitrate(&mut self, bitrate: u64);
+}
+
+impl MetricsTarget for hang::catalog::VideoConfig {
+	fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>) {
+		hang::catalog::VideoConfig::set_latency_min(self, latency_min);
+	}
+
+	fn bitrate(&self) -> Option<u64> {
+		self.bitrate
+	}
+
+	fn set_bitrate(&mut self, bitrate: u64) {
+		self.bitrate = Some(bitrate);
+	}
+}
+
+impl MetricsTarget for hang::catalog::AudioConfig {
+	fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>) {
+		hang::catalog::AudioConfig::set_latency_min(self, latency_min);
+	}
+
+	fn bitrate(&self) -> Option<u64> {
+		self.bitrate
+	}
+
+	fn set_bitrate(&mut self, bitrate: u64) {
+		self.bitrate = Some(bitrate);
+	}
 }
 
 /// Tracks catalog metrics for one media track.

@@ -812,9 +812,9 @@ fn update_track_bitrate<E: crate::catalog::hang::CatalogExt>(
 	track: &Fmp4Track,
 	update: Update,
 ) -> Result<()> {
-	let Some(bitrate) = update.bitrate else {
+	if update.bitrate.is_none() {
 		return Ok(());
-	};
+	}
 
 	let mut catalog = catalog.lock();
 	match track.kind {
@@ -824,9 +824,7 @@ fn update_track_bitrate<E: crate::catalog::hang::CatalogExt>(
 				.renditions
 				.get_mut(track.track.name())
 				.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
-			if config.bitrate.is_none_or(|current| bitrate > current) {
-				config.bitrate = Some(bitrate);
-			}
+			update.apply_bitrate(config);
 		}
 		TrackKind::Audio => {
 			let config = catalog
@@ -834,9 +832,7 @@ fn update_track_bitrate<E: crate::catalog::hang::CatalogExt>(
 				.renditions
 				.get_mut(track.track.name())
 				.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
-			if config.bitrate.is_none_or(|current| bitrate > current) {
-				config.bitrate = Some(bitrate);
-			}
+			update.apply_bitrate(config);
 		}
 	}
 	Ok(())
