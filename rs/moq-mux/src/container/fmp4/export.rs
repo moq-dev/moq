@@ -394,7 +394,7 @@ impl<S: Stream> Export<S> {
 				.ok_or_else(|| Error::MissingVideoTrack(name.clone()))?;
 			match &config.container {
 				Container::Cmaf { init, .. } => {
-					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
+					extract_init(init, track.track_id, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
 				Container::Legacy | Container::Loc => {
 					// H.264/H.265 need a synthesized config record here; VP8 has none.
@@ -422,7 +422,7 @@ impl<S: Stream> Export<S> {
 				.ok_or_else(|| Error::MissingAudioTrack(name.clone()))?;
 			match &config.container {
 				Container::Cmaf { init, .. } => {
-					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
+					extract_init(init, track.track_id, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
 				Container::Legacy | Container::Loc => {
 					let trak = crate::container::fmp4::synthesize_audio_trak(track.track_id, track.timescale, config)?;
@@ -468,10 +468,18 @@ impl<S: Stream> Export<S> {
 }
 
 /// Pull ftyp + moov from a single-track CMAF init segment and merge into the
-/// caller's accumulators. Original track ids are preserved so passthrough
-/// fragments keep matching their moov entries.
+/// caller's accumulators, rewriting the track id to `track_id`.
+///
+/// The source init carries whatever id the track had in ITS broadcast (e.g. an
+/// audio track that was second in the source is `2`), but our fragments are always
+/// re-encoded with the exporter's own `track.track_id` (see [`encode_fragment`]) --
+/// nothing is passed through. So the moov MUST adopt that same id, or a player
+/// loads an init declaring track N and then a fragment claiming a different track
+/// and rejects it ("no tfhd for track"). It also keeps a merged multi-track moov
+/// from colliding when two single-track source inits both used id `1`.
 fn extract_init(
 	init: &Bytes,
+	track_id: u32,
 	ftyp_data: &mut Option<mp4_atom::Ftyp>,
 	traks: &mut Vec<mp4_atom::Trak>,
 	trexs: &mut Vec<mp4_atom::Trex>,
@@ -483,11 +491,13 @@ fn extract_init(
 				*ftyp_data = Some(f);
 			}
 			mp4_atom::Any::Moov(moov) => {
-				for trak in moov.trak {
+				for mut trak in moov.trak {
+					trak.tkhd.track_id = track_id;
 					traks.push(trak);
 				}
 				if let Some(mvex) = moov.mvex {
-					for trex in mvex.trex {
+					for mut trex in mvex.trex {
+						trex.track_id = track_id;
 						trexs.push(trex);
 					}
 				}
