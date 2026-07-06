@@ -113,7 +113,8 @@ export class Source {
 
 		// Use catalog latencyMin if available, otherwise estimate from codec frame duration.
 		// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
-		const codecLatency = selected.config.latencyMin ?? selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
+		const codecLatency =
+			selected.config.latencyMin ?? selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
 		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
 		const latencyMin = codecLatency + overhead;
 		effect.set(this.sync.audio, latencyMin as Moq.Time.Milli);
