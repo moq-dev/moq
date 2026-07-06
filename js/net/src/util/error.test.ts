@@ -29,9 +29,17 @@ test("client-actionable fault codes surface (warn), not teardown", () => {
 	expect(isStreamAbort(new Error("STOP_SENDING: 6"))).toBe(false); // Unauthorized over qmux
 });
 
-test("non-stream-reset errors are surfaced", () => {
+test("non-WebTransport errors are surfaced", () => {
 	expect(isStreamAbort(new Error("first subscribe response must be SUBSCRIBE_OK"))).toBe(false);
-	expect(isStreamAbort(wtError("session", 0))).toBe(false); // session-level, not a stream reset
 	expect(isStreamAbort("not an error")).toBe(false);
 	expect(isStreamAbort(undefined)).toBe(false);
+});
+
+test("WebTransport errors are classified by code regardless of source", () => {
+	// Chrome surfaces a write-side abort (a downstream unsubscribe seen by the publisher) as a
+	// WebTransportError with source "session" and the relay's Cancel(0) code: routine, must not warn.
+	expect(isStreamAbort(wtError("session", 0))).toBe(true);
+	expect(isStreamAbort(wtError("session", null))).toBe(true);
+	// A genuine session-level fault code still surfaces.
+	expect(isStreamAbort(wtError("session", 6))).toBe(false); // Unauthorized
 });

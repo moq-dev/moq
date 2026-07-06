@@ -338,7 +338,9 @@ export class Encoder {
 				const kind: Kind = source ? normalizeSource(source).kind : "auto";
 				const encoderConfig = toEncoderConfig(
 					config,
-					worklet.context.sampleRate,
+					// Opus is configured at the canonical 48 kHz to match the resampled AudioData (see the
+					// port "message" handler); other codecs use the actual capture rate.
+					config.codec === "opus" ? OPUS_OUTPUT_RATE : worklet.context.sampleRate,
 					kind,
 					this.#opusOptions(effect),
 				);
@@ -347,6 +349,7 @@ export class Encoder {
 				encoder.configure(encoderConfig);
 			});
 
+			let resampler: StreamResampler | undefined;
 			effect.event(worklet.port, "message", (event: Event) => {
 				const data = (event as MessageEvent<Capture.AudioFrame>).data;
 				const channelCount = data.channels.length;
@@ -357,7 +360,25 @@ export class Encoder {
 					return;
 				}
 
-				const channels = data.channels;
+				const captureRate = worklet.context.sampleRate;
+				// Opus must be fed a canonical rate (48 kHz). Chrome/Firefox honor the 48 kHz context
+				// request so captureRate is already 48000 and this is a bypass; Safari ignores it and
+				// captures at the hardware rate (~44.1 kHz, which native Opus misencodes into scratchy
+				// audio), so resample to 48 kHz before encoding. Mirror of the watch-side resampler.
+				const encodeRate = config.codec === "opus" ? OPUS_OUTPUT_RATE : captureRate;
+
+				let channels = data.channels;
+				if (captureRate !== encodeRate) {
+					if (!resampler) {
+						resampler = new StreamResampler(captureRate, encodeRate);
+						console.debug(
+							`audio: capture at ${captureRate} Hz, resampling to ${encodeRate} Hz for the encoder`,
+						);
+					}
+					channels = resampler.resample(channels);
+					if (channels[0].length === 0) return; // no output for this chunk yet
+				}
+
 				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
 				const joined = new Float32Array(joinedLength);
 
@@ -368,7 +389,7 @@ export class Encoder {
 
 				const frame = new AudioData({
 					format: "f32-planar",
-					sampleRate: worklet.context.sampleRate,
+					sampleRate: encodeRate,
 					numberOfFrames: channels[0].length,
 					numberOfChannels: channels.length,
 					timestamp: data.timestamp,
@@ -448,6 +469,52 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 // captureRate is the capture AudioContext's rate, which every AudioData is stamped with. The
 // encoder MUST be configured at that rate (native encoders reject mismatched input), while the
 // catalog can advertise a different decode rate (48 kHz for Opus).
+// Continuous linear resampler for a stream of PCM chunks (one rate -> another). Carries the sub-sample
+// phase and the previous chunk's last sample across chunks, so there is NO per-chunk discontinuity - a
+// per-chunk-independent resample would inject a slope kink every ~3 ms that the Opus encoder then bakes
+// in as an audible buzz. Used to feed Opus a canonical 48 kHz stream when the capture context runs at a
+// non-canonical hardware rate (Safari pins ~44.1 kHz and ignores AudioContext({sampleRate: 48000})).
+class StreamResampler {
+	readonly #ratio: number; // input samples advanced per output sample
+	#pos = 0; // source position (input-sample units, relative to the current chunk start) of the next output
+	#prev: number[] | undefined; // last input sample per channel from the previous chunk
+
+	constructor(inputRate: number, outputRate: number) {
+		this.#ratio = inputRate / outputRate;
+	}
+
+	resample(channels: Float32Array[]): Float32Array[] {
+		const n = channels[0]?.length ?? 0;
+		if (n === 0) return channels.map(() => new Float32Array(0));
+
+		const ratio = this.#ratio;
+		const numCh = channels.length;
+
+		// How many output samples fall within reach this chunk (their bracketing input samples exist).
+		let count = 0;
+		for (let p = this.#pos; p <= n - 1; p += ratio) count++;
+
+		const out = channels.map(() => new Float32Array(count));
+		let p = this.#pos;
+		for (let j = 0; j < count; j++, p += ratio) {
+			const i0 = Math.floor(p);
+			const frac = p - i0;
+			for (let c = 0; c < numCh; c++) {
+				const ch = channels[c];
+				// i0 is >= -1 (the carried phase never falls further back than the previous chunk's tail).
+				const s0 = i0 < 0 ? (this.#prev?.[c] ?? ch[0]) : ch[i0];
+				const s1 = ch[Math.min(i0 + 1, n - 1)];
+				out[c][j] = s0 * (1 - frac) + s1 * frac;
+			}
+		}
+
+		// Shift the next output position into the next chunk's coordinate; remember the boundary sample.
+		this.#pos = p - n;
+		this.#prev = channels.map((ch) => ch[n - 1]);
+		return out;
+	}
+}
+
 function toEncoderConfig(
 	config: Catalog.AudioConfig,
 	captureRate: number,

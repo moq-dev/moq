@@ -20,6 +20,12 @@ export type DecoderProps = {
 // build the render pipeline at that rate up front instead of discovering it on the first frame.
 const OPUS_OUTPUT_RATE = 48000;
 
+// Decoder restart policy (mirrors js/watch/src/video/decoder.ts). Cap in-place rebuilds so a permanently
+// bad config can't loop forever (reset on a successful decode); rapid repeats back off ~one frame.
+const MAX_AUDIO_RESTARTS = 5;
+const RESTART_RAPID_MS = 300;
+const RESTART_BACKOFF_MS = 500;
+
 export interface AudioStats {
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
@@ -66,6 +72,13 @@ export class Decoder {
 	// #emit resamples from this to the ring's actual context rate, and treats a sample at a DIFFERENT rate
 	// as a real decoder-rate change (-> #decodedRate rebuild) rather than something to resample.
 	#ringSourceRate: number | undefined;
+
+	// Decoder restart bookkeeping (see #onDecoderError), mirroring the video decoder.
+	#restart = new Signal(0);
+	#restartCount = 0;
+	#lastRestart = 0;
+	// The config the current restart budget applies to; a rebuild for a different config resets the budget.
+	#budgetConfig: Catalog.AudioConfig | undefined;
 
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<BufferedRanges>([]);
@@ -225,6 +238,9 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
+		// Re-run (rebuild subscription + decoder) when #onDecoderError bumps #restart.
+		effect.get(this.#restart);
+
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
@@ -236,6 +252,15 @@ export class Decoder {
 
 		const config = effect.get(this.source.config);
 		if (!config) return;
+
+		// A rebuild for a NEW config (not a #restart bump, which keeps the same config object) starts a
+		// fresh restart budget. The video decoder gets this free via a per-track instance; here the counter
+		// lives on the long-lived Decoder, so reset it explicitly, or an exhausted budget from an old config
+		// would kill a healthy new stream on its first transient error.
+		if (config !== this.#budgetConfig) {
+			this.#budgetConfig = config;
+			this.#restartCount = 0;
+		}
 
 		const active = effect.get(broadcast.active);
 		if (!active) return;
@@ -283,7 +308,7 @@ export class Decoder {
 					}
 					this.#emit(data);
 				},
-				error: (error) => console.error(error),
+				error: (error) => this.#onDecoderError(error, effect),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -329,7 +354,19 @@ export class Decoder {
 					timestamp: frame.timestamp,
 				});
 
-				decoder.decode(chunk);
+				if (decoder.state === "closed") break;
+				try {
+					decoder.decode(chunk);
+				} catch (err) {
+					// A wrong-config chunk makes decode() throw synchronously. Audio frames are independent,
+					// so drop the bad one and continue; a closed decoder (from the async error callback) ends
+					// the loop and #onDecoderError rebuilds via #restart.
+					if (err instanceof DOMException && err.name === "DataError") {
+						console.debug("audio decode error; dropping frame", err);
+						continue;
+					}
+					break;
+				}
 			}
 		});
 	}
@@ -367,7 +404,7 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error(error),
+				error: (error) => this.#onDecoderError(error, effect),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -403,18 +440,53 @@ export class Decoder {
 				await this.#ring?.wait(frame.timestamp);
 
 				if (decoder.state === "closed") break;
-				decoder.decode(
-					new EncodedAudioChunk({
-						type: frame.keyframe ? "key" : "delta",
-						data: frame.data,
-						timestamp: frame.timestamp,
-					}),
-				);
+				try {
+					decoder.decode(
+						new EncodedAudioChunk({
+							type: frame.keyframe ? "key" : "delta",
+							data: frame.data,
+							timestamp: frame.timestamp,
+						}),
+					);
+				} catch (err) {
+					// See #runLegacyDecoder: drop a bad chunk (DataError) and continue; else end the loop.
+					if (err instanceof DOMException && err.name === "DataError") {
+						console.debug("audio decode error; dropping frame", err);
+						continue;
+					}
+					break;
+				}
 			}
 		});
 	}
 
+	// Recover from a fatal AudioDecoder error by rebuilding in place (re-run #runDecoder) instead of
+	// leaving the loop abandoned. Capped (reset on a successful #emit); rapid repeats back off. Unlike the
+	// video decoder's per-track wrapper, #runDecoder is the persistent effect, so on exhaustion we stop
+	// retrying WITHOUT closing it - a later config change re-runs it and a working decoder resets the budget.
+	#onDecoderError(error: unknown, effect: Effect): void {
+		if (this.#restartCount >= MAX_AUDIO_RESTARTS) {
+			console.error("audio decoder error; giving up until the next config change", error);
+			return;
+		}
+		// Measure "rapid" against when the restart is DISPATCHED (see the video decoder), not the error
+		// time, so a backed-off restart doesn't reset the interval and oscillate immediate/backoff.
+		const rapid = performance.now() - this.#lastRestart < RESTART_RAPID_MS;
+		this.#restartCount++;
+		if (this.#restartCount === 1) console.warn("audio decoder error; restarting", error);
+		else console.debug("audio decoder error; restarting", error);
+		const restart = () => {
+			this.#lastRestart = performance.now();
+			this.#restart.update((n) => n + 1);
+		};
+		if (rapid) effect.timer(restart, RESTART_BACKOFF_MS);
+		else restart();
+	}
+
 	#emit(sample: AudioData) {
+		// A frame decoded successfully: reset the restart budget.
+		this.#restartCount = 0;
+
 		const timestamp = sample.timestamp as Time.Micro;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
 

@@ -38,7 +38,10 @@ export function isStreamAbort(err: unknown): boolean {
 	if (!(err instanceof Error)) return false;
 
 	let code: number | undefined;
-	if (err.name === "WebTransportError" && (err as { source?: string }).source === "stream") {
+	if (err.name === "WebTransportError") {
+		// Trust the relay's numeric app code regardless of `source`: Chrome reports a WRITE-side abort
+		// (a downstream unsubscribe seen by the publisher) as source "session", not "stream", so gating on
+		// source would leave that routine teardown warning on every closed viewer.
 		const c = (err as { streamErrorCode?: number | null }).streamErrorCode;
 		code = typeof c === "number" ? c : undefined;
 	} else {

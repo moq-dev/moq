@@ -208,6 +208,12 @@ interface DecoderTrackProps {
 // configures cleanly but always fails to decode can't restart-loop forever. Reset on a successful decode.
 const MAX_DECODER_RESTARTS = 5;
 
+// When a restart errors again within RESTART_RAPID_MS, the fresh subscription immediately hit the same
+// wrong-codec bytes (a codec switch whose catalog update still lags the media track). Back off ~one group
+// before the next retry so the budget spans the lag window instead of burning out in a sub-second storm.
+const RESTART_RAPID_MS = 300;
+const RESTART_BACKOFF_MS = 500;
+
 class DecoderTrack {
 	source: Source;
 	broadcast: Moq.Broadcast;
@@ -216,6 +222,9 @@ class DecoderTrack {
 	stats: Signal<Stats | undefined>;
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
+	// The last decoded frame, held ACROSS #restart re-runs: a restart rebuilds the subscription + decoder
+	// but must NOT clear this, or the renderer paints black between restarts. Only a real track promotion
+	// or close (DecoderTrack.close) clears it.
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
 	// Network jitter + decode buffer.
@@ -233,6 +242,8 @@ class DecoderTrack {
 	// that configures cleanly but always fails to decode can't loop forever.
 	#restart = new Signal(0);
 	#restartCount = 0;
+	// performance.now() of the last restart, to detect rapid repeats (a config mismatch, not a transient).
+	#lastRestart = 0;
 
 	signals = new Effect();
 
@@ -303,16 +314,31 @@ class DecoderTrack {
 			},
 			error: (error) => {
 				// Rebuild the decoder in place rather than permanently closing the track. WebCodecs has
-				// already closed the decoder here, so recovery needs a fresh one via a #run re-run. Cap the
-				// restarts so a config that always fails to decode can't loop forever.
-				if (this.#restartCount < MAX_DECODER_RESTARTS) {
-					this.#restartCount++;
-					console.warn("video decoder error; restarting", error);
-					this.#restart.update((n) => n + 1);
-				} else {
+				// already closed the decoder here, so recovery needs a fresh one via a #run re-run.
+				if (this.#restartCount >= MAX_DECODER_RESTARTS) {
 					console.error("video decoder error; restart budget exhausted", error);
 					effect.close();
+					return;
 				}
+
+				// Rapid repeat = the fresh subscription hit the same wrong-codec bytes (catalog lag after a
+				// codec switch). Back off ~one group so the budget spans the lag window instead of a
+				// sub-second storm; an isolated (transient) error still restarts immediately. "rapid" is
+				// measured against when the restart is DISPATCHED (stamped in `restart` below), not the error
+				// time, so a backed-off restart doesn't reset the interval and oscillate immediate/backoff.
+				const rapid = performance.now() - this.#lastRestart < RESTART_RAPID_MS;
+
+				this.#restartCount++;
+				// First restart warns; subsequent ones are debug so a routine codec switch doesn't spam.
+				if (this.#restartCount === 1) console.warn("video decoder error; restarting", error);
+				else console.debug("video decoder error; restarting", error);
+
+				const restart = () => {
+					this.#lastRestart = performance.now();
+					this.#restart.update((n) => n + 1);
+				};
+				if (rapid) effect.timer(restart, RESTART_BACKOFF_MS);
+				else restart();
 			},
 		});
 		effect.cleanup(() => {
