@@ -36,7 +36,9 @@ A namespace subscription MAY carry a single Hop ID to exclude, which a relay use
 
 # Introduction
 {{moqt}} is designed to deliver content end-to-end through a mesh of relays.
-A namespace advertisement (PUBLISH_NAMESPACE, {{moqt}} Section 10.15) originates at a publisher and propagates downstream through one or more relays toward interested subscribers, which express interest with SUBSCRIBE_NAMESPACE ({{moqt}} Section 10.18).
+A namespace advertisement originates at a publisher and propagates downstream through one or more relays toward interested subscribers.
+A publisher advertises proactively with PUBLISH_NAMESPACE ({{moqt}} Section 10.15); a subscriber expresses interest with SUBSCRIBE_NAMESPACE ({{moqt}} Section 10.18), and matching advertisements are delivered back on that subscription's response stream as NAMESPACE messages ({{moqt}} Section 10.16).
+Both PUBLISH_NAMESPACE and NAMESPACE are namespace advertisements for the purposes of this extension.
 
 In a redundant deployment, relays are interconnected so that the same namespace can reach a given relay over more than one path.
 This redundancy is desirable for failover, but it leaves a receiver with no information that {{moqt}} does not address:
@@ -67,8 +69,11 @@ RELAY_HOPS Setup Option {
 
 The extension applies to a single hop (one MOQT session) and is negotiated independently for each session; a relay MUST NOT assume that because one of its sessions negotiated Relay Hops, another did.
 
-A relay that negotiated this extension on a downstream session MUST include the HOP_PATH parameter on every PUBLISH_NAMESPACE it sends on that session, and MUST honor an EXCLUDE_HOP parameter it receives in SUBSCRIBE_NAMESPACE.
-An endpoint that did not negotiate the extension simply omits these parameters; per {{moqt}} an unknown Key-Value-Pair Type is ignored, so an advertisement forwarded into a non-supporting session loses its hop information gracefully.
+Negotiating this extension on a session also enables the extended NAMESPACE message format defined in [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements), which appends a Parameters field to NAMESPACE so that it, too, can carry HOP_PATH.
+
+A relay that negotiated this extension on a downstream session MUST include the HOP_PATH parameter on every PUBLISH_NAMESPACE and NAMESPACE it sends on that session, and MUST honor an EXCLUDE_HOP parameter it receives in SUBSCRIBE_NAMESPACE.
+An endpoint that did not negotiate the extension neither adds these parameters nor, for NAMESPACE, the Parameters field that would carry them.
+PUBLISH_NAMESPACE and SUBSCRIBE_NAMESPACE carry a Parameters field in {{moqt}} regardless, and per {{moqt}} an unknown Key-Value-Pair Type is ignored; either way an advertisement forwarded into a non-supporting session loses its hop information gracefully.
 
 
 # Hop IDs
@@ -83,9 +88,42 @@ An endpoint SHOULD keep its Hop ID stable for the lifetime of a session (and MAY
 When a relay bridges an advertisement from an upstream peer that did **not** negotiate this extension, the upstream carries no HOP_PATH. The relay MUST synthesize one (see [Relay Behavior](#relay-behavior)) by assigning a random Hop ID to stand in for the unknown upstream, so that loop detection and path length still work within the cooperating region of the mesh.
 
 
+# Carrying Parameters on Namespace Advertisements
+This extension attaches its downstream state (HOP_PATH) to namespace advertisements as Key-Value-Pair parameters (see {{moqt}} Section 2.5).
+PUBLISH_NAMESPACE ({{moqt}} Section 10.15) already defines a Parameters field, so HOP_PATH is added to it directly.
+
+The NAMESPACE message ({{moqt}} Section 10.16), which delivers advertisements on a SUBSCRIBE_NAMESPACE response stream, does **not** define a Parameters field in {{moqt}}.
+Because a subscriber-driven relay mesh propagates advertisements downstream as NAMESPACE messages, HOP_PATH would otherwise have no way to travel along that path.
+This extension therefore defines an extended NAMESPACE message that appends a Parameters field, used only on a session that negotiated Relay Hops:
+
+~~~
+NAMESPACE Message (Relay Hops) {
+  Type (vi64) = 0x8,
+  Length (16),
+  Track Namespace Suffix (..),
+  Number of Parameters (vi64),
+  Parameters (..) ...
+}
+~~~
+
+The appended fields use the same encoding as the Parameters field of PUBLISH_NAMESPACE ({{moqt}} Section 10.15):
+
+**Number of Parameters**:
+The number of Key-Value-Pair parameters that follow.
+
+**Parameters**:
+Zero or more Key-Value-Pairs ({{moqt}} Section 2.5).
+
+The Track Namespace Suffix is self-delimiting, so a receiver parses it and then reads the Parameters that follow, bounded by the message Length.
+Both endpoints of a session know whether Relay Hops was negotiated, so there is no ambiguity about whether a NAMESPACE message on that session carries the appended Parameters field.
+An endpoint MUST NOT append a Parameters field to a NAMESPACE message on a session that did not negotiate Relay Hops, and a receiver on such a session MUST NOT expect one.
+
+This document does not extend NAMESPACE_DONE ({{moqt}} Section 10.17); it carries no Relay Hops state.
+
+
 # HOP_PATH Parameter
 The HOP_PATH parameter carries the ordered list of Hop IDs that an advertisement has traversed, from the origin publisher toward the receiver.
-It is a Key-Value-Pair (see {{moqt}} Section 2.5) carried in the Parameters of a PUBLISH_NAMESPACE message ({{moqt}} Section 10.15).
+It is a Key-Value-Pair (see {{moqt}} Section 2.5) carried in the Parameters of a namespace advertisement: a PUBLISH_NAMESPACE message ({{moqt}} Section 10.15) or an extended NAMESPACE message (see [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements)).
 
 Because the value is a variable-length list, HOP_PATH uses an odd Type so that it is length-prefixed:
 
@@ -173,12 +211,12 @@ This document requests a registration in the "MOQT Setup Options" registry ({{mo
 ## MOQT Message Parameters
 
 This document requests registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-HOP_PATH and EXCLUDE_HOP are message parameters carried in PUBLISH_NAMESPACE and SUBSCRIBE_NAMESPACE respectively.
+HOP_PATH is carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message defined by this document (see [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements)); EXCLUDE_HOP is carried in SUBSCRIBE_NAMESPACE.
 
-| Value   | Name        | Carried In          | Reference     |
-|:--------|:------------|:--------------------|:--------------|
-| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE   | This Document |
-| 0x40B58 | EXCLUDE_HOP | SUBSCRIBE_NAMESPACE | This Document |
+| Value   | Name        | Carried In                   | Reference     |
+|:--------|:------------|:-----------------------------|:--------------|
+| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| 0x40B58 | EXCLUDE_HOP | SUBSCRIBE_NAMESPACE          | This Document |
 
 
 --- back
