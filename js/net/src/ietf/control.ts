@@ -141,6 +141,10 @@ const MessagesV17 = {
 // * #1542 splits SUBSCRIBE_NAMESPACE into SUBSCRIBE_NAMESPACE + SUBSCRIBE_TRACKS (0x51).
 //   moq-lite does not implement track subscription via PUBLISH replication, so 0x51
 //   is rejected as an explicit error rather than silently ignored.
+//
+// draft-19 (#1765 range filters, #1613 MAX_REQUEST_UPDATES, GOAWAY request-id
+// removal, etc.) makes no wire changes to the messages moq-lite exchanges, so it
+// reuses the same map.
 const MessagesV18 = MessagesV17;
 
 type V14MessageType = (typeof MessagesV14)[keyof typeof MessagesV14];
@@ -208,10 +212,10 @@ export class Stream {
 		return await this.#readLock.runExclusive(async () => {
 			const messageType = await this.stream.reader.u53();
 
-			// Draft-18 (#1542) splits SUBSCRIBE_NAMESPACE into SUBSCRIBE_NAMESPACE +
+			// Draft-18+ (#1542) splits SUBSCRIBE_NAMESPACE into SUBSCRIBE_NAMESPACE +
 			// SUBSCRIBE_TRACKS (0x51). moq-lite does not support track subscription
 			// via PUBLISH replication, so reject loudly rather than wait forever.
-			if (this.version === Version.DRAFT_18 && messageType === SUBSCRIBE_TRACKS_ID) {
+			if (this.version >= Version.DRAFT_18 && messageType === SUBSCRIBE_TRACKS_ID) {
 				throw new Error("SUBSCRIBE_TRACKS (0x51) is not supported in moq-lite (no PUBLISH replication)");
 			}
 

@@ -120,9 +120,9 @@ where
 /// Newest first so axum's exact-string match picks the freshest one.
 const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
 
-/// moq-transport-18 requires qmux-01, so we never pair it with qmux-00.
-/// Mirrors `js/net`'s `connect.ts` and moq-native's `qmux_versions_for`.
-const QMUX01_ONLY_ALPN: &str = "moqt-18";
+/// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
+/// Mirrors `js/net`'s `connect.ts` and moq-native's `websocket_subprotocols`.
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
 
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
@@ -133,13 +133,13 @@ const QMUX01_ONLY_ALPN: &str = "moqt-18";
 /// resolve a moq version from it, and the relay silently downgrades clients to
 /// Lite02 via SETUP-based negotiation.
 ///
-/// `qmux-00.moqt-18` is excluded: moq-transport-18 requires qmux-01, so that
-/// pair is illegal.
+/// `qmux-00.moqt-1{8,9}` is excluded: moq-transport-18 and -19 require qmux-01, so
+/// those pairs are illegal.
 fn supported_subprotocols() -> Vec<String> {
 	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
 	for &version in QMUX_VERSIONS {
 		for &alpn in moq_net::ALPNS {
-			if version == qmux::Version::QMux00 && alpn == QMUX01_ONLY_ALPN {
+			if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
 				continue;
 			}
 			out.push(format!("{}{alpn}", version.prefix()));
@@ -218,10 +218,14 @@ mod tests {
 
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
-		// Guard the literal: it must stay the IETF draft-18 ALPN (wire 0xff000012).
+		// Guard the literals: they must stay the IETF draft-18/19 ALPNs
+		// (wire 0xff000012 / 0xff000013).
 		assert_eq!(
-			moq_net::Version::from_alpn(QMUX01_ONLY_ALPN).map(|v| v.code()),
-			Some(0xff000012)
+			QMUX01_ONLY_ALPNS
+				.iter()
+				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
+				.collect::<Vec<_>>(),
+			vec![Some(0xff000012), Some(0xff000013)]
 		);
 
 		let list = supported_subprotocols();
@@ -232,11 +236,11 @@ mod tests {
 		assert_eq!(list.first().map(String::as_str), Some(expected_first.as_str()));
 
 		// Every moq ALPN must appear under every qmux wire version, except the
-		// illegal `qmux-00.moqt-18` pair (moq-transport-18 needs qmux-01).
+		// illegal `qmux-00.moqt-1{8,9}` pairs (moq-transport-18/19 need qmux-01).
 		for &version in QMUX_VERSIONS {
 			for &alpn in moq_net::ALPNS {
 				let entry = format!("{}{alpn}", version.prefix());
-				if version == qmux::Version::QMux00 && alpn == QMUX01_ONLY_ALPN {
+				if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
 					assert!(!list.contains(&entry), "illegal pair {entry} must not be advertised");
 					continue;
 				}

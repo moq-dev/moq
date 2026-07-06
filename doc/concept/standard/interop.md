@@ -5,7 +5,7 @@ description: Publish and subscribe to a moq-transport relay with moq-cli
 
 # Interoperability
 
-`moq-cli` speaks moq-transport drafts **14 through 18**, negotiated over ALPN at
+`moq-cli` speaks moq-transport drafts **14 through 19**, negotiated over ALPN at
 connect. Point it at your relay and it picks the newest version you both
 support. (You should try [moq-lite](/concept/layer/moq-lite) too, btw.)
 

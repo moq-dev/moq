@@ -386,6 +386,27 @@ mod tests {
 		assert!(GroupFlags::decode(v17 | GroupFlags::FIRST_OBJECT_BIT, Version::Draft17).is_err());
 	}
 
+	/// Draft-19 makes no changes to the subgroup header wire format, so the flags
+	/// byte must be byte-identical to draft-18 on both encode and decode.
+	#[test]
+	fn test_draft19_matches_draft18() {
+		for flags in [
+			GroupFlags::default(),
+			GroupFlags {
+				has_subgroup: true,
+				has_extensions: true,
+				has_end: true,
+				has_subgroup_object: false,
+				has_priority: false,
+			},
+		] {
+			let v18 = flags.encode(Version::Draft18).unwrap();
+			let v19 = flags.encode(Version::Draft19).unwrap();
+			assert_eq!(v18, v19, "draft-19 must encode the subgroup header like draft-18");
+			assert_eq!(GroupFlags::decode(v19, Version::Draft19).unwrap(), flags);
+		}
+	}
+
 	/// Draft-18 byte 0x70..=0x7D should decode to the same flags as 0x30..=0x3D.
 	#[test]
 	fn test_draft18_extended_range() {

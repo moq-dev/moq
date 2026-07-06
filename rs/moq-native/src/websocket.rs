@@ -201,13 +201,13 @@ fn websocket_subprotocols(alpns: &[&str]) -> Vec<String> {
 	// newest first, then the bare qmux fallbacks. Mirrors qmux's own ALPN
 	// builder, which isn't public.
 	//
-	// `qmux-00.moqt-18` is excluded: moq-transport-18 requires qmux-01, so that
-	// pair is illegal (matches the relay and js/net's connect.ts).
+	// `qmux-00.moqt-1{8,9}` is excluded: moq-transport-18 and -19 require qmux-01, so
+	// those pairs are illegal (matches the relay and js/net's connect.ts).
 	let versions = [qmux::Version::QMux01, qmux::Version::QMux00];
 	let mut protocols = Vec::with_capacity(versions.len() * alpns.len() + qmux::ALPNS.len());
 	for &alpn in alpns {
 		for version in versions {
-			if version == qmux::Version::QMux00 && alpn == "moqt-18" {
+			if version == qmux::Version::QMux00 && matches!(alpn, "moqt-18" | "moqt-19") {
 				continue;
 			}
 			protocols.push(format!("{}{alpn}", version.prefix()));

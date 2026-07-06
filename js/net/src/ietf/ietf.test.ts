@@ -555,6 +555,14 @@ test("Reader#u62: accepts 0xFC 7-byte form on draft-18", async () => {
 	expect(await reader.done()).toBe(true);
 });
 
+test("Reader#u62: accepts 0xFC 7-byte form on draft-19", async () => {
+	const value = 0x12_3456_789a_bcn;
+	const bytes = new Uint8Array([0xfc, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+	const reader = new Reader(undefined, bytes, Version.DRAFT_19);
+	expect(await reader.u62()).toBe(value);
+	expect(await reader.done()).toBe(true);
+});
+
 test("Leading-ones varint: 7-byte form round-trips on draft-18", () => {
 	// Encode 7 bytes manually: 1111110_0 (prefix bit 48 = 0) + 6 bytes payload
 	const value = 0x12_3456_789a_bcn;

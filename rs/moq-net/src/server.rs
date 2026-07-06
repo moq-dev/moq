@@ -1,6 +1,6 @@
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP,
+	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -78,6 +78,15 @@ impl Server {
 		};
 
 		let (encoding, supported) = match session.protocol() {
+			Some(ALPN_19) => {
+				self.versions
+					.select(Version::Ietf(ietf::Version::Draft19))
+					.ok_or(Error::Version)?;
+				return Ok(deferred(Handshake::IetfModern {
+					session,
+					version: ietf::Version::Draft19,
+				}));
+			}
 			Some(ALPN_18) => {
 				self.versions
 					.select(Version::Ietf(ietf::Version::Draft18))
