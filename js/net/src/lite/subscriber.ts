@@ -172,7 +172,7 @@ export class Subscriber {
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ path, active: true });
+						announced.append({ path: suffix, active: true });
 					}
 					break;
 				}
@@ -202,7 +202,7 @@ export class Subscriber {
 				const path = Path.join(prefix, announce.suffix);
 
 				console.debug(`announced: broadcast=${path} active=${announce.active}`);
-				announced.append({ path, active: announce.active });
+				announced.append({ path: announce.suffix, active: announce.active });
 			}
 
 			announced.close();

@@ -72,8 +72,9 @@ export class Subscriber {
 	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
 		for (const active of this.#announced) {
-			if (!Path.hasPrefix(prefix, active)) continue;
-			announced.append({ path: active, active: true });
+			const suffix = Path.stripPrefix(prefix, active);
+			if (suffix === null) continue;
+			announced.append({ path: suffix, active: true });
 		}
 		this.#announcedConsumers.add(announced);
 
@@ -144,8 +145,9 @@ export class Subscriber {
 
 							this.#announced.add(path);
 							for (const consumer of this.#announcedConsumers) {
-								if (!Path.hasPrefix(consumer.prefix, path)) continue;
-								consumer.append({ path, active: true });
+								const suffix = Path.stripPrefix(consumer.prefix, path);
+								if (suffix === null) continue;
+								consumer.append({ path: suffix, active: true });
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -154,8 +156,9 @@ export class Subscriber {
 
 							this.#announced.delete(path);
 							for (const consumer of this.#announcedConsumers) {
-								if (!Path.hasPrefix(consumer.prefix, path)) continue;
-								consumer.append({ path, active: false });
+								const suffix = Path.stripPrefix(consumer.prefix, path);
+								if (suffix === null) continue;
+								consumer.append({ path: suffix, active: false });
 							}
 						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
 							const blocked = await PublishBlocked.decode(stream.reader, version);
@@ -407,7 +410,7 @@ export class Subscriber {
 			for (const consumer of this.#announcedConsumers) {
 				const suffix = Path.stripPrefix(consumer.prefix, path);
 				if (suffix === null) continue;
-				consumer.append({ path, active: true });
+				consumer.append({ path: suffix, active: true });
 			}
 
 			// Wait for stream close (= PublishNamespaceDone)
@@ -422,7 +425,7 @@ export class Subscriber {
 				const suffix = Path.stripPrefix(consumer.prefix, path);
 				if (suffix === null) continue;
 				try {
-					consumer.append({ path, active: false });
+					consumer.append({ path: suffix, active: false });
 				} catch {
 					// Consumer already closed, will be cleaned up
 				}
