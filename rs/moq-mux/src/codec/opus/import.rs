@@ -1,6 +1,7 @@
 use super::Config;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
+use crate::container::jitter::Metrics;
 
 /// Opus importer.
 ///
@@ -14,6 +15,7 @@ use crate::container::Frame;
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
+	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -38,6 +40,7 @@ impl<E: CatalogExt> Import<E> {
 		Ok(Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
+			metrics: Metrics::new(),
 		})
 	}
 
@@ -53,12 +56,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		self.rendition.update_metrics(self.metrics.finish_group(None));
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		self.rendition.update_metrics(self.metrics.finish_group(None));
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -66,6 +71,8 @@ impl<E: CatalogExt> Import<E> {
 	/// Publish one Opus packet as its own group, stamping `pts` or a wall clock when absent.
 	pub fn decode(&mut self, frame: &[u8], pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
+		self.rendition
+			.update_metrics(self.metrics.finish_group(Some(timestamp)));
 		self.track.write(Frame {
 			timestamp,
 			payload: bytes::Bytes::copy_from_slice(frame),
@@ -73,6 +80,8 @@ impl<E: CatalogExt> Import<E> {
 			duration: None,
 		})?;
 		self.track.finish_group()?;
+		self.rendition
+			.update_metrics(self.metrics.observe_frame(timestamp, frame.len()));
 		Ok(())
 	}
 }

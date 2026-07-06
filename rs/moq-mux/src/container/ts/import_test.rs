@@ -46,20 +46,23 @@ fn import_bbb_catalog() {
 }
 
 /// The Kyrion capture is H.264 1080i with B-frames (open-GOP, ~5-frame reorder despite only
-/// 3 consecutive B-frames). Its video rendition's `jitter` must capture that reorder delay
+/// 3 consecutive B-frames). Its video rendition's `latencyMin` must capture that reorder delay
 /// (the source `PTS - DTS`), not just the ~33 ms frame interval, so a transmuxer/player sizes
 /// its decode buffer correctly. The stream is ~30 fps, so the reorder is ~5 * 33 ms.
 #[test]
-fn import_kyrion_video_jitter_captures_reorder() {
+fn import_kyrion_video_latency_min_captures_reorder() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
 	let catalog = import_ts(data);
 
 	let video = catalog.video.renditions.values().next().expect("a video track");
-	let jitter = video.jitter.expect("B-frame stream must publish jitter").as_millis();
+	let latency_min = video
+		.latency_min()
+		.expect("B-frame stream must publish latencyMin")
+		.as_millis();
 	// ~5 frames of reorder at ~30 fps is ~167 ms, far above the ~33 ms frame interval.
 	assert!(
-		(150..=200).contains(&jitter),
-		"jitter {jitter} ms should reflect the ~5-frame reorder, not the frame interval"
+		(150..=200).contains(&latency_min),
+		"latencyMin {latency_min} ms should reflect the ~5-frame reorder, not the frame interval"
 	);
 }
 

@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use super::Error;
 use crate::Result;
 use crate::container::Timestamp;
+use crate::container::jitter::{Metrics, Update};
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -77,6 +78,9 @@ struct Fmp4Track {
 
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
+
+	// Tracks bitrate and jitter updates for the catalog.
+	metrics: Metrics,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -233,6 +237,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					last_timestamp: None,
 					min_duration: None,
 					pending_sequence: None,
+					metrics: Metrics::new(),
 				},
 			);
 		}
@@ -720,14 +725,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			let _ = timestamp;
+			if contains_keyframe {
+				let update = track.metrics.finish_group(Some(timestamp));
+				update_track_bitrate(&mut self.catalog, track, update)?;
+			}
 			let mut frame = g.create_frame(moq_net::Frame {
 				size: fragment_bytes.len() as u64,
 			})?;
+			let bytes = fragment_bytes.len();
 			frame.write(fragment_bytes)?;
 			frame.finish()?;
 
 			track.group = Some(g);
+			let update = track.metrics.observe_frame(timestamp, bytes);
+			update_track_bitrate(&mut self.catalog, track, update)?;
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
@@ -744,7 +755,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								.renditions
 								.get_mut(track.track.name())
 								.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
-							config.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
+							config
+								.set_latency_min(moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok());
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -752,7 +764,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								.renditions
 								.get_mut(track.track.name())
 								.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
-							config.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
+							config
+								.set_latency_min(moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok());
 						}
 					}
 				}
@@ -767,6 +780,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
+			let update = track.metrics.finish_group(None);
+			update_track_bitrate(&mut self.catalog, track, update)?;
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -781,6 +796,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
+			let update = track.metrics.finish_group(None);
+			update_track_bitrate(&mut self.catalog, track, update)?;
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -788,6 +805,41 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		Ok(())
 	}
+}
+
+fn update_track_bitrate<E: crate::catalog::hang::CatalogExt>(
+	catalog: &mut crate::catalog::Producer<E>,
+	track: &Fmp4Track,
+	update: Update,
+) -> Result<()> {
+	let Some(bitrate) = update.bitrate else {
+		return Ok(());
+	};
+
+	let mut catalog = catalog.lock();
+	match track.kind {
+		TrackKind::Video => {
+			let config = catalog
+				.video
+				.renditions
+				.get_mut(track.track.name())
+				.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
+			if config.bitrate.is_none_or(|current| bitrate > current) {
+				config.bitrate = Some(bitrate);
+			}
+		}
+		TrackKind::Audio => {
+			let config = catalog
+				.audio
+				.renditions
+				.get_mut(track.track.name())
+				.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
+			if config.bitrate.is_none_or(|current| bitrate > current) {
+				config.bitrate = Some(bitrate);
+			}
+		}
+	}
+	Ok(())
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {

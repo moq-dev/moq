@@ -596,6 +596,33 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn opus_import_publishes_max_bitrate() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let track = broadcast.create_track(moq_net::Track::new("audio")).unwrap();
+		let config = crate::codec::opus::Config {
+			sample_rate: 48_000,
+			channel_count: 2,
+		};
+		let mut import = crate::codec::opus::Import::new(track, catalog.clone(), config).unwrap();
+
+		import
+			.decode(&[0; 100], Some(Timestamp::from_micros(0).unwrap()))
+			.unwrap();
+		import
+			.decode(&[0; 50], Some(Timestamp::from_micros(1_000_000).unwrap()))
+			.unwrap();
+		import
+			.decode(&[0; 200], Some(Timestamp::from_micros(2_000_000).unwrap()))
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		let audio = snapshot.audio.renditions.get("audio").unwrap();
+		assert_eq!(audio.bitrate, Some(800));
+
+		import.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn existing_track_h264_uses_existing_name_in_catalog() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.create_track(moq_net::Track::new("camera")).unwrap();

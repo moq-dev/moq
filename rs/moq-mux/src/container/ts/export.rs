@@ -1107,7 +1107,7 @@ fn author_dts(pts: u64, reserve: u64, last: &mut Option<u64>) -> Option<u64> {
 /// in 90 kHz ticks, or [`DEFAULT_DTS_RESERVE`] when none is declared.
 fn dts_reserve(config: &VideoConfig) -> u64 {
 	config
-		.jitter
+		.latency_min()
 		.map(|t| (t.as_micros() * 90_000 / 1_000_000) as u64)
 		.filter(|&ticks| ticks > 0)
 		.unwrap_or(DEFAULT_DTS_RESERVE)

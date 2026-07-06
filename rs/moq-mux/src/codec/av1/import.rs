@@ -19,7 +19,7 @@ use super::split::ObuIterator;
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::Jitter;
+use crate::container::jitter::Metrics;
 
 /// A pure-publisher importer for AV1 with inline sequence headers.
 ///
@@ -32,7 +32,7 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_seq: Option<Bytes>,
-	jitter: Jitter,
+	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -44,7 +44,7 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_seq: None,
-			jitter: Jitter::new(),
+			metrics: Metrics::new(),
 		}
 	}
 
@@ -169,6 +169,7 @@ impl<E: CatalogExt> Import<E> {
 		}
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
+		self.rendition.update_metrics(self.metrics.current());
 		self.config = Some(config);
 	}
 
@@ -201,18 +202,20 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
+		self.rendition.update_metrics(self.metrics.finish_group(None));
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.rendition.update_metrics(self.metrics.finish_group(None));
 		self.track.seek(sequence)?;
 		Ok(())
 	}
 
 	/// Write split frames to the track, resolving the config from the first
-	/// keyframe's inline sequence header and refining the catalog jitter.
+	/// keyframe's inline sequence header and refining the catalog metrics.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
 			if frame.keyframe
@@ -226,21 +229,24 @@ impl<E: CatalogExt> Import<E> {
 				return Err(Error::MissingSequenceHeader.into());
 			}
 
+			if frame.keyframe {
+				self.rendition
+					.update_metrics(self.metrics.finish_group(Some(frame.timestamp)));
+			}
+
 			let pts = frame.timestamp;
+			let bytes = frame.payload.len();
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which a caller joining mid-stream skips.
 			self.track.write(frame)?;
 
-			if let Some(jitter) = self.jitter.observe(pts) {
-				self.rendition
-					.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
-			}
+			self.rendition.update_metrics(self.metrics.observe_frame(pts, bytes));
 		}
 		Ok(())
 	}
 
 	/// Publish split frames, resolving the config from the first keyframe's inline
-	/// sequence header and refining the catalog jitter.
+	/// sequence header and refining the catalog metrics.
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}

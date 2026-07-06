@@ -1,5 +1,6 @@
 use super::Producer;
 use super::hang::CatalogExt;
+use crate::container::jitter::Update;
 
 /// A single video track's catalog rendition, retired on drop.
 ///
@@ -42,7 +43,7 @@ impl<E: CatalogExt> VideoTrack<E> {
 		self.present = true;
 	}
 
-	/// Refine the rendition in place (e.g. observed jitter), publishing if present.
+	/// Refine the rendition in place (e.g. observed metrics), publishing if present.
 	pub fn update(&mut self, f: impl FnOnce(&mut hang::catalog::VideoConfig)) {
 		if !self.present {
 			return;
@@ -51,6 +52,19 @@ impl<E: CatalogExt> VideoTrack<E> {
 		if let Some(config) = guard.video.renditions.get_mut(&self.name) {
 			f(config);
 		}
+	}
+
+	pub(crate) fn update_metrics(&mut self, update: Update) {
+		self.update(|config| {
+			if let Some(latency_min) = update.latency_min {
+				config.set_latency_min(moq_net::Time::try_from(latency_min).ok());
+			}
+			if let Some(bitrate) = update.bitrate
+				&& config.bitrate.is_none_or(|current| bitrate > current)
+			{
+				config.bitrate = Some(bitrate);
+			}
+		});
 	}
 }
 
@@ -96,7 +110,7 @@ impl<E: CatalogExt> AudioTrack<E> {
 		self.present = true;
 	}
 
-	/// Refine the rendition in place (e.g. a synthesized description or jitter),
+	/// Refine the rendition in place (e.g. a synthesized description or metrics),
 	/// publishing if present.
 	pub fn update(&mut self, f: impl FnOnce(&mut hang::catalog::AudioConfig)) {
 		if !self.present {
@@ -106,6 +120,19 @@ impl<E: CatalogExt> AudioTrack<E> {
 		if let Some(config) = guard.audio.renditions.get_mut(&self.name) {
 			f(config);
 		}
+	}
+
+	pub(crate) fn update_metrics(&mut self, update: Update) {
+		self.update(|config| {
+			if let Some(latency_min) = update.latency_min {
+				config.set_latency_min(moq_net::Time::try_from(latency_min).ok());
+			}
+			if let Some(bitrate) = update.bitrate
+				&& config.bitrate.is_none_or(|current| bitrate > current)
+			{
+				config.bitrate = Some(bitrate);
+			}
+		});
 	}
 }
 

@@ -18,7 +18,7 @@ use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
-use crate::container::jitter::Jitter;
+use crate::container::jitter::Metrics;
 
 /// H.264 importer: a pure frame publisher that resolves the catalog rendition.
 ///
@@ -35,7 +35,7 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_sps: Option<Bytes>,
-	jitter: Jitter,
+	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -48,7 +48,7 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_sps: None,
-			jitter: Jitter::new(),
+			metrics: Metrics::new(),
 		}
 	}
 
@@ -122,12 +122,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
+		self.rendition.update_metrics(self.metrics.finish_group(None));
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.rendition.update_metrics(self.metrics.finish_group(None));
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -136,10 +138,7 @@ impl<E: CatalogExt> Import<E> {
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.
 	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
-		if let Some(jitter) = self.jitter.observe_reorder(reorder) {
-			self.rendition
-				.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
-		}
+		self.rendition.update_metrics(self.metrics.observe_reorder(reorder));
 	}
 
 	/// Resolve the avc3 config from an inline SPS, updating it in place.
@@ -176,18 +175,15 @@ impl<E: CatalogExt> Import<E> {
 		}
 		tracing::debug!(?config, "starting H.264 track");
 		self.rendition.set(config.clone());
-		// Seed jitter from whatever has accumulated: a dirty start (or a B-frame
+		// Seed metrics from whatever has accumulated: a dirty start (or a B-frame
 		// reorder observed via observe_reorder) can feed updates before this
 		// rendition exists, so those would otherwise be lost on (re)publish.
-		if let Some(jitter) = self.jitter.current() {
-			self.rendition
-				.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
-		}
+		self.rendition.update_metrics(self.metrics.current());
 		self.config = Some(config);
 	}
 
 	/// Write split frames to the track, resolving the avc3 config from the first
-	/// keyframe's inline SPS and refining the catalog jitter as it goes.
+	/// keyframe's inline SPS and refining the catalog metrics as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
 			// avc1 config arrives out-of-band via initialize(); avc3 carries SPS
@@ -209,19 +205,22 @@ impl<E: CatalogExt> Import<E> {
 				}
 			}
 
+			if frame.keyframe {
+				self.rendition
+					.update_metrics(self.metrics.finish_group(Some(frame.timestamp)));
+			}
+
 			let pts = frame.timestamp;
+			let bytes = frame.payload.len();
 			self.track.write(frame)?;
 
-			if let Some(jitter) = self.jitter.observe(pts) {
-				self.rendition
-					.update(|c| c.jitter = moq_net::Time::try_from(jitter).ok());
-			}
+			self.rendition.update_metrics(self.metrics.observe_frame(pts, bytes));
 		}
 		Ok(())
 	}
 
 	/// Publish split frames, resolving the avc3 config from the first keyframe's
-	/// inline SPS and refining the catalog jitter as it goes.
+	/// inline SPS and refining the catalog metrics as it goes.
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}

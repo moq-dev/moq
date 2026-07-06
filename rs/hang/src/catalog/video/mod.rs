@@ -137,14 +137,19 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum jitter before the next frame is emitted in milliseconds.
-	/// The player's jitter buffer should be larger than this value.
-	/// If not provided, the player should assume each frame is flushed immediately.
+	/// Minimum additional latency required by this track in milliseconds.
+	///
+	/// This is added to the subscriber's own latency target for steady playback.
 	///
 	/// ex:
 	/// - If each frame is flushed immediately, this would be 1000/fps.
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
+	#[serde(default)]
+	#[serde(rename = "latencyMin")]
+	pub latency_min: Option<moq_net::Time>,
+
+	#[doc(hidden)]
 	#[serde(default)]
 	pub jitter: Option<moq_net::Time>,
 }
@@ -168,7 +173,19 @@ impl VideoConfig {
 			framerate: None,
 			optimize_for_latency: None,
 			container: Container::default(),
+			latency_min: None,
 			jitter: None,
 		}
+	}
+
+	/// The minimum additional latency required by this track.
+	pub fn latency_min(&self) -> Option<moq_net::Time> {
+		self.latency_min.or(self.jitter)
+	}
+
+	/// Set the minimum additional latency required by this track.
+	pub fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>) {
+		self.latency_min = latency_min;
+		self.jitter = latency_min;
 	}
 }

@@ -599,7 +599,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	});
 	video_config.container = Container::Legacy;
 	video_config.description = Some(Bytes::from(avcc()));
-	video_config.jitter = Some(moq_net::Time::try_from(Duration::from_millis(80)).unwrap());
+	video_config.set_latency_min(Some(moq_net::Time::try_from(Duration::from_millis(80)).unwrap()));
 	catalog
 		.lock()
 		.video

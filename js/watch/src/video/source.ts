@@ -258,7 +258,7 @@ export class Source {
 			const config = available[target.name];
 			effect.set(this.#track, target.name);
 			effect.set(this.#config, config);
-			effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
+			effect.set(this.sync.video, (config.latencyMin ?? config.jitter) as Moq.Time.Milli | undefined);
 			return;
 		}
 
@@ -286,9 +286,10 @@ export class Source {
 		effect.set(this.#track, selected);
 		effect.set(this.#config, config);
 
-		// Use catalog jitter if available, otherwise estimate from framerate.
-		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		effect.set(this.sync.video, jitter as Moq.Time.Milli | undefined);
+		// Use catalog latencyMin if available, otherwise estimate from framerate.
+		const latencyMin =
+			config.latencyMin ?? config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
+		effect.set(this.sync.video, latencyMin as Moq.Time.Milli | undefined);
 	}
 
 	/**
