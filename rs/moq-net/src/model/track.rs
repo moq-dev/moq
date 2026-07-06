@@ -157,7 +157,7 @@ struct TrackState {
 	info: Option<Info>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
-	groups: VecDeque<Option<(group::Producer, web_async::time::Instant)>>,
+	groups: VecDeque<Option<(group::Cache, web_async::time::Instant)>>,
 
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
@@ -339,7 +339,7 @@ impl TrackState {
 			return Poll::Pending;
 		}
 
-		let mut best: Option<&group::Producer> = None;
+		let mut best: Option<&group::Cache> = None;
 		for (group, _) in self.groups.iter().flatten() {
 			if group.sequence < next_sequence {
 				continue;
@@ -496,7 +496,12 @@ impl TrackState {
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
 	/// [`Fetch`] resolves via [`Self::poll_fetch`].
-	fn insert_group_request(&mut self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
+	fn insert_group_request(
+		&mut self,
+		sequence: u64,
+		info: Option<Info>,
+		parent: Keepalive,
+	) -> Result<group::Producer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
 		}
@@ -512,11 +517,11 @@ impl TrackState {
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = *self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = group::Producer::new(group::Info { sequence }, info);
+		let group = group::Producer::with_parent(group::Info { sequence }, info, parent);
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
-		self.groups.push_back(Some((group.clone(), now)));
+		self.groups.push_back(Some((group.cache(), now)));
 		self.evict_expired(now, cache);
 		Ok(group)
 	}
@@ -534,9 +539,8 @@ impl TrackState {
 #[derive(Clone)]
 pub struct Producer {
 	name: Arc<str>,
-	// The parent broadcast's info, inherited from [`broadcast::Producer::create_track`].
-	// Top link of the ownership chain; carried for identity and future inheritance.
-	broadcast: Arc<broadcast::Info>,
+	// Keeps the parent broadcast alive while this track is externally produced.
+	broadcast: broadcast::Keepalive,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
 }
@@ -546,10 +550,10 @@ impl Producer {
 	///
 	/// Crate-private: tracks are born from their broadcast via
 	/// [`broadcast::Producer::create_track`] (or served on demand through a
-	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` down so
-	/// the broadcast owns the namespace and there's a single way to mint a track.
+	/// [`Request`]), which threads the broadcast keepalive down so the broadcast
+	/// owns the namespace and there's a single way to mint a track.
 	pub(crate) fn new(
-		broadcast: Arc<broadcast::Info>,
+		broadcast: broadcast::Keepalive,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
@@ -571,7 +575,7 @@ impl Producer {
 
 	/// The parent broadcast this track belongs to.
 	pub fn broadcast(&self) -> &broadcast::Info {
-		&self.broadcast
+		self.broadcast.info()
 	}
 
 	/// Create a new group with the given sequence number.
@@ -586,14 +590,14 @@ impl Producer {
 		let track = *info;
 		let cache = info.cache;
 
-		let group = group::Producer::new(group, track);
+		let group = group::Producer::with_parent(group, track, self.keepalive());
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
 
 		let now = web_async::time::Instant::now();
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
-		state.groups.push_back(Some((group.clone(), now)));
+		state.groups.push_back(Some((group.cache(), now)));
 		state.evict_expired(now, cache);
 
 		Ok(group)
@@ -616,12 +620,12 @@ impl Producer {
 		let track = *info;
 		let cache = info.cache;
 
-		let group = group::Producer::new(group::Info { sequence }, track);
+		let group = group::Producer::with_parent(group::Info { sequence }, track, self.keepalive());
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
-		state.groups.push_back(Some((group.clone(), now)));
+		state.groups.push_back(Some((group.cache(), now)));
 		state.evict_expired(now, cache);
 
 		Ok(group)
@@ -915,6 +919,39 @@ impl Producer {
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
 		TrackState::modify(&self.state)
+	}
+
+	fn keepalive(&self) -> Keepalive {
+		Keepalive {
+			state: self.state.clone(),
+		}
+	}
+}
+
+pub(crate) struct Keepalive {
+	state: kio::Producer<TrackState>,
+}
+
+impl Clone for Keepalive {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+		}
+	}
+}
+
+impl Drop for Keepalive {
+	fn drop(&mut self) {
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = self.state.write()
+			&& state.final_sequence.is_none()
+		{
+			state.groups.clear();
+			state.datagrams.clear();
+			state.duplicates.clear();
+		}
 	}
 }
 
@@ -1327,7 +1364,10 @@ impl GroupRequest {
 	/// already present, or the track's abort error if it closed while pending.
 	pub fn accept(mut self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.done = true;
-		TrackState::modify(&self.state)?.insert_group_request(self.sequence, info.into())
+		let parent = Keepalive {
+			state: self.state.clone(),
+		};
+		TrackState::modify(&self.state)?.insert_group_request(self.sequence, info.into(), parent)
 	}
 
 	/// Reject the fetch, resolving the waiting [`Consumer::fetch_group`] with `err`.
@@ -1634,7 +1674,7 @@ impl Subscriber {
 pub struct Request {
 	name: Arc<str>,
 	// The parent broadcast's info, threaded into the [`Producer`] on accept.
-	broadcast: Arc<broadcast::Info>,
+	broadcast: broadcast::KeepaliveRef,
 	state: kio::Producer<TrackState>,
 
 	// The previous subscription that was combined, used to detect changes.
@@ -1648,17 +1688,21 @@ pub struct Request {
 }
 
 impl Request {
-	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
+	pub(crate) fn new(broadcast: impl Into<broadcast::KeepaliveRef>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::<TrackState>::default();
 		let dynamic = Dynamic::new(name.clone(), state.clone());
 		Self {
 			name,
-			broadcast,
+			broadcast: broadcast.into(),
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
 		}
+	}
+
+	pub(crate) fn strengthen_parent(&mut self, parent: broadcast::Keepalive) {
+		self.broadcast = parent.into();
 	}
 
 	/// The requested track name.
@@ -1694,7 +1738,7 @@ impl Request {
 		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
 		Producer {
 			name: self.name,
-			broadcast: self.broadcast,
+			broadcast: self.broadcast.upgrade().expect("request parent should be live"),
 			state: self.state,
 			prev_subscription: None,
 		}
@@ -1805,7 +1849,8 @@ mod test {
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
-		Producer::new(Arc::new(broadcast::Info::default()), name, info)
+		let broadcast = broadcast::Info::default().produce();
+		Producer::new(broadcast.keepalive(), name, info)
 	}
 
 	/// Helper: count non-tombstoned groups in state.
@@ -1852,6 +1897,19 @@ mod test {
 		assert_eq!(got.sequence, seq);
 		assert_eq!(got.timestamp, ts);
 		assert_eq!(&got.payload[..], b"hello");
+	}
+
+	#[tokio::test]
+	async fn active_group_keeps_track_alive() {
+		let mut producer = track_producer("test", None);
+		let subscriber = producer.subscribe(None);
+		let group = producer.append_group().unwrap();
+
+		drop(producer);
+		subscriber.assert_not_closed();
+
+		drop(group);
+		subscriber.assert_closed();
 	}
 
 	#[tokio::test]

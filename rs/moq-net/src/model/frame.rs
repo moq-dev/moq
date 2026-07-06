@@ -1,7 +1,9 @@
 use crate::group;
-use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+	Arc,
+	atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -185,6 +187,12 @@ struct FrameState {
 	abort: Option<Error>,
 }
 
+#[derive(Default)]
+struct WriterState {
+	writers: AtomicUsize,
+	terminal: AtomicBool,
+}
+
 /// Writes a frame's payload in one or more chunks.
 ///
 /// The total bytes written must exactly match [Info::size].
@@ -193,20 +201,16 @@ struct FrameState {
 /// A single whole-frame [`write`](Self::write) keeps the caller's allocation
 /// (zero-copy); chunked writes copy into one buffer sized to the declared frame.
 pub struct Producer {
-	info: Info,
-	// The parent group's info, inherited from [`group::Producer::create_frame`]
-	// so the ownership chain reaches the leaf. A small `Copy` value; carried for
-	// identity/debugging (the timestamp-vs-timescale check lives on the group).
-	group: group::Info,
-	state: kio::Producer<FrameState>,
-	buf: FrameBuf,
+	cache: Cache,
+	parent: Option<group::Keepalive>,
+	writers: Arc<WriterState>,
 }
 
 impl std::ops::Deref for Producer {
 	type Target = Info;
 
 	fn deref(&self) -> &Self::Target {
-		&self.info
+		&self.cache.info
 	}
 }
 
@@ -216,27 +220,59 @@ impl Producer {
 	/// The payload storage chokepoint: rejects a frame whose declared
 	/// [`Info::size`] exceeds [`MAX_FRAME_SIZE`] with [`Error::FrameTooLarge`]
 	/// before storing the untrusted payload.
+	#[cfg(test)]
 	pub(crate) fn new(info: Info, group: group::Info) -> Result<Self> {
 		if info.size > MAX_FRAME_SIZE {
 			return Err(Error::FrameTooLarge);
 		}
 		let buf = FrameBuf::new(info.size as usize);
 		Ok(Self {
-			info,
-			group,
-			state: kio::Producer::new(FrameState::default()),
-			buf,
+			cache: Cache {
+				info,
+				group,
+				state: kio::Producer::new(FrameState::default()),
+				buf,
+			},
+			parent: None,
+			writers: Arc::new(WriterState {
+				writers: AtomicUsize::new(1),
+				terminal: AtomicBool::new(false),
+			}),
 		})
+	}
+
+	pub(crate) fn with_parent(info: Info, group: group::Info, parent: group::Keepalive) -> Result<Self> {
+		if info.size > MAX_FRAME_SIZE {
+			return Err(Error::FrameTooLarge);
+		}
+		let buf = FrameBuf::new(info.size as usize);
+		Ok(Self {
+			cache: Cache {
+				info,
+				group,
+				state: kio::Producer::new(FrameState::default()),
+				buf,
+			},
+			parent: Some(parent),
+			writers: Arc::new(WriterState {
+				writers: AtomicUsize::new(1),
+				terminal: AtomicBool::new(false),
+			}),
+		})
+	}
+
+	pub(crate) fn cache(&self) -> Cache {
+		self.cache.clone()
 	}
 
 	/// The parent group this frame belongs to.
 	pub fn group(&self) -> &group::Info {
-		&self.group
+		&self.cache.group
 	}
 
 	/// Bytes still needed to complete the frame.
 	pub fn remaining(&self) -> usize {
-		self.buf.capacity() - self.buf.written(Ordering::Acquire)
+		self.cache.buf.capacity() - self.cache.buf.written(Ordering::Acquire)
 	}
 
 	/// Write a chunk of data to the frame.
@@ -250,13 +286,13 @@ impl Producer {
 		// Surface aborts before writing.
 		self.bail_if_aborted()?;
 		// Fast path: a single whole-frame write keeps the caller's allocation.
-		if len == self.buf.capacity() && self.buf.written(Ordering::Acquire) == 0 {
-			match self.buf.try_set_bytes(chunk.into_bytes()) {
+		if len == self.cache.buf.capacity() && self.cache.buf.written(Ordering::Acquire) == 0 {
+			match self.cache.buf.try_set_bytes(chunk.into_bytes()) {
 				Ok(()) => {
-					let cap = self.buf.capacity();
+					let cap = self.cache.buf.capacity();
 					// Safety: `try_set_bytes` checked that the buffer exactly matches
 					// the declared size, so publishing all bytes is within bounds.
-					unsafe { self.buf.store_written(cap) };
+					unsafe { self.cache.buf.store_written(cap) };
 					self.notify_written(cap);
 					return Ok(());
 				}
@@ -276,8 +312,8 @@ impl Producer {
 		if src.is_empty() {
 			return;
 		}
-		let prev = self.buf.written(Ordering::Relaxed);
-		let Some(buf) = self.buf.mutable() else {
+		let prev = self.cache.buf.written(Ordering::Relaxed);
+		let Some(buf) = self.cache.buf.mutable() else {
 			// Only reachable if the frame is already complete, which `write` rejects
 			// for a non-empty chunk. Nothing to copy.
 			return;
@@ -286,7 +322,7 @@ impl Producer {
 		// remaining capacity, and consumers only read `[..written]`.
 		unsafe {
 			std::ptr::copy_nonoverlapping(src.as_ptr(), buf.data.add(prev), src.len());
-			self.buf.store_written(prev + src.len());
+			self.cache.buf.store_written(prev + src.len());
 		}
 		self.notify_written(prev + src.len());
 	}
@@ -295,50 +331,48 @@ impl Producer {
 	///
 	/// Returns [Error::WrongSize] if the bytes written don't match [Info::size].
 	pub fn finish(&mut self) -> Result<()> {
-		let written = self.buf.written(Ordering::Acquire);
-		if written != self.buf.capacity() {
+		let written = self.cache.buf.written(Ordering::Acquire);
+		if written != self.cache.buf.capacity() {
 			return Err(Error::WrongSize);
 		}
 		// Mark fin (idempotent if the last write already set it on the final byte).
 		let mut state = self.modify()?;
 		state.fin = true;
+		drop(state);
+		self.writers.terminal.store(true, Ordering::Release);
 		Ok(())
 	}
 
 	/// Abort the frame with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut guard = self.modify()?;
-		guard.abort = Some(err);
-		guard.close();
+		self.abort_inner(err)?;
+		self.writers.terminal.store(true, Ordering::Release);
 		Ok(())
 	}
 
 	/// Create a new consumer for the frame.
 	pub fn consume(&self) -> Consumer {
-		Consumer {
-			info: self.info,
-			state: self.state.consume(),
-			buf: self.buf.clone(),
-			read_idx: 0,
-		}
+		self.cache.consume()
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
+		self.cache
+			.state
 			.unused()
 			.await
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	fn modify(&mut self) -> Result<kio::Mut<'_, FrameState>> {
-		self.state
+		self.cache
+			.state
 			.write()
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	fn bail_if_aborted(&self) -> Result<()> {
-		let state = self.state.read();
+		let state = self.cache.state.read();
 		if let Some(err) = &state.abort {
 			return Err(err.clone());
 		}
@@ -348,21 +382,69 @@ impl Producer {
 	fn notify_written(&mut self, written: usize) {
 		// Briefly take the kio write lock to wake waiters; drop of `Mut` triggers
 		// kio's notify. Also flip `fin` if we just filled the buffer.
-		if let Ok(mut state) = self.state.write()
-			&& written == self.buf.capacity()
+		if let Ok(mut state) = self.cache.state.write()
+			&& written == self.cache.buf.capacity()
 		{
 			state.fin = true;
+			self.writers.terminal.store(true, Ordering::Release);
 		}
+	}
+
+	fn abort_inner(&mut self, err: Error) -> Result<()> {
+		let mut guard = self.modify()?;
+		guard.abort = Some(err);
+		guard.close();
+		Ok(())
 	}
 }
 
 impl Clone for Producer {
 	fn clone(&self) -> Self {
+		self.writers.writers.fetch_add(1, Ordering::Relaxed);
 		Self {
+			cache: self.cache.clone(),
+			parent: self.parent.clone(),
+			writers: self.writers.clone(),
+		}
+	}
+}
+
+impl Drop for Producer {
+	fn drop(&mut self) {
+		let prev = self.writers.writers.fetch_sub(1, Ordering::AcqRel);
+		if prev > 1 || self.writers.terminal.load(Ordering::Acquire) {
+			return;
+		}
+		let _ = self.abort_inner(Error::Dropped);
+	}
+}
+
+#[derive(Clone)]
+pub(crate) struct Cache {
+	info: Info,
+	// The parent group's info, inherited from [`group::Producer::create_frame`]
+	// so the ownership chain reaches the leaf. A small `Copy` value; carried for
+	// identity/debugging (the timestamp-vs-timescale check lives on the group).
+	group: group::Info,
+	state: kio::Producer<FrameState>,
+	buf: FrameBuf,
+}
+
+impl std::ops::Deref for Cache {
+	type Target = Info;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
+impl Cache {
+	pub(crate) fn consume(&self) -> Consumer {
+		Consumer {
 			info: self.info,
-			group: self.group,
-			state: self.state.clone(),
+			state: self.state.consume(),
 			buf: self.buf.clone(),
+			read_idx: 0,
 		}
 	}
 }

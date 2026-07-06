@@ -716,7 +716,8 @@ mod test {
 	use crate::{Timestamp, broadcast};
 
 	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
-		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+		let broadcast = broadcast::Info::default().produce();
+		track::Producer::new(broadcast.keepalive(), name, None)
 	}
 
 	#[tokio::test]

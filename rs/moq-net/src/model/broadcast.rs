@@ -128,7 +128,7 @@ impl Producer {
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = track::Producer::new(self.info.clone(), name, info);
+		let track = track::Producer::new(self.keepalive(), name, info);
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())?;
 		drop(state);
@@ -143,7 +143,7 @@ impl Producer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`Dynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
-		let request = track::Request::new(self.info.clone(), name);
+		let request = track::Request::new(self.keepalive(), name);
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(request.weak())?;
 		drop(state);
@@ -192,6 +192,61 @@ impl Producer {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+
+	pub(crate) fn keepalive(&self) -> Keepalive {
+		Keepalive {
+			info: self.info.clone(),
+			_state: self.state.clone(),
+		}
+	}
+}
+
+#[derive(Clone)]
+pub(crate) struct Keepalive {
+	info: Arc<Info>,
+	_state: kio::Producer<BroadcastState>,
+}
+
+impl Keepalive {
+	pub(crate) fn info(&self) -> &Info {
+		&self.info
+	}
+}
+
+#[derive(Clone)]
+pub(crate) struct KeepaliveWeak {
+	info: Arc<Info>,
+	state: kio::Weak<BroadcastState>,
+}
+
+#[derive(Clone)]
+pub(crate) enum KeepaliveRef {
+	Strong(Keepalive),
+	Weak(KeepaliveWeak),
+}
+
+impl KeepaliveRef {
+	pub(crate) fn upgrade(&self) -> Result<Keepalive, Error> {
+		Ok(match self {
+			Self::Strong(parent) => parent.clone(),
+			Self::Weak(parent) => Keepalive {
+				info: parent.info.clone(),
+				_state: parent.state.produce().ok_or(Error::Dropped)?,
+			},
+		})
+	}
+}
+
+impl From<Keepalive> for KeepaliveRef {
+	fn from(value: Keepalive) -> Self {
+		Self::Strong(value)
+	}
+}
+
+impl From<KeepaliveWeak> for KeepaliveRef {
+	fn from(value: KeepaliveWeak) -> Self {
+		Self::Weak(value)
 	}
 }
 
@@ -272,7 +327,11 @@ impl Dynamic {
 		}))?;
 
 		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
-		let pending = state.requests.remove(&name).expect("request_order out of sync");
+		let mut pending = state.requests.remove(&name).expect("request_order out of sync");
+		pending.strengthen_parent(Keepalive {
+			info: self.info.clone(),
+			_state: self.state.clone(),
+		});
 		state.tracks.insert(name, pending.weak());
 		Poll::Ready(Ok(pending))
 	}
@@ -346,6 +405,13 @@ impl Consumer {
 		&self.info
 	}
 
+	fn weak_keepalive(&self) -> KeepaliveWeak {
+		KeepaliveWeak {
+			info: self.info.clone(),
+			state: self.state.weak(),
+		}
+	}
+
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
@@ -375,7 +441,7 @@ impl Consumer {
 		// Allocate the name once and share the same Arc across the request, the
 		// requests map, and the FIFO order.
 		let name: Arc<str> = name.into();
-		let request = track::Request::new(self.info.clone(), name.clone());
+		let request = track::Request::new(self.weak_keepalive(), name.clone());
 		let consumer = request.consume();
 
 		state.requests.insert(name.clone(), request);
@@ -491,6 +557,19 @@ mod test {
 		// track1's producer is held outside the broadcast, so it survives.
 		assert!(!track1.is_closed());
 		track1c.assert_not_closed();
+	}
+
+	#[tokio::test]
+	async fn active_track_keeps_broadcast_alive() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.assert_create_track("track", None);
+
+		drop(producer);
+		consumer.assert_not_closed();
+
+		drop(track);
+		consumer.assert_closed();
 	}
 
 	#[tokio::test]

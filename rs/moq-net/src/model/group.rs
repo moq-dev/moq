@@ -9,6 +9,10 @@
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use crate::{frame, track};
 use std::collections::VecDeque;
+use std::sync::{
+	Arc,
+	atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -80,7 +84,7 @@ impl From<u16> for Info {
 struct GroupState {
 	// The frames currently cached in the group.
 	// Evicted frames are popped from the front; `offset` tracks how many.
-	frames: VecDeque<frame::Producer>,
+	frames: VecDeque<frame::Cache>,
 
 	// The number of frames evicted from the front of the group.
 	offset: usize,
@@ -136,32 +140,28 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
+#[derive(Default)]
+struct WriterState {
+	writers: AtomicUsize,
+	terminal: AtomicBool,
+}
+
 /// Writes frames to a group in order.
 ///
 /// Each group is delivered independently over a QUIC stream.
 /// Use [Self::write_frame] for simple single-buffer frames,
 /// or [Self::create_frame] for multi-chunk streaming writes.
 pub struct Producer {
-	// Mutable stream state.
-	state: kio::Producer<GroupState>,
-
-	// The group header containing the sequence number. A small `Copy` value,
-	// inherited by each frame (see [`Self::create_frame`]).
-	info: Info,
-
-	// The parent track's info, inherited rather than passed piecemeal. Its
-	// `timescale` is used by [`Self::create_frame`] to normalize every frame's
-	// timestamp into the track scale before it enters the stream, and enforced in
-	// [`Self::append_frame`]. Threaded down by value from
-	// [`track::Producer::create_group`] / `append_group`.
-	track: track::Info,
+	cache: Cache,
+	parent: Option<track::Keepalive>,
+	writers: Arc<WriterState>,
 }
 
 impl std::ops::Deref for Producer {
 	type Target = Info;
 
 	fn deref(&self) -> &Self::Target {
-		&self.info
+		&self.cache.info
 	}
 }
 
@@ -172,17 +172,44 @@ impl Producer {
 	/// which threads its [`track::Info`] down so properties like the timescale are
 	/// inherited rather than passed in. Every frame added to this group is
 	/// normalized to the track's timescale by [`Self::create_frame`].
+	#[cfg(test)]
 	pub(crate) fn new(info: Info, track: track::Info) -> Self {
 		Self {
-			info,
-			state: kio::Producer::default(),
-			track,
+			cache: Cache {
+				info,
+				state: kio::Producer::default(),
+				track,
+			},
+			parent: None,
+			writers: Arc::new(WriterState {
+				writers: AtomicUsize::new(1),
+				terminal: AtomicBool::new(false),
+			}),
 		}
+	}
+
+	pub(crate) fn with_parent(info: Info, track: track::Info, parent: track::Keepalive) -> Self {
+		Self {
+			cache: Cache {
+				info,
+				state: kio::Producer::default(),
+				track,
+			},
+			parent: Some(parent),
+			writers: Arc::new(WriterState {
+				writers: AtomicUsize::new(1),
+				terminal: AtomicBool::new(false),
+			}),
+		}
+	}
+
+	pub(crate) fn cache(&self) -> Cache {
+		self.cache.clone()
 	}
 
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
-		self.track.timescale
+		self.cache.track.timescale
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -220,10 +247,10 @@ impl Producer {
 		let mut frame = frame;
 		frame.timestamp = frame
 			.timestamp
-			.convert(self.track.timescale)
+			.convert(self.cache.track.timescale)
 			.map_err(|_| Error::TimestampMismatch)?;
 
-		let frame = frame::Producer::new(frame, self.info)?;
+		let frame = frame::Producer::with_parent(frame, self.cache.info, self.keepalive())?;
 		self.append_frame(frame.clone())?;
 		Ok(frame)
 	}
@@ -246,30 +273,31 @@ impl Producer {
 		// Catch the contract violation here, at the model layer, so peers that
 		// downstream-encode (e.g. the lite publisher's `serve_frame`) can rely
 		// on the invariant instead of re-validating per byte.
-		if frame.timestamp.scale() != self.track.timescale {
+		if frame.timestamp.scale() != self.cache.track.timescale {
 			return Err(Error::TimestampMismatch);
 		}
 
-		let mut state = modify(&self.state)?;
+		let mut state = modify(&self.cache.state)?;
 		if state.fin {
 			return Err(Error::Closed);
 		}
 		state.cache += frame.size;
-		state.frames.push_back(frame);
+		state.frames.push_back(frame.cache());
 		state.evict();
 		Ok(())
 	}
 
 	/// Return the number of frames written so far.
 	pub fn frame_count(&self) -> usize {
-		let state = self.state.read();
+		let state = self.cache.state.read();
 		state.offset + state.frames.len()
 	}
 
 	/// Mark the group as complete; no more frames will be written.
 	pub fn finish(&mut self) -> Result<()> {
-		let mut state = modify(&self.state)?;
+		let mut state = modify(&self.cache.state)?;
 		state.fin = true;
+		self.writers.terminal.store(true, Ordering::Release);
 		Ok(())
 	}
 
@@ -281,7 +309,33 @@ impl Producer {
 	/// Child frames are independent: a consumer that already pulled a
 	/// [`frame::Consumer`] keeps its own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut guard = modify(&self.state)?;
+		self.abort_inner(err)?;
+		self.writers.terminal.store(true, Ordering::Release);
+		Ok(())
+	}
+
+	/// Create a new consumer for the group.
+	pub fn consume(&self) -> Consumer {
+		self.cache.consume()
+	}
+
+	/// Block until the group is closed or aborted.
+	pub async fn closed(&self) -> Error {
+		self.cache.state.closed().await;
+		self.cache.state.read().abort.clone().unwrap_or(Error::Dropped)
+	}
+
+	/// Block until there are no active consumers.
+	pub async fn unused(&self) -> Result<()> {
+		self.cache
+			.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	fn abort_inner(&mut self, err: Error) -> Result<()> {
+		let mut guard = modify(&self.cache.state)?;
 		guard.abort = Some(err);
 		guard.frames.clear();
 		guard.cache = 0;
@@ -289,46 +343,27 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the group.
-	pub fn consume(&self) -> Consumer {
-		Consumer {
-			info: self.info,
-			state: self.state.consume(),
-			track: self.track,
-			index: 0,
+	fn keepalive(&self) -> Keepalive {
+		Keepalive {
+			state: self.cache.state.clone(),
 		}
-	}
-
-	/// Block until the group is closed or aborted.
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
-	}
-
-	/// Block until there are no active consumers.
-	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
-impl Clone for Producer {
+pub(crate) struct Keepalive {
+	state: kio::Producer<GroupState>,
+}
+
+impl Clone for Keepalive {
 	fn clone(&self) -> Self {
 		Self {
-			info: self.info,
 			state: self.state.clone(),
-			track: self.track,
 		}
 	}
 }
 
-impl Drop for Producer {
+impl Drop for Keepalive {
 	fn drop(&mut self) {
-		// See track::Producer::drop: the last producer dropping without a clean
-		// finish releases the cached frames so a stale consumer can't pin their
-		// buffers forever. A finished group keeps its cache so consumers can drain.
 		if !self.state.is_last() {
 			return;
 		}
@@ -338,6 +373,71 @@ impl Drop for Producer {
 			state.frames.clear();
 			state.cache = 0;
 		}
+	}
+}
+
+impl Clone for Producer {
+	fn clone(&self) -> Self {
+		self.writers.writers.fetch_add(1, Ordering::Relaxed);
+		Self {
+			cache: self.cache.clone(),
+			parent: self.parent.clone(),
+			writers: self.writers.clone(),
+		}
+	}
+}
+
+impl Drop for Producer {
+	fn drop(&mut self) {
+		let prev = self.writers.writers.fetch_sub(1, Ordering::AcqRel);
+		if prev > 1 || self.writers.terminal.load(Ordering::Acquire) {
+			return;
+		}
+		let _ = self.abort_inner(Error::Dropped);
+	}
+}
+
+#[derive(Clone)]
+pub(crate) struct Cache {
+	// Mutable stream state.
+	state: kio::Producer<GroupState>,
+
+	// The group header containing the sequence number. A small `Copy` value,
+	// inherited by each frame (see [`Producer::create_frame`]).
+	info: Info,
+
+	// The parent track's info, inherited rather than passed piecemeal. Its
+	// `timescale` is used by [`Producer::create_frame`] to normalize every frame's
+	// timestamp into the track scale before it enters the stream, and enforced in
+	// [`Producer::append_frame`].
+	track: track::Info,
+}
+
+impl std::ops::Deref for Cache {
+	type Target = Info;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
+impl Cache {
+	pub(crate) fn consume(&self) -> Consumer {
+		Consumer {
+			info: self.info,
+			state: self.state.consume(),
+			track: self.track,
+			index: 0,
+		}
+	}
+
+	pub(crate) fn abort(&self, err: Error) -> Result<()> {
+		let mut guard = modify(&self.state)?;
+		guard.abort = Some(err);
+		guard.frames.clear();
+		guard.cache = 0;
+		guard.close();
+		Ok(())
 	}
 }
 
@@ -568,11 +668,11 @@ mod test {
 
 		// A stale consumer that never reads must not pin the cached frames.
 		let _consumer = producer.consume();
-		assert_eq!(producer.state.read().frames.len(), 1);
+		assert_eq!(producer.cache.state.read().frames.len(), 1);
 
 		producer.abort(crate::Error::Cancel).unwrap();
 
-		let state = producer.state.read();
+		let state = producer.cache.state.read();
 		assert!(state.frames.is_empty(), "cached frames should be dropped on abort");
 		assert_eq!(state.cache, 0);
 	}
@@ -585,7 +685,7 @@ mod test {
 
 		// A stale consumer keeps the channel (and thus the cache) alive.
 		let mut consumer = producer.consume();
-		assert_eq!(producer.state.read().frames.len(), 1);
+		assert_eq!(producer.cache.state.read().frames.len(), 1);
 
 		// Drop every producer without finishing: the cache is released.
 		drop(writer);
