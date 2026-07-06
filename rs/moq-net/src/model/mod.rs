@@ -38,3 +38,10 @@ pub mod announce {
 // Origin identity and the `Consume` conversion trait aren't part of a role
 // module; keep them flat at the crate root.
 pub use origin_impl::{Consume, InvalidOrigin, Origin, OriginList, TooManyOrigins};
+
+pub(crate) fn warn_dropped_abort(producer: &'static str) {
+	tracing::warn!(
+		producer,
+		"aborting with Error::Dropped; call finish or abort before dropping producer"
+	);
+}

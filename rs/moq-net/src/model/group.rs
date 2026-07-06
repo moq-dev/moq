@@ -335,6 +335,9 @@ impl Producer {
 	}
 
 	fn abort_inner(&mut self, err: Error) -> Result<()> {
+		if matches!(&err, Error::Dropped) {
+			super::warn_dropped_abort("group");
+		}
 		let mut guard = modify(&self.cache.state)?;
 		guard.abort = Some(err);
 		guard.frames.clear();
@@ -432,6 +435,9 @@ impl Cache {
 	}
 
 	pub(crate) fn abort(&self, err: Error) -> Result<()> {
+		if matches!(&err, Error::Dropped) {
+			super::warn_dropped_abort("group");
+		}
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
 		guard.frames.clear();

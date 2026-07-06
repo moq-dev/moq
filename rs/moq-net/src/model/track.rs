@@ -752,6 +752,9 @@ impl Producer {
 	/// independent: a consumer that already pulled a [`group::Consumer`] keeps its
 	/// own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
+		if matches!(&err, Error::Dropped) {
+			super::warn_dropped_abort("track");
+		}
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
 		guard.groups.clear();

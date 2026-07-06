@@ -391,6 +391,9 @@ impl Producer {
 	}
 
 	fn abort_inner(&mut self, err: Error) -> Result<()> {
+		if matches!(&err, Error::Dropped) {
+			super::warn_dropped_abort("frame");
+		}
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
 		guard.close();
