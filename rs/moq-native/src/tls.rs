@@ -508,14 +508,15 @@ static ANDROID_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::A
 ///
 /// On Android the OS trust store is only reachable through the JVM, so the
 /// platform verifier needs a JNI handle to the application `Context` before it
-/// can be used. Call this once at startup (e.g. from `JNI_OnLoad`) with a
-/// `JNIEnv` for the calling thread and the application `Context`. The `moq-ffi`
-/// bindings call it automatically, so most consumers never touch this directly.
+/// can be used. Call this once at startup (e.g. from `JNI_OnLoad`) with an
+/// attached [`jni::Env`] for the calling thread and the application `Context`.
+/// The `moq-ffi` bindings call it automatically, so most consumers never touch
+/// this directly.
 ///
 /// Until it succeeds, clients fall back to the bundled Mozilla roots, so a
 /// missing or failed init degrades to webpki verification rather than failing.
 #[cfg(target_os = "android")]
-pub fn init_android(env: &mut jni::JNIEnv, context: jni::objects::JObject) -> Result<()> {
+pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Result<()> {
 	rustls_platform_verifier::android::init_with_env(env, context).map_err(Error::AndroidInit)?;
 	ANDROID_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
 	Ok(())
