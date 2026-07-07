@@ -1,9 +1,10 @@
 //! A shared byte budget for cached groups, reclaimed with LRU eviction.
 //!
 //! Every group registers its cached bytes in a [`Pool`]. When the pool exceeds its
-//! capacity, the least-recently-read groups are aborted with [`Error::Evicted`],
-//! freeing their frames immediately. The latest group of each track is pinned and
-//! never evicted, so the live edge always survives memory pressure.
+//! capacity, the least-recently-read groups are aborted with
+//! [`Error::Evicted`](crate::Error::Evicted), freeing their frames immediately. The
+//! latest group of each track is pinned and never evicted, so the live edge always
+//! survives memory pressure.
 //!
 //! A pool is inert by default ([`Pool::unbounded`]): publishers and subscribers that
 //! never set a capacity pay only a couple of atomic counters. A relay creates one
@@ -12,8 +13,10 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+
+use web_async::Lock;
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -26,9 +29,9 @@ const ENTRY_OVERHEAD: u64 = 256;
 ///
 /// The pool tracks how many payload bytes are cached across every registered group
 /// and evicts the least-recently-read groups once `used` exceeds `capacity`.
-/// Eviction aborts the victim group with [`Error::Evicted`], which frees its frames
-/// immediately and wakes any parked readers. Pinned (latest) groups are never
-/// evicted but still count against the budget.
+/// Eviction aborts the victim group with [`Error::Evicted`](crate::Error::Evicted),
+/// which frees its frames immediately and wakes any parked readers. Pinned (latest)
+/// groups are never evicted but still count against the budget.
 ///
 /// Reads and writes only touch atomics; the internal lock is taken when a group
 /// registers/unregisters and when the pool is actually over budget.
@@ -44,7 +47,7 @@ struct Inner {
 	capacity: AtomicU64,
 	// Reference point for the coarse `last_access` clock.
 	epoch: web_async::time::Instant,
-	lru: Mutex<Lru>,
+	lru: Lock<Lru>,
 }
 
 impl Default for Inner {
@@ -53,7 +56,7 @@ impl Default for Inner {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
 			epoch: web_async::time::Instant::now(),
-			lru: Mutex::default(),
+			lru: Lock::default(),
 		}
 	}
 }
@@ -153,7 +156,7 @@ impl Pool {
 	pub(crate) fn register(&self, evict: Box<dyn Fn() + Send + Sync>) -> Charge {
 		let inner = self.inner.clone();
 		let entry = {
-			let mut lru = inner.lru.lock().unwrap();
+			let mut lru = inner.lru.lock();
 			let id = lru.next_id;
 			lru.next_id += 1;
 
@@ -190,7 +193,7 @@ impl Pool {
 
 		let mut victims = Vec::new();
 		{
-			let mut lru = inner.lru.lock().unwrap();
+			let mut lru = inner.lru.lock();
 			// Bytes the collected victims will release once aborted below.
 			let mut freed = 0u64;
 			// Pinned entries popped this pass; re-pushing them immediately would just
@@ -316,7 +319,7 @@ impl Drop for Charge {
 		let bytes = entry.bytes.swap(0, Ordering::Relaxed);
 		inner.used.fetch_sub(bytes, Ordering::Relaxed);
 		// The heap slot (if any) goes stale and is discarded on its next pop.
-		inner.lru.lock().unwrap().entries.remove(&entry.id);
+		inner.lru.lock().entries.remove(&entry.id);
 	}
 }
 

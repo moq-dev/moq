@@ -162,6 +162,13 @@ impl GroupState {
 			self.offset += 1;
 		}
 	}
+
+	/// Drop the cached frames and release their pool charge.
+	fn release(&mut self) {
+		self.frames.clear();
+		self.cache = 0;
+		self.charge.clear();
+	}
 }
 
 fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>> {
@@ -176,9 +183,7 @@ fn evict(state: &kio::Weak<GroupState>) {
 		return;
 	}
 	state.abort = Some(Error::Evicted);
-	state.frames.clear();
-	state.cache = 0;
-	state.charge.clear();
+	state.release();
 	state.close();
 }
 
@@ -341,9 +346,7 @@ impl Producer {
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
-		guard.frames.clear();
-		guard.cache = 0;
-		guard.charge.clear();
+		guard.release();
 		guard.close();
 		Ok(())
 	}
@@ -406,9 +409,7 @@ impl Drop for Producer {
 		if let Ok(mut state) = modify(&self.state)
 			&& !state.fin
 		{
-			state.frames.clear();
-			state.cache = 0;
-			state.charge.clear();
+			state.release();
 		}
 	}
 }

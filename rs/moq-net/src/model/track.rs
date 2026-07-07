@@ -555,6 +555,9 @@ impl TrackState {
 		}
 		let group = group::Producer::new(group::Info { sequence }, track, &self.pool);
 		*slot = Some((group.clone(), now));
+		// The replaced group can hold max_sequence when the publisher aborted the
+		// latest group itself; re-pin so the live edge stays eviction-immune.
+		self.pin_latest(&group);
 		Some(Ok(group))
 	}
 
@@ -3144,6 +3147,47 @@ mod test {
 		group0.write_frame_now(bytes::Bytes::from(vec![0u8; 4000])).unwrap();
 		assert!(pool.used() <= 3000, "growth on an old group triggers eviction");
 		assert!(matches!(group0.abort(Error::Cancel), Err(Error::Evicted)));
+	}
+
+	#[tokio::test]
+	async fn refetched_latest_group_is_repinned() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(3000);
+		let dynamic = producer.dynamic();
+
+		// Seq 0 stays open: the straggler used to apply memory pressure later.
+		let mut straggler = producer.append_group().unwrap();
+		straggler.write_frame_now(bytes::Bytes::from(vec![0u8; 1000])).unwrap();
+		tokio::time::advance(Duration::from_millis(10)).await;
+
+		// The publisher aborts its own latest group; the slot stays at max_sequence.
+		let mut latest = producer.append_group().unwrap(); // seq 1
+		latest.abort(Error::Cancel).unwrap();
+		tokio::time::advance(Duration::from_millis(10)).await;
+
+		// Re-fetch it: the replacement takes over max_sequence and must be
+		// re-pinned, or memory pressure could evict the live edge.
+		let consumer = producer.consume();
+		let pending = consumer.fetch_group(1, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut group = req.accept(None).unwrap();
+		group.write_frame_now(bytes::Bytes::from(vec![0u8; 1000])).unwrap();
+		group.finish().unwrap();
+		pending.await.unwrap();
+		tokio::time::advance(Duration::from_millis(10)).await;
+
+		// Blow the budget with the straggler; the refetched latest is pinned, so
+		// the straggler itself is the only eligible victim.
+		straggler.write_frame_now(bytes::Bytes::from(vec![0u8; 4000])).unwrap();
+
+		assert!(pool.used() <= 3000);
+		let mut group = consumer.get_group(1).expect("refetched latest must stay pinned");
+		assert_eq!(group.read_frame().await.unwrap().unwrap().len(), 1000);
 	}
 
 	#[tokio::test]
