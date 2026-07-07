@@ -111,9 +111,14 @@ pub async fn accept(
 		.await
 		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {broadcast} not announced")))?;
 
+	// Keep the origin attached (rooted at this broadcast's path) so a rendition whose
+	// catalog `broadcast` field references a sibling broadcast (e.g. `../source`) is
+	// resolved on the same subscribe origin rather than looked up on the catalog broadcast.
+	let source = moq_mux::Source::new(consumer).with_origin(subscriber.clone(), &broadcast);
+
 	// Bound the wait for the first catalog: an announced-but-catalog-less broadcast
 	// would otherwise park this handler forever.
-	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(consumer))
+	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(source))
 		.await
 		.map_err(|_| {
 			Error::Other(anyhow::anyhow!(

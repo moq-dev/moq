@@ -33,9 +33,11 @@ pub struct WriteRequest {
 	pub payload: Bytes,
 }
 
-/// Holds the broadcast + catalog and spawns per-rendition pump tasks.
+/// Holds the export source + catalog and spawns per-rendition pump tasks.
 pub struct EgressSource {
-	broadcast: moq_net::broadcast::Consumer,
+	/// The catalog broadcast plus optional origin context, so a rendition referencing a
+	/// sibling broadcast (its catalog `broadcast` field) resolves against the origin.
+	source: moq_mux::Source,
 	/// Snapshot of the catalog at session start. Sufficient for v1: SDP
 	/// negotiation happens once and the codec list is fixed for the
 	/// lifetime of the session.
@@ -47,11 +49,18 @@ pub struct EgressSource {
 impl EgressSource {
 	/// Subscribe to the broadcast's catalog and wait for the first snapshot.
 	///
+	/// Pass a bare [`moq_net::broadcast::Consumer`] when every rendition lives in the
+	/// catalog's own broadcast, or a [`moq_mux::Source`] with origin context (via
+	/// [`Source::with_origin`](moq_mux::Source::with_origin)) to also resolve renditions
+	/// that reference a sibling broadcast (their catalog `broadcast` field).
+	///
 	/// The session loop drives the pumps via the returned channel; the
 	/// caller hands `EgressSource` to [`Session::egress`](crate::session::Session::egress)
 	/// which takes the receiver via [`Self::take_writes`].
-	pub async fn new(broadcast: moq_net::broadcast::Consumer) -> Result<Self> {
-		let catalog_track = broadcast
+	pub async fn new(source: impl Into<moq_mux::Source>) -> Result<Self> {
+		let source = source.into();
+		let catalog_track = source
+			.broadcast()
 			.track(hang::Catalog::DEFAULT_NAME)?
 			.subscribe(hang::Catalog::default_subscription())
 			.await?;
@@ -64,7 +73,7 @@ impl EgressSource {
 
 		let (tx, rx) = mpsc::channel(64);
 		Ok(Self {
-			broadcast,
+			source,
 			catalog,
 			writes_tx: tx,
 			writes_rx: Some(rx),
@@ -86,10 +95,10 @@ impl EgressSource {
 		// the `subscribe` call blocks on SUBSCRIBE_OK, so pick + subscribe inside
 		// the pump task to keep this str0m callback non-blocking.
 		let tx = self.writes_tx.clone();
-		let broadcast = self.broadcast.clone();
+		let source = self.source.clone();
 		let catalog = self.catalog.clone();
 		tokio::spawn(async move {
-			let track = match pick_track(&broadcast, &catalog, codec).await {
+			let track = match pick_track(&source, &catalog, codec).await {
 				Ok(Some(t)) => t,
 				Ok(None) => {
 					tracing::warn!(?codec, "no matching catalog rendition; egress track ignored");
@@ -139,15 +148,13 @@ impl EgressSource {
 }
 
 /// Find the first catalog rendition for the given codec and build a
-/// [`codec::Track`] subscribed to it. Returns `None` if no rendition matches.
-async fn pick_track(
-	broadcast: &moq_net::broadcast::Consumer,
-	catalog: &Catalog,
-	codec: Codec,
-) -> Result<Option<codec::Track>> {
+/// [`codec::Track`] subscribed to it, honoring an optional cross-broadcast
+/// reference (the rendition's catalog `broadcast` field). Returns `None` if no
+/// rendition matches.
+async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -> Result<Option<codec::Track>> {
 	match codec {
 		Codec::Opus => {
-			let Some((name, _config)) = catalog
+			let Some((name, config)) = catalog
 				.audio
 				.renditions
 				.iter()
@@ -155,7 +162,8 @@ async fn pick_track(
 			else {
 				return Ok(None);
 			};
-			Ok(Some(codec::Track::opus(broadcast, name).await?))
+			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
+			Ok(Some(codec::Track::opus(track)))
 		}
 		Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 => {
 			let target = match codec {
@@ -169,7 +177,8 @@ async fn pick_track(
 			let Some((name, config)) = catalog.video.renditions.iter().find(|(_, c)| c.codec.kind() == target) else {
 				return Ok(None);
 			};
-			Ok(Some(codec::Track::video(broadcast, name, config).await?))
+			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
+			Ok(Some(codec::Track::video(track, config)?))
 		}
 		other => Err(Error::UnsupportedCodec(format!("{other:?}"))),
 	}

@@ -74,6 +74,31 @@ impl Source {
 
 		Ok(Subscribe::Track(self.broadcast.track(name)?.subscribe(None)))
 	}
+
+	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
+	/// awaiting SUBSCRIBE_OK.
+	///
+	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty / self
+	/// reference) subscribes on the catalog broadcast; anything else fetches the
+	/// referenced broadcast from the attached origin first. Without origin context a
+	/// non-trivial reference fails with [`Error::MissingOrigin`](crate::Error::MissingOrigin).
+	///
+	/// This is the async counterpart to the poll-driven container exporters: consumers
+	/// that wrap a raw [`moq_net::track::Subscriber`] themselves (e.g. the WebRTC egress)
+	/// use it to honor cross-broadcast renditions without reimplementing the path math.
+	pub async fn subscribe_track(
+		&self,
+		rel: Option<&moq_net::PathRelative<'_>>,
+		name: &str,
+	) -> crate::Result<moq_net::track::Subscriber> {
+		match self.subscribe(rel, name)? {
+			Subscribe::Track(pending) => Ok(pending.await?),
+			Subscribe::Broadcast(pending, name) => {
+				let broadcast = pending.await?;
+				Ok(broadcast.track(&name)?.subscribe(None).await?)
+			}
+		}
+	}
 }
 
 impl From<moq_net::broadcast::Consumer> for Source {
@@ -169,5 +194,51 @@ mod tests {
 		};
 		assert_eq!(name, "video");
 		pending.await.expect("referenced broadcast should resolve");
+	}
+
+	#[tokio::test]
+	async fn subscribe_track_resolves_catalog_broadcast() {
+		let mut producer = broadcast();
+		// The track must exist for the subscription to resolve (SUBSCRIBE_OK).
+		let _video = producer.create_track("video", None).unwrap();
+		let source = Source::new(producer.consume());
+
+		source
+			.subscribe_track(None, "video")
+			.await
+			.expect("catalog track should resolve");
+	}
+
+	#[tokio::test]
+	async fn subscribe_track_without_origin_fails() {
+		let producer = broadcast();
+		let source = Source::new(producer.consume());
+
+		let rel = PathRelative::new("../other");
+		assert!(matches!(
+			source.subscribe_track(Some(&rel), "video").await,
+			Err(crate::Error::MissingOrigin(_))
+		));
+	}
+
+	#[tokio::test]
+	async fn subscribe_track_resolves_referenced_broadcast() {
+		let origin = Origin::random().produce();
+
+		let catalog = broadcast();
+		let _catalog_publish = origin.publish_broadcast("a/pub", &catalog).unwrap();
+
+		let mut referenced = broadcast();
+		let _video = referenced.create_track("video", None).unwrap();
+		let _referenced_publish = origin.publish_broadcast("a/source", &referenced).unwrap();
+
+		let source = Source::new(catalog.consume()).with_origin(origin.consume(), "a/pub");
+
+		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
+		let rel = PathRelative::new("../source");
+		source
+			.subscribe_track(Some(&rel), "video")
+			.await
+			.expect("referenced track should resolve");
 	}
 }

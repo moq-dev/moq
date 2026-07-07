@@ -80,28 +80,21 @@ enum TrackConvert {
 }
 
 impl Track {
-	/// Audio track for an Opus rendition.
-	pub async fn opus(broadcast: &moq_net::broadcast::Consumer, name: &str) -> Result<Self> {
+	/// Audio track for an Opus rendition, from a subscribed `track`.
+	pub fn opus(track: moq_net::track::Subscriber) -> Self {
 		let container = moq_mux::catalog::hang::Container::Legacy;
-		// `None` subscription => start at the latest (in-progress) group. Groups
-		// begin at a keyframe, so a late joiner gets a decodable start immediately
-		// rather than waiting for the next group boundary.
-		let track = broadcast.track(name)?.subscribe(None).await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
-		Ok(Self {
+		Self {
 			consumer,
 			convert: TrackConvert::Passthrough,
-		})
+		}
 	}
 
-	/// Video track. Codec inferred from `config.codec`; for H.264 / H.265 the
-	/// bitstream shape (inline vs out-of-band parameter sets) is inferred from
-	/// `config.description` (avc1/hvc1 vs avc3/hev1).
-	pub async fn video(broadcast: &moq_net::broadcast::Consumer, name: &str, config: &VideoConfig) -> Result<Self> {
+	/// Video track from a subscribed `track` consumer. Codec inferred from
+	/// `config.codec`; for H.264 / H.265 the bitstream shape (inline vs out-of-band
+	/// parameter sets) is inferred from `config.description` (avc1/hvc1 vs avc3/hev1).
+	pub fn video(track: moq_net::track::Subscriber, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
-		// `None` subscription => start at the latest (in-progress) group, which
-		// begins at a keyframe, so a late-joining peer gets a decodable start.
-		let track = broadcast.track(name)?.subscribe(None).await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
 		let convert = match &config.codec {
