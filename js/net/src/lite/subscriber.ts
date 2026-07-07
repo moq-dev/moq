@@ -180,11 +180,17 @@ export class Subscriber {
 
 		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
-		const stream = await Stream.open(this.#quic);
-		await stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(stream.writer, this.version);
-
+		// Undefined until Stream.open() resolves: opening or writing the SUBSCRIBE can reject if the
+		// session closes underneath us (e.g. the publisher's tab closes while we're re-subscribing), so
+		// the open+write live inside the try. Otherwise the rejection escapes as an unhandled promise
+		// rejection (nothing awaits this method; consume() fires it as `void`) and the `finally` that
+		// clears the #subscribes entry / closes the track is skipped.
+		let stream: Stream | undefined;
 		try {
+			stream = await Stream.open(this.#quic);
+			await stream.writer.u53(StreamId.Subscribe);
+			await msg.encode(stream.writer, this.version);
+
 			// The first response MUST be a SUBSCRIBE_OK.
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
 			if (!("ok" in resp)) {
@@ -219,7 +225,7 @@ export class Subscriber {
 			console[isStreamAbort(e) ? "debug" : "warn"](
 				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
 			);
-			stream.abort(e);
+			stream?.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
 		}

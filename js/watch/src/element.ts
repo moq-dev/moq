@@ -55,6 +55,12 @@ const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 const STALL_RECOVERY_MS = 10_000;
 const STALL_RECOVERY_MAX_MS = 60_000;
 
+// On becoming visible while stalled, wait this long before forcing a reconnect. A briefly-suspended
+// Safari WebTransport (tab occluded by a window resize, or a quick tab-switch) usually resumes on its
+// own within a few hundred ms; reconnecting instantly turns that into a needless multi-second reload.
+// A frame arriving within the window clears `stalled` and the reconnect never fires.
+const VISIBILITY_RECOVERY_GRACE_MS = 1_000;
+
 // An optional web component that wraps a <canvas>
 export default class MoqWatch extends HTMLElement {
 	static observedAttributes = OBSERVED;
@@ -270,8 +276,10 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	// Fast path for the Safari tab-switch wedge: returning to a hidden tab often leaves playback stalled
-	// against a suspended WebTransport session. On becoming visible, if we're stalled while still live,
-	// reconnect immediately instead of waiting out the stall-recovery timer.
+	// against a suspended WebTransport session. On becoming visible while stalled and still live, force a
+	// reconnect, but only after a short grace period: a briefly-suspended session (a quick tab-switch, or
+	// the tab occluded by a window resize) usually resumes on its own, so we re-check at the deadline and
+	// reconnect only if it's still wedged. A frame arriving first clears `stalled` and the timer no-ops.
 	#runVisibilityRecovery(effect: Effect): void {
 		// Subscribe to #enabled so this effect only listens while connected AND subscribes to a signal,
 		// which avoids the "will never rerun" warning for an otherwise listener-only effect.
@@ -282,8 +290,14 @@ export default class MoqWatch extends HTMLElement {
 			if (!this.backend.video.stalled.peek()) return;
 			if (this.broadcast.status.peek() !== "live") return;
 
-			this.connection.reconnect();
-			this.#stallDelay = STALL_RECOVERY_MS;
+			effect.timer(() => {
+				if (document.hidden) return;
+				if (!this.backend.video.stalled.peek()) return;
+				if (this.broadcast.status.peek() !== "live") return;
+
+				this.connection.reconnect();
+				this.#stallDelay = STALL_RECOVERY_MS;
+			}, VISIBILITY_RECOVERY_GRACE_MS);
 		});
 	}
 
