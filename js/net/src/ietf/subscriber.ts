@@ -8,9 +8,9 @@ import { error } from "../util/error.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, PublishError } from "./publish.ts";
-import type { PublishNamespace } from "./publish_namespace.ts";
+import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
 	SubscribeNamespace,
@@ -272,10 +272,7 @@ export class Subscriber {
 							// SubscribeError (v14) or RequestError (v15+)
 							const err =
 								version === Version.DRAFT_14
-									? await (await import("./subscribe.ts")).SubscribeError.decode(
-											stream.reader,
-											version,
-										)
+									? await SubscribeError.decode(stream.reader, version)
 									: await RequestError.decode(stream.reader, version);
 							reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
 						}
@@ -311,7 +308,6 @@ export class Subscriber {
 		if (this.#announced.has(path)) {
 			console.warn("duplicate PublishNamespace");
 			if (version === Version.DRAFT_14) {
-				const { PublishNamespaceError } = await import("./publish_namespace.ts");
 				await stream.writer.u53(PublishNamespaceError.id);
 				const err = new PublishNamespaceError({
 					requestId: msg.requestId,
@@ -339,7 +335,6 @@ export class Subscriber {
 			// because consumers may trigger Subscribe writes that would
 			// interleave with our OK on the control stream.
 			if (version === Version.DRAFT_14) {
-				const { PublishNamespaceOk } = await import("./publish_namespace.ts");
 				await stream.writer.u53(PublishNamespaceOk.id);
 				const ok = new PublishNamespaceOk({ requestId: msg.requestId });
 				await ok.encode(stream.writer, version);
