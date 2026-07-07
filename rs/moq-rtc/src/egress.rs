@@ -49,18 +49,17 @@ pub struct EgressSource {
 impl EgressSource {
 	/// Subscribe to the broadcast's catalog and wait for the first snapshot.
 	///
-	/// Pass a bare [`moq_net::broadcast::Consumer`] when every rendition lives in the
-	/// catalog's own broadcast, or a [`moq_mux::Source`] with origin context (via
-	/// [`Source::with_origin`](moq_mux::Source::with_origin)) to also resolve renditions
-	/// that reference a sibling broadcast (their catalog `broadcast` field).
+	/// The [`moq_mux::Source`] carries the origin and catalog-broadcast path, so a
+	/// rendition whose catalog `broadcast` field references a sibling broadcast is
+	/// resolved against the same origin.
 	///
 	/// The session loop drives the pumps via the returned channel; the
 	/// caller hands `EgressSource` to [`Session::egress`](crate::session::Session::egress)
 	/// which takes the receiver via [`Self::take_writes`].
-	pub async fn new(source: impl Into<moq_mux::Source>) -> Result<Self> {
-		let source = source.into();
+	pub async fn new(source: moq_mux::Source) -> Result<Self> {
 		let catalog_track = source
 			.broadcast()
+			.await?
 			.track(hang::Catalog::DEFAULT_NAME)?
 			.subscribe(hang::Catalog::default_subscription())
 			.await?;

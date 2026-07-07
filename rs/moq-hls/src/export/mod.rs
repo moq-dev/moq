@@ -76,10 +76,9 @@ pub struct Broadcaster {
 }
 
 impl Broadcaster {
-	/// Subscribe to `source` and start tracking its renditions.
-	pub fn new(source: impl Into<moq_mux::Source>, config: Config) -> Arc<Self> {
-		let source = source.into();
-		let broadcast = source.broadcast().clone();
+	/// Resolve `source`'s catalog broadcast and start tracking its renditions.
+	pub async fn new(source: moq_mux::Source, config: Config) -> Result<Arc<Self>, moq_mux::Error> {
+		let broadcast = source.broadcast().await?;
 		let (ready, _) = watch::channel(0);
 		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
@@ -91,9 +90,9 @@ impl Broadcaster {
 		});
 		// The watcher holds a Weak so it can't keep the Broadcaster alive; the
 		// Broadcaster owns the watcher's handle and aborts it on Drop.
-		let watcher = tokio::spawn(watch_catalog(source, config, Arc::downgrade(&broadcaster)));
+		let watcher = tokio::spawn(watch_catalog(source, broadcast, config, Arc::downgrade(&broadcaster)));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
-		broadcaster
+		Ok(broadcaster)
 	}
 
 	/// Pause or resume pulling media from the broadcast.
@@ -205,15 +204,20 @@ impl Drop for Broadcaster {
 	}
 }
 
-async fn watch_catalog(source: moq_mux::Source, config: Config, broadcaster: Weak<Broadcaster>) {
+async fn watch_catalog(
+	source: moq_mux::Source,
+	broadcast: moq_net::broadcast::Consumer,
+	config: Config,
+	broadcaster: Weak<Broadcaster>,
+) {
 	let mut consumer = loop {
-		match catalog::Consumer::<()>::new(source.broadcast(), CatalogFormat::Hang).await {
+		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
 				tokio::select! {
 					_ = tokio::time::sleep(CATALOG_RETRY) => {}
-					_ = kio::wait(|waiter| source.broadcast().poll_closed(waiter)) => return,
+					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => return,
 				}
 			}
 		}

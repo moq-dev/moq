@@ -122,11 +122,6 @@ pub enum Error {
 	/// reserved media section (`video`/`audio`).
 	#[error("reserved catalog section: {0}")]
 	ReservedSection(String),
-
-	/// The catalog references a track in another broadcast, but the export was built
-	/// without origin context to resolve it. See [`Source::with_origin`](crate::Source::with_origin).
-	#[error("catalog references another broadcast: {0}")]
-	MissingOrigin(moq_net::PathRelativeOwned),
 }
 
 impl From<anyhow::Error> for Error {

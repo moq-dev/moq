@@ -161,10 +161,16 @@ impl<S: Stream> Client<S> {
 	/// mux the broadcast to FLV, and send each tag as an RTMP audio/video message
 	/// until the broadcast ends or the connection drops.
 	///
-	/// `broadcast` is the read side of whatever you want restreamed (e.g. from
-	/// `origin.consume().announced_broadcast(path)`). This future resolves when the
-	/// broadcast ends, so callers usually run it on its own task.
-	pub async fn publish(mut self, stream_key: &str, broadcast: broadcast::Consumer) -> Result<()> {
+	/// `path` names the broadcast to restream on `origin`; the FLV export resolves it
+	/// (and any sibling broadcast a rendition's catalog `broadcast` field references)
+	/// through the origin. This future resolves when the broadcast ends, so callers
+	/// usually run it on its own task.
+	pub async fn publish(
+		mut self,
+		stream_key: &str,
+		origin: origin::Consumer,
+		path: impl moq_net::AsPath,
+	) -> Result<()> {
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -178,7 +184,7 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let mut export = FlvExport::new(broadcast)
+		let mut export = FlvExport::new(moq_mux::Source::new(origin, path))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.with_latency(self.latency);

@@ -96,7 +96,9 @@ pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: S
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
 pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: String) -> anyhow::Result<()> {
-	let broadcast = origin
+	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
+	// the egress re-resolves it (and any referenced sibling broadcast) through the origin.
+	origin
 		.announced_broadcast(&name)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
@@ -105,7 +107,7 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	notify_ready();
 
 	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());
-	Ok(client.publish(url, broadcast).await?)
+	Ok(client.publish(url, origin, &name).await?)
 }
 
 fn server(

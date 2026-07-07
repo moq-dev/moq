@@ -49,9 +49,9 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is expected to be narrowed to a single H.265 rendition. If
 	/// multiple H.265 renditions appear in a snapshot, the first by BTreeMap
 	/// order wins and a warning is logged.
-	pub fn new(source: impl Into<crate::Source>, catalog: S) -> Self {
+	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			source: source.into(),
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			track: None,
@@ -284,7 +284,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let consumer = broadcast.consume();
-		let mut export = Export::new(consumer, Once(Some(catalog)));
+		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");

@@ -19,8 +19,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 
 /// Subscribe to a moq broadcast and produce a single Matroska / WebM byte stream.
 ///
-/// Built from a [`Source`](crate::Source) (or a bare [`moq_net::broadcast::Consumer`] via
-/// `Into`), `Export` subscribes to the hang catalog,
+/// Built from a [`Source`](crate::Source), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks, decodes them via a per-track source, and
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
 /// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
@@ -159,9 +158,9 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(source: impl Into<crate::Source>, catalog: S) -> Self {
+	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			source: source.into(),
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,

@@ -264,15 +264,16 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 /// Subscribe to `name` from the Origin and write it to stdout.
 async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
-	let broadcast = consumer
+
+	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
+	// resolves it (and any sibling broadcast a rendition's `broadcast` field references,
+	// e.g. "../source") through the origin.
+	consumer
 		.announced_broadcast(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	// Keep the origin around so catalogs referencing sibling broadcasts (a rendition's
-	// `broadcast` field, e.g. "../source") can be resolved.
-	let source = moq_mux::Source::new(broadcast).with_origin(consumer, &name);
-
+	let source = moq_mux::Source::new(consumer, &name);
 	Subscribe::new(source, catalog, args).run().await
 }
 

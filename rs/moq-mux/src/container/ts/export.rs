@@ -155,17 +155,17 @@ struct PesUnit {
 
 impl Export {
 	/// Subscribe to `source`, using the default catalog format.
-	pub async fn new(source: impl Into<crate::Source>) -> Result<Self, crate::Error> {
+	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
 		Self::with_catalog_format(source, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `source`, selecting an explicit catalog format. Media only;
 	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
 	pub async fn with_catalog_format(
-		source: impl Into<crate::Source>,
+		source: crate::Source,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::build(source.into(), catalog_format).await
+		Self::build(source, catalog_format).await
 	}
 }
 
@@ -174,11 +174,8 @@ impl Export<catalog::Ext> {
 	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
 	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
 	/// plain constructors are media-only).
-	pub async fn with_ts(
-		source: impl Into<crate::Source>,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		Self::build(source.into(), catalog_format).await
+	pub async fn with_ts(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		Self::build(source, catalog_format).await
 	}
 }
 
@@ -186,7 +183,8 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let catalog = crate::catalog::Consumer::<E>::new(source.broadcast(), catalog_format).await?;
+		let broadcast = source.broadcast().await?;
+		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
 		Ok(Self {
 			source,
 			catalog: Some(catalog),

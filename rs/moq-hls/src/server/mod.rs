@@ -120,14 +120,19 @@ impl Server {
 			}
 		}
 
-		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.announced_broadcast(name))
+		// Confirm the broadcast is announced (and in scope) before building a broadcaster;
+		// `Broadcaster::new` re-resolves it through the origin, which also lets a rendition's
+		// catalog `broadcast` field reference a sibling broadcast.
+		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.announced_broadcast(name))
 			.await
 			.ok()
 			.flatten()?;
 
-		// Keep the origin attached so renditions referencing a sibling broadcast
-		// (the catalog `broadcast` field) can be resolved.
-		let source = moq_mux::Source::new(broadcast).with_origin(self.inner.origin.consume(), name);
+		let source = moq_mux::Source::new(self.inner.origin.consume(), name);
+		let broadcaster = Broadcaster::new(source, self.inner.config.clone())
+			.await
+			.map_err(|err| tracing::warn!(%err, %name, "failed to resolve broadcast catalog"))
+			.ok()?;
 
 		let mut broadcasters = self.inner.broadcasters.lock().unwrap();
 		if let Some(existing) = broadcasters.get(name) {
@@ -138,7 +143,6 @@ impl Server {
 		}
 
 		let name = name.to_string();
-		let broadcaster = Broadcaster::new(source, self.inner.config.clone());
 		broadcasters.insert(name.clone(), broadcaster.clone());
 		tokio::spawn(evict_closed(self.inner.clone(), name, broadcaster.clone()));
 		Some(broadcaster)
@@ -161,9 +165,14 @@ async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcas
 mod tests {
 	use super::*;
 
-	fn closed_broadcaster() -> Arc<Broadcaster> {
-		let producer = moq_net::broadcast::Info::new().produce();
-		let broadcaster = Broadcaster::new(producer.consume(), Config::default());
+	async fn closed_broadcaster() -> Arc<Broadcaster> {
+		let origin = moq_net::Origin::random().produce();
+		let producer = origin.create_broadcast("gone").expect("publish allowed");
+		let source = moq_mux::Source::new(origin.consume(), "gone");
+		let broadcaster = Broadcaster::new(source, Config::default())
+			.await
+			.expect("catalog broadcast resolves while announced");
+		// Drop the publisher so the resolved broadcast (and the broadcaster) reports closed.
 		drop(producer);
 		broadcaster
 	}
@@ -172,7 +181,7 @@ mod tests {
 	async fn broadcaster_replaces_finished_cached_instance() {
 		let origin = moq_net::Origin::random().produce();
 		let server = Server::new(origin.consume(), Config::default());
-		let stale = closed_broadcaster();
+		let stale = closed_broadcaster().await;
 
 		server
 			.inner
@@ -192,9 +201,11 @@ mod tests {
 	async fn eviction_keeps_newer_cached_instance() {
 		let origin = moq_net::Origin::random().produce();
 		let server = Server::new(origin.consume(), Config::default());
-		let old = closed_broadcaster();
-		let new_producer = moq_net::broadcast::Info::new().produce();
-		let new = Broadcaster::new(new_producer.consume(), Config::default());
+		let old = closed_broadcaster().await;
+		let new_producer = origin.create_broadcast("live").expect("publish allowed");
+		let new = Broadcaster::new(moq_mux::Source::new(origin.consume(), "live"), Config::default())
+			.await
+			.expect("catalog broadcast resolves while announced");
 
 		server
 			.inner

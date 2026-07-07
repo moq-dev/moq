@@ -189,18 +189,15 @@ pub struct Subscribe {
 
 impl Subscribe {
 	/// Wrap the broadcast + resolved settings; [`run`](Self::run) drives it.
-	pub fn new(source: impl Into<moq_mux::Source>, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
-		Self {
-			source: source.into(),
-			catalog,
-			args,
-		}
+	pub fn new(source: moq_mux::Source, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		Self { source, catalog, args }
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
 	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
-		let consumer = catalog::Consumer::new(self.source.broadcast(), self.catalog).await?;
+		let broadcast = self.source.broadcast().await?;
+		let consumer = catalog::Consumer::new(&broadcast, self.catalog).await?;
 		Ok(consumer.select(self.args.selection()?))
 	}
 

@@ -393,6 +393,9 @@ mod tests {
 	async fn manufacture_input() -> Vec<u8> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
+		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
+		let origin = moq_net::Origin::random().produce();
+		let _publish = origin.publish_broadcast("cli", &consumer).unwrap();
 		let mut catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
 
@@ -458,7 +461,7 @@ mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(consumer, CatalogFormat::Hang)
+			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_latency(Duration::ZERO),
@@ -480,6 +483,9 @@ mod tests {
 		// streams land in the broadcast instead of being dropped by the media-only path.
 		let mut publish = Publish::new(&PublishFormat::Ts).unwrap();
 		let consumer = publish.consume();
+		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
+		let origin = moq_net::Origin::random().produce();
+		let _publish = origin.publish_broadcast("cli", &consumer).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream(decoder) = &mut publish.source else {
 			panic!("expected a stream source");
@@ -490,7 +496,7 @@ mod tests {
 		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(consumer, CatalogFormat::Hang)
+			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_latency(Duration::ZERO),

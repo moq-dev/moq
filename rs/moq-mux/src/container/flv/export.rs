@@ -166,18 +166,18 @@ impl FlvTrack {
 impl Export {
 	/// Subscribe to `source` and produce FLV byte chunks, using the default
 	/// catalog format ([`CatalogFormat::Hang`]).
-	pub async fn new(source: impl Into<crate::Source>) -> Result<Self, crate::Error> {
+	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
 		Self::with_catalog_format(source, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `source` and produce FLV byte chunks, selecting an explicit
 	/// `catalog_format` for track discovery.
 	pub async fn with_catalog_format(
-		source: impl Into<crate::Source>,
+		source: crate::Source,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		let source = source.into();
-		let catalog = crate::catalog::Consumer::new(source.broadcast(), catalog_format).await?;
+		let broadcast = source.broadcast().await?;
+		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
 		Ok(Self {
 			source,
 			catalog: Some(catalog),

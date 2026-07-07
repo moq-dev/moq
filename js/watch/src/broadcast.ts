@@ -211,12 +211,11 @@ export class Broadcast {
 	 * relative to this broadcast's name and consume the resolved broadcast on the same
 	 * connection. Otherwise return the catalog's own active broadcast.
 	 *
-	 * Override broadcasts are cached per resolved path and owned by this Broadcast's
-	 * `signals`; the caller's `effect` only subscribes to the cached signal. Many
-	 * renditions referencing the same source thus share one underlying subscription,
-	 * and the override outlives any single caller effect.
+	 * The consumer is scoped to the caller's `effect` (closed on its next run), so a
+	 * reference resolves lazily and reacts to `enabled` / connection / announcement
+	 * changes exactly like the catalog broadcast.
 	 */
-	trackBroadcast(effect: Effect, rel: string | undefined): Moq.broadcast.Consumer | undefined {
+	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.broadcast.Consumer | undefined {
 		if (!rel) return effect.get(this.output.active);
 
 		const base = effect.get(this.input.name);
@@ -227,33 +226,16 @@ export class Broadcast {
 		// avoiding a duplicate subscription on the same path.
 		if (resolved === base || resolved === Path.empty()) return effect.get(this.output.active);
 
-		return effect.get(this.#override(resolved));
-	}
+		if (!effect.get(this.input.enabled)) return undefined;
 
-	#overrides = new Map<Moq.Path.Valid, Signal<Moq.broadcast.Consumer | undefined>>();
+		const conn = effect.get(this.input.connection);
+		if (!conn) return undefined;
 
-	#override(path: Moq.Path.Valid): Signal<Moq.broadcast.Consumer | undefined> {
-		const cached = this.#overrides.get(path);
-		if (cached) return cached;
+		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
 
-		const signal = new Signal<Moq.broadcast.Consumer | undefined>(undefined);
-		this.#overrides.set(path, signal);
-
-		this.signals.run((effect) => {
-			const enabled = effect.get(this.input.enabled);
-			if (!enabled) return;
-
-			const conn = effect.get(this.input.connection);
-			if (!conn) return;
-
-			if (!this.#isPathAnnounced(effect, path)) return;
-
-			const broadcast = conn.consume(path);
-			effect.cleanup(() => broadcast.close());
-			effect.set(signal, broadcast, undefined);
-		});
-
-		return signal;
+		const broadcast = conn.consume(resolved);
+		effect.cleanup(() => broadcast.close());
+		return broadcast;
 	}
 
 	close() {

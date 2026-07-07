@@ -577,12 +577,14 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Some(broadcast) = broadcast else {
+		if broadcast.is_none() {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
-		};
+		}
 
-		let mut export = FlvExport::new(broadcast)
+		// The export re-resolves the broadcast (and any sibling broadcast a rendition's
+		// catalog `broadcast` field references) through the origin.
+		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.with_latency(self.latency)

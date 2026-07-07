@@ -100,7 +100,7 @@ export class Decoder implements Backend {
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
-		const active: Moq.broadcast.Consumer | undefined = broadcast.trackBroadcast(effect, config.broadcast);
+		const active: Moq.broadcast.Consumer | undefined = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);

@@ -64,7 +64,7 @@ export class Mse implements Backend {
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
-		const active = broadcast.trackBroadcast(effect, config.broadcast);
+		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
 
 		const mime = `video/mp4; codecs="${config.codec}"`;

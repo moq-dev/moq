@@ -15,8 +15,7 @@ use moq_net::Timestamp;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
-/// Built from a [`Source`](crate::Source) (or a bare [`moq_net::broadcast::Consumer`] via
-/// `Into`), `Export` subscribes to the hang catalog,
+/// Built from a [`Source`](crate::Source), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init
 /// segment + moof+mdat fragments in presentation-timestamp order across tracks. This
@@ -107,9 +106,9 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(source: impl Into<crate::Source>, catalog: S) -> Self {
+	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			source: source.into(),
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,

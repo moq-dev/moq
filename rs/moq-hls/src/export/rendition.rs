@@ -148,7 +148,11 @@ async fn run_pump(
 	cfg: &Config,
 	mut paused: watch::Receiver<bool>,
 ) -> Result<()> {
-	let consumer = catalog::Consumer::<()>::new(source.broadcast(), CatalogFormat::Hang).await?;
+	// Resolve the catalog broadcast once; an announced broadcast resolves immediately and
+	// repeat requests share the subscription, so this matches the per-rendition subscribes
+	// the `Export` below makes through the same `source`.
+	let broadcast = source.broadcast().await?;
+	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
 
 	// Select this rendition's name on its own axis so the exporter sees exactly one track.
 	let selection = match kind {
@@ -158,8 +162,8 @@ async fn run_pump(
 	let filtered = consumer.select(selection);
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
-	// below takes its own clone for pulling fragments.
-	let closed = source.broadcast().clone();
+	// below subscribes per-rendition tracks through `source`.
+	let closed = broadcast;
 
 	let mut export = Export::new(source, filtered)
 		.with_fragment_duration(cfg.part_target)

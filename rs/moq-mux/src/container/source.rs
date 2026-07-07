@@ -48,23 +48,14 @@ impl VideoTransform {
 
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
-	/// Waiting for a cross-broadcast reference to resolve into a broadcast; the
-	/// track (by name) is subscribed once it does.
+	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
+	/// reference) to resolve; the track (by name) is subscribed once it does.
 	Requesting(kio::Pending<moq_net::origin::Requested>, String),
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(kio::Pending<moq_net::track::Subscribe>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
 	/// the `Subscribing` variant (clippy `large_enum_variant`).
 	Active(Box<Consumer<HangContainer>>),
-}
-
-impl From<crate::source::Subscribe> for SourceState {
-	fn from(subscribe: crate::source::Subscribe) -> Self {
-		match subscribe {
-			crate::source::Subscribe::Track(pending) => Self::Subscribing(pending),
-			crate::source::Subscribe::Broadcast(pending, name) => Self::Requesting(pending, name),
-		}
-	}
 }
 
 /// A per-rendition source that normalizes frame shape (Annex-B →
@@ -95,7 +86,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: source.subscribe(config.broadcast.as_ref(), name)?.into(),
+			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
 			latency,
 			transform,
@@ -117,7 +108,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: source.subscribe(config.broadcast.as_ref(), name)?.into(),
+			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -137,7 +128,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: source.subscribe(config.broadcast.as_ref(), name)?.into(),
+			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -150,7 +141,7 @@ impl ExportSource {
 	/// verbatim bytes the muxer writes back out as PES or private sections.
 	pub fn for_stream(source: &crate::Source, name: &str, latency: Duration) -> Result<Self, crate::Error> {
 		Ok(Self {
-			state: source.subscribe(None, name)?.into(),
+			state: SourceState::Requesting(source.request(None), name.to_string()),
 			media: Some(HangContainer::Legacy),
 			latency,
 			transform: None,
