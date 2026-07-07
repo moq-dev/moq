@@ -153,7 +153,13 @@ export class Transcode {
 		});
 
 		const encoder = new VideoEncoder({
-			output: (chunk: EncodedVideoChunk) => {
+			output: (chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata) => {
+				// Configure the decoder from the init the encoder actually produced, not the requested
+				// codec: hvc1/av1 carry parameter sets (hvcC/av1C) in decoderConfig.description that a bare
+				// { codec } omits, so HEVC/AV1 preview would never decode. Mirrors video/encoder.ts.
+				if (decoder.state === "unconfigured" && metadata?.decoderConfig) {
+					decoder.configure({ ...metadata.decoderConfig, optimizeForLatency: true });
+				}
 				if (decoder.state === "configured") decoder.decode(chunk);
 			},
 			error: (err: Error) => {
@@ -166,9 +172,6 @@ export class Transcode {
 		});
 
 		encoder.configure(config);
-
-		// The encoder emits Annex B (inline SPS/PPS on keyframes), so the decoder needs no description.
-		decoder.configure({ codec: config.codec, optimizeForLatency: true });
 
 		// Re-key on the same cadence as the real encoder so the decoder can start and recover.
 		let lastKeyframe: Time.Micro | undefined;

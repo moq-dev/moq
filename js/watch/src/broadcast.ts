@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Path } from "@moq/net";
+import { isStreamAbort, Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
@@ -76,14 +76,23 @@ export class Broadcast {
 	// announcement gate and subscribes immediately.
 	readonly #announced?: Getter<Set<Moq.Path.Valid>>;
 
-	// Whether `name` is currently in the announced set (or skipping the check).
-	// Derived in its own effect so that flaps for unrelated broadcasts don't
-	// retrigger the broadcast/catalog subscriptions.
-	readonly #announcedNow = new Signal(false);
+	// Per-path announce generation from the connection (optional; see the constructor props).
+	readonly #announcedGenerations?: Getter<ReadonlyMap<Moq.Path.Valid, number>>;
+
+	// The announce generation of `name`: 0 when not announced, else the connection's generation for it (or
+	// 1 when generations aren't provided). A NUMBER rather than a boolean so a same-name republish by a new
+	// publisher (generation bump) re-runs #runBroadcast and re-consumes against the new instance. Derived
+	// in its own effect so flaps for unrelated broadcasts don't retrigger the broadcast/catalog subs.
+	readonly #announcedNow = new Signal(0);
 
 	signals = new Effect();
 
-	constructor(props?: Inputs<BroadcastInput> & { announced?: Getter<Set<Moq.Path.Valid>> }) {
+	constructor(
+		props?: Inputs<BroadcastInput> & {
+			announced?: Getter<Set<Moq.Path.Valid>>;
+			announcedGenerations?: Getter<ReadonlyMap<Moq.Path.Valid, number>>;
+		},
+	) {
 		this.input = {
 			connection: getter(props?.connection),
 			name: getter(props?.name ?? Path.empty()),
@@ -94,6 +103,7 @@ export class Broadcast {
 		};
 
 		this.#announced = props?.announced;
+		this.#announcedGenerations = props?.announcedGenerations;
 
 		this.signals.run(this.#runAnnouncedNow.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
@@ -102,19 +112,21 @@ export class Broadcast {
 
 	#runAnnouncedNow(effect: Effect): void {
 		const name = effect.get(this.input.name);
-		this.#announcedNow.set(this.#isPathAnnounced(effect, name));
+		this.#announcedNow.set(this.#announcedGeneration(effect, name));
 	}
 
-	// Whether `name` is currently announced on the connection (or skipping the check
-	// because reload is off, no announced set is wired in, or the relay doesn't support
-	// announcements). Used by both `#runAnnouncedNow` (for `input.name`) and
+	// The announce generation for `name`: 0 when it is not announced, otherwise a counter that bumps
+	// on every re-announce. The bump is what makes a same-name republish (a new publisher instance)
+	// re-consume, even when the unannounce+announce coalesce so the presence Set never observably
+	// flips. Returns 1 when the check is skipped (reload is off, no announced set is wired in, or the
+	// relay doesn't support announcements). Used by both `#runAnnouncedNow` (for `input.name`) and
 	// `relativeBroadcast` (for cross-broadcast refs, which reruns per rendition).
-	#isPathAnnounced(effect: Effect, name: Moq.Path.Valid): boolean {
+	#announcedGeneration(effect: Effect, name: Moq.Path.Valid): number {
 		const reload = effect.get(this.input.reload);
-		if (!reload) return true;
+		if (!reload) return 1;
 
 		// Without an announced set to consult, subscribe immediately.
-		if (!this.#announced) return true;
+		if (!this.#announced) return 1;
 
 		// Cloudflare's relay does not yet support announcement subscriptions,
 		// so default to subscribing immediately instead of waiting forever. This runs in a
@@ -126,11 +138,14 @@ export class Broadcast {
 				warnedNoDiscovery.add(conn);
 				console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
 			}
-			return true;
+			return 1;
 		}
 
 		const announced = effect.get(this.#announced);
-		return announced.has(name);
+		if (!announced.has(name)) return 0;
+
+		const gen = this.#announcedGenerations ? effect.get(this.#announcedGenerations).get(name) : undefined;
+		return gen ?? 1;
 	}
 
 	#runBroadcast(effect: Effect): void {
@@ -205,7 +220,9 @@ export class Broadcast {
 					this.#output.status.set("live");
 				}
 			} catch (err) {
-				console.warn("error fetching catalog", this.input.name.peek(), err);
+				// A routine transport reset during a publisher handover is expected; a real fetch/parse
+				// failure (auth, not-found, protocol, or schema validation) still warns.
+				console[isStreamAbort(err) ? "debug" : "warn"]("error fetching catalog", this.input.name.peek(), err);
 			} finally {
 				this.#output.catalog.set(undefined);
 				this.#output.status.set("offline");
@@ -240,7 +257,7 @@ export class Broadcast {
 		const conn = effect.get(this.input.connection);
 		if (!conn) return undefined;
 
-		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
+		if (!this.#announcedGeneration(effect, resolved)) return undefined;
 
 		const broadcast = conn.consume(resolved);
 		effect.cleanup(() => broadcast.close());

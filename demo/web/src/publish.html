@@ -148,6 +148,42 @@
 						<span id="channels-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
 					</div>
 				</label>
+				<details class="text-xs text-neutral-400">
+					<summary class="cursor-pointer text-neutral-300">Mic processing</summary>
+					<div class="mt-2 space-y-2">
+						<p class="text-[11px] text-neutral-500">
+							Auto keeps the browser default. On macOS the defaults engage voice processing:
+							auto gain can slowly pull the level down and other system audio gets ducked.
+						</p>
+						<label class="block">
+							Echo cancellation
+							<select id="echo-cancellation"
+								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<option value="" selected>Auto</option>
+								<option value="on">On</option>
+								<option value="off">Off</option>
+							</select>
+						</label>
+						<label class="block">
+							Auto gain control
+							<select id="auto-gain-control"
+								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<option value="" selected>Auto</option>
+								<option value="on">On</option>
+								<option value="off">Off</option>
+							</select>
+						</label>
+						<label class="block">
+							Noise suppression
+							<select id="noise-suppression"
+								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<option value="" selected>Auto</option>
+								<option value="on">On</option>
+								<option value="off">Off</option>
+							</select>
+						</label>
+					</div>
+				</details>
 				<details id="opus-advanced" class="text-xs text-neutral-400">
 					<summary class="cursor-pointer text-neutral-300">Opus options</summary>
 					<div class="mt-2 space-y-2">

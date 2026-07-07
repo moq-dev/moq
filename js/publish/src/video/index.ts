@@ -63,19 +63,33 @@ export class Root {
 		// NOTE: We modify the stock MediaStreamTrackProcessor so timestamps use our wall clock time.
 		// This is so even when the source is changed or encoder reloaded, the timestamps will be consistent.
 		const reader = TrackProcessor(source).getReader();
-		effect.cleanup(() => reader.cancel());
+		// cancel() rejects when the stream already errored (e.g. the worker crashed); swallow it so
+		// teardown doesn't emit an unhandled rejection.
+		effect.cleanup(() => reader.cancel().catch(() => {}));
 
 		effect.spawn(async () => {
-			for (;;) {
-				const next = await Promise.race([reader.read(), effect.cancel]);
-				if (!next?.value) break;
+			try {
+				for (;;) {
+					const next = await Promise.race([reader.read(), effect.cancel]);
+					if (!next?.value) break;
 
+					this.frame.update((prev) => {
+						prev?.close();
+						return next.value;
+					});
+
+					this.display.set({ width: next.value.codedWidth, height: next.value.codedHeight });
+				}
+			} catch (err) {
+				// The capture stream errored (e.g. the Safari worker crashed). effect.spawn swallows the
+				// rejection and the effect won't rerun on its own, so clear the last frame rather than
+				// leave a stale image looking live.
+				console.warn("video capture stopped:", err);
 				this.frame.update((prev) => {
 					prev?.close();
-					return next.value;
+					return undefined;
 				});
-
-				this.display.set({ width: next.value.codedWidth, height: next.value.codedHeight });
+				this.display.set(undefined);
 			}
 		});
 

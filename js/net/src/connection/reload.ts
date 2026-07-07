@@ -60,6 +60,14 @@ export class Reload {
 	/** The set of broadcast paths currently announced by the server, updated reactively. */
 	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
 
+	// Per-path announce generation, bumped every time a path is (re-)announced. Lets a consumer notice
+	// that the SAME name was re-announced by a NEW publisher instance even when the unannounce+announce
+	// coalesce so the presence Set never observably flips. Monotonic per connection (reset on reconnect).
+	#announcedGen = new Signal<Map<Path.Valid, number>>(new Map());
+
+	/** Per-path announce generation; bumps on every (re-)announce. Pairs with {@link Reload.announced}. */
+	readonly announcedGenerations: Getter<ReadonlyMap<Path.Valid, number>> = this.#announcedGen;
+
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
@@ -162,11 +170,15 @@ export class Reload {
 
 	#runAnnounced(effect: Effect): void {
 		this.#announced.set(new Set());
+		this.#announcedGen.set(new Map());
 
 		const conn = effect.get(this.established);
 		if (!conn) return;
 
-		effect.cleanup(() => this.#announced.set(new Set()));
+		effect.cleanup(() => {
+			this.#announced.set(new Set());
+			this.#announcedGen.set(new Map());
+		});
 
 		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
 		// skip announce subscriptions entirely for those hosts.
@@ -190,12 +202,38 @@ export class Reload {
 							active.delete(entry.path);
 						}
 					});
+
+					// Bump a MONOTONIC per-path generation on each active announce so a same-name republish
+					// is always observable, even when the unannounce+announce coalesce and the presence Set
+					// never visibly flips (the watcher re-consumes on any generation change). Never delete on
+					// unannounce: resetting a path back to 1 would make a coalesced republish look unchanged
+					// (1 -> 1), so the watcher would stay bound to the dead route. The map therefore grows by
+					// one entry per DISTINCT path ever announced on this connection (cumulative, not just the
+					// active set), freed only by the wholesale reset on reconnect above. Pruning inactive paths
+					// here is unsafe (a pending coalesced re-announce could reset the counter), so the growth is
+					// an accepted tradeoff; a very-high-churn relay may want an epoch-based redesign instead.
+					if (entry.active) {
+						this.#announcedGen.mutate((gens) => {
+							gens.set(entry.path, (gens.get(entry.path) ?? 0) + 1);
+						});
+					}
 				}
 			} catch (err) {
 				this.#announced.set(new Set());
+				this.#announcedGen.set(new Map());
 				throw err;
 			}
 		});
+	}
+
+	/**
+	 * Force the current session to drop and reconnect immediately. Recovers from a session that has
+	 * silently wedged (e.g. Safari's WebTransport stops delivering incoming streams without settling
+	 * `WebTransport.closed`), which the reconnect loop cannot detect on its own. No-op if disabled or
+	 * no URL is set.
+	 */
+	reconnect() {
+		this.#tick.update((prev) => prev + 1);
 	}
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */

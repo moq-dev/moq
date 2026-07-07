@@ -334,7 +334,9 @@ Requires modern browser features:
 **Experimental support:**
 
 - Firefox (behind flag)
-- Safari (future support planned)
+- Safari 18+ (publishing: hardware H.264/HEVC encode, Worker capture; older Safari falls back to a degraded capture that pauses while the tab is hidden). Opus audio uses the native WebCodecs codec on Safari 26+ and a WebAssembly polyfill on Safari 16.4 through 18.7, which ship no WebCodecs audio API.
+
+On macOS the browser's default microphone constraints engage the system voice processor: auto gain control can slowly pull the capture level down, and other system audio is ducked while the mic is live. Pass `{ echoCancellation: false, autoGainControl: false, noiseSuppression: false }` via the microphone source's `constraints` to capture the raw signal instead (expect echo without headphones).
 
 ## Production Deployment
 

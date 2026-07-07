@@ -55,6 +55,13 @@ export default class MoqPublish extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
+	// Set by the pagehide hook when the tab is being torn down (or bfcache-frozen), so the connection
+	// closes immediately and the relay unannounces without waiting for the transport idle timeout.
+	#suspended = new Signal(false);
+
+	// The effective gate: connected to the DOM AND not page-suspended. Drives the connection + publishing.
+	#active = new Signal(false);
+
 	// Whether to actually publish the broadcast: connected to the DOM and allowed by the `announce` mode.
 	#publishEnabled = new Signal(false);
 
@@ -65,8 +72,13 @@ export default class MoqPublish extends HTMLElement {
 
 		cleanup.register(this, this.signals);
 
+		// #active = connected AND not page-suspended; gates both the connection and publishing.
+		this.signals.run((effect) => {
+			this.#active.set(effect.get(this.#enabled) && !effect.get(this.#suspended));
+		});
+
 		this.connection = new Moq.Connection.Reload({
-			enabled: this.#enabled,
+			enabled: this.#active,
 		});
 		this.signals.cleanup(() => this.connection.close());
 
@@ -88,7 +100,7 @@ export default class MoqPublish extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const enabled = effect.get(this.#enabled);
+			const enabled = effect.get(this.#active);
 			const announce = effect.get(this.state.announce);
 			const hasSource = effect.get(this.state.source) !== undefined;
 			const announcing = announce === "always" || (announce === "source" && hasSource);
@@ -112,6 +124,21 @@ export default class MoqPublish extends HTMLElement {
 			},
 		});
 		this.signals.cleanup(() => this.broadcast.close());
+
+		// Close the connection eagerly when the tab is torn down or frozen, so the relay unannounces
+		// immediately instead of holding the broadcast route until the transport idle timeout (which would
+		// block a same-name republish). All browsers. Gated on #enabled so the window listeners are removed
+		// on DOM disconnect (element stays GC-eligible), and this effect never re-runs when #suspended flips.
+		this.signals.run((effect) => {
+			if (!effect.get(this.#enabled)) return;
+			effect.event(window, "pagehide", () => {
+				this.connection.established.peek()?.close();
+				this.#suspended.set(true);
+			});
+			effect.event(window, "pageshow", (event) => {
+				if ((event as PageTransitionEvent).persisted) this.#suspended.set(false);
+			});
+		});
 
 		// Watch to see if the preview element is added or removed.
 		const setPreview = () => {

@@ -11,7 +11,9 @@ export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement
 	parent.run((effect) => {
 		const buffering = effect.get(watch.backend.video.output.stalled);
 		const offline = effect.get(watch.broadcast.output.status) === "offline";
-		container.style.display = buffering && !offline ? "" : "none";
+		// Don't spin when no rendition is decodable: the unsupported-codec notice shows instead.
+		const unsupported = effect.get(watch.backend.video.source.output.unsupported);
+		container.style.display = buffering && !offline && !unsupported ? "" : "none";
 	});
 
 	return container;
