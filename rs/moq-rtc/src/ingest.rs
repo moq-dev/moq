@@ -61,13 +61,8 @@ impl session::MediaSink for IngestSink {
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
 		self.bridges.push(mid, frame)
 	}
-}
 
-impl Drop for IngestSink {
-	fn drop(&mut self) {
-		// The RTP flow ended (the peer left / ICE dropped); an async `Drop` can't
-		// finish, so abort the bridge tracks with a real Cancel rather than letting
-		// them surface a bare Error::Dropped.
-		self.bridges.abort(moq_net::Error::Cancel);
+	fn abort(&mut self, err: moq_net::Error) {
+		self.bridges.abort(err);
 	}
 }

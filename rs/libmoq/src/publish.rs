@@ -61,15 +61,14 @@ impl Publish {
 		Ok((broadcast, catalog))
 	}
 
-	/// Finalize the catalog stream and cleanly close the broadcast, so subscribers
+	/// Cleanly close the broadcast and finalize the catalog stream, so subscribers
 	/// see a normal end rather than [`moq_net::Error::Dropped`].
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let (broadcast, mut catalog) = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		// Close the broadcast even if finalizing the catalog fails, so the clean end
-		// still reaches subscribers.
-		let result = catalog.finish();
+		// Close the broadcast first so the clean end reaches subscribers even if
+		// finalizing the catalog fails.
 		broadcast.close();
-		result?;
+		catalog.finish()?;
 		Ok(())
 	}
 

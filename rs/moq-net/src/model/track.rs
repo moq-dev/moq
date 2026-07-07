@@ -1033,7 +1033,7 @@ impl Drop for Producer {
 			// finish()/abort().
 			tracing::warn!(
 				track = %self.name(),
-				"track::Producer dropped without finish() or abort(); consumers will see Error::Dropped"
+				"track::Producer dropped without finish() or abort()"
 			);
 			state.groups.clear();
 			state.datagrams.clear();

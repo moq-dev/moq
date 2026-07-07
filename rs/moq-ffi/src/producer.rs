@@ -367,11 +367,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.state.lock().unwrap();
 		let mut state = guard.take().ok_or(MoqError::Closed)?;
-		// Close the broadcast even if finalizing the catalog fails, so the clean end
-		// still reaches subscribers.
-		let result = state.catalog.finish();
+		// Close the broadcast first so the clean end reaches subscribers even if
+		// finalizing the catalog fails.
 		state.broadcast.close();
-		result?;
+		state.catalog.finish()?;
 		Ok(())
 	}
 }

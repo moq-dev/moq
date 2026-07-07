@@ -402,7 +402,7 @@ impl Drop for Producer {
 			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
 			tracing::warn!(
 				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort(); consumers will see Error::Dropped"
+				"group::Producer dropped without finish() or abort()"
 			);
 			state.frames.clear();
 			state.partial = None;

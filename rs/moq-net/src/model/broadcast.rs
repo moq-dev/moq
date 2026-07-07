@@ -245,7 +245,7 @@ impl Drop for Producer {
 			&& !state.closed
 		{
 			tracing::warn!(
-				"broadcast::Producer dropped without close(); consumers will see Error::Dropped. Keep the producer alive while publishing, then call close()."
+				"broadcast::Producer dropped without close(). Keep the producer alive while publishing, then call close()."
 			);
 		}
 	}

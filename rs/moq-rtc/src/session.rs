@@ -72,6 +72,10 @@ pub trait MediaSink: Send {
 	/// Called on each [`MediaData`](str0m::media::MediaData) event. The session
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
+
+	/// Called once when the session ends with a genuine failure, so the sink can
+	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
+	fn abort(&mut self, err: moq_net::Error);
 }
 
 /// What the session does with the negotiated media stream.
@@ -160,6 +164,20 @@ impl Session {
 	}
 
 	pub async fn run(mut self) -> Result<()> {
+		let result = self.run_loop().await;
+		// A genuine failure (not a normal peer disconnect or an unconnected offer)
+		// propagates to subscribers as the real cause; the normal ends just let the
+		// sink's tracks close as Dropped.
+		if let Err(err) = &result
+			&& !matches!(err, Error::SessionClosed | Error::IceTimeout)
+			&& let MediaRole::Ingest(sink) = &mut self.role
+		{
+			sink.abort(moq_net::Error::Transport(err.to_string()));
+		}
+		result
+	}
+
+	async fn run_loop(&mut self) -> Result<()> {
 		let started = Instant::now();
 		let mut connected = false;
 		loop {

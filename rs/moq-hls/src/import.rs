@@ -97,20 +97,6 @@ pub struct Import {
 	audio: Option<TrackState>,
 }
 
-impl Drop for Import {
-	fn drop(&mut self) {
-		// The HLS import loop ends by cancellation (or after a VOD playlist ends);
-		// an async `Drop` can't `finish()`, so abort the importers explicitly with a
-		// real Cancel rather than letting their tracks surface a bare Error::Dropped.
-		for importer in &mut self.video_importers {
-			importer.abort(moq_net::Error::Cancel);
-		}
-		if let Some(importer) = &mut self.audio_importer {
-			importer.abort(moq_net::Error::Cancel);
-		}
-	}
-}
-
 #[derive(Debug, Clone, Copy)]
 enum TrackKind {
 	Video(usize),
@@ -214,6 +200,19 @@ impl Import {
 			);
 
 			tokio::time::sleep(delay).await;
+		}
+	}
+
+	/// Abort every importer's tracks with `err` so subscribers see the real cause.
+	///
+	/// Call this when the import is torn down with a known error; simply dropping the
+	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		for importer in &mut self.video_importers {
+			importer.abort(err.clone());
+		}
+		if let Some(importer) = &mut self.audio_importer {
+			importer.abort(err.clone());
 		}
 	}
 
