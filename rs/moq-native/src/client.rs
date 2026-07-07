@@ -782,23 +782,23 @@ mod tests {
 	}
 
 	#[test]
-	fn test_toml_server_name_survives_update_from() {
+	fn test_toml_host_name_survives_update_from() {
 		let toml = r#"
-			tls.server_name = "example.host"
+			tls.host_name = "example.host"
 		"#;
 
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
-		assert_eq!(config.tls.server_name.as_deref(), Some("example.host"));
+		assert_eq!(config.tls.host_name.as_deref(), Some("example.host"));
 
-		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-server-name flag).
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-host-name flag).
 		config.update_from(["test"]);
-		assert_eq!(config.tls.server_name.as_deref(), Some("example.host"));
+		assert_eq!(config.tls.host_name.as_deref(), Some("example.host"));
 	}
 
 	#[test]
-	fn test_cli_server_name() {
-		let config = ClientConfig::parse_from(["test", "--client-tls-server-name", "override.example"]);
-		assert_eq!(config.tls.server_name.as_deref(), Some("override.example"));
+	fn test_cli_host_name() {
+		let config = ClientConfig::parse_from(["test", "--client-tls-host-name", "override.example"]);
+		assert_eq!(config.tls.host_name.as_deref(), Some("override.example"));
 	}
 
 	#[test]
