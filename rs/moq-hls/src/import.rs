@@ -97,6 +97,20 @@ pub struct Import {
 	audio: Option<TrackState>,
 }
 
+impl Drop for Import {
+	fn drop(&mut self) {
+		// The HLS import loop ends by cancellation (or after a VOD playlist ends);
+		// an async `Drop` can't `finish()`, so abort the importers explicitly with a
+		// real Cancel rather than letting their tracks surface a bare Error::Dropped.
+		for importer in &mut self.video_importers {
+			importer.abort(moq_net::Error::Cancel);
+		}
+		if let Some(importer) = &mut self.audio_importer {
+			importer.abort(moq_net::Error::Cancel);
+		}
+	}
+}
+
 #[derive(Debug, Clone, Copy)]
 enum TrackKind {
 	Video(usize),

@@ -418,6 +418,14 @@ impl Bridges {
 		}
 		Ok(())
 	}
+
+	/// Abort every bridge's track with `err` so subscribers see the real cause
+	/// rather than a bare `Error::Dropped`.
+	pub fn abort(&mut self, err: moq_net::Error) {
+		for bridge in self.inner.values_mut() {
+			bridge.abort(err.clone());
+		}
+	}
 }
 
 /// Build a [`Rtc`] with `CodecConfig` restricted to the supplied codecs.
