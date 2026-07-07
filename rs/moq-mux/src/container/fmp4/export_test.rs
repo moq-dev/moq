@@ -508,6 +508,80 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	moov.encode(&mut buf).expect("encode merged moov");
 }
 
+/// Per-rendition export (a single non-first source track, e.g. moq-hls exporting
+/// the audio rendition alone) must give the init moov the SAME track id its
+/// re-encoded fragments carry.
+///
+/// bbb.mp4's audio is the second track, so its source CMAF init declares track id
+/// 2, but an audio-only export re-encodes fragments as track 1 (the exporter's own
+/// per-export numbering). If the moov kept the source id (2) while the moof said 1,
+/// a player would reject every segment ("no tfhd for track") and stall -- the VOD
+/// audio-playback bug this guards against.
+#[tokio::test(start_paused = true)]
+async fn single_track_export_init_matches_fragment_track_id() {
+	use crate::catalog::Stream;
+
+	let data = include_bytes!("test_data/bbb.mp4");
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
+	let buf = BytesMut::from(data.as_slice());
+	let _ = importer.decode(&buf);
+
+	// Audio only: unselected video is dropped, so this is a single-track export.
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let selected = catalog_stream.select(crate::select::Broadcast::default().audio(crate::select::Audio::default()));
+	let mut exporter = crate::container::fmp4::Export::new(consumer, selected);
+
+	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init bytes");
+
+	// The next non-init fragment is a moof+mdat for the same (only) track.
+	let fragment = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected a fragment");
+
+	drop(importer);
+
+	// init moov: exactly one trak, whose id must equal its trex id.
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov: Option<mp4_atom::Moov> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(m) = atom {
+			moov = Some(m);
+		}
+	}
+	let moov = moov.expect("moov");
+	assert_eq!(moov.trak.len(), 1, "audio-only export has one track");
+	let init_id = moov.trak[0].tkhd.track_id;
+	let mvex = moov.mvex.as_ref().expect("mvex");
+	assert_eq!(mvex.trex[0].track_id, init_id, "trex id must match its trak");
+
+	// fragment moof: the tfhd track id must match the init.
+	let mut cursor = Cursor::new(fragment.as_ref());
+	let mut moof: Option<mp4_atom::Moof> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode fragment") {
+		if let mp4_atom::Any::Moof(m) = atom {
+			moof = Some(m);
+		}
+	}
+	let moof = moof.expect("moof");
+	assert_eq!(
+		moof.traf[0].tfhd.track_id, init_id,
+		"fragment track id must match the init moov, or players reject the segment"
+	);
+}
+
 /// `next_fragment` reports the init flag, per-fragment sync-sample independence,
 /// and a positive duration. With a sub-GOP fragment cap, a part in the middle of
 /// a GOP is reported as non-independent while the GOP's leading part stays

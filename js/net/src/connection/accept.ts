@@ -22,7 +22,9 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = transport.protocol;
 
-	if (protocol === Ietf.ALPN.DRAFT_18) {
+	if (protocol === Ietf.ALPN.DRAFT_19) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_19);
+	} else if (protocol === Ietf.ALPN.DRAFT_18) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_18);
 	} else if (protocol === Ietf.ALPN.DRAFT_17) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_17);

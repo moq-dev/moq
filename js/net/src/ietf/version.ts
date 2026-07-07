@@ -37,6 +37,12 @@ export const Version = {
 	 * https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.txt
 	 */
 	DRAFT_18: 0xff000012,
+
+	/**
+	 * draft-ietf-moq-transport-19
+	 * https://www.ietf.org/archive/id/draft-ietf-moq-transport-19.txt
+	 */
+	DRAFT_19: 0xff000013,
 } as const;
 
 export type Version = (typeof Version)[keyof typeof Version];
@@ -48,6 +54,7 @@ export const ALPN = {
 	DRAFT_16: "moqt-16",
 	DRAFT_17: "moqt-17",
 	DRAFT_18: "moqt-18",
+	DRAFT_19: "moqt-19",
 } as const;
 
 /**
@@ -59,7 +66,8 @@ export type IetfVersion =
 	| typeof Version.DRAFT_15
 	| typeof Version.DRAFT_16
 	| typeof Version.DRAFT_17
-	| typeof Version.DRAFT_18;
+	| typeof Version.DRAFT_18
+	| typeof Version.DRAFT_19;
 
 const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_07]: "moq-transport-07",
@@ -68,6 +76,7 @@ const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_16]: "moq-transport-16",
 	[Version.DRAFT_17]: "moq-transport-17",
 	[Version.DRAFT_18]: "moq-transport-18",
+	[Version.DRAFT_19]: "moq-transport-19",
 };
 
 export function versionName(v: Version): string {

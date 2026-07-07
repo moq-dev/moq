@@ -23,6 +23,7 @@ pub const ALPNS: &[&str] = &[
 	ALPN_LITE_04,
 	ALPN_LITE_03,
 	ALPN_LITE,
+	ALPN_19,
 	ALPN_18,
 	ALPN_17,
 	ALPN_16,
@@ -40,6 +41,7 @@ pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
+pub(crate) const ALPN_19: &str = "moqt-19";
 
 /// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,6 +65,7 @@ impl Version {
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
 			0xff000011 => Some(Self::Ietf(ietf::Version::Draft17)),
 			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
+			0xff000013 => Some(Self::Ietf(ietf::Version::Draft19)),
 			_ => None,
 		}
 	}
@@ -80,6 +83,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
 			Self::Ietf(ietf::Version::Draft17) => 0xff000011,
 			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
+			Self::Ietf(ietf::Version::Draft19) => 0xff000013,
 		}
 	}
 
@@ -98,6 +102,7 @@ impl Version {
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
 			ALPN_17 => Some(Self::Ietf(ietf::Version::Draft17)),
 			ALPN_18 => Some(Self::Ietf(ietf::Version::Draft18)),
+			ALPN_19 => Some(Self::Ietf(ietf::Version::Draft19)),
 			_ => None,
 		}
 	}
@@ -114,6 +119,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => ALPN_16,
 			Self::Ietf(ietf::Version::Draft17) => ALPN_17,
 			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
+			Self::Ietf(ietf::Version::Draft19) => ALPN_19,
 		}
 	}
 
@@ -167,6 +173,7 @@ impl FromStr for Version {
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
 			"moq-transport-17" => Ok(Self::Ietf(ietf::Version::Draft17)),
 			"moq-transport-18" => Ok(Self::Ietf(ietf::Version::Draft18)),
+			"moq-transport-19" => Ok(Self::Ietf(ietf::Version::Draft19)),
 			_ => Err(format!("unknown version: {s}")),
 		}
 	}
@@ -232,6 +239,7 @@ impl Versions {
 			Version::Lite(lite::Version::Lite03),
 			Version::Lite(lite::Version::Lite02),
 			Version::Lite(lite::Version::Lite01),
+			Version::Ietf(ietf::Version::Draft19),
 			Version::Ietf(ietf::Version::Draft18),
 			Version::Ietf(ietf::Version::Draft17),
 			Version::Ietf(ietf::Version::Draft16),
