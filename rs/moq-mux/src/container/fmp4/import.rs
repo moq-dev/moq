@@ -737,8 +737,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			frame.finish()?;
 
 			track.group = Some(g);
-			let update = track.metrics.observe_frame(timestamp, bytes);
-			update_track_bitrate(&mut self.catalog, track, update)?;
+			// Only feeds the internal bitrate accumulator: observe_frame's Update carries
+			// latency (never bitrate), which fmp4 derives separately below. Bitrate reaches
+			// the catalog via finish_group on the next keyframe.
+			track.metrics.observe_frame(timestamp, bytes);
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
