@@ -569,7 +569,11 @@ impl Consumer {
 			if index < state.offset {
 				return Poll::Ready(Err(Error::CacheFull));
 			}
-			let local = index - state.offset;
+			// `local` can run past the buffered count when frames were cleared or evicted out
+			// from under us (abort, unfinished drop, an eviction gap); clamp so `range` never
+			// panics on an out-of-bounds start. `fill` always resets the batch, so an empty
+			// range leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
+			let local = (index - state.offset).min(state.frames.len());
 			prefetch.fill(state.frames.range(local..).cloned());
 			if prefetch.len > 0 {
 				return Poll::Ready(Ok(()));
@@ -896,6 +900,26 @@ mod test {
 			assert_eq!(data, Bytes::from(vec![i; 1]));
 		}
 		assert!(consumer.next_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A `read_frame` whose index sits past the buffered frames (cleared by an abort, or an
+	/// eviction gap) must surface the error, not panic on an out-of-range `range(local..)`.
+	#[test]
+	fn read_frame_past_cleared_frames_does_not_panic() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
+		producer.write_frame_now(Bytes::from_static(b"b")).unwrap();
+
+		let mut consumer = producer.consume();
+		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+
+		// Abort clears the cached frames but leaves the consumer's index (2) past them, so the
+		// refill's `local` (2) exceeds `frames.len()` (0).
+		producer.abort(Error::Cancel).unwrap();
+
+		let result = consumer.read_frame().now_or_never().unwrap();
+		assert!(matches!(result, Err(Error::Cancel)), "expected Cancel, got {result:?}");
 	}
 
 	/// Dropping a consumer mid-batch must drop the buffered-but-untaken frames
