@@ -165,6 +165,12 @@ async fn broadcast_moq_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_transport_19() {
+	broadcast_test("moqt", Some("moq-transport-19"), Some("moq-transport-19")).await;
+}
+
 // ── Raw QUIC – server supports all versions, client pins one ─────────
 
 #[tracing_test::traced_test]
@@ -215,6 +221,12 @@ async fn broadcast_negotiate_server_all_client_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), None).await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_transport_19() {
+	broadcast_test("moqt", Some("moq-transport-19"), None).await;
+}
+
 // ── Raw QUIC – client supports all versions, server pins one ─────────
 
 #[tracing_test::traced_test]
@@ -263,6 +275,12 @@ async fn broadcast_negotiate_client_all_server_transport_17() {
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_transport_19() {
+	broadcast_test("moqt", None, Some("moq-transport-19")).await;
 }
 
 // ── WebTransport (https://) – same version on both sides ────────────
@@ -321,6 +339,12 @@ async fn broadcast_webtransport_moq_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_moq_transport_19() {
+	broadcast_test("https", Some("moq-transport-19"), Some("moq-transport-19")).await;
+}
+
 // ── WebTransport – server supports all, client pins one ─────────────
 
 #[tracing_test::traced_test]
@@ -371,6 +395,12 @@ async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), None).await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_transport_19() {
+	broadcast_test("https", Some("moq-transport-19"), None).await;
+}
+
 // ── WebTransport – client supports all, server pins one ─────────────
 
 #[tracing_test::traced_test]
@@ -419,6 +449,12 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_17() {
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 	broadcast_test("https", None, Some("moq-transport-18")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_transport_19() {
+	broadcast_test("https", None, Some("moq-transport-19")).await;
 }
 
 // ── WebSocket (ws://) ───────────────────────────────────────────────
