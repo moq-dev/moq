@@ -582,11 +582,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
 	pub fn abort(&mut self, err: moq_net::Error) {
-		if let Some(stream) = self.video.as_mut() {
+		for stream in self.video.values_mut() {
 			stream.track.abort(err.clone());
 		}
-		if let Some(stream) = self.audio.as_mut() {
-			stream.track.abort(err);
+		for stream in self.audio.values_mut() {
+			stream.track.abort(err.clone());
 		}
 	}
 }
