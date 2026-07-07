@@ -383,6 +383,15 @@ impl Cluster {
 		})
 	}
 
+	/// Attach the shared group [`cache::Pool`](moq_net::cache::Pool) so every
+	/// session's broadcasts cache into one memory budget. Call before deriving
+	/// any origin handles (e.g. [`with_stats`](Self::with_stats)) so they inherit
+	/// the pool.
+	pub fn with_cache(mut self, pool: moq_net::cache::Pool) -> Self {
+		self.origin = self.origin.with_pool(pool);
+		self
+	}
+
 	/// Attach a QUIC client used to dial cluster peers.
 	///
 	/// Required when `config.connect` is non-empty; [`run`](Self::run) returns

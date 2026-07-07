@@ -1,4 +1,4 @@
-use crate::track;
+use crate::{cache, track};
 use std::{
 	collections::{HashMap, VecDeque, hash_map},
 	sync::Arc,
@@ -19,12 +19,18 @@ pub struct Info {
 	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
 	/// shortest-path preference.
 	pub hops: OriginList,
+
+	/// The cache pool every group of every track in this broadcast registers with.
+	/// Unbounded by default; a relay shares one bounded [`cache::Pool`] across all
+	/// broadcasts so old groups are evicted under memory pressure.
+	pub pool: cache::Pool,
 }
 
 impl Default for Info {
 	fn default() -> Self {
 		Self {
 			hops: OriginList::new(),
+			pool: cache::Pool::default(),
 		}
 	}
 }
@@ -33,6 +39,13 @@ impl Info {
 	/// Create a new broadcast with an empty hop chain.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the cache pool this broadcast's groups register with, returning `self`
+	/// for chaining. Defaults to an unbounded pool.
+	pub fn with_pool(mut self, pool: crate::cache::Pool) -> Self {
+		self.pool = pool;
+		self
 	}
 
 	/// Consume this [Info] to create a producer that carries its metadata

@@ -101,6 +101,12 @@ pub enum Error {
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
+	/// The group was evicted from the cache under memory pressure (see
+	/// [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`], the group was
+	/// still within the publisher's window; it can be re-fetched.
+	#[error("evicted")]
+	Evicted,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -136,6 +142,7 @@ impl Error {
 			Self::FrameTooLarge => 27,
 			Self::TimestampMismatch => 29,
 			Self::Unroutable => 30,
+			Self::Evicted => 31,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}

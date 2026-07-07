@@ -8,6 +8,7 @@
 //! See `main.rs` for a complete example of how these pieces fit together.
 
 mod auth;
+mod cache;
 mod cluster;
 mod config;
 mod connection;
@@ -33,6 +34,7 @@ fn trusted_tier(label: Option<String>) -> moq_net::Tier {
 }
 
 pub use auth::*;
+pub use cache::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;

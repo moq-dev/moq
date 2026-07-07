@@ -1,4 +1,4 @@
-use crate::{broadcast, track};
+use crate::{broadcast, cache, track};
 use std::{
 	collections::{BTreeMap, HashMap, VecDeque},
 	fmt,
@@ -802,6 +802,10 @@ pub struct Producer {
 	// `nodes` because dynamic broadcasts are never announced: they only resolve a
 	// consumer's `request_broadcast` when no live announcement exists.
 	dynamic: kio::Producer<OriginDynamicState>,
+
+	// The cache pool inherited by broadcasts created under this origin (sessions
+	// mint their remote broadcasts with it). Unbounded by default.
+	pool: cache::Pool,
 }
 
 impl std::ops::Deref for Producer {
@@ -821,7 +825,23 @@ impl Producer {
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
 			dynamic: kio::Producer::default(),
+			pool: cache::Pool::default(),
 		}
+	}
+
+	/// Set the [`cache::Pool`] that broadcasts created under this origin register
+	/// their groups with, returning `self` for chaining.
+	///
+	/// A relay installs one bounded pool on its origin so every cached group in the
+	/// process shares a single memory budget. Defaults to an unbounded pool.
+	pub fn with_pool(mut self, pool: cache::Pool) -> Self {
+		self.pool = pool;
+		self
+	}
+
+	/// The cache pool broadcasts created under this origin inherit.
+	pub fn pool(&self) -> cache::Pool {
+		self.pool.clone()
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -834,6 +854,7 @@ impl Producer {
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: PathOwned::default(),
 			dynamic: kio::Producer::default(),
+			pool: cache::Pool::default(),
 		}
 	}
 
@@ -844,7 +865,7 @@ impl Producer {
 	/// unannounces the broadcast. See [`publish_broadcast`](Self::publish_broadcast) for the
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<Broadcast, Error> {
-		let producer = broadcast::Info::new().produce();
+		let producer = broadcast::Info::new().with_pool(self.pool.clone()).produce();
 		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(Broadcast { producer, publish })
 	}
@@ -909,6 +930,7 @@ impl Producer {
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
+			pool: self.pool.clone(),
 		})
 	}
 
@@ -953,6 +975,7 @@ impl Producer {
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
 			dynamic: self.dynamic.clone(),
+			pool: self.pool.clone(),
 		})
 	}
 
@@ -1937,6 +1960,7 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
 			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			..Default::default()
 		}
 		.produce();
 		let b = broadcast::Info::new().produce();
@@ -1958,6 +1982,7 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
 			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			..Default::default()
 		}
 		.produce();
 		let b = broadcast::Info::new().produce();
@@ -2008,7 +2033,11 @@ mod tests {
 					.collect::<Vec<_>>(),
 			)
 			.unwrap();
-			broadcast::Info { hops }.produce()
+			broadcast::Info {
+				hops,
+				..Default::default()
+			}
+			.produce()
 		}
 
 		// Resolve the active route for "test" after publishing both routes in the given order.

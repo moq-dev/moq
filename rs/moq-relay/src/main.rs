@@ -55,7 +55,9 @@ async fn main() -> anyhow::Result<()> {
 		config.auth.init(&config.client.tls).await?
 	};
 
+	let cache = config.cache.init()?;
 	let cluster = Cluster::new(config.cluster)?
+		.with_cache(cache)
 		.with_client(client)
 		.with_client_tls(config.client.tls.build()?);
 	let stats = config.stats.build(cluster.origin.clone());

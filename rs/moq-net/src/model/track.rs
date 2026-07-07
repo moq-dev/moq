@@ -14,7 +14,7 @@
 //! The track is closed with [Error] when all writers or readers are dropped.
 
 use crate::{Error, Result, Subscription, Timescale, Timestamp, coding};
-use crate::{broadcast, group};
+use crate::{broadcast, cache, group};
 
 use super::{Datagram, MAX_DATAGRAM_PAYLOAD};
 
@@ -156,6 +156,16 @@ struct TrackState {
 	// A small `Copy` value, inherited by each group it creates.
 	info: Option<Info>,
 
+	// The shared cache pool every group registers with, inherited from the parent
+	// broadcast. Unbounded by default; a relay installs a bounded pool so old
+	// groups are evicted under memory pressure.
+	pool: cache::Pool,
+
+	// The pool registration of the current max_sequence group, pinned so the
+	// latest group is immune to pool eviction. `None` when the pool is detached
+	// or no group exists yet.
+	latest_entry: Option<Arc<cache::Entry>>,
+
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
 	groups: VecDeque<Option<(group::Producer, web_async::time::Instant)>>,
 
@@ -220,6 +230,7 @@ impl TrackState {
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot
 				&& group.sequence >= min_sequence
+				&& !group.is_aborted()
 			{
 				return Poll::Ready(Ok(Some((group.consume(), self.offset + i))));
 			}
@@ -292,7 +303,9 @@ impl TrackState {
 					return Poll::Ready(Ok(Some((frame, self.offset + i, group.sequence))));
 				}
 				Poll::Ready(Ok(None)) => continue,
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+				// A single group failing (aborted upstream, or evicted from the
+				// cache) doesn't poison the track; skip it like a gap.
+				Poll::Ready(Err(_)) => continue,
 				Poll::Pending => {
 					pending_seen = true;
 					continue;
@@ -349,6 +362,9 @@ impl TrackState {
 			{
 				continue;
 			}
+			if group.is_aborted() {
+				continue;
+			}
 			if best.is_none_or(|b| group.sequence < b.sequence) {
 				best = Some(group);
 			}
@@ -372,12 +388,14 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	/// Find a cached group by sequence, skipping tombstones. Synchronous, never blocks.
+	/// Find a cached group by sequence, skipping tombstones and groups evicted from
+	/// the cache pool (a fetch treats those as a miss and re-fetches). Synchronous,
+	/// never blocks.
 	fn cached_group(&self, sequence: u64) -> Option<group::Consumer> {
 		self.groups
 			.iter()
 			.flatten()
-			.find(|(group, _)| group.sequence == sequence)
+			.find(|(group, _)| group.sequence == sequence && !group.is_aborted())
 			.map(|(group, _)| group.consume())
 	}
 
@@ -448,9 +466,21 @@ impl TrackState {
 	/// non-max_sequence group (everything after it arrived even later).
 	/// When max_sequence is at the front, we skip past it and tombstone expired groups
 	/// behind it.
+	///
+	/// Also reaps slots whose group the cache pool already evicted (walked before
+	/// the early exit); ones behind fresh groups stay as soft tombstones that every
+	/// read path skips, and are replaced in place if the sequence is re-fetched.
 	fn evict_expired(&mut self, now: web_async::time::Instant, max_age: Duration) {
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
+
+			// Evicted by the pool: the frames are already gone, reclaim the slot
+			// and the sequence so a later fetch can re-insert it.
+			if group.is_aborted() {
+				self.duplicates.remove(&group.sequence);
+				*slot = None;
+				continue;
+			}
 
 			if Some(group.sequence) == self.max_sequence {
 				continue;
@@ -477,6 +507,21 @@ impl TrackState {
 		}
 	}
 
+	/// Pin `group` as the latest (immune to pool eviction) if it holds the track's
+	/// max_sequence, releasing the previous pin. Call after updating `max_sequence`.
+	fn pin_latest(&mut self, group: &group::Producer) {
+		if Some(group.sequence) != self.max_sequence {
+			return;
+		}
+		if let Some(prev) = self.latest_entry.take() {
+			prev.set_pinned(false);
+		}
+		if let Some(entry) = group.cache_entry() {
+			entry.set_pinned(true);
+			self.latest_entry = Some(entry);
+		}
+	}
+
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if let Some(fin) = self.final_sequence {
 			Poll::Ready(Ok(fin))
@@ -489,6 +534,28 @@ impl TrackState {
 
 	fn modify(producer: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>> {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Replace the slot of a duplicate `sequence` whose group was evicted from the
+	/// cache pool, returning the fresh producer. `Err(Duplicate)` when the cached
+	/// group is still live; `None` when no slot holds the sequence.
+	fn replace_evicted(
+		&mut self,
+		sequence: u64,
+		track: Info,
+		now: web_async::time::Instant,
+	) -> Option<Result<group::Producer>> {
+		let slot = self
+			.groups
+			.iter_mut()
+			.find(|slot| matches!(slot, Some((group, _)) if group.sequence == sequence))?;
+		let (existing, _) = slot.as_ref().unwrap();
+		if !existing.is_aborted() {
+			return Some(Err(Error::Duplicate));
+		}
+		let group = group::Producer::new(group::Info { sequence }, track, &self.pool);
+		*slot = Some((group.clone(), now));
+		Some(Ok(group))
 	}
 
 	/// Insert a group fetched for a [`GroupRequest`], setting the track's [`Info`]
@@ -505,19 +572,23 @@ impl TrackState {
 		{
 			return Err(Error::Closed);
 		}
-		if !self.duplicates.insert(sequence) {
-			return Err(Error::Duplicate);
-		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = *self.info.get_or_insert_with(|| info.unwrap_or_default());
-
-		let group = group::Producer::new(group::Info { sequence }, info);
-		let cache = info.cache;
 		let now = web_async::time::Instant::now();
+
+		if !self.duplicates.insert(sequence) {
+			// A pool-evicted group can be re-fetched into its old slot.
+			return self
+				.replace_evicted(sequence, info, now)
+				.unwrap_or(Err(Error::Duplicate));
+		}
+
+		let group = group::Producer::new(group::Info { sequence }, info, &self.pool);
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
 		self.groups.push_back(Some((group.clone(), now)));
-		self.evict_expired(now, cache);
+		self.pin_latest(&group);
+		self.evict_expired(now, info.cache);
 		Ok(group)
 	}
 
@@ -554,11 +625,13 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let info = info.into().unwrap_or_default();
+		let pool = broadcast.pool.clone();
 		Self {
 			name: name.into(),
 			broadcast,
 			state: kio::Producer::new(TrackState {
 				info: Some(info),
+				pool,
 				..Default::default()
 			}),
 			prev_subscription: None,
@@ -585,15 +658,19 @@ impl Producer {
 		let info = state.info.as_ref().unwrap();
 		let track = *info;
 		let cache = info.cache;
+		let now = web_async::time::Instant::now();
 
-		let group = group::Producer::new(group, track);
 		if !state.duplicates.insert(group.sequence) {
-			return Err(Error::Duplicate);
+			// A pool-evicted group can be re-created into its old slot.
+			return state
+				.replace_evicted(group.sequence, track, now)
+				.unwrap_or(Err(Error::Duplicate));
 		}
 
-		let now = web_async::time::Instant::now();
+		let group = group::Producer::new(group, track, &state.pool);
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
+		state.pin_latest(&group);
 		state.evict_expired(now, cache);
 
 		Ok(group)
@@ -616,12 +693,13 @@ impl Producer {
 		let track = *info;
 		let cache = info.cache;
 
-		let group = group::Producer::new(group::Info { sequence }, track);
+		let group = group::Producer::new(group::Info { sequence }, track, &state.pool);
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
+		state.pin_latest(&group);
 		state.evict_expired(now, cache);
 
 		Ok(group)
@@ -753,6 +831,7 @@ impl Producer {
 		guard.groups.clear();
 		guard.datagrams.clear();
 		guard.duplicates.clear();
+		guard.latest_entry = None;
 		guard.close();
 		Ok(())
 	}
@@ -1031,6 +1110,7 @@ impl Drop for Producer {
 			state.groups.clear();
 			state.datagrams.clear();
 			state.duplicates.clear();
+			state.latest_entry = None;
 		}
 	}
 }
@@ -1650,7 +1730,10 @@ pub struct Request {
 impl Request {
 	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
-		let state = kio::Producer::<TrackState>::default();
+		let state = kio::Producer::new(TrackState {
+			pool: broadcast.pool.clone(),
+			..Default::default()
+		});
 		let dynamic = Dynamic::new(name.clone(), state.clone());
 		Self {
 			name,
@@ -2938,6 +3021,164 @@ mod test {
 
 		// And it doesn't signal the dynamic handler.
 		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// Mint a track whose groups register with a bounded [`cache::Pool`].
+	fn pooled_producer(capacity: u64) -> (Producer, cache::Pool) {
+		let pool = cache::Pool::new(capacity);
+		let broadcast = broadcast::Info::default().with_pool(pool.clone());
+		(Producer::new(Arc::new(broadcast), "test", None), pool)
+	}
+
+	fn finished_group(producer: &mut Producer, size: usize) -> u64 {
+		let mut group = producer.append_group().unwrap();
+		group.write_frame_now(bytes::Bytes::from(vec![0u8; size])).unwrap();
+		group.finish().unwrap();
+		group.sequence
+	}
+
+	#[tokio::test]
+	async fn pool_evicts_oldest_group() {
+		tokio::time::pause();
+
+		// Fits two 1000-byte groups (plus per-group overhead) but not three.
+		let (mut producer, pool) = pooled_producer(3000);
+
+		finished_group(&mut producer, 1000); // seq 0
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 1
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 2, pinned as latest
+
+		// The write to seq 2 pushed the pool over budget: seq 0 (stalest, unpinned)
+		// was evicted and its bytes released.
+		assert!(pool.used() <= 3000, "pool should be back under budget");
+
+		let consumer = producer.consume();
+		assert!(consumer.get_group(0).is_none(), "evicted group is a cache miss");
+		assert!(consumer.get_group(1).is_some());
+		assert!(consumer.get_group(2).is_some());
+
+		// A fresh subscriber skips the evicted group entirely.
+		let mut subscriber = producer.subscribe(None);
+		assert_eq!(subscriber.assert_group().sequence, 1);
+		assert_eq!(subscriber.assert_group().sequence, 2);
+	}
+
+	#[tokio::test]
+	async fn pool_never_evicts_latest() {
+		tokio::time::pause();
+
+		// Far too small for even one group: the latest is pinned and survives anyway.
+		let (mut producer, pool) = pooled_producer(100);
+		finished_group(&mut producer, 1000);
+
+		assert!(pool.used() > 100, "pinned latest may exceed the budget");
+		let mut subscriber = producer.subscribe(None);
+		let mut group = subscriber.assert_group();
+		assert_eq!(group.read_frame().await.unwrap().unwrap().len(), 1000);
+	}
+
+	#[tokio::test]
+	async fn pool_reads_bump_recency() {
+		tokio::time::pause();
+
+		let (mut producer, _pool) = pooled_producer(3000);
+		let mut subscriber = producer.subscribe(None);
+
+		finished_group(&mut producer, 1000); // seq 0
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 1
+		tokio::time::advance(Duration::from_millis(10)).await;
+
+		// Read seq 0 so seq 1 becomes the least recently used.
+		let mut group = subscriber.assert_group();
+		assert_eq!(group.sequence, 0);
+		group.read_frame().await.unwrap().unwrap();
+		tokio::time::advance(Duration::from_millis(10)).await;
+
+		// Over budget: seq 1 (stale) is the victim, the just-read seq 0 survives.
+		finished_group(&mut producer, 1000); // seq 2, pinned
+
+		let consumer = producer.consume();
+		assert!(consumer.get_group(0).is_some(), "recently read group survives");
+		assert!(consumer.get_group(1).is_none(), "stale group is evicted");
+	}
+
+	#[tokio::test]
+	async fn pool_eviction_aborts_readers() {
+		tokio::time::pause();
+
+		let (mut producer, _pool) = pooled_producer(3000);
+		let mut subscriber = producer.subscribe(None);
+
+		finished_group(&mut producer, 1000); // seq 0
+		let group0 = subscriber.assert_group();
+
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 1
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 2 evicts seq 0
+
+		// A consumer holding the evicted group surfaces the eviction, not a hang
+		// or a truncated clean end.
+		let mut group0 = group0;
+		assert!(matches!(group0.read_frame().await, Err(Error::Evicted)));
+	}
+
+	#[tokio::test]
+	async fn pool_growth_on_old_group_charges() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(3000);
+
+		// Seq 0 stays open (a straggler still being written).
+		let mut group0 = producer.append_group().unwrap();
+		tokio::time::advance(Duration::from_millis(10)).await;
+		// Seq 1 becomes the pinned latest; seq 0 is now evictable.
+		let _group1 = producer.append_group().unwrap();
+		tokio::time::advance(Duration::from_millis(10)).await;
+
+		// A late frame on the old group still counts against the budget, and can
+		// evict that very group once it blows past capacity.
+		group0.write_frame_now(bytes::Bytes::from(vec![0u8; 4000])).unwrap();
+		assert!(pool.used() <= 3000, "growth on an old group triggers eviction");
+		assert!(matches!(group0.abort(Error::Cancel), Err(Error::Evicted)));
+	}
+
+	#[tokio::test]
+	async fn pool_eviction_allows_refetch() {
+		tokio::time::pause();
+
+		let (mut producer, _pool) = pooled_producer(3000);
+		let dynamic = producer.dynamic();
+
+		finished_group(&mut producer, 1000); // seq 0
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 1
+		tokio::time::advance(Duration::from_millis(10)).await;
+		finished_group(&mut producer, 1000); // seq 2 evicts seq 0
+
+		// The evicted group is a miss, so the fetch queues for the dynamic handler
+		// (a relay would issue a wire FETCH upstream).
+		let consumer = producer.consume();
+		assert!(consumer.get_group(0).is_none());
+		let pending = consumer.fetch_group(0, None);
+
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		assert_eq!(req.sequence(), 0);
+
+		// Accept replaces the evicted slot in place (not Error::Duplicate).
+		let mut group = req.accept(None).unwrap();
+		group.write_frame_now(bytes::Bytes::from_static(b"refetched")).unwrap();
+		group.finish().unwrap();
+
+		let mut group = pending.await.unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap()[..], b"refetched");
 	}
 
 	#[tokio::test]

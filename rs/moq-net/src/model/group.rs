@@ -7,8 +7,9 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
-use crate::{frame, track};
+use crate::{cache, frame, track};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -42,7 +43,7 @@ impl Info {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
-		Producer::new(self, track::Info::default())
+		Producer::new(self, track::Info::default(), &cache::Pool::default())
 	}
 }
 
@@ -88,6 +89,10 @@ struct GroupState {
 	// The total size (in bytes) of all cached frames.
 	cache: u64,
 
+	// This group's registration in the track's cache pool; mirrors `cache` so the
+	// pool can evict the least-recently-read groups under memory pressure.
+	charge: cache::Charge,
+
 	// Whether the group has been finalized (no more frames).
 	fin: bool,
 
@@ -100,11 +105,15 @@ impl GroupState {
 		if index < self.offset {
 			Poll::Ready(Err(Error::CacheFull))
 		} else if let Some(frame) = self.frames.get(index - self.offset) {
+			self.charge.touch();
 			Poll::Ready(Ok(Some(frame.consume())))
+		} else if let Some(err) = &self.abort {
+			// Checked before `fin`: an evicted group is both finished and aborted,
+			// and a reader past the cleared frames must see the abort, not a clean
+			// end-of-group at the wrong index.
+			Poll::Ready(Err(err.clone()))
 		} else if self.fin {
 			Poll::Ready(Ok(None))
-		} else if let Some(err) = &self.abort {
-			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -131,10 +140,12 @@ impl GroupState {
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
-		if self.fin {
-			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
-		} else if let Some(err) = &self.abort {
+		if let Some(err) = &self.abort {
+			// Checked before `fin`: an evicted group is both finished and aborted,
+			// and its cleared frames would report a bogus count.
 			Poll::Ready(Err(err.clone()))
+		} else if self.fin {
+			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
 		} else {
 			Poll::Pending
 		}
@@ -147,6 +158,7 @@ impl GroupState {
 				break;
 			};
 			self.cache -= frame.size;
+			self.charge.sub(frame.size);
 			self.offset += 1;
 		}
 	}
@@ -154,6 +166,20 @@ impl GroupState {
 
 fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>> {
 	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+}
+
+/// The pool's eviction hook: abort the group with [`Error::Evicted`], freeing its
+/// frames immediately. A no-op once the group is already aborted or fully dropped.
+fn evict(state: &kio::Weak<GroupState>) {
+	let Ok(mut state) = state.write() else { return };
+	if state.abort.is_some() {
+		return;
+	}
+	state.abort = Some(Error::Evicted);
+	state.frames.clear();
+	state.cache = 0;
+	state.charge.clear();
+	state.close();
 }
 
 /// Writes frames to a group in order.
@@ -192,12 +218,15 @@ impl Producer {
 	/// which threads its [`track::Info`] down so properties like the timescale are
 	/// inherited rather than passed in. Every frame added to this group is
 	/// normalized to the track's timescale by [`Self::create_frame`].
-	pub(crate) fn new(info: Info, track: track::Info) -> Self {
-		Self {
-			info,
-			state: kio::Producer::default(),
-			track,
-		}
+	///
+	/// Registers the group in `pool` so its cached bytes count against the shared
+	/// budget and it can be evicted under memory pressure.
+	pub(crate) fn new(info: Info, track: track::Info, pool: &cache::Pool) -> Self {
+		let state = kio::Producer::<GroupState>::default();
+		let weak = state.weak();
+		let charge = pool.register(Box::new(move || evict(&weak)));
+		state.write().ok().expect("a new group is open").charge = charge;
+		Self { info, state, track }
 	}
 
 	/// The parent track's timescale.
@@ -275,8 +304,17 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		state.cache += frame.size;
+		state.charge.add(frame.size);
 		state.frames.push_back(frame);
 		state.evict();
+
+		// The pool evicts other groups' state, so trigger it only after releasing
+		// our own lock.
+		let pool = state.charge.pool();
+		drop(state);
+		if let Some(pool) = pool {
+			pool.evict();
+		}
 		Ok(())
 	}
 
@@ -305,8 +343,21 @@ impl Producer {
 		guard.abort = Some(err);
 		guard.frames.clear();
 		guard.cache = 0;
+		guard.charge.clear();
 		guard.close();
 		Ok(())
+	}
+
+	/// Whether the group has been aborted (including pool eviction). The track's
+	/// read paths treat an aborted cached group as absent.
+	pub(crate) fn is_aborted(&self) -> bool {
+		self.state.read().abort.is_some()
+	}
+
+	/// This group's cache pool registration, used by the track to pin the latest
+	/// group. `None` when the pool is detached (the unbounded default).
+	pub(crate) fn cache_entry(&self) -> Option<Arc<cache::Entry>> {
+		self.state.read().charge.entry()
 	}
 
 	/// Create a new consumer for the group.
@@ -357,6 +408,7 @@ impl Drop for Producer {
 		{
 			state.frames.clear();
 			state.cache = 0;
+			state.charge.clear();
 		}
 	}
 }
@@ -747,6 +799,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			&cache::Pool::default(),
 		);
 		let frame = frame::Info {
 			size: 3,
@@ -765,6 +818,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			&cache::Pool::default(),
 		);
 		let writer = producer.create_frame_now(3).unwrap();
 		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
@@ -779,6 +833,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			&cache::Pool::default(),
 		);
 		let frame = frame::Info {
 			size: 1,
@@ -799,6 +854,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			&cache::Pool::default(),
 		);
 		let frame = frame::Info {
 			size: 1,

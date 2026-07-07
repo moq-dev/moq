@@ -327,6 +327,36 @@ Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
 environment variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`,
 `MOQ_STATS_INTERVAL`, `MOQ_STATS_NODE`, `MOQ_STATS_DEPTH`).
 
+### \[cache]
+
+Memory budget for cached groups. Old (non-latest) groups stay cached until their
+track's TTL expires or the pool runs out of room, whichever comes first; under
+memory pressure the least-recently-read groups are evicted first. The latest
+group of every track is always retained. With neither knob set the cache is
+unbounded and only the per-track TTL limits memory.
+
+```toml
+[cache]
+# Maximum bytes of cached group payload. Accepts absolute sizes ("8GiB",
+# "512MB") or a percentage of memory ("75%", respecting the cgroup limit
+# inside containers). Unbounded when unset.
+capacity = "8GiB"
+
+# Keep at least this much system memory available ("2GiB" or "10%"). Enables a
+# background governor that re-sizes the cache every few seconds: it grows into
+# idle memory and shrinks (evicting) when the rest of the system needs it, so
+# the cache is effectively the lowest-priority user of RAM. Combine with
+# `capacity` to also cap the absolute size.
+headroom = "2GiB"
+```
+
+The `capacity` budget counts group payload bytes, not process RSS, so leave
+slack below physical memory (or just use `headroom`, which measures actual
+available memory).
+
+Both flags also accept CLI arguments (`--cache-capacity`, `--cache-headroom`)
+and environment variables (`MOQ_CACHE_CAPACITY`, `MOQ_CACHE_HEADROOM`).
+
 ### \[iroh]
 
 Experimental P2P support via iroh.

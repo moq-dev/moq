@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, CacheConfig, ClusterConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -44,6 +44,12 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub stats: StatsConfig,
+
+	/// Group cache sizing. Unbounded unless `cache.capacity` or `cache.headroom`
+	/// is set.
+	#[command(flatten)]
+	#[serde(default)]
+	pub cache: CacheConfig,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -156,6 +162,44 @@ depth = 2
 		assert_eq!(config.stats.interval, Some(5));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, Some(2));
+	}
+
+	/// Serializes tests that touch `MOQ_CACHE_*`. Same rationale as
+	/// `STATS_ENV_LOCK`.
+	static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the clap+TOML clobber bug applied to `[cache]`. Both
+	/// fields are `Option<String>` so a TOML-configured cache size survives the
+	/// CLI re-parse when no `--cache-*` flag is passed.
+	#[test]
+	fn cli_does_not_clobber_toml_cache() {
+		let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CACHE_ENV_LOCK ensures no other test in this binary touches
+		// these env vars concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_CACHE_CAPACITY");
+			std::env::remove_var("MOQ_CACHE_HEADROOM");
+		}
+
+		let toml = r#"
+[cache]
+capacity = "8GiB"
+headroom = "10%"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cache-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cache.capacity.as_deref(),
+			Some("8GiB"),
+			"TOML's cache.capacity must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(config.cache.headroom.as_deref(), Some("10%"));
 	}
 
 	/// Serializes tests that touch `MOQ_SERVER_PREFERRED_V4` / `_V6`. Same
