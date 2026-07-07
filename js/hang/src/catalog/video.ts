@@ -51,7 +51,9 @@ export const VideoConfigSchema = z.object({
 	// - If frames are buffered into 2s segments, this would be 2s.
 	latencyMin: z.optional(u53Schema),
 
-	jitter: z.optional(u53Schema),
+	// Deprecated: renamed to `latencyMin`. Still emitted (mirrored from `latencyMin`) so
+	// older consumers keep working; new code should read and write `latencyMin`.
+	jitter: z.optional(u53Schema).meta({ deprecated: true }),
 });
 
 /**
