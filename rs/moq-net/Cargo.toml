@@ -39,10 +39,6 @@ criterion = "0.8"
 # wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
 
-[[bench]]
-name = "group"
-harness = false
-
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select
 # their own backend in the leaf binary.
@@ -50,3 +46,7 @@ harness = false
 getrandom = { version = "0.4", features = ["wasm_js"] }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
 wasm-bindgen-test = "=0.3.71"
+
+[[bench]]
+name = "group"
+harness = false
