@@ -53,7 +53,7 @@ export const VideoConfigSchema = z.object({
 
 	// Deprecated: renamed to `latencyMin`. Still emitted (mirrored from `latencyMin`) so
 	// older consumers keep working; new code should read and write `latencyMin`.
-	jitter: z.optional(u53Schema).meta({ deprecated: true }),
+	jitter: z.optional(u53Schema).register(z.globalRegistry, { deprecated: true }),
 });
 
 /**
