@@ -6,6 +6,7 @@ import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
+import { isSafari } from "../util/agent.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
@@ -146,8 +147,10 @@ export class Connection implements Established {
 		}
 
 		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams
-		// no-ops on a transport that doesn't carry them).
-		if (hasDatagrams(this.#version)) {
+		// no-ops on a transport that doesn't carry them). Skip Safari: its WebTransport
+		// datagram reads fault and would tear down the session, so it receives groups over
+		// streams only (its publisher side skips datagrams too, see publisher.ts).
+		if (!isSafari && hasDatagrams(this.#version)) {
 			tasks.push(this.#subscriber.runDatagrams());
 		}
 

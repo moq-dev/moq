@@ -5,6 +5,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
+import { isSafari } from "../util/agent.ts";
 import { error, isStreamAbort } from "../util/error.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -93,7 +94,10 @@ export class Publisher {
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
 		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
-		if (hasDatagrams(version) && quic.datagrams.maxDatagramSize > 0) {
+		// Skip Safari: its WebTransport datagram I/O is broken (getWriter/write faults kill the
+		// session), so serve groups over streams only, as builds before lite-05 datagrams did.
+		// `isSafari` is checked first so `quic.datagrams` is never touched on Safari.
+		if (!isSafari && hasDatagrams(version) && quic.datagrams.maxDatagramSize > 0) {
 			this.#datagramWriter = quic.datagrams.writable.getWriter();
 		}
 	}
