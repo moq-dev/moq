@@ -267,13 +267,14 @@ impl Publish {
 				}
 				.await;
 
-				match &result {
-					// EOF: flush the importer's buffered trailing frame and close the tracks.
-					Ok(()) => decoder.finish()?,
-					// A read/decode error: abort with the real cause so subscribers see it.
-					Err(err) => decoder.abort(moq_net::Error::Transport(err.to_string())),
+				// Flush on a clean EOF; on any error (read, decode, or the flush
+				// itself) abort with the real cause so subscribers see it instead of
+				// a bare Error::Dropped.
+				let outcome = result.and_then(|()| decoder.finish());
+				if let Err(err) = &outcome {
+					decoder.abort(moq_net::Error::Transport(err.to_string()));
 				}
-				result
+				outcome
 			}
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {

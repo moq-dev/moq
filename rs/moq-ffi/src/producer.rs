@@ -361,12 +361,17 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
-	/// Finish this publisher, finalizing the catalog stream.
+	/// Finish this publisher, finalizing the catalog stream and cleanly closing the
+	/// broadcast so subscribers see a normal end rather than `Error::Dropped`.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.state.lock().unwrap();
-		let mut state = guard.take().ok_or_else(|| MoqError::Closed)?;
-		state.catalog.finish()?;
+		let mut state = guard.take().ok_or(MoqError::Closed)?;
+		// Close the broadcast even if finalizing the catalog fails, so the clean end
+		// still reaches subscribers.
+		let result = state.catalog.finish();
+		state.broadcast.close();
+		result?;
 		Ok(())
 	}
 }
