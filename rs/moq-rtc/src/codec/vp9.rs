@@ -58,6 +58,10 @@ impl codec::Bridge for Bridge {
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("vp9 track write failed: {err}")))?;
 		Ok(())
 	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.track.abort(err);
+	}
 }
 
 /// Detect a VP9 keyframe from the uncompressed header's first byte (VP9 spec

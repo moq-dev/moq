@@ -1110,6 +1110,13 @@ impl Drop for Producer {
 		if let Ok(mut state) = self.state.write()
 			&& state.final_sequence.is_none()
 		{
+			// Dropped without finish() or abort(), so consumers will see
+			// Error::Dropped instead of a clean end. Deliberate ends go through
+			// finish()/abort().
+			tracing::warn!(
+				track = %self.name(),
+				"track::Producer dropped without finish() or abort()"
+			);
 			state.groups.clear();
 			state.datagrams.clear();
 			state.duplicates.clear();

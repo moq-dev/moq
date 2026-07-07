@@ -203,6 +203,19 @@ impl Import {
 		}
 	}
 
+	/// Abort every importer's tracks with `err` so subscribers see the real cause.
+	///
+	/// Call this when the import is torn down with a known error; simply dropping the
+	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		for importer in &mut self.video_importers {
+			importer.abort(err.clone());
+		}
+		if let Some(importer) = &mut self.audio_importer {
+			importer.abort(err.clone());
+		}
+	}
+
 	/// Internal: fetch the latest playlist, download the init segment, and buffer segments.
 	async fn prime(&mut self) -> Result<usize> {
 		self.ensure_tracks().await?;

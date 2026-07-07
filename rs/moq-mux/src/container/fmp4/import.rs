@@ -787,6 +787,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
+	/// cause rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		for track in self.tracks.values_mut() {
+			if let Some(mut g) = track.group.take() {
+				let _ = g.abort(err.clone());
+			}
+			let _ = track.track.abort(err.clone());
+		}
+	}
+
 	/// Close the current group on every track and open the next one at `sequence`.
 	///
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
