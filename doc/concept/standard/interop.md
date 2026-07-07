@@ -47,4 +47,4 @@ If it plays, you interop. That's the whole test.
 - **Subscriber sees nothing?** If your relay doesn't replay existing
   announcements, start the subscriber before the publisher.
 - **Verbose logs:** prefix with `RUST_LOG=info,moq_net=debug`. It prints the
-  negotiated version (e.g. `connected version=moq-transport-18`).
+  negotiated version (e.g. `connected version=moq-transport-19`).
