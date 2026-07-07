@@ -16,6 +16,19 @@ fn avcc() -> Vec<u8> {
 
 /// AudioSpecificConfig for AAC-LC, 44100 Hz, stereo.
 const ASC: [u8; 2] = [0x12, 0x10];
+const AV1C: [u8; 4] = [0x81, 0x08, 0x0c, 0x00];
+const AC3_FRAME: [u8; 7] = [0x0B, 0x77, 0x00, 0x00, 0x1C, 0x40, 0xE1];
+const EAC3_FRAME: [u8; 6] = [0x0B, 0x77, 0x00, 0xFF, 0x3F, 0x80];
+
+fn flv_header(flags: u8) -> Vec<u8> {
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(flags);
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+	out
+}
 
 /// Append an FLV tag (header + body + trailing PreviousTagSize) to `out`.
 fn write_tag(out: &mut Vec<u8>, tag_type: u8, timestamp: u32, body: &[u8]) {
@@ -75,10 +88,10 @@ fn synth_flv() -> Vec<u8> {
 
 #[tokio::test(start_paused = true)]
 async fn import_populates_catalog() {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
@@ -100,11 +113,11 @@ async fn import_populates_catalog() {
 
 #[tokio::test(start_paused = true)]
 async fn import_emits_frames() {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
@@ -130,10 +143,10 @@ async fn import_handles_split_input() {
 	let flv = synth_flv();
 	let (head, tail) = flv.split_at(flv.len() / 2);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(head)).unwrap();
 	importer.decode(&bytes::BytesMut::from(tail)).unwrap();
 	importer.finish().unwrap();
@@ -164,9 +177,9 @@ async fn import_enhanced_vp9() {
 	body.extend_from_slice(VP9_KEYFRAME_320X240);
 	write_tag(&mut out, super::TAG_VIDEO, 0, &body);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -208,9 +221,9 @@ async fn import_enhanced_opus() {
 	frame.extend_from_slice(&[0xfc, 0xff, 0xfe]);
 	write_tag(&mut out, super::TAG_AUDIO, 20, &frame);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -243,9 +256,9 @@ async fn import_legacy_mp3() {
 	tag.extend_from_slice(&mp3);
 	write_tag(&mut out, super::TAG_AUDIO, 0, &tag);
 
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let mut importer = Import::new(producer, catalog.clone());
+	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
 	importer.finish().unwrap();
 
@@ -259,11 +272,181 @@ async fn import_legacy_mp3() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn import_enhanced_av1() {
+	let mut out = flv_header(0x01);
+
+	let mut seq = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"av01");
+	seq.extend_from_slice(&AV1C);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+
+	let payload = [0x12, 0x00, 0x34, 0x56];
+	let mut frame = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES_X];
+	frame.extend_from_slice(b"av01");
+	frame.extend_from_slice(&payload);
+	write_tag(&mut out, super::TAG_VIDEO, 33, &frame);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	let (name, v) = snap.video.renditions.iter().next().unwrap();
+	assert!(matches!(v.codec, VideoCodec::AV1(_)));
+	assert_eq!(v.description.as_ref().map(|b| b.as_ref()), Some(&AV1C[..]));
+
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
+		.with_latency(std::time::Duration::from_secs(1));
+	let frame = decoder.read().await.unwrap().expect("an AV1 frame");
+	assert!(frame.keyframe);
+	assert_eq!(frame.payload.as_ref(), payload);
+}
+
+#[tokio::test(start_paused = true)]
+async fn import_enhanced_ac3() {
+	let mut out = flv_header(0x04);
+	let mut frame = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
+	frame.extend_from_slice(b"ac-3");
+	frame.extend_from_slice(&AC3_FRAME);
+	write_tag(&mut out, super::TAG_AUDIO, 0, &frame);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	let a = snap.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Ac3));
+	assert_eq!(a.sample_rate, 48_000);
+	assert_eq!(a.channel_count, 6);
+	assert!(a.description.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn import_enhanced_eac3() {
+	let mut out = flv_header(0x04);
+	let mut frame = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
+	frame.extend_from_slice(b"ec-3");
+	frame.extend_from_slice(&EAC3_FRAME);
+	write_tag(&mut out, super::TAG_AUDIO, 0, &frame);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	let a = snap.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Ec3));
+	assert_eq!(a.sample_rate, 48_000);
+	assert_eq!(a.channel_count, 6);
+	assert!(a.description.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn import_reports_negative_pts_and_can_resume() {
+	let mut out = flv_header(0x01);
+
+	let mut seq = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	seq.extend_from_slice(&avcc());
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+
+	let mut negative = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_NALU,
+		0xff,
+		0xff,
+		0xff,
+	];
+	negative.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &negative);
+
+	let mut good = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_NALU,
+		0,
+		0,
+		0,
+	];
+	good.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+	write_tag(&mut out, super::TAG_VIDEO, 10, &good);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	let err = importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap_err();
+	assert!(matches!(
+		err,
+		crate::Error::NegativeFlvPts {
+			dts_ms: 0,
+			composition_time_ms: -1
+		}
+	));
+	importer.decode(&[]).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	let name = snap.video.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
+		.with_latency(std::time::Duration::from_secs(1));
+	let frame = decoder.read().await.unwrap().expect("the good frame");
+	assert_eq!(frame.timestamp.as_millis(), 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn import_enhanced_hvc1_applies_composition_time() {
+	let mut out = flv_header(0x01);
+
+	// Use avc1 to bootstrap a video track with a tiny config record; the coded
+	// frame below uses hvc1, which is the branch this regression covers.
+	let mut seq = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"avc1");
+	seq.extend_from_slice(&avcc());
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+
+	let mut coded = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES];
+	coded.extend_from_slice(b"hvc1");
+	coded.extend_from_slice(&[0, 0, 7]);
+	coded.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+	write_tag(&mut out, super::TAG_VIDEO, 10, &coded);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	let name = snap.video.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
+		.with_latency(std::time::Duration::from_secs(1));
+	let frame = decoder.read().await.unwrap().expect("a video frame");
+	assert_eq!(frame.timestamp.as_millis(), 17);
+}
+
+#[tokio::test(start_paused = true)]
 async fn import_rejects_non_flv() {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut importer = Import::new(producer, catalog);
+	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(&b"NOTFLV\x00\x00\x00"[..]);
 	assert!(importer.decode(&buf).is_err());
 }

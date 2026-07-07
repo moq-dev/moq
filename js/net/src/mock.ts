@@ -38,11 +38,14 @@ class MockTransport implements WebTransport {
 	#closeResolve!: (info: WebTransportCloseInfo) => void;
 	#bidiController!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
 	#uniController!: ReadableStreamDefaultController<ReadableStream<Uint8Array>>;
+	// Incoming-datagram controller (only set when datagrams are enabled); the peer's
+	// writable enqueues into it.
+	#datagramController?: ReadableStreamDefaultController<Uint8Array>;
 
 	// Reference to the peer so we can enqueue streams to them
 	#peer?: MockTransport;
 
-	constructor(protocol: string) {
+	constructor(protocol: string, datagramsEnabled = true) {
 		this.protocol = protocol;
 		this.ready = Promise.resolve(undefined);
 		this.closed = new Promise((resolve) => {
@@ -64,16 +67,51 @@ class MockTransport implements WebTransport {
 		this.congestionControl = "default";
 		this.reliability = "supports-unreliable";
 
-		// Stub datagrams
-		this.datagrams = {
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			incomingHighWaterMark: 0,
-			outgoingHighWaterMark: 0,
-			incomingMaxAge: null,
-			outgoingMaxAge: null,
-			maxDatagramSize: 0,
-		};
+		if (datagramsEnabled) {
+			// A real datagram duplex: writes enqueue into the peer's incoming readable,
+			// so a peer pair actually exchanges datagrams (unlike a real qmux Session,
+			// whose datagram streams are inert stubs).
+			const readable = new ReadableStream<Uint8Array>({
+				start: (controller) => {
+					this.#datagramController = controller;
+				},
+			});
+			const writable = new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					const peer = this.#peer;
+					if (!peer) return;
+					const controller = peer.#datagramController;
+					if (!controller) return;
+					try {
+						// Copy so the caller's scratch buffer reuse can't corrupt queued data.
+						controller.enqueue(new Uint8Array(chunk));
+					} catch {
+						// Peer closed; drop (datagrams are best-effort).
+					}
+				},
+			});
+			this.datagrams = {
+				readable,
+				writable,
+				incomingHighWaterMark: 0,
+				outgoingHighWaterMark: 0,
+				incomingMaxAge: null,
+				outgoingMaxAge: null,
+				maxDatagramSize: 1200,
+			};
+		} else {
+			// Simulate a transport that doesn't carry datagrams (maxDatagramSize 0): the
+			// wire layer must fall back to not sending, with no group fallback.
+			this.datagrams = {
+				readable: new ReadableStream(),
+				writable: new WritableStream(),
+				incomingHighWaterMark: 0,
+				outgoingHighWaterMark: 0,
+				incomingMaxAge: null,
+				outgoingMaxAge: null,
+				maxDatagramSize: 0,
+			};
+		}
 	}
 
 	setPeer(peer: MockTransport) {
@@ -141,6 +179,12 @@ class MockTransport implements WebTransport {
 			// Already closed
 		}
 
+		try {
+			this.#datagramController?.close();
+		} catch {
+			// Already closed
+		}
+
 		// Also close peer's incoming streams
 		if (this.#peer) {
 			try {
@@ -150,6 +194,11 @@ class MockTransport implements WebTransport {
 			}
 			try {
 				this.#peer.#uniController.close();
+			} catch {
+				// Already closed
+			}
+			try {
+				this.#peer.#datagramController?.close();
 			} catch {
 				// Already closed
 			}
@@ -163,15 +212,30 @@ class MockTransport implements WebTransport {
 	}
 }
 
+/** Options for {@link createMockTransportPair}. */
+export interface MockTransportOptions {
+	/**
+	 * Whether the paired transports carry QUIC datagrams (default true). Set false to
+	 * simulate a transport that reports `maxDatagramSize` 0 (e.g. a qmux/WebSocket
+	 * session), so the wire layer must fall back to not sending datagrams.
+	 */
+	datagrams?: boolean;
+}
+
 /**
  * Creates a pair of connected MockTransport instances.
  *
  * @param protocol - The WebTransport protocol identifier (e.g. "moqt-17", "moql", "")
+ * @param options - Optional behavior toggles (e.g. disabling datagrams)
  * @returns An object containing `client` and `server` transports
  */
-export function createMockTransportPair(protocol = ""): { client: WebTransport; server: WebTransport } {
-	const client = new MockTransport(protocol);
-	const server = new MockTransport(protocol);
+export function createMockTransportPair(
+	protocol = "",
+	options?: MockTransportOptions,
+): { client: WebTransport; server: WebTransport } {
+	const datagrams = options?.datagrams ?? true;
+	const client = new MockTransport(protocol, datagrams);
+	const server = new MockTransport(protocol, datagrams);
 	client.setPeer(server);
 	server.setPeer(client);
 	return { client, server };

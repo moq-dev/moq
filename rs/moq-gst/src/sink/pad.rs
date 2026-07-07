@@ -65,7 +65,7 @@ impl Pad {
 	/// sticky event keep the live producer.
 	pub fn observe_caps(
 		&mut self,
-		broadcast: &moq_net::BroadcastProducer,
+		broadcast: &moq_net::broadcast::Producer,
 		catalog: &moq_mux::catalog::Producer,
 		caps: &gst::Caps,
 	) {
@@ -80,7 +80,7 @@ impl Pad {
 
 	fn build(
 		&mut self,
-		broadcast: &moq_net::BroadcastProducer,
+		broadcast: &moq_net::broadcast::Producer,
 		catalog: &moq_mux::catalog::Producer,
 		caps: &gst::Caps,
 	) -> Result<()> {
@@ -117,8 +117,9 @@ impl Pad {
 				// directly and lifts it into a `Track` via `.into()`.
 				let name = broadcast.unique_name(".mp3");
 				let request = broadcast.reserve_track(name)?;
-				let producer = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
-				moq_mux::codec::mp3::Import::new(producer, catalog, config)?.into()
+				let producer =
+					request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
+				moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config)?.into()
 			}
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
@@ -148,8 +149,9 @@ impl Pad {
 				// importer directly and lifts it into a `Track` via `.into()`.
 				let name = broadcast.unique_name(".opus");
 				let request = broadcast.reserve_track(name)?;
-				let producer = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
-				moq_mux::codec::opus::Import::new(producer, catalog, config)?.into()
+				let producer =
+					request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
+				moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config)?.into()
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
@@ -161,7 +163,7 @@ impl Pad {
 	/// Reserve a uniquely named track and hand it to the single-codec importer, which accepts the request
 	/// (setting the microsecond timescale) and registers the catalog rendition once the config resolves.
 	fn reserve(
-		broadcast: &mut moq_net::BroadcastProducer,
+		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		suffix: &str,
 		format: &str,
@@ -169,7 +171,7 @@ impl Pad {
 	) -> Result<import::Track> {
 		let name = broadcast.unique_name(suffix);
 		let request = broadcast.reserve_track(name)?;
-		Ok(import::Track::new(request, catalog, format, init)?)
+		Ok(import::Track::new(request, catalog.reserve(), format, init)?)
 	}
 
 	/// Drops the producer (closing its track) and marks the pad failed so further buffers are dropped.
@@ -330,8 +332,8 @@ mod tests {
 	use super::*;
 
 	/// Local producers, no network: a broadcast plus its catalog, exactly what the element holds.
-	fn producers() -> (moq_net::BroadcastProducer, moq_mux::catalog::Producer) {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	fn producers() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		(broadcast, catalog)
 	}

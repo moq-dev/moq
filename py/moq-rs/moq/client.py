@@ -1,4 +1,4 @@
-"""Client wrapper — simplified connection with automatic origin wiring."""
+"""Client wrapper for simplified connection with automatic origin wiring."""
 
 from __future__ import annotations
 
@@ -111,6 +111,7 @@ class Client:
         return self._consumer.announced_broadcast(path)
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
+        """Request a broadcast by path, resolving as soon as it can be served."""
         if self._consumer is None:
             raise RuntimeError("no consume origin configured")
         return await self._consumer.request_broadcast(path)
@@ -125,6 +126,8 @@ def connect(
     url: str,
     *,
     tls_verify: bool = True,
+    tls_roots: list[str] | None = None,
+    tls_fingerprints: list[str] | None = None,
     bind: str | None = None,
     publish: OriginProducer | None = None,
     subscribe: OriginProducer | None = None,
@@ -136,4 +139,12 @@ def connect(
         async with moq.connect("https://relay.example.com") as client:
             ...
     """
-    return Client(url, tls_verify=tls_verify, bind=bind, publish=publish, subscribe=subscribe)
+    return Client(
+        url,
+        tls_verify=tls_verify,
+        tls_roots=tls_roots,
+        tls_fingerprints=tls_fingerprints,
+        bind=bind,
+        publish=publish,
+        subscribe=subscribe,
+    )

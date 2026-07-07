@@ -17,12 +17,51 @@ const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
 
 /// Whether a rendition carries video or audio (drives the store's segmenting policy).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// Also the first URL path component of a rendition (`/{broadcast}/{kind}/{name}/...`),
+/// so video and audio renditions that share a name don't collide.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Kind {
 	/// Video: a segment is a GOP, rolling on each independent fragment.
 	Video,
 	/// Audio: segments roll on accumulated duration (no keyframes).
 	Audio,
+}
+
+impl Kind {
+	/// The URL path component for this kind (`"video"` / `"audio"`).
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Kind::Video => "video",
+			Kind::Audio => "audio",
+		}
+	}
+}
+
+impl std::str::FromStr for Kind {
+	type Err = ();
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		match s {
+			"video" => Ok(Kind::Video),
+			"audio" => Ok(Kind::Audio),
+			_ => Err(()),
+		}
+	}
+}
+
+/// Shared context passed to every rendition constructor: the export source (the
+/// catalog broadcast plus optional origin context for cross-broadcast renditions),
+/// the export tuning, and the pause signal. Grouped so the constructors don't take
+/// a long list of easily-transposed positional arguments.
+pub(crate) struct Context<'a> {
+	/// The export source whose track this rendition exports. Carries origin context
+	/// so a rendition referencing a sibling broadcast (catalog `broadcast` field) resolves.
+	pub source: moq_mux::Source,
+	/// Export tuning shared across renditions.
+	pub cfg: &'a Config,
+	/// Pause signal shared with every rendition pump.
+	pub paused: watch::Receiver<bool>,
 }
 
 /// A single HLS rendition: its display metadata for the master playlist plus the
@@ -42,19 +81,17 @@ pub struct Rendition {
 	pub codec: String,
 	/// The segment/part store fed by this rendition's exporter task.
 	pub store: Arc<SegmentStore>,
+	/// Aborts the background exporter pump when the rendition is dropped, so a
+	/// pump doesn't outlive the [`Broadcaster`](super::Broadcaster) (and server)
+	/// that owns it.
+	pump: tokio::task::JoinHandle<()>,
 }
 
 impl Rendition {
 	/// Build a video rendition and spawn its exporter pump.
-	pub fn video(
-		name: String,
-		config: &VideoConfig,
-		source: moq_mux::Source,
-		cfg: &Config,
-		paused: watch::Receiver<bool>,
-	) -> Self {
-		let store = Arc::new(SegmentStore::new(Kind::Video, cfg));
-		spawn_pump(source, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
+	pub(crate) fn video(name: String, config: &VideoConfig, ctx: Context<'_>) -> Self {
+		let store = Arc::new(SegmentStore::new(Kind::Video, ctx.cfg));
+		let pump = spawn_pump(name.clone(), Kind::Video, store.clone(), &ctx);
 		Self {
 			name,
 			kind: Kind::Video,
@@ -63,19 +100,14 @@ impl Rendition {
 			height: config.coded_height,
 			codec: config.codec.to_string(),
 			store,
+			pump,
 		}
 	}
 
 	/// Build an audio rendition and spawn its exporter pump.
-	pub fn audio(
-		name: String,
-		config: &AudioConfig,
-		source: moq_mux::Source,
-		cfg: &Config,
-		paused: watch::Receiver<bool>,
-	) -> Self {
-		let store = Arc::new(SegmentStore::new(Kind::Audio, cfg));
-		spawn_pump(source, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
+	pub(crate) fn audio(name: String, config: &AudioConfig, ctx: Context<'_>) -> Self {
+		let store = Arc::new(SegmentStore::new(Kind::Audio, ctx.cfg));
+		let pump = spawn_pump(name.clone(), Kind::Audio, store.clone(), &ctx);
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -84,25 +116,28 @@ impl Rendition {
 			height: None,
 			codec: config.codec.to_string(),
 			store,
+			pump,
 		}
 	}
 }
 
-fn spawn_pump(
-	source: moq_mux::Source,
-	name: String,
-	kind: Kind,
-	store: Arc<SegmentStore>,
-	cfg: Config,
-	paused: watch::Receiver<bool>,
-) {
+impl Drop for Rendition {
+	fn drop(&mut self) {
+		self.pump.abort();
+	}
+}
+
+fn spawn_pump(name: String, kind: Kind, store: Arc<SegmentStore>, ctx: &Context<'_>) -> tokio::task::JoinHandle<()> {
+	let source = ctx.source.clone();
+	let cfg = ctx.cfg.clone();
+	let paused = ctx.paused.clone();
 	tokio::spawn(async move {
 		if let Err(err) = run_pump(source, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
 		store.finish();
-	});
+	})
 }
 
 async fn run_pump(

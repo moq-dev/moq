@@ -34,7 +34,7 @@ export class Broadcast {
 	// offline. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	// Reacquire it via an effect, since reconnecting swaps in a fresh producer.
-	readonly net = new Signal<Moq.Broadcast | undefined>(undefined);
+	readonly net = new Signal<Moq.broadcast.Producer | undefined>(undefined);
 
 	signals = new Effect();
 
@@ -77,7 +77,7 @@ export class Broadcast {
 			);
 		}
 
-		const broadcast = new Moq.Broadcast();
+		const broadcast = new Moq.broadcast.Producer();
 		effect.cleanup(() => broadcast.close());
 
 		// Publish it before serving so an application reacting to `net` can insert its own tracks.
@@ -91,14 +91,14 @@ export class Broadcast {
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
 	}
 
-	async #runBroadcast(broadcast: Moq.Broadcast, effect: Effect) {
+	async #runBroadcast(broadcast: Moq.broadcast.Producer, effect: Effect) {
 		for (;;) {
 			const request = await broadcast.requested();
 			if (!request) break;
 
 			// dev's reshape hands back a TrackRequest: switch on its name, reject unknown
 			// tracks, and accept the rest into a producer to serve.
-			let serve: ((track: Moq.TrackProducer, effect: Effect) => void) | undefined;
+			let serve: ((track: Moq.track.Producer, effect: Effect) => void) | undefined;
 			switch (request.name) {
 				case Broadcast.CATALOG_TRACK:
 					serve = (track, effect) => this.catalog.serve(track, effect);
@@ -125,7 +125,7 @@ export class Broadcast {
 			const track = request.accept();
 			effect.cleanup(() => track.close());
 			effect.run((effect) => {
-				if (effect.get(track.state.closed)) return;
+				if (effect.get(track.closedSignal)) return;
 				serve(track, effect);
 			});
 		}

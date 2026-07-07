@@ -23,17 +23,17 @@ const OBSERVED = [
 ] as const;
 type Observed = (typeof OBSERVED)[number];
 
-// Parse the `visible` attribute into a Visible value, falling back to "0px" (on screen only).
+// Parse the `visible` attribute into a Visible value, falling back to "20%".
 function parseVisible(value: string | null): Video.Visible {
 	const trimmed = value?.trim();
-	if (!trimmed) return "0px";
+	if (!trimmed) return "20%";
 	if (trimmed === "never" || trimmed === "always") return trimmed;
 	// A CSS length usable as an IntersectionObserver rootMargin (px or %).
 	if (/^-?\d+(\.\d+)?(px|%)$/.test(trimmed)) return trimmed;
 	// Allow a bare number as a px convenience (e.g. visible="200").
 	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`;
 	console.warn(`moq-watch: invalid visible="${value}", expected "never", "always", or a CSS length like "200px"`);
-	return "0px";
+	return "20%";
 }
 
 function parseBoolean(value: string | null, defaultValue: boolean): boolean {
@@ -68,7 +68,7 @@ export default class MoqWatch extends HTMLElement {
 		volume: new Signal(0.5),
 		muted: new Signal(false),
 		// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
-		visible: new Signal<Video.Visible>("0px"),
+		visible: new Signal<Video.Visible>("20%"),
 		latency: new Signal<Latency>("real-time"),
 		// The desired video rendition (resolution/bitrate cap).
 		target: new Signal<Video.Target | undefined>(undefined),

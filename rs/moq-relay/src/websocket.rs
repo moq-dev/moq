@@ -14,7 +14,8 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_net::{OriginProducer, StatsHandle};
+use moq_net::StatsHandle;
+use moq_net::origin;
 
 use crate::{AuthParams, web::AuthQuery, web::MtlsPeer, web::WebState, web::landing_response};
 
@@ -83,8 +84,8 @@ async fn handle_socket<T>(
 	_id: u64,
 	socket: T,
 	alpn: Option<String>,
-	publish: Option<OriginProducer>,
-	subscribe: Option<OriginProducer>,
+	publish: Option<origin::Producer>,
+	subscribe: Option<origin::Producer>,
 	stats: StatsHandle,
 ) -> anyhow::Result<()>
 where

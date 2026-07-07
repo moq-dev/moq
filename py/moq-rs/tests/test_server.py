@@ -1,4 +1,4 @@
-"""Server tests — end-to-end Server + Client over loopback with TLS."""
+"""Server tests for end-to-end Server + Client over loopback with TLS."""
 
 import asyncio
 import struct

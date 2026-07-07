@@ -1,15 +1,16 @@
 import { Signal } from "@moq/signals";
-import { Announced } from "../announced.ts";
+import * as announce from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
-import { Broadcast, type TrackRequest } from "../broadcast.ts";
-import { Group } from "../group.ts";
+import * as broadcast from "../broadcast.ts";
+import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
-import type { TrackProducer } from "../track.ts";
+import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -17,7 +18,7 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceOk, Version } from "./version.ts";
+import { hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
@@ -59,8 +60,8 @@ export interface AnnouncedOptions {
 
 interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
-	// the matching TrackSubscriber it got from Broadcast.subscribe.
-	track: TrackProducer;
+	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
+	track: track.Producer;
 	// Per-frame timestamp scale (0 = none). undefined until it's known (from TRACK_INFO
 	// on lite-05+, or implicit defaults on older drafts). A non-zero value means each
 	// frame on the group stream is prefixed with a zigzag-delta timestamp varint that
@@ -133,13 +134,13 @@ export class Subscriber {
 	 * Pass `{ ignoreSelf: true }` to skip announces that have already traversed
 	 * this connection's {@link origin}.
 	 */
-	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): Announced {
-		const announced = new Announced();
+	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): announce.Consumer {
+		const announced = new announce.Producer(prefix);
 		void this.#runAnnounced(announced, prefix, options);
-		return announced;
+		return announced.consume();
 	}
 
-	async #runAnnounced(announced: Announced, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Send our own session-level origin id so the peer can skip announces
 		// whose hop chain already passed through us. Matches the Rust subscriber's
@@ -171,7 +172,7 @@ export class Subscriber {
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ path, active: true });
+						announced.append({ path: suffix, active: true });
 					}
 					break;
 				}
@@ -201,7 +202,7 @@ export class Subscriber {
 				const path = Path.join(prefix, announce.suffix);
 
 				console.debug(`announced: broadcast=${path} active=${announce.active}`);
-				announced.append({ path, active: announce.active });
+				announced.append({ path: announce.suffix, active: announce.active });
 			}
 
 			announced.close();
@@ -216,12 +217,12 @@ export class Subscriber {
 	 * @param name - The name of the broadcast to consume
 	 * @returns A Broadcast instance
 	 */
-	consume(path: Path.Valid): Broadcast {
-		const broadcast = new Broadcast();
+	consume(path: Path.Valid): broadcast.Consumer {
+		const consumer = new broadcast.Consumer();
 
 		// Resolve TrackConsumer.info() via a TRACK stream (lite-05+). On older drafts
 		// there's no TRACK stream, so info() rejects rather than fabricating defaults.
-		broadcast.onTrackInfo(async (name) => {
+		consumer.onTrackInfo(async (name) => {
 			if (!supportsTrackStream(this.version)) {
 				throw new Error("track info requires moq-lite-05 or newer");
 			}
@@ -238,16 +239,16 @@ export class Subscriber {
 
 		void (async () => {
 			for (;;) {
-				const request = await broadcast.requested();
+				const request = await consumer.requested();
 				if (!request) break;
 				void this.#runSubscribe(path, request);
 			}
 		})();
 
-		return broadcast;
+		return consumer;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
+	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
@@ -263,7 +264,7 @@ export class Subscriber {
 		const state: { stream?: Stream } = {};
 		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
-		let opened: { stream: Stream; producer: TrackProducer };
+		let opened: { stream: Stream; producer: track.Producer };
 		try {
 			opened = await withTimeout(
 				setup,
@@ -322,7 +323,7 @@ export class Subscriber {
 	}
 
 	// Determine the track's immutable properties, accept the request (so the
-	// application's TrackSubscriber resolves and incoming groups have a producer to
+	// application's track.Subscriber resolves and incoming groups have a producer to
 	// write into), register it, then open the subscribe stream. `state.stream` is
 	// populated as soon as the subscribe stream opens so the caller can clean it up
 	// on timeout even before this promise settles.
@@ -333,11 +334,11 @@ export class Subscriber {
 	async #openSubscribe(
 		state: { stream?: Stream },
 		msg: Subscribe,
-		request: TrackRequest,
+		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
-	): Promise<{ stream: Stream; producer: TrackProducer }> {
-		let producer: TrackProducer;
+	): Promise<{ stream: Stream; producer: track.Producer }> {
+		let producer: track.Producer;
 		let drainOk = false;
 
 		if (supportsTrackStream(this.version)) {
@@ -422,7 +423,7 @@ export class Subscriber {
 	async #runPriorityUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
-		track: TrackProducer,
+		track: track.Producer,
 		msg: Subscribe,
 		stream: Stream,
 	): Promise<void> {
@@ -430,10 +431,10 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const current = track.state.priority.peek();
+			const current = track.prioritySignal.peek();
 			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.state.priority.next(), stopped]);
+				const next = await Promise.race([track.prioritySignal.next(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -471,7 +472,7 @@ export class Subscriber {
 		}
 
 		const { track, timescale } = entry;
-		const producer = new Group(group.sequence);
+		const producer = new netGroup.Producer(group.sequence);
 		track.writeGroup(producer);
 
 		try {
@@ -479,13 +480,13 @@ export class Subscriber {
 			// TRACK_INFO (or implicit defaults) resolves it on the subscribe stream.
 			let scale = timescale.peek();
 			while (scale === undefined) {
-				if (track.state.closed.peek()) {
+				if (track.closedSignal.peek()) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
 					stream.stop(new Error("cancel"));
 					return;
 				}
-				await Signal.race(timescale, track.state.closed);
+				await Signal.race(timescale, track.closedSignal);
 				scale = timescale.peek();
 			}
 
@@ -520,6 +521,61 @@ export class Subscriber {
 			producer.close(e);
 			stream.stop(e);
 		}
+	}
+
+	/**
+	 * Receives QUIC datagrams and routes each to its subscription's track producer (lite-05 §6.4).
+	 *
+	 * Returns immediately on a non-datagram transport or pre-lite-05 version. A decode error or an
+	 * unknown subscribe id drops that datagram without tearing down the session (best-effort); the
+	 * loop ends only when the datagram stream closes.
+	 *
+	 * @internal
+	 */
+	async runDatagrams(): Promise<void> {
+		if (!hasDatagrams(this.version) || this.#quic.datagrams.maxDatagramSize === 0) {
+			return;
+		}
+
+		// Never reject: this loop is awaited alongside the connection's other tasks, so a
+		// datagram-stream failure must not tear the whole session down (it's best-effort).
+		try {
+			const reader = this.#quic.datagrams.readable.getReader();
+			try {
+				for (;;) {
+					const { value, done } = await reader.read();
+					if (done) break;
+					if (!value) continue;
+
+					try {
+						await this.#routeDatagram(value);
+					} catch (err: unknown) {
+						console.debug(`dropping datagram: ${error(err).message}`);
+					}
+				}
+			} finally {
+				reader.releaseLock();
+			}
+		} catch (err: unknown) {
+			console.warn("datagram stream error", err);
+		}
+	}
+
+	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
+	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
+	async #routeDatagram(payload: Uint8Array): Promise<void> {
+		const dg = await DatagramMessage.decode(payload);
+
+		const entry = this.#subscribes.get(dg.subscribe);
+		if (!entry) return; // Unknown or already-closed subscription.
+
+		// Datagrams are lite-05+, which always negotiates a timescale; if it hasn't resolved
+		// yet (the datagram raced ahead of TRACK_INFO), drop rather than guess.
+		const scale = entry.timescale.peek();
+		if (!scale) return;
+
+		const timestamp = new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
+		entry.track.writeDatagram({ sequence: dg.sequence, timestamp, payload: dg.payload });
 	}
 
 	/**

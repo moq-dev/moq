@@ -46,7 +46,7 @@ impl Producer {
 	/// in `catalog`. The packets fed to [`publish`](Self::publish) must be in
 	/// that codec's framing (the matching [`Encoder`](super::Encoder) emits it).
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
+		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		codec: Codec,
 	) -> Result<Self, Error> {
@@ -55,14 +55,14 @@ impl Producer {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog),
+					import: moq_mux::codec::h264::Import::new(track, catalog.reserve()),
 				}
 			}
 			Codec::H265 => {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".hev1")?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog),
+					import: moq_mux::codec::h265::Import::new(track, catalog.reserve()),
 				}
 			}
 		};
@@ -71,8 +71,8 @@ impl Producer {
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
 	/// subscription state is observable before any frames arrive. Watch it via
-	/// [`used`](moq_net::TrackDemand::used) / [`unused`](moq_net::TrackDemand::unused).
-	pub fn demand(&self) -> moq_net::TrackDemand {
+	/// [`used`](moq_net::track::Demand::used) / [`unused`](moq_net::track::Demand::unused).
+	pub fn demand(&self) -> moq_net::track::Demand {
 		match &self.codecs {
 			Codecs::H264 { import, .. } => import.demand(),
 			Codecs::H265 { import, .. } => import.demand(),
@@ -136,7 +136,7 @@ pub struct Options {
 /// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
 /// tracks aligned.
 pub async fn publish_capture(
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	capture: capture::Config,
 	encode: Options,
@@ -170,7 +170,7 @@ pub async fn publish_capture(
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 fn assert_publish_capture_send(
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	capture: capture::Config,
 	encode: Options,
@@ -204,7 +204,7 @@ fn log_track_ended(err: moq_net::Error) {
 /// itself wedged.
 async fn capture_loop(
 	producer: &mut Producer,
-	demand: &moq_net::TrackDemand,
+	demand: &moq_net::track::Demand,
 	capture: &capture::Config,
 	encode: &Options,
 	clock: &moq_mux::Clock,
@@ -297,7 +297,7 @@ mod tests {
 	/// `Auto`, which on Linux CI would try the NVENC backend and panic in cudarc
 	/// on a GPU-less runner.
 	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> String {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut producer = Producer::new(broadcast, catalog.clone(), codec).unwrap();
 

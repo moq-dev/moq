@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Computed, Effect, Signal } from "./index.ts";
+import { Computed, Effect, Once, Signal } from "./index.ts";
 
 // Flush pending microtasks. Signal notifications and effect/computed reruns are
 // coalesced onto microtasks, so a chain of A -> B -> effect needs several flushes.
@@ -291,5 +291,45 @@ describe("effect.computed", () => {
 		await settle();
 		expect(computes).toBe(before);
 		observer.close();
+	});
+});
+
+describe("Once", () => {
+	test("awaits the settled value, immediately if already settled", async () => {
+		const { Once } = await import("./index.ts");
+		const once = new Once<string>();
+
+		let awaited: string | undefined;
+		void once.then((v) => {
+			awaited = v;
+		});
+		expect(awaited).toBeUndefined();
+
+		once.set("done");
+		await once; // resolves now
+		expect(await once).toBe("done"); // still resolves after the fact
+		expect(awaited).toBe("done");
+	});
+
+	test("peek returns undefined while pending, the value once settled", () => {
+		const once = new Once<number>();
+		expect(once.peek()).toBeUndefined();
+		once.set(7);
+		expect(once.peek()).toBe(7);
+	});
+
+	test("set throws if called twice", () => {
+		const once = new Once<boolean>();
+		once.set(true);
+		expect(() => once.set(true)).toThrow();
+	});
+
+	test("notifies subscribers once when it settles", async () => {
+		const once = new Once<string>();
+		const seen: (string | undefined)[] = [];
+		once.subscribe((v) => seen.push(v));
+		once.set("x");
+		await flush();
+		expect(seen).toEqual(["x"]);
 	});
 });

@@ -10,7 +10,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 
 **Transport / protocol**
 
-- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. Owns the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session` (no concrete QUIC dep). Submodules are private; the public surface is re-exported flat from the crate root.
+- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. Owns the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session` (no concrete QUIC dep). Each level of the hierarchy is a public role module that owns short names (`broadcast::Consumer`, `track::Producer`, `group::Info`, `frame::Producer`, `origin::Consumer`, `announce::Consumer`); origin + announce share one private implementation surfaced as two curated modules.
 - `moq-native` (lib): native connection helpers. `ClientConfig`/`ServerConfig` wrap QUIC backends (Quinn/Quiche/Noq/Iroh), WebTransport, WebSocket, TCP (qmux), Unix sockets, TLS, cert hot-reload, logging, jemalloc. Re-exports `moq_net`. Example: `examples/clock.rs`.
 - `kio` (lib): "easy async". `Producer<T>`/`Consumer<T>` shared-state channels with `Waiter`-based notification, built on `std::task::Waker`, no runtime dependency. Underpins all the `poll_*` plumbing in moq-net and moq-mux. `src/producer.rs`, `src/consumer.rs`, `src/waiter.rs`.
 
@@ -51,18 +51,20 @@ When you change `moq-ffi`'s surface, mirror it in `libmoq` and the language wrap
 
 The whole stack is built on a split-handle pattern: a `Producer` writes, one or more `Consumer`s read, state is shared via `kio`. This recurs in moq-net, moq-mux, moq-json.
 
-- Broadcast: `BroadcastProducer` / `BroadcastConsumer` / `BroadcastDynamic` (`model/broadcast.rs:74,370,216`).
-- Track: `TrackProducer` / `TrackConsumer` / `TrackWeak` (`model/track.rs:206,459,425`).
-- Group: `GroupProducer` / `GroupConsumer` (`model/group.rs:140,286`). Consumers `clone()` for fanout.
-- Frame: `FrameProducer` (impls `BufMut`) / `FrameConsumer` (`model/frame.rs:162,317`).
-- Origin: `OriginProducer` / `OriginConsumer` (`model/origin.rs`).
+Each level is a role module (`broadcast`, `track`, `group`, `frame`, `origin`, `announce`) owning short `Producer`/`Consumer` names:
+
+- Broadcast: `broadcast::{Producer, Consumer, Dynamic}` (`model/broadcast.rs`).
+- Track: `track::{Producer, Consumer, Subscriber, ...}` plus the `pub(crate)` `track::TrackWeak` (`model/track.rs`).
+- Group: `group::{Producer, Consumer, Info}` (`model/group.rs`). Consumers `clone()` for fanout.
+- Frame: `frame::Producer` / `frame::Consumer` (`model/frame.rs`).
+- Origin: `origin::{Producer, Consumer}` for the broadcast set; `announce::{Producer, Consumer}` for (un)announce events. Both share the private `origin.rs` implementation (`mod origin_impl`), surfaced via `model/mod.rs`.
 
 ## Async / poll plumbing
 
 Two ways to drive things, both backed by `kio`:
 
 - `async fn` (requires an active tokio runtime; awaiting outside one may panic, see `moq-net/src/lib.rs:42`).
-- `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `TrackConsumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs:502,518`).
+- `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `track::Consumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs`).
 
 Follow the root `poll_*` conventions: collapse `Poll::Pending => Poll::Pending` with `ready!(...)`, and prefer `Ok(x?)` over `.map_err(Into::into)` so a fallible poll reads `let v = ready!(inner.poll_next(cx))?;`. Representative `ready!` sites: `moq-mux/src/container/consumer.rs:201`, `moq-net/src/model/group.rs`.
 
@@ -84,9 +86,15 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 - **Prefer `kio` over tokio sync primitives**: reach for `kio::Producer`/`Consumer` (and the `poll_*` plumbing) instead of `tokio::sync` channels or `watch`. A `tokio::sync::watch` (or a channel) carrying a single value is a code smell. `kio` ties into the runtime-free `poll_*` model and avoids a hard runtime dependency.
 - **Errors**: `thiserror` with `#[from]` for libraries, `anyhow` (with `.context("...")`, not `.map_err(|_| anyhow!())`) for binaries. Always `#[non_exhaustive]` on public error enums (e.g. `moq-net/src/error.rs:6`, `moq-ffi/src/error.rs:4`, `moq-loc/src/lib.rs:55`). Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors (see `moq-token/src/error.rs`).
 - **Config + TOML merge**: any `#[arg]` field on a TOML-loadable config must be `Option<T>`, never a bare `bool`/`String`/etc. The TOML->CLI merge re-applies clap defaults and silently clobbers TOML values for bare fields. See `moq-relay/src/config.rs` and its regression tests (`cli_does_not_clobber_toml_*`, around line 126); add such a test for any new flag.
-- **Config structs**: `#[derive(Parser, Serialize, Deserialize)]` with `#[serde(deny_unknown_fields, default)]`, clap `#[arg(long, env = "MOQ_...")]`, nested configs via `#[command(flatten)]`, and an `.init()`/`.load()` method that produces the live object. Add `#[non_exhaustive]` + `Default`/constructor to **public-field** configs consumers build (per root Public API Scrutiny). A struct whose fields are all private and built through a builder (e.g. `select::Broadcast`) already blocks struct literals, so it doesn't need `#[non_exhaustive]`.
+- **Config structs**: `#[derive(Parser, Serialize, Deserialize)]` with `#[serde(deny_unknown_fields, default)]`, clap `#[arg(long, env = "MOQ_...")]`, nested configs via `#[command(flatten)]`, and an `.init()`/`.load()` method that produces the live object. See the `#[non_exhaustive]` conventions below for whether the struct gets the attribute and/or a builder.
+- **`#[non_exhaustive]` (future-proofing additions, per root Public API Scrutiny)**: the attribute's only job is to keep *adding* a field/variant from being a semver-breaking change. It is not a reflexive default.
+  - *Structs*: add it to one that will probably grow with additive, defaultable fields (the classic `Config`), paired with `Default`/a constructor so callers build via `default()`/`new()` + field set (not a struct literal), and prefer adding a field to it over adding a positional parameter. Skip it on a struct that won't grow, or where a new field would *change behavior* rather than default to a no-op. There the addition should be a deliberate breaking change, not one the attribute waves through.
+  - *Enums*: add it to a public enum that may gain variants so external `match`es keep compiling; always on public error enums (see Errors above).
+  - *Builders* (private fields + chained `.with_x()` setters) are the orthogonal construction-ergonomics layer: reach for one when a struct has a lot of optional knobs, or is `#[non_exhaustive]` and you want construction to stay clean as fields get added (e.g. `select::Broadcast`).
+- **Make misuse unrepresentable in the type system** (root Public API Scrutiny): make terminal operations consume `self` (e.g. `fn close(self)`) so use-after-close can't even be written, rather than `&mut self` plus a `closed` flag. Return owned handles whose `Drop` runs the cleanup instead of asking callers to remember a teardown call.
 - **Unwrapping**: prefer `if let Some(v) = x { ... }` / `let Some(v) = x else { ... };` over a `match` whose only job is to bind the inner value. Keep `match` when both arms do real work.
-- **Naming**: role-based module + short unprefixed type (`encode::Encoder`, `capture::Config`), not `EncoderConfig`/`CameraConfig`. Re-export flat to avoid stutter (`mod encoder` private, `pub use encoder::Encoder`).
+- **Naming / namespacing**: name by role, not by today's only implementation (`capture::Config`, `publish_capture`, not `CameraConfig`/`publish_camera`), so a second implementation slots in without a rename; don't bundle generic options under a specific-case name. Split a growing crate into role modules (`capture`, `encode`, `decode`) so each owns short, unprefixed names: the module supplies the prefix, so `encode::Config` beats `EncoderConfig` and `encode::Producer` beats `VideoProducer`. Don't nest a module whose name echoes its main type (`encode::encoder::Encoder` stutters): keep `mod encoder` private and re-export flat (`pub use encoder::{Encoder, Config}`) so it reads `encode::Encoder`.
+- **Deprecation mechanics** (root Deprecation explains the why): a deprecated CLI flag stays a hidden alias (clap `alias = "..."`, or a separate `#[arg(..., hide = true)]` when it needs its own runtime deprecation warning); a deprecated public item gets `#[doc(hidden)]`. No `--help` entry and no "deprecated, use X" note in the doc comment, so it drops off docs.rs.
 
 ## Binary setup
 

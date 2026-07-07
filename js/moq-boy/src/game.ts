@@ -55,7 +55,7 @@ export const KEY_MAP: Record<string, string> = {
 };
 
 /**
- * A Game Boy streaming session — the non-UI backend.
+ * A Game Boy streaming session for the non-UI backend.
  *
  * Manages video/audio playback, input commands, and status tracking
  * for a single game session. The UI layer (SolidJS components) reads
@@ -85,7 +85,7 @@ export class Game {
 	// The video rendition target, owned here and wired into the video source as an input.
 	readonly #target = new Moq.Signals.Signal<Watch.Video.Target | undefined>(undefined);
 
-	// Watch API objects — exposed so UI can access canvas, etc.
+	// Watch API objects exposed so UI can access canvas, etc.
 	readonly broadcast: Watch.Broadcast;
 	readonly sync: Watch.Sync;
 	readonly videoSource: Watch.Video.Source;
@@ -149,7 +149,7 @@ export class Game {
 		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, this.sync, { enabled: videoEnabled });
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
-		// Renderer needs a canvas — created by the UI layer, set via `canvas`.
+		// Renderer needs a canvas created by the UI layer, set via `canvas`.
 		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder, { canvas: this.canvas });
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
@@ -157,7 +157,7 @@ export class Game {
 		// Reads the renderer's visibility, so it must run after the renderer exists.
 		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
 
-		// Audio pipeline — the emitter stops the download when muted or paused.
+		// Audio pipeline. The emitter stops the download when muted or paused.
 		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync);
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
@@ -291,7 +291,7 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcast = new Moq.Broadcast();
+		const viewerBroadcast = new Moq.broadcast.Producer();
 		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
 		effect.cleanup(() => {
 			viewerBroadcast.close();
@@ -315,11 +315,11 @@ export class Game {
 	}
 
 	#runCommandTrack(
-		track: Moq.TrackProducer,
+		track: Moq.track.Producer,
 		producer: Json.Producer<Record<string, unknown>>,
 		effect: Moq.Signals.Effect,
 	) {
-		if (effect.get(track.state.closed)) return;
+		if (effect.get(track.closedSignal)) return;
 
 		const command = effect.get(this.#command);
 		if (!command) return;

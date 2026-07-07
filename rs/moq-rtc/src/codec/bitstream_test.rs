@@ -4,8 +4,13 @@
 //! but the WHIP path depends on the importer parsing the SPS for the catalog
 //! and accepting Annex-B input via the bridge. These tests guard against
 //! regressions in the contract the moq-rtc bridge depends on.
+//!
+//! Inline (rather than under `tests/`) because they exercise the crate-private
+//! `codec` module directly.
 
 use bytes::{Bytes, BytesMut};
+
+use crate::codec::{self, Bridge, Frame, Track};
 
 const START_CODE_4: &[u8] = &[0, 0, 0, 1];
 
@@ -32,17 +37,17 @@ async fn h264_annexb_frame_publishes_catalog_entry() {
 
 	let frame = annexb(&[sps, pps, idr]);
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = moq_rtc::codec::h264::Bridge::new(producer, catalog.clone()).expect("bridge");
+	let mut bridge = codec::h264::Bridge::new(producer, catalog.clone()).expect("bridge");
 
-	let codec_frame = moq_rtc::codec::Frame {
+	let codec_frame = Frame {
 		timestamp_us: 0,
 		payload: frame,
 	};
-	moq_rtc::codec::Bridge::push(&mut bridge, codec_frame).expect("push");
+	Bridge::push(&mut bridge, codec_frame).expect("push");
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(
@@ -62,18 +67,18 @@ async fn h264_annexb_frame_publishes_catalog_entry() {
 
 #[tokio::test(start_paused = true)]
 async fn opus_frame_publishes_catalog_entry() {
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = moq_rtc::codec::opus::Bridge::new(producer, catalog.clone(), 48_000, 2).expect("bridge");
+	let mut bridge = codec::opus::Bridge::new(producer, catalog.clone(), 48_000, 2).expect("bridge");
 
 	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]); // arbitrary 3-byte Opus packet
-	let codec_frame = moq_rtc::codec::Frame {
+	let codec_frame = Frame {
 		timestamp_us: 20_000,
 		payload,
 	};
-	moq_rtc::codec::Bridge::push(&mut bridge, codec_frame).expect("push");
+	Bridge::push(&mut bridge, codec_frame).expect("push");
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.audio.renditions.len(), 1);
@@ -85,20 +90,20 @@ async fn opus_frame_publishes_catalog_entry() {
 
 #[tokio::test(start_paused = true)]
 async fn vp9_keyframe_flag_from_uncompressed_header() {
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = moq_rtc::codec::vp9::Bridge::new(producer, catalog.clone()).expect("bridge");
+	let mut bridge = codec::vp9::Bridge::new(producer, catalog.clone()).expect("bridge");
 
 	// VP9 uncompressed header: frame_type is bit 2. 0 = keyframe, 1 = inter.
 	// Byte with bit 2 cleared is a keyframe; with bit 2 set is an inter frame.
 	let keyframe_byte = 0b1000_0010; // frame_marker=10, profile bits, frame_type=0
 	let interframe_byte = 0b1000_0110; // same shape but frame_type=1
 
-	moq_rtc::codec::Bridge::push(
+	Bridge::push(
 		&mut bridge,
-		moq_rtc::codec::Frame {
+		Frame {
 			timestamp_us: 0,
 			payload: Bytes::from(vec![keyframe_byte, 0, 0]),
 		},
@@ -108,9 +113,9 @@ async fn vp9_keyframe_flag_from_uncompressed_header() {
 	// A non-keyframe right after a keyframe must not panic; the underlying
 	// container Producer requires keyframes start groups, and a stray
 	// inter-frame following a keyframe should extend the current group.
-	moq_rtc::codec::Bridge::push(
+	Bridge::push(
 		&mut bridge,
-		moq_rtc::codec::Frame {
+		Frame {
 			timestamp_us: 33_000,
 			payload: Bytes::from(vec![interframe_byte, 0, 0]),
 		},
@@ -136,15 +141,15 @@ async fn vp9_keyframe_flag_from_uncompressed_header() {
 #[tokio::test(start_paused = true)]
 async fn egress_opus_passthrough() {
 	// Build an opus broadcast via the ingest bridge.
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
-	let mut bridge = moq_rtc::codec::opus::Bridge::new(producer.clone(), catalog.clone(), 48_000, 2).expect("bridge");
+	let mut bridge = codec::opus::Bridge::new(producer.clone(), catalog.clone(), 48_000, 2).expect("bridge");
 
 	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]);
-	moq_rtc::codec::Bridge::push(
+	Bridge::push(
 		&mut bridge,
-		moq_rtc::codec::Frame {
+		Frame {
 			timestamp_us: 20_000,
 			payload: payload.clone(),
 		},
@@ -156,7 +161,7 @@ async fn egress_opus_passthrough() {
 	let snapshot = catalog.snapshot();
 	let (name, _) = snapshot.audio.renditions.iter().next().expect("rendition");
 	let consumer = producer.consume();
-	let mut track = moq_rtc::codec::Track::opus(&consumer, name).await.expect("opus track");
+	let mut track = Track::opus(&consumer, name).await.expect("opus track");
 
 	let frame = track.next().await.expect("ok").expect("frame");
 	assert_eq!(frame.timestamp_us, 20_000);
@@ -172,14 +177,14 @@ async fn egress_h264_avc3_passthrough() {
 	let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 	let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
-	let broadcast = moq_net::BroadcastInfo::new();
+	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
-	let mut bridge = moq_rtc::codec::h264::Bridge::new(producer.clone(), catalog.clone()).expect("bridge");
-	moq_rtc::codec::Bridge::push(
+	let mut bridge = codec::h264::Bridge::new(producer.clone(), catalog.clone()).expect("bridge");
+	Bridge::push(
 		&mut bridge,
-		moq_rtc::codec::Frame {
+		Frame {
 			timestamp_us: 0,
 			payload: annexb(&[sps, pps, idr]),
 		},
@@ -189,9 +194,7 @@ async fn egress_h264_avc3_passthrough() {
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.video.renditions.iter().next().expect("rendition");
 	let consumer = producer.consume();
-	let mut track = moq_rtc::codec::Track::video(&consumer, name, config)
-		.await
-		.expect("h264 track");
+	let mut track = Track::video(&consumer, name, config).await.expect("h264 track");
 
 	let frame = track.next().await.expect("ok").expect("frame");
 	// avc3 storage means catalog `description` is empty; the egress track

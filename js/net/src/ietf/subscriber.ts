@@ -1,10 +1,10 @@
-import { Announced } from "../announced.ts";
-import { Broadcast, type TrackRequest } from "../broadcast.ts";
-import { Group } from "../group.ts";
+import * as announce from "../announced.ts";
+import * as broadcast from "../broadcast.ts";
+import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { Timestamp } from "../time.ts";
-import type { TrackProducer } from "../track.ts";
+import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
@@ -46,15 +46,15 @@ type SubscribeSetupState = {
 export class Subscriber {
 	#session: Session;
 
-	// Our subscribed tracks — keyed by trackAlias for group routing
+	// Our subscribed tracks, keyed by trackAlias for group routing.
 	// trackAlias -> the write side; incoming object streams are routed here.
-	#subscribes = new Map<bigint, TrackProducer>();
+	#subscribes = new Map<bigint, track.Producer>();
 
 	// Any currently active announcements.
 	#announced = new Set<Path.Valid>();
 
 	// Any consumers that want each new announcement.
-	#announcedConsumers = new Set<Announced>();
+	#announcedConsumers = new Set<announce.Producer>();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -69,11 +69,12 @@ export class Subscriber {
 	/**
 	 * Gets an announced reader for the specified prefix.
 	 */
-	announced(prefix = Path.empty()): Announced {
-		const announced = new Announced(prefix);
+	announced(prefix = Path.empty()): announce.Consumer {
+		const announced = new announce.Producer(prefix);
 		for (const active of this.#announced) {
-			if (!Path.hasPrefix(prefix, active)) continue;
-			announced.append({ path: active, active: true });
+			const suffix = Path.stripPrefix(prefix, active);
+			if (suffix === null) continue;
+			announced.append({ path: suffix, active: true });
 		}
 		this.#announcedConsumers.add(announced);
 
@@ -82,10 +83,10 @@ export class Subscriber {
 			announced.close();
 		});
 
-		return announced;
+		return announced.consume();
 	}
 
-	async #runAnnounced(announced: Announced, prefix: Path.Valid) {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid) {
 		const version = this.#session.version;
 
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
@@ -144,8 +145,9 @@ export class Subscriber {
 
 							this.#announced.add(path);
 							for (const consumer of this.#announcedConsumers) {
-								if (!Path.hasPrefix(consumer.prefix, path)) continue;
-								consumer.append({ path, active: true });
+								const suffix = Path.stripPrefix(consumer.prefix, path);
+								if (suffix === null) continue;
+								consumer.append({ path: suffix, active: true });
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -154,8 +156,9 @@ export class Subscriber {
 
 							this.#announced.delete(path);
 							for (const consumer of this.#announcedConsumers) {
-								if (!Path.hasPrefix(consumer.prefix, path)) continue;
-								consumer.append({ path, active: false });
+								const suffix = Path.stripPrefix(consumer.prefix, path);
+								if (suffix === null) continue;
+								consumer.append({ path: suffix, active: false });
 							}
 						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
 							const blocked = await PublishBlocked.decode(stream.reader, version);
@@ -196,21 +199,21 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 */
-	consume(path: Path.Valid): Broadcast {
-		const broadcast = new Broadcast();
+	consume(path: Path.Valid): broadcast.Consumer {
+		const consumer = new broadcast.Consumer();
 
 		void (async () => {
 			for (;;) {
-				const request = await broadcast.requested();
+				const request = await consumer.requested();
 				if (!request) break;
 				void this.#runSubscribe(path, request);
 			}
 		})();
 
-		return broadcast;
+		return consumer;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
+	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const version = this.#session.version;
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
@@ -299,8 +302,8 @@ export class Subscriber {
 	async #openSubscribe(
 		state: SubscribeSetupState,
 		broadcast: Path.Valid,
-		request: TrackRequest,
-		producer: TrackProducer,
+		request: track.Request,
+		producer: track.Producer,
 		requestId: bigint,
 	): Promise<{ stream: Stream; alias: bigint }> {
 		const version = this.#session.version;
@@ -385,7 +388,7 @@ export class Subscriber {
 		this.#announced.add(path);
 
 		try {
-			// Send OK first — must complete before notifying consumers,
+			// Send OK first. This must complete before notifying consumers,
 			// because consumers may trigger Subscribe writes that would
 			// interleave with our OK on the control stream.
 			if (version === Version.DRAFT_14) {
@@ -407,7 +410,7 @@ export class Subscriber {
 			for (const consumer of this.#announcedConsumers) {
 				const suffix = Path.stripPrefix(consumer.prefix, path);
 				if (suffix === null) continue;
-				consumer.append({ path, active: true });
+				consumer.append({ path: suffix, active: true });
 			}
 
 			// Wait for stream close (= PublishNamespaceDone)
@@ -422,7 +425,7 @@ export class Subscriber {
 				const suffix = Path.stripPrefix(consumer.prefix, path);
 				if (suffix === null) continue;
 				try {
-					consumer.append({ path, active: false });
+					consumer.append({ path: suffix, active: false });
 				} catch {
 					// Consumer already closed, will be cleaned up
 				}
@@ -465,7 +468,7 @@ export class Subscriber {
 	 * @internal
 	 */
 	async handleGroup(group: GroupMessage, stream: Reader) {
-		const producer = new Group(group.groupId);
+		const producer = new netGroup.Producer(group.groupId);
 
 		if (group.subGroupId !== 0) {
 			throw new Error("subgroups are not supported");

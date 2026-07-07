@@ -74,7 +74,7 @@ struct VideoTaskEntry {
 impl Video {
 	pub fn consume(
 		&mut self,
-		broadcast: &moq_net::BroadcastConsumer,
+		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &hang::catalog::VideoConfig,
 		name: &str,
 		config: moq_video::decode::Config,

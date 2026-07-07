@@ -173,3 +173,138 @@ impl<S: Stream> Export<S> {
 		Ok(())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+	use std::task::Poll;
+
+	use bytes::{Bytes, BytesMut};
+	use hang::catalog::{H265, Video, VideoConfig};
+
+	use super::*;
+	use crate::catalog::Stream;
+	use crate::catalog::hang::Catalog;
+
+	struct Once(Option<Catalog>);
+
+	impl Stream for Once {
+		type Ext = ();
+
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+			Poll::Ready(Ok(self.0.take()))
+		}
+	}
+
+	fn hvc1_catalog(name: &str, hvcc: Bytes) -> Catalog {
+		let mut config = VideoConfig::new(H265 {
+			in_band: false,
+			profile_space: 0,
+			profile_idc: 1,
+			profile_compatibility_flags: [0, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 93,
+			constraint_flags: [0, 0, 0, 0, 0, 0],
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.description = Some(hvcc);
+		config.container = hang::catalog::Container::Legacy;
+
+		let mut renditions = BTreeMap::new();
+		renditions.insert(name.to_string(), config);
+
+		Catalog {
+			video: Video {
+				renditions,
+				display: None,
+				rotation: None,
+				flip: None,
+			},
+			..Default::default()
+		}
+	}
+
+	fn hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Bytes {
+		let mut out = BytesMut::new();
+		out.extend_from_slice(&[0u8; 21]);
+		out.extend_from_slice(&[0xff, 3]);
+		for (nal_type, nal) in [(32u8, vps), (33, sps), (34, pps)] {
+			out.extend_from_slice(&[0x80 | nal_type, 0, 1]);
+			out.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+			out.extend_from_slice(nal);
+		}
+		out.freeze()
+	}
+
+	fn write_length_prefixed(group: &mut moq_net::group::Producer, timestamp_us: u64, nals: &[&[u8]]) {
+		let mut payload = BytesMut::new();
+		for nal in nals {
+			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			payload.extend_from_slice(nal);
+		}
+		let frame = crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+			duration: None,
+			payload: payload.freeze(),
+			keyframe: false,
+		};
+		<crate::catalog::hang::Container as crate::container::Container>::write(
+			&crate::catalog::hang::Container::Legacy,
+			group,
+			&[frame],
+		)
+		.unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hvc1_export_injects_vps_sps_pps_on_keyframes() {
+		let vps = &[0x40, 0x01, 0x0c][..];
+		let sps = &[0x42, 0x01, 0x01, 0x60][..];
+		let pps = &[0x44, 0x01, 0xc0][..];
+		let idr = &[0x26, 0x01, 0x88, 0x84][..];
+		let trail = &[0x02, 0x01, 0xe0, 0x12][..];
+
+		let catalog = hvc1_catalog("video.hvc1", hvcc(vps, sps, pps));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut track = broadcast
+			.create_track(
+				"video.hvc1",
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
+			)
+			.unwrap();
+
+		let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_length_prefixed(&mut g0, 0, &[idr]);
+		g0.finish().unwrap();
+
+		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_length_prefixed(&mut g1, 33_000, &[trail]);
+		g1.finish().unwrap();
+		track.finish().unwrap();
+
+		let consumer = broadcast.consume();
+		let mut export = Export::new(consumer, Once(Some(catalog)));
+
+		let frame0 = export.next().await.unwrap().expect("first frame");
+		let frame1 = export.next().await.unwrap().expect("second frame");
+		assert!(export.next().await.unwrap().is_none(), "track ended");
+
+		let prefix = crate::codec::annexb::build_prefix(
+			[
+				Bytes::copy_from_slice(vps),
+				Bytes::copy_from_slice(sps),
+				Bytes::copy_from_slice(pps),
+			]
+			.iter(),
+		);
+
+		assert!(frame0.starts_with(&prefix), "frame 0 must begin with VPS/SPS/PPS");
+		assert_eq!(&frame0[prefix.len()..], &[0, 0, 0, 1, 0x26, 0x01, 0x88, 0x84]);
+		assert!(
+			frame1.starts_with(&prefix),
+			"group-start frame must begin with VPS/SPS/PPS"
+		);
+		assert_eq!(&frame1[prefix.len()..], &[0, 0, 0, 1, 0x02, 0x01, 0xe0, 0x12]);
+	}
+}

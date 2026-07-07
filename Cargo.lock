@@ -3806,6 +3806,7 @@ name = "kio"
 version = "0.4.1"
 dependencies = [
  "smallvec",
+ "tokio",
 ]
 
 [[package]]
@@ -4121,7 +4122,6 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -4370,6 +4370,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-nvenc"
+version = "0.0.1"
+dependencies = [
+ "cudarc",
+ "lazy_static",
+ "libloading 0.8.9",
+]
+
+[[package]]
 name = "moq-relay"
 version = "0.13.1"
 dependencies = [
@@ -4517,8 +4526,8 @@ dependencies = [
  "libloading 0.8.9",
  "moq-mux",
  "moq-net",
+ "moq-nvenc",
  "moq-vaapi",
- "nvidia-video-codec-sdk",
  "objc2",
  "objc2-av-foundation",
  "objc2-core-foundation",
@@ -5122,16 +5131,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1e13adea6de269faa0724df58f43f6fe2a81af7094f1dcb8b5b968eb2103cb3"
 dependencies = [
  "scuffle-workspace-hack",
-]
-
-[[package]]
-name = "nvidia-video-codec-sdk"
-version = "0.4.0"
-source = "git+https://github.com/kixelated/nvidia-video-codec-sdk.git?branch=dynamic-loading#5434cc808bd590705217d6e9e00c6dc041f8c0f5"
-dependencies = [
- "cudarc",
- "lazy_static",
- "libloading 0.8.9",
 ]
 
 [[package]]

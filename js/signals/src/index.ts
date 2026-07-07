@@ -21,7 +21,9 @@ export interface Getter<T> {
 	/** Returns the current value without subscribing. */
 	peek(): T;
 
-	/** Calls `fn` once the next time the value changes. */
+	/** Resolves with the value the next time it changes. */
+	changed(): Promise<T>;
+	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 
 	/** Calls `fn` every time the value changes. */
@@ -35,6 +37,13 @@ export interface Setter<T> {
 	/** Transforms the value via a function of the previous value. */
 	update(fn: (prev: T) => T): void;
 }
+
+/**
+ * The read side of a {@link Once}: observe it reactively ({@link Getter}, `undefined` while
+ * pending) or await it ({@link PromiseLike}, resolves with the settled value, immediately if it
+ * already settled). Expose this to callers so they can peek/observe/await but not settle it.
+ */
+export interface GetPromise<T> extends Getter<T | undefined>, PromiseLike<T> {}
 
 /** A mutable observable value. Writes are coalesced per microtask and only notify subscribers when the value actually changes. */
 export class Signal<T> implements Getter<T>, Setter<T> {
@@ -169,17 +178,22 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return () => this.#subscribers.delete(fn);
 	}
 
-	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
-	changed(fn: (value: T) => void): Dispose {
-		this.#changed.add(fn);
-		return () => this.#changed.delete(fn);
+	/** Resolves with the value the next time it changes, or calls `fn` once on the next change. */
+	changed(): Promise<T>;
+	changed(fn: Subscriber<T>): Dispose;
+	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
+		if (fn) {
+			this.#changed.add(fn);
+			return () => this.#changed.delete(fn);
+		}
+		return new Promise<T>((resolve) => {
+			this.#changed.add(resolve);
+		});
 	}
 
 	/** Resolves with the next value, once the signal changes. */
 	next(): Promise<T> {
-		return new Promise<T>((resolve) => {
-			this.changed(resolve);
-		});
+		return this.changed();
 	}
 
 	/** Calls `fn` with the current value now, and again every time it changes. */
@@ -189,9 +203,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return dispose;
 	}
 
-	/** Resolves with the next value from whichever of the given signals changes first. */
+	/** Resolves with the next value from whichever of the given readables changes first. */
 	static async race<T extends readonly unknown[]>(
-		...sigs: { [K in keyof T]: Signal<T[K]> }
+		...sigs: { [K in keyof T]: Getter<T[K]> }
 	): Promise<Awaited<T[number]>> {
 		const dispose: Dispose[] = [];
 
@@ -203,6 +217,60 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 		for (const fn of dispose) fn();
 		return result;
+	}
+}
+
+/**
+ * A value that settles exactly once, then never changes: both **observable** and **awaitable**.
+ *
+ * Read it reactively like a {@link Getter} (`peek()` / `changed()` / `subscribe()` / `effect.get()`;
+ * the value is `undefined` while pending), or await it like a promise (`await once` /
+ * `once.then(...)` resolve with the settled value, immediately if it already settled). This is the
+ * shape of terminal state such as "closed": one handle serves the sync check, the reactive
+ * short-circuit, and the `await`.
+ *
+ * Settle it with {@link set} exactly once; a second call throws. Expose it to callers as
+ * {@link GetPromise} so they can observe/await but not settle it. `T` must not include `undefined`
+ * (that is the pending sentinel).
+ */
+export class Once<T> implements GetPromise<T> {
+	#signal = new Signal<T | undefined>(undefined);
+
+	/** Settle the value. Throws if it has already settled. */
+	set(value: T): void {
+		if (this.#signal.peek() !== undefined) {
+			throw new Error("Once has already settled");
+		}
+		this.#signal.set(value);
+	}
+
+	/** The settled value, or `undefined` while still pending. */
+	peek(): T | undefined {
+		return this.#signal.peek();
+	}
+
+	/** Resolves when it settles, or calls `fn` once when it settles. */
+	changed(): Promise<T | undefined>;
+	changed(fn: (value: T | undefined) => void): Dispose;
+	changed(fn?: (value: T | undefined) => void): Promise<T | undefined> | Dispose {
+		return fn ? this.#signal.changed(fn) : this.#signal.changed();
+	}
+
+	/** Calls `fn` when it settles (fires at most once). Returns a function to unsubscribe. */
+	subscribe(fn: (value: T | undefined) => void): Dispose {
+		return this.#signal.subscribe(fn);
+	}
+
+	/** Resolves with the settled value, immediately if it already settled. Never rejects on its own. */
+	// biome-ignore lint/suspicious/noThenProperty: Once is intentionally awaitable (thenable).
+	then<R1 = T, R2 = never>(
+		onFulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
+		onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
+	): PromiseLike<R1 | R2> {
+		const current = this.#signal.peek();
+		const settled: Promise<T> =
+			current !== undefined ? Promise.resolve(current) : this.#signal.changed().then((value) => value as T);
+		return settled.then(onFulfilled, onRejected);
 	}
 }
 
@@ -730,9 +798,11 @@ export class Computed<T> implements Getter<T | undefined> {
 		return this.#signal.peek();
 	}
 
-	/** Calls `fn` once the next time the derived value changes. */
-	changed(fn: Subscriber<T | undefined>): Dispose {
-		return this.#signal.changed(fn);
+	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */
+	changed(): Promise<T | undefined>;
+	changed(fn: Subscriber<T | undefined>): Dispose;
+	changed(fn?: Subscriber<T | undefined>): Promise<T | undefined> | Dispose {
+		return fn ? this.#signal.changed(fn) : this.#signal.changed();
 	}
 
 	/** Calls `fn` every time the derived value changes. */

@@ -1,5 +1,6 @@
 export * from "./announce.ts";
 export * from "./connection.ts";
+export * from "./datagram.ts";
 export * from "./fetch.ts";
 export * from "./goaway.ts";
 export * from "./group.ts";

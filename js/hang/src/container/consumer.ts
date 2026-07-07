@@ -15,7 +15,7 @@ export interface ConsumerProps {
 }
 
 interface Group {
-	consumer: Moq.Group;
+	consumer: Moq.group.Consumer;
 	frames: Frame[]; // decode order
 	latest?: Time.Micro; // The timestamp of the latest known frame
 	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
@@ -76,7 +76,7 @@ class Rewind {
 
 /** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
 export class Consumer {
-	#track: Moq.TrackSubscriber;
+	#track: Moq.track.Subscriber;
 	#format: Format;
 	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
@@ -93,7 +93,7 @@ export class Consumer {
 	#signals = new Effect();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
-	constructor(track: Moq.TrackSubscriber, props: ConsumerProps) {
+	constructor(track: Moq.track.Subscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);
@@ -134,7 +134,7 @@ export class Consumer {
 			}
 
 			if (drop) {
-				console.warn(`skipping old group: ${consumer.sequence}`);
+				console.warn(`skipping old group: track=${this.#track.name} ${consumer.sequence}`);
 				consumer.close();
 				continue;
 			}
@@ -264,7 +264,9 @@ export class Consumer {
 			const first = this.#groups.shift();
 			if (!first) break;
 			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
+			console.warn(
+				`skipping slow group: track=${this.#track.name} ${first.consumer.sequence} -> ${this.#active}`,
+			);
 
 			first.consumer.close();
 			first.frames.length = 0;
@@ -343,7 +345,9 @@ export class Consumer {
 			return !stale;
 		});
 
-		console.warn(`buffer reset: group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`);
+		console.warn(
+			`buffer reset: track=${this.#track.name} group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`,
+		);
 
 		// Resume from the earliest survivor; if none, from the rewound group. Anchor the live
 		// edge at the rewind point (delivered), not group.latest (buffered ahead of playback).

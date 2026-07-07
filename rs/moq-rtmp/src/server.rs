@@ -35,7 +35,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
-use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
+use moq_net::{broadcast, origin};
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
 use rml_rtmp::time::RtmpTimestamp;
@@ -55,6 +55,17 @@ const READ_BUFFER: usize = 16 * 1024;
 /// connections can't accumulate without limit. With TLS this also covers the TLS
 /// handshake.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Maximum number of accepted sockets that can be handshaking or waiting for a
+/// publish/play request at once.
+const MAX_PENDING_REQUESTS: usize = 128;
+
+/// Maximum gap between media packets from an accepted publisher.
+const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a play request may wait for its broadcast and initial FLV header
+/// before the server rejects it.
+const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// TCP keepalive idle period before the kernel starts probing a silent peer, and
 /// the interval between probes. Once a connection is publishing or playing it can
@@ -81,6 +92,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 /// This is the stream type behind a [`Server`]-produced [`Request`] (hence
 /// `Request<Conn>`). Bring-your-own-transport callers using [`accept_stream`]
 /// keep their own stream type instead.
+#[non_exhaustive]
 pub enum Conn {
 	/// A plaintext TCP connection (`rtmp://`).
 	Plain(TcpStream),
@@ -189,7 +201,7 @@ impl Server {
 					}
 				}
 				// A new TCP connection: start its (TLS +) handshake concurrently.
-				res = self.listener.accept() => match res {
+				res = self.listener.accept(), if self.pending.len() < MAX_PENDING_REQUESTS => match res {
 					Ok((stream, peer)) => {
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
@@ -225,6 +237,9 @@ impl Server {
 								}
 							}
 						}));
+						if self.pending.len() == MAX_PENDING_REQUESTS {
+							tracing::warn!(pending = MAX_PENDING_REQUESTS, "RTMP pending request limit reached");
+						}
 					}
 					Err(err) => {
 						// A failed accept must not take the listener down; back off so a
@@ -364,7 +379,7 @@ impl<S: Stream> Publish<S> {
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
-	pub async fn accept(mut self, origin: &OriginProducer, path: &str) -> Result<()> {
+	pub async fn accept(mut self, origin: &origin::Producer, path: &str) -> Result<()> {
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -491,7 +506,63 @@ impl<S: Stream> Play<S> {
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &OriginConsumer, path: &str) -> Result<()> {
+	pub async fn accept(mut self, origin: &origin::Consumer, path: &str) -> Result<()> {
+		// Wait for the broadcast before telling the client playback started. Feed the
+		// client's bytes through the session (not discard them) so its deserializer
+		// stays in sync for everything `play_pump` parses next.
+		let broadcast = tokio::select! {
+			biased;
+			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
+				res?;
+				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
+				return Ok(());
+			}
+			broadcast = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.announced_broadcast(path)) => {
+				match broadcast {
+					Ok(broadcast) => broadcast,
+					Err(_) => {
+						tracing::debug!(peer = %self.peer, %path, "play broadcast resolve timed out");
+						return self.reject("stream not found").await;
+					}
+				}
+			}
+		};
+		let Some(broadcast) = broadcast else {
+			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
+			return self.reject("stream not found").await;
+		};
+
+		let mut export = FlvExport::new(broadcast)
+			.await
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.with_latency(self.latency);
+
+		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
+		// broadcast that never produces a playable FLV header looks successful to the
+		// viewer but never emits media.
+		let first_chunk = tokio::select! {
+			biased;
+			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
+				res?;
+				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
+				return Ok(());
+			}
+			chunk = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
+				match chunk {
+					Ok(Ok(Some(chunk))) => chunk,
+					Ok(Ok(None)) => {
+						tracing::debug!(peer = %self.peer, %path, "play broadcast ended before FLV header");
+						return self.reject("stream not available").await;
+					}
+					Ok(Err(e)) => return Err(e.into()),
+					Err(_) => {
+						tracing::debug!(peer = %self.peer, %path, "play FLV header resolve timed out");
+						return self.reject("stream not available").await;
+					}
+				}
+			}
+		};
+
 		// Tell the client playback is starting (Play.Reset / Play.Start + StreamBegin).
 		let results = self
 			.session
@@ -502,32 +573,22 @@ impl<S: Stream> Play<S> {
 
 		tracing::info!(peer = %self.peer, %path, "rtmp play accepted");
 
-		// Wait for the broadcast, but abandon the wait if the viewer hangs up. Feed
-		// the client's bytes through the session (not discard them) so its
-		// deserializer stays in sync for everything `play_pump` parses next.
-		let broadcast = tokio::select! {
-			biased;
-			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
-				res?;
-				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
-				return Ok(());
-			}
-			broadcast = origin.announced_broadcast(path) => broadcast,
-		};
-		let Some(broadcast) = broadcast else {
-			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
-			return Ok(());
-		};
+		let mut tags = flv::TagReader::new();
+		send_flv_chunk(
+			&mut self.stream,
+			&mut self.session,
+			&mut tags,
+			self.stream_id,
+			first_chunk,
+		)
+		.await?;
 
-		let mut export = FlvExport::new(broadcast)
-			.await
-			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_latency(self.latency);
 		let result = play_pump(
 			&mut self.stream,
 			&mut self.session,
 			&mut self.work,
 			&mut export,
+			tags,
 			self.stream_id,
 			self.peer,
 		)
@@ -653,6 +714,7 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
+	let mut media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
@@ -665,11 +727,13 @@ async fn pump<S: Stream>(
 					// consumes whole tags atomically, so one bad frame doesn't desync
 					// the stream, and tearing down a live publish over it would be worse.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
+						media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						if let Err(err) = publisher.push(flv::TAG_AUDIO, timestamp.value, &data) {
 							tracing::warn!(%peer, %err, "dropping RTMP audio frame that failed to demux");
 						}
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
+						media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						if let Err(err) = publisher.push(flv::TAG_VIDEO, timestamp.value, &data) {
 							tracing::warn!(%peer, %err, "dropping RTMP video frame that failed to demux");
 						}
@@ -689,7 +753,12 @@ async fn pump<S: Stream>(
 			break;
 		}
 
-		let n = stream.read(&mut buffer).await?;
+		let n = tokio::select! {
+			res = stream.read(&mut buffer) => res?,
+			_ = tokio::time::sleep_until(media_deadline) => {
+				anyhow::bail!("peer {peer} sent no RTMP media for {:?}", PUBLISH_IDLE_TIMEOUT);
+			}
+		};
 		if n == 0 {
 			break;
 		}
@@ -716,45 +785,25 @@ async fn play_pump<S: Stream>(
 	session: &mut ServerSession,
 	work: &mut VecDeque<ServerSessionResult>,
 	export: &mut FlvExport,
+	mut tags: flv::TagReader,
 	stream_id: u32,
 	peer: SocketAddr,
 ) -> Result<()> {
 	let (mut reader, mut writer) = tokio::io::split(stream);
-	let mut tags = flv::TagReader::new();
 	let mut buffer = [0u8; READ_BUFFER];
 
-	loop {
-		// Flush responses queued by the last batch of client input.
-		while let Some(result) = work.pop_front() {
-			match result {
-				ServerSessionResult::OutboundResponse(packet) => writer.write_all(&packet.bytes).await?,
-				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. }) => {
-					tracing::debug!(%peer, "viewer stopped playback");
-					return Ok(());
-				}
-				ServerSessionResult::RaisedEvent(other) => {
-					tracing::trace!(%peer, ?other, "ignoring RTMP event during play")
-				}
-				ServerSessionResult::UnhandleableMessageReceived(_) => {}
-			}
-		}
+	if flush_play_work(work, &mut writer, peer).await? {
+		return Ok(());
+	}
 
+	loop {
+		if flush_play_work(work, &mut writer, peer).await? {
+			return Ok(());
+		}
 		tokio::select! {
 			// Media from the broadcast: split into tags and send each one down.
 			chunk = export.next() => match chunk? {
-				Some(bytes) => {
-					tags.push(&bytes);
-					while let Some(tag) = tags.next()? {
-						let ts = RtmpTimestamp::new(tag.timestamp);
-						let packet = match tag.tag_type {
-							flv::TAG_VIDEO => session.send_video_data(stream_id, tag.body, ts, false),
-							flv::TAG_AUDIO => session.send_audio_data(stream_id, tag.body, ts, false),
-							_ => continue,
-						}
-						.map_err(|e| anyhow::anyhow!("rtmp send media: {e:?}"))?;
-						writer.write_all(&packet.bytes).await?;
-					}
-				}
+				Some(bytes) => send_flv_chunk(&mut writer, session, &mut tags, stream_id, bytes).await?,
 				// Broadcast ended: tell the player and finish.
 				None => {
 					let packet = session
@@ -777,6 +826,50 @@ async fn play_pump<S: Stream>(
 			}
 		}
 	}
+}
+
+/// Flush responses queued by RTMP client input during playback.
+async fn flush_play_work<W: AsyncWrite + Unpin>(
+	work: &mut VecDeque<ServerSessionResult>,
+	writer: &mut W,
+	peer: SocketAddr,
+) -> Result<bool> {
+	while let Some(result) = work.pop_front() {
+		match result {
+			ServerSessionResult::OutboundResponse(packet) => writer.write_all(&packet.bytes).await?,
+			ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. }) => {
+				tracing::debug!(%peer, "viewer stopped playback");
+				return Ok(true);
+			}
+			ServerSessionResult::RaisedEvent(other) => {
+				tracing::trace!(%peer, ?other, "ignoring RTMP event during play")
+			}
+			ServerSessionResult::UnhandleableMessageReceived(_) => {}
+		}
+	}
+	Ok(false)
+}
+
+/// Convert one FLV chunk into RTMP media messages.
+async fn send_flv_chunk<W: AsyncWrite + Unpin>(
+	writer: &mut W,
+	session: &mut ServerSession,
+	tags: &mut flv::TagReader,
+	stream_id: u32,
+	bytes: bytes::Bytes,
+) -> Result<()> {
+	tags.push(&bytes);
+	while let Some(tag) = tags.next()? {
+		let ts = RtmpTimestamp::new(tag.timestamp);
+		let packet = match tag.tag_type {
+			flv::TAG_VIDEO => session.send_video_data(stream_id, tag.body, ts, false),
+			flv::TAG_AUDIO => session.send_audio_data(stream_id, tag.body, ts, false),
+			_ => continue,
+		}
+		.map_err(|e| anyhow::anyhow!("rtmp send media: {e:?}"))?;
+		writer.write_all(&packet.bytes).await?;
+	}
+	Ok(())
 }
 
 /// Write every queued [`OutboundResponse`](ServerSessionResult::OutboundResponse)
@@ -834,11 +927,6 @@ async fn feed_input<S: Stream>(
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
 	let mut handshake = Handshake::new(PeerType::Server);
-	let p0_p1 = handshake
-		.generate_outbound_p0_and_p1()
-		.map_err(|e| anyhow::anyhow!("rtmp handshake p0/p1: {e:?}"))?;
-	stream.write_all(&p0_p1).await?;
-
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -870,21 +958,21 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 }
 
 /// An active publish: the moq-mux FLV importer (which owns the
-/// [`BroadcastProducer`](moq_net::BroadcastProducer) it publishes into) plus the
+/// [`BroadcastProducer`](moq_net::broadcast::Producer) it publishes into) plus the
 /// origin announcement. Dropping it closes and unannounces the broadcast.
 struct Publisher {
 	/// Held to keep the broadcast announced for the publisher's lifetime.
-	_publish: OriginPublish,
+	_publish: origin::Publish,
 	importer: FlvImport,
 }
 
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
-	fn new(origin: &OriginProducer, path: &str) -> anyhow::Result<Self> {
-		let mut broadcast = BroadcastInfo::new().produce();
+	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
+		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let mut importer = FlvImport::new(broadcast.clone(), catalog);
+		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
 
 		let publish = origin.publish_broadcast(path, broadcast.consume())?;
 
@@ -906,12 +994,12 @@ impl Publisher {
 			"RTMP message body {} exceeds FLV's 24-bit tag size limit",
 			body.len()
 		);
-		self.importer.decode(&flv::tag(tag_type, timestamp, body))
+		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
 	/// Flush any buffered media and close out the broadcast's open groups.
 	fn finish(&mut self) -> anyhow::Result<()> {
-		self.importer.finish()
+		Ok(self.importer.finish()?)
 	}
 }
 
@@ -1094,9 +1182,9 @@ mod tests {
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = BroadcastInfo::new().produce();
+		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut importer = FlvImport::new(broadcast.clone(), catalog);
+		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
 		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
@@ -1135,6 +1223,46 @@ mod tests {
 		assert_eq!(media[1].1[1], 0x01);
 
 		server_task.abort();
+	}
+
+	#[tokio::test]
+	async fn play_missing_broadcast_rejects_without_start() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+
+		let origin = moq_net::Origin::random().produce();
+		let consumer = origin.consume();
+
+		let stream = TcpStream::connect(addr).await.unwrap();
+		let client = tokio::spawn(async move {
+			run_client(stream, ClientMode::Play).await;
+		});
+		let request = server.accept().await.expect("a request");
+		let Request::Play(play) = request else {
+			panic!("expected a play request");
+		};
+
+		tokio::time::pause();
+		let server_task = tokio::spawn(async move {
+			play.accept(&consumer, "live/missing").await.unwrap();
+		});
+
+		tokio::task::yield_now().await;
+		tokio::time::advance(PLAY_RESOLVE_TIMEOUT + Duration::from_millis(1)).await;
+		for _ in 0..10 {
+			if server_task.is_finished() {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+
+		if !server_task.is_finished() {
+			client.abort();
+			server_task.abort();
+			panic!("play accept did not finish after resolve timeout");
+		}
+		server_task.await.unwrap();
+		client.abort();
 	}
 
 	#[tokio::test]

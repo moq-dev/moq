@@ -39,8 +39,12 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 ///
 /// Unsupported codecs (e.g. Vorbis, AC3, subtitles) are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
+
+	/// Held until the Tracks element is processed, so the catalog is withheld from the broadcast
+	/// until every rendition is in (and, when composed with other importers, until they finish too).
+	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
@@ -65,17 +69,18 @@ enum TrackKind {
 struct MkvTrack {
 	kind: TrackKind,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	group: Option<moq_net::GroupProducer>,
+	group: Option<moq_net::group::Producer>,
 	/// Highest block timestamp (Matroska ticks: cluster_ts + block_relative) already emitted.
 	/// Used to dedup re-parsed blocks across decode() calls.
 	last_emitted_ticks: Option<i64>,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			broadcast,
-			catalog,
+			catalog: reserved.producer(),
+			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
@@ -184,6 +189,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
 				self.handle_tracks(children)?;
 				self.tracks_seen = true;
+				// The full track set is declared now; release the reservation so the catalog publishes.
+				self.initial_reservation = None;
 			}
 			MatroskaSpec::Cluster(Master::Start) => {
 				self.cluster_timestamp = 0;
@@ -265,7 +272,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		let track = self.broadcast.create_track(
 			self.broadcast.unique_name(suffix),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();

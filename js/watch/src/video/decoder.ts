@@ -100,7 +100,7 @@ export class Decoder implements Backend {
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
-		const active: Moq.Broadcast | undefined = broadcast.trackBroadcast(effect, config.broadcast);
+		const active: Moq.broadcast.Consumer | undefined = broadcast.trackBroadcast(effect, config.broadcast);
 		if (!active) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
@@ -217,7 +217,7 @@ export class Decoder implements Backend {
 
 interface DecoderTrackProps {
 	sync: Sync;
-	broadcast: Moq.Broadcast;
+	broadcast: Moq.broadcast.Consumer;
 	track: string;
 	config: Catalog.VideoConfig;
 
@@ -226,7 +226,7 @@ interface DecoderTrackProps {
 
 class DecoderTrack {
 	sync: Sync;
-	broadcast: Moq.Broadcast;
+	broadcast: Moq.broadcast.Consumer;
 	track: string;
 	config: RequiredDecoderConfig;
 	stats: Signal<Stats | undefined>;
@@ -323,7 +323,7 @@ class DecoderTrack {
 		}
 	}
 
-	#runLegacy(effect: Effect, sub: Moq.TrackSubscriber, decoder: VideoDecoder): void {
+	#runLegacy(effect: Effect, sub: Moq.track.Subscriber, decoder: VideoDecoder): void {
 		const format =
 			this.config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
@@ -403,7 +403,7 @@ class DecoderTrack {
 		});
 	}
 
-	#runCmaf(effect: Effect, sub: Moq.TrackSubscriber, decoder: VideoDecoder): void {
+	#runCmaf(effect: Effect, sub: Moq.track.Subscriber, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
 		const initSegment = base64ToBytes(this.config.container.init);

@@ -5,7 +5,7 @@ use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_string, moq_video_config};
 
 struct ConsumeCatalog {
-	broadcast: moq_net::BroadcastConsumer,
+	broadcast: moq_net::broadcast::Consumer,
 
 	// Carries the untyped `Extra` extension so application catalog sections survive
 	// into `moq_catalog_section_*` instead of being dropped on parse.
@@ -34,7 +34,7 @@ struct TaskEntry {
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
-	broadcast: NonZeroSlab<moq_net::BroadcastConsumer>,
+	broadcast: NonZeroSlab<moq_net::broadcast::Consumer>,
 
 	/// Active catalog consumers and their broadcast references.
 	catalog: NonZeroSlab<ConsumeCatalog>,
@@ -56,7 +56,7 @@ pub struct Consume {
 }
 
 impl Consume {
-	pub fn start(&mut self, broadcast: moq_net::BroadcastConsumer) -> Result<Id, Error> {
+	pub fn start(&mut self, broadcast: moq_net::broadcast::Consumer) -> Result<Id, Error> {
 		self.broadcast.insert(broadcast)
 	}
 
@@ -95,7 +95,7 @@ impl Consume {
 
 	async fn run_catalog(
 		callback: OnStatus,
-		broadcast: moq_net::BroadcastConsumer,
+		broadcast: moq_net::broadcast::Consumer,
 		mut catalog: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -284,14 +284,18 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let name = consume
+		let (name, config) = consume
 			.catalog
 			.video
 			.renditions
-			.keys()
+			.iter()
 			.nth(index)
-			.ok_or(Error::NoIndex)?
-			.clone();
+			.ok_or(Error::NoIndex)?;
+		let name = name.clone();
+		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
+		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
+		// browser @moq/publish) are misread as raw frames.
+		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
 		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
@@ -311,8 +315,7 @@ impl Consume {
 						..Default::default()
 					})
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
-					.with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -336,14 +339,15 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let name = consume
+		let (name, config) = consume
 			.catalog
 			.audio
 			.renditions
-			.keys()
+			.iter()
 			.nth(index)
-			.ok_or(Error::NoIndex)?
-			.clone();
+			.ok_or(Error::NoIndex)?;
+		let name = name.clone();
+		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
 		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
@@ -363,8 +367,7 @@ impl Consume {
 						..Default::default()
 					})
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
-					.with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -480,7 +483,7 @@ impl Consume {
 
 	async fn run_raw(
 		callback: OnStatus,
-		mut track: moq_net::TrackSubscriber,
+		mut track: moq_net::track::Subscriber,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
@@ -554,7 +557,7 @@ impl Consume {
 		&self,
 		catalog: Id,
 		index: usize,
-	) -> Result<(moq_net::BroadcastConsumer, hang::catalog::VideoConfig, String), Error> {
+	) -> Result<(moq_net::broadcast::Consumer, hang::catalog::VideoConfig, String), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (name, config) = consume
 			.catalog
@@ -573,7 +576,7 @@ impl Consume {
 		&self,
 		catalog: Id,
 		index: usize,
-	) -> Result<(moq_net::BroadcastConsumer, hang::catalog::AudioConfig, String), Error> {
+	) -> Result<(moq_net::broadcast::Consumer, hang::catalog::AudioConfig, String), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (name, config) = consume
 			.catalog

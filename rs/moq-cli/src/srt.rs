@@ -31,7 +31,7 @@ pub struct Args {
 
 /// Accept incoming SRT publishes into the Origin as `name`; reject requests (import).
 pub async fn listen_import(
-	origin: moq_net::OriginProducer,
+	origin: moq_net::origin::Producer,
 	addr: SocketAddr,
 	name: String,
 	latency: Duration,
@@ -65,7 +65,7 @@ pub async fn listen_import(
 
 /// Serve SRT requests for `name` from the Origin; reject publishes (export).
 pub async fn listen_export(
-	origin: moq_net::OriginConsumer,
+	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
 	latency: Duration,
@@ -99,7 +99,7 @@ pub async fn listen_export(
 
 /// Dial a remote SRT server and pull its stream into the Origin under `name` (import).
 pub async fn connect_import(
-	origin: moq_net::OriginProducer,
+	origin: moq_net::origin::Producer,
 	url: Url,
 	name: String,
 	latency: Duration,
@@ -113,7 +113,7 @@ pub async fn connect_import(
 
 /// Push a broadcast from the Origin to a remote SRT server (export).
 pub async fn connect_export(
-	origin: moq_net::OriginConsumer,
+	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
 	latency: Duration,

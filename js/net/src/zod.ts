@@ -5,12 +5,12 @@
  */
 
 import type * as z from "zod/mini";
-import type { Group } from "./group.ts";
-import type { TrackProducer, TrackSubscriber } from "./track.ts";
+import type * as group from "./group.ts";
+import type * as track from "./track.ts";
 
 /** Read the next JSON frame and validate it against the schema. Returns undefined at end of stream. */
 export async function read<T = unknown>(
-	source: TrackSubscriber | Group,
+	source: track.Subscriber | group.Consumer,
 	schema: z.ZodMiniType<T>,
 ): Promise<T | undefined> {
 	const next = await source.readJson();
@@ -19,7 +19,7 @@ export async function read<T = unknown>(
 }
 
 /** Validate a value against the schema, then write it as a JSON frame. */
-export function write<T = unknown>(source: TrackProducer | Group, value: T, schema: z.ZodMiniType<T>) {
+export function write<T = unknown>(source: track.Producer | group.Producer, value: T, schema: z.ZodMiniType<T>) {
 	const valid = schema.parse(value);
 	source.writeJson(valid);
 }

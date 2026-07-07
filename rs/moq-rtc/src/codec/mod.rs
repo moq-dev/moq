@@ -13,9 +13,11 @@ pub mod opus;
 pub mod vp8;
 pub mod vp9;
 
+#[cfg(test)]
+mod bitstream_test;
+
 use bytes::Bytes;
 use hang::catalog::VideoConfig;
-use str0m::format::Codec;
 
 use crate::Result;
 
@@ -60,7 +62,6 @@ pub struct PacketizedFrame {
 /// the session loop.
 pub struct Track {
 	consumer: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-	codec: Codec,
 	convert: TrackConvert,
 }
 
@@ -80,7 +81,7 @@ enum TrackConvert {
 
 impl Track {
 	/// Audio track for an Opus rendition.
-	pub async fn opus(broadcast: &moq_net::BroadcastConsumer, name: &str) -> Result<Self> {
+	pub async fn opus(broadcast: &moq_net::broadcast::Consumer, name: &str) -> Result<Self> {
 		let container = moq_mux::catalog::hang::Container::Legacy;
 		// `None` subscription => start at the latest (in-progress) group. Groups
 		// begin at a keyframe, so a late joiner gets a decodable start immediately
@@ -89,7 +90,6 @@ impl Track {
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
 			consumer,
-			codec: Codec::Opus,
 			convert: TrackConvert::Passthrough,
 		})
 	}
@@ -97,31 +97,23 @@ impl Track {
 	/// Video track. Codec inferred from `config.codec`; for H.264 / H.265 the
 	/// bitstream shape (inline vs out-of-band parameter sets) is inferred from
 	/// `config.description` (avc1/hvc1 vs avc3/hev1).
-	pub async fn video(broadcast: &moq_net::BroadcastConsumer, name: &str, config: &VideoConfig) -> Result<Self> {
+	pub async fn video(broadcast: &moq_net::broadcast::Consumer, name: &str, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
 		// `None` subscription => start at the latest (in-progress) group, which
 		// begins at a keyframe, so a late-joining peer gets a decodable start.
 		let track = broadcast.track(name)?.subscribe(None).await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
-		let (codec, convert) = match &config.codec {
-			hang::catalog::VideoCodec::VP8 => (Codec::Vp8, TrackConvert::Passthrough),
-			hang::catalog::VideoCodec::VP9(_) => (Codec::Vp9, TrackConvert::Passthrough),
-			hang::catalog::VideoCodec::AV1(_) => (Codec::Av1, TrackConvert::Passthrough),
-			hang::catalog::VideoCodec::H264(_) => (Codec::H264, h264_convert(config)?),
-			hang::catalog::VideoCodec::H265(_) => (Codec::H265, h265_convert(config)?),
+		let convert = match &config.codec {
+			hang::catalog::VideoCodec::VP8 => TrackConvert::Passthrough,
+			hang::catalog::VideoCodec::VP9(_) => TrackConvert::Passthrough,
+			hang::catalog::VideoCodec::AV1(_) => TrackConvert::Passthrough,
+			hang::catalog::VideoCodec::H264(_) => h264_convert(config)?,
+			hang::catalog::VideoCodec::H265(_) => h265_convert(config)?,
 			other => return Err(crate::Error::UnsupportedCodec(format!("{other:?}"))),
 		};
 
-		Ok(Self {
-			consumer,
-			codec,
-			convert,
-		})
-	}
-
-	pub fn codec(&self) -> Codec {
-		self.codec
+		Ok(Self { consumer, convert })
 	}
 
 	/// Pull the next RTP-ready frame. Returns `None` when the track ends.

@@ -46,8 +46,13 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 /// and dropped. A single FLV stream carries at most one video and one audio
 /// track; a new sequence header replaces the previous configuration.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
-	broadcast: moq_net::BroadcastProducer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
+
+	/// Held until the first media frame, by which point all sequence headers (hence renditions) have
+	/// been declared, so the catalog is withheld until the track set is known (and, when composed with
+	/// other importers, until they finish too).
+	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
@@ -74,10 +79,11 @@ struct AudioStream {
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			broadcast,
-			catalog,
+			catalog: reserved.producer(),
+			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
 			video: None,
@@ -88,10 +94,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Append `buf` to the internal scratch and demux every whole tag it now
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.
-	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
 		self.buffer.extend_from_slice(data);
 
-		self.drain()
+		match self.drain() {
+			Ok(()) => Ok(()),
+			Err(err) => match err.downcast::<crate::Error>() {
+				Ok(err) => Err(err),
+				Err(err) => Err(err.into()),
+			},
+		}
 	}
 
 	fn drain(&mut self) -> anyhow::Result<()> {
@@ -310,13 +322,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Write one decoded video sample, dropping a leading delta before the first
 	/// keyframe (a mid-GOP join) rather than aborting.
 	fn write_video(&mut self, data: &[u8], dts: u64, composition_time: i32, keyframe: bool) -> anyhow::Result<()> {
-		let Some(stream) = self.video.as_mut() else {
+		if self.video.is_none() {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
-		};
+		}
+		// A media frame means every sequence header has arrived (FLV sends config before data), so
+		// the track set is declared; release the reservation to publish.
+		self.initial_reservation = None;
+		let stream = self.video.as_mut().expect("video stream present");
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
-		anyhow::ensure!(pts_ms >= 0, "negative video presentation timestamp");
+		if pts_ms < 0 {
+			return Err(crate::Error::NegativeFlvPts {
+				dts_ms: dts,
+				composition_time_ms: composition_time,
+			}
+			.into());
+		}
 		match stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(pts_ms as u64)?,
 			duration: None,
@@ -330,10 +352,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
 	fn write_audio(&mut self, data: &[u8], timestamp: u64) -> anyhow::Result<()> {
-		let Some(stream) = self.audio.as_mut() else {
+		if self.audio.is_none() {
 			tracing::debug!("audio frame before config, dropping");
 			return Ok(());
-		};
+		}
+		// A media frame means every sequence header has arrived (FLV sends config before data), so
+		// the track set is declared; release the reservation to publish.
+		self.initial_reservation = None;
+		let stream = self.audio.as_mut().expect("audio stream present");
 		stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(timestamp)?,
 			duration: None,
@@ -386,32 +412,32 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Drop any existing video track (finishing it and clearing its catalog
 	/// rendition) and allocate a fresh one.
-	fn replace_video(&mut self) -> anyhow::Result<moq_net::TrackProducer> {
+	fn replace_video(&mut self) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.video.take() {
 			old.track.finish()?;
 			self.catalog.lock().video.renditions.remove(old.track.name());
 		}
 		Ok(self.broadcast.unique_track(
 			".flv-v",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?)
 	}
 
 	/// Drop any existing audio track (finishing it and clearing its catalog
 	/// rendition) and allocate a fresh one.
-	fn replace_audio(&mut self) -> anyhow::Result<moq_net::TrackProducer> {
+	fn replace_audio(&mut self) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.audio.take() {
 			old.track.finish()?;
 			self.catalog.lock().audio.renditions.remove(old.track.name());
 		}
 		Ok(self.broadcast.unique_track(
 			".flv-a",
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		if let Some(stream) = self.video.as_mut() {
 			stream.track.seek(sequence)?;
 		}
@@ -422,7 +448,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Finish every track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		if let Some(stream) = self.video.as_mut() {
 			stream.track.finish()?;
 		}

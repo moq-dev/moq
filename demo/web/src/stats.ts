@@ -115,14 +115,15 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const node = (Net.Path.stripPrefix(prefix, entry.path) ?? entry.path) as string;
+			const node = entry.path as string;
 			if (!node) continue;
+			const path = Net.Path.join(prefix, entry.path);
 
 			if (entry.active) {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);
-				subscribeNode(ne, conn, entry.path, node);
+				subscribeNode(ne, conn, path, node);
 			} else {
 				subs.get(node)?.close();
 				subs.delete(node);

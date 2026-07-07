@@ -104,7 +104,7 @@ export class Mse implements Backend {
 
 	#runCmafMedia(
 		effect: Effect,
-		active: Moq.Broadcast,
+		active: Moq.broadcast.Consumer,
 		track: string,
 		config: Catalog.VideoConfig,
 		sourceBuffer: SourceBuffer,
@@ -117,7 +117,7 @@ export class Mse implements Backend {
 
 		// Decode the catalog's authoritative init segment once and read the
 		// timescale out of it. The catalog also gives us the bytes to feed
-		// directly into MSE — no need to regenerate.
+		// directly into MSE. No need to regenerate.
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 
@@ -133,7 +133,7 @@ export class Mse implements Backend {
 				} catch (err) {
 					// Falling behind a group's eviction window drops frames; resync from
 					// the next group (a keyframe segment) rather than stopping playback.
-					if (err instanceof Moq.CacheFull) continue;
+					if (err instanceof Moq.group.CacheFull) continue;
 					throw err;
 				}
 				if (!frame) return;
@@ -154,7 +154,7 @@ export class Mse implements Backend {
 
 	#runLegacyMedia(
 		effect: Effect,
-		active: Moq.Broadcast,
+		active: Moq.broadcast.Consumer,
 		track: string,
 		config: Catalog.VideoConfig,
 		sourceBuffer: SourceBuffer,

@@ -15,7 +15,7 @@ use moq_net::Timestamp;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
-/// Built from a [`Source`](crate::Source) (or a bare [`moq_net::BroadcastConsumer`] via
+/// Built from a [`Source`](crate::Source) (or a bare [`moq_net::broadcast::Consumer`] via
 /// `Into`), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init

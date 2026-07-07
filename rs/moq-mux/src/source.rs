@@ -3,8 +3,8 @@
 //! A hang catalog rendition may reference a track published in *another*
 //! broadcast via its `broadcast` field (a path relative to the catalog's
 //! broadcast, e.g. `../source`). Resolving that reference requires more than a
-//! [`moq_net::BroadcastConsumer`]: it needs the catalog broadcast's own path and
-//! an [`moq_net::OriginConsumer`] to fetch the referenced broadcast from.
+//! [`moq_net::broadcast::Consumer`]: it needs the catalog broadcast's own path and
+//! an [`moq_net::origin::Consumer`] to fetch the referenced broadcast from.
 //! [`Source`] bundles the three so exporters can subscribe to any rendition.
 
 use moq_net::AsPath;
@@ -12,19 +12,19 @@ use moq_net::AsPath;
 /// The subscription side of an export: the broadcast whose catalog drives it,
 /// plus optional origin context for resolving cross-broadcast rendition references.
 ///
-/// Build one from a bare [`moq_net::BroadcastConsumer`] (via `From` or [`Source::new`])
+/// Build one from a bare [`moq_net::broadcast::Consumer`] (via `From` or [`Source::new`])
 /// when every track lives in the catalog's own broadcast. Add origin context with
 /// [`Source::with_origin`] to also serve catalogs whose renditions reference sibling
 /// broadcasts; without it, such a rendition fails with [`Error::MissingOrigin`](crate::Error::MissingOrigin).
 #[derive(Clone)]
 pub struct Source {
-	broadcast: moq_net::BroadcastConsumer,
-	origin: Option<(moq_net::OriginConsumer, moq_net::PathOwned)>,
+	broadcast: moq_net::broadcast::Consumer,
+	origin: Option<(moq_net::origin::Consumer, moq_net::PathOwned)>,
 }
 
 impl Source {
 	/// A source without origin context: every track must live in the catalog's broadcast.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Self {
+	pub fn new(broadcast: moq_net::broadcast::Consumer) -> Self {
 		Self {
 			broadcast,
 			origin: None,
@@ -35,15 +35,15 @@ impl Source {
 	/// enabling renditions that reference another broadcast (e.g. `../source`).
 	///
 	/// The relative reference is resolved against `path` and fetched via
-	/// [`moq_net::OriginConsumer::request_broadcast`], so the referenced broadcast must
+	/// [`moq_net::origin::Consumer::request_broadcast`], so the referenced broadcast must
 	/// be reachable through `origin` (announced, or served by a dynamic handler).
-	pub fn with_origin(mut self, origin: moq_net::OriginConsumer, path: impl AsPath) -> Self {
+	pub fn with_origin(mut self, origin: moq_net::origin::Consumer, path: impl AsPath) -> Self {
 		self.origin = Some((origin, path.as_path().to_owned()));
 		self
 	}
 
 	/// The broadcast whose catalog drives the export.
-	pub fn broadcast(&self) -> &moq_net::BroadcastConsumer {
+	pub fn broadcast(&self) -> &moq_net::broadcast::Consumer {
 		&self.broadcast
 	}
 
@@ -76,8 +76,8 @@ impl Source {
 	}
 }
 
-impl From<moq_net::BroadcastConsumer> for Source {
-	fn from(broadcast: moq_net::BroadcastConsumer) -> Self {
+impl From<moq_net::broadcast::Consumer> for Source {
+	fn from(broadcast: moq_net::broadcast::Consumer) -> Self {
 		Self::new(broadcast)
 	}
 }
@@ -85,18 +85,18 @@ impl From<moq_net::BroadcastConsumer> for Source {
 /// A pending rendition subscription, either direct or via a referenced broadcast.
 pub(crate) enum Subscribe {
 	/// Subscribing on the catalog broadcast.
-	Track(kio::Pending<moq_net::TrackSubscribe>),
+	Track(kio::Pending<moq_net::track::Subscribe>),
 	/// Waiting for the referenced broadcast; the track (by name) is subscribed once it resolves.
-	Broadcast(kio::Pending<moq_net::BroadcastRequested>, String),
+	Broadcast(kio::Pending<moq_net::origin::Requested>, String),
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::{BroadcastInfo, Origin, PathRelative};
+	use moq_net::{Origin, PathRelative};
 
-	fn broadcast() -> moq_net::BroadcastProducer {
-		BroadcastInfo::new().produce()
+	fn broadcast() -> moq_net::broadcast::Producer {
+		moq_net::broadcast::Info::new().produce()
 	}
 
 	#[test]

@@ -1,6 +1,7 @@
+use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Consume,
-	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -8,8 +9,8 @@ use crate::{
 /// A MoQ client session builder.
 #[derive(Default, Clone)]
 pub struct Client {
-	publish: Option<OriginConsumer>,
-	subscribe: Option<OriginProducer>,
+	publish: Option<origin::Consumer>,
+	subscribe: Option<origin::Producer>,
 	stats: StatsHandle,
 	versions: Versions,
 	setup_path: Option<String>,
@@ -21,29 +22,29 @@ impl Client {
 	}
 
 	/// Publish local broadcasts to the remote: the session reads from the given
-	/// origin (pass an [`OriginProducer`] or [`OriginConsumer`] by reference) and
+	/// origin (pass an [`origin::Producer`] or [`origin::Consumer`] by reference) and
 	/// forwards its announcements. Omit to publish nothing.
-	pub fn with_publisher(mut self, publish: impl Consume<OriginConsumer>) -> Self {
+	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
 		self.publish = Some(publish.consume());
 		self
 	}
 
 	/// Subscribe to remote broadcasts: the session writes the broadcasts the
-	/// remote announces into this [`OriginProducer`]. Omit to subscribe to nothing.
-	pub fn with_subscriber(mut self, subscribe: OriginProducer) -> Self {
+	/// remote announces into this [`origin::Producer`]. Omit to subscribe to nothing.
+	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
 		self.subscribe = Some(subscribe);
 		self
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 
@@ -55,11 +56,11 @@ impl Client {
 		self
 	}
 
-	/// Set both publish and subscribe from one shared [`OriginProducer`].
+	/// Set both publish and subscribe from one shared [`origin::Producer`].
 	///
 	/// Equivalent to [`with_publisher`](Self::with_publisher) and
 	/// [`with_subscriber`](Self::with_subscriber) with the same origin.
-	pub fn with_origin(self, origin: OriginProducer) -> Self {
+	pub fn with_origin(self, origin: origin::Producer) -> Self {
 		self.with_publisher(&origin).with_subscriber(origin)
 	}
 

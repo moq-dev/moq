@@ -17,7 +17,7 @@ pub struct Wire;
 impl Container for Wire {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			let hang_frame = hang::container::Frame {
 				timestamp: frame.timestamp,
@@ -30,7 +30,7 @@ impl Container for Wire {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_net::GroupConsumer,
+		group: &mut moq_net::group::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;

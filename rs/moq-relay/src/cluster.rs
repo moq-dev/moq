@@ -6,7 +6,8 @@ use std::{
 };
 
 use anyhow::Context;
-use moq_net::{BroadcastPublish, Origin, OriginProducer, Path, Stats, Tier};
+use moq_net::origin;
+use moq_net::{Origin, Path, Stats, Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use url::Url;
@@ -21,8 +22,9 @@ const MESH_PREFIX: &str = ".internal/origins";
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a peer must stay unannounced before we abort the dial. Must clear the
-/// "prefer shorter hop" restart flap (which arrives as unannounce-then-announce
-/// within sub-milliseconds) plus reasonable churn from a peer restart.
+/// "prefer shorter hop" re-announce flap (which arrives as
+/// unannounce-then-announce within sub-milliseconds) plus reasonable churn from
+/// a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// How often the relay re-checks an http(s) `--cluster-connect-api` endpoint. The
@@ -321,11 +323,11 @@ pub struct ClusterConfig {
 	pub tier: Option<String>,
 }
 
-/// A relay cluster built around a single [`OriginProducer`].
+/// A relay cluster built around a single [`origin::Producer`].
 ///
 /// Local sessions and remote cluster connections all publish into the same
 /// origin. Loop prevention and shortest-path preference come from the
-/// hop list carried on each broadcast (see [`moq_net::BroadcastInfo::hops`]).
+/// hop list carried on each broadcast (see [`moq_net::broadcast::Info::hops`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
 /// a [`Stats`] aggregator with the `with_*` builder methods. A cluster without
@@ -342,7 +344,7 @@ pub struct Cluster {
 
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
-	pub origin: OriginProducer,
+	pub origin: origin::Producer,
 
 	/// Stats aggregator. One instance per relay; sessions pick a billing tier via
 	/// [`Stats::tier`] at acceptance time (default tier for JWT/public, `internal`
@@ -367,11 +369,11 @@ impl Cluster {
 			Some(id) if id >= 1 << 62 => {
 				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
 			}
-			Some(id) => Origin::from(id),
+			Some(id) => Origin::new(id).expect("cluster id already validated"),
 			None => Origin::random(),
 		}
 		.produce();
-		tracing::info!(origin_id = %origin.id, configured = config.id.is_some(), "cluster initialized");
+		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
 			client: None,
@@ -415,16 +417,16 @@ impl Cluster {
 		crate::trusted_tier(self.config.tier.clone())
 	}
 
-	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
+	/// Returns an [`origin::Producer`] scoped to this session's subscribe permissions.
 	///
 	/// Passed by reference to [`moq_net::Server::with_publisher`] (or the
 	/// equivalent per-request setter), which derives the read handle.
-	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginProducer> {
+	pub fn subscriber(&self, token: &AuthToken) -> Option<origin::Producer> {
 		self.origin.with_root(&token.root)?.scope(&token.subscribe)
 	}
 
-	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
-	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
+	/// Returns an [`origin::Producer`] scoped to this session's publish permissions.
+	pub fn publisher(&self, token: &AuthToken) -> Option<origin::Producer> {
 		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
@@ -553,7 +555,7 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		let _self_registration: Option<BroadcastPublish> = if gossip {
+		let _self_registration: Option<origin::Broadcast> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
@@ -594,7 +596,7 @@ impl Cluster {
 	/// instead of two. Unannounces don't abort immediately. They just mark the
 	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
 	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
-	/// shorter hop" path in OriginProducer delivers restartments as
+	/// shorter hop" path in origin::Producer delivers re-announces as
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
 	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
@@ -1002,7 +1004,7 @@ mod tests {
 		assert!(dialed.contains("healthy:4443"));
 	}
 
-	/// A restart after an unannounce clears the pending-sweep timestamp, so
+	/// A re-announce after an unannounce clears the pending-sweep timestamp, so
 	/// the entry survives even if the original unannounce was old enough to
 	/// otherwise trigger eviction.
 	#[tokio::test]
@@ -1145,7 +1147,7 @@ mod tests {
 			..Default::default()
 		})
 		.expect("valid id");
-		assert_eq!(cluster.origin.id, 42);
+		assert_eq!(cluster.origin.id(), 42);
 	}
 
 	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather

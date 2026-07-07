@@ -89,15 +89,18 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	}
 
 	// MoQ side: publish the Origin outward.
-	if let Some(url) = moq.client_connect.clone() {
-		let client = net.client(moq.client.clone())?;
-		let origin = origin.clone();
-		tasks.spawn(async move { moq::client_import(client, url, &origin).await });
+	if moq.client.connect.is_some() {
+		if let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume()) {
+			moq::notify_ready();
+			tasks.spawn(async move { Ok(reconnect.closed().await?) });
+		}
 	}
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
 		let tls_info = server.tls_info();
-		tasks.spawn(moq::server_import(server, origin.clone()));
+		moq::notify_ready();
+		let origin = origin.consume();
+		tasks.spawn(async move { Ok(server.serve_publish(origin).await?) });
 		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
 	}
 
@@ -188,15 +191,18 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 
 	// MoQ side: fill the Origin.
-	if let Some(url) = moq.client_connect.clone() {
-		let client = net.client(moq.client.clone())?;
-		let origin = origin.clone();
-		tasks.spawn(async move { moq::client_export(client, url, origin).await });
+	if moq.client.connect.is_some() {
+		if let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone()) {
+			moq::notify_ready();
+			tasks.spawn(async move { Ok(reconnect.closed().await?) });
+		}
 	}
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
 		let tls_info = server.tls_info();
-		tasks.spawn(moq::server_export(server, origin.clone()));
+		moq::notify_ready();
+		let origin = origin.clone();
+		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
 		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
 	}
 
@@ -256,7 +262,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 }
 
 /// Subscribe to `name` from the Origin and write it to stdout.
-async fn run_stdout(consumer: moq_net::OriginConsumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 	let broadcast = consumer
 		.announced_broadcast(&name)

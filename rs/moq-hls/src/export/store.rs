@@ -67,8 +67,12 @@ pub struct Snapshot {
 	pub init_ready: bool,
 	/// LL-HLS PART-TARGET, in seconds.
 	pub part_target: f64,
+	/// Latched `EXT-X-TARGETDURATION`, in seconds.
+	pub target_duration: u64,
 	/// `EXT-X-MEDIA-SEQUENCE`: sequence of the first segment in the window.
 	pub media_sequence: u64,
+	/// `EXT-X-DISCONTINUITY-SEQUENCE`: discontinuities before the window.
+	pub discontinuity_sequence: u64,
 	/// Sequence the next segment to roll will be assigned.
 	pub next_sequence: u64,
 	/// Segments currently in the sliding window, oldest first.
@@ -95,6 +99,8 @@ struct Inner {
 	init: Option<Bytes>,
 	segments: VecDeque<Segment>,
 	next_sequence: u64,
+	discontinuity_sequence: u64,
+	target_duration: u64,
 	finished: bool,
 	/// Set by [`SegmentStore::mark_discontinuity`] after a resume; the next segment
 	/// to roll is forced open and tagged discontinuous, then this clears.
@@ -121,11 +127,14 @@ impl SegmentStore {
 	/// timing from `config`.
 	pub fn new(kind: Kind, config: &Config) -> Self {
 		let (notify, _) = watch::channel(Version::default());
+		let target_duration = config.part_target.as_secs_f64().ceil().max(1.0) as u64;
 		Self {
 			inner: Mutex::new(Inner {
 				init: None,
 				segments: VecDeque::new(),
 				next_sequence: 0,
+				discontinuity_sequence: 0,
+				target_duration,
 				finished: false,
 				discontinuity_pending: false,
 			}),
@@ -151,8 +160,18 @@ impl SegmentStore {
 
 			// A pending discontinuity forces a fresh segment so the resumed media never
 			// shares a segment with pre-pause media (matters for audio, which otherwise
-			// rolls on duration, not keyframes).
-			let discontinuity = inner.discontinuity_pending;
+			// rolls on duration, not keyframes). For video the discontinuity segment must
+			// begin on an independent (keyframe) fragment: opening it on a P-frame would
+			// put a `#EXT-X-DISCONTINUITY` in front of a segment a decoder can't start on,
+			// resetting it onto a P-frame (green video). So defer the discontinuity until
+			// the next independent fragment; any P-frames arriving first are dropped rather
+			// than appended to the pre-pause timeline. A resume reads from the next group,
+			// which begins on a keyframe, so at most a partial GOP is dropped.
+			let discontinuity_pending = inner.discontinuity_pending;
+			if discontinuity_pending && self.kind == Kind::Video && !fragment.independent {
+				return;
+			}
+			let discontinuity = discontinuity_pending;
 			let need_new = discontinuity
 				|| match inner.segments.back() {
 					None => true,
@@ -168,8 +187,11 @@ impl SegmentStore {
 				};
 
 			if need_new {
-				if let Some(cur) = inner.segments.back_mut() {
+				if let Some(duration) = inner.segments.back_mut().map(|cur| {
 					cur.complete = true;
+					cur.duration
+				}) {
+					latch_target_duration(duration, &mut inner.target_duration);
 				}
 				let sequence = inner.next_sequence;
 				inner.next_sequence += 1;
@@ -197,7 +219,10 @@ impl SegmentStore {
 				let total: f64 = inner.segments.iter().map(|s| s.duration).sum();
 				let oldest = inner.segments.front().expect("segments non-empty").duration;
 				if total - oldest >= self.window {
-					inner.segments.pop_front();
+					let evicted = inner.segments.pop_front().expect("segments non-empty");
+					if evicted.discontinuity {
+						inner.discontinuity_sequence = inner.discontinuity_sequence.saturating_add(1);
+					}
 				} else {
 					break;
 				}
@@ -219,8 +244,11 @@ impl SegmentStore {
 	pub fn finish(&self) {
 		{
 			let mut inner = self.inner.lock().unwrap();
-			if let Some(cur) = inner.segments.back_mut() {
+			if let Some(duration) = inner.segments.back_mut().map(|cur| {
 				cur.complete = true;
+				cur.duration
+			}) {
+				latch_target_duration(duration, &mut inner.target_duration);
 			}
 			inner.finished = true;
 		}
@@ -332,10 +360,124 @@ impl SegmentStore {
 		Snapshot {
 			init_ready: inner.init.is_some(),
 			part_target: self.part_target,
+			target_duration: inner.target_duration,
 			media_sequence,
+			discontinuity_sequence: inner.discontinuity_sequence,
 			next_sequence: inner.next_sequence,
 			segments,
 			finished: inner.finished,
 		}
+	}
+}
+
+fn latch_target_duration(duration: f64, target_duration: &mut u64) {
+	*target_duration = (*target_duration).max(duration.ceil().max(1.0) as u64);
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use bytes::Bytes;
+
+	use super::*;
+
+	fn config(window: Duration) -> Config {
+		Config {
+			part_target: Duration::from_millis(500),
+			window,
+			latency: Duration::from_secs(10),
+			audio_segment_target: Duration::from_secs(2),
+		}
+	}
+
+	fn fragment(duration: f64) -> Fragment {
+		Fragment {
+			data: Bytes::new(),
+			init: false,
+			independent: true,
+			duration,
+		}
+	}
+
+	fn dependent_fragment(duration: f64) -> Fragment {
+		Fragment {
+			data: Bytes::new(),
+			init: false,
+			independent: false,
+			duration,
+		}
+	}
+
+	#[test]
+	fn evicting_discontinuous_segment_advances_sequence() {
+		let cfg = config(Duration::from_secs(2));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.push(fragment(1.0));
+		store.mark_discontinuity();
+		store.push(fragment(1.0));
+		store.push(fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.media_sequence, 1);
+		assert_eq!(snapshot.discontinuity_sequence, 0);
+		assert!(snapshot.segments[0].discontinuity);
+
+		store.push(fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.media_sequence, 2);
+		assert_eq!(snapshot.discontinuity_sequence, 1);
+		assert!(snapshot.segments.iter().all(|s| !s.discontinuity));
+	}
+
+	#[test]
+	fn video_discontinuity_waits_for_keyframe() {
+		// A resume that lands mid-GOP must not open the discontinuity segment on a
+		// P-frame: the segment after `#EXT-X-DISCONTINUITY` has to be decodable.
+		let cfg = config(Duration::from_secs(16));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.push(fragment(1.0)); // seq 0, keyframe
+		store.mark_discontinuity();
+
+		// P-frames arriving first are dropped, not tagged as the discontinuity segment.
+		store.push(dependent_fragment(1.0));
+		store.push(dependent_fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.segments.len(), 1);
+		assert!(!snapshot.segments[0].discontinuity);
+
+		// The next keyframe opens the discontinuity segment.
+		store.push(fragment(1.0)); // seq 1, keyframe
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.segments.len(), 2);
+		assert!(!snapshot.segments[0].discontinuity);
+		assert!(snapshot.segments[1].discontinuity);
+		// The discontinuity segment starts on an independent part.
+		assert!(snapshot.segments[1].parts[0].independent);
+	}
+
+	#[test]
+	fn target_duration_never_decreases_after_eviction() {
+		let cfg = config(Duration::from_secs(2));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.push(fragment(6.0));
+		store.push(fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.target_duration, 6);
+		assert_eq!(snapshot.media_sequence, 0);
+
+		store.push(fragment(1.0));
+		store.push(fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.media_sequence, 2);
+		assert_eq!(snapshot.target_duration, 6);
 	}
 }

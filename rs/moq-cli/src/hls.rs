@@ -48,8 +48,8 @@ pub struct ExportArgs {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
-pub async fn import(origin: &moq_net::OriginProducer, name: String, playlist: String) -> anyhow::Result<()> {
-	let mut producer = moq_net::BroadcastInfo::new().produce();
+pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: String) -> anyhow::Result<()> {
+	let mut producer = moq_net::broadcast::Info::new().produce();
 	// Hold the RAII announcement for the lifetime of the import.
 	let _announce = origin
 		.publish_broadcast(&name, producer.consume())
@@ -67,17 +67,15 @@ pub async fn import(origin: &moq_net::OriginProducer, name: String, playlist: St
 
 /// Serve HLS/LL-HLS over HTTP for the single broadcast `name` (reached at
 /// `/<name>/master.m3u8`); other broadcasts in the Origin are not served.
-pub async fn export(origin: moq_net::OriginConsumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
+pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
 	let scoped = origin
 		.scope(&[name.as_path()])
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
-	let config = moq_hls::export::Config {
-		part_target: args.part_target,
-		window: args.window,
-		latency: args.latency_max,
-		..Default::default()
-	};
+	let mut config = moq_hls::export::Config::default();
+	config.part_target = args.part_target;
+	config.window = args.window;
+	config.latency = args.latency_max;
 	let server = moq_hls::Server::new(scoped, config);
 	let app = server.router().layer(args.cors.layer([Method::GET])?);
 

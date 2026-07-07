@@ -129,8 +129,8 @@ export default class MoqBoy extends HTMLElement {
 				const entry = await Promise.race([effect.cancel, announced.next()]);
 				if (!entry) break;
 
-				// Strip prefix, skip nested paths (e.g. "viewer/..." sub-broadcasts).
-				const suffix = Moq.Path.stripPrefix(prefix, entry.path);
+				// Skip nested paths (e.g. "viewer/..." sub-broadcasts).
+				const suffix = entry.path;
 				if (!suffix || suffix.includes("/")) continue;
 
 				const id = suffix;

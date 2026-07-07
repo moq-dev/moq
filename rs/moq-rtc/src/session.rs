@@ -11,11 +11,11 @@
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use str0m::{Event, IceConnectionState, Input, Output, Rtc, net::Receive};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, net::Receive};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -466,23 +466,40 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
 /// server paths share one socket via `crate::server::mux` instead. `advertise`
-/// IPs are used verbatim (reusing the bound port); empty falls back to whatever
-/// address the OS picked (loopback only).
+/// IPs are used verbatim (reusing the bound port); empty falls back to the
+/// bound address, substituting loopback when that address is unspecified.
 pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>)> {
 	let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
 	let local = socket.local_addr()?;
-	let candidates = if advertise.is_empty() {
-		vec![local]
-	} else {
-		// Reuse the bound port across each advertised IP, since str0m's ICE
-		// agent picks the destination port from the candidate it's pairing
-		// against.
-		advertise
-			.iter()
-			.map(|addr| SocketAddr::new(addr.ip(), local.port()))
-			.collect()
-	};
+	let candidates = advertised_candidates(advertise, local)?;
 	Ok((Arc::new(socket), candidates))
+}
+
+/// Pair configured ICE candidates with the bound UDP port and validate them.
+pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr) -> Result<Vec<SocketAddr>> {
+	let port = local.port();
+	let candidates = if advertise.is_empty() {
+		let ip = match local.ip() {
+			IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+			IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+			ip => ip,
+		};
+
+		let candidate = SocketAddr::new(ip, port);
+		if candidate != local {
+			tracing::info!(bound = %local, advertised = %candidate, "webrtc udp bind is unspecified, advertising loopback ICE candidate");
+		}
+		vec![candidate]
+	} else {
+		// Reuse the bound port across each advertised IP, since str0m's ICE agent
+		// picks the destination port from the candidate it's pairing against.
+		advertise.iter().map(|addr| SocketAddr::new(addr.ip(), port)).collect()
+	};
+
+	for addr in &candidates {
+		Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
+	}
+	Ok(candidates)
 }
 
 /// Spawn a 1:1 reader pumping every datagram from `socket` into a channel, for
@@ -518,6 +535,44 @@ mod tests {
 	use str0m::media::Mid;
 
 	use super::*;
+
+	#[test]
+	fn advertised_candidates_use_loopback_for_unspecified_ipv4() {
+		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
+		let candidates = advertised_candidates(&[], local).unwrap();
+		assert_eq!(candidates, vec!["127.0.0.1:4444".parse().unwrap()]);
+	}
+
+	#[test]
+	fn advertised_candidates_use_loopback_for_unspecified_ipv6() {
+		let local: SocketAddr = "[::]:4444".parse().unwrap();
+		let candidates = advertised_candidates(&[], local).unwrap();
+		assert_eq!(candidates, vec!["[::1]:4444".parse().unwrap()]);
+	}
+
+	#[test]
+	fn advertised_candidates_keep_bound_address_when_specific() {
+		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
+		assert_eq!(advertised_candidates(&[], local).unwrap(), vec![local]);
+	}
+
+	#[test]
+	fn advertised_candidates_reuse_bound_port_for_configured_addresses() {
+		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
+		let advertised = vec!["127.0.0.1:1000".parse().unwrap(), "[::1]:2000".parse().unwrap()];
+
+		assert_eq!(
+			advertised_candidates(&advertised, local).unwrap(),
+			vec!["127.0.0.1:4444".parse().unwrap(), "[::1]:4444".parse().unwrap()]
+		);
+	}
+
+	#[test]
+	fn advertised_candidates_reject_configured_unspecified_addresses() {
+		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
+		let advertised = vec!["0.0.0.0:1000".parse().unwrap()];
+		assert!(advertised_candidates(&advertised, local).is_err());
+	}
 
 	#[test]
 	fn pick_local_matches_address_family() {

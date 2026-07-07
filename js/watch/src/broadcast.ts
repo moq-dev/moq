@@ -51,7 +51,7 @@ type BroadcastInput = {
 
 type BroadcastOutput = {
 	status: Signal<Status>;
-	active: Signal<Moq.Broadcast | undefined>;
+	active: Signal<Moq.broadcast.Consumer | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode.
 	catalog: Signal<Catalog.Root | undefined>;
@@ -63,7 +63,7 @@ export class Broadcast {
 
 	readonly #output: BroadcastOutput = {
 		status: new Signal<Status>("offline"),
-		active: new Signal<Moq.Broadcast | undefined>(undefined),
+		active: new Signal<Moq.broadcast.Consumer | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
 	readonly output = readonlys(this.#output);
@@ -205,7 +205,7 @@ export class Broadcast {
 	}
 
 	/**
-	 * Resolve the `Moq.Broadcast` that publishes a given track.
+	 * Resolve the `Moq.broadcast.Consumer` that publishes a given track.
 	 *
 	 * If `rel` is set (a rendition's catalog `broadcast` field), treat it as a path
 	 * relative to this broadcast's name and consume the resolved broadcast on the same
@@ -216,7 +216,7 @@ export class Broadcast {
 	 * renditions referencing the same source thus share one underlying subscription,
 	 * and the override outlives any single caller effect.
 	 */
-	trackBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast | undefined {
+	trackBroadcast(effect: Effect, rel: string | undefined): Moq.broadcast.Consumer | undefined {
 		if (!rel) return effect.get(this.output.active);
 
 		const base = effect.get(this.input.name);
@@ -230,13 +230,13 @@ export class Broadcast {
 		return effect.get(this.#override(resolved));
 	}
 
-	#overrides = new Map<Moq.Path.Valid, Signal<Moq.Broadcast | undefined>>();
+	#overrides = new Map<Moq.Path.Valid, Signal<Moq.broadcast.Consumer | undefined>>();
 
-	#override(path: Moq.Path.Valid): Signal<Moq.Broadcast | undefined> {
+	#override(path: Moq.Path.Valid): Signal<Moq.broadcast.Consumer | undefined> {
 		const cached = this.#overrides.get(path);
 		if (cached) return cached;
 
-		const signal = new Signal<Moq.Broadcast | undefined>(undefined);
+		const signal = new Signal<Moq.broadcast.Consumer | undefined>(undefined);
 		this.#overrides.set(path, signal);
 
 		this.signals.run((effect) => {

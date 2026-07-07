@@ -16,11 +16,6 @@ use crate::Range;
 #[command(version = env!("VERSION"))]
 #[non_exhaustive]
 pub struct Config {
-	/// The URL of the MoQ server to benchmark (e.g. `https://relay.example.com`).
-	#[arg(long, env = "MOQ_BENCH_URL")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub url: Option<url::Url>,
-
 	/// The broadcast namespace prefix. Each broadcast is published under
 	/// `<name>/<run>/<connection>/<index>` and subscribers discover peers under `<name>`.
 	#[arg(long, env = "MOQ_BENCH_NAME")]
@@ -164,11 +159,11 @@ mod tests {
 	#[test]
 	fn cli_overrides_toml() {
 		let toml = r#"
-url = "https://example.com"
 connections = 100
 fps = "24:60"
 
 [client]
+connect = "https://example.com"
 tls.disable_verify = true
 "#;
 		let dir = std::env::temp_dir().join("moq-bench-config-test");
@@ -185,6 +180,7 @@ tls.disable_verify = true
 		let config = Config::parse_and_merge(args).unwrap();
 		assert_eq!(config.connections(), Range::new(100, 100));
 		assert_eq!(config.fps(), Range::new(24, 60));
+		assert_eq!(config.client.connect.as_ref().unwrap().as_str(), "https://example.com/");
 		assert_eq!(config.client.tls.disable_verify, Some(true));
 
 		// CLI flag wins over the TOML value.

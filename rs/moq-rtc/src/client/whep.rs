@@ -3,9 +3,8 @@
 //!
 //! Mints an SDP offer with `recvonly` audio and video, POSTs it to the
 //! WHEP resource URL with `Content-Type: application/sdp`, parses the
-//! returned answer, then hands the resulting `str0m::Rtc` to a
-//! [`crate::session::Session`] that reuses [`IngestSink`] (the same sink the
-//! WHIP server uses).
+//! returned answer, then hands the resulting `str0m::Rtc` to the internal
+//! session driver in ingest mode (the same sink the WHIP server uses).
 
 use std::time::Instant;
 
@@ -18,7 +17,7 @@ use url::Url;
 
 use crate::{Error, Result, client::Client, ingest::IngestSink, session};
 
-pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::BroadcastProducer) -> Result<()> {
+pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcast::Producer) -> Result<()> {
 	let sink = Box::new(IngestSink::new(broadcast)?);
 
 	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;

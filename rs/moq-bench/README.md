@@ -48,11 +48,11 @@ shape, so a subscriber works against peers it didn't publish itself.
 
 ```bash
 # Roll the dice with the built-in defaults (1 connection, 1 broadcast, 30fps).
-moq-bench --url https://relay.example.com
+moq-bench --client-connect https://relay.example.com
 
 # Use a preset, overriding the target and connection count on the CLI.
 moq-bench --file rs/moq-bench/config/hd.toml \
-  --url https://relay.example.com \
+  --client-connect https://relay.example.com \
   --connections 500
 ```
 

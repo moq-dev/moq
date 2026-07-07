@@ -7,6 +7,7 @@
 # the repository root, so these recipes run from the repo root rather than
 # from rs/ (cargo resolves paths relative to the workspace root either way).
 
+set unstable
 set working-directory := '..'
 
 default:
@@ -27,6 +28,7 @@ check *args:
 # force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
 #
 # `cargo deny` runs here (not in `check`) so the inner-loop stays fast
+
 # and devs aren't blocked by a fresh upstream advisory mid-edit.
 ci FILES="":
     #!/usr/bin/env bash
@@ -101,6 +103,7 @@ update:
 #
 # Examples:
 #   just rs package moq-relay deb
+
 # just rs package moq-cli rpm
 package crate packager:
     #!/usr/bin/env bash

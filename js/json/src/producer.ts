@@ -44,10 +44,10 @@ export interface Config<T> {
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
 export class Producer<T> {
-	#track: Moq.TrackProducer;
+	#track: Moq.track.Producer;
 	#config: Config<T>;
 
-	#group?: Moq.Group;
+	#group?: Moq.group.Producer;
 	#last?: unknown;
 	// Bytes of deltas already written to the current group, excluding the snapshot frame. Compressed
 	// frame sizes when compressing, raw otherwise, matching {@link #snapshotLen} so the budget check is
@@ -63,7 +63,7 @@ export class Producer<T> {
 	#compress = false;
 	#encoder?: Encoder;
 
-	constructor(track: Moq.TrackProducer, config: Config<T> = {}) {
+	constructor(track: Moq.track.Producer, config: Config<T> = {}) {
 		this.#track = track;
 		this.#config = config;
 		this.#compress = config.compression ?? false;
@@ -174,7 +174,7 @@ export class Producer<T> {
 
 	// Write a group's snapshot (frame 0), returning the bytes written. On the compressed path this opens
 	// a fresh per-group encoder (cold window), so the snapshot and its deltas share one DEFLATE stream.
-	#writeSnapshot(group: Moq.Group, frame: Uint8Array): number {
+	#writeSnapshot(group: Moq.group.Producer, frame: Uint8Array): number {
 		let data = frame;
 		if (this.#compress) {
 			this.#encoder = new Encoder();
@@ -186,7 +186,7 @@ export class Producer<T> {
 
 	// Write a delta frame, compressed against the current group's encoder when compressing. Returns the
 	// bytes written.
-	#writeDelta(group: Moq.Group, frame: Uint8Array): number {
+	#writeDelta(group: Moq.group.Producer, frame: Uint8Array): number {
 		let data = frame;
 		if (this.#compress) {
 			if (!this.#encoder) throw new Error("compressed delta requires an open group");

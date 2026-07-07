@@ -16,13 +16,13 @@ pub enum Version {
 }
 
 impl Version {
-	/// Whether the track can carry a per-track timescale (reported in TRACK_INFO on
-	/// lite-05+). When the publisher advertises one, the publisher and subscriber
-	/// agree to prefix every frame with a zigzag-delta timestamp varint; with `None`
-	/// the wire skips the byte entirely, so this method only governs whether the
-	/// negotiation field exists, not whether timestamps are always present.
+	/// Whether the version has lite-05's dedicated TRACK stream and related stream
+	/// layout changes.
+	///
+	/// This is the common feature boundary for TRACK_INFO, FETCH streams,
+	/// SUBSCRIBE_START/END, and per-frame timestamp prefixes.
 	#[allow(clippy::match_like_matches_macro)]
-	pub fn has_timestamps(self) -> bool {
+	pub fn has_track_stream(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
@@ -35,6 +35,19 @@ impl Version {
 	/// setup exchange (Lite01/02) and the no-setup drafts (Lite03/04) don't use it.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_setup_stream(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
+	/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload`
+	/// and is routed over the existing subscription. Added in lite-05; older versions never
+	/// send or accept datagram bodies.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_datagrams(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,

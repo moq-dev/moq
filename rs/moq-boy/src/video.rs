@@ -20,7 +20,7 @@ use crate::emulator::{HEIGHT, WIDTH};
 pub struct VideoEncoder {
 	tx: tokio::sync::mpsc::Sender<EncoderMsg>,
 	/// Watch-only handle to the video track, for monitoring used/unused.
-	pub demand: moq_net::TrackDemand,
+	pub demand: moq_net::track::Demand,
 	force_keyframe: Arc<AtomicBool>,
 	/// Latest encode duration in microseconds.
 	encode_duration: Arc<AtomicU64>,
@@ -33,7 +33,7 @@ struct EncoderMsg {
 }
 
 impl VideoEncoder {
-	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
+	pub fn spawn(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264)
 			.expect("failed to create avc3 producer");

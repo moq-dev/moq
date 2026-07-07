@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Preserve draft-00 `generatedAt` and `isComplete` as version-neutral `Catalog` fields so broadcast termination can be represented.
+- Mark `Catalog` as `#[non_exhaustive]` and add `Catalog::new` for external construction.
+
+### Fixed
+
+- Reject draft-01 tracks whose `initRef` points at a missing or unsupported `initDataList` entry instead of silently exposing `Track::init_data = None`.
+
 ## [0.3.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.2.0...moq-msf-v0.3.0) - 2026-06-30
 
 ### Other
@@ -15,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Track draft-ietf-moq-msf-01, with the wire format hidden behind the API. `Catalog` is now a version-agnostic snapshot (`{ tracks }`); the `version` field and the `Version` enum are gone. Parsing accepts draft-00 (numeric `version`, inline `initData`) and draft-01 (string `version`, root `initDataList` + per-track `initRef`); serializing always emits draft-01. Init data is resolved to inline `Track::init_data` on parse and hoisted into a deduplicated `initDataList` on serialize, so callers never touch the version or the init-data indirection.
+- Track draft-ietf-moq-msf-01, with the wire format hidden behind the API. `Catalog` is now a version-agnostic snapshot (`{ tracks }`) and no longer exposes the wire `version` field. Parsing accepts draft-00 (numeric `version`, inline `initData`) and draft-01 (string `version`, root `initDataList` + per-track `initRef`); serializing always emits draft-01. Init data is resolved to inline `Track::init_data` on parse and hoisted into a deduplicated `initDataList` on serialize, so callers never touch the version or the init-data indirection.
 
 ## [0.2.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.1.3...moq-msf-v0.2.0) - 2026-05-23
 

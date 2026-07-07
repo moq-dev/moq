@@ -101,7 +101,7 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`connect(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
 - **`Client(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
   - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.

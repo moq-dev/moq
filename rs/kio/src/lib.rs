@@ -18,6 +18,9 @@ mod future;
 mod producer;
 mod weak;
 
+#[cfg(feature = "tokio")]
+pub mod tokio;
+
 #[cfg(test)]
 mod tests;
 

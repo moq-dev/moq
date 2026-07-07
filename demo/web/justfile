@@ -1,4 +1,5 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
+set unstable
 
 # Run the web server targeting the default relay.
 default:
@@ -6,6 +7,7 @@ default:
 
 # Run the web server targeting the specified relay.
 # The vite config opens the watch, publish, and stats demos in separate tabs;
+
 # set MOQ_NO_OPEN=1 to skip opening a browser.
 serve url='http://localhost:4443':
     VITE_RELAY_URL="{{ url }}" bun --bun vite

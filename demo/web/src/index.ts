@@ -19,7 +19,7 @@
 import "./highlight";
 import "@moq/watch/element"; // defines <moq-watch>
 import "@moq/watch/ui"; // defines <moq-watch-ui>
-import { Json, Net, Signals } from "@moq/watch";
+import { Hang, Json, Net, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";
@@ -168,7 +168,8 @@ discovery.run((effect) => {
 	broadcasts.set([]);
 	if (!conn) return;
 
-	const announced = conn.announced(prefixPath(effect.get(prefixInput)));
+	const prefix = prefixPath(effect.get(prefixInput));
+	const announced = conn.announced(prefix);
 	effect.cleanup(() => announced.close());
 
 	const live = new Set<string>();
@@ -176,11 +177,12 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
+			const path = Net.Path.join(prefix, entry.path);
 			// Only `.hang` broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
-			if (!entry.path.endsWith(".hang")) continue;
-			if (entry.active) live.add(entry.path);
-			else live.delete(entry.path);
+			if (!path.endsWith(".hang")) continue;
+			if (entry.active) live.add(path);
+			else live.delete(path);
 			broadcasts.set([...live].sort());
 		}
 	});
@@ -399,7 +401,7 @@ ui.run((effect) => {
 		return;
 	}
 
-	const track = broadcast.track(trackName).subscribe();
+	const track = broadcast.track(trackName).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
 	effect.cleanup(() => track.close());
 	const consumer = new Json.Consumer<unknown>(track);
 

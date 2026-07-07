@@ -6,7 +6,7 @@ use crate::container::Frame;
 ///
 /// Publishes raw FLAC frames to a single moq track. Build it with
 /// [`new`](Self::new), passing the track producer and the
-/// [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
+/// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 ///
 /// The STREAMINFO ([`Config`]) is required up front: it becomes the catalog
 /// `description` (the `fLaC` marker plus STREAMINFO) so a decoder can initialize
@@ -19,10 +19,10 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	/// Publish on an existing track producer, reserving the rendition from `reserved`.
 	pub fn new(
-		track: moq_net::TrackProducer,
-		catalog: crate::catalog::Producer<E>,
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
 		config: Config,
 	) -> crate::Result<Self> {
 		let mut audio = hang::catalog::AudioConfig::new(
@@ -35,7 +35,7 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
 
-		let mut rendition = catalog.audio_track(track.name());
+		let mut rendition = reserved.audio(track.name());
 		rendition.set(audio);
 
 		Ok(Self {
@@ -45,7 +45,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
-	pub fn demand(&self) -> moq_net::TrackDemand {
+	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
 	}
 
@@ -62,11 +62,11 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Publish one FLAC frame as its own group, stamping `pts` or a wall clock when absent.
-	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp,
-			payload: bytes::Bytes::copy_from_slice(frame),
+			payload: frame.into_bytes(),
 			keyframe: true,
 			duration: None,
 		})?;

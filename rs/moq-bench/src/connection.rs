@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_native::Status;
-use moq_native::moq_net::{self, BroadcastConsumer, BroadcastInfo, Origin, TrackProducer, bytes::Bytes};
+use moq_native::moq_net::{self, Origin, bytes::Bytes};
+use moq_native::moq_net::{broadcast, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -75,7 +76,7 @@ pub async fn run(ctx: Connection) {
 		stats,
 	} = ctx;
 
-	let url = config.url.clone().expect("url required");
+	let url = config.client.connect.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
 	let publish = Origin::random().produce();
@@ -91,7 +92,7 @@ pub async fn run(ctx: Connection) {
 	for index in 0..rolled.broadcasts {
 		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
 
-		let mut broadcast = BroadcastInfo::new().produce();
+		let mut broadcast = broadcast::Info::new().produce();
 		let track = match broadcast.create_track(TRACK, None) {
 			Ok(track) => track,
 			Err(err) => {
@@ -173,7 +174,7 @@ async fn produce(
 	connection: u64,
 	path: String,
 	rolled: Rolled,
-	mut track: TrackProducer,
+	mut track: track::Producer,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.broadcasts);
@@ -228,7 +229,7 @@ async fn produce(
 /// Watch announcements and drain up to `want` peer broadcasts (excluding our own),
 /// spreading each subscription's start over `startup` to avoid a thundering herd.
 async fn subscribe(
-	mut announced: moq_net::AnnounceConsumer,
+	mut announced: moq_net::announce::Consumer,
 	own: HashSet<String>,
 	want: u64,
 	startup: Duration,
@@ -272,7 +273,7 @@ async fn subscribe(
 
 /// Subscribe to the broadcast's track, counting every frame received and tracking
 /// group-sequence gaps to report skipped groups.
-async fn drain(broadcast: BroadcastConsumer, stats: &Stats) -> anyhow::Result<()> {
+async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
 	let mut track = broadcast.track(TRACK)?.subscribe(None).await?;
@@ -418,7 +419,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = BroadcastInfo::new().produce();
+		let mut broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -456,7 +457,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = BroadcastInfo::new().produce();
+		let mut broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 

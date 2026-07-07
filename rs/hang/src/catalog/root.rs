@@ -76,10 +76,10 @@ impl Catalog {
 	}
 
 	/// Track properties for creating the catalog track via
-	/// [`create_track`](moq_net::BroadcastProducer::create_track) at
+	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
-	pub fn default_track_info() -> moq_net::TrackInfo {
-		moq_net::TrackInfo::default()
+	pub fn default_track_info() -> moq_net::track::Info {
+		moq_net::track::Info::default()
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so

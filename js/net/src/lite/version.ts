@@ -26,6 +26,22 @@ export function hasSetupStream(version: Version): boolean {
 	}
 }
 
+/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
+/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload` and is
+/// routed over the existing subscription. Added in lite-05; older versions never send/accept them.
+export function hasDatagrams(version: Version): boolean {
+	// Explicitly list older versions so future versions default to having datagrams.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
 export function hasAnnounceOk(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.

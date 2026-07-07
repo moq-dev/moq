@@ -1,16 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use crate::{announce, frame, group, origin, track};
+use std::{sync::Arc, task::Poll, time::Duration};
 
+use bytes::Buf;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, TrackSubscriber,
-	coding::{Stream, Writer},
+	AsPath, Error, Origin, OriginList, StatsHandle as MoqStats,
+	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	model::{FrameConsumer, GroupConsumer},
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -19,7 +20,7 @@ use super::Version;
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin we read local broadcasts from.
-	pub origin: OriginConsumer,
+	pub origin: origin::Consumer,
 	/// Stats aggregator for this session's egress. Use [`MoqStats::default`]
 	/// to opt out.
 	pub stats: MoqStats,
@@ -28,7 +29,7 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
-	origin: OriginConsumer,
+	origin: origin::Consumer,
 	stats: MoqStats,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
@@ -58,7 +59,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
-		// `OriginConsumer` and friends are cheap to clone (shared handles), so each control
+		// `origin::Consumer` and friends are cheap to clone (shared handles), so each control
 		// stream gets its own task and they all make progress independently.
 		let this = Arc::new(self);
 
@@ -190,8 +191,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	#[allow(clippy::too_many_arguments)]
 	async fn run_announce(
 		stream: &mut Stream<S, Version>,
-		origin: &OriginConsumer,
-		announced: &mut AnnounceConsumer,
+		origin: &origin::Consumer,
+		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
 		// Peer's session-level origin id, sent in AnnounceInterest. We skip
@@ -270,7 +271,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let hops = &info.hops;
 							// Apply the same exclude_hop and reflected-announce skips as the live
 							// loop so the count matches exactly what we send (minus the self push).
-							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+							if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
 								continue;
 							}
 							if hops.contains(&self_origin) {
@@ -297,14 +298,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					origin: self_origin,
 					active: initial.len() as u64,
 				};
-				stream.writer.encode(&ok).await?;
-
-				for (suffix, hops) in initial {
-					stream
-						.writer
-						.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
-						.await?;
+				let mut buf = bytes::BytesMut::new();
+				ok.encode(&mut buf, version)?;
+				for (suffix, hops) in &initial {
+					lite::AnnounceBroadcast::Active {
+						suffix: suffix.as_path(),
+						hops: hops.clone(),
+					}
+					.encode(&mut buf, version)?;
 				}
+				let mut buf = buf.freeze();
+				stream.writer.write_all(&mut buf).await?;
 
 				// Count each initial announce by broadcast name length, mirroring the
 				// live loop below (the name, not the encoded message size).
@@ -334,7 +338,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let absolute = origin.absolute(&path).to_owned();
 
 						match event {
-							crate::Announced::Active(active) => {
+							announce::Event::Active(active) => {
 								let info = active.info();
 								let Some(hops) = Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
@@ -348,7 +352,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 							}
-							crate::Announced::Restart(active) => {
+							announce::Event::Restart(active) => {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
 								// `Active` for an already-announced path). Older versions never defined
 								// that, so split it into an unannounce followed by a fresh announce.
@@ -385,7 +389,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									}
 								}
 							}
-							crate::Announced::Ended => {
+							announce::Event::Ended => {
 								tracing::debug!(broadcast = %absolute, "unannounce");
 								// Count the name length whether or not a guard is held: the Ended
 								// message is sent even for announces we filtered out above.
@@ -412,7 +416,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 		absolute: &crate::Path,
 	) -> Option<OriginList> {
-		if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+		if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
 			tracing::debug!(broadcast = %absolute, %exclude_hop, "skipping announce per peer's exclude_hop");
 			return None;
 		}
@@ -433,7 +437,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub async fn recv_track(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		// The Track Stream is lite-05+ only.
-		if !self.version.has_timestamps() {
+		if !self.version.has_track_stream() {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -458,7 +462,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track_info(&self, stream: &mut Stream<S, Version>, request: &lite::Track<'_>) -> Result<(), Error> {
 		// The peer requested this exact path, so it has already seen an announcement for it.
-		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
+		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&request.broadcast).await?;
 		let info = broadcast.track(&request.track)?.info().await?;
@@ -491,7 +495,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// We just received a subscribe for this exact path, so by definition the peer has
 		// already seen an announcement for it. `request_broadcast` resolves an announced
-		// broadcast immediately; if it isn't announced it falls back to an `OriginDynamic`
+		// broadcast immediately; if it isn't announced it falls back to an `origin::Dynamic`
 		// handler (or resolves to an error when there is none).
 		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
@@ -533,7 +537,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		broadcast: kio::Pending<crate::BroadcastRequested>,
+		broadcast: kio::Pending<origin::Requested>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -553,13 +557,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
 		// immediately otherwise (including an unroutable/dropped error).
 		let broadcast = broadcast.await?;
-		let track = broadcast.track(&subscribe.track)?.subscribe(subscription).await?;
+		let track_consumer = broadcast.track(&subscribe.track)?;
+		// One subscriber for the whole subscription: `run_track` polls its groups and its
+		// best-effort datagrams from this single cursor, so a group-only or datagram-only
+		// track opens exactly one subscription (no duplicate demand).
+		let track = track_consumer.subscribe(subscription).await?;
 
 		// Per-frame timestamps require a wire format that carries them. Lite05+ prefixes
 		// every frame with a zigzag-delta timestamp at the track's timescale; older
 		// drafts have no wire field, so `None` here means "don't emit the prefix" (the
 		// frames still carry timestamps in the model, just not on this wire).
-		let timescale = if version.has_timestamps() {
+		let timescale = if version.has_track_stream() {
 			Some(track.info().timescale)
 		} else {
 			None
@@ -572,7 +580,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties live
 		// in TRACK_INFO, and the resolved range arrives as SUBSCRIBE_START/END emitted
 		// from run_track. Older drafts still acknowledge with SUBSCRIBE_OK here.
-		if !version.has_timestamps() {
+		if !version.has_track_stream() {
 			let info = lite::SubscribeOk {
 				priority: subscribe.priority,
 				ordered: false,
@@ -606,6 +614,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
 		// peer FIN actually ends the subscription. This is what lets relays pause an
 		// upstream subscription across consumer churn without tearing it down.
+		//
+		// run_track serves groups and best-effort datagrams off the one subscriber.
 		sub.run_track(
 			track,
 			subscribe.start_group,
@@ -621,8 +631,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn recv_fetch(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
-		// FETCH is lite-05+ only; older drafts have no per-frame timestamp format.
-		if !self.version.has_timestamps() {
+		// FETCH is lite-05+ only; older drafts have no dedicated FETCH stream.
+		if !self.version.has_track_stream() {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -635,7 +645,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(broadcast = %absolute, %track, %group, "fetch started");
 
 		// The peer fetched this exact path, so it has already seen an announcement for it.
-		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
+		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
@@ -658,7 +668,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch(
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
-		broadcast: kio::Pending<crate::BroadcastRequested>,
+		broadcast: kio::Pending<origin::Requested>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
@@ -668,15 +678,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let group = track
 			.fetch_group(
 				fetch.group,
-				crate::Fetch {
+				group::Fetch {
 					priority: fetch.priority,
 				},
 			)
 			.await?;
 
-		// FETCH is gated to lite-05+, which always prefixes frames with a timestamp at
-		// the track's timescale.
-		let timescale = if version.has_timestamps() {
+		// FETCH is gated to lite-05+, which learned the track timescale via TRACK_INFO.
+		let timescale = if version.has_track_stream() {
 			Some(group.timescale())
 		} else {
 			None
@@ -701,18 +710,49 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 }
 
+#[cfg(test)]
+mod test {
+	use super::*;
+	use crate::{Timestamp, broadcast};
+
+	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
+		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+	}
+
+	#[tokio::test]
+	async fn recv_next_drains_datagram_before_finished() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		producer
+			.append_datagram(Timestamp::from_millis(1).unwrap(), &b"last"[..])
+			.unwrap();
+		producer.finish().unwrap();
+
+		match recv_next(&mut subscriber, true).await.unwrap() {
+			Recv::Datagram(datagram) => assert_eq!(&datagram.payload[..], b"last"),
+			_ => panic!("expected datagram before finished"),
+		}
+
+		match recv_next(&mut subscriber, true).await.unwrap() {
+			Recv::Finished => {}
+			_ => panic!("expected finished after datagram"),
+		}
+	}
+}
+
 /// Encode the per-frame timing prefix when the track advertises a timescale:
 /// `[zigzag-delta timestamp]` (the lite-05 FRAME format). With `None` the field is
 /// omitted entirely, saving the bytes on tracks where timing isn't meaningful
 /// (catalogs, control channels, IETF transport).
 ///
 /// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
-/// model layer (`GroupProducer::create_frame`) already converted the timestamp
+/// model layer (`group::Producer::create_frame`) already converted the timestamp
 /// into the track timescale, so its raw value goes straight onto the wire. Mirrors
 /// the decode in the subscriber's `run_group`.
 async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
-	frame: &FrameConsumer,
+	frame: &frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 ) -> Result<(), Error> {
@@ -749,7 +789,7 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 /// stream up front.
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
-	frame: &mut FrameConsumer,
+	frame: &mut frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 	track_stats: &crate::PublisherTrack,
@@ -758,13 +798,50 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 
 	writer.encode(&frame.size).await?;
 	track_stats.frame();
-	while let Some(mut chunk) = frame.read_chunk().await? {
+	while let Some(chunk) = frame.read_chunk().await? {
 		let n = chunk.len() as u64;
-		writer.write_all(&mut chunk).await?;
+		writer.write_chunk(chunk).await?;
 		track_stats.bytes(n);
 	}
 
 	Ok(())
+}
+
+/// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
+/// best-effort datagram to forward, or the track finishing.
+enum Recv {
+	Group(group::Consumer),
+	Datagram(crate::Datagram),
+	Finished,
+}
+
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware) or datagram from one `&mut`
+/// borrow, so groups and datagrams share the same subscription. Groups are polled first so a
+/// datagram burst can't starve them; datagrams are polled only when the transport carries them.
+async fn recv_next(track: &mut track::Subscriber, datagrams: bool) -> Result<Recv, Error> {
+	kio::wait(|waiter| {
+		let mut groups_finished = false;
+		match track.poll_next_group(waiter) {
+			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
+			Poll::Ready(Ok(None)) => groups_finished = true,
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			Poll::Pending => {}
+		}
+		if datagrams {
+			match track.poll_recv_datagram(waiter) {
+				Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
+				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
+				Poll::Ready(Ok(None)) => {}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => {}
+			}
+		}
+		if groups_finished {
+			return Poll::Ready(Ok(Recv::Finished));
+		}
+		Poll::Pending
+	})
+	.await
 }
 
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
@@ -780,16 +857,15 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Negotiated timestamp scale for this track. `Some(_)` iff
-	/// [`Version::has_timestamps`] is true for `version` (gated in
-	/// `run_subscribe`); used to validate per-frame timestamps before encoding.
+	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
+	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
 	timescale: Option<crate::Timescale>,
 }
 
 impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
-		mut track: TrackSubscriber,
+		mut track: track::Subscriber,
 		start_group: Option<u64>,
 		initial_end_group: Option<u64>,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
@@ -809,8 +885,12 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
 		// once the first group is known, SUBSCRIBE_END when the track finishes.
-		let emit_range = self.version.has_timestamps();
+		let emit_range = self.version.has_track_stream();
 		let mut start_sent = false;
+
+		// Serve datagrams off this same subscriber, but only on lite-05 over a datagram-capable
+		// transport (qmux/WebSocket/TCP/UDS report size 0). No group fallback: otherwise off.
+		let datagrams = self.version.has_datagrams() && self.session.max_datagram_size() > 0;
 
 		loop {
 			tokio::select! {
@@ -820,12 +900,13 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					false
 				} => unreachable!(),
 
-				// next_group respects the cap set via track.end_at and parks
-				// while the next sequence is above the cap. Groups beyond the
-				// cap stay in the producer's cache (bounded by its cache window).
-				res = track.next_group() => {
+				// One cursor drives the whole subscription: poll the cap-aware next group and,
+				// when enabled, the next best-effort datagram. Groups are polled first so a
+				// datagram burst can't starve them; datagrams flow whenever no group is ready
+				// (including while groups are paused above the cap).
+				res = recv_next(&mut track, datagrams) => {
 					match res? {
-						Some(group) => {
+						Recv::Group(group) => {
 							if emit_range && !start_sent {
 								start_sent = true;
 								writer
@@ -834,11 +915,16 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 							}
 							self.spawn_serve(group, &mut tasks);
 						}
-						None => {
+						Recv::Datagram(datagram) => self.serve_datagram(datagram),
+						Recv::Finished => {
 							// Track finished cleanly. Tell the subscriber no group will
 							// follow, then drain in-flight tasks and exit.
 							if emit_range {
-								let group = track.latest().unwrap_or(0);
+								let group = track
+									.latest()
+									.map(|group| group.checked_add(1).ok_or(crate::coding::BoundsExceeded))
+									.transpose()?
+									.unwrap_or(0);
 								writer
 									.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
 									.await?;
@@ -866,7 +952,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	fn spawn_serve(&mut self, group: GroupConsumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
+	fn spawn_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
@@ -881,7 +967,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut self,
 		sequence: u64,
 		mut priority: PriorityHandle,
-		mut group: GroupConsumer,
+		mut group: group::Consumer,
 	) -> Result<(), Error> {
 		let msg = lite::Group {
 			subscribe: self.id,
@@ -912,13 +998,35 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
+	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
+	///
+	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
+	/// transport's datagram limit or the send fails (congestion / no capacity right now).
+	fn serve_datagram(&self, datagram: crate::Datagram) {
+		let body = lite::Datagram {
+			subscribe: self.id,
+			sequence: datagram.sequence,
+			// Already at the track timescale (normalized by the model producer).
+			timestamp: datagram.timestamp.value(),
+			payload: datagram.payload,
+		};
+		// has_datagrams is checked before this runs, so encoding never hits the version guard.
+		let Ok(body) = body.encode_bytes(self.version) else {
+			return;
+		};
+
+		if body.len() <= self.session.max_datagram_size() && self.session.send_datagram(body).is_ok() {
+			self.track_stats.group();
+		}
+	}
+
 	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we
 	/// never buffer the whole thing.
 	async fn serve_frame(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		mut frame: FrameConsumer,
+		mut frame: frame::Consumer,
 		prev_ts: &mut u64,
 	) -> Result<(), Error> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
@@ -939,8 +1047,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		group: &mut GroupConsumer,
-	) -> Result<Option<FrameConsumer>, Error> {
+		group: &mut group::Consumer,
+	) -> Result<Option<frame::Consumer>, Error> {
 		loop {
 			tokio::select! {
 				biased;
@@ -957,7 +1065,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		frame: &mut FrameConsumer,
+		frame: &mut frame::Consumer,
 	) -> Result<Option<bytes::Bytes>, Error> {
 		loop {
 			tokio::select! {
@@ -979,18 +1087,16 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
 		let n = chunk.len() as u64;
-		loop {
-			tokio::select! {
-				biased;
-				result = stream.write_all(&mut chunk) => {
-					result?;
-					break;
-				}
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
-			}
+		while chunk.has_remaining() {
+			self.apply_priority(stream, priority);
+			stream.write(&mut chunk).await?;
 		}
 		self.track_stats.bytes(n);
 		Ok(())
+	}
+
+	fn apply_priority(&mut self, stream: &mut Writer<S::SendStream, Version>, priority: &mut PriorityHandle) {
+		priority.set_track(*self.track_priority.borrow_and_update());
+		stream.set_priority(priority.current());
 	}
 }

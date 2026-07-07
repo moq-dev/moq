@@ -238,7 +238,7 @@ mod tests {
 
 	/// Write a length-prefixed (4-byte) NAL frame onto a moq-net group via
 	/// the Legacy wire codec.
-	fn write_length_prefixed(group: &mut moq_net::GroupProducer, timestamp_us: u64, nals: &[&[u8]]) {
+	fn write_length_prefixed(group: &mut moq_net::group::Producer, timestamp_us: u64, nals: &[&[u8]]) {
 		let mut payload = bytes::BytesMut::new();
 		for nal in nals {
 			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
@@ -275,23 +275,23 @@ mod tests {
 		let catalog = avc1_catalog("video.m4s", avcc);
 
 		// Producer side: publish the broadcast with one length-prefixed video track.
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
 			.create_track(
 				"video.m4s",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.
-		let mut g0 = track.create_group(moq_net::GroupInfo { sequence: 0 }).unwrap();
+		let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write_length_prefixed(&mut g0, 0, &[idr]);
 		g0.finish().unwrap();
 
 		// Group 1 (next group): one P-slice. Consumer marks the first frame
 		// of every group as keyframe by protocol invariant, so the exporter
 		// MUST treat both group-starts as keyframes and inject SPS+PPS twice.
-		let mut g1 = track.create_group(moq_net::GroupInfo { sequence: 1 }).unwrap();
+		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[p_slice]);
 		g1.finish().unwrap();
 		track.finish().unwrap();

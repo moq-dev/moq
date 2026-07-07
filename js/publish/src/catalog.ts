@@ -30,8 +30,11 @@ export class CatalogProducer {
 	 * Pass `opts.compression` to DEFLATE-compress this subscriber's frames, so the same catalog can be
 	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).
 	 */
-	serve(track: Moq.TrackProducer, effect: Effect, opts?: { compression?: boolean }): void {
-		const output = new Json.Producer<Catalog.Root>(track, { compression: opts?.compression });
+	serve(track: Moq.track.Producer, effect: Effect, opts?: { compression?: boolean }): void {
+		const output = new Json.Producer<Catalog.Root>(track, {
+			compression: opts?.compression,
+			deltaRatio: 0,
+		});
 		output.update(this.#value);
 
 		this.#outputs.add(output);

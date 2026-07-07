@@ -21,7 +21,7 @@ pub struct AudioEncoder {
 
 impl AudioEncoder {
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
+		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		input_sample_rate: u32,
 	) -> Result<Self> {
@@ -39,7 +39,7 @@ impl AudioEncoder {
 		Ok(Self { producer })
 	}
 
-	pub fn track(&self) -> &moq_net::TrackProducer {
+	pub fn track(&self) -> &moq_net::track::Producer {
 		self.producer.track()
 	}
 

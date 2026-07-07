@@ -386,25 +386,25 @@ impl Server {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
+	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_subscriber(mut self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
 		self
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 
@@ -412,6 +412,39 @@ impl Server {
 	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
+	}
+
+	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
+	///
+	/// Spawns a task per session and logs (rather than propagates) per-session
+	/// errors, so one bad peer never tears down the listener. Returns when
+	/// interrupted (Ctrl-C) or on a fatal bind failure. For per-session auth or
+	/// routing, drive [`accept`](Self::accept) yourself instead.
+	pub async fn serve_publish(self, origin: moq_net::origin::Consumer) -> crate::Result<()> {
+		self.with_publisher(origin).serve().await
+	}
+
+	/// Accept sessions until the listener stops, ingesting each publisher into `origin`.
+	///
+	/// The mirror of [`serve_publish`](Self::serve_publish) for the consume direction.
+	pub async fn serve_consume(self, origin: moq_net::origin::Producer) -> crate::Result<()> {
+		self.with_subscriber(origin).serve().await
+	}
+
+	/// Shared accept loop for [`serve_publish`](Self::serve_publish) /
+	/// [`serve_consume`](Self::serve_consume); the origin is already attached.
+	async fn serve(mut self) -> crate::Result<()> {
+		if let Ok(addr) = self.local_addr() {
+			tracing::info!(%addr, "listening");
+		}
+		while let Some(request) = self.accept().await {
+			tokio::spawn(async move {
+				if let Err(err) = serve_session(request).await {
+					tracing::warn!(%err, "session ended with error");
+				}
+			});
+		}
+		Ok(())
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
@@ -669,6 +702,13 @@ impl Server {
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
 		unreachable!("no QUIC backend compiled");
 	}
+}
+
+/// Complete one accepted [`Request`] and wait for the session to close.
+async fn serve_session(request: Request) -> crate::Result<()> {
+	let session = request.ok().await?;
+	session.closed().await?;
+	Ok(())
 }
 
 /// The version set offered on stream (`tcp://`/`unix://`) listeners.
@@ -939,7 +979,7 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
+	pub fn with_publisher(self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		let Request { server, kind } = self;
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -961,7 +1001,7 @@ impl Request {
 	}
 
 	/// Subscribe to the given origin from the session.
-	pub fn with_subscriber(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self {
 		let Request { server, kind } = self;
 		match kind {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -982,15 +1022,15 @@ impl Request {
 		}
 	}
 
-	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
 		self.with_publisher(publish)
 	}
 
-	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[doc(hidden)]
 	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
 		self.with_subscriber(subscribe)
 	}
 

@@ -1,21 +1,22 @@
-//! A track is a collection of semi-reliable and semi-ordered streams, split into a [TrackProducer] and [TrackSubscriber] handle.
+//! A track is a collection of semi-reliable and semi-ordered streams, split into a [Producer] and [Subscriber] handle.
 //!
-//! A [TrackProducer] creates streams with a sequence number and priority.
+//! A [Producer] creates streams with a sequence number and priority.
 //! The sequence number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
 //! This may seem counter-intuitive, but is designed for live streaming where the newest streams may be higher priority.
-//! A cloned [TrackProducer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
+//! A cloned [Producer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
 //!
-//! A [TrackSubscriber] may not receive all streams in order or at all.
+//! A [Subscriber] may not receive all streams in order or at all.
 //! These streams are meant to be transmitted over congested networks and the key to MoQ Transport is to not block on them.
 //! Streams will be cached for a potentially limited duration added to the unreliable nature.
-//! A [TrackConsumer] is a cheap, cloneable handle; subscribing it multiple times fans the same
-//! cached streams out to each independent [TrackSubscriber].
+//! A [Consumer] is a cheap, cloneable handle; subscribing it multiple times fans the same
+//! cached streams out to each independent [Subscriber].
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{BroadcastInfo, Error, Result, Subscription, Timescale, Timestamp, coding};
+use crate::{Error, Result, Subscription, Timescale, Timestamp, coding};
+use crate::{broadcast, group};
 
-use super::{Fetch, GroupConsumer, GroupInfo, GroupProducer};
+use super::{Datagram, MAX_DATAGRAM_PAYLOAD};
 
 use std::{
 	collections::{HashMap, HashSet, VecDeque},
@@ -24,18 +25,26 @@ use std::{
 	time::Duration,
 };
 
-/// Default [`TrackInfo::cache`] age when the publisher doesn't set one.
+/// Default [`Info::cache`] age when the publisher doesn't set one.
 pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
+
+/// How long a datagram stays in the per-track buffer before it is dropped.
+///
+/// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
+/// few tens of milliseconds are kept, so a consumer that stalls loses stale datagrams instead of
+/// replaying them. Sized like a typical send buffer for real-time audio/video.
+const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
 /// while the track is alive. A subscriber learns them via
-/// [`crate::BroadcastConsumer::track`](crate::BroadcastConsumer::track),
-/// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
+/// [`broadcast::Consumer::track`](broadcast::Consumer::track),
+/// which returns the publisher's [`Info`] once the subscription is accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TrackInfo {
+#[non_exhaustive]
+pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
 	///
 	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
@@ -79,7 +88,7 @@ fn is_default_cache(cache: &Duration) -> bool {
 	*cache == DEFAULT_CACHE
 }
 
-/// Serialize [`TrackInfo::cache`] as a bare integer of milliseconds, matching the
+/// Serialize [`Info::cache`] as a bare integer of milliseconds, matching the
 /// catalog's other durations (and the wire), rather than serde's `{secs, nanos}`.
 #[cfg(feature = "serde")]
 mod cache_millis {
@@ -94,7 +103,7 @@ mod cache_millis {
 		Ok(Duration::from_millis(ms))
 	}
 }
-impl Default for TrackInfo {
+impl Default for Info {
 	fn default() -> Self {
 		Self {
 			timescale: Timescale::default(),
@@ -105,7 +114,7 @@ impl Default for TrackInfo {
 	}
 }
 
-impl TrackInfo {
+impl Info {
 	/// Set the per-frame timestamp scale, returning `self` for chaining.
 	///
 	/// Defaults to [`Timescale::MILLI`]. On Lite05+ this scale is reported in TRACK_INFO
@@ -143,12 +152,21 @@ impl TrackInfo {
 
 #[derive(Default)]
 struct TrackState {
-	// The info for the track; always Some for TrackSubscriber/TrackProducer.
+	// The info for the track; always Some for Subscriber/Producer.
 	// A small `Copy` value, inherited by each group it creates.
-	info: Option<TrackInfo>,
+	info: Option<Info>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
-	groups: VecDeque<Option<(GroupProducer, web_async::time::Instant)>>,
+	groups: VecDeque<Option<(group::Producer, web_async::time::Instant)>>,
+
+	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
+	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
+	// is otherwise independent.
+	datagrams: VecDeque<(Datagram, web_async::time::Instant)>,
+
+	// Number of datagrams dropped off the front (aged out), mapping a subscriber's absolute
+	// cursor to an index into `datagrams` (mirrors `offset` for groups).
+	datagram_offset: usize,
 
 	// TODO Do we need this?
 	duplicates: HashSet<u64>,
@@ -169,7 +187,7 @@ struct TrackState {
 	subscriptions: Vec<kio::Consumer<Subscription>>,
 
 	// Specific groups requested via `fetch` that aren't cached yet, FIFO for a
-	// `TrackDynamic` to serve (see `TrackDynamic::requested_group`).
+	// `Dynamic` to serve (see `Dynamic::requested_group`).
 	fetches: VecDeque<GroupRequested>,
 
 	// Monotonic IDs for fetches that reached a dynamic handler.
@@ -179,14 +197,14 @@ struct TrackState {
 	// transient attempt doesn't poison future retries for the same sequence.
 	fetch_rejections: HashMap<u64, Error>,
 
-	// Number of live `TrackDynamic` handles. While zero, the track serves no
+	// Number of live `Dynamic` handles. While zero, the track serves no
 	// uncached groups, so a cache-miss `fetch` on an accepted track fails fast
 	// instead of blocking forever (mirrors `BroadcastState::dynamic`).
 	dynamic: usize,
 }
 
 impl TrackState {
-	fn poll_info(&self) -> Poll<Result<TrackInfo>> {
+	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = &self.info {
 			Poll::Ready(Ok(*info))
 		} else {
@@ -197,7 +215,7 @@ impl TrackState {
 	/// Find the next non-tombstoned group at or after `index` in arrival order.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Consumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot
@@ -214,6 +232,40 @@ impl TrackState {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
+		}
+	}
+
+	/// Find the next datagram at or after the subscriber's absolute `index`.
+	///
+	/// Returns the datagram and its absolute index so the consumer can advance past it. A
+	/// consumer whose `index` has fallen behind `datagram_offset` (older datagrams dropped)
+	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
+	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(Datagram, usize)>>> {
+		let start = index.saturating_sub(self.datagram_offset);
+		if let Some((datagram, _)) = self.datagrams.get(start) {
+			return Poll::Ready(Ok(Some((datagram.clone(), self.datagram_offset + start))));
+		}
+
+		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
+		if self.final_sequence.is_some() {
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	/// Push a datagram onto the buffer, dropping any that have aged past [`MAX_DATAGRAM_AGE`].
+	fn push_datagram(&mut self, datagram: Datagram) {
+		let now = web_async::time::Instant::now();
+		self.datagrams.push_back((datagram, now));
+		while let Some((_, at)) = self.datagrams.front() {
+			if now.duration_since(*at) <= MAX_DATAGRAM_AGE {
+				break;
+			}
+			self.datagrams.pop_front();
+			self.datagram_offset += 1;
 		}
 	}
 
@@ -263,14 +315,18 @@ impl TrackState {
 
 	/// Find the smallest-sequence cached group satisfying
 	/// `next_sequence <= seq <= end_sequence (if set)`. Used by
-	/// [`TrackSubscriber::next_group`] so the range can be widened (or unset)
+	/// [`Subscriber::next_group`] so the range can be widened (or unset)
 	/// after the fact and previously-skipped cached groups become available
 	/// without scanning past them in arrival order.
 	///
 	/// Returns `Poll::Pending` when no in-range group is currently cached but
 	/// future groups could still arrive in range; returns `Ok(None)` only when
 	/// the track is finalized and no further in-range group is possible.
-	fn poll_next_in_range(&self, next_sequence: u64, end_sequence: Option<u64>) -> Poll<Result<Option<GroupConsumer>>> {
+	fn poll_next_in_range(
+		&self,
+		next_sequence: u64,
+		end_sequence: Option<u64>,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		// If the end cap is already below where we'd resume, no group can
 		// ever satisfy this call until the cap rises. Pending (not None) so
 		// the consumer is parked rather than told the stream is over.
@@ -283,7 +339,7 @@ impl TrackState {
 			return Poll::Pending;
 		}
 
-		let mut best: Option<&GroupProducer> = None;
+		let mut best: Option<&group::Producer> = None;
 		for (group, _) in self.groups.iter().flatten() {
 			if group.sequence < next_sequence {
 				continue;
@@ -317,7 +373,7 @@ impl TrackState {
 	}
 
 	/// Find a cached group by sequence, skipping tombstones. Synchronous, never blocks.
-	fn cached_group(&self, sequence: u64) -> Option<GroupConsumer> {
+	fn cached_group(&self, sequence: u64) -> Option<group::Consumer> {
 		self.groups
 			.iter()
 			.flatten()
@@ -325,7 +381,7 @@ impl TrackState {
 			.map(|(group, _)| group.consume())
 	}
 
-	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
+	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
 		if let Some(group) = self.cached_group(sequence) {
 			return Poll::Ready(Ok(Some(group)));
 		}
@@ -349,10 +405,10 @@ impl TrackState {
 	/// missing group is a failure ([`Error::NotFound`]), not an end-of-stream.
 	///
 	/// A miss is unservable when the group is past the final sequence, or when no
-	/// [`TrackDynamic`] exists to fetch old content (`dynamic == 0`). On-demand tracks
-	/// (from a [`TrackRequest`]) are dynamic from creation, so a relay's fetch waits to
+	/// [`Dynamic`] exists to fetch old content (`dynamic == 0`). On-demand tracks
+	/// (from a [`Request`]) are dynamic from creation, so a relay's fetch waits to
 	/// be served rather than racing the handler into existence.
-	fn poll_fetch(&self, sequence: u64, request_id: Option<u64>) -> Poll<Result<GroupConsumer>> {
+	fn poll_fetch(&self, sequence: u64, request_id: Option<u64>) -> Poll<Result<group::Consumer>> {
 		if let Some(group) = self.cached_group(sequence) {
 			return Poll::Ready(Ok(group));
 		}
@@ -435,12 +491,12 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	/// Insert a group fetched for a [`GroupRequest`], setting the track's [`TrackInfo`]
+	/// Insert a group fetched for a [`GroupRequest`], setting the track's [`Info`]
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
-	/// [`TrackFetch`] resolves via [`Self::poll_fetch`].
-	fn insert_group_request(&mut self, sequence: u64, info: Option<TrackInfo>) -> Result<GroupProducer> {
+	/// [`Fetch`] resolves via [`Self::poll_fetch`].
+	fn insert_group_request(&mut self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
 		}
@@ -456,7 +512,7 @@ impl TrackState {
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = *self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = GroupProducer::new(GroupInfo { sequence }, info);
+		let group = group::Producer::new(group::Info { sequence }, info);
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -476,26 +532,26 @@ impl TrackState {
 
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
-pub struct TrackProducer {
+pub struct Producer {
 	name: Arc<str>,
-	// The parent broadcast's info, inherited from [`crate::BroadcastProducer::create_track`].
+	// The parent broadcast's info, inherited from [`broadcast::Producer::create_track`].
 	// Top link of the ownership chain; carried for identity and future inheritance.
-	broadcast: Arc<BroadcastInfo>,
+	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
 }
 
-impl TrackProducer {
+impl Producer {
 	/// Build a producer for the given track metadata.
 	///
 	/// Crate-private: tracks are born from their broadcast via
-	/// [`crate::BroadcastProducer::create_track`] (or served on demand through a
-	/// [`TrackRequest`]), which threads the broadcast's `Arc<BroadcastInfo>` down so
+	/// [`broadcast::Producer::create_track`] (or served on demand through a
+	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` down so
 	/// the broadcast owns the namespace and there's a single way to mint a track.
 	pub(crate) fn new(
-		broadcast: Arc<BroadcastInfo>,
+		broadcast: Arc<broadcast::Info>,
 		name: impl Into<Arc<str>>,
-		info: impl Into<Option<TrackInfo>>,
+		info: impl Into<Option<Info>>,
 	) -> Self {
 		let info = info.into().unwrap_or_default();
 		Self {
@@ -514,12 +570,12 @@ impl TrackProducer {
 	}
 
 	/// The parent broadcast this track belongs to.
-	pub fn broadcast(&self) -> &BroadcastInfo {
+	pub fn broadcast(&self) -> &broadcast::Info {
 		&self.broadcast
 	}
 
 	/// Create a new group with the given sequence number.
-	pub fn create_group(&mut self, group: GroupInfo) -> Result<GroupProducer> {
+	pub fn create_group(&mut self, group: group::Info) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.sequence >= fin
@@ -530,7 +586,7 @@ impl TrackProducer {
 		let track = *info;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(group, track);
+		let group = group::Producer::new(group, track);
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -544,7 +600,7 @@ impl TrackProducer {
 	}
 
 	/// Create a new group with the next sequence number.
-	pub fn append_group(&mut self) -> Result<GroupProducer> {
+	pub fn append_group(&mut self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
@@ -560,7 +616,7 @@ impl TrackProducer {
 		let track = *info;
 		let cache = info.cache;
 
-		let group = GroupProducer::new(GroupInfo { sequence }, track);
+		let group = group::Producer::new(group::Info { sequence }, track);
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
@@ -571,22 +627,82 @@ impl TrackProducer {
 		Ok(group)
 	}
 
+	/// Append a datagram with the next sequence number, returning the assigned sequence.
+	///
+	/// A datagram is delivered best-effort over a single QUIC datagram, parallel to the
+	/// track's groups but drawing from the same sequence namespace (so interleaving with
+	/// [`Self::append_group`] never reuses a number). The payload must not exceed
+	/// [`MAX_DATAGRAM_PAYLOAD`]; there is no group fallback. An origin publisher uses this;
+	/// a relay preserving upstream numbering uses [`Self::write_datagram`].
+	pub fn append_datagram<B: Into<bytes::Bytes>>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
+		let payload = payload.into();
+		if payload.len() > MAX_DATAGRAM_PAYLOAD {
+			return Err(Error::WrongSize);
+		}
+		let mut state = self.modify()?;
+		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
+		let timescale = state.info.as_ref().unwrap().timescale;
+		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
+		let sequence = match state.max_sequence {
+			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
+			None => 0,
+		};
+		if let Some(fin) = state.final_sequence
+			&& sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+		state.max_sequence = Some(sequence);
+		state.push_datagram(Datagram {
+			sequence,
+			timestamp,
+			payload,
+		});
+		Ok(sequence)
+	}
+
+	/// Write a datagram with an explicit sequence number.
+	///
+	/// Preserves the supplied sequence (bumping the shared `max_sequence` if needed), so a
+	/// relay can forward a datagram without renumbering it. The payload must not exceed
+	/// [`MAX_DATAGRAM_PAYLOAD`]. Most origin publishers want [`Self::append_datagram`] instead.
+	pub fn write_datagram(&mut self, mut datagram: Datagram) -> Result<()> {
+		if datagram.payload.len() > MAX_DATAGRAM_PAYLOAD {
+			return Err(Error::WrongSize);
+		}
+		let mut state = self.modify()?;
+		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
+		let timescale = state.info.as_ref().unwrap().timescale;
+		datagram.timestamp = datagram
+			.timestamp
+			.convert(timescale)
+			.map_err(|_| Error::TimestampMismatch)?;
+		if let Some(fin) = state.final_sequence
+			&& datagram.sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(datagram.sequence));
+		state.push_datagram(datagram);
+		Ok(())
+	}
+
 	/// Create a group with a single frame, at the given presentation timestamp.
 	///
 	/// The timestamp is converted into the track's timescale. Use
 	/// [`Self::write_frame_now`] to stamp wall-clock time instead.
-	pub fn write_frame<B: Into<bytes::Bytes>>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
+	pub fn write_frame<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
 		let mut group = self.append_group()?;
-		group.write_frame(timestamp, frame.into())?;
+		group.write_frame(timestamp, frame)?;
 		group.finish()?;
 		Ok(())
 	}
 
 	/// Like [`Self::write_frame`] but stamps the frame with wall-clock now
 	/// ([`Timestamp::now`]).
-	pub fn write_frame_now<B: Into<bytes::Bytes>>(&mut self, frame: B) -> Result<()> {
+	pub fn write_frame_now<B: crate::IntoBytes>(&mut self, frame: B) -> Result<()> {
 		let mut group = self.append_group()?;
-		group.write_frame_now(frame.into())?;
+		group.write_frame_now(frame)?;
 		group.finish()?;
 		Ok(())
 	}
@@ -626,15 +742,16 @@ impl TrackProducer {
 
 	/// Abort the track with the given error.
 	///
-	/// Drops the cached groups so a stale [`TrackConsumer`] can't pin them (and
+	/// Drops the cached groups so a stale [`Consumer`] can't pin them (and
 	/// their frame buffers) in memory forever. Consumers that haven't drained yet
 	/// surface the abort error instead of the leftover cache. Child groups are
-	/// independent: a consumer that already pulled a [`GroupConsumer`] keeps its
+	/// independent: a consumer that already pulled a [`group::Consumer`] keeps its
 	/// own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
 		guard.groups.clear();
+		guard.datagrams.clear();
 		guard.duplicates.clear();
 		guard.close();
 		Ok(())
@@ -685,15 +802,15 @@ impl TrackProducer {
 		}
 	}
 
-	/// Create a [`TrackDemand`]: a cloneable, watch-only handle to this track's
+	/// Create a [`Demand`]: a cloneable, watch-only handle to this track's
 	/// subscriber demand.
 	///
 	/// Lets a publisher gate work (e.g. on-demand capture) on whether anyone is
 	/// subscribed, without the ability to publish frames or close the track. The
 	/// handle is weak, so holding one neither keeps the track alive nor pins its
 	/// cached groups.
-	pub fn demand(&self) -> TrackDemand {
-		TrackDemand {
+	pub fn demand(&self) -> Demand {
+		Demand {
 			name: self.name.clone(),
 			state: self.state.weak(),
 		}
@@ -703,8 +820,8 @@ impl TrackProducer {
 	///
 	/// Unlike a wire subscription, the info is already known, so a subscription
 	/// opened from this handle resolves immediately.
-	pub fn consume(&self) -> TrackConsumer {
-		TrackConsumer {
+	pub fn consume(&self) -> Consumer {
+		Consumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
 		}
@@ -715,7 +832,7 @@ impl TrackProducer {
 	/// The info is fixed at creation, so there's nothing to wait for (no
 	/// SUBSCRIBE_OK round trip). The subscriber's stale window is clamped to the
 	/// track's cache. Pass `None` for [`Subscription::default`].
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let mut preferences = subscription.into().unwrap_or_default();
 
 		let mut state = self.modify().expect("track producer state is never closed");
@@ -725,12 +842,13 @@ impl TrackProducer {
 		state.subscriptions.push(subscription.consume());
 		drop(state);
 
-		TrackSubscriber {
+		Subscriber {
 			name: self.name.clone(),
 			info,
 			state: self.state.consume(),
 			subscription,
 			index: 0,
+			datagram_index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
@@ -788,11 +906,11 @@ impl TrackProducer {
 		self.state.poll_unused(waiter).map(|_| ())
 	}
 
-	/// Create a [`TrackDynamic`] handle that serves on-demand fetches of uncached
+	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
-	pub fn dynamic(&self) -> TrackDynamic {
-		TrackDynamic::new(self.name.clone(), self.state.clone())
+	pub fn dynamic(&self) -> Dynamic {
+		Dynamic::new(self.name.clone(), self.state.clone())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
@@ -802,7 +920,7 @@ impl TrackProducer {
 
 /// Pop the next queued group fetch off the shared state and wrap it in a
 /// [`GroupRequest`] bound to a fresh producer handle. Shared by every
-/// [`TrackDynamic`] handle on the track.
+/// [`Dynamic`] handle on the track.
 fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
 	// Read-only predicate: ready once there's a request to pop, or the track aborted.
 	let mut guard = ready!(state.poll(waiter, |state| {
@@ -830,20 +948,20 @@ fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter)
 }
 
 /// Serves on-demand fetches of uncached (old) groups for a track, the group-level
-/// analogue of [`crate::BroadcastDynamic`].
+/// analogue of [`broadcast::Dynamic`].
 ///
 /// Most tracks never serve old content, so this capability lives on a dedicated
-/// handle rather than [`TrackProducer`]: a relay creates one (via
-/// [`TrackProducer::dynamic`] or [`TrackRequest::dynamic`]) to pull past groups
+/// handle rather than [`Producer`]: a relay creates one (via
+/// [`Producer::dynamic`] or [`Request::dynamic`]) to pull past groups
 /// from upstream. While at least one is alive the track will block a cache-miss
-/// [`TrackConsumer::fetch_group`] waiting to be served; with none, an accepted track's
+/// [`Consumer::fetch_group`] waiting to be served; with none, an accepted track's
 /// miss fails fast with [`Error::NotFound`].
-pub struct TrackDynamic {
+pub struct Dynamic {
 	name: Arc<str>,
 	state: kio::Producer<TrackState>,
 }
 
-impl TrackDynamic {
+impl Dynamic {
 	fn new(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
 		if let Ok(mut state) = state.write() {
 			state.dynamic += 1;
@@ -874,9 +992,9 @@ impl TrackDynamic {
 	}
 }
 
-impl Clone for TrackDynamic {
+impl Clone for Dynamic {
 	fn clone(&self) -> Self {
-		// Bump `dynamic` so each live handle is counted (mirrors `BroadcastDynamic`).
+		// Bump `dynamic` so each live handle is counted (mirrors `broadcast::Dynamic`).
 		if let Ok(mut state) = self.state.write() {
 			state.dynamic += 1;
 		}
@@ -887,10 +1005,10 @@ impl Clone for TrackDynamic {
 	}
 }
 
-impl Drop for TrackDynamic {
+impl Drop for Dynamic {
 	fn drop(&mut self) {
-		// Unlike `BroadcastDynamic`, dropping the last handle doesn't abort the track:
-		// a live `TrackProducer` may still be serving the subscription. It just stops
+		// Unlike `broadcast::Dynamic`, dropping the last handle doesn't abort the track:
+		// a live `Producer` may still be serving the subscription. It just stops
 		// fetch serving, after which an accepted track's cache miss fails fast.
 		if let Ok(mut state) = self.state.write() {
 			state.dynamic = state.dynamic.saturating_sub(1);
@@ -898,7 +1016,7 @@ impl Drop for TrackDynamic {
 	}
 }
 
-impl Drop for TrackProducer {
+impl Drop for Producer {
 	fn drop(&mut self) {
 		// The last producer going away without finishing is an abrupt teardown:
 		// release the cached groups so a stale consumer can't pin them (and their
@@ -911,6 +1029,7 @@ impl Drop for TrackProducer {
 			&& state.final_sequence.is_none()
 		{
 			state.groups.clear();
+			state.datagrams.clear();
 			state.duplicates.clear();
 		}
 	}
@@ -920,8 +1039,8 @@ impl Drop for TrackProducer {
 ///
 /// Read-only: iterates `subscriptions` immutably and registers `waiter` on each, so it
 /// never flags the [`TrackState`] as modified. Marking it modified would drain and wake
-/// unrelated waiters on the channel (e.g. a [`TrackSubscribe`] parked on track info),
-/// which races with [`TrackRequest::accept`] and can drop that wakeup. Callers decide
+/// unrelated waiters on the channel (e.g. a [`Subscribe`] parked on track info),
+/// which races with [`Request::accept`] and can drop that wakeup. Callers decide
 /// readiness from the returned value, then prune closed subscribers through the `Mut`.
 fn combined_subscription(state: &TrackState, waiter: &kio::Waiter) -> Option<Subscription> {
 	let mut combined = None;
@@ -945,8 +1064,8 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn consume(&self) -> TrackConsumer {
-		TrackConsumer {
+	pub fn consume(&self) -> Consumer {
+		Consumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
 		}
@@ -961,19 +1080,19 @@ impl TrackWeak {
 
 /// A cloneable, watch-only handle to a track's subscriber demand.
 ///
-/// Obtained from [`TrackProducer::demand`]. A publisher uses it to react to
+/// Obtained from [`Producer::demand`]. A publisher uses it to react to
 /// whether anyone is subscribed (on-demand capture / encoding) without being able
 /// to publish frames or close the track. It's a weak handle, so it neither keeps
-/// the track alive nor pins its cached groups; once the owning [`TrackProducer`]
+/// the track alive nor pins its cached groups; once the owning [`Producer`]
 /// goes away, [`used`](Self::used) / [`unused`](Self::unused) report the track's
 /// closure.
 #[derive(Clone)]
-pub struct TrackDemand {
+pub struct Demand {
 	name: Arc<str>,
 	state: kio::Weak<TrackState>,
 }
 
-impl TrackDemand {
+impl Demand {
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -1004,17 +1123,17 @@ impl TrackDemand {
 
 /// A handle to a single track within a broadcast.
 ///
-/// Obtained from [`crate::BroadcastConsumer::track`]. Holding it sends nothing
+/// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing
 /// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
 /// to (a live, ongoing stream of groups) later. The same handle can be subscribed
 /// to multiple times, and clones are cheap.
 #[derive(Clone)]
-pub struct TrackConsumer {
+pub struct Consumer {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 }
 
-impl TrackConsumer {
+impl Consumer {
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -1023,18 +1142,18 @@ impl TrackConsumer {
 	/// Open a live subscription.
 	///
 	/// Registers the subscription on the track and returns a [`kio::Pending`] that resolves to the
-	/// [`TrackSubscriber`] once the track info is available, or the track's abort error (or
+	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<TrackSubscribe> {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribe> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
 		// Register the subscription if the track is live. If it is already closed, the returned
-		// future resolves to the abort error via `TrackSubscribe::poll_ok`.
+		// future resolves to the abort error via `Subscribe::poll_ok`.
 		if let Ok(mut state) = self.state.write() {
 			state.subscriptions.push(subscription.consume());
 		}
 
-		kio::Pending::new(TrackSubscribe {
+		kio::Pending::new(Subscribe {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
@@ -1042,29 +1161,29 @@ impl TrackConsumer {
 	}
 
 	/// Return a cached group by sequence without blocking, or `None` if it isn't in
-	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`TrackDynamic`]
+	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`Dynamic`]
 	/// will serve on demand.
-	pub fn get_group(&self, sequence: u64) -> Option<GroupConsumer> {
+	pub fn get_group(&self, sequence: u64) -> Option<group::Consumer> {
 		self.state.read().cached_group(sequence)
 	}
 
 	/// Fetch a single past group, without holding a live subscription.
 	///
-	/// Returns a [`kio::Pending`] that resolves to the [`GroupConsumer`]:
-	/// immediately if the group is cached, otherwise once a [`TrackDynamic`] serves
-	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`Fetch`],
-	/// or `Fetch::default()`.
+	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
+	/// immediately if the group is cached, otherwise once a [`Dynamic`] serves
+	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
+	/// or `group::Fetch::default()`.
 	///
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
-	/// (past the final sequence, or no [`TrackDynamic`] on the track), or the track's abort error
+	/// (past the final sequence, or no [`Dynamic`] on the track), or the track's abort error
 	/// if it's already closed.
-	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> kio::Pending<TrackFetch> {
+	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetch> {
 		let options = options.into().unwrap_or_default();
 		let mut request_id = None;
 
 		// Queue a request only when a handler can serve it but the group isn't cached yet. A cached
 		// group, an unservable sequence (NotFound), or a closed track all resolve through
-		// `TrackFetch::poll` without a queue entry.
+		// `Fetch::poll` without a queue entry.
 		if let Ok(mut state) = self.state.write() {
 			if state.poll_fetch(sequence, None).is_pending() {
 				let id = state.next_fetch;
@@ -1078,40 +1197,41 @@ impl TrackConsumer {
 			}
 		}
 
-		kio::Pending::new(TrackFetch {
+		kio::Pending::new(Fetch {
 			state: self.state.clone(),
 			sequence,
 			request_id,
 		})
 	}
 
-	pub fn info(&self) -> kio::Pending<TrackInfoQuery> {
-		kio::Pending::new(TrackInfoQuery {
+	pub fn info(&self) -> kio::Pending<InfoQuery> {
+		kio::Pending::new(InfoQuery {
 			state: self.state.clone(),
 		})
 	}
 }
 
-/// The pollable state of a [`TrackConsumer::subscribe`]; awaited via the
+/// The pollable state of a [`Consumer::subscribe`]; awaited via the
 /// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
-pub struct TrackSubscribe {
+pub struct Subscribe {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
 }
 
-impl TrackSubscribe {
-	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber>> {
+impl Subscribe {
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 
-		Poll::Ready(Ok(TrackSubscriber {
+		Poll::Ready(Ok(Subscriber {
 			name: self.name.clone(),
 			info,
 			state: self.state.clone(),
 			subscription: self.subscription.clone(),
 			index: 0,
+			datagram_index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
@@ -1128,22 +1248,22 @@ impl TrackSubscribe {
 	}
 }
 
-impl kio::Future for TrackSubscribe {
-	type Output = Result<TrackSubscriber>;
+impl kio::Future for Subscribe {
+	type Output = Result<Subscriber>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
 
-/// The pollable state of a [`TrackConsumer::info`]; awaited via the
+/// The pollable state of a [`Consumer::info`]; awaited via the
 /// [`kio::Pending`] wrapper.
-pub struct TrackInfoQuery {
+pub struct InfoQuery {
 	state: kio::Consumer<TrackState>,
 }
 
-impl TrackInfoQuery {
-	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackInfo>> {
+impl InfoQuery {
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Info>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
@@ -1151,19 +1271,19 @@ impl TrackInfoQuery {
 	}
 }
 
-impl kio::Future for TrackInfoQuery {
-	type Output = Result<TrackInfo>;
+impl kio::Future for InfoQuery {
+	type Output = Result<Info>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
 
-/// A specific group requested via [`TrackConsumer::fetch_group`], queued on the
-/// track for a [`TrackDynamic`] to serve.
+/// A specific group requested via [`Consumer::fetch_group`], queued on the
+/// track for a [`Dynamic`] to serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GroupRequested {
-	/// The request ID matching the waiting [`TrackFetch`].
+	/// The request ID matching the waiting [`Fetch`].
 	id: u64,
 	/// The group sequence the consumer wants.
 	sequence: u64,
@@ -1172,11 +1292,11 @@ struct GroupRequested {
 }
 
 /// A consumer's request for a single past group, handed to a handler via
-/// [`TrackDynamic::requested_group`].
+/// [`Dynamic::requested_group`].
 ///
 /// The handler fulfills it by calling [`Self::accept`], which inserts the group
-/// into the track cache (resolving the matching [`TrackConsumer::fetch_group`]) and
-/// returns a [`GroupProducer`] to fill. A relay typically opens a wire FETCH, reads
+/// into the track cache (resolving the matching [`Consumer::fetch_group`]) and
+/// returns a [`group::Producer`] to fill. A relay typically opens a wire FETCH, reads
 /// FETCH_OK, then accepts. The request carries its own producer handle, so it works
 /// the same whether or not the track has been accepted yet.
 pub struct GroupRequest {
@@ -1199,18 +1319,18 @@ impl GroupRequest {
 	}
 
 	/// Insert the fetched group into the track cache, resolving the waiting
-	/// [`TrackConsumer::fetch_group`], and return a [`GroupProducer`] to fill.
+	/// [`Consumer::fetch_group`], and return a [`group::Producer`] to fill.
 	///
-	/// The group's timescale comes from the track's [`TrackInfo`]. `info` sets that
+	/// The group's timescale comes from the track's [`Info`]. `info` sets that
 	/// info if the track hasn't been accepted yet (a fetch with no live subscription),
 	/// and is ignored once accepted. Returns [`Error::Duplicate`] if the group is
 	/// already present, or the track's abort error if it closed while pending.
-	pub fn accept(mut self, info: impl Into<Option<TrackInfo>>) -> Result<GroupProducer> {
+	pub fn accept(mut self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.done = true;
 		TrackState::modify(&self.state)?.insert_group_request(self.sequence, info.into())
 	}
 
-	/// Reject the fetch, resolving the waiting [`TrackConsumer::fetch_group`] with `err`.
+	/// Reject the fetch, resolving the waiting [`Consumer::fetch_group`] with `err`.
 	pub fn reject(mut self, err: Error) {
 		self.done = true;
 		if let Ok(mut state) = self.state.write() {
@@ -1230,22 +1350,22 @@ impl Drop for GroupRequest {
 	}
 }
 
-/// The pollable state of a [`TrackConsumer::fetch_group`].
+/// The pollable state of a [`Consumer::fetch_group`].
 ///
 /// Awaited via the [`kio::Pending`] wrapper; resolves to the
-/// [`GroupConsumer`] once the group lands in the track's cache (already present,
+/// [`group::Consumer`] once the group lands in the track's cache (already present,
 /// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
-pub struct TrackFetch {
+pub struct Fetch {
 	state: kio::Consumer<TrackState>,
 	sequence: u64,
 	request_id: Option<u64>,
 }
 
-impl kio::Future for TrackFetch {
-	type Output = Result<GroupConsumer>;
+impl kio::Future for Fetch {
+	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		// `poll_fetch` already yields a `Result<GroupConsumer>` (group, or NotFound /
+		// `poll_fetch` already yields a `Result<group::Consumer>` (group, or NotFound /
 		// abort); the outer error is the channel closing without one.
 		let res = match ready!(
 			self.state
@@ -1267,17 +1387,19 @@ impl kio::Future for TrackFetch {
 
 /// A live subscription to a track, used to read its groups.
 ///
-/// Created via [`TrackConsumer::subscribe`](crate::TrackConsumer::subscribe), or
-/// directly from a [`TrackProducer`] for an in-process track. Carries this
+/// Created via [`Consumer::subscribe`](Consumer::subscribe), or
+/// directly from a [`Producer`] for an in-process track. Carries this
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
-pub struct TrackSubscriber {
+pub struct Subscriber {
 	name: Arc<str>,
-	info: TrackInfo,
+	info: Info,
 	state: kio::Consumer<TrackState>,
 
 	subscription: kio::Producer<Subscription>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
+	/// Arrival-order cursor used by [`Self::recv_datagram`], independent of groups.
+	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
 	min_sequence: u64,
 	/// One past the highest sequence returned by [`Self::next_group`].
@@ -1290,8 +1412,8 @@ pub struct TrackSubscriber {
 	end_sequence: Option<u64>,
 }
 
-impl TrackSubscriber {
-	pub fn info(&self) -> &TrackInfo {
+impl Subscriber {
+	pub fn info(&self) -> &Info {
 		&self.info
 	}
 
@@ -1321,7 +1443,7 @@ impl TrackSubscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished,
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
-	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let Some((consumer, found_index)) =
 			ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
 		else {
@@ -1337,8 +1459,40 @@ impl TrackSubscriber {
 	/// Every group is returned exactly once, in the order it landed on the wire — which may
 	/// be out of sequence due to network reordering or loss. Use [`Self::next_group`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
-	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
+	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_recv_group(waiter)).await
+	}
+
+	/// Poll for the next datagram in arrival order, without blocking.
+	///
+	/// Datagrams are a separate best-effort channel from groups (see
+	/// [`Producer::append_datagram`]); they share only the sequence namespace. A consumer
+	/// that falls too far behind silently loses the oldest datagrams.
+	/// Returning a datagram advances [`Self::poll_next_group`] past that sequence.
+	///
+	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
+	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
+	/// is aborted, or `Poll::Pending` when none is buffered yet.
+	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+		let Some((datagram, found_index)) =
+			ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
+		else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.datagram_index = found_index + 1;
+		self.next_sequence = self.next_sequence.max(datagram.sequence.saturating_add(1));
+		Poll::Ready(Ok(Some(datagram)))
+	}
+
+	/// Receive the next datagram in arrival order.
+	///
+	/// A best-effort channel parallel to [`Self::recv_group`]; the two share only the sequence
+	/// namespace. To receive both concurrently from one subscriber, poll [`Self::poll_next_group`]
+	/// (or [`Self::poll_recv_group`]) and [`Self::poll_recv_datagram`] together in a single `poll`
+	/// closure (sequential `&mut` borrows), rather than awaiting the two `recv` futures at once.
+	pub async fn recv_datagram(&mut self) -> Result<Option<Datagram>> {
+		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// Poll for the next group with a higher sequence number than any previously returned.
@@ -1349,7 +1503,7 @@ impl TrackSubscriber {
 	///
 	/// Honors the cap set by [`Self::end_at`]: groups with sequence past the cap are left
 	/// in the producer's cache and become eligible again if the cap is raised or removed.
-	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let floor = self.next_sequence.max(self.min_sequence);
 		let Some(group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, self.end_sequence))?) else {
 			return Poll::Ready(Ok(None));
@@ -1363,13 +1517,13 @@ impl TrackSubscriber {
 	/// Late arrivals (sequence at or below the last returned) are silently skipped, so this
 	/// produces a monotonically increasing sequence at the cost of dropping out-of-order
 	/// groups. Use [`Self::recv_group`] to see every group in arrival order instead.
-	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
+	pub async fn next_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
 	/// A helper that calls [`Self::poll_next_group`] and returns its first frame,
 	/// skipping the rest of the group. Intended for single-frame groups (see
-	/// [`TrackProducer::write_frame`]).
+	/// [`Producer::write_frame`]).
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
 		let lower = self.min_sequence.max(self.next_sequence);
 		let Some((frame, found_index, sequence)) =
@@ -1390,19 +1544,26 @@ impl TrackSubscriber {
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
-	/// Poll for the group with the given sequence, without blocking.
-	pub fn poll_get_group(&self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
+	/// Poll for the group with the given sequence.
+	///
+	/// This waits for live arrival, not on-demand retrieval. If the sequence is
+	/// below the final sequence but was already evicted from the cache, this parks
+	/// until the track closes. Use [`Consumer::fetch_group`] for a past group that a
+	/// [`Dynamic`] can serve on demand.
+	pub fn poll_get_group(&self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll(waiter, |state| state.poll_get_group(sequence))
 	}
 
 	/// Wait until the group with the given sequence becomes available.
 	///
-	/// Resolves to `Some(GroupConsumer)` once the group is in the cache.
+	/// Resolves to `Some(group::Consumer)` once the group is in the cache.
 	/// Resolves to `None` only when `sequence` is at or past the track's
 	/// `final_sequence` (set by `finish()` / `finish_at()`), since such a
 	/// group can never be produced. Sequences below `final_sequence` still
-	/// wait, since older groups may still arrive out of order.
-	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
+	/// wait, since older groups may still arrive out of order. If the sequence
+	/// was already evicted, this waits until the track closes; use
+	/// [`Consumer::fetch_group`] for on-demand retrieval of past groups.
+	pub async fn get_group(&self, sequence: u64) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
 
@@ -1470,10 +1631,10 @@ impl TrackSubscriber {
 	}
 }
 
-pub struct TrackRequest {
+pub struct Request {
 	name: Arc<str>,
-	// The parent broadcast's info, threaded into the [`TrackProducer`] on accept.
-	broadcast: Arc<BroadcastInfo>,
+	// The parent broadcast's info, threaded into the [`Producer`] on accept.
+	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 
 	// The previous subscription that was combined, used to detect changes.
@@ -1483,14 +1644,14 @@ pub struct TrackRequest {
 	// birth: a consumer's cache-miss `fetch_group` waits to be served instead of
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
-	_dynamic: TrackDynamic,
+	_dynamic: Dynamic,
 }
 
-impl TrackRequest {
-	pub(crate) fn new(broadcast: Arc<BroadcastInfo>, name: impl Into<Arc<str>>) -> Self {
+impl Request {
+	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::<TrackState>::default();
-		let dynamic = TrackDynamic::new(name.clone(), state.clone());
+		let dynamic = Dynamic::new(name.clone(), state.clone());
 		Self {
 			name,
 			broadcast,
@@ -1505,18 +1666,18 @@ impl TrackRequest {
 		&self.name
 	}
 
-	pub fn consume(&self) -> TrackConsumer {
-		TrackConsumer {
+	pub fn consume(&self) -> Consumer {
+		Consumer {
 			name: self.name.clone(),
 			state: self.state.consume(),
 		}
 	}
 
-	/// Create a [`TrackDynamic`] handle that serves on-demand fetches of uncached
+	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
 	/// groups, before [`Self::accept`] is even called. A relay creates one to fetch
 	/// past groups from upstream while (or instead of) serving a live subscription.
-	pub fn dynamic(&self) -> TrackDynamic {
-		TrackDynamic::new(self.name.clone(), self.state.clone())
+	pub fn dynamic(&self) -> Dynamic {
+		Dynamic::new(self.name.clone(), self.state.clone())
 	}
 
 	/// Poll for the request becoming unused (every consumer dropped), so a relay can
@@ -1529,9 +1690,9 @@ impl TrackRequest {
 	///
 	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
 	/// mismatch, or the broadcast's abort error if it closed while pending.
-	pub fn accept(self, info: impl Into<Option<TrackInfo>>) -> TrackProducer {
+	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
-		TrackProducer {
+		Producer {
 			name: self.name,
 			broadcast: self.broadcast,
 			state: self.state,
@@ -1575,7 +1736,7 @@ impl TrackRequest {
 			}
 		})) {
 			Ok(state) => state,
-			Err(_) => unreachable!("a TrackRequest holds the only producer"),
+			Err(_) => unreachable!("a Request holds the only producer"),
 		};
 		// The aggregate changed: prune any closed subscribers now that we hold the lock.
 		state.subscriptions.retain(|sub| !sub.is_closed());
@@ -1596,8 +1757,8 @@ impl TrackRequest {
 use futures::FutureExt;
 
 #[cfg(test)]
-impl TrackSubscriber {
-	pub fn assert_group(&mut self) -> GroupConsumer {
+impl Subscriber {
+	pub fn assert_group(&mut self) -> group::Consumer {
 		self.recv_group()
 			.now_or_never()
 			.expect("group would have blocked")
@@ -1642,9 +1803,9 @@ mod test {
 	use super::*;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
-	/// normally born from a [`crate::BroadcastProducer`].
-	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> TrackProducer {
-		TrackProducer::new(Arc::new(BroadcastInfo::default()), name, info)
+	/// normally born from a [`broadcast::Producer`].
+	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
+		Producer::new(Arc::new(broadcast::Info::default()), name, info)
 	}
 
 	/// Helper: count non-tombstoned groups in state.
@@ -1655,6 +1816,222 @@ mod test {
 	/// Helper: get the sequence number of the first live group.
 	fn first_live_sequence(state: &TrackState) -> u64 {
 		state.groups.iter().flatten().next().unwrap().0.sequence
+	}
+
+	/// Helper: non-blocking datagram receive that must be ready with a datagram.
+	fn recv_datagram(dg: &mut Subscriber) -> Datagram {
+		dg.recv_datagram()
+			.now_or_never()
+			.expect("datagram would have blocked")
+			.expect("would have errored")
+			.expect("track was closed")
+	}
+
+	#[tokio::test]
+	async fn append_datagram_shares_group_sequence() {
+		let mut producer = track_producer("test", None);
+		let ts = Timestamp::from_millis(10).unwrap();
+
+		// Interleave groups and datagrams: they draw from one monotonic counter.
+		assert_eq!(producer.append_group().unwrap().sequence, 0);
+		assert_eq!(producer.append_datagram(ts, &b"a"[..]).unwrap(), 1);
+		assert_eq!(producer.append_group().unwrap().sequence, 2);
+		assert_eq!(producer.append_datagram(ts, &b"b"[..]).unwrap(), 3);
+		assert_eq!(producer.latest(), Some(3));
+	}
+
+	#[tokio::test]
+	async fn append_datagram_roundtrip() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+
+		let ts = Timestamp::from_millis(42).unwrap();
+		let seq = producer.append_datagram(ts, &b"hello"[..]).unwrap();
+
+		let got = recv_datagram(&mut dg);
+		assert_eq!(got.sequence, seq);
+		assert_eq!(got.timestamp, ts);
+		assert_eq!(&got.payload[..], b"hello");
+	}
+
+	#[tokio::test]
+	async fn write_datagram_preserves_sequence() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+
+		let ts = Timestamp::from_millis(5).unwrap();
+		// A relay forwarding an upstream datagram keeps its sequence number.
+		producer
+			.write_datagram(Datagram {
+				sequence: 100,
+				timestamp: ts,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+
+		assert_eq!(recv_datagram(&mut dg).sequence, 100);
+		// max_sequence advanced, so the next appended group/datagram continues past it.
+		assert_eq!(producer.append_group().unwrap().sequence, 101);
+	}
+
+	#[tokio::test]
+	async fn recv_datagram_advances_ordered_group_cursor() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let ts = Timestamp::from_millis(5).unwrap();
+
+		producer
+			.write_datagram(Datagram {
+				sequence: 5,
+				timestamp: ts,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 5);
+
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 6 }).unwrap();
+
+		let group = subscriber
+			.next_group()
+			.now_or_never()
+			.expect("group would have blocked")
+			.expect("would have errored")
+			.expect("track was closed");
+		assert_eq!(group.sequence, 6);
+	}
+
+	#[tokio::test]
+	async fn datagram_normalized_to_track_timescale() {
+		let info = Info::default().with_timescale(Timescale::MICRO);
+		let mut producer = track_producer("test", info);
+		let mut dg = producer.subscribe(None);
+
+		// Supplied at millis; stored/emitted at the track's micro timescale.
+		producer
+			.append_datagram(Timestamp::from_millis(2).unwrap(), &b"z"[..])
+			.unwrap();
+		let got = recv_datagram(&mut dg);
+		assert_eq!(got.timestamp.scale(), Timescale::MICRO);
+		assert_eq!(got.timestamp.value(), 2_000);
+	}
+
+	#[tokio::test]
+	async fn datagram_rejects_oversized() {
+		let mut producer = track_producer("test", None);
+		let big = bytes::Bytes::from(vec![0u8; MAX_DATAGRAM_PAYLOAD + 1]);
+		let ts = Timestamp::from_millis(0).unwrap();
+		assert!(matches!(
+			producer.append_datagram(ts, big.clone()),
+			Err(Error::WrongSize)
+		));
+		assert!(matches!(
+			producer.write_datagram(Datagram {
+				sequence: 0,
+				timestamp: ts,
+				payload: big,
+			}),
+			Err(Error::WrongSize)
+		));
+	}
+
+	#[tokio::test]
+	async fn datagram_fanout_to_subscribers() {
+		let mut producer = track_producer("test", None);
+		// Two independent subscribers, each with its own datagram cursor.
+		let mut a = producer.subscribe(None);
+		let mut b = producer.subscribe(None);
+		let ts = Timestamp::from_millis(1).unwrap();
+
+		producer.append_datagram(ts, &b"first"[..]).unwrap();
+		producer.append_datagram(ts, &b"second"[..]).unwrap();
+
+		// Both receive every datagram in order, independently.
+		assert_eq!(&recv_datagram(&mut a).payload[..], b"first");
+		assert_eq!(&recv_datagram(&mut a).payload[..], b"second");
+		assert_eq!(&recv_datagram(&mut b).payload[..], b"first");
+		assert_eq!(&recv_datagram(&mut b).payload[..], b"second");
+	}
+
+	#[tokio::test]
+	async fn datagram_evicts_stale() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		producer.append_datagram(ts, &b"old"[..]).unwrap(); // sequence 0
+
+		// Age past the send-buffer window, then push a fresh datagram: the stale one is evicted.
+		tokio::time::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10)).await;
+		producer.append_datagram(ts, &b"new"[..]).unwrap(); // sequence 1
+
+		// A lagging consumer resumes at the oldest still-buffered datagram (the fresh one).
+		let got = recv_datagram(&mut dg);
+		assert_eq!(got.sequence, 1);
+		assert_eq!(&got.payload[..], b"new");
+	}
+
+	#[tokio::test]
+	async fn datagram_recv_pends_until_written() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+
+		assert!(
+			dg.recv_datagram().now_or_never().is_none(),
+			"should block with no datagrams"
+		);
+
+		producer
+			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"go"[..])
+			.unwrap();
+		assert_eq!(&recv_datagram(&mut dg).payload[..], b"go");
+	}
+
+	/// Exercises the full producer -> publisher-encode -> subscriber-decode -> producer seam
+	/// (everything but the QUIC datagram send/recv), catching any field-order mismatch between
+	/// the wire codec and the model.
+	#[tokio::test]
+	async fn datagram_wire_roundtrip_between_tracks() {
+		use crate::coding::{Decode, Encode};
+		use crate::lite;
+
+		let version = lite::Version::Lite05Wip;
+
+		// Origin publishes a datagram; the publisher reads it and encodes the wire body.
+		let mut origin = track_producer("test", None);
+		let mut origin_dg = origin.subscribe(None);
+		let ts = Timestamp::from_millis(7).unwrap();
+		let seq = origin.append_datagram(ts, &b"payload"[..]).unwrap();
+
+		let d = recv_datagram(&mut origin_dg);
+		let body = lite::Datagram {
+			subscribe: 5,
+			sequence: d.sequence,
+			timestamp: d.timestamp.value(),
+			payload: d.payload.clone(),
+		}
+		.encode_bytes(version)
+		.unwrap();
+
+		// Subscriber decodes the body and writes it downstream, preserving the sequence.
+		let mut slice = &body[..];
+		let wire = lite::Datagram::decode(&mut slice, version).unwrap();
+		let mut downstream = track_producer("test", None);
+		let mut downstream_dg = downstream.subscribe(None);
+		downstream
+			.write_datagram(Datagram {
+				sequence: wire.sequence,
+				timestamp: Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
+				payload: wire.payload,
+			})
+			.unwrap();
+
+		let got = recv_datagram(&mut downstream_dg);
+		assert_eq!(got.sequence, seq);
+		assert_eq!(got.timestamp, ts);
+		assert_eq!(&got.payload[..], b"payload");
 	}
 
 	#[tokio::test]
@@ -1753,7 +2130,7 @@ mod test {
 		tokio::time::pause();
 
 		// A shorter cache evicts sooner than the default.
-		let mut producer = track_producer("test", TrackInfo::default().with_cache(Duration::from_secs(1)));
+		let mut producer = track_producer("test", Info::default().with_cache(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the custom cache but well within DEFAULT_CACHE.
@@ -1768,7 +2145,7 @@ mod test {
 
 	#[test]
 	fn stale_clamped_to_cache() {
-		let producer = track_producer("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
+		let producer = track_producer("test", Info::default().with_cache(Duration::from_secs(2)));
 
 		// A stale window beyond the cache is capped to the cache; a group can't be
 		// waited for longer than the publisher keeps it.
@@ -1790,9 +2167,9 @@ mod test {
 		let mut producer = track_producer("test", None);
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 4 }).unwrap();
 
 		// max_sequence = 5, which is at the front of the VecDeque.
 		{
@@ -1826,12 +2203,12 @@ mod test {
 		let mut producer = track_producer("test", None);
 
 		// Arrive: seq 5, then seq 3.
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
 		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
 
 		// Seq 5 is max_sequence (protected). Seq 3 is not expired (just created).
 		// Nothing should be evicted.
@@ -1845,7 +2222,7 @@ mod test {
 		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
-		producer.create_group(GroupInfo { sequence: 2 }).unwrap();
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
 
 		// Seq 5 is still max_sequence (protected, at front, blocks trim).
 		// Seq 3 is expired → tombstoned.
@@ -1946,7 +2323,7 @@ mod test {
 	#[test]
 	fn insert_finish_validates_sequence_and_freezes_to_max() {
 		let mut producer = track_producer("test", None);
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
 		assert!(producer.finish_at(4).is_err());
 		assert!(producer.finish_at(10).is_err());
@@ -1958,14 +2335,14 @@ mod test {
 		}
 
 		assert!(producer.finish_at(5).is_err());
-		assert!(producer.create_group(GroupInfo { sequence: 4 }).is_ok());
-		assert!(producer.create_group(GroupInfo { sequence: 5 }).is_err());
+		assert!(producer.create_group(group::Info { sequence: 4 }).is_ok());
+		assert!(producer.create_group(group::Info { sequence: 5 }).is_err());
 	}
 
 	#[tokio::test]
 	async fn recv_group_finishes_without_waiting_for_gaps() {
 		let mut producer = track_producer("test", None);
-		producer.create_group(GroupInfo { sequence: 1 }).unwrap();
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
 		let mut consumer = producer.subscribe(None);
@@ -1985,7 +2362,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 5 arrives first.
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
 		let group = consumer
 			.next_group()
 			.now_or_never()
@@ -1995,11 +2372,11 @@ mod test {
 		assert_eq!(group.sequence, 5);
 
 		// Seq 3 arrives late — skipped because 3 <= 5.
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
 		// Seq 4 arrives late — also skipped.
-		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
+		producer.create_group(group::Info { sequence: 4 }).unwrap();
 		// Seq 7 arrives — returned.
-		producer.create_group(GroupInfo { sequence: 7 }).unwrap();
+		producer.create_group(group::Info { sequence: 7 }).unwrap();
 
 		let group = consumer
 			.next_group()
@@ -2022,8 +2399,8 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
 		let group = consumer
 			.next_group()
@@ -2048,8 +2425,8 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
 
 		// next_group is sequence-ordered: it returns the smallest sequence first,
 		// regardless of arrival order.
@@ -2072,7 +2449,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
-			producer.create_group(GroupInfo { sequence: s }).unwrap();
+			producer.create_group(group::Info { sequence: s }).unwrap();
 		}
 
 		consumer.end_at(2);
@@ -2104,7 +2481,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
-			producer.create_group(GroupInfo { sequence: s }).unwrap();
+			producer.create_group(group::Info { sequence: s }).unwrap();
 		}
 
 		consumer.end_at(1);
@@ -2149,7 +2526,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..3 {
-			producer.create_group(GroupInfo { sequence: s }).unwrap();
+			producer.create_group(group::Info { sequence: s }).unwrap();
 		}
 
 		// Drain everything with no cap.
@@ -2168,8 +2545,8 @@ mod test {
 
 		// Lower the cap below the cursor. New groups beyond the cap are blocked.
 		consumer.end_at(1);
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 4 }).unwrap();
 		assert!(
 			consumer.next_group().now_or_never().is_none(),
 			"cap is below cursor; nothing returnable until cap rises"
@@ -2195,12 +2572,12 @@ mod test {
 		consumer.end_at(5);
 
 		// Out-of-order arrivals all within the cap.
-		producer.create_group(GroupInfo { sequence: 2 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 5 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
 		// One beyond the cap; should be held even though it arrived in the middle.
-		producer.create_group(GroupInfo { sequence: 8 }).unwrap();
-		producer.create_group(GroupInfo { sequence: 4 }).unwrap();
+		producer.create_group(group::Info { sequence: 8 }).unwrap();
+		producer.create_group(group::Info { sequence: 4 }).unwrap();
 
 		// next_group walks in sequence order through everything <= cap.
 		assert_eq!(
@@ -2261,9 +2638,9 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3: group open, no frame yet (stalled).
-		let _stalled = producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		let _stalled = producer.create_group(group::Info { sequence: 3 }).unwrap();
 		// Seq 5: fully-written group with a frame.
-		let mut g5 = producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		let mut g5 = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		g5.write_frame_now(bytes::Bytes::from_static(b"later")).unwrap();
 		g5.finish().unwrap();
 
@@ -2283,7 +2660,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 
 		// Group 0 has two frames; only the first is returned.
-		let mut g0 = producer.create_group(GroupInfo { sequence: 0 }).unwrap();
+		let mut g0 = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		g0.write_frame_now(bytes::Bytes::from_static(b"one")).unwrap();
 		g0.write_frame_now(bytes::Bytes::from_static(b"two")).unwrap();
 		g0.finish().unwrap();
@@ -2316,7 +2693,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		let mut g0 = producer.create_group(GroupInfo { sequence: 0 }).unwrap();
+		let mut g0 = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		producer.finish().unwrap();
 
 		// Track is finished but group 0 has no frame yet — must block, not return None.
@@ -2345,11 +2722,11 @@ mod test {
 		consumer.start_at(5);
 
 		// Seq 3 has a frame but is below min_sequence — must be skipped.
-		let mut g3 = producer.create_group(GroupInfo { sequence: 3 }).unwrap();
+		let mut g3 = producer.create_group(group::Info { sequence: 3 }).unwrap();
 		g3.write_frame_now(bytes::Bytes::from_static(b"skip-me")).unwrap();
 		g3.finish().unwrap();
 
-		let mut g5 = producer.create_group(GroupInfo { sequence: 5 }).unwrap();
+		let mut g5 = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		g5.write_frame_now(bytes::Bytes::from_static(b"keep")).unwrap();
 		g5.finish().unwrap();
 
@@ -2389,7 +2766,7 @@ mod test {
 	#[tokio::test]
 	async fn get_group_finishes_without_waiting_for_gaps() {
 		let mut producer = track_producer("test", None);
-		producer.create_group(GroupInfo { sequence: 1 }).unwrap();
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
 		let consumer = producer.subscribe(None);
@@ -2450,9 +2827,9 @@ mod test {
 
 		// A cache miss isn't in `get_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
-		// wrapper to the inner `TrackFetch` (a `kio::Future`).
+		// wrapper to the inner `Fetch` (a `kio::Future`).
 		assert!(consumer.get_group(5).is_none());
-		let pending = consumer.fetch_group(5, Fetch::default().with_priority(7));
+		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
 		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
@@ -2539,7 +2916,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_miss_no_dynamic_not_found() {
-		// A track with no `TrackDynamic` can't serve old content, so a cache miss
+		// A track with no `Dynamic` can't serve old content, so a cache miss
 		// resolves to NotFound instead of blocking forever.
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0, but we miss on seq 5

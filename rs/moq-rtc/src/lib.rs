@@ -10,15 +10,14 @@
 //! | HTTP client | [`Client::subscribe`] (WHEP client) | [`Client::publish`] (WHIP client) |
 //!
 //! The two HTTP-client paths and the two HTTP-server paths share a single
-//! [`session::Session`] driver and the same per-codec adapters in [`codec`];
-//! the per-direction split lives in [`session::MediaSink`] (ingest) /
-//! [`egress::EgressSource`] (egress).
+//! internal session driver and the same per-codec adapters; the per-direction
+//! split lives in the (crate-private) ingest and egress sources.
 //!
 //! ## Embedding
 //!
 //! Build a [`Server`] over your own
-//! [`OriginProducer`](moq_net::OriginProducer) /
-//! [`OriginConsumer`](moq_net::OriginConsumer) and merge
+//! [`OriginProducer`](moq_net::origin::Producer) /
+//! [`OriginConsumer`](moq_net::origin::Consumer) and merge
 //! [`Server::publish_router`] / [`Server::subscribe_router`] into your own axum
 //! app, or dial out with [`Client`]. A command-line interface is provided by the
 //! `moq-cli` binary, on top of this library.
@@ -38,13 +37,24 @@
 //! transform is needed in the gateway. Opus, VP8, and VP9 pass through.
 
 pub mod client;
-pub mod codec;
-pub mod egress;
-mod error;
-pub mod ingest;
-pub mod sdp;
 pub mod server;
-pub mod session;
+
+// Implementation detail modules: these carry the WebRTC/str0m plumbing (str0m
+// `Rtc`, `Mid`/`Pt`, tokio channels, raw packet buffers) and are deliberately
+// crate-private, so the public surface stays `Client`, `Server`,
+// `whip`/`whep::accept`, and `Response`.
+mod codec;
+mod egress;
+mod error;
+mod ingest;
+mod sdp;
+mod session;
+
+/// Re-export of the underlying WebRTC stack, so consumers can name the str0m
+/// types that surface through [`Error::Rtc`] / [`Error::RtcInput`] without adding
+/// their own str0m dependency (and risking a version mismatch). A major str0m
+/// bump is therefore a breaking change for this crate.
+pub use str0m;
 
 pub use client::Client;
 pub use error::*;

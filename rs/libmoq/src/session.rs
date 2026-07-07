@@ -28,8 +28,8 @@ impl Session {
 	pub fn connect(
 		&mut self,
 		url: Url,
-		publish: Option<moq_net::OriginProducer>,
-		consume: Option<moq_net::OriginProducer>,
+		publish: Option<moq_net::origin::Producer>,
+		consume: Option<moq_net::origin::Producer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
 		let mut client = moq_native::ClientConfig::default().init()?;

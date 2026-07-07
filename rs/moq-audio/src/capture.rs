@@ -181,7 +181,7 @@ impl Microphone {
 /// (codec, bitrate, frame duration) from [`EncoderOutput`]. Returns when the
 /// broadcast is dropped or the capture loop fails.
 pub async fn publish_microphone(
-	mut broadcast: moq_net::BroadcastProducer,
+	mut broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	config: Config,
 	track_name: impl Into<String>,
@@ -218,7 +218,7 @@ pub async fn publish_microphone(
 /// and stops the cpal stream. No blocking thread is left behind.
 async fn capture_loop(
 	producer: &mut AudioProducer,
-	track: &moq_net::TrackProducer,
+	track: &moq_net::track::Producer,
 	config: &Config,
 	clock: &moq_mux::Clock,
 ) -> Result<(), AudioError> {

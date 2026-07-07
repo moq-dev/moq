@@ -1,7 +1,7 @@
 import { Signal } from "@moq/signals";
-import type { Announced } from "../announced.ts";
+import type * as announce from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
-import type { Broadcast } from "../broadcast.ts";
+import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -17,7 +17,7 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasSetupStream, Version, versionName } from "./version.ts";
+import { hasDatagrams, hasSetupStream, Version, versionName } from "./version.ts";
 
 const SEND_BW_POLL_INTERVAL = 100; // ms
 
@@ -140,6 +140,12 @@ export class Connection implements Established {
 			tasks.push(this.#subscriber.runProbe());
 		}
 
+		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams
+		// no-ops on a transport that doesn't carry them).
+		if (hasDatagrams(this.#version)) {
+			tasks.push(this.#subscriber.runDatagrams());
+		}
+
 		try {
 			await Promise.all(tasks);
 		} catch (err) {
@@ -149,16 +155,16 @@ export class Connection implements Established {
 		}
 	}
 
-	publish(path: Path.Valid, broadcast: Broadcast) {
-		this.#publisher.publish(path, broadcast);
+	publish(path: Path.Valid, producer: broadcast.Producer) {
+		this.#publisher.publish(path, producer);
 	}
 
-	announced(prefix = Path.empty()): Announced {
+	announced(prefix = Path.empty()): announce.Consumer {
 		return this.#subscriber.announced(prefix);
 	}
 
-	consume(broadcast: Path.Valid): Broadcast {
-		return this.#subscriber.consume(broadcast);
+	consume(path: Path.Valid): broadcast.Consumer {
+		return this.#subscriber.consume(path);
 	}
 
 	async #runSession() {

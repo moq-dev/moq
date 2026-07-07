@@ -40,7 +40,7 @@ impl<E: CatalogExt> AudioProducer<E> {
 	/// Build a producer for `name` on `broadcast`, registering the
 	/// rendition in `catalog` immediately.
 	pub fn new(
-		broadcast: &mut moq_net::BroadcastProducer,
+		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		name: impl Into<String>,
 		input: EncoderInput,
@@ -69,7 +69,7 @@ impl<E: CatalogExt> AudioProducer<E> {
 		// layer accepts Frame::timestamp on append.
 		let track = broadcast.create_track(
 			name.clone(),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
@@ -93,8 +93,8 @@ impl<E: CatalogExt> AudioProducer<E> {
 	}
 
 	/// The underlying track producer, e.g. to watch subscriber state via
-	/// [`used`](moq_net::TrackProducer::used) / [`unused`](moq_net::TrackProducer::unused).
-	pub fn track(&self) -> &moq_net::TrackProducer {
+	/// [`used`](moq_net::track::Producer::used) / [`unused`](moq_net::track::Producer::unused).
+	pub fn track(&self) -> &moq_net::track::Producer {
 		self.track.track()
 	}
 
@@ -211,7 +211,7 @@ mod tests {
 	/// If `reset_before` contains an index, `reset_epoch()` is called before that
 	/// frame's `write`.
 	async fn published_pts(frames: &[Frame], reset_before: Option<usize>) -> Vec<u128> {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let consumer = broadcast.consume();
 

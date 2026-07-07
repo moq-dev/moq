@@ -1,7 +1,7 @@
 //! HTTP-server side: accept WHIP/WHEP offers from remote clients.
 //!
-//! Mounts axum routers that publish into [`moq_net::OriginProducer`] (WHIP
-//! / `server publish`) and pull from [`moq_net::OriginConsumer`] (WHEP /
+//! Mounts axum routers that publish into [`moq_net::origin::Producer`] (WHIP
+//! / `server publish`) and pull from [`moq_net::origin::Consumer`] (WHEP /
 //! `server subscribe`). The HTTP listener itself is the caller's
 //! responsibility; the `moq-cli` `rtc` subcommand mounts these under an
 //! HTTP server.
@@ -61,7 +61,7 @@ struct AcceptedSession {
 	session: Option<crate::session::Session>,
 	/// Announcement guard for the ingest (WHIP) path; unannounces on drop.
 	/// `None` for egress (WHEP) sessions.
-	publish: Option<moq_net::OriginPublish>,
+	publish: Option<moq_net::origin::Publish>,
 	registration: Option<mux::Registration>,
 	cancel: Option<oneshot::Receiver<()>>,
 	role: &'static str,
@@ -132,8 +132,9 @@ pub struct Config {
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
 	/// answer so a remote peer can reach us.
 	///
-	/// If empty, the mux advertises whatever address the OS picked for the
-	/// shared socket. That works for loopback testing but not behind NAT.
+	/// If empty, the mux advertises the bound address, substituting loopback
+	/// when the socket is bound to an unspecified address. That works for
+	/// loopback testing but not behind NAT.
 	pub ice_candidates: Vec<SocketAddr>,
 
 	/// Address the shared WebRTC media socket binds to. Every WHIP/WHEP session
@@ -164,9 +165,9 @@ pub struct Server {
 
 struct Inner {
 	config: Config,
-	publisher: moq_net::OriginProducer,
+	publisher: moq_net::origin::Producer,
 	/// Source for `server subscribe` (WHEP) egress.
-	subscriber: moq_net::OriginConsumer,
+	subscriber: moq_net::origin::Consumer,
 	/// The shared media socket + demux, bound lazily on the first accept so
 	/// `Server::new` can stay synchronous (and an idle server binds no port).
 	mux: OnceCell<Mux>,
@@ -179,7 +180,7 @@ struct Inner {
 impl Server {
 	/// Build a server. `publisher` receives WHIP broadcasts; `subscriber`
 	/// is the source for WHEP egress.
-	pub fn new(config: Config, publisher: moq_net::OriginProducer, subscriber: moq_net::OriginConsumer) -> Self {
+	pub fn new(config: Config, publisher: moq_net::origin::Producer, subscriber: moq_net::origin::Consumer) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				config,
@@ -221,11 +222,11 @@ impl Server {
 		whep::router(self.clone())
 	}
 
-	pub(crate) fn publisher(&self) -> &moq_net::OriginProducer {
+	pub(crate) fn publisher(&self) -> &moq_net::origin::Producer {
 		&self.inner.publisher
 	}
 
-	pub(crate) fn subscriber(&self) -> &moq_net::OriginConsumer {
+	pub(crate) fn subscriber(&self) -> &moq_net::origin::Consumer {
 		&self.inner.subscriber
 	}
 

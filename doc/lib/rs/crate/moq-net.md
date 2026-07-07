@@ -35,7 +35,7 @@ moq-net = "0.1"
 
 ## API Reference
 
-The Rust API uses a builder pattern with `Session`, `OriginProducer`/`OriginConsumer`, and related types. See the full API documentation for details:
+The Rust API uses a builder pattern with `Session`, `origin::Producer`/`origin::Consumer`, and related types. See the full API documentation for details:
 
 **[docs.rs/moq-net](https://docs.rs/moq-net)**
 
