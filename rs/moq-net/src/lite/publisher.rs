@@ -675,7 +675,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = broadcast.await?;
 		let track = broadcast.track(&fetch.track)?;
 
-		let group = track
+		let mut group = track
 			.fetch_group(
 				fetch.group,
 				group::Fetch {
@@ -695,14 +695,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// the timescale from TRACK_INFO and the group sequence from its request.
 		track_stats.group();
 
-		// Honor frame_start: skip earlier frames, then stream the rest in order. The
-		// delta-timestamp baseline resets to 0, so the first served frame's delta is
-		// its absolute timestamp (the subscriber decodes against the same baseline).
-		let mut index = fetch.frame_start as usize;
+		// Stream every frame in order. The delta-timestamp baseline resets to 0, so the
+		// first served frame's delta is its absolute timestamp (the subscriber decodes
+		// against the same baseline).
 		let mut prev_ts: u64 = 0;
-		while let Some(mut frame) = group.get_frame(index).await? {
+		while let Some(mut frame) = group.next_frame().await? {
 			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts, &track_stats).await?;
-			index += 1;
 		}
 
 		stream.writer.finish()?;
