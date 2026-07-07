@@ -37,6 +37,9 @@ impl Info {
 
 	/// Consume this [Info] to create a producer that carries its metadata
 	/// (including the hop chain).
+	///
+	/// Keep the returned [`Producer`] alive for as long as the broadcast should stay
+	/// available, and end it with [`Producer::close`]. See the note on [`Producer`].
 	pub fn produce(self) -> Producer {
 		Producer::new(self)
 	}
@@ -59,6 +62,10 @@ struct BroadcastState {
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
 	dynamic: usize,
+
+	// Set by an explicit `Producer::close()` so `Drop` can tell a deliberate
+	// shutdown apart from a producer that was dropped by accident.
+	closed: bool,
 }
 
 impl BroadcastState {
@@ -90,6 +97,21 @@ impl BroadcastState {
 /// Create tracks up front with [Self::create_track], reserve a name to fill in
 /// later with [Self::reserve_track], or handle on-demand consumer requests via
 /// [Self::dynamic].
+///
+/// # Lifetime
+///
+/// **You must keep this producer alive for as long as the broadcast should stay
+/// available.** A broadcast lives as long as at least one [`Producer`] exists;
+/// children do *not* keep it alive (cloning a [`Consumer`], holding a
+/// [`track::Producer`], or holding the [`crate::origin::Publish`] guard does
+/// nothing for the broadcast's lifetime). When the last producer goes away every
+/// consumer observes [`Error::Dropped`].
+///
+/// End the broadcast with [`Self::close`] rather than dropping it. Dropping is an
+/// easy footgun in garbage-collected bindings (Go, Python, ...), where the handle
+/// can be collected the moment it falls out of scope even while you are still
+/// publishing, tearing the stream down mid-broadcast. Dropping the last producer
+/// without [`Self::close`] logs a warning.
 #[derive(Clone)]
 pub struct Producer {
 	// Held behind an Arc so each track born from this broadcast can inherit a shared
@@ -189,9 +211,43 @@ impl Producer {
 		}
 	}
 
+	/// Cleanly close the broadcast once you are done publishing.
+	///
+	/// Marks the broadcast as deliberately finished so consumers observe a normal
+	/// end. Prefer this over dropping the producer: an accidental drop (see the note
+	/// on [`Producer`]) logs a warning, whereas a `close()` is silent.
+	///
+	/// Only marks intent; the broadcast actually ends once every producer clone is
+	/// gone, so a clone that outlives this call keeps it alive until it too is
+	/// dropped or closed.
+	pub fn close(self) {
+		if let Ok(mut state) = self.state.write() {
+			state.closed = true;
+		}
+	}
+
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+impl Drop for Producer {
+	fn drop(&mut self) {
+		// Only the last producer ending the broadcast matters; a clone dropping
+		// leaves it live. Warn if that last exit wasn't an explicit close(), since
+		// consumers will then see Error::Dropped (classically a GC-collected handle
+		// in a language binding that tears the stream down mid-publish).
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(state) = self.state.write()
+			&& !state.closed
+		{
+			tracing::warn!(
+				"broadcast::Producer dropped without close(); consumers will see Error::Dropped. Keep the producer alive while publishing, then call close()."
+			);
+		}
 	}
 }
 

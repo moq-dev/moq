@@ -398,6 +398,12 @@ impl Drop for Producer {
 		if let Ok(mut state) = modify(&self.state)
 			&& !state.fin
 		{
+			// Dropped without finish() or abort(), so consumers will see
+			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
+			tracing::warn!(
+				sequence = self.info.sequence,
+				"group::Producer dropped without finish() or abort(); consumers will see Error::Dropped"
+			);
 			state.frames.clear();
 			state.partial = None;
 			state.cache = 0;
