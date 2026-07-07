@@ -190,7 +190,13 @@ export class AudioRingBuffer {
 		if (this.#stalled) return 0;
 
 		const samples = Math.min(this.#writeIndex - this.#readIndex, output[0].length);
-		if (samples === 0) return 0;
+		if (samples === 0) {
+			// Buffered ring fully drained while playing: re-stall so the parked decode loop is released to
+			// refill (a drained un-stalled ring is a deadlock; only that loop can refill it). Live mode holds
+			// no lookahead, so a momentary underflow there is normal and must not re-stall.
+			if (this.#buffered) this.#stalled = true;
+			return 0;
+		}
 
 		for (let channel = 0; channel < this.channels; channel++) {
 			const dst = output[channel];

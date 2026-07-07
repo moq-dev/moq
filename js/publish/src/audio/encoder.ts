@@ -4,21 +4,29 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { snapCadence } from "./cadence";
 import type * as Capture from "./capture";
+import { StreamResampler } from "./resampler";
 import { type Kind, normalizeSource, type Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION = Time.Milli(20);
+// Opus decoders always emit 48 kHz PCM (RFC 6716) regardless of the encoder's input rate, so the
+// catalog must advertise 48000 for watchers to build their pipeline at. The capture rate (which can
+// be e.g. 16 kHz on Safari's voice-processed mic) stays private to the encoder.
+const OPUS_OUTPUT_RATE = 48000;
+// When resampling capture PCM to the encoder rate (Safari's non-canonical hardware rate -> 48 kHz), the
+// output-clock timestamp is synthesized from a running sample counter. If the capture clock drifts more
+// than one frame from that synthesized clock (chunks dropped during a mute/unmute channel-count flip),
+// re-anchor to the live capture timestamp so audio never lags real time (and video) forever.
+const RESAMPLE_REANCHOR_US = 20000;
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
-
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
-import CaptureWorklet from "./capture-worklet.ts?worklet";
 
 // Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
 // object with the mime plus tuning knobs.
@@ -94,6 +102,11 @@ export class Encoder {
 	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
 
+	// Just the codec mime ("opus"/"aac"), value-deduped. #runSource only needs to know which codec
+	// (Opus captures at 48 kHz), not its knobs, so reading this instead of the whole codec signal
+	// keeps a bitrate/complexity tweak from tearing down and rebuilding the AudioContext.
+	#codecMime: Getter<"opus" | "aac" | undefined>;
+
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 
 	#gain = new Signal<GainNode | undefined>(undefined);
@@ -112,6 +125,10 @@ export class Encoder {
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
 
+		// Created before the effects below so its microtask runs first: #runSource then reads a
+		// populated mime rather than the initial undefined.
+		this.#codecMime = this.#signals.computed((effect) => normalizeCodec(effect.get(this.codec)).mime);
+
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
@@ -126,7 +143,13 @@ export class Encoder {
 
 		const settings = source.track.getSettings();
 		const overrideSampleRate = effect.get(this.sampleRate);
-		const sampleRate = overrideSampleRate ?? settings.sampleRate;
+		// For Opus, default the capture context to 48 kHz instead of the device rate: Web Audio
+		// resamples the source transparently, low-rate devices (Bluetooth telephony at 8/16 kHz)
+		// lose their quirks, and device rates libopus rejects (44.1 kHz) never reach a native
+		// encoder's configure(). An explicit sampleRate override still wins. Reading the deduped
+		// mime (not the whole codec) means Opus knob tweaks don't rebuild the context.
+		const codecDefaultRate = effect.get(this.#codecMime) === "opus" ? OPUS_OUTPUT_RATE : settings.sampleRate;
+		const sampleRate = overrideSampleRate ?? codecDefaultRate;
 
 		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
 		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
@@ -153,7 +176,11 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			await context.audioWorklet.addModule(CaptureWorklet);
+			// Load lazily (compiled and inlined as a blob URL via vite-plugin-worklet). A static
+			// import would pull the ?worklet module into the eager graph, which breaks non-Vite
+			// loaders like `bun test` that lack the plugin.
+			const { default: captureWorklet } = await import("./capture-worklet.ts?worklet");
+			await context.audioWorklet.addModule(captureWorklet);
 			if (context.state === "closed") return;
 
 			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
@@ -221,7 +248,10 @@ export class Encoder {
 
 		return {
 			codec: "opus",
-			sampleRate,
+			// The catalog carries what DECODERS output, and Opus decoders always emit 48 kHz whatever
+			// rate we capture/encode at. Advertising the capture rate here garbles playback: the watcher
+			// builds its ring at the catalog rate, then receives 48 kHz-dense samples.
+			sampleRate: Catalog.u53(OPUS_OUTPUT_RATE),
 			numberOfChannels,
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
@@ -286,17 +316,49 @@ export class Encoder {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
 
+			let cadence: number | undefined; // nominal frame-cadence clock for the timestamp snap below
 			const encoder = new AudioEncoder({
 				output: (frame) => {
 					if (frame.type !== "key") {
 						throw new Error("only key frames are supported");
 					}
 
+					// Snap the container timestamp onto the nominal frame cadence. Safari's AudioEncoder
+					// stamps each output frame with the timestamp of the INPUT AudioData chunk holding its
+					// start, quantizing to the 128-sample capture-quantum grid (a 20 ms Opus frame alternates
+					// 18667/21333 us). That per-frame jitter makes the watcher's timestamp-indexed ring
+					// zero-fill or overwrite a sample every frame and crackle. Chrome/Firefox already emit an
+					// exact cadence, so this is an identity rewrite; a gap over the window (mute, DTX silence,
+					// suspend) re-anchors to the real timestamp. Device- and option-independent: capture
+					// timestamps are sample-counted (capture-worklet.ts), the rate is whatever the context
+					// actually runs at, and `nominal` tracks the encoder's frameDuration.
+					let ts = frame.timestamp as number;
+					if (config) {
+						const nominal =
+							config.codec === "opus"
+								? (config.jitter ?? OPUS_FRAME_DURATION) * 1000
+								: (AAC_FRAME_SAMPLES / worklet.context.sampleRate) * 1_000_000;
+						// One capture quantum in stream time. Rate-conversion-invariant: the resampler emits
+						// exactly one output chunk per 128-sample capture chunk, so the encoder's input-chunk
+						// duration (the stamping granularity) is 128/captureRate whatever the encode rate.
+						const quantum = (128 / worklet.context.sampleRate) * 1_000_000;
+						if (quantum < nominal) {
+							// Absorb up to one quantum of jitter, never a real frame gap.
+							const snapped = snapCadence(cadence, ts, nominal, Math.max(nominal / 2, quantum));
+							ts = snapped.ts;
+							cadence = snapped.next;
+						} else {
+							// Frame no larger than one quantum: jitter is indistinguishable from a real
+							// one-frame gap, so pass the raw timestamp through.
+							cadence = undefined;
+						}
+					}
+
 					// Each audio frame is its own group so the relay can forward it without
 					// waiting for a group boundary. Loss is handled by the codec's PLC.
 					track.writeFrame({
-						data: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
-						timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
+						data: Container.Legacy.encodeFrame(frame, ts as Time.Micro),
+						timestamp: Time.Timestamp.fromMicros(ts as Time.Micro),
 					});
 				},
 				error: (err) => {
@@ -304,7 +366,11 @@ export class Encoder {
 					track.close(err);
 				},
 			});
-			effect.cleanup(() => encoder.close());
+			// Guard against double-close: a fatal error auto-closes the encoder, and close() on a closed
+			// encoder throws InvalidStateError, aborting the signals dispose loop and leaking the sibling effects.
+			effect.cleanup(() => {
+				if (encoder.state !== "closed") encoder.close();
+			});
 
 			let config: Catalog.AudioConfig | undefined;
 			effect.run((effect: Effect) => {
@@ -313,12 +379,22 @@ export class Encoder {
 
 				const source = effect.get(this.source);
 				const kind: Kind = source ? normalizeSource(source).kind : "auto";
-				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
+				const encoderConfig = toEncoderConfig(
+					config,
+					// Opus is configured at the canonical 48 kHz to match the resampled AudioData (see the
+					// port "message" handler); other codecs use the actual capture rate.
+					config.codec === "opus" ? OPUS_OUTPUT_RATE : worklet.context.sampleRate,
+					kind,
+					this.#opusOptions(effect),
+				);
 
 				console.debug("encoding audio", encoderConfig);
+				cadence = undefined; // re-anchor the cadence snap on (re)configure
 				encoder.configure(encoderConfig);
 			});
 
+			let resampler: StreamResampler | undefined;
+			let anchor = 0; // capture-clock time (us) of the resampler's first output sample
 			effect.event(worklet.port, "message", (event: Event) => {
 				const data = (event as MessageEvent<Capture.AudioFrame>).data;
 				const channelCount = data.channels.length;
@@ -329,7 +405,42 @@ export class Encoder {
 					return;
 				}
 
-				const channels = data.channels;
+				const captureRate = worklet.context.sampleRate;
+				// Opus must be fed a canonical rate (48 kHz). Chrome/Firefox honor the 48 kHz context
+				// request so captureRate is already 48000 and this is a bypass; Safari ignores it and
+				// captures at the hardware rate (~44.1 kHz, which native Opus misencodes into scratchy
+				// audio), so resample to 48 kHz before encoding. Mirror of the watch-side resampler.
+				const encodeRate = config.codec === "opus" ? OPUS_OUTPUT_RATE : captureRate;
+
+				let channels = data.channels;
+				let timestamp = data.timestamp;
+				if (captureRate !== encodeRate) {
+					if (!resampler) {
+						resampler = new StreamResampler(captureRate, encodeRate);
+						anchor = data.timestamp;
+						console.debug(
+							`audio: capture at ${captureRate} Hz, resampling to ${encodeRate} Hz for the encoder`,
+						);
+					} else {
+						// Re-anchor if the capture clock has run far past our synthesized output clock, which
+						// happens when chunks are dropped (mute/unmute channel-count flip). Otherwise the
+						// synthesized timestamps would keep counting from the pre-gap anchor and lag real time.
+						const expected = anchor + (resampler.emitted / encodeRate) * 1e6;
+						if (Math.abs(data.timestamp - expected) > RESAMPLE_REANCHOR_US) {
+							resampler = new StreamResampler(captureRate, encodeRate);
+							anchor = data.timestamp;
+						}
+					}
+					channels = resampler.resample(channels);
+					if (channels[0].length === 0) return; // no output for this chunk yet
+					// Stamp on the encoder's 48 kHz clock: the first sample of this chunk sits at
+					// anchor + (emitted so far - this chunk's samples) / encodeRate. Derived from the absolute
+					// counter (not an incremented running total) so rounding never accumulates.
+					timestamp = Math.round(
+						anchor + ((resampler.emitted - channels[0].length) / encodeRate) * 1e6,
+					) as Time.Micro;
+				}
+
 				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
 				const joined = new Float32Array(joinedLength);
 
@@ -340,10 +451,10 @@ export class Encoder {
 
 				const frame = new AudioData({
 					format: "f32-planar",
-					sampleRate: worklet.context.sampleRate,
+					sampleRate: encodeRate,
 					numberOfFrames: channels[0].length,
 					numberOfChannels: channels.length,
-					timestamp: data.timestamp,
+					timestamp,
 					data: joined,
 					transfer: [joined.buffer],
 				});
@@ -415,15 +526,21 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
-// no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
+// no such knobs, so it just uses the shared base fields (codec/channels/bitrate).
+//
+// captureRate is the capture AudioContext's rate, which every AudioData is stamped with. The
+// encoder MUST be configured at that rate (native encoders reject mismatched input), while the
+// catalog can advertise a different decode rate (48 kHz for Opus).
+
 function toEncoderConfig(
 	config: Catalog.AudioConfig,
+	captureRate: number,
 	kind: Kind,
 	opusOptions: OpusEncoderConfigExt,
 ): AudioEncoderConfig {
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,
-		sampleRate: config.sampleRate,
+		sampleRate: captureRate,
 		numberOfChannels: config.numberOfChannels,
 		bitrate: config.bitrate,
 	};

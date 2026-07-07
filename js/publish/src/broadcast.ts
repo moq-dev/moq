@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { CatalogProducer } from "./catalog";
 import * as Video from "./video";
@@ -35,6 +35,15 @@ export class Broadcast {
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	// Reacquire it via an effect, since reconnecting swaps in a fresh producer.
 	readonly net = new Signal<Moq.broadcast.Producer | undefined>(undefined);
+
+	#requestCount = new Signal(0);
+
+	/**
+	 * Number of track requests received on the current session, resetting to 0 on reconnect.
+	 * Relays subscribe to the catalog almost immediately after an announce, so a session that
+	 * stays at 0 has likely wedged; the `<moq-publish>` element uses this to force a reconnect.
+	 */
+	readonly requestCount: Getter<number> = this.#requestCount;
 
 	signals = new Effect();
 
@@ -86,6 +95,7 @@ export class Broadcast {
 			if (this.net.peek() === broadcast) this.net.set(undefined);
 		});
 
+		this.#requestCount.set(0);
 		connection.publish(name, broadcast);
 
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
@@ -95,6 +105,9 @@ export class Broadcast {
 		for (;;) {
 			const request = await broadcast.requested();
 			if (!request) break;
+
+			// Any request proves the session delivers incoming streams, i.e. it is not wedged.
+			this.#requestCount.update((n) => n + 1);
 
 			// dev's reshape hands back a TrackRequest: switch on its name, reject unknown
 			// tracks, and accept the rest into a producer to serve.

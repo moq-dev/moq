@@ -1,3 +1,4 @@
+import * as Util from "@moq/hang/util";
 import { Effect, Signal } from "@moq/signals";
 import type * as Video from "../video";
 import { Device, type DeviceProps } from "./device";
@@ -22,6 +23,11 @@ export class Camera {
 	constraints: Signal<Video.Constraints | undefined>;
 
 	source = new Signal<Video.Source | undefined>(undefined);
+
+	// Bumped when the captured track ends underneath us (e.g. the webcam is unplugged),
+	// so #run re-acquires instead of leaving a frozen source forever.
+	#retry = new Signal(0);
+
 	signals = new Effect();
 
 	constructor(props?: CameraProps) {
@@ -36,6 +42,7 @@ export class Camera {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
+		effect.get(this.#retry);
 		const device = effect.get(this.device.requested);
 		const constraints = effect.get(this.constraints) ?? {};
 
@@ -47,7 +54,12 @@ export class Camera {
 		};
 
 		effect.spawn(async () => {
-			const media = navigator.mediaDevices.getUserMedia({ video: finalConstraints }).catch(() => undefined);
+			// A denied/cancelled permission prompt must not take down the effect, but stay visible:
+			// the broadcast still announces, so watchers would otherwise buffer forever with no clue why.
+			const media = navigator.mediaDevices.getUserMedia({ video: finalConstraints }).catch((err) => {
+				console.warn("camera capture failed:", err);
+				return undefined;
+			});
 
 			// If the effect is cancelled for any reason (ex. cancel), stop any media that we got.
 			effect.cleanup(() =>
@@ -67,6 +79,30 @@ export class Camera {
 			if (!source) return;
 
 			const settings = source.getSettings();
+
+			// The track can end underneath us (device unplugged, OS revoked). Re-acquire so
+			// capture moves to whatever device is now available.
+			effect.event(source, "ended", () => {
+				console.warn("camera track ended; re-acquiring");
+				this.#retry.update((n) => n + 1);
+			});
+
+			// Safari mutes (does not end) the track when the tab is backgrounded and doesn't reliably
+			// unmute it on return, leaving a frozen source. On return to the foreground, give Safari a
+			// moment to auto-unmute; if the track is still muted, re-acquire. Safari-only: desktop
+			// Chrome/Firefox don't mute on background, and mobile Chrome/Firefox auto-unmute reliably, so
+			// re-acquiring there would only glitch a stream that was about to recover on its own.
+			if (Util.Hacks.isSafari) {
+				effect.event(document, "visibilitychange", () => {
+					if (document.hidden || !source.muted) return;
+					effect.timer(() => {
+						if (!document.hidden && source.muted) {
+							console.warn("camera track stuck muted after returning to foreground; re-acquiring");
+							this.#retry.update((n) => n + 1);
+						}
+					}, 500);
+				});
+			}
 
 			effect.set(this.device.active, settings.deviceId);
 			effect.set(this.source, source);

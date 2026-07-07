@@ -11,10 +11,13 @@ import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
  * floor-sized ring. Both transports share this; they differ only in how they observe the playhead
  * (Atomics poll vs worklet state messages). A no-op when not buffered (the ring bounds itself).
  */
+// A parked backpressure waiter; `cleanup` detaches its abort listener when it resolves.
+type Waiter = { timestamp: Time.Micro; resolve: () => void; cleanup?: () => void };
+
 class Backpressure {
 	readonly #enabled: boolean;
 	#headroom: Time.Micro;
-	#waiters: Array<{ timestamp: Time.Micro; resolve: () => void }> = [];
+	#waiters: Array<Waiter> = [];
 
 	constructor(enabled: boolean, headroom: Time.Micro) {
 		this.#enabled = enabled;
@@ -26,26 +29,45 @@ class Backpressure {
 		this.#headroom = headroom;
 	}
 
-	wait(timestamp: Time.Micro, playhead: Time.Micro): Promise<void> {
+	// `signal` (the decode effect's abort) unparks a waiter when the loop is torn down, so a frozen
+	// playhead (e.g. a mute that stopped the render graph) can never strand the spawn.
+	wait(timestamp: Time.Micro, playhead: Time.Micro, signal?: AbortSignal): Promise<void> {
 		if (!this.#enabled) return Promise.resolve();
+		if (signal?.aborted) return Promise.resolve();
 		if (playhead >= ((timestamp - this.#headroom) | 0)) return Promise.resolve();
-		return new Promise((resolve) => this.#waiters.push({ timestamp, resolve }));
+		return new Promise((resolve) => {
+			const waiter: Waiter = { timestamp, resolve };
+			if (signal) {
+				const onAbort = () => {
+					const i = this.#waiters.indexOf(waiter);
+					if (i >= 0) this.#waiters.splice(i, 1);
+					resolve();
+				};
+				signal.addEventListener("abort", onAbort, { once: true });
+				waiter.cleanup = () => signal.removeEventListener("abort", onAbort);
+			}
+			this.#waiters.push(waiter);
+		});
 	}
 
 	// Resolve every waiter the playhead has reached. Thresholds are recomputed live so a changed
 	// headroom takes effect on queued waiters too.
 	advance(playhead: Time.Micro): void {
 		if (this.#waiters.length === 0) return;
-		this.#waiters = this.#waiters.filter(({ timestamp, resolve }) => {
-			if (playhead < ((timestamp - this.#headroom) | 0)) return true;
-			resolve();
+		this.#waiters = this.#waiters.filter((waiter) => {
+			if (playhead < ((waiter.timestamp - this.#headroom) | 0)) return true;
+			waiter.cleanup?.();
+			waiter.resolve();
 			return false;
 		});
 	}
 
 	// Resolve everything unconditionally (reset/close): never strand a decode loop.
 	flush(): void {
-		for (const { resolve } of this.#waiters) resolve();
+		for (const waiter of this.#waiters) {
+			waiter.cleanup?.();
+			waiter.resolve();
+		}
 		this.#waiters = [];
 	}
 }
@@ -83,7 +105,7 @@ export interface AudioBuffer {
 	 * floor ahead of the playhead, so the caller holds the (encoded) frame instead of decoding it too
 	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
 	 */
-	wait(timestamp: Time.Micro): Promise<void>;
+	wait(timestamp: Time.Micro, signal?: AbortSignal): Promise<void>;
 
 	/** Current playback timestamp (derived from reader position). */
 	readonly timestamp: Getter<Time.Micro>;
@@ -129,6 +151,7 @@ class SharedAudioBuffer implements AudioBuffer {
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
 	#ring: SharedRingBuffer;
+	readonly #buffered: boolean;
 
 	readonly #timestamp = new Signal<Time.Micro>(0 as Time.Micro);
 	readonly timestamp: Getter<Time.Micro> = this.#timestamp;
@@ -145,6 +168,8 @@ class SharedAudioBuffer implements AudioBuffer {
 		this.channels = channels;
 		this.rate = rate;
 
+		this.#buffered = buffered;
+
 		// The ring holds the latency floor as decoded PCM (headroom above it for overflow). In
 		// buffered mode the lookahead above the floor stays encoded upstream, held back by `wait()`.
 		const capacity = Math.max(rate, latencySamples * 2);
@@ -159,6 +184,10 @@ class SharedAudioBuffer implements AudioBuffer {
 
 		// Poll the shared control array and reflect it into signals.
 		this.#signals.interval(() => {
+			// A buffered ring that has fully drained while un-stalled is a deadlock: only the parked decode
+			// loop can refill it, but it is blocked on wait(). Re-stall so the loop resumes and re-anchors
+			// (the fall-through stalled branch flushes backpressure). Never in live mode (no lookahead).
+			if (this.#buffered && !this.#ring.stalled && this.#ring.length === 0) this.#ring.reset();
 			const stalled = this.#ring.stalled;
 			this.#timestamp.set(this.#ring.timestamp);
 			this.#stalled.set(stalled);
@@ -194,10 +223,10 @@ class SharedAudioBuffer implements AudioBuffer {
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
 	}
 
-	wait(timestamp: Time.Micro): Promise<void> {
+	wait(timestamp: Time.Micro, signal?: AbortSignal): Promise<void> {
 		// Stalled = still filling the floor (bootstrap or underflow): let frames through to refill.
 		if (this.#ring.stalled) return Promise.resolve();
-		return this.#backpressure.wait(timestamp, this.#ring.timestamp);
+		return this.#backpressure.wait(timestamp, this.#ring.timestamp, signal);
 	}
 
 	close(): void {
@@ -271,15 +300,18 @@ class PostAudioBuffer implements AudioBuffer {
 	reset(): void {
 		const msg: Reset = { type: "reset" };
 		this.#worklet.port.postMessage(msg);
+		// Reflect stalled locally at once: the worklet's confirming state message round-trips a frame
+		// later, and until then the next wait() must not park on the stale (un-stalled) flag.
+		this.#stalled.set(true);
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
 	}
 
-	wait(timestamp: Time.Micro): Promise<void> {
+	wait(timestamp: Time.Micro, signal?: AbortSignal): Promise<void> {
 		// Stalled = still filling the floor (bootstrap or underflow): let frames through to refill.
 		if (this.#stalled.peek()) return Promise.resolve();
 		// Uses the worklet-reported playhead, which lags by a state-message interval; the floor's
 		// headroom covers that. The worklet still drops the oldest if a frame slips through.
-		return this.#backpressure.wait(timestamp, this.#timestamp.peek());
+		return this.#backpressure.wait(timestamp, this.#timestamp.peek(), signal);
 	}
 
 	close(): void {

@@ -23,5 +23,7 @@ export * as Path from "./path.ts";
 export * as Time from "./time.ts";
 /** Track role handles. */
 export * as track from "./track.ts";
+/** Classify an error as a routine stream teardown vs a client-actionable fault (for log-level decisions). */
+export { isStreamAbort } from "./util/error.ts";
 /** QUIC variable-length integer encoding and decoding. */
 export * as Varint from "./varint.ts";
