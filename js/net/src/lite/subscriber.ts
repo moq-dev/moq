@@ -11,6 +11,7 @@ import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -218,24 +219,10 @@ export class Subscriber {
 	 * @returns A Broadcast instance
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		const consumer = new broadcast.Consumer();
-
-		// Resolve TrackConsumer.info() via a TRACK stream (lite-05+). On older drafts
-		// there's no TRACK stream, so info() rejects rather than fabricating defaults.
-		consumer.onTrackInfo(async (name) => {
-			if (!supportsTrackStream(this.version)) {
-				throw new Error("track info requires moq-lite-05 or newer");
-			}
-			const info = await this.#trackInfo(path, name);
-			return {
-				timescale: Time.Timescale(info.timescale),
-				// Publisher Max Latency rides on the wire, so the local retention window
-				// matches what the upstream advertises (relays re-serve with the same bound).
-				cache: info.cache,
-				priority: info.priority,
-				ordered: info.ordered,
-			};
-		});
+		// A consumed broadcast resolves info() and fetchGroup() over the wire by reaching
+		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
+		// installing callbacks on the broadcast.
+		const consumer = new ConsumeBroadcast(this, path);
 
 		void (async () => {
 			for (;;) {
@@ -344,14 +331,7 @@ export class Subscriber {
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
-			producer = request.accept({
-				timescale: Time.Timescale(info.timescale),
-				// Publisher Max Latency rides on the wire, so the local retention window
-				// matches what the upstream advertises (relays re-serve with the same bound).
-				cache: info.cache,
-				priority: info.priority,
-				ordered: info.ordered,
-			});
+			producer = request.accept(this.#toModelInfo(info));
 			timescale.set(info.timescale);
 		} else {
 			// Older drafts negotiate nothing per-track: verbatim frames, no timescale.
@@ -391,6 +371,86 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(error(err));
 			throw err;
+		}
+	}
+
+	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
+	#toModelInfo(info: TrackInfo): track.Info {
+		return {
+			timescale: Time.Timescale(info.timescale),
+			// Publisher Max Latency rides on the wire, so the local retention window
+			// matches what the upstream advertises (relays re-serve with the same bound).
+			cache: info.cache,
+			priority: info.priority,
+			ordered: info.ordered,
+		};
+	}
+
+	// Resolve a track's immutable model info via a TRACK stream (lite-05+), for the
+	// ConsumeBroadcast backing track.Consumer.info(). On older drafts there's no TRACK
+	// stream, so this rejects rather than fabricating defaults.
+	async resolveTrackInfo(broadcast: Path.Valid, track: string): Promise<track.Info> {
+		if (!supportsTrackStream(this.version)) {
+			throw new Error("track info requires moq-lite-05 or newer");
+		}
+		return this.#toModelInfo(await this.#trackInfo(broadcast, track));
+	}
+
+	// Open a FETCH stream for one group and stream its bare frames into a group, for the
+	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
+	async fetchGroup(
+		broadcast: Path.Valid,
+		track: string,
+		sequence: number,
+		options: track.FetchGroupOptions = {},
+	): Promise<netGroup.Consumer> {
+		if (!supportsTrackStream(this.version)) {
+			throw new Error("fetch group requires moq-lite-05 or newer");
+		}
+
+		const info = await this.#trackInfo(broadcast, track);
+		const priority = options.priority ?? 0;
+		const stream = await Stream.open(this.#quic, undefined, priority);
+		const group = new netGroup.Producer(sequence);
+
+		try {
+			await stream.writer.u53(StreamId.Fetch);
+			await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
+		} catch (err: unknown) {
+			const e = error(err);
+			group.close(e);
+			stream.abort(e);
+			throw e;
+		}
+
+		void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
+		return group.consume();
+	}
+
+	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
+	// FIN. A stream-level failure aborts the group so its reader observes the gap.
+	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: Time.Timescale): Promise<void> {
+		try {
+			let prevTs = 0n;
+
+			for (;;) {
+				const done = await Promise.race([stream.reader.done(), group.closed]);
+				if (done !== false) break;
+
+				prevTs += unzigzag(await stream.reader.u62());
+				const timestamp = new Time.Timestamp(Number(prevTs), timescale);
+				const size = await stream.reader.u53();
+				const payload = await stream.reader.read(size);
+				if (!payload) break;
+				group.writeFrame({ data: payload, timestamp });
+			}
+
+			group.close();
+			stream.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			group.close(e);
+			stream.abort(e);
 		}
 	}
 
@@ -640,5 +700,30 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
+	}
+}
+
+/**
+ * A broadcast consumed from a lite session. It resolves `track.Consumer.info()` and
+ * `.fetchGroup()` over the wire (lite-05+ TRACK / FETCH streams) by reaching into the
+ * {@link Subscriber} it was opened from, the way the Rust `BroadcastConsumer` holds its
+ * session. Live subscribes still flow through the inherited requested() queue.
+ */
+class ConsumeBroadcast extends broadcast.Consumer {
+	#subscriber: Subscriber;
+	#path: Path.Valid;
+
+	constructor(subscriber: Subscriber, path: Path.Valid) {
+		super();
+		this.#subscriber = subscriber;
+		this.#path = path;
+	}
+
+	override resolveTrackInfo(name: string): Promise<track.Info> {
+		return this.#subscriber.resolveTrackInfo(this.#path, name);
+	}
+
+	override fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<netGroup.Consumer> {
+		return this.#subscriber.fetchGroup(this.#path, name, sequence, options);
 	}
 }
