@@ -577,6 +577,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		Ok(())
 	}
+
+	/// Abort every track with `err`, so consumers see the real cause instead of the
+	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
+	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
+	pub fn abort(&mut self, err: moq_net::Error) {
+		if let Some(stream) = self.video.as_mut() {
+			stream.track.abort(err.clone());
+		}
+		if let Some(stream) = self.audio.as_mut() {
+			stream.track.abort(err);
+		}
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
