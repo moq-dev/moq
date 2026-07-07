@@ -16,10 +16,6 @@ pub struct Fetch<'a> {
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub group: u64,
-	/// The 0-based index of the first frame to return; the publisher skips all
-	/// earlier frames. `0` returns the entire group. Lite05+ only; older drafts
-	/// always return the whole group.
-	pub frame_start: u64,
 }
 
 impl Message for Fetch<'_> {
@@ -35,17 +31,12 @@ impl Message for Fetch<'_> {
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
 		let group = u64::decode(r, version)?;
-		let frame_start = match version {
-			Version::Lite03 | Version::Lite04 => 0,
-			_ => u64::decode(r, version)?,
-		};
 
 		Ok(Self {
 			broadcast,
 			track,
 			priority,
 			group,
-			frame_start,
 		})
 	}
 
@@ -61,10 +52,6 @@ impl Message for Fetch<'_> {
 		self.track.encode(w, version)?;
 		self.priority.encode(w, version)?;
 		self.group.encode(w, version)?;
-		match version {
-			Version::Lite03 | Version::Lite04 => {}
-			_ => self.frame_start.encode(w, version)?,
-		}
 		Ok(())
 	}
 }
@@ -79,7 +66,6 @@ mod test {
 			track: Cow::Borrowed("video"),
 			priority: 3,
 			group: 7,
-			frame_start: 5,
 		}
 	}
 
@@ -91,25 +77,19 @@ mod test {
 	}
 
 	#[test]
-	fn fetch_frame_start_roundtrips_on_lite05() {
-		assert_eq!(fetch_roundtrip(Version::Lite05Wip, &fetch_sample()).frame_start, 5);
+	fn fetch_roundtrips() {
+		for version in [Version::Lite03, Version::Lite04, Version::Lite05] {
+			let got = fetch_roundtrip(version, &fetch_sample());
+			assert_eq!(got.broadcast, Path::new("room"));
+			assert_eq!(got.track, "video");
+			assert_eq!(got.priority, 3);
+			assert_eq!(got.group, 7);
+		}
 	}
 
 	#[test]
-	fn fetch_frame_start_absent_before_lite05() {
-		let msg = fetch_sample();
-
-		// The frame_start varint only exists on lite-05+, so the older encoding is
-		// strictly shorter and always decodes back as 0.
-		let mut buf04 = Vec::new();
-		msg.encode_msg(&mut buf04, Version::Lite04).unwrap();
-		let mut buf05 = Vec::new();
-		msg.encode_msg(&mut buf05, Version::Lite05Wip).unwrap();
-		assert!(
-			buf05.len() > buf04.len(),
-			"lite-05 carries the extra frame_start varint"
-		);
-
-		assert_eq!(fetch_roundtrip(Version::Lite04, &msg).frame_start, 0);
+	fn fetch_rejected_before_lite03() {
+		let mut buf = Vec::new();
+		assert!(fetch_sample().encode_msg(&mut buf, Version::Lite02).is_err());
 	}
 }

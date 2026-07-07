@@ -88,16 +88,16 @@ test("integration: lite draft-03", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_03);
 });
 
-test("integration: lite draft-05-wip", async () => {
+test("integration: lite draft-05", async () => {
 	// Exercises AnnounceOk: the announce flow only completes if the subscriber
 	// reads the publisher's AnnounceOk before the initial Announce messages.
-	await runPublishSubscribeFlow(Lite.ALPN_05_WIP);
+	await runPublishSubscribeFlow(Lite.ALPN_05);
 });
 
-test("integration: lite draft-05-wip datagram delivery", async () => {
+test("integration: lite draft-05 datagram delivery", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
-	const pair = createMockTransportPair(Lite.ALPN_05_WIP);
+	const pair = createMockTransportPair(Lite.ALPN_05);
 
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
@@ -133,11 +133,11 @@ test("integration: lite draft-05-wip datagram delivery", async () => {
 	server.close();
 });
 
-test("integration: lite draft-05-wip datagrams not sent on a non-datagram transport", async () => {
+test("integration: lite draft-05 datagrams not sent on a non-datagram transport", async () => {
 	const enc = new TextEncoder();
 	// maxDatagramSize 0 simulates a qmux/WebSocket session: the publisher must fall back to
 	// not sending datagrams (there is no group fallback), while groups still flow.
-	const pair = createMockTransportPair(Lite.ALPN_05_WIP, { datagrams: false });
+	const pair = createMockTransportPair(Lite.ALPN_05, { datagrams: false });
 
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 

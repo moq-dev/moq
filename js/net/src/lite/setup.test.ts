@@ -27,8 +27,8 @@ async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 }
 
 async function roundTrip(msg: Setup): Promise<Setup> {
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05_WIP)));
-	const got = await Setup.decode(reader, Version.DRAFT_05_WIP);
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const got = await Setup.decode(reader, Version.DRAFT_05);
 	expect(await reader.done()).toBe(true);
 	return got;
 }
@@ -69,7 +69,7 @@ test("unknown probe level saturates to Increase", async () => {
 		await w.write(body);
 	});
 
-	const got = await Setup.decode(new Reader(undefined, framed), Version.DRAFT_05_WIP);
+	const got = await Setup.decode(new Reader(undefined, framed), Version.DRAFT_05);
 	expect(got.probe).toBe(ProbeLevel.Increase);
 });
 
@@ -78,7 +78,7 @@ test("SETUP is rejected before draft-05", async () => {
 });
 
 test("SETUP decode is rejected before draft-05", async () => {
-	const framed = await bytes((w) => new Setup().encode(w, Version.DRAFT_05_WIP));
+	const framed = await bytes((w) => new Setup().encode(w, Version.DRAFT_05));
 	await expect(Setup.decode(new Reader(undefined, framed), Version.DRAFT_04)).rejects.toThrow();
 });
 
@@ -93,5 +93,5 @@ test("empty path is rejected on decode", async () => {
 		await w.u53(body.byteLength);
 		await w.write(body);
 	});
-	await expect(Setup.decode(new Reader(undefined, framed), Version.DRAFT_05_WIP)).rejects.toThrow();
+	await expect(Setup.decode(new Reader(undefined, framed), Version.DRAFT_05)).rejects.toThrow();
 });

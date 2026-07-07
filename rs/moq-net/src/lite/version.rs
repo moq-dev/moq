@@ -7,12 +7,11 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
-	/// Work-in-progress lite-05. Adds the TRACK stream (immutable per-track
-	/// properties incl. timescale), zigzag-delta timestamps in per-frame headers,
-	/// and drops SUBSCRIBE_OK/FETCH_OK. Advertised over ALPN and included in the
-	/// default version sets as the preferred version; still WIP, revisit before
-	/// promoting the branch to `main`.
-	Lite05Wip,
+	/// lite-05. Adds the TRACK stream (immutable per-track properties incl.
+	/// timescale), zigzag-delta timestamps in per-frame headers, and drops
+	/// SUBSCRIBE_OK/FETCH_OK. Advertised over ALPN and the preferred version in the
+	/// default version sets.
+	Lite05,
 }
 
 impl Version {
@@ -74,7 +73,7 @@ impl fmt::Display for Version {
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
-			Self::Lite05Wip => write!(f, "moq-lite-05-wip"),
+			Self::Lite05 => write!(f, "moq-lite-05"),
 		}
 	}
 }
@@ -86,7 +85,7 @@ impl From<Version> for crate::Version {
 			Version::Lite02 => crate::Version::Lite(Version::Lite02),
 			Version::Lite03 => crate::Version::Lite(Version::Lite03),
 			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-			Version::Lite05Wip => crate::Version::Lite(Version::Lite05Wip),
+			Version::Lite05 => crate::Version::Lite(Version::Lite05),
 		}
 	}
 }

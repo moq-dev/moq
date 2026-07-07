@@ -702,7 +702,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_frame(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		frame: &mut frame::Producer,
+		frame: &mut frame::Producer<'_>,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
@@ -1233,7 +1233,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				track: name.as_str().into(),
 				priority: request.priority(),
 				group,
-				frame_start: 0,
 			};
 			stream.writer.encode(&lite::ControlType::Fetch).await?;
 			stream.writer.encode(&msg).await
