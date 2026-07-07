@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
+import { TimelineSchema } from "./timeline";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
@@ -40,6 +41,9 @@ export const AudioConfigSchema = z.object({
 	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
 	jitter: z.optional(u53Schema),
+
+	// The companion timeline track indexing this rendition's groups, if the publisher offers one.
+	timeline: z.optional(TimelineSchema),
 });
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */

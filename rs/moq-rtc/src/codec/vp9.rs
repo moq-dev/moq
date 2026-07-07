@@ -16,7 +16,7 @@ impl Bridge {
 	/// Publish a `.vp9` track on `broadcast`; the catalog rendition is added on the first frame.
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = broadcast.unique_track(".vp9")?;
-		let producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let producer = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
 		Ok(Self {
 			catalog,
 			track: producer,
@@ -28,13 +28,11 @@ impl Bridge {
 		if self.announced {
 			return;
 		}
+		let name = self.track.track().name.clone();
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VP9::default());
 		config.container = hang::catalog::Container::Legacy;
-		self.catalog
-			.lock()
-			.video
-			.renditions
-			.insert(self.track.track().name.clone(), config);
+		config.timeline = Some(self.catalog.timeline_section(&name));
+		self.catalog.lock().video.renditions.insert(name, config);
 		self.announced = true;
 	}
 }

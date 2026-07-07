@@ -13,5 +13,6 @@ export * from "./integers";
 export * from "./priority";
 export * from "./producer";
 export * from "./root";
+export * from "./timeline";
 export * from "./track";
 export * from "./video";

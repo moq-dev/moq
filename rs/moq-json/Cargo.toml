@@ -1,6 +1,6 @@
 [package]
 name = "moq-json"
-description = "Snapshot/delta JSON publishing over MoQ tracks using RFC 7396 JSON Merge Patch."
+description = "JSON publishing over MoQ tracks: snapshot/delta (RFC 7396 merge patch) objects, or append-log record streams."
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"

@@ -96,6 +96,11 @@ pub struct AudioConfig {
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
 	#[serde(default)]
 	pub jitter: Option<moq_net::Time>,
+
+	/// The companion timeline track indexing this rendition's groups, if the publisher
+	/// offers one. See [`Timeline`](crate::catalog::Timeline).
+	#[serde(default)]
+	pub timeline: Option<crate::catalog::Timeline>,
 }
 
 impl AudioConfig {
@@ -114,6 +119,7 @@ impl AudioConfig {
 			description: None,
 			container: Container::default(),
 			jitter: None,
+			timeline: None,
 		}
 	}
 }

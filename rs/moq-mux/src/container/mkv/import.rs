@@ -284,7 +284,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track_number,
 			MkvTrack {
 				kind,
-				track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+				track: self
+					.catalog
+					.media_producer(track, crate::catalog::hang::Container::Legacy),
 				group: None,
 				last_emitted_ticks: None,
 			},

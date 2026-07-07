@@ -44,7 +44,7 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = catalog.video_track(track.name());
 		Self {
 			avc1: false,
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			track: catalog.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 			last_sps: None,

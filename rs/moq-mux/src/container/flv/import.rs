@@ -475,7 +475,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			VideoStream {
 				// Leading deltas before the first keyframe are skipped at the write
 				// site (the producer reports MissingKeyframe), so a mid-GOP join works.
-				track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
+				track: self
+					.catalog
+					.media_producer(net_track, crate::catalog::hang::Container::Legacy),
 				config,
 			},
 		);
@@ -497,7 +499,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.audio.insert(
 			track_id,
 			AudioStream {
-				track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
+				track: self
+					.catalog
+					.media_producer(net_track, crate::catalog::hang::Container::Legacy),
 				config,
 			},
 		);

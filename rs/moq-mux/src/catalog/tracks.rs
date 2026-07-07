@@ -37,7 +37,11 @@ impl<E: CatalogExt> VideoTrack<E> {
 	}
 
 	/// Insert or replace the rendition, publishing the catalog.
-	pub fn set(&mut self, config: hang::catalog::VideoConfig) {
+	///
+	/// Advertises the rendition's timeline track in the config, so a consumer can index its
+	/// groups without downloading media (see [`Producer::timeline_section`](crate::catalog::Producer::timeline_section)).
+	pub fn set(&mut self, mut config: hang::catalog::VideoConfig) {
+		config.timeline = Some(self.catalog.timeline_section(&self.name));
 		self.catalog.lock().video.renditions.insert(self.name.clone(), config);
 		self.present = true;
 	}
@@ -91,7 +95,11 @@ impl<E: CatalogExt> AudioTrack<E> {
 	}
 
 	/// Insert or replace the rendition, publishing the catalog.
-	pub fn set(&mut self, config: hang::catalog::AudioConfig) {
+	///
+	/// Advertises the rendition's timeline track in the config, so a consumer can index its
+	/// groups without downloading media (see [`Producer::timeline_section`](crate::catalog::Producer::timeline_section)).
+	pub fn set(&mut self, mut config: hang::catalog::AudioConfig) {
+		config.timeline = Some(self.catalog.timeline_section(&self.name));
 		self.catalog.lock().audio.renditions.insert(self.name.clone(), config);
 		self.present = true;
 	}

@@ -122,7 +122,9 @@ impl Reset {
 }
 
 impl<F: Container> Consumer<F> {
-	/// Create a new Consumer wrapping the given moq-lite consumer.
+	/// Create a Consumer wrapping the given moq-lite consumer, decoding `format`.
+	///
+	/// Skips aggressively by default; raise the tolerance with [`with_latency`](Self::with_latency).
 	pub fn new(track: moq_net::TrackConsumer, format: F) -> Self {
 		Self {
 			track,
@@ -137,8 +139,8 @@ impl<F: Container> Consumer<F> {
 
 	/// Set the maximum latency tolerance.
 	///
-	/// Groups with timestamps older than the newest timestamp minus this value will be skipped.
-	/// A value of zero (the default) skips aggressively — any group with a newer alternative is dropped.
+	/// Groups with timestamps older than the newest timestamp minus this value are skipped. Zero
+	/// (the default) skips aggressively: any group with a newer alternative is dropped.
 	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
 		self.latency = latency;
 		self

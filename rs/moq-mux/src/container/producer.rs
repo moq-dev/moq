@@ -37,10 +37,18 @@ pub struct Producer<C: Container> {
 	/// Sequence to use for the next group opened by [`Self::write`].
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
+
+	/// Records each group open (sequence + keyframe timestamp) into this rendition's
+	/// timeline track, when the producer was built with one.
+	recorder: Option<crate::timeline::Recorder>,
 }
 
 impl<C: Container> Producer<C> {
-	/// Create a new Producer wrapping the given moq-lite producer.
+	/// Create a Producer wrapping the given moq-lite producer, muxing into `container`.
+	///
+	/// A plain media track by default: no latency buffering, no timeline. Add buffering with
+	/// [`with_latency`](Self::with_latency); the timeline recorder is wired by the catalog (see
+	/// [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer)).
 	pub fn new(track: moq_net::TrackProducer, container: C) -> Self {
 		Self {
 			inner: track,
@@ -49,25 +57,36 @@ impl<C: Container> Producer<C> {
 			buffer: Vec::new(),
 			latency: std::time::Duration::ZERO,
 			pending_sequence: None,
+			recorder: None,
 		}
+	}
+
+	/// Set the maximum buffering latency.
+	///
+	/// When non-zero, frames are buffered and flushed together when the buffered duration exceeds
+	/// it, or a keyframe arrives, packing multiple samples into one container frame (e.g. a CMAF
+	/// moof+mdat). Zero (the default) flushes each frame immediately.
+	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
+		self.latency = latency;
+		self
+	}
+
+	/// Record each group open (sequence + keyframe timestamp) through `recorder`, so consumers can
+	/// index the media without downloading it.
+	///
+	/// Not public: a timeline is 1:1 with its media track (the record carries no track id), and the
+	/// [`Recorder`](crate::timeline::Recorder) is move-only, so it's bound to this exact track and
+	/// can't be shared. The catalog owns that binding, via
+	/// [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer).
+	pub(crate) fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
+		self.recorder = Some(recorder);
+		self
 	}
 
 	/// The underlying moq-lite track producer. Read-only; mutating it directly
 	/// would sidestep group/keyframe invariants.
 	pub fn track(&self) -> &moq_net::TrackProducer {
 		&self.inner
-	}
-
-	/// Set the maximum buffering latency.
-	///
-	/// When non-zero, frames are buffered and flushed together when the buffered
-	/// duration exceeds this value, or when a keyframe arrives. This allows packing
-	/// multiple samples into a single container frame (e.g. CMAF moof+mdat).
-	///
-	/// Default is zero (flush immediately).
-	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
-		self.latency = latency;
-		self
 	}
 
 	/// Write a frame to the track.
@@ -89,10 +108,24 @@ impl<C: Container> Producer<C> {
 				// mid-stream join) decides whether to skip until the first keyframe.
 				return Err(super::MissingKeyframe.into());
 			}
-			self.group = Some(match self.pending_sequence.take() {
+			let group = match self.pending_sequence.take() {
 				Some(sequence) => self.inner.create_group(moq_net::Group { sequence })?,
 				None => self.inner.append_group()?,
-			});
+			};
+
+			// Index the group the moment it opens: its start is this keyframe's timestamp. The
+			// timeline is an optional sidecar (consumers tolerate gaps by extrapolating), so a
+			// recording failure must NOT abort the media write. Drop the recorder and carry on.
+			let timeline_err = match self.recorder.as_mut() {
+				Some(recorder) => recorder.record(group.sequence, frame.timestamp).err(),
+				None => None,
+			};
+			if let Some(err) = timeline_err {
+				tracing::warn!(?err, "timeline recording failed; dropping the timeline for this track");
+				self.recorder = None;
+			}
+
+			self.group = Some(group);
 		}
 
 		// Buffer or write the frame.

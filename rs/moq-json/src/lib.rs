@@ -8,8 +8,13 @@
 //!
 //! Deltas are controlled by [`ProducerConfig::delta_ratio`]. A ratio of `0` disables them, so every
 //! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
+//!
+//! This root module is the "object" mode: one value, updated over time, where a late joiner
+//! only wants the latest state. For an ordered log of self-contained records that are never
+//! superseded (an event log, a media timeline), see [`stream`].
 
 mod diff;
+pub mod stream;
 
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};

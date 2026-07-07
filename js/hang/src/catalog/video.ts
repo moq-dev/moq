@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
+import { TimelineSchema } from "./timeline";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
@@ -51,6 +52,9 @@ export const VideoConfigSchema = z.object({
 	// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	// - If frames are buffered into 2s segments, this would be 2s.
 	jitter: z.optional(u53Schema),
+
+	// The companion timeline track indexing this rendition's groups, if the publisher offers one.
+	timeline: z.optional(TimelineSchema),
 });
 
 /**

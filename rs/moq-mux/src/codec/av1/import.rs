@@ -40,7 +40,7 @@ impl<E: CatalogExt> Import<E> {
 	pub fn new(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		let rendition = catalog.video_track(track.name());
 		Self {
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			track: catalog.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 			last_seq: None,

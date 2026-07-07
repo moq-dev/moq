@@ -38,7 +38,7 @@ impl<E: CatalogExt> Import<E> {
 		rendition.set(audio_config);
 
 		Ok(Self {
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			track: catalog.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 		})
 	}

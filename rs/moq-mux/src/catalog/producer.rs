@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -31,6 +32,15 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// gets a clone (a `Copy` of the same epoch), so timestamps they synthesize when
 	/// a caller has none land on one timeline and audio/video stay in sync.
 	clock: crate::Clock,
+
+	/// A clone of the broadcast, retained so per-rendition timeline tracks can be created
+	/// lazily when a rendition is registered (the codec importers hold only their media
+	/// track, not the broadcast).
+	broadcast: moq_net::BroadcastProducer,
+
+	/// The per-rendition timeline producers, memoized by media-track name so the catalog
+	/// section and the media track's group recorder share one track. See [`media_producer`](Self::media_producer).
+	timelines: Arc<Mutex<BTreeMap<String, crate::timeline::Producer>>>,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -42,6 +52,8 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			msf_track: self.msf_track.clone(),
 			current: self.current.clone(),
 			clock: self.clock,
+			broadcast: self.broadcast.clone(),
+			timelines: self.timelines.clone(),
 		}
 	}
 }
@@ -83,6 +95,8 @@ impl<E: CatalogExt> Producer<E> {
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
 			clock: crate::Clock::new(),
+			broadcast: broadcast.clone(),
+			timelines: Arc::new(Mutex::new(BTreeMap::new())),
 		})
 	}
 
@@ -128,6 +142,48 @@ impl<E: CatalogExt> Producer<E> {
 		super::AudioTrack::new(self.clone(), name)
 	}
 
+	/// Build the media [`container::Producer`](crate::container::Producer) for the rendition named by
+	/// `track`, with its timeline recorder wired in.
+	///
+	/// The timeline is bound to this exact track, so a rendition records only into its own
+	/// `<name>.timeline.z` track (timelines are 1:1 with media tracks and can't be shared). This is
+	/// how a media track gets a timeline: build it here rather than attaching one by hand.
+	pub fn media_producer<C: crate::container::Container>(
+		&self,
+		track: moq_net::TrackProducer,
+		container: C,
+	) -> crate::container::Producer<C> {
+		let recorder = self.timeline_recorder(track.name());
+		crate::container::Producer::new(track, container).with_recorder(recorder)
+	}
+
+	/// The catalog [`Timeline`](hang::catalog::Timeline) section for media rendition `name`, to
+	/// advertise on the rendition's config (creating the timeline track on first use).
+	///
+	/// [`VideoTrack::set`](super::VideoTrack::set) / [`AudioTrack::set`](super::AudioTrack::set) do
+	/// this automatically; callers that build a rendition config by hand attach it themselves.
+	pub fn timeline_section(&self, name: &str) -> hang::catalog::Timeline {
+		self.with_timeline(name, |timeline| timeline.section())
+	}
+
+	/// Mint the media track's timeline [`Recorder`](crate::timeline::Recorder) for rendition `name`,
+	/// creating its track on first use. Used by [`media_producer`](Self::media_producer) to wire one
+	/// recorder per media track.
+	pub(crate) fn timeline_recorder(&self, name: &str) -> crate::timeline::Recorder {
+		self.with_timeline(name, |timeline| timeline.recorder())
+	}
+
+	/// Run `f` against the timeline producer for rendition `name`, memoized by name (creating its
+	/// track on first use). Panics only if the broadcast can't mint the track (a duplicate name),
+	/// which the `<name>.timeline.z` convention avoids.
+	fn with_timeline<R>(&self, name: &str, f: impl FnOnce(&mut crate::timeline::Producer) -> R) -> R {
+		let mut timelines = self.timelines.lock().unwrap();
+		let timeline = timelines.entry(name.to_string()).or_insert_with(|| {
+			crate::timeline::Producer::new(&mut self.broadcast.clone(), name).expect("failed to create timeline track")
+		});
+		f(timeline)
+	}
+
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
 		Ok(Consumer::new(self.hang.consume()))
@@ -138,6 +194,9 @@ impl<E: CatalogExt> Producer<E> {
 		self.hang.finish()?;
 		self.hangz.finish()?;
 		self.msf_track.finish()?;
+		for timeline in self.timelines.lock().unwrap().values_mut() {
+			timeline.finish()?;
+		}
 		Ok(())
 	}
 }

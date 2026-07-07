@@ -147,6 +147,11 @@ pub struct VideoConfig {
 	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde(default)]
 	pub jitter: Option<moq_net::Time>,
+
+	/// The companion timeline track indexing this rendition's groups, if the publisher
+	/// offers one. See [`Timeline`](crate::catalog::Timeline).
+	#[serde(default)]
+	pub timeline: Option<crate::catalog::Timeline>,
 }
 
 impl VideoConfig {
@@ -169,6 +174,7 @@ impl VideoConfig {
 			optimize_for_latency: None,
 			container: Container::default(),
 			jitter: None,
+			timeline: None,
 		}
 	}
 }
