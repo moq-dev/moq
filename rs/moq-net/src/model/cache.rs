@@ -149,6 +149,28 @@ impl Pool {
 		Arc::ptr_eq(&self.inner, &other.inner)
 	}
 
+	/// Test-only snapshot of the live entries: (id, last_access ms, bytes, pinned),
+	/// plus the pool's current clock reading. For diagnosing eviction order.
+	#[cfg(test)]
+	pub(crate) fn debug_entries(&self) -> (u64, Vec<(u64, u64, u64, bool)>) {
+		let now = self.inner.epoch.elapsed().as_millis() as u64;
+		let lru = self.inner.lru.lock();
+		let mut entries: Vec<_> = lru
+			.entries
+			.values()
+			.map(|e| {
+				(
+					e.id,
+					e.last_access.load(Ordering::Relaxed),
+					e.bytes.load(Ordering::Relaxed),
+					e.pinned.load(Ordering::Relaxed),
+				)
+			})
+			.collect();
+		entries.sort_unstable();
+		(now, entries)
+	}
+
 	/// Register a group, returning the [`Charge`] that tracks its bytes.
 	///
 	/// `evict` must abort the group (releasing its charge); it is invoked without

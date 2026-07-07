@@ -3086,7 +3086,7 @@ mod test {
 	async fn pool_reads_bump_recency() {
 		tokio::time::pause();
 
-		let (mut producer, _pool) = pooled_producer(3000);
+		let (mut producer, pool) = pooled_producer(3000);
 		let mut subscriber = producer.subscribe(None);
 
 		finished_group(&mut producer, 1000); // seq 0
@@ -3104,15 +3104,23 @@ mod test {
 		finished_group(&mut producer, 1000); // seq 2, pinned
 
 		let consumer = producer.consume();
-		assert!(consumer.get_group(0).is_some(), "recently read group survives");
-		assert!(consumer.get_group(1).is_none(), "stale group is evicted");
+		assert!(
+			consumer.get_group(0).is_some(),
+			"recently read group survives: {:?}",
+			pool.debug_entries()
+		);
+		assert!(
+			consumer.get_group(1).is_none(),
+			"stale group is evicted: {:?}",
+			pool.debug_entries()
+		);
 	}
 
 	#[tokio::test]
 	async fn pool_eviction_aborts_readers() {
 		tokio::time::pause();
 
-		let (mut producer, _pool) = pooled_producer(3000);
+		let (mut producer, pool) = pooled_producer(3000);
 		let mut subscriber = producer.subscribe(None);
 
 		finished_group(&mut producer, 1000); // seq 0
@@ -3126,7 +3134,12 @@ mod test {
 		// A consumer holding the evicted group surfaces the eviction, not a hang
 		// or a truncated clean end.
 		let mut group0 = group0;
-		assert!(matches!(group0.read_frame().await, Err(Error::Evicted)));
+		let read = group0.read_frame().await;
+		assert!(
+			matches!(read, Err(Error::Evicted)),
+			"expected Evicted, got {read:?}: {:?}",
+			pool.debug_entries()
+		);
 	}
 
 	#[tokio::test]
