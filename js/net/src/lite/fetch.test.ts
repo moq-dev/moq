@@ -35,9 +35,12 @@ function sample(): Fetch {
 	return new Fetch(Path.from("room/1"), "video", 3, 42);
 }
 
-test("Fetch: round-trips", async () => {
-	const got = await roundtrip(Version.DRAFT_05_WIP, sample());
-	expect(got.group).toBe(42);
-	expect(got.priority).toBe(3);
-	expect(got.track).toBe("video");
+test("Fetch round-trips on draft-03/04/05", async () => {
+	for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05]) {
+		const got = await roundtrip(version, sample());
+		expect(got.broadcast).toBe(Path.from("room/1"));
+		expect(got.track).toBe("video");
+		expect(got.priority).toBe(3);
+		expect(got.group).toBe(42);
+	}
 });

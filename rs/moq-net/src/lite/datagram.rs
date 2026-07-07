@@ -78,9 +78,9 @@ mod test {
 			payload: Bytes::from_static(b"hello"),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05Wip).unwrap();
+		original.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let decoded = Datagram::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let decoded = Datagram::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(decoded, original);
 		assert!(!slice.has_remaining(), "payload has no trailing length prefix");
 	}
@@ -94,9 +94,9 @@ mod test {
 			payload: Bytes::new(),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05Wip).unwrap();
+		original.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let decoded = Datagram::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let decoded = Datagram::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -110,7 +110,7 @@ mod test {
 			timestamp: 3,
 			payload: Bytes::from_static(b"world"),
 		};
-		let buf = dg.encode_bytes(Version::Lite05Wip).unwrap();
+		let buf = dg.encode_bytes(Version::Lite05).unwrap();
 		// 1 + 1 + 1 (single-byte varints) + 5 payload = 8 bytes, no length byte.
 		assert_eq!(buf.len(), 8);
 		assert_eq!(&buf[3..], b"world");

@@ -78,9 +78,18 @@ mod test {
 
 	#[test]
 	fn fetch_roundtrips() {
-		let got = fetch_roundtrip(Version::Lite05Wip, &fetch_sample());
-		assert_eq!(got.group, 7);
-		assert_eq!(got.priority, 3);
-		assert_eq!(&got.track, "video");
+		for version in [Version::Lite03, Version::Lite04, Version::Lite05] {
+			let got = fetch_roundtrip(version, &fetch_sample());
+			assert_eq!(got.broadcast, Path::new("room"));
+			assert_eq!(got.track, "video");
+			assert_eq!(got.priority, 3);
+			assert_eq!(got.group, 7);
+		}
+	}
+
+	#[test]
+	fn fetch_rejected_before_lite03() {
+		let mut buf = Vec::new();
+		assert!(fetch_sample().encode_msg(&mut buf, Version::Lite02).is_err());
 	}
 }

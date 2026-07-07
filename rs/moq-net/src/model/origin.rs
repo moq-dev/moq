@@ -1763,7 +1763,7 @@ mod tests {
 
 		let mut zero = [0u8].as_slice();
 		assert_eq!(
-			Origin::decode(&mut zero, crate::lite::Version::Lite05Wip).unwrap(),
+			Origin::decode(&mut zero, crate::lite::Version::Lite05).unwrap(),
 			Origin::UNKNOWN
 		);
 	}

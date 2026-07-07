@@ -113,7 +113,7 @@ mod test {
 
 	#[test]
 	fn track_info_roundtrips_on_lite05() {
-		let got = info_roundtrip(Version::Lite05Wip, &info_sample());
+		let got = info_roundtrip(Version::Lite05, &info_sample());
 		assert_eq!(got.priority, 7);
 		assert!(!got.ordered);
 		assert_eq!(got.cache, Duration::from_millis(2000));
@@ -124,7 +124,7 @@ mod test {
 	fn track_info_default_timescale_roundtrips() {
 		let mut info = info_sample();
 		info.timescale = Timescale::default();
-		assert_eq!(info_roundtrip(Version::Lite05Wip, &info).timescale, Timescale::MILLI);
+		assert_eq!(info_roundtrip(Version::Lite05, &info).timescale, Timescale::MILLI);
 	}
 
 	#[test]
@@ -140,9 +140,9 @@ mod test {
 			track: Cow::Borrowed("video"),
 		};
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite05Wip).unwrap();
+		msg.encode_msg(&mut buf, Version::Lite05).unwrap();
 		let mut slice = buf.as_slice();
-		let got = Track::decode_msg(&mut slice, Version::Lite05Wip).unwrap();
+		let got = Track::decode_msg(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(got.broadcast, Path::new("room"));
 		assert_eq!(got.track, "video");
 	}

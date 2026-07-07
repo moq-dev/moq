@@ -149,9 +149,9 @@ mod tests {
 
 	fn round_trip(msg: &Setup) -> Setup {
 		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		msg.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		got
 	}
@@ -186,14 +186,14 @@ mod tests {
 		let mut params = Parameters::default();
 		params.set_varint(PARAM_PROBE, 99);
 		let mut body = Vec::new();
-		params.encode(&mut body, Version::Lite05Wip).unwrap();
+		params.encode(&mut body, Version::Lite05).unwrap();
 
 		let mut buf = bytes::BytesMut::new();
-		body.len().encode(&mut buf, Version::Lite05Wip).unwrap();
+		body.len().encode(&mut buf, Version::Lite05).unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
@@ -215,15 +215,15 @@ mod tests {
 		params.set_bytes(0xbeef, b"whatever".to_vec());
 
 		let mut body = Vec::new();
-		params.encode(&mut body, Version::Lite05Wip).unwrap();
+		params.encode(&mut body, Version::Lite05).unwrap();
 
 		// Wrap with the message size prefix the Message impl expects.
 		let mut buf = bytes::BytesMut::new();
-		body.len().encode(&mut buf, Version::Lite05Wip).unwrap();
+		body.len().encode(&mut buf, Version::Lite05).unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(got.path.as_deref(), Some("/foo"));
 	}
 }

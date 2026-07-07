@@ -50,14 +50,14 @@ test("SubscribeOk round-trips priority/ordered/groups on draft-04", async () => 
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {
-	const got = await responseRoundtrip(Version.DRAFT_05_WIP, { start: new SubscribeStart(42) });
+	const got = await responseRoundtrip(Version.DRAFT_05, { start: new SubscribeStart(42) });
 	expect("start" in got).toBe(true);
 	if (!("start" in got)) throw new Error("expected start");
 	expect(got.start.group).toBe(42);
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {
-	const got = await responseRoundtrip(Version.DRAFT_05_WIP, { end: new SubscribeEnd(7) });
+	const got = await responseRoundtrip(Version.DRAFT_05, { end: new SubscribeEnd(7) });
 	expect("end" in got).toBe(true);
 	if (!("end" in got)) throw new Error("expected end");
 	expect(got.end.group).toBe(7);
@@ -66,18 +66,18 @@ test("SubscribeEnd round-trips on draft-05", async () => {
 test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {
 	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1, end: 3, error: 0 }) };
 
-	const wire05 = await encode(Version.DRAFT_05_WIP, drop);
+	const wire05 = await encode(Version.DRAFT_05, drop);
 	expect(wire05[0]).toBe(2);
 
 	const wire04 = await encode(Version.DRAFT_04, drop);
 	expect(wire04[0]).toBe(1);
 
-	const got = await responseRoundtrip(Version.DRAFT_05_WIP, drop);
+	const got = await responseRoundtrip(Version.DRAFT_05, drop);
 	expect("drop" in got).toBe(true);
 	if (!("drop" in got)) throw new Error("expected drop");
 	expect([got.drop.start, got.drop.end]).toEqual([1, 3]);
 });
 
 test("SUBSCRIBE_OK is rejected on draft-05", async () => {
-	await expect(encode(Version.DRAFT_05_WIP, { ok: new SubscribeOk({ priority: 1 }) })).rejects.toThrow();
+	await expect(encode(Version.DRAFT_05, { ok: new SubscribeOk({ priority: 1 }) })).rejects.toThrow();
 });
