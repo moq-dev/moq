@@ -214,6 +214,35 @@ const MAX_DECODER_RESTARTS = 5;
 const RESTART_RAPID_MS = 300;
 const RESTART_BACKOFF_MS = 500;
 
+// Cap the encoded frames queued in the hardware decoder. Steady-state live playback keeps the queue near
+// zero (frames arrive network-paced); only a subscribe/restart catch-up burst (up to a full GoP, ~120
+// frames at 1080p60) exceeds this, and an unbounded burst can overwhelm hardware decoders at high
+// resolutions. Backpressure, not dropping: frame order and count are untouched, only the catch-up is paced.
+const MAX_DECODE_QUEUE = 32;
+
+// Wait until the decoder's queue drops back to the cap (or the effect tears down). Resolves promptly on
+// each `dequeue`; the timer is a fallback for a browser that doesn't fire it (it is spec'd and shipped
+// everywhere, but don't hang the decode loop on that). Each wait fully unregisters its own listeners and
+// timer so a sustained-overload stream (e.g. 4K the decoder can't keep up with) doesn't accumulate them.
+async function drainDecodeQueue(decoder: VideoDecoder, effect: Effect): Promise<void> {
+	const signal = effect.abort; // pin the run's signal; the getter is replaced on every re-run
+	while (decoder.state === "configured" && decoder.decodeQueueSize > MAX_DECODE_QUEUE) {
+		if (signal.aborted) return; // torn down
+		await new Promise<void>((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const done = () => {
+				if (timer !== undefined) clearTimeout(timer);
+				decoder.removeEventListener("dequeue", done);
+				signal.removeEventListener("abort", done);
+				resolve();
+			};
+			decoder.addEventListener("dequeue", done, { once: true });
+			signal.addEventListener("abort", done, { once: true });
+			timer = setTimeout(done, 50);
+		});
+	}
+}
+
 class DecoderTrack {
 	source: Source;
 	broadcast: Moq.Broadcast;
@@ -262,7 +291,12 @@ class DecoderTrack {
 
 	#run(effect: Effect): void {
 		// Re-run (rebuild subscription + decoder) when the error callback bumps #restart.
-		effect.get(this.#restart);
+		const restarted = effect.get(this.#restart) > 0;
+
+		// A restart re-run whose config the catalog has already moved past would only re-decode wrong-codec
+		// bytes until the replacement DecoderTrack promotes. Idle instead, holding the last frame. Never on
+		// the first run (restarted === false), which must always proceed.
+		if (restarted && this.#superseded()) return;
 
 		const sub = this.broadcast.subscribe(this.track, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
@@ -315,6 +349,15 @@ class DecoderTrack {
 			error: (error) => {
 				// Rebuild the decoder in place rather than permanently closing the track. WebCodecs has
 				// already closed the decoder here, so recovery needs a fresh one via a #run re-run.
+
+				// If the catalog has moved past this config (a codec switch whose media bytes arrived before
+				// the catalog update), a replacement DecoderTrack is already coming. Stop restarting instead
+				// of storming resubscribes against stale wrong-codec bytes, and don't burn the budget on them.
+				if (this.#superseded()) {
+					console.debug("video decoder error; config superseded, awaiting replacement", error);
+					return;
+				}
+
 				if (this.#restartCount >= MAX_DECODER_RESTARTS) {
 					console.error("video decoder error; restart budget exhausted", error);
 					effect.close();
@@ -334,6 +377,8 @@ class DecoderTrack {
 				else console.debug("video decoder error; restarting", error);
 
 				const restart = () => {
+					// Re-check after the backoff timer: the catalog may have landed during the wait.
+					if (this.#superseded()) return;
 					this.#lastRestart = performance.now();
 					this.#restart.update((n) => n + 1);
 				};
@@ -347,13 +392,22 @@ class DecoderTrack {
 
 		// Input processing - depends on container type
 		if (this.config.container.kind === "cmaf") {
-			this.#runCmaf(effect, sub, decoder);
+			this.#runCmaf(effect, sub, decoder, restarted);
 		} else {
-			this.#runLegacy(effect, sub, decoder);
+			this.#runLegacy(effect, sub, decoder, restarted);
 		}
 	}
 
-	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
+	// True when the catalog has moved past this track's frozen config: the Source is already building a
+	// replacement DecoderTrack, so restarting this one would only re-decode wrong-codec bytes until the
+	// replacement promotes. Compares by track name and config fields, never object identity (Signal.set
+	// stores a deep-equal object without notifying, so peek() can return a new-but-equal object).
+	#superseded(): boolean {
+		if (this.source.track.peek() !== this.track) return true;
+		return configSuperseded(this.source.config.peek(), this.config);
+	}
+
+	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder, restarted: boolean): void {
 		const format =
 			this.config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
@@ -379,7 +433,10 @@ class DecoderTrack {
 		});
 
 		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
-		let resyncing = false;
+		// A restarted run must not feed deltas before its first keyframe. Normally a no-op: a fresh
+		// subscribe delivers the live group from frame 0 (forced keyframe), so this clears immediately;
+		// it only bites the group-head-eviction / mid-group-start edge.
+		let resyncing = restarted;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -413,12 +470,6 @@ class DecoderTrack {
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 				this.source.sync.received(timestamp, "video");
 
-				const chunk = new EncodedVideoChunk({
-					type: frame.keyframe ? "key" : "delta",
-					data: frame.data,
-					timestamp: frame.timestamp,
-				});
-
 				// Track both frame count and bytes received for stats in the UI
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
@@ -439,9 +490,16 @@ class DecoderTrack {
 					final: false,
 				};
 
+				if (decoder.decodeQueueSize > MAX_DECODE_QUEUE) await drainDecodeQueue(decoder, effect);
 				if (decoder.state === "closed") break;
 				try {
-					decoder.decode(chunk);
+					decoder.decode(
+						new EncodedVideoChunk({
+							type: frame.keyframe ? "key" : "delta",
+							data: frame.data,
+							timestamp: frame.timestamp,
+						}),
+					);
 				} catch (err) {
 					// Wrong-codec bytes (e.g. a mid-stream codec switch landing on the tail of the old
 					// codec's group) make decode() throw DataError synchronously. Skip to the next keyframe
@@ -459,7 +517,7 @@ class DecoderTrack {
 		});
 	}
 
-	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
+	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder, restarted: boolean): void {
 		if (this.config.container.kind !== "cmaf") return;
 
 		const initSegment = base64ToBytes(this.config.container.init);
@@ -489,7 +547,10 @@ class DecoderTrack {
 		});
 
 		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
-		let resyncing = false;
+		// A restarted run must not feed deltas before its first keyframe. Normally a no-op: a fresh
+		// subscribe delivers the live group from frame 0 (forced keyframe), so this clears immediately;
+		// it only bites the group-head-eviction / mid-group-start edge.
+		let resyncing = restarted;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -542,6 +603,7 @@ class DecoderTrack {
 					final: false,
 				};
 
+				if (decoder.decodeQueueSize > MAX_DECODE_QUEUE) await drainDecodeQueue(decoder, effect);
 				if (decoder.state === "closed") break;
 				try {
 					decoder.decode(
@@ -621,6 +683,23 @@ class DecoderTrack {
 			return undefined;
 		});
 	}
+}
+
+/**
+ * Whether a live catalog config has diverged from the one a decoder was frozen with, in a way that needs
+ * a new decoder (codec, container kind, or codec description). Compared by value, never object identity,
+ * because Signal.set stores a deep-equal object without notifying. Exported for unit tests.
+ */
+export function configSuperseded(
+	current: Pick<Catalog.VideoConfig, "codec" | "container" | "description"> | undefined,
+	frozen: Pick<Catalog.VideoConfig, "codec" | "container" | "description">,
+): boolean {
+	if (!current) return false;
+	return (
+		current.codec !== frozen.codec ||
+		current.container.kind !== frozen.container.kind ||
+		current.description !== frozen.description
+	);
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {

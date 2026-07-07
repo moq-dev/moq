@@ -247,7 +247,10 @@ export class Sync {
 	async wait(timestamp: Time.Milli): Promise<void> {
 		const reference = this.#reference.peek();
 		if (reference === undefined) {
-			throw new Error("reference not set; call update() first");
+			// No reference yet (bootstrap, or a frame slipped in during a reset -> re-anchor window):
+			// render immediately instead of throwing an uncaught rejection into a decode output callback.
+			// received() re-anchors from this frame. Matches the in-loop currentRef-undefined path below.
+			return;
 		}
 
 		for (;;) {

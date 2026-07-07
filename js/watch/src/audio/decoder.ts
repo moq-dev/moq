@@ -9,6 +9,7 @@ import type { BufferedRanges } from "../buffered";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
+import { snapTimestamp } from "./snap";
 import type { Source } from "./source";
 
 export type DecoderProps = {
@@ -25,6 +26,18 @@ const OPUS_OUTPUT_RATE = 48000;
 const MAX_AUDIO_RESTARTS = 5;
 const RESTART_RAPID_MS = 300;
 const RESTART_BACKOFF_MS = 500;
+
+// Snap a decoded frame's timestamp to the previous frame's exact end when they're within this window, so
+// the timestamp-indexed ring writes back-to-back. Comfortably above the worst-case publisher timestamp
+// quantization (~one capture quantum, ~2.9 ms) and well below any genuine gap (>= one 20 ms Opus frame:
+// packet loss, DTX silence, publisher restart), which must still zero-fill.
+const SNAP_US = 5000;
+
+// A wire timestamp jump larger than this is a publisher mute/pause, not jitter: re-anchor playback to
+// live instead of playing out the silent gap. A constant (never maxBuffer-scaled) that clears Opus DTX
+// comfort-noise spacing (~400 ms) and can never trip on a 20 ms cadence or on packet loss (loss does
+// not gap PTS).
+const REANCHOR_GAP_US = 1_000_000;
 
 export interface AudioStats {
 	/** Number of encoded bytes received. */
@@ -72,6 +85,10 @@ export class Decoder {
 	// #emit resamples from this to the ring's actual context rate, and treats a sample at a DIFFERENT rate
 	// as a real decoder-rate change (-> #decodedRate rebuild) rather than something to resample.
 	#ringSourceRate: number | undefined;
+
+	// Expected timestamp (us) of the next decoded frame, used only on the resample path to snap
+	// near-contiguous frames (see SNAP_US). Reset at every re-anchor (discontinuity, reset, ring rebuild).
+	#expectedNext: Time.Micro | undefined;
 
 	// Decoder restart bookkeeping (see #onDecoderError), mirroring the video decoder.
 	#restart = new Signal(0);
@@ -204,10 +221,12 @@ export class Decoder {
 			const ring = createAudioBuffer(worklet, channelCount, ringRate, latencySamples, buffered);
 			this.#ring = ring;
 			this.#ringSourceRate = sampleRate;
+			this.#expectedNext = undefined;
 			effect.cleanup(() => {
 				ring.close();
 				this.#ring = undefined;
 				this.#ringSourceRate = undefined;
+				this.#expectedNext = undefined;
 			});
 
 			// Mirror ring state (timestamp/stalled) onto our public signals.
@@ -293,8 +312,9 @@ export class Decoder {
 		});
 
 		effect.spawn(async () => {
+			const abort = effect.abort; // pin this run's signal; the getter is replaced on every re-run
 			const loaded = await Util.Libav.polyfill();
-			if (!loaded) return; // cancelled
+			if (!loaded || abort.aborted) return;
 
 			let warmed = 0;
 
@@ -326,15 +346,28 @@ export class Decoder {
 				description,
 			});
 
+			let prevTs: number | undefined;
 			for (;;) {
 				const next = await consumer.next();
-				if (!next) break;
+				if (!next) {
+					// Track ended cleanly. If our config is unchanged (a deep-equal republish) the effect
+					// won't re-run on its own, so resubscribe; a real local teardown aborted before here.
+					if (!abort.aborted) this.#onCleanEnd(effect);
+					break;
+				}
 
 				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
 				this.#onDiscontinuity(next.discontinuity);
 
 				const { frame } = next;
 				if (!frame) continue;
+
+				// A large forward wire gap is a publisher mute/pause: re-anchor to live and skip the wait so
+				// the frame re-seeds the (now stalled) ring immediately instead of playing out the silent gap.
+				const wireTs = frame.timestamp as number;
+				const gapped = prevTs !== undefined && wireTs - prevTs > REANCHOR_GAP_US;
+				if (gapped) this.#reanchor();
+				prevTs = wireTs;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -346,7 +379,10 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await this.#ring?.wait(frame.timestamp as Time.Micro);
+				if (!gapped) {
+					await this.#ring?.wait(frame.timestamp as Time.Micro, abort);
+					if (abort.aborted) break;
+				}
 
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -399,8 +435,9 @@ export class Decoder {
 		});
 
 		effect.spawn(async () => {
+			const abort = effect.abort; // pin this run's signal; the getter is replaced on every re-run
 			const loaded = await Util.Libav.polyfill();
-			if (!loaded) return; // cancelled
+			if (!loaded || abort.aborted) return;
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
@@ -418,15 +455,26 @@ export class Decoder {
 				description,
 			});
 
+			let prevTs: number | undefined;
 			for (;;) {
 				const next = await consumer.next();
-				if (!next) break;
+				if (!next) {
+					// See #runLegacyDecoder: resubscribe on a clean end unless we tore down locally.
+					if (!abort.aborted) this.#onCleanEnd(effect);
+					break;
+				}
 
 				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
 				this.#onDiscontinuity(next.discontinuity);
 
 				const { frame } = next;
 				if (!frame) continue;
+
+				// A large forward wire gap is a publisher mute/pause: re-anchor to live and skip the wait.
+				const wireTs = frame.timestamp as number;
+				const gapped = prevTs !== undefined && wireTs - prevTs > REANCHOR_GAP_US;
+				if (gapped) this.#reanchor();
+				prevTs = wireTs;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.source.sync.received(timestamp, "audio");
@@ -437,7 +485,10 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await this.#ring?.wait(frame.timestamp);
+				if (!gapped) {
+					await this.#ring?.wait(frame.timestamp, abort);
+					if (abort.aborted) break;
+				}
 
 				if (decoder.state === "closed") break;
 				try {
@@ -465,6 +516,17 @@ export class Decoder {
 	// video decoder's per-track wrapper, #runDecoder is the persistent effect, so on exhaustion we stop
 	// retrying WITHOUT closing it - a later config change re-runs it and a working decoder resets the budget.
 	#onDecoderError(error: unknown, effect: Effect): void {
+		// If the catalog has already moved past the config this decoder was built for, the error is just
+		// wrong-config bytes during a codec/rate switch and #runDecoder is about to rebuild for the new
+		// config, so don't burn the restart budget re-decoding stale bytes. Compare fields, not identity:
+		// Signal.set stores a deep-equal object without notifying, so peek() can return a new-but-equal one.
+		const current = this.source.config.peek();
+		const budget = this.#budgetConfig;
+		if (budget && current && (current.codec !== budget.codec || current.container.kind !== budget.container.kind)) {
+			console.debug("audio decoder error; config superseded, rebuild pending", error);
+			return;
+		}
+
 		if (this.#restartCount >= MAX_AUDIO_RESTARTS) {
 			console.error("audio decoder error; giving up until the next config change", error);
 			return;
@@ -487,8 +549,7 @@ export class Decoder {
 		// A frame decoded successfully: reset the restart budget.
 		this.#restartCount = 0;
 
-		const timestamp = sample.timestamp as Time.Micro;
-		const timestampMilli = Time.Milli.fromMicro(timestamp);
+		let timestamp = sample.timestamp as Time.Micro;
 
 		const ring = this.#ring;
 		if (!ring) {
@@ -520,6 +581,20 @@ export class Decoder {
 
 		// Calculate end time from sample duration
 		const durationMicro = ((sample.numberOfFrames / sample.sampleRate) * 1_000_000) as Time.Micro;
+
+		// Snap a near-contiguous frame to the previous frame's exact end so the timestamp-indexed ring writes
+		// back-to-back instead of zero-filling or overwriting a sample every frame (Safari-to-Safari crackle:
+		// Safari's decoder passes the publisher's quantized wire timestamps straight through, where Chrome's
+		// regenerates an exact cadence). Magnitude-keyed, not rate-keyed: an already-contiguous stream makes
+		// this an identity no-op, so Chrome/Firefox are unaffected. The publisher also snaps at the encoder
+		// (see encoder.ts); this covers unfixed publishers. The window is capped at half a frame so a genuine
+		// gap (>= one frame: loss, DTX silence, restart) always exceeds it and still zero-fills, whatever the
+		// frame duration.
+		const snapWindow = Math.min(SNAP_US, durationMicro / 2);
+		timestamp = snapTimestamp(this.#expectedNext, timestamp, snapWindow) as Time.Micro;
+		this.#expectedNext = (timestamp + durationMicro) as Time.Micro;
+
+		const timestampMilli = Time.Milli.fromMicro(timestamp);
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
 		const end = Time.Milli.add(timestampMilli, durationMilli);
 
@@ -584,21 +659,40 @@ export class Decoder {
 		});
 	}
 
-	// Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
-	// Use in buffered mode at an utterance boundary (see Sync.reset).
-	reset(): void {
+	// Flush the audio buffer and re-stall, re-anchoring playback to the next frame. Drops stale buffered
+	// PCM WITHOUT touching Sync: a forward gap (mute/pause) keeps the publisher's epoch, and video shares
+	// the Sync, so resetting it here would perturb video.
+	#reanchor(): void {
 		this.#ring?.reset();
+		this.#expectedNext = undefined;
 	}
 
-	// React to the container consumer's discontinuity counter. When it changes the publisher
-	// has rewound the timeline, so flush the queued PCM and re-anchor the shared clock before
-	// the first frame of the new utterance is decoded. This makes the wire signal trigger the
-	// same flush as a manual `reset()`, with no app involvement.
+	// Public utterance-boundary flush (buffered mode, see Sync.reset).
+	reset(): void {
+		this.#reanchor();
+	}
+
+	// React to the container consumer's discontinuity counter. It changes only on a BACKWARD rewind
+	// (publisher timeline reset), so flush the queued PCM and re-anchor the shared clock before the new
+	// utterance. Forward gaps (mute/pause) are handled in the decode loop and must NOT reset Sync.
 	#onDiscontinuity(count: number): void {
 		if (count === this.#discontinuity) return;
 		this.#discontinuity = count;
-		this.#ring?.reset();
+		this.#reanchor();
 		this.source.sync.reset();
+	}
+
+	// The publisher closed the audio track but our catalog config is unchanged (a deep-equal republish,
+	// e.g. a Sample-rate override that re-pins 48 kHz), so #runDecoder won't re-run on its own and we'd
+	// go silent. Resubscribe via the restart budget (a successful #emit resets it); a genuine local
+	// teardown aborts the loop before this is reached.
+	#onCleanEnd(effect: Effect): void {
+		if (this.#restartCount >= MAX_AUDIO_RESTARTS) return;
+		this.#restartCount++;
+		effect.timer(() => {
+			this.#lastRestart = performance.now();
+			this.#restart.update((n) => n + 1);
+		}, RESTART_BACKOFF_MS);
 	}
 
 	close() {

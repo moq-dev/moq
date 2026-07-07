@@ -4,7 +4,9 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { snapCadence } from "./cadence";
 import type * as Capture from "./capture";
+import { StreamResampler } from "./resampler";
 import { type Kind, normalizeSource, type Source } from "./types";
 
 const GAIN_MIN = 0.001;
@@ -15,6 +17,11 @@ const OPUS_FRAME_DURATION_MS = 20;
 // catalog must advertise 48000 for watchers to build their pipeline at. The capture rate (which can
 // be e.g. 16 kHz on Safari's voice-processed mic) stays private to the encoder.
 const OPUS_OUTPUT_RATE = 48000;
+// When resampling capture PCM to the encoder rate (Safari's non-canonical hardware rate -> 48 kHz), the
+// output-clock timestamp is synthesized from a running sample counter. If the capture clock drifts more
+// than one frame from that synthesized clock (chunks dropped during a mute/unmute channel-count flip),
+// re-anchor to the live capture timestamp so audio never lags real time (and video) forever.
+const RESAMPLE_REANCHOR_US = 20000;
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 
@@ -308,15 +315,47 @@ export class Encoder {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
 
+			let cadence: number | undefined; // nominal frame-cadence clock for the timestamp snap below
 			const encoder = new AudioEncoder({
 				output: (frame) => {
 					if (frame.type !== "key") {
 						throw new Error("only key frames are supported");
 					}
 
+					// Snap the container timestamp onto the nominal frame cadence. Safari's AudioEncoder
+					// stamps each output frame with the timestamp of the INPUT AudioData chunk holding its
+					// start, quantizing to the 128-sample capture-quantum grid (a 20 ms Opus frame alternates
+					// 18667/21333 us). That per-frame jitter makes the watcher's timestamp-indexed ring
+					// zero-fill or overwrite a sample every frame and crackle. Chrome/Firefox already emit an
+					// exact cadence, so this is an identity rewrite; a gap over the window (mute, DTX silence,
+					// suspend) re-anchors to the real timestamp. Device- and option-independent: capture
+					// timestamps are sample-counted (capture-worklet.ts), the rate is whatever the context
+					// actually runs at, and `nominal` tracks the encoder's frameDuration.
+					let ts = frame.timestamp as number;
+					if (config) {
+						const nominal =
+							config.codec === "opus"
+								? (config.jitter ?? OPUS_FRAME_DURATION_MS) * 1000
+								: (AAC_FRAME_SAMPLES / worklet.context.sampleRate) * 1_000_000;
+						// One capture quantum in stream time. Rate-conversion-invariant: the resampler emits
+						// exactly one output chunk per 128-sample capture chunk, so the encoder's input-chunk
+						// duration (the stamping granularity) is 128/captureRate whatever the encode rate.
+						const quantum = (128 / worklet.context.sampleRate) * 1_000_000;
+						if (quantum < nominal) {
+							// Absorb up to one quantum of jitter, never a real frame gap.
+							const snapped = snapCadence(cadence, ts, nominal, Math.max(nominal / 2, quantum));
+							ts = snapped.ts;
+							cadence = snapped.next;
+						} else {
+							// Frame no larger than one quantum: jitter is indistinguishable from a real
+							// one-frame gap, so pass the raw timestamp through.
+							cadence = undefined;
+						}
+					}
+
 					// Each audio frame is its own group so the relay can forward it without
 					// waiting for a group boundary. Loss is handled by the codec's PLC.
-					track.writeFrame(Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro));
+					track.writeFrame(Container.Legacy.encodeFrame(frame, ts as Time.Micro));
 				},
 				error: (err) => {
 					console.error("encoder error", err);
@@ -346,10 +385,12 @@ export class Encoder {
 				);
 
 				console.debug("encoding audio", encoderConfig);
+				cadence = undefined; // re-anchor the cadence snap on (re)configure
 				encoder.configure(encoderConfig);
 			});
 
 			let resampler: StreamResampler | undefined;
+			let anchor = 0; // capture-clock time (us) of the resampler's first output sample
 			effect.event(worklet.port, "message", (event: Event) => {
 				const data = (event as MessageEvent<Capture.AudioFrame>).data;
 				const channelCount = data.channels.length;
@@ -368,15 +409,32 @@ export class Encoder {
 				const encodeRate = config.codec === "opus" ? OPUS_OUTPUT_RATE : captureRate;
 
 				let channels = data.channels;
+				let timestamp = data.timestamp;
 				if (captureRate !== encodeRate) {
 					if (!resampler) {
 						resampler = new StreamResampler(captureRate, encodeRate);
+						anchor = data.timestamp;
 						console.debug(
 							`audio: capture at ${captureRate} Hz, resampling to ${encodeRate} Hz for the encoder`,
 						);
+					} else {
+						// Re-anchor if the capture clock has run far past our synthesized output clock, which
+						// happens when chunks are dropped (mute/unmute channel-count flip). Otherwise the
+						// synthesized timestamps would keep counting from the pre-gap anchor and lag real time.
+						const expected = anchor + (resampler.emitted / encodeRate) * 1e6;
+						if (Math.abs(data.timestamp - expected) > RESAMPLE_REANCHOR_US) {
+							resampler = new StreamResampler(captureRate, encodeRate);
+							anchor = data.timestamp;
+						}
 					}
 					channels = resampler.resample(channels);
 					if (channels[0].length === 0) return; // no output for this chunk yet
+					// Stamp on the encoder's 48 kHz clock: the first sample of this chunk sits at
+					// anchor + (emitted so far - this chunk's samples) / encodeRate. Derived from the absolute
+					// counter (not an incremented running total) so rounding never accumulates.
+					timestamp = Math.round(
+						anchor + ((resampler.emitted - channels[0].length) / encodeRate) * 1e6,
+					) as Time.Micro;
 				}
 
 				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
@@ -392,7 +450,7 @@ export class Encoder {
 					sampleRate: encodeRate,
 					numberOfFrames: channels[0].length,
 					numberOfChannels: channels.length,
-					timestamp: data.timestamp,
+					timestamp,
 					data: joined,
 					transfer: [joined.buffer],
 				});
@@ -469,51 +527,6 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 // captureRate is the capture AudioContext's rate, which every AudioData is stamped with. The
 // encoder MUST be configured at that rate (native encoders reject mismatched input), while the
 // catalog can advertise a different decode rate (48 kHz for Opus).
-// Continuous linear resampler for a stream of PCM chunks (one rate -> another). Carries the sub-sample
-// phase and the previous chunk's last sample across chunks, so there is NO per-chunk discontinuity - a
-// per-chunk-independent resample would inject a slope kink every ~3 ms that the Opus encoder then bakes
-// in as an audible buzz. Used to feed Opus a canonical 48 kHz stream when the capture context runs at a
-// non-canonical hardware rate (Safari pins ~44.1 kHz and ignores AudioContext({sampleRate: 48000})).
-class StreamResampler {
-	readonly #ratio: number; // input samples advanced per output sample
-	#pos = 0; // source position (input-sample units, relative to the current chunk start) of the next output
-	#prev: number[] | undefined; // last input sample per channel from the previous chunk
-
-	constructor(inputRate: number, outputRate: number) {
-		this.#ratio = inputRate / outputRate;
-	}
-
-	resample(channels: Float32Array[]): Float32Array[] {
-		const n = channels[0]?.length ?? 0;
-		if (n === 0) return channels.map(() => new Float32Array(0));
-
-		const ratio = this.#ratio;
-		const numCh = channels.length;
-
-		// How many output samples fall within reach this chunk (their bracketing input samples exist).
-		let count = 0;
-		for (let p = this.#pos; p <= n - 1; p += ratio) count++;
-
-		const out = channels.map(() => new Float32Array(count));
-		let p = this.#pos;
-		for (let j = 0; j < count; j++, p += ratio) {
-			const i0 = Math.floor(p);
-			const frac = p - i0;
-			for (let c = 0; c < numCh; c++) {
-				const ch = channels[c];
-				// i0 is >= -1 (the carried phase never falls further back than the previous chunk's tail).
-				const s0 = i0 < 0 ? (this.#prev?.[c] ?? ch[0]) : ch[i0];
-				const s1 = ch[Math.min(i0 + 1, n - 1)];
-				out[c][j] = s0 * (1 - frac) + s1 * frac;
-			}
-		}
-
-		// Shift the next output position into the next chunk's coordinate; remember the boundary sample.
-		this.#pos = p - n;
-		this.#prev = channels.map((ch) => ch[n - 1]);
-		return out;
-	}
-}
 
 function toEncoderConfig(
 	config: Catalog.AudioConfig,
