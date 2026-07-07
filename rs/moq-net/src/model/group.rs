@@ -11,6 +11,7 @@
 use crate::frame::{self, Frame, FrameBuf};
 use crate::{Timescale, track};
 use std::collections::VecDeque;
+use std::mem::MaybeUninit;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -131,27 +132,6 @@ impl GroupState {
 				timestamp: p.timestamp,
 			};
 			return Poll::Ready(Ok(Some((info, frame::Source::Partial(p.buf.clone())))));
-		}
-		if let Some(err) = &self.abort {
-			return Poll::Ready(Err(err.clone()));
-		}
-		if self.fin {
-			return Poll::Ready(Ok(None));
-		}
-		Poll::Pending
-	}
-
-	/// Poll for the full payload of the completed frame at `index`.
-	///
-	/// Unlike [`Self::poll_frame_source`], an in-flight tail resolves to `Pending`:
-	/// the whole-frame API waits for the frame to finish rather than streaming it.
-	fn poll_complete_frame(&self, index: usize) -> Poll<Result<Option<Bytes>>> {
-		if index < self.offset {
-			return Poll::Ready(Err(Error::CacheFull));
-		}
-		let local = index - self.offset;
-		if let Some(f) = self.frames.get(local) {
-			return Poll::Ready(Ok(Some(f.payload.clone())));
 		}
 		if let Some(err) = &self.abort {
 			return Poll::Ready(Err(err.clone()));
@@ -378,6 +358,7 @@ impl Producer {
 			state: self.state.consume(),
 			track: self.track,
 			index: 0,
+			prefetch: Prefetch::default(),
 		}
 	}
 
@@ -424,8 +405,66 @@ impl Drop for Producer {
 	}
 }
 
+/// A small inline batch of completed frames, drained from the shared group state
+/// under one lock and then handed out without re-locking.
+///
+/// Each [`Consumer::read_frame`] otherwise takes the group mutex and allocates a
+/// waker just to clone one `Bytes`; draining a batch amortizes both across `CAP`
+/// frames. Storage is inline and uninitialized (no heap), so a consumer that never
+/// reads whole frames, or drains through a higher-level buffer, pays nothing.
+struct Prefetch {
+	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
+	frames: [MaybeUninit<Frame>; Self::CAP],
+	pos: usize,
+	len: usize,
+}
+
+impl Prefetch {
+	const CAP: usize = 8;
+
+	/// Take the next buffered frame, or `None` if the batch is drained.
+	fn pop(&mut self) -> Option<Frame> {
+		if self.pos == self.len {
+			return None;
+		}
+		// SAFETY: `pos < len`, so this slot was written by `fill` and not yet taken.
+		let frame = unsafe { self.frames[self.pos].assume_init_read() };
+		self.pos += 1;
+		Some(frame)
+	}
+
+	/// Refill with up to `CAP` frames. Must be drained first (`pop` returned `None`).
+	fn fill(&mut self, frames: impl Iterator<Item = Frame>) {
+		debug_assert_eq!(self.pos, self.len, "fill on a non-empty batch would leak frames");
+		self.pos = 0;
+		self.len = 0;
+		for frame in frames.take(Self::CAP) {
+			self.frames[self.len].write(frame);
+			self.len += 1;
+		}
+	}
+}
+
+impl Default for Prefetch {
+	fn default() -> Self {
+		Self {
+			frames: [const { MaybeUninit::uninit() }; Self::CAP],
+			pos: 0,
+			len: 0,
+		}
+	}
+}
+
+impl Drop for Prefetch {
+	fn drop(&mut self) {
+		for slot in &mut self.frames[self.pos..self.len] {
+			// SAFETY: slots in `pos..len` are initialized and were never taken.
+			unsafe { slot.assume_init_drop() };
+		}
+	}
+}
+
 /// Consume a group, frame-by-frame.
-#[derive(Clone)]
 pub struct Consumer {
 	// Shared state with the producer.
 	state: kio::Consumer<GroupState>,
@@ -440,6 +479,23 @@ pub struct Consumer {
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
+
+	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
+	prefetch: Prefetch,
+}
+
+impl Clone for Consumer {
+	fn clone(&self) -> Self {
+		// A clone shares the channel and inherits `index`, but starts with an empty
+		// prefetch: it re-reads its batch from the shared state, in parallel.
+		Self {
+			state: self.state.clone(),
+			info: self.info,
+			track: self.track,
+			index: self.index,
+			prefetch: Prefetch::default(),
+		}
+	}
 }
 
 impl std::ops::Deref for Consumer {
@@ -477,6 +533,17 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		// Hand out any frames a prior read_frame prefetched before touching the tail.
+		if let Some(frame) = self.prefetch.pop() {
+			self.index += 1;
+			let info = frame::Info {
+				size: frame.payload.len() as u64,
+				timestamp: frame.timestamp,
+			};
+			let source = frame::Source::Complete(frame.payload);
+			return Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))));
+		}
+
 		let index = self.index;
 		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
 			return Poll::Ready(Ok(None));
@@ -488,17 +555,55 @@ impl Consumer {
 
 	/// Read the next frame's data all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		let index = self.index;
-		let Some(data) = ready!(self.poll(waiter, |state| state.poll_complete_frame(index))?) else {
-			return Poll::Ready(Ok(None));
-		};
+		// Fast path: serve from the prefetched batch without locking or allocating a waker.
+		if let Some(frame) = self.prefetch.pop() {
+			self.index += 1;
+			return Poll::Ready(Ok(Some(frame.payload)));
+		}
 
-		self.index += 1;
-		Poll::Ready(Ok(Some(data)))
+		// The batch is drained: refill it under a single lock, registering the waiter if
+		// nothing is ready. Borrow the two fields disjointly so the closure can fill.
+		let index = self.index;
+		let prefetch = &mut self.prefetch;
+		let res = self.state.poll(waiter, |state| {
+			if index < state.offset {
+				return Poll::Ready(Err(Error::CacheFull));
+			}
+			let local = index - state.offset;
+			prefetch.fill(state.frames.range(local..).cloned());
+			if prefetch.len > 0 {
+				return Poll::Ready(Ok(()));
+			}
+			// Nothing completed at `index`: an in-flight tail waits, otherwise resolve
+			// the terminal state (whole-frame reads never stream the partial).
+			if let Some(err) = &state.abort {
+				return Poll::Ready(Err(err.clone()));
+			}
+			if state.fin {
+				return Poll::Ready(Ok(()));
+			}
+			Poll::Pending
+		});
+
+		match ready!(res) {
+			Ok(Ok(())) => {}
+			Ok(Err(err)) => return Poll::Ready(Err(err)),
+			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+		}
+
+		Poll::Ready(Ok(self.prefetch.pop().map(|frame| {
+			self.index += 1;
+			frame.payload
+		})))
 	}
 
 	/// Read the next frame's data all at once.
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
+		// Serve from the prefetched batch without building a future or allocating a waker.
+		if let Some(frame) = self.prefetch.pop() {
+			self.index += 1;
+			return Ok(Some(frame.payload));
+		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
@@ -749,6 +854,64 @@ mod test {
 
 		let end = c2.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
+	}
+
+	/// Reading more than one prefetch batch drains every frame in order across the
+	/// batch boundary (the refill starts exactly where the previous batch ended).
+	#[test]
+	fn read_frame_crosses_prefetch_batches() {
+		let n = Prefetch::CAP * 3 + 5;
+		let mut producer = Info { sequence: 0 }.produce();
+		for i in 0..n {
+			producer.write_frame_now(Bytes::from(vec![i as u8; 4])).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		for i in 0..n {
+			let data = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(data, Bytes::from(vec![i as u8; 4]));
+		}
+		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// `next_frame` drains frames a prior `read_frame` prefetched, preserving order.
+	#[test]
+	fn interleave_read_and_next_frame() {
+		let mut producer = Info { sequence: 0 }.produce();
+		for i in 0..5u8 {
+			producer.write_frame_now(Bytes::from(vec![i; 1])).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		// The first whole-frame read prefetches all five frames into the batch.
+		let f0 = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f0, Bytes::from(vec![0u8; 1]));
+
+		// next_frame must continue from the batch, not skip ahead or repeat.
+		for i in 1..5u8 {
+			let mut f = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			let data = f.read_all().now_or_never().unwrap().unwrap();
+			assert_eq!(data, Bytes::from(vec![i; 1]));
+		}
+		assert!(consumer.next_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// Dropping a consumer mid-batch must drop the buffered-but-untaken frames
+	/// (exercises the `MaybeUninit` Drop path; run under miri to catch leaks/UB).
+	#[test]
+	fn drop_with_partial_batch() {
+		let mut producer = Info { sequence: 0 }.produce();
+		for _ in 0..Prefetch::CAP {
+			producer.write_frame_now(Bytes::from_static(b"x")).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		// Take one frame so the batch is filled but only partially drained.
+		let _ = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		drop(consumer);
 	}
 
 	/// A frame whose timestamp is at a different scale is converted to the group's

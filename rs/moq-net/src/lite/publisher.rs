@@ -807,6 +807,10 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, or the track finishing.
+// A `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the
+// others. This is a transient, one-at-a-time return value, so the padding is never held in
+// bulk; boxing would only add a per-group allocation.
+#[allow(clippy::large_enum_variant)]
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::Datagram),
