@@ -34,9 +34,14 @@ web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 
 [dev-dependencies]
+criterion = "0.8"
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on
 # wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
+
+[[bench]]
+name = "group"
+harness = false
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select

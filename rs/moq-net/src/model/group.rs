@@ -21,7 +21,7 @@ use crate::{Error, IntoBytes, Result, Timescale, Timestamp};
 const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// Maximum number of frames cached in a group before old frames are evicted.
-const MAX_GROUP_FRAMES: usize = 1024;
+const MAX_GROUP_FRAMES: usize = 32 * 1024;
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
