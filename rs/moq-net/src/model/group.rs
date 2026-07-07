@@ -130,10 +130,16 @@ impl GroupState {
 			return Poll::Ready(Err(Error::CacheFull));
 		}
 		match self.frames.get(index - self.offset) {
-			Some(frame) => Poll::Ready(Ok(Some(ready!(frame.poll_read_all(waiter))?))),
-			None if self.fin => Poll::Ready(Ok(None)),
+			Some(frame) => {
+				self.charge.touch();
+				Poll::Ready(Ok(Some(ready!(frame.poll_read_all(waiter))?)))
+			}
+			// `abort` is checked before `fin`: an evicted group is both finished and
+			// aborted with its frames cleared, and the reader must see the abort
+			// rather than a clean end-of-group at the wrong index.
 			None => match &self.abort {
 				Some(err) => Poll::Ready(Err(err.clone())),
+				None if self.fin => Poll::Ready(Ok(None)),
 				None => Poll::Pending,
 			},
 		}
