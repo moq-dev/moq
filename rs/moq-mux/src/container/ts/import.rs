@@ -590,6 +590,17 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		Ok(())
 	}
+
+	/// Abort every track with `err` instead of finishing, so subscribers see the
+	/// real cause rather than [`moq_net::Error::Dropped`]. Buffered PES is discarded.
+	pub fn abort(&mut self, err: moq_net::Error) {
+		for stream in self.streams.values_mut() {
+			stream.abort(err.clone());
+		}
+		for section in self.sections.values_mut() {
+			section.abort(err.clone());
+		}
+	}
 }
 
 /// A reassembled PES packet awaiting routing to its codec importer.
@@ -735,6 +746,10 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		self.track.finish()?;
 		Ok(())
 	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.track.abort(err);
+	}
 }
 
 impl<E: catalog::Catalog> Drop for SectionStream<E> {
@@ -817,6 +832,10 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	fn finish(&mut self) -> anyhow::Result<()> {
 		self.track.finish()?;
 		Ok(())
+	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.track.abort(err);
 	}
 }
 
@@ -1071,6 +1090,18 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
+	fn abort(&mut self, err: moq_net::Error) {
+		match self {
+			Stream::H264 { import, .. } => import.abort(err),
+			Stream::H265 { import, .. } => import.abort(err),
+			Stream::Aac(stream) => stream.abort(err),
+			Stream::Opus(stream) => stream.abort(err),
+			Stream::Legacy(stream) => stream.abort(err),
+			Stream::Verbatim(stream) => stream.abort(err),
+			Stream::Clock | Stream::Ignored => {}
+		}
+	}
+
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
 	/// exists. `None` for verbatim/clock/ignored streams (verbatim self-registers).
 	fn media_track_name(&self) -> Option<String> {
@@ -1208,6 +1239,12 @@ impl<E: CatalogExt> AacStream<E> {
 		}
 		Ok(())
 	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		if let Some(import) = &mut self.import {
+			import.abort(err);
+		}
+	}
 }
 
 /// One Opus elementary stream. The channels come from the PMT descriptors and the rate
@@ -1258,6 +1295,10 @@ impl<E: CatalogExt> OpusStream<E> {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		Ok(self.import.finish()?)
+	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
@@ -1457,6 +1498,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 			import.finish()?;
 		}
 		Ok(())
+	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		if let Some(import) = &mut self.import {
+			import.abort(err);
+		}
 	}
 }
 

@@ -53,6 +53,15 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerImpl<E> {
 		}
 	}
 
+	fn abort(&mut self, err: moq_net::Error) {
+		match self {
+			ContainerImpl::Fmp4(decoder) => decoder.abort(err),
+			ContainerImpl::Mkv(decoder) => decoder.abort(err),
+			ContainerImpl::Ts(decoder) => decoder.abort(err),
+			ContainerImpl::Flv(decoder) => decoder.abort(err),
+		}
+	}
+
 	fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.seek(sequence),
@@ -100,6 +109,12 @@ impl<E: crate::container::ts::catalog::Catalog> Container<E> {
 		self.inner.finish()
 	}
 
+	/// Abort every published track with `err`, so subscribers see the real cause
+	/// rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		self.inner.abort(err)
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
@@ -143,6 +158,12 @@ impl<E: crate::container::ts::catalog::Catalog> ContainerStream<E> {
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.finish()
+	}
+
+	/// Abort every published track with `err`, so subscribers see the real cause
+	/// rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		self.inner.abort(err)
 	}
 
 	/// Close the current group and open the next one at `sequence`.

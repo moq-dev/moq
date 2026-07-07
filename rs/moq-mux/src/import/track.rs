@@ -247,6 +247,23 @@ impl<E: CatalogExt> Track<E> {
 		}
 	}
 
+	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
+	/// see the real cause rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		match self.kind {
+			TrackKind::Avc3 { ref mut import, .. } => import.abort(err),
+			TrackKind::Avc1 { ref mut import, .. } => import.abort(err),
+			TrackKind::Hev1 { ref mut import, .. } => import.abort(err),
+			TrackKind::Av01 { ref mut import, .. } => import.abort(err),
+			TrackKind::Vp8(ref mut import) => import.abort(err),
+			TrackKind::Vp9(ref mut import) => import.abort(err),
+			TrackKind::Aac(ref mut import) => import.abort(err),
+			TrackKind::Opus(ref mut import) => import.abort(err),
+			TrackKind::Mp3(ref mut import) => import.abort(err),
+			TrackKind::Flac(ref mut import) => import.abort(err),
+		}
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self.kind {
@@ -481,6 +498,16 @@ impl<E: CatalogExt> TrackStream<E> {
 				import.decode(tail)?;
 				import.finish()
 			}
+		}
+	}
+
+	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
+	/// see the real cause rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		match self.kind {
+			TrackStreamKind::Avc3 { ref mut import, .. } => import.abort(err),
+			TrackStreamKind::Hev1 { ref mut import, .. } => import.abort(err),
+			TrackStreamKind::Av01 { ref mut import, .. } => import.abort(err),
 		}
 	}
 

@@ -141,6 +141,17 @@ impl PublishDecoder {
 		}
 		Ok(())
 	}
+
+	/// Abort the tracks with `err` instead of finishing, so subscribers see the
+	/// real cause rather than `Error::Dropped`.
+	fn abort(&mut self, err: moq_net::Error) {
+		match self {
+			Self::Avc3 { import, .. } => import.abort(err),
+			Self::Fmp4(d) => d.abort(err),
+			Self::Ts(d) => d.abort(err),
+			Self::Flv(d) => d.abort(err),
+		}
+	}
 }
 
 // Exactly one Source exists per process, so the size gap between the small
@@ -242,16 +253,27 @@ impl Publish {
 				let mut stdin = tokio::io::stdin();
 				let mut buffer = bytes::BytesMut::new();
 
-				loop {
-					buffer.clear();
-					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
-					if n == 0 {
-						// EOF: flush the importer's buffered trailing frame and close the tracks.
-						decoder.finish()?;
-						return Ok(());
+				// Run the read/decode loop so an error surfaces here rather than
+				// dropping the decoder (and its tracks) with a bare Error::Dropped.
+				let result: anyhow::Result<()> = async {
+					loop {
+						buffer.clear();
+						let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
+						if n == 0 {
+							return Ok(()); // EOF
+						}
+						decoder.decode_chunk(&buffer)?;
 					}
-					decoder.decode_chunk(&buffer)?;
 				}
+				.await;
+
+				match &result {
+					// EOF: flush the importer's buffered trailing frame and close the tracks.
+					Ok(()) => decoder.finish()?,
+					// A read/decode error: abort with the real cause so subscribers see it.
+					Err(err) => decoder.abort(moq_net::Error::Transport(err.to_string())),
+				}
+				result
 			}
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {
