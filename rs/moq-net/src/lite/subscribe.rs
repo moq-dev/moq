@@ -413,9 +413,9 @@ mod test {
 	fn subscribe_start_roundtrips_on_lite05() {
 		let resp = SubscribeResponse::Start(SubscribeStart { group: 42 });
 		let mut buf = Vec::new();
-		resp.encode(&mut buf, Version::Lite05Wip).unwrap();
+		resp.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = buf.as_slice();
-		match SubscribeResponse::decode(&mut slice, Version::Lite05Wip).unwrap() {
+		match SubscribeResponse::decode(&mut slice, Version::Lite05).unwrap() {
 			SubscribeResponse::Start(start) => assert_eq!(start.group, 42),
 			other => panic!("expected Start, got {other:?}"),
 		}
@@ -425,9 +425,9 @@ mod test {
 	fn subscribe_end_roundtrips_on_lite05() {
 		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
 		let mut buf = Vec::new();
-		resp.encode(&mut buf, Version::Lite05Wip).unwrap();
+		resp.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = buf.as_slice();
-		match SubscribeResponse::decode(&mut slice, Version::Lite05Wip).unwrap() {
+		match SubscribeResponse::decode(&mut slice, Version::Lite05).unwrap() {
 			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
@@ -441,12 +441,12 @@ mod test {
 			error: 0,
 		});
 		let mut buf = Vec::new();
-		resp.encode(&mut buf, Version::Lite05Wip).unwrap();
+		resp.encode(&mut buf, Version::Lite05).unwrap();
 		// Type discriminator is the first varint; on Lite05 DROP is 0x2.
 		assert_eq!(buf[0], 2);
 
 		let mut slice = buf.as_slice();
-		match SubscribeResponse::decode(&mut slice, Version::Lite05Wip).unwrap() {
+		match SubscribeResponse::decode(&mut slice, Version::Lite05).unwrap() {
 			SubscribeResponse::Drop(drop) => assert_eq!((drop.start, drop.end), (1, 3)),
 			other => panic!("expected Drop, got {other:?}"),
 		}
@@ -474,6 +474,6 @@ mod test {
 			end_group: None,
 		});
 		let mut buf = Vec::new();
-		assert!(resp.encode(&mut buf, Version::Lite05Wip).is_err());
+		assert!(resp.encode(&mut buf, Version::Lite05).is_err());
 	}
 }

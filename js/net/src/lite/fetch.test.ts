@@ -32,23 +32,15 @@ async function roundtrip(version: Version, fetch: Fetch): Promise<Fetch> {
 }
 
 function sample(): Fetch {
-	return new Fetch(Path.from("room/1"), "video", 3, 42, 7);
+	return new Fetch(Path.from("room/1"), "video", 3, 42);
 }
 
-test("Fetch: frameStart round-trips on draft-05", async () => {
-	const got = await roundtrip(Version.DRAFT_05_WIP, sample());
-	expect(got.group).toBe(42);
-	expect(got.frameStart).toBe(7);
-});
-
-test("Fetch: frameStart is absent before draft-05", async () => {
-	// draft-03/draft-04 don't carry the frame start varint, so it decodes to 0.
-	const got = await roundtrip(Version.DRAFT_04, sample());
-	expect(got.group).toBe(42);
-	expect(got.frameStart).toBe(0);
-
-	// The draft-04 encoding is strictly shorter (no trailing frame start varint).
-	const buf04 = await encode(Version.DRAFT_04, sample());
-	const buf05 = await encode(Version.DRAFT_05_WIP, sample());
-	expect(buf05.byteLength).toBeGreaterThan(buf04.byteLength);
+test("Fetch round-trips on draft-03/04/05", async () => {
+	for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05]) {
+		const got = await roundtrip(version, sample());
+		expect(got.broadcast).toBe(Path.from("room/1"));
+		expect(got.track).toBe("video");
+		expect(got.priority).toBe(3);
+		expect(got.group).toBe(42);
+	}
 });
