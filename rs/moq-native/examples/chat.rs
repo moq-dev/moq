@@ -74,5 +74,10 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Sleep before exiting and closing the broadcast.
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
+	// Cleanly close the broadcast so subscribers see a normal end. Dropping the
+	// producer works too, but closing is explicit (and dropping it by accident
+	// while still publishing is a common bug this makes obvious).
+	broadcast.close();
+
 	Ok(())
 }

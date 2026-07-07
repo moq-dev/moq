@@ -60,6 +60,10 @@ impl codec::Bridge for Bridge {
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("vp8 track write failed: {err}")))?;
 		Ok(())
 	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.track.abort(err);
+	}
 }
 
 impl Drop for Bridge {

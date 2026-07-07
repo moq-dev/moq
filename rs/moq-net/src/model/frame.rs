@@ -312,6 +312,10 @@ impl Drop for Producer<'_> {
 		if !self.done {
 			// An unfinished frame leaves the group stream broken; fail the group so
 			// consumers surface an error instead of hanging on the partial forever.
+			tracing::warn!(
+				group = self.group.info().sequence,
+				"frame::Producer dropped before writing all bytes"
+			);
 			self.group.frame_abort(Error::Dropped);
 		}
 	}

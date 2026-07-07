@@ -278,11 +278,21 @@ async fn run(config: &Config) -> Result<()> {
 		move || run_emulator(session, &rom_path, audio_encoder, status_publisher, cmd_rx)
 	});
 
-	tokio::select! {
-		res = emulator_handle => res?.context("emulator error"),
-		res = reconnect.closed() => Ok(res?),
+	// Keep the result out of the `select!` arms (a `?` there would return before
+	// the close below runs), so the broadcast is always closed on shutdown.
+	let result = tokio::select! {
+		res = emulator_handle => match res {
+			Ok(inner) => inner.context("emulator error"),
+			Err(join) => Err(join.into()),
+		},
+		res = reconnect.closed() => res.map_err(Into::into),
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
-	}
+	};
+
+	// Cleanly close the broadcast so subscribers see a normal end rather than
+	// Error::Dropped.
+	broadcast.close();
+	result
 }
 
 /// The main emulator loop, running on a blocking thread.

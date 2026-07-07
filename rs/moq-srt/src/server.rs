@@ -277,11 +277,24 @@ pub(crate) async fn serve_publish(origin: &origin::Producer, path: &str, mut soc
 	use futures::TryStreamExt;
 
 	let mut publisher = crate::ts::Publisher::new(origin, path)?;
-	while let Some((_instant, bytes)) = socket.try_next().await? {
-		publisher.feed(bytes)?;
+
+	// Run the read/feed loop so an error surfaces here instead of unwinding past
+	// the publisher, which would drop it (and its tracks) with a bare Error::Dropped.
+	let result: Result<()> = async {
+		while let Some((_instant, bytes)) = socket.try_next().await? {
+			publisher.feed(bytes)?;
+		}
+		Ok(())
 	}
-	publisher.finish()?;
-	Ok(())
+	.await;
+
+	match &result {
+		// Clean end (the caller closed): flush the final groups.
+		Ok(()) => publisher.finish()?,
+		// The socket or demux failed: abort with the real cause so subscribers see it.
+		Err(err) => publisher.abort(moq_net::Error::Transport(err.to_string())),
+	}
+	result
 }
 
 /// Mux the requested broadcast back to MPEG-TS and stream it to the SRT caller
