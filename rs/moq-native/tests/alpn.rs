@@ -2,7 +2,7 @@
 //! successful MoQ handshake between a Quinn server and client.
 //!
 //! This covers both ALPN-based version negotiation (moq-lite-03/04,
-//! moqt-15/16/17/18) and SETUP-based version negotiation (moql, moq-00) used
+//! moqt-15/16/17/18/19) and SETUP-based version negotiation (moql, moq-00) used
 //! by older protocol versions like moq-transport-14 and moq-lite-01/02.
 //!
 //! It also tests WebTransport, which uses sub-protocols in the HTTP CONNECT
@@ -163,6 +163,12 @@ async fn version_moq_transport_18() {
 	connect_with_version("moq-transport-18").await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn version_moq_transport_19() {
+	connect_with_version("moq-transport-19").await;
+}
+
 // ── WebTransport: sub-protocol negotiation ──────────────────────────
 // Browser clients use WebTransport (h3 ALPN) and negotiate the MoQ
 // protocol version via sub-protocols in the HTTP CONNECT request.
@@ -219,4 +225,10 @@ async fn webtransport_moq_transport_17() {
 #[tokio::test]
 async fn webtransport_moq_transport_18() {
 	connect_with_webtransport(Some("moq-transport-18")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn webtransport_moq_transport_19() {
+	connect_with_webtransport(Some("moq-transport-19")).await;
 }

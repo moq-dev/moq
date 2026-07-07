@@ -448,8 +448,7 @@ can carry NVENC and use it only where the driver is present.
 
 ### Follow-ups
 
-- CI builds + tests NVENC normally on Linux (`cargo {check,test} -p moq-video
-  --all-features`); the dlopen feature means no GPU/driver and no special flags are
+- CI builds + tests NVENC normally on Linux (`cargo {check,test} -p moq-video --all-features`); the dlopen feature means no GPU/driver and no special flags are
   needed. moq-video stays excluded from the *workspace* `--all-features` runs only
   because its SDK crate has no macOS bindings (see `rs/justfile`'s `ci` recipe).
 - Still needed on real hardware: NVENC encode validation on a Linux+GPU box (pitch

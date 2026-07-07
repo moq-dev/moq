@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.1...moq-mux-v0.7.2) - 2026-07-05
+
+### Other
+
+- *(deps)* bump the cargo group with 9 updates ([#2098](https://github.com/moq-dev/moq/pull/2098))
+- [codex] fix AAC catalog description ([#2093](https://github.com/moq-dev/moq/pull/2093))
+
+## [0.7.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.0...moq-mux-v0.7.1) - 2026-07-04
+
+### Added
+
+- *(moq-rtmp,moq-mux)* enhanced-RTMP capsEx negotiation + multitrack ([#2068](https://github.com/moq-dev/moq/pull/2068))
+- *(moq-mux)* add FLAC support (catalog + mp4/mkv import/export) ([#1969](https://github.com/moq-dev/moq/pull/1969))
+- *(moq-mux,moq-gst)* MP3 support for MKV and GStreamer ([#1970](https://github.com/moq-dev/moq/pull/1970))
+- *(moq-mux)* add MP3 audio support for FLV/RTMP ([#1967](https://github.com/moq-dev/moq/pull/1967))
+- *(moq-mux)* Opus audio over MPEG-TS (import + export) ([#1965](https://github.com/moq-dev/moq/pull/1965))
+
+### Fixed
+
+- *(moq-mux)* treat H.264 recovery-point SEI as an open-GOP keyframe ([#2066](https://github.com/moq-dev/moq/pull/2066))
+
+### Other
+
+- [codex] fix FLV export DTS timestamps
+- [codex] fix timestamp elapsed arithmetic ([#2051](https://github.com/moq-dev/moq/pull/2051))
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+- [codex] fix fMP4 composition offsets ([#2015](https://github.com/moq-dev/moq/pull/2015))
+- Add track name to the consumer skip/reset logs ([#2012](https://github.com/moq-dev/moq/pull/2012))
+
 ## [0.7.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.6.0...moq-mux-v0.7.0) - 2026-06-30
 
 ### Added

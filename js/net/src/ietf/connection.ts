@@ -70,7 +70,7 @@ export class Connection implements Established {
 		this.#quic = quic;
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
-		if (version === Version.DRAFT_17 || version === Version.DRAFT_18) {
+		if (version >= Version.DRAFT_17) {
 			this.#session = new NativeSession(quic, version);
 			// v17+: control/setup stream only carries GoAway
 			void this.#runGoAway(control, version);

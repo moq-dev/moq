@@ -18,7 +18,7 @@ Media muxers and demuxers for converting existing media formats into MoQ broadca
 - **fMP4/CMAF** - Fragmented MP4 and Common Media Application Format
 - **MPEG-TS** - Transport stream (import and export)
 - **Matroska / WebM** - EBML container (import and export)
-- **FLV** - Flash Video / RTMP container (H.264 + AAC; import and export)
+- **FLV** - Flash Video / RTMP container (import and export). Legacy H.264 + AAC + MP3 plus the enhanced-RTMP FourCC codecs (HEVC, AV1, VP9, Opus, AC-3, E-AC-3), including enhanced-RTMP multitrack (several video/audio renditions in one stream)
 - **Annex B** - H.264/H.265 raw NAL unit streams
 
 This crate is designed for ingesting existing content into the MoQ ecosystem, converting from traditional formats into [hang](/lib/rs/crate/hang) broadcasts.

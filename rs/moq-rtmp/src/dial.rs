@@ -28,14 +28,14 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::rml::handshake::{Handshake, HandshakeProcessResult, PeerType};
+use crate::rml::sessions::{
+	ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
+};
+use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
 use moq_net::{broadcast, origin};
-use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
-use rml_rtmp::sessions::{
-	ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
-};
-use rml_rtmp::time::RtmpTimestamp;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -78,7 +78,7 @@ impl Client<TcpStream> {
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
 		let stream = TcpStream::connect(addr).await?;
-		stream.set_nodelay(true).ok();
+		crate::server::configure_socket(&stream, addr);
 		// Advertise a tcUrl derived from the dial target: several ingest servers
 		// (YouTube, Twitch, some nginx-rtmp configs) reject a connect without one.
 		Self::with_stream_config(stream, app, Some(format!("rtmp://{addr}/{app}"))).await

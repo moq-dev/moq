@@ -127,6 +127,25 @@ mod tests {
 		assert_eq!(decoded.timeout, 5000);
 	}
 
+	/// Draft-19 (#1623) removed the Request ID again: the body is just URI + timeout,
+	/// same bytes we already emit. Round-trip to lock that in.
+	#[test]
+	fn test_goaway_v19_timeout() {
+		let msg = GoAway {
+			new_session_uri: "moqt://relay.example/".into(),
+			timeout: 5000,
+		};
+
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, Version::Draft19).unwrap();
+
+		let mut bytes = bytes::Bytes::from(buf.to_vec());
+		let decoded: GoAway = GoAway::decode_msg(&mut bytes, Version::Draft19).unwrap();
+
+		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
+		assert_eq!(decoded.timeout, 5000);
+	}
+
 	/// Draft-18 added an optional trailing Request ID (#1559). A peer that emits
 	/// one must not break our decoder; we drain and discard it.
 	#[test]

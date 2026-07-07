@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.6.0"
+version = "0.6.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -19,7 +19,6 @@ tokio = ["dep:tokio"]
 [dependencies]
 aws-lc-rs = "1"
 base64 = "0.22"
-elliptic-curve = "0.13.8"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = "0.13.2"
 p384 = "0.13.1"

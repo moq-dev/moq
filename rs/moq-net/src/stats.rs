@@ -133,7 +133,7 @@
 
 use crate::{broadcast, origin, track};
 use std::{
-	collections::{BTreeMap, HashMap},
+	collections::{BTreeMap, HashMap, HashSet},
 	fmt,
 	sync::{
 		Arc, Mutex, Weak,
@@ -327,6 +327,14 @@ pub struct StatsConfig {
 	pub node: Option<PathOwned>,
 	/// How long the snapshot task waits between publishes. Default 1s.
 	pub interval: Duration,
+	/// How many leading broadcast-path segments to use as a grouping key.
+	///
+	/// Default `0` publishes one `<prefix>/node/<node>` broadcast carrying every
+	/// path. `1` publishes one broadcast per first segment at
+	/// `<prefix>/<group>/node/<node>`, and larger values include more leading
+	/// segments. Group broadcasts are announced while their group has live traffic;
+	/// at depth `0`, the single broadcast stays announced for the aggregator's life.
+	pub depth: usize,
 }
 
 impl StatsConfig {
@@ -339,6 +347,7 @@ impl StatsConfig {
 			prefix: PathOwned::from(".stats"),
 			node: None,
 			interval: Duration::from_secs(1),
+			depth: 0,
 		}
 	}
 
@@ -364,6 +373,12 @@ impl StatsConfig {
 	/// Set the node suffix (default none). An empty path is treated as unset.
 	pub fn with_node(mut self, node: impl Into<Option<PathOwned>>) -> Self {
 		self.node = node.into();
+		self
+	}
+
+	/// Set the grouping depth (default 0, a single broadcast). See [`Self::depth`].
+	pub fn with_depth(mut self, depth: usize) -> Self {
+		self.depth = depth;
 		self
 	}
 }
@@ -469,6 +484,7 @@ impl Stats {
 			prefix,
 			node,
 			interval,
+			depth,
 		} = config;
 		// An empty path after normalization is indistinguishable from "no node
 		// set"; collapse it so downstream code only sees a single representation.
@@ -482,8 +498,13 @@ impl Stats {
 				entries: Lock::default(),
 				sessions: Default::default(),
 			});
-			let advertised = advertised_path(&prefix, node.as_ref().map(|p| p.as_str()));
-			spawn(run_publisher(Arc::downgrade(&shared), advertised, interval));
+			spawn(run_publisher(
+				Arc::downgrade(&shared),
+				prefix.clone(),
+				node.clone(),
+				depth,
+				interval,
+			));
 			shared
 		});
 
@@ -1083,96 +1104,142 @@ fn flush_track<T: Serialize>(track: &mut track::Producer, frame: &T, last: &mut 
 	*last = json;
 }
 
-/// One broadcast path with a snapshot of its per-tier counters, cloned out of
-/// the shared map so the lock can be dropped before the change-detection pass.
-type EntrySnapshot = (PathOwned, Vec<(Tier, Arc<TierCounters>)>);
+/// One group stats publisher and its change-detection state.
+struct GroupPublisher {
+	_publish: origin::Publish,
+	broadcast: broadcast::Producer,
+	broadcast_tracks: HashMap<String, track::Producer>,
+	session_tracks: HashMap<String, track::Producer>,
+	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
+	broadcast_last: HashMap<String, Vec<u8>>,
+	session_local: HashMap<Tier, HashMap<PathOwned, SessionSlotState>>,
+	session_last: HashMap<String, Vec<u8>>,
+}
 
-/// One tier with a snapshot of its per-root session gauges, cloned out of the
-/// shared map for the same reason.
-type TierSessions = (Tier, Vec<(PathOwned, Arc<SessionCounters>)>);
+type EntryTiers = Vec<(Tier, Arc<TierCounters>)>;
+type EntrySnapshots = Vec<(PathOwned, EntryTiers)>;
+type SessionRoots = Vec<(PathOwned, Arc<SessionCounters>)>;
+type SessionSnapshots = Vec<(Tier, SessionRoots)>;
+type GroupedEntries<'a> = HashMap<PathOwned, Vec<(&'a PathOwned, &'a EntryTiers)>>;
+type GroupedSessions<'a> = HashMap<PathOwned, Vec<(&'a PathOwned, &'a Arc<SessionCounters>)>>;
 
-/// Create any track named by `frames` that doesn't exist yet, then write every
-/// existing track. Writing all tracks (not just the ones with data this tick)
-/// lets one that went idle emit `{}`; track-latest retains the most recent
-/// frame for late subscribers. New tier tracks appear lazily the first tick
-/// traffic routes to their label.
-fn flush_dynamic<T: Serialize>(
-	broadcast: &mut broadcast::Producer,
-	tracks: &mut HashMap<String, track::Producer>,
-	last: &mut HashMap<String, Vec<u8>>,
-	frames: &HashMap<String, BTreeMap<String, T>>,
-) {
-	for name in frames.keys() {
-		if !tracks.contains_key(name) {
-			match broadcast.create_track(name.as_str(), None) {
+impl GroupPublisher {
+	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
+		let mut broadcast = broadcast::Info::new().produce();
+		let mut broadcast_tracks = HashMap::new();
+		let mut session_tracks = HashMap::new();
+
+		for name in [PUBLISHER_TRACK, SUBSCRIBER_TRACK] {
+			match broadcast.create_track(name, None) {
 				Ok(track) => {
-					tracks.insert(name.clone(), track);
+					broadcast_tracks.insert(name.to_string(), track);
 				}
-				Err(err) => tracing::warn!(?err, name, "stats: failed to create track"),
+				Err(err) => {
+					tracing::warn!(?err, name, "stats: failed to create track");
+					return None;
+				}
 			}
 		}
+		match broadcast.create_track(SESSIONS_TRACK, None) {
+			Ok(track) => {
+				session_tracks.insert(SESSIONS_TRACK.to_string(), track);
+			}
+			Err(err) => {
+				tracing::warn!(?err, name = SESSIONS_TRACK, "stats: failed to create track");
+				return None;
+			}
+		}
+
+		let advertised = advertised_path(prefix, group, node);
+		let publish = match origin.publish_broadcast(&advertised, &broadcast) {
+			Ok(publish) => publish,
+			Err(err) => {
+				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
+				return None;
+			}
+		};
+		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
+
+		Some(Self {
+			_publish: publish,
+			broadcast,
+			broadcast_tracks,
+			session_tracks,
+			local: HashMap::new(),
+			broadcast_last: HashMap::new(),
+			session_local: HashMap::new(),
+			session_last: HashMap::new(),
+		})
 	}
 
-	let empty = BTreeMap::new();
-	for (name, track) in tracks.iter_mut() {
-		let frame = frames.get(name).unwrap_or(&empty);
-		let last = last.entry(name.clone()).or_default();
-		flush_track(track, frame, last, name);
+	fn flush_dynamic<T: Serialize>(
+		broadcast: &mut broadcast::Producer,
+		tracks: &mut HashMap<String, track::Producer>,
+		last: &mut HashMap<String, Vec<u8>>,
+		frames: &HashMap<String, BTreeMap<String, T>>,
+	) {
+		for name in frames.keys() {
+			if !tracks.contains_key(name) {
+				match broadcast.create_track(name.as_str(), None) {
+					Ok(track) => {
+						tracks.insert(name.clone(), track);
+					}
+					Err(err) => tracing::warn!(?err, name, "stats: failed to create track"),
+				}
+			}
+		}
+
+		let empty = BTreeMap::new();
+		for (name, track) in tracks.iter_mut() {
+			let frame = frames.get(name).unwrap_or(&empty);
+			let last = last.entry(name.clone()).or_default();
+			flush_track(track, frame, last, name);
+		}
 	}
 }
 
-/// Publishes the stats broadcast and writes a frame per tick. Spawned once by
+fn group_key(path: &str, depth: usize) -> PathOwned {
+	if depth == 0 {
+		return Path::empty().to_owned();
+	}
+
+	let mut seen = 0;
+	let mut end = path.len();
+	for (i, b) in path.bytes().enumerate() {
+		if b == b'/' {
+			seen += 1;
+			if seen == depth {
+				end = i;
+				break;
+			}
+		}
+	}
+	Path::new(&path[..end]).to_owned()
+}
+
+/// Publishes stats broadcasts and writes a frame per tick. Spawned once by
 /// [`Stats::new`] when an origin is set; runs until every [`Stats`] clone is
 /// dropped (`weak.upgrade()` returns `None`).
-async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval: Duration) {
-	let Some(shared) = weak.upgrade() else {
-		return;
-	};
+async fn run_publisher(
+	weak: Weak<StatsShared>,
+	prefix: PathOwned,
+	node: Option<PathOwned>,
+	depth: usize,
+	interval: Duration,
+) {
+	let node = node.as_ref().map(|p| p.as_str());
+	let mut groups: HashMap<PathOwned, GroupPublisher> = HashMap::new();
 
-	let mut broadcast = broadcast::Info::new().produce();
-
-	// Pre-create the default tier's tracks so they always exist and emit `{}`
-	// while idle. Named-tier tracks are created lazily (see `flush_dynamic`) the
-	// first tick traffic routes to that label.
-	let mut broadcast_tracks: HashMap<String, track::Producer> = HashMap::new();
-	let mut session_tracks: HashMap<String, track::Producer> = HashMap::new();
-	for name in [PUBLISHER_TRACK, SUBSCRIBER_TRACK] {
-		match broadcast.create_track(name, None) {
-			Ok(track) => {
-				broadcast_tracks.insert(name.to_string(), track);
-			}
-			Err(err) => {
-				tracing::warn!(?err, name, "stats: failed to create track");
-				return;
-			}
-		}
-	}
-	match broadcast.create_track(SESSIONS_TRACK, None) {
-		Ok(track) => {
-			session_tracks.insert(SESSIONS_TRACK.to_string(), track);
-		}
-		Err(err) => {
-			tracing::warn!(?err, name = SESSIONS_TRACK, "stats: failed to create track");
+	if depth == 0 {
+		let Some(shared) = weak.upgrade() else {
 			return;
-		}
+		};
+		let Some(group) = GroupPublisher::create(&shared.origin, &prefix, &Path::empty(), node) else {
+			return;
+		};
+		groups.insert(Path::empty().to_owned(), group);
+		drop(shared);
 	}
-
-	// Hold the announce guard for the task's lifetime; dropping it (on return)
-	// unannounces the stats broadcast.
-	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, &broadcast) else {
-		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
-		return;
-	};
-	drop(shared);
-
-	// Per-path snapshot state owned by this task, the diff source for change
-	// detection across ticks. Keyed by `(path, tier)` for broadcasts and
-	// `(tier, root)` for sessions, mirroring the shared maps. The `*_last` maps
-	// hold the last serialized payload per track name for idle-frame skipping.
-	let mut local: HashMap<PathOwned, HashMap<Tier, SideSlots>> = HashMap::new();
-	let mut broadcast_last: HashMap<String, Vec<u8>> = HashMap::new();
-	let mut session_local: HashMap<Tier, HashMap<PathOwned, SessionSlotState>> = HashMap::new();
-	let mut session_last: HashMap<String, Vec<u8>> = HashMap::new();
 
 	let mut ticker = web_async::time::interval(interval);
 	ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
@@ -1184,11 +1251,7 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			return;
 		};
 
-		// ---- per-broadcast tracks ----
-
-		// Clone the current entries and each entry's tier set so we can drop the
-		// locks before the change-detection pass.
-		let entries: Vec<EntrySnapshot> = {
+		let entries: EntrySnapshots = {
 			let map = shared.entries.lock();
 			map.iter()
 				.map(|(path, entry)| {
@@ -1204,34 +1267,108 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 				.collect()
 		};
 
-		// Track name -> { broadcast path -> Snapshot } for this tick.
-		let mut frames: HashMap<String, BTreeMap<String, Snapshot>> = HashMap::new();
+		let sessions: SessionSnapshots = {
+			let map = shared.sessions.lock();
+			map.iter()
+				.map(|(tier, roots)| {
+					let roots = roots.iter().map(|(root, c)| (root.clone(), c.clone())).collect();
+					(tier.clone(), roots)
+				})
+				.collect()
+		};
+
+		let mut entries_by_group: GroupedEntries<'_> = HashMap::new();
 		for (path, tiers) in &entries {
-			let path_local = local.entry(path.clone()).or_default();
-			for (tier, counters) in tiers {
-				let slots = path_local.entry(tier.clone()).or_default();
-				process_slot(&counters.publisher, &mut slots.publisher, |snap| {
-					frames
-						.entry(tier.track_name(PUBLISHER_TRACK))
-						.or_default()
-						.insert(path.as_str().to_string(), snap);
-				});
-				process_slot(&counters.subscriber, &mut slots.subscriber, |snap| {
-					frames
-						.entry(tier.track_name(SUBSCRIBER_TRACK))
-						.or_default()
-						.insert(path.as_str().to_string(), snap);
-				});
+			entries_by_group
+				.entry(group_key(path.as_str(), depth))
+				.or_default()
+				.push((path, tiers));
+		}
+
+		let mut sessions_by_group: GroupedSessions<'_> = HashMap::new();
+		for (_tier, roots) in &sessions {
+			for (root, counters) in roots {
+				sessions_by_group
+					.entry(group_key(root.as_str(), depth))
+					.or_default()
+					.push((root, counters));
 			}
 		}
-		drop(entries);
 
-		// GC global entries and their tiers, then prune local state to match.
-		// `strong_count(entry) > 1` keeps an entry a builder is mid-creating (it
-		// holds a clone) even before its first tier lands, so a later bump can't
-		// be lost on an orphaned `Arc`. Within a kept entry, an idle tier
-		// (counters all equal, no guard holding the `Arc`) is dropped; its final
-		// close snapshot was already emitted above.
+		let mut active: HashSet<PathOwned> = HashSet::new();
+		active.extend(entries_by_group.keys().cloned());
+		active.extend(sessions_by_group.keys().cloned());
+		if depth == 0 {
+			active.insert(Path::empty().to_owned());
+		}
+
+		for group in &active {
+			if !groups.contains_key(group) {
+				let Some(publisher) = GroupPublisher::create(&shared.origin, &prefix, group, node) else {
+					continue;
+				};
+				groups.insert(group.clone(), publisher);
+			}
+			let publisher = groups.get_mut(group).expect("just inserted");
+
+			let mut frames: HashMap<String, BTreeMap<String, Snapshot>> = HashMap::new();
+			if let Some(group_entries) = entries_by_group.get(group) {
+				for &(path, tiers) in group_entries {
+					let path_local = publisher.local.entry(path.clone()).or_default();
+					for (tier, counters) in tiers {
+						let slots = path_local.entry(tier.clone()).or_default();
+						process_slot(&counters.publisher, &mut slots.publisher, |snap| {
+							frames
+								.entry(tier.track_name(PUBLISHER_TRACK))
+								.or_default()
+								.insert(path.as_str().to_string(), snap);
+						});
+						process_slot(&counters.subscriber, &mut slots.subscriber, |snap| {
+							frames
+								.entry(tier.track_name(SUBSCRIBER_TRACK))
+								.or_default()
+								.insert(path.as_str().to_string(), snap);
+						});
+					}
+				}
+			}
+
+			let mut session_frames: HashMap<String, BTreeMap<String, SessionSnapshot>> = HashMap::new();
+			for (tier, roots) in &sessions {
+				for (root, counters) in roots {
+					if group_key(root.as_str(), depth) != *group {
+						continue;
+					}
+					let tier_local = publisher.session_local.entry(tier.clone()).or_default();
+					let state = tier_local.entry(root.clone()).or_default();
+					process_session_slot(counters, state, |snap| {
+						session_frames
+							.entry(tier.track_name(SESSIONS_TRACK))
+							.or_default()
+							.insert(root.as_str().to_string(), snap);
+					});
+				}
+			}
+
+			GroupPublisher::flush_dynamic(
+				&mut publisher.broadcast,
+				&mut publisher.broadcast_tracks,
+				&mut publisher.broadcast_last,
+				&frames,
+			);
+			GroupPublisher::flush_dynamic(
+				&mut publisher.broadcast,
+				&mut publisher.session_tracks,
+				&mut publisher.session_last,
+				&session_frames,
+			);
+		}
+
+		drop(entries_by_group);
+		drop(sessions_by_group);
+		drop(entries);
+		drop(sessions);
+
 		{
 			let mut map = shared.entries.lock();
 			map.retain(|_, entry| {
@@ -1242,63 +1379,36 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 				tiers.retain(|_, counters| Arc::strong_count(counters) > 1);
 				!tiers.is_empty()
 			});
-			local.retain(|path, tier_states| match map.get(path) {
-				Some(entry) => {
-					let tiers = entry.tiers.lock().expect("stats tiers poisoned");
-					tier_states.retain(|tier, _| tiers.contains_key(tier));
-					true
-				}
-				None => false,
-			});
-		}
-
-		// ---- per-tier session tracks ----
-
-		let sessions: Vec<TierSessions> = {
-			let map = shared.sessions.lock();
-			map.iter()
-				.map(|(tier, roots)| {
-					let roots = roots.iter().map(|(root, c)| (root.clone(), c.clone())).collect();
-					(tier.clone(), roots)
-				})
-				.collect()
-		};
-
-		let mut session_frames: HashMap<String, BTreeMap<String, SessionSnapshot>> = HashMap::new();
-		for (tier, roots) in &sessions {
-			let tier_local = session_local.entry(tier.clone()).or_default();
-			for (root, counters) in roots {
-				let state = tier_local.entry(root.clone()).or_default();
-				process_session_slot(counters, state, |snap| {
-					session_frames
-						.entry(tier.track_name(SESSIONS_TRACK))
-						.or_default()
-						.insert(root.as_str().to_string(), snap);
+			for publisher in groups.values_mut() {
+				publisher.local.retain(|path, tier_states| match map.get(path) {
+					Some(entry) => {
+						let tiers = entry.tiers.lock().expect("stats tiers poisoned");
+						tier_states.retain(|tier, _| tiers.contains_key(tier));
+						true
+					}
+					None => false,
 				});
 			}
 		}
-		drop(sessions);
 
-		// GC session roots whose last guard dropped, then tiers with no roots
-		// left, then prune local state to match.
 		{
 			let mut map = shared.sessions.lock();
 			for roots in map.values_mut() {
 				roots.retain(|_, counters| Arc::strong_count(counters) > 1);
 			}
 			map.retain(|_, roots| !roots.is_empty());
-			session_local.retain(|tier, states| match map.get(tier) {
-				Some(roots) => {
-					states.retain(|root, _| roots.contains_key(root));
-					true
-				}
-				None => false,
-			});
+			for publisher in groups.values_mut() {
+				publisher.session_local.retain(|tier, states| match map.get(tier) {
+					Some(roots) => {
+						states.retain(|root, _| roots.contains_key(root));
+						true
+					}
+					None => false,
+				});
+			}
 		}
 
-		// ---- flush ----
-		flush_dynamic(&mut broadcast, &mut broadcast_tracks, &mut broadcast_last, &frames);
-		flush_dynamic(&mut broadcast, &mut session_tracks, &mut session_last, &session_frames);
+		groups.retain(|group, _| active.contains(group));
 
 		drop(shared);
 	}
@@ -1332,10 +1442,16 @@ struct SessionSnapshot {
 	sessions_closed: u64,
 }
 
-fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
+fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
+	// `<prefix>/<group>/node/<node>`. The group segment is empty at depth 0.
 	// The fixed `node` category leaves room for sibling categories (e.g.
-	// `<top-prefix>/cluster` for relay-mesh stats) under the same prefix.
-	let mut out = format!("{}/node", prefix.as_str());
+	// `<top-prefix>/<group>/cluster` for relay-mesh stats) under the same prefix.
+	let mut out = prefix.as_str().to_string();
+	if !group.is_empty() {
+		out.push('/');
+		out.push_str(group.as_str());
+	}
+	out.push_str("/node");
 	if let Some(node) = node {
 		out.push('/');
 		out.push_str(node);
@@ -1398,12 +1514,34 @@ mod tests {
 	#[test]
 	fn advertised_path_with_and_without_node() {
 		let prefix = Path::new(".stats");
-		assert_eq!(advertised_path(&prefix, Some("sjc")).as_str(), ".stats/node/sjc");
-		assert_eq!(advertised_path(&prefix, Some("sjc/1")).as_str(), ".stats/node/sjc/1");
-		assert_eq!(advertised_path(&prefix, None).as_str(), ".stats/node");
+		let empty = Path::empty();
+		assert_eq!(
+			advertised_path(&prefix, &empty, Some("sjc")).as_str(),
+			".stats/node/sjc"
+		);
+		assert_eq!(
+			advertised_path(&prefix, &empty, Some("sjc/1")).as_str(),
+			".stats/node/sjc/1"
+		);
+		assert_eq!(advertised_path(&prefix, &empty, None).as_str(), ".stats/node");
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("acme"), Some("sjc")).as_str(),
+			".stats/acme/node/sjc"
+		);
 
 		let prefix = Path::new("metrics");
-		assert_eq!(advertised_path(&prefix, Some("lon")).as_str(), "metrics/node/lon");
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("demo/room"), Some("lon")).as_str(),
+			"metrics/demo/room/node/lon"
+		);
+	}
+
+	#[test]
+	fn group_key_uses_leading_segments() {
+		assert_eq!(group_key("acme/room/cam", 0), Path::empty().to_owned());
+		assert_eq!(group_key("acme/room/cam", 1), Path::new("acme").to_owned());
+		assert_eq!(group_key("acme/room/cam", 2), Path::new("acme/room").to_owned());
+		assert_eq!(group_key("acme/room", 3), Path::new("acme/room").to_owned());
 	}
 
 	/// The advertised path normalizes a messy node suffix and drops an

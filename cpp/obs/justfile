@@ -10,7 +10,6 @@
 # libmoq is built from the in-tree crate (rs/libmoq) via cargo. MOQ_LOCAL points
 # CMake at the repo root by default, so there's no prebuilt release to download.
 
-set unstable
 set quiet
 
 # List all of the available commands.

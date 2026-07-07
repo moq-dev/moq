@@ -605,7 +605,7 @@ async fn internal_unix_round_trip() {
 /// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
 fn path_versions() -> Vec<moq_net::Version> {
 	[
-		"moq-lite-05-wip",
+		"moq-lite-05",
 		"moq-transport-14",
 		"moq-transport-15",
 		"moq-transport-16",

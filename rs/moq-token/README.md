@@ -9,20 +9,20 @@ For comprehensive documentation including token structure, authorization rules, 
 
 ```bash
 # generate secret key
-moq-token-cli --key key.jwk generate
+moq-token generate --out key.jwk
 # sign a new JWT
-moq-token-cli --key key.jwk sign --root demo --publish bbb > token.jwt
+moq-token sign --key key.jwk --root demo --publish bbb > token.jwt
 # verify the JWT
-moq-token-cli --key key.jwk verify < token.jwt
+moq-token verify --key key.jwk < token.jwt
 ```
 
 ## Quick Usage (asymmetric keys)
 
 ```bash
 # generate private and public keys
-moq-token-cli --key private.jwk generate --algorithm RS256 --public public.jwk
+moq-token generate --algorithm RS256 --out private.jwk --public public.jwk
 # sign a new JWT (using private key)
-moq-token-cli --key private.jwk sign --root demo --publish bbb > token.jwt
+moq-token sign --key private.jwk --root demo --publish bbb > token.jwt
 # verify the JWT (using public key)
-moq-token-cli --key public.jwk verify < token.jwt
+moq-token verify --key public.jwk < token.jwt
 ```

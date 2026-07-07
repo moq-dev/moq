@@ -55,13 +55,16 @@
 //!   Useful when an existing TLS terminator, proxy, or non-TCP transport already
 //!   owns the socket.
 //!
-//! Pure Rust: the RTMP handshake, chunk codec, and session state machine come
-//! from [`rml_rtmp`], with no librtmp or ffmpeg dependency.
+//! Pure Rust: the RTMP handshake, chunk codec, and session state machine live in
+//! the vendored `rml` module (a fork of `rml_rtmp`), with no librtmp or ffmpeg
+//! dependency.
 
 mod dial;
 mod error;
 mod flv;
 mod listen;
+// Vendored fork of rml_rtmp; see the module docs.
+mod rml;
 mod server;
 
 pub use dial::Client;

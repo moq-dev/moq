@@ -83,7 +83,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// `Connecting::ready` resolve immediately. An empty subscribe origin also resolves
 	// immediately because the subscriber arms with a prefix count of zero.
 	let (connecting_producer, connecting) = Connecting::new();
-	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05Wip) {
+	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05) {
 		Some(connecting_producer)
 	} else {
 		None

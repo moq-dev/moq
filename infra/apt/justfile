@@ -1,5 +1,4 @@
 set fallback
-set unstable
 
 # Deploy the apt.moq.dev worker.
 deploy:

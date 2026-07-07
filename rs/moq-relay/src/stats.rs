@@ -64,6 +64,15 @@ pub struct StatsConfig {
 	/// path. Single-relay deployments can leave this unset.
 	#[arg(long = "stats-node", env = "MOQ_STATS_NODE")]
 	pub node: Option<String>,
+
+	/// Number of leading broadcast-path segments to bucket stats by, one
+	/// broadcast per bucket at `<prefix>/<group>/node/<node>`. Defaults to 0: a
+	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
+	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
+	/// announce-scope to just that group rather than slurping every node's full
+	/// stats. See [`moq_net::StatsConfig::depth`].
+	#[arg(long = "stats-depth", env = "MOQ_STATS_DEPTH")]
+	pub depth: Option<usize>,
 }
 
 impl StatsConfig {
@@ -78,13 +87,15 @@ impl StatsConfig {
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
 		let node = self.node.clone().map(PathOwned::from);
-		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, "stats publishing enabled");
+		let depth = self.depth.unwrap_or(0);
+		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, "stats publishing enabled");
 		// Fully qualified to disambiguate from this module's clap-derived StatsConfig.
 		let config = moq_net::StatsConfig::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
-			.with_node(node);
+			.with_node(node)
+			.with_depth(depth);
 		Stats::new(config)
 	}
 }

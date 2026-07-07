@@ -133,9 +133,9 @@ ffmpeg -i input.mp4 -f mpegts - | \
 
 [Learn more](/bin/cli)
 
-### moq-token-cli
+### moq-token CLI
 
-Command-line tool for JWT token management (binary name: `moq-token-cli`).
+Command-line tool for JWT token management (binary name: `moq-token`).
 
 **Installation:**
 
@@ -147,10 +147,10 @@ cargo install moq-token-cli
 
 ```bash
 # Generate a key
-moq-token-cli generate --out root.jwk
+moq-token generate --out root.jwk
 
 # Sign a token
-moq-token-cli sign --key root.jwk \
+moq-token sign --key root.jwk \
   --root "rooms/123" \
   --publish "alice" \
   --expires 1735689600

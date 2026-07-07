@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.9...moq-gst-v0.2.10) - 2026-07-04
+
+### Added
+
+- *(moq-mux,moq-gst)* MP3 support for MKV and GStreamer ([#1970](https://github.com/moq-dev/moq/pull/1970))
+
 ## [0.2.9](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.8...moq-gst-v0.2.9) - 2026-06-30
 
 ### Other

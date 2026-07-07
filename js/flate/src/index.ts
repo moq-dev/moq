@@ -86,7 +86,7 @@ export class Encoder {
 		if (payload.length === 0) return payload;
 		this.#chunks = [];
 		this.#total = 0;
-		this.#deflate.push(payload, pako.constants.Z_SYNC_FLUSH);
+		this.#deflate.push(payload, pako.Z_SYNC_FLUSH);
 
 		// Copy into one tight owned buffer, dropping the trailing sync-flush marker. We can't return
 		// pako's chunk views: a caller retains the reference and pako backs each chunk with a ~16 KB
@@ -155,7 +155,7 @@ export class Decoder {
 		// Feed the slice then the re-appended sync-flush marker as two pushes, so no combined buffer is
 		// allocated. The marker delimits the frame and flushes its last bytes out of the inflate buffer.
 		this.#inflate.push(slice, false);
-		this.#inflate.push(SYNC_FLUSH_TAIL, pako.constants.Z_SYNC_FLUSH);
+		this.#inflate.push(SYNC_FLUSH_TAIL, pako.Z_SYNC_FLUSH);
 		if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
 		if (this.#tooLarge) throw new Error(`decompressed frame exceeded ${this.#maxFrameSize} bytes`);
 

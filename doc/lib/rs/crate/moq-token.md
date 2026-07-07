@@ -35,23 +35,23 @@ moq-token = "0.1"
 cargo install moq-token-cli
 ```
 
-The binary is named `moq-token-cli`.
+The binary is named `moq-token`.
 
 #### Using Nix
 
 ```bash
 # Run directly
-nix run github:moq-dev/moq#moq-token-cli
+nix run github:moq-dev/moq#moq-token
 
 # Or build and find the binary in ./result/bin/
-nix build github:moq-dev/moq#moq-token-cli
+nix build github:moq-dev/moq#moq-token
 ```
 
 #### Using Docker
 
 ```bash
 docker pull moqdev/moq-token-cli
-docker run -v "$(pwd):/app" -w /app moqdev/moq-token-cli generate --out root.jwk
+docker run -v "$(pwd):/app" -w /app moqdev/moq-token-cli:latest generate --out root.jwk
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-token-cli).
@@ -62,19 +62,19 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ```bash
 # Symmetric key (HMAC)
-moq-token-cli generate --out root.jwk --algorithm HS256
+moq-token generate --out root.jwk --algorithm HS256
 
 # Asymmetric key pair (RSA)
-moq-token-cli generate --algorithm RS256 --out private.jwk --public public.jwk
+moq-token generate --algorithm RS256 --out private.jwk --public public.jwk
 
 # Asymmetric key pair (EdDSA)
-moq-token-cli generate --algorithm EdDSA --out private.jwk --public public.jwk
+moq-token generate --algorithm EdDSA --out private.jwk --public public.jwk
 ```
 
 ### Sign a Token
 
 ```bash
-moq-token-cli sign --key root.jwk \
+moq-token sign --key root.jwk \
   --root "rooms/123" \
   --publish "alice" \
   --subscribe "" \
@@ -84,7 +84,7 @@ moq-token-cli sign --key root.jwk \
 ### Verify a Token
 
 ```bash
-moq-token-cli verify --key root.jwk < alice.jwt
+moq-token verify --key root.jwk < alice.jwt
 ```
 
 ## Supported Algorithms

@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Consume,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, Consume,
 	Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
@@ -90,6 +90,29 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
+			Some(ALPN_19) => {
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft19))
+					.ok_or(Error::Version)?;
+
+				// Draft-17+: SETUP is exchanged in the background by the session.
+				ietf::start(
+					session.clone(),
+					None,
+					None,
+					true,
+					self.publish.clone(),
+					self.subscribe.clone(),
+					self.stats.clone(),
+					ietf::Version::Draft19,
+					self.setup_path.clone(),
+					None,
+				)?;
+
+				tracing::debug!(version = ?v, "connected");
+				return Ok(Session::new(session, v, None));
+			}
 			Some(ALPN_18) => {
 				let v = self
 					.versions
@@ -159,9 +182,9 @@ impl Client {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(ALPN_LITE_05_WIP) => {
+			Some(ALPN_LITE_05) => {
 				self.versions
-					.select(Version::Lite(lite::Version::Lite05Wip))
+					.select(Version::Lite(lite::Version::Lite05))
 					.ok_or(Error::Version)?;
 
 				// Advertise our capabilities (we report send bitrate; we don't pad) plus
@@ -177,7 +200,7 @@ impl Client {
 					self.publish.clone(),
 					self.subscribe.clone(),
 					self.stats.clone(),
-					lite::Version::Lite05Wip,
+					lite::Version::Lite05,
 					our_setup,
 					None,
 				)?;
@@ -187,7 +210,7 @@ impl Client {
 				// immediately instead of racing announcement gossip.
 				connecting.ready().await;
 
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
+				return Ok(Session::new(session, lite::Version::Lite05.into(), recv_bw));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions

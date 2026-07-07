@@ -119,7 +119,6 @@ pub(crate) struct QuinnClient {
 	pub transport: Arc<quinn::TransportConfig>,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
-	pub versions: moq_net::Versions,
 }
 
 impl QuinnClient {
@@ -150,11 +149,15 @@ impl QuinnClient {
 			quic,
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
-			versions: config.versions(),
 		})
 	}
 
-	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> Result<web_transport_quinn::Session> {
+	pub async fn connect(
+		&self,
+		tls: &rustls::ClientConfig,
+		url: Url,
+		versions: &moq_net::Versions,
+	) -> Result<web_transport_quinn::Session> {
 		let mut url = url;
 		let mut config = tls.clone();
 
@@ -207,12 +210,7 @@ impl QuinnClient {
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => self
-				.versions
-				.alpns()
-				.iter()
-				.map(|alpn| alpn.as_bytes().to_vec())
-				.collect(),
+			"moqt" | "moql" => versions.alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => return Err(Error::InvalidScheme),
 		};
 
@@ -229,7 +227,7 @@ impl QuinnClient {
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
-		for alpn in self.versions.alpns() {
+		for alpn in versions.alpns() {
 			request = request.with_protocol(alpn.to_string());
 		}
 

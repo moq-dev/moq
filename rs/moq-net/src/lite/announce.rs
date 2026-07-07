@@ -265,7 +265,7 @@ mod tests {
 	// subscriber turns it into a restart for an already-announced path).
 	#[test]
 	fn decodes_explicit_restart_status_as_active_on_lite05() {
-		let version = Version::Lite05Wip;
+		let version = Version::Lite05;
 		let mut slice = encode_forged_restart(version);
 		let decoded = AnnounceBroadcast::decode(&mut slice, version).expect("explicit restart must decode");
 		assert!(!slice.has_remaining(), "trailing bytes after decode");
@@ -291,9 +291,9 @@ mod tests {
 
 	fn round_trip(msg: &AnnounceOk) -> AnnounceOk {
 		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		msg.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let got = AnnounceOk::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let got = AnnounceOk::decode(&mut slice, Version::Lite05).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		got
 	}
@@ -343,13 +343,13 @@ mod tests {
 			suffix: Path::new("room/cam"),
 			hops: hops.clone(),
 		};
-		assert_eq!(broadcast_round_trip(&msg, Version::Lite05Wip), msg);
+		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
 		let ended = AnnounceBroadcast::Ended {
 			suffix: Path::new("room/cam"),
 			hops: OriginList::new(),
 		};
-		assert_eq!(broadcast_round_trip(&ended, Version::Lite05Wip), ended);
+		assert_eq!(broadcast_round_trip(&ended, Version::Lite05), ended);
 	}
 
 	#[test]
@@ -373,7 +373,7 @@ mod tests {
 			origin: Origin::new(1).unwrap(),
 			active: 0,
 		}
-		.encode(&mut buf, Version::Lite05Wip)
+		.encode(&mut buf, Version::Lite05)
 		.unwrap();
 		// origin id 1 sits right after the size prefix; rewrite it to 0.
 		let bytes = &buf[..];
@@ -381,7 +381,7 @@ mod tests {
 		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)
 		patched[1] = 0x00;
 		let mut slice = &patched[..];
-		let got = AnnounceOk::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let got = AnnounceOk::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(got.origin.id(), 0);
 		assert_eq!(got.active, 0);
 	}

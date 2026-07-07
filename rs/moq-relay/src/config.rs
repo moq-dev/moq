@@ -103,10 +103,10 @@ mod tests {
 
 	use super::*;
 
-	/// Serializes tests that touch `MOQ_STATS_ENABLED`. Cargo runs tests in
-	/// parallel within a single binary, and `env::set_var` / `remove_var` are
-	/// not thread-safe with concurrent env reads (which is why they're `unsafe`
-	/// as of Rust 1.80). Any test that mutates this env must hold this lock.
+	/// Serializes tests that touch `MOQ_STATS_*`. Cargo runs tests in parallel
+	/// within a single binary, and `env::set_var` / `remove_var` are not
+	/// thread-safe with concurrent env reads (which is why they're `unsafe` as
+	/// of Rust 1.80). Any test that mutates this env must hold this lock.
 	static STATS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 	/// Regression test for the clap+TOML interaction documented on
@@ -120,18 +120,20 @@ mod tests {
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
 		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// clap reads MOQ_STATS_ENABLED via `env = ...`. If the host environment
-		// has it set, the test would pass for the wrong reason. Clear it for
-		// the duration of this test (lock above serializes with sibling tests).
+		// clap reads MOQ_STATS_* via `env = ...`. If the host environment has
+		// one set, the test would pass for the wrong reason. Clear them for the
+		// duration of this test (lock above serializes with sibling tests).
 		// SAFETY: STATS_ENV_LOCK ensures no other test in this binary touches
-		// this env var concurrently.
+		// these env vars concurrently.
 		unsafe { std::env::remove_var("MOQ_STATS_ENABLED") };
+		unsafe { std::env::remove_var("MOQ_STATS_DEPTH") };
 
 		let toml = r#"
 [stats]
 enabled = true
 interval = 5
 node = "localhost"
+depth = 2
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -153,6 +155,7 @@ node = "localhost"
 		// exactly this reason.
 		assert_eq!(config.stats.interval, Some(5));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
+		assert_eq!(config.stats.depth, Some(2));
 	}
 
 	/// Serializes tests that touch `MOQ_SERVER_PREFERRED_V4` / `_V6`. Same

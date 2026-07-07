@@ -33,9 +33,8 @@ just wasm
 ```
 
 That compiles `rs/moq-wasm` for `wasm32-unknown-unknown`, runs `wasm-bindgen`
-(web target) into `dist/`, and shrinks the binary with `wasm-opt`. The required
-toolchain (wasm target, `wasm-bindgen-cli`, `binaryen`) is provided by the Nix
-dev shell.
+(web target) into `dist/`. The required toolchain (wasm target and
+`wasm-bindgen-cli`) is provided by the Nix dev shell.
 
 ## Status
 

@@ -182,13 +182,16 @@ pub(crate) async fn connect(
 
 /// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::*::with_protocols`.
 ///
-/// moq-transport-18 requires qmux-01, so we never offer `qmux-00.moqt-18` (an
-/// illegal pair). This mirrors the policy in `js/net`'s `connect.ts`. Every other
-/// ALPN returns `&[]`, which qmux expands to every draft it knows about.
+/// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
+/// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
+/// `&[]`, which qmux expands to every draft it knows about.
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
+
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
-	match alpn {
-		"moqt-18" => &[qmux::Version::QMux01],
-		_ => &[],
+	if QMUX01_ONLY_ALPNS.contains(&alpn) {
+		&[qmux::Version::QMux01]
+	} else {
+		&[]
 	}
 }
 
@@ -248,18 +251,23 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn moqt_18_pins_to_qmux01() {
-		// The "moqt-18" literal in `qmux_versions_for` must stay the IETF
-		// draft-18 ALPN; otherwise the pin silently stops matching.
+	fn moqt_18_and_19_pin_to_qmux01() {
+		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
+		// otherwise the pin silently stops matching.
 		assert_eq!(
-			moq_net::Version::from_alpn("moqt-18").map(|v| v.code()),
-			Some(0xff000012)
+			QMUX01_ONLY_ALPNS
+				.iter()
+				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
+				.collect::<Vec<_>>(),
+			vec![Some(0xff000012), Some(0xff000013)]
 		);
-		assert_eq!(qmux_versions_for("moqt-18"), &[qmux::Version::QMux01]);
+		for &alpn in QMUX01_ONLY_ALPNS {
+			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);
+		}
 
 		// Everything else stays unrestricted (qmux expands `&[]` to all drafts).
 		for &alpn in moq_net::ALPNS {
-			if alpn != "moqt-18" {
+			if !QMUX01_ONLY_ALPNS.contains(&alpn) {
 				assert!(qmux_versions_for(alpn).is_empty(), "{alpn} should not be pinned");
 			}
 		}

@@ -1017,28 +1017,36 @@ impl Auth {
 		// Non-mTLS connections default to the unprefixed tier; the API may bucket
 		// specific ones (e.g. a first-party dashboard token to `internal`).
 		let tier = resp.tier().unwrap_or_default();
-		// Absent alias -> use the request path unchanged.
-		let root = resp.alias.unwrap_or_else(|| params.path.clone());
+		// The API resolves the connection path's leading segment (a vanity name or
+		// pid) to the project's canonical pid. Broadcasts anchor here on the
+		// backbone so they survive vanity renames. Absent alias (unknown project)
+		// -> route to the request path unchanged.
+		let alias = resp.alias.unwrap_or_else(|| params.path.clone());
 
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let key = resp.key.ok_or(AuthError::KeyNotFound)?;
+			// claims.root is the token's own root (a vanity name OR a pid); it is
+			// checked against the ORIGINAL connection path below, not the alias, so
+			// a vanity token matches a vanity URL and a pid token matches a pid URL.
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
 		} else {
 			let public = resp.public.unwrap_or_default();
 			if public.subscribe.is_empty() && public.publish.is_empty() {
 				return Err(AuthError::ExpectedToken);
 			}
-			// Public prefixes are relative to the connection root, so anchor the
-			// claims there (mirrors the standalone --auth-public-api path).
+			// Anonymous access: anchor the public claims at the connection path so
+			// the overlap check below is a no-op; routing still lands on the alias.
 			moq_token::Claims {
-				root: root.clone(),
+				root: params.path.clone(),
 				subscribe: public.subscribe,
 				publish: public.publish,
 				..Default::default()
 			}
 		};
 
-		let mut token = Self::finalize(&root, claims)?;
+		// Check the token root against the ORIGINAL connection path (vanity or
+		// pid); anchor the resulting scope on the alias (canonical pid).
+		let mut token = Self::finalize(&params.path, &alias, claims)?;
 		token.tier = tier;
 		Ok(token)
 	}
@@ -1071,7 +1079,7 @@ impl Auth {
 			// Verify the token with the resolved key
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
 		} else if !self.public.is_empty() {
-			// No JWT — use public access (static prefixes + optional API).
+			// No JWT. Use public access (static prefixes + optional API).
 			let root = Path::new(&params.path);
 
 			// Use static config if any static prefix overlaps the request path in either
@@ -1085,7 +1093,7 @@ impl Auth {
 					..Default::default()
 				}
 			} else if let Some((base, client)) = &self.public.api {
-				// No static overlap — fetch from API. Response paths are relative to the namespace.
+				// No static overlap. Response paths are relative to the namespace.
 				let namespace = root.to_string();
 				let url = base.join(&namespace)?;
 				let response = Self::fetch_public_response(client, &url).await?;
@@ -1102,21 +1110,39 @@ impl Auth {
 			return Err(AuthError::ExpectedToken);
 		};
 
-		Self::finalize(&params.path, claims)
+		Self::finalize(&params.path, &params.path, claims)
 	}
 
-	/// Reduce verified `claims` against the connection `root_str` into an
-	/// [`AuthToken`]. The connection path and the token root must overlap; the
-	/// permission prefixes are re-based onto the connection root and any that
-	/// fall outside it are dropped. Shared by the standalone and `--auth-api`
-	/// paths.
-	fn finalize(root_str: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
-		let root = Path::new(root_str);
+	/// Reduce verified `claims` into an [`AuthToken`].
+	///
+	/// The token root must overlap `check_root` (the ORIGINAL connection path the
+	/// client dialed, e.g. a vanity name), and the permission prefixes are re-based
+	/// against that overlap; a token whose root sits outside the path is rejected.
+	/// The resulting `AuthToken.root` is anchored at `route_root` (the `--auth-api`
+	/// alias, i.e. the canonical pid), so broadcasts live under the stable pid on
+	/// the backbone and survive vanity-name changes. `route_root` is `check_root`
+	/// with only its leading segment swapped to the pid (same depth), so the rebased
+	/// relative prefixes anchor unchanged. The standalone path passes the same value
+	/// for both (no alias). Shared by the standalone and `--auth-api` paths.
+	fn finalize(check_root: &str, route_root: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
+		let root = Path::new(check_root);
+		let route_root = Path::new(route_root);
 		let claims_root = Path::new(&claims.root);
+		let depth = |path: &Path<'_>| {
+			if path.is_empty() {
+				0
+			} else {
+				path.as_str().split('/').count()
+			}
+		};
+
+		if depth(&root) != depth(&route_root) {
+			return Err(AuthError::IncorrectRoot);
+		}
 
 		// The URL path and the token root must overlap:
-		// - URL extends root (e.g. URL="/demo/room", root="demo") → suffix narrows permissions
-		// - URL is parent of root (e.g. URL="/", root="demo") → prefix widens permission paths
+		// - URL extends root (e.g. URL="/demo/room", root="demo") so suffix narrows permissions
+		// - URL is parent of root (e.g. URL="/", root="demo") so prefix widens permission paths
 		let (suffix, prefix) = if let Some(suffix) = root.strip_prefix(&claims_root) {
 			(suffix, Path::new(""))
 		} else if let Some(prefix) = claims_root.strip_prefix(&root) {
@@ -1153,7 +1179,7 @@ impl Auth {
 		}
 
 		Ok(AuthToken {
-			root: root.to_owned(),
+			root: route_root.to_owned(),
 			subscribe,
 			publish,
 			tier: Tier::default(),
@@ -2996,8 +3022,10 @@ api = "https://api.example.com/access"
 
 	#[tokio::test]
 	async fn auth_api_jwt_scopes_to_alias() -> anyhow::Result<()> {
-		// JWT connection: the unified call returns the verifying key plus the
-		// full resolved alias; the token scopes to that alias root.
+		// JWT connection: the token root is the vanity path the client dialed
+		// ("demo/room"); the API resolves that to the canonical alias
+		// ("x7k2qp/room"), and the verified token anchors on the alias so the
+		// backbone uses the stable pid.
 		let server = MockServer::start().await;
 		let key = create_test_key_with_kid("test-key");
 
@@ -3014,7 +3042,7 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 
 		let claims = moq_token::Claims {
-			root: "x7k2qp/room".to_string(),
+			root: "demo/room".to_string(),
 			subscribe: vec!["".to_string()],
 			..Default::default()
 		};
@@ -3033,8 +3061,9 @@ api = "https://api.example.com/access"
 
 	#[tokio::test]
 	async fn auth_api_full_root_passthrough() -> anyhow::Result<()> {
-		// The server returns the FULL resolved root (deep path preserved); the
-		// relay uses it verbatim — no client-side first-segment rewriting.
+		// A vanity parent token ("demo") connecting to a deep path
+		// ("demo/room/cam"): the token root overlaps the connection path, and the
+		// verified root is anchored on the FULL resolved alias ("x7k2qp/room/cam").
 		let server = MockServer::start().await;
 		let key = create_test_key_with_kid("test-key");
 
@@ -3050,7 +3079,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let claims = moq_token::Claims {
-			root: "x7k2qp".to_string(),
+			root: "demo".to_string(),
 			subscribe: vec!["".to_string()],
 			..Default::default()
 		};
@@ -3063,6 +3092,48 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 		assert_eq!(verified.root, "x7k2qp/room/cam".as_path());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_jwt_vanity_root_scopes_to_pid() -> anyhow::Result<()> {
+		// Regression for the dashboard flow: a token minted with the vanity
+		// project name as its root ("kixelated") connecting to the vanity
+		// subdomain path. The API aliases the name to the pid ("uwwdyw61"); the
+		// token verifies against the vanity path and the scope anchors on the pid,
+		// so publishing "hello-world" lands at "uwwdyw61/hello-world".
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "kixelated"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(format!(r#"{{"alias":"uwwdyw61","key":{}}}"#, jwk_body(&key))),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "kixelated".to_string(),
+			publish: vec!["hello-world".to_string()],
+			subscribe: vec!["hello-world".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/kixelated".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "uwwdyw61".as_path());
+		assert_eq!(verified.publish, vec!["hello-world".as_path()]);
+		assert_eq!(verified.subscribe, vec!["hello-world".as_path()]);
 		Ok(())
 	}
 
@@ -3085,6 +3156,25 @@ api = "https://api.example.com/access"
 		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
 		assert_eq!(verified.publish, vec![]);
 		assert_eq!(verified.tier, Tier::default());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_alias_depth_mismatch_fails_closed() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(r#"{"alias":"x7k2qp/room/extra","public":{"subscribe":[""]}}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let result = auth.verify(&AuthParams::new("/demo/room")).await;
+		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
 		Ok(())
 	}
 

@@ -8,8 +8,19 @@
 //! addresses; the client's address-family matching lives in `util::pick_addr`).
 //! See <https://github.com/moq-dev/moq/issues/1375>.
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::time::Duration;
+
+/// TCP keepalive idle period before the kernel starts probing a silent peer, and
+/// the interval between probes. A long-lived connection (a parked WebSocket, an
+/// idle HTTP/2 session) can otherwise sit in a `read` forever, so a peer that
+/// vanished without a FIN/RST (a yanked cable, a crashed NAT) would pin its
+/// socket and any resources behind it. Keepalive lets the kernel surface the dead
+/// peer as a read error and tear the connection down. The values are generous
+/// enough not to disturb a healthy but momentarily quiet connection.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Bind a UDP socket, making an IPv6 socket dual-stack so it also serves IPv4.
 pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
@@ -32,6 +43,17 @@ pub fn tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
 	// restarted relay can rebind a port still in TIME_WAIT.
 	#[cfg(not(windows))]
 	socket.set_reuse_address(true)?;
+	// Enable keepalive on the listening socket so every accepted connection
+	// inherits it (accept() carries socket options across on Linux, macOS, and
+	// Windows). axum_server owns the accept loop, so this is the one hook we have
+	// to reach the HTTP/HTTPS/WebSocket connections it serves. Best-effort: a
+	// platform that rejects the option keeps the connection rather than failing.
+	let keepalive = TcpKeepalive::new()
+		.with_time(KEEPALIVE_IDLE)
+		.with_interval(KEEPALIVE_INTERVAL);
+	if let Err(err) = socket.set_tcp_keepalive(&keepalive) {
+		tracing::warn!(%err, "failed to enable TCP keepalive; dead peers may linger");
+	}
 	socket.bind(&addr.into())?;
 	socket.listen(1024)?;
 	let listener: TcpListener = socket.into();

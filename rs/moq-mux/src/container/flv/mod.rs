@@ -88,6 +88,9 @@ const VIDEO_PACKET_SEQUENCE_END: u8 = 2;
 /// Coded frames with the composition-time offset omitted (always zero).
 const VIDEO_PACKET_CODED_FRAMES_X: u8 = 3;
 const VIDEO_PACKET_METADATA: u8 = 4;
+/// Multitrack framing: the next byte carries the `AvMultitrackType` plus the real
+/// `VideoPacketType`, and each track payload is tagged with its own track id.
+const VIDEO_PACKET_MULTITRACK: u8 = 5;
 
 /// Enhanced-RTMP audio signaling: SoundFormat 9 in the high nibble of an audio
 /// tag's first byte switches to a FourCC codec + packet type.
@@ -98,6 +101,20 @@ const AUDIO_PACKET_SEQUENCE_START: u8 = 0;
 const AUDIO_PACKET_CODED_FRAMES: u8 = 1;
 const AUDIO_PACKET_SEQUENCE_END: u8 = 2;
 const AUDIO_PACKET_MULTICHANNEL_CONFIG: u8 = 4;
+/// Multitrack framing, mirroring [`VIDEO_PACKET_MULTITRACK`] for audio.
+const AUDIO_PACKET_MULTITRACK: u8 = 5;
+
+/// `AvMultitrackType` (high nibble of the multitrack framing byte): how the
+/// per-track payloads that follow are laid out.
+///
+/// - `OneTrack`: a single track, tagged with its id; the payload runs to the end
+///   of the tag (no per-track size).
+/// - `ManyTracks`: several tracks sharing one codec, each length-prefixed.
+/// - `ManyTracksManyCodecs`: several tracks, each carrying its own FourCC and
+///   length prefix.
+const MULTITRACK_ONE_TRACK: u8 = 0;
+const MULTITRACK_MANY_TRACKS: u8 = 1;
+const MULTITRACK_MANY_TRACKS_MANY_CODECS: u8 = 2;
 
 /// Read a 24-bit big-endian unsigned integer.
 fn read_u24(b: &[u8]) -> u32 {

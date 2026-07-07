@@ -1225,7 +1225,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				track: name.as_str().into(),
 				priority: request.priority(),
 				group,
-				frame_start: 0,
 			};
 			stream.writer.encode(&lite::ControlType::Fetch).await?;
 			stream.writer.encode(&msg).await

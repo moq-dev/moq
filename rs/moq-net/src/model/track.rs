@@ -1997,7 +1997,7 @@ mod test {
 		use crate::coding::{Decode, Encode};
 		use crate::lite;
 
-		let version = lite::Version::Lite05Wip;
+		let version = lite::Version::Lite05;
 
 		// Origin publishes a datagram; the publisher reads it and encodes the wire body.
 		let mut origin = track_producer("test", None);

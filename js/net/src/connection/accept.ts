@@ -22,7 +22,9 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = transport.protocol;
 
-	if (protocol === Ietf.ALPN.DRAFT_18) {
+	if (protocol === Ietf.ALPN.DRAFT_19) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_19);
+	} else if (protocol === Ietf.ALPN.DRAFT_18) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_18);
 	} else if (protocol === Ietf.ALPN.DRAFT_17) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_17);
@@ -30,8 +32,8 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 		return acceptSetup(transport, url, Ietf.Version.DRAFT_16);
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		return acceptSetup(transport, url, Ietf.Version.DRAFT_15);
-	} else if (protocol === Lite.ALPN_05_WIP) {
-		return new Lite.Connection(url, transport, Lite.Version.DRAFT_05_WIP, undefined);
+	} else if (protocol === Lite.ALPN_05) {
+		return new Lite.Connection(url, transport, Lite.Version.DRAFT_05, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		return new Lite.Connection(url, transport, Lite.Version.DRAFT_04, undefined);
 	} else if (protocol === Lite.ALPN_03) {

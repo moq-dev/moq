@@ -28,7 +28,7 @@ key = "/var/lib/moq-relay/key.pem"
 # [web.http]
 # listen = "[::]:80"
 
-# JWT authentication. Generate a key with `moq-token-cli`.
+# JWT authentication. Generate a key with `moq-token`.
 # See https://moq.dev/docs/auth for the full reference.
 [auth]
 key = "/var/lib/moq-relay/root.jwk"

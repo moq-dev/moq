@@ -24,21 +24,22 @@
 //! the established stream to [`accept_stream`]; everything here is generic over
 //! the [`Stream`] trait.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::rml::handshake::{Handshake, HandshakeProcessResult, PeerType};
+use crate::rml::rml_amf0::Amf0Value;
+use crate::rml::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
+use crate::rml::time::RtmpTimestamp;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
 use moq_net::{broadcast, origin};
-use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
-use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
-use rml_rtmp::time::RtmpTimestamp;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -77,6 +78,50 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// momentarily quiet connection.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+// Enhanced-RTMP FourCcInfoMask bit: this gateway forwards the codec. We demux FLV
+// into MoQ without decoding, so `CanForward` (not `CanDecode`) is the honest bit.
+const FOURCC_CAN_FORWARD: f64 = 0x04 as f64;
+
+// Enhanced-RTMP FourCC codecs the FLV importer accepts on ingest. Keep in sync
+// with `moq_mux::container::flv::Import`; an encoder that reads our advertised
+// support may gate whether it sends these.
+const INGEST_VIDEO_FOURCCS: [&[u8; 4]; 4] = [b"avc1", b"hvc1", b"av01", b"vp09"];
+const INGEST_AUDIO_FOURCCS: [&[u8; 4]; 5] = [b"Opus", b"mp4a", b".mp3", b"ac-3", b"ec-3"];
+
+// Enhanced-RTMP `capsEx` (CapsExMask) bit for multitrack audio/video: several
+// tracks in one RTMP stream. We ingest and egress multitrack, so we advertise it.
+const CAPS_EX_MULTITRACK: u32 = 0x02;
+
+/// The enhanced-RTMP `capsEx` capabilities this gateway supports. We handle
+/// multitrack on both ingest (demux several tracks) and egress (mux several
+/// renditions); reconnect and the ModEx timestamp extensions are not supported.
+const SUPPORTED_CAPS_EX: u32 = CAPS_EX_MULTITRACK;
+
+/// Enhanced-RTMP capabilities to echo in the connect `_result` command object, so
+/// an enhanced encoder knows it may send these FourCC codecs on ingest and that
+/// multitrack is negotiated.
+fn advertised_connect_properties() -> HashMap<String, Amf0Value> {
+	fn info_map(fourccs: &[&[u8; 4]]) -> Amf0Value {
+		Amf0Value::Object(
+			fourccs
+				.iter()
+				.map(|fourcc| {
+					(
+						String::from_utf8_lossy(*fourcc).into_owned(),
+						Amf0Value::Number(FOURCC_CAN_FORWARD),
+					)
+				})
+				.collect(),
+		)
+	}
+
+	HashMap::from([
+		("videoFourCcInfoMap".to_string(), info_map(&INGEST_VIDEO_FOURCCS)),
+		("audioFourCcInfoMap".to_string(), info_map(&INGEST_AUDIO_FOURCCS)),
+		("capsEx".to_string(), Amf0Value::Number(SUPPORTED_CAPS_EX as f64)),
+	])
+}
 
 /// A bidirectional byte stream carrying an RTMP session.
 ///
@@ -253,12 +298,13 @@ impl Server {
 	}
 }
 
-/// Tune a freshly accepted RTMP socket: Nagle off for latency, keepalive on so a
-/// dead peer is reaped rather than pinning a broadcast forever.
+/// Tune an RTMP TCP socket (accepted by the server or dialed by the client):
+/// Nagle off for latency, keepalive on so a dead peer is reaped rather than
+/// pinning a broadcast forever.
 ///
 /// Both are best-effort: a failure to set either is logged and ignored rather
 /// than dropping an otherwise healthy connection.
-fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
+pub(crate) fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 	// Nagle off: RTMP is latency-sensitive and we write whole packets.
 	if let Err(err) = stream.set_nodelay(true) {
 		tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");
@@ -469,6 +515,10 @@ pub struct Play<S = Conn> {
 	/// one. Zero (the default) drops stale groups aggressively; raise it with
 	/// [`with_latency`](Self::with_latency).
 	latency: Duration,
+	/// Whether the player advertised enhanced-RTMP multitrack support (connect
+	/// `capsEx`). When set, every rendition is muxed as a multitrack track;
+	/// otherwise only the first video + first audio rendition is sent.
+	multitrack: bool,
 }
 
 impl<S: Stream> Play<S> {
@@ -535,7 +585,8 @@ impl<S: Stream> Play<S> {
 		let mut export = FlvExport::new(broadcast)
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_latency(self.latency);
+			.with_latency(self.latency)
+			.with_multitrack(self.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
 		// broadcast that never produces a playable FLV header looks successful to the
@@ -633,6 +684,11 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 		work.extend(results);
 	}
 
+	// Whether the client advertised enhanced-RTMP multitrack support in its
+	// connect `capsEx`. Set at connect time and carried into a later play so the
+	// FLV muxer only emits multitrack tags to a player that can parse them.
+	let mut client_multitrack = false;
+
 	let mut buffer = [0u8; READ_BUFFER];
 	loop {
 		while let Some(result) = work.pop_front() {
@@ -642,8 +698,16 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 				}
 				ServerSessionResult::RaisedEvent(event) => match event {
 					// Accept every connect; authorization happens at publish/play time.
-					ServerSessionEvent::ConnectionRequested { request_id, app_name } => {
-						tracing::debug!(%peer, %app_name, "rtmp connect");
+					ServerSessionEvent::ConnectionRequested {
+						request_id,
+						app_name,
+						caps_ex,
+					} => {
+						client_multitrack = caps_ex & CAPS_EX_MULTITRACK != 0;
+						tracing::debug!(%peer, %app_name, caps_ex, client_multitrack, "rtmp connect");
+						// Advertise the enhanced-RTMP codecs we ingest, and our capsEx, in
+						// the connect _result.
+						session.set_connect_response_properties(advertised_connect_properties());
 						let results = session
 							.accept_request(request_id)
 							.map_err(|e| anyhow::anyhow!("rtmp accept connect: {e:?}"))?;
@@ -684,6 +748,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							peer,
 							latency: Duration::ZERO,
+							multitrack: client_multitrack,
 						})));
 					}
 					other => tracing::trace!(%peer, ?other, "ignoring RTMP event before publish/play"),
@@ -1006,7 +1071,7 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use rml_rtmp::sessions::{
+	use crate::rml::sessions::{
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};
 
@@ -1095,7 +1160,8 @@ mod tests {
 
 	/// Drive an RTMP play client over `stream` through handshake -> connect(`live`)
 	/// -> play(`cam0`), collecting media messages until `want` have arrived.
-	async fn play_client_collect<S: Stream>(mut stream: S, want: usize) -> Vec<Media> {
+	/// `caps_ex` is advertised in the connect `capsEx` (0 for a legacy player).
+	async fn play_client_collect<S: Stream>(mut stream: S, want: usize, caps_ex: u32) -> Vec<Media> {
 		// Handshake.
 		let mut handshake = Handshake::new(PeerType::Client);
 		stream
@@ -1127,6 +1193,12 @@ mod tests {
 		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
 		if !remaining.is_empty() {
 			work.extend(session.handle_input(&remaining).unwrap());
+		}
+		if caps_ex != 0 {
+			session.set_connect_request_properties(HashMap::from([(
+				"capsEx".to_string(),
+				Amf0Value::Number(caps_ex as f64),
+			)]));
 		}
 		work.push_back(session.request_connection("live".to_string()).unwrap());
 
@@ -1205,7 +1277,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(Duration::from_secs(5), play_client_collect(stream, 2))
+		let media = tokio::time::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0))
 			.await
 			.expect("play client timed out");
 
@@ -1221,6 +1293,100 @@ mod tests {
 		// Second is the keyframe NALU (AVCPacketType 1).
 		assert!(media[1].0, "second message should be video");
 		assert_eq!(media[1].1[1], 0x01);
+
+		server_task.abort();
+	}
+
+	/// End-to-end multitrack egress: publish a broadcast carrying two H.264
+	/// renditions, then a play client that advertised the multitrack `capsEx`
+	/// receives enhanced-RTMP multitrack video tags for both track ids. Proves the
+	/// negotiation reaches the FLV muxer.
+	#[tokio::test]
+	async fn play_multitrack_to_capable_client() {
+		// Enhanced-RTMP multitrack framing constants, matching moq-mux's FLV muxer.
+		const EX: u8 = 0x80;
+		const MULTITRACK: u8 = 5;
+		const SEQUENCE_START: u8 = 0;
+		const CODED_FRAMES: u8 = 1;
+		const MANY_TRACKS: u8 = 1;
+
+		let avcc = |level: u8| {
+			let sps = [0x67u8, 0x42, 0xc0, level];
+			let mut out = vec![0x01, 0x42, 0xc0, level, 0xff, 0xe1, 0x00, sps.len() as u8];
+			out.extend_from_slice(&sps);
+			out.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+			out
+		};
+
+		// Build one ManyTracks multitrack video tag body over two avc1 tracks.
+		let multitrack_body = |packet_type: u8, tracks: &[(u8, Vec<u8>)]| {
+			let mut body = vec![EX | (1 << 4) | MULTITRACK, (MANY_TRACKS << 4) | packet_type];
+			body.extend_from_slice(b"avc1"); // shared codec
+			for (track_id, payload) in tracks {
+				body.push(*track_id);
+				body.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]); // UI24 size
+				body.extend_from_slice(payload);
+			}
+			body
+		};
+
+		let seq = multitrack_body(SEQUENCE_START, &[(0, avcc(0x1f)), (1, avcc(0x1e))]);
+		// CodedFrames: avc1 prefixes a 3-byte composition time (zero) before the NALU.
+		let nalu = |b: u8| vec![0, 0, 0, 0, 0, 5, 0x65, b, 0x84, 0x21, 0x00];
+		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
+
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
+		importer.decode(&flv::file_header()).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &seq)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &frames)).unwrap();
+		importer.finish().unwrap();
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let consumer = origin.consume();
+
+		let server_task = tokio::spawn(async move {
+			let request = server.accept().await.expect("a request");
+			let Request::Play(play) = request else {
+				panic!("expected a play request");
+			};
+			play.accept(&consumer, "live/cam0").await.unwrap();
+		});
+
+		// The player advertises multitrack; collect the four video messages (two
+		// sequence headers + two keyframes across the two tracks).
+		let stream = TcpStream::connect(addr).await.unwrap();
+		let media = tokio::time::timeout(
+			Duration::from_secs(5),
+			play_client_collect(stream, 4, CAPS_EX_MULTITRACK),
+		)
+		.await
+		.expect("play client timed out");
+
+		let video: Vec<&bytes::Bytes> = media.iter().filter(|(is_video, _)| *is_video).map(|(_, d)| d).collect();
+		assert!(
+			video.len() >= 2,
+			"expected multitrack video messages, got {}",
+			video.len()
+		);
+		// Every video message uses the multitrack framing (packet type 5) over avc1.
+		for data in &video {
+			assert_eq!(data[0] & 0x0f, MULTITRACK, "video message should be multitrack-framed");
+			assert_eq!(&data[2..6], b"avc1");
+		}
+		// Both track ids show up (the byte after the FourCC in each OneTrack tag).
+		let mut track_ids: Vec<u8> = video.iter().map(|data| data[6]).collect();
+		track_ids.sort_unstable();
+		track_ids.dedup();
+		assert_eq!(
+			track_ids,
+			vec![0, 1],
+			"both renditions should egress as multitrack tracks"
+		);
 
 		server_task.abort();
 	}
@@ -1288,6 +1454,122 @@ mod tests {
 		};
 		publish.reject("test rejection").await.unwrap();
 		client.abort();
+	}
+
+	/// The connect `_result` should advertise the enhanced-RTMP codecs we ingest
+	/// plus our `capsEx` (multitrack), so an enhanced encoder knows what it may
+	/// send. Drives a raw client through the handshake, sends `connect` (itself
+	/// advertising `capsEx`), and deserializes the server's `_result` to read the
+	/// command object (rml's ClientSession discards those properties).
+	#[tokio::test]
+	async fn connect_result_advertises_capabilities() {
+		use crate::rml::chunk_io::{ChunkDeserializer, ChunkSerializer};
+		use crate::rml::messages::RtmpMessage;
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+
+		// The server processes the connect while parked in accept() awaiting a
+		// publish/play that never comes; abort it once we've read the _result.
+		let server_task = tokio::spawn(async move {
+			let _ = server.accept().await;
+		});
+
+		let mut stream = TcpStream::connect(addr).await.unwrap();
+
+		// Client handshake.
+		let mut handshake = Handshake::new(PeerType::Client);
+		stream
+			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0u8; 4096];
+		let remaining = loop {
+			let n = stream.read(&mut buffer).await.unwrap();
+			match handshake.process_bytes(&buffer[..n]).unwrap() {
+				HandshakeProcessResult::InProgress { response_bytes } => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+				}
+				HandshakeProcessResult::Completed {
+					response_bytes,
+					remaining_bytes,
+				} => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+					break remaining_bytes;
+				}
+			}
+		};
+
+		// Send a `connect` advertising our own capsEx (multitrack).
+		let connect = RtmpMessage::Amf0Command {
+			command_name: "connect".to_string(),
+			transaction_id: 1.0,
+			command_object: Amf0Value::Object(HashMap::from([
+				("app".to_string(), Amf0Value::Utf8String("live".to_string())),
+				("capsEx".to_string(), Amf0Value::Number(CAPS_EX_MULTITRACK as f64)),
+			])),
+			additional_arguments: Vec::new(),
+		};
+		let payload = connect.into_message_payload(RtmpTimestamp::new(0), 0).unwrap();
+		let packet = ChunkSerializer::new().serialize(&payload, false, false).unwrap();
+		stream.write_all(&packet.bytes).await.unwrap();
+
+		// Read inbound and pull out the `_result` command object. Track SetChunkSize
+		// so the multi-chunk _result reassembles correctly.
+		let mut deserializer = ChunkDeserializer::new();
+		let mut pending = remaining;
+		let command_object = 'outer: loop {
+			let mut input: &[u8] = &pending;
+			while let Some(payload) = deserializer.get_next_message(input).unwrap() {
+				input = &[];
+				match payload.to_rtmp_message() {
+					Ok(RtmpMessage::SetChunkSize { size }) => {
+						deserializer.set_max_chunk_size(size as usize).unwrap();
+					}
+					Ok(RtmpMessage::Amf0Command {
+						command_name,
+						command_object,
+						..
+					}) if command_name == "_result" => break 'outer command_object,
+					_ => {}
+				}
+			}
+			let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+				.await
+				.expect("timed out awaiting connect _result")
+				.unwrap();
+			assert!(n > 0, "server closed before sending connect _result");
+			pending = buffer[..n].to_vec();
+		};
+
+		let Amf0Value::Object(properties) = command_object else {
+			panic!("connect _result command object was not an AMF0 object");
+		};
+		let Some(Amf0Value::Object(video)) = properties.get("videoFourCcInfoMap") else {
+			panic!("connect _result did not advertise videoFourCcInfoMap");
+		};
+		assert!(video.contains_key("hvc1"), "expected hvc1 in videoFourCcInfoMap");
+		assert!(video.contains_key("av01"), "expected av01 in videoFourCcInfoMap");
+		let Some(Amf0Value::Object(audio)) = properties.get("audioFourCcInfoMap") else {
+			panic!("connect _result did not advertise audioFourCcInfoMap");
+		};
+		assert!(audio.contains_key("Opus"), "expected Opus in audioFourCcInfoMap");
+
+		// The server echoes its supported capsEx, including the multitrack bit.
+		let Some(Amf0Value::Number(caps_ex)) = properties.get("capsEx") else {
+			panic!("connect _result did not advertise capsEx");
+		};
+		assert_eq!(
+			*caps_ex as u32 & CAPS_EX_MULTITRACK,
+			CAPS_EX_MULTITRACK,
+			"connect _result should advertise the multitrack capsEx bit"
+		);
+
+		server_task.abort();
 	}
 
 	#[tokio::test]

@@ -4,7 +4,6 @@
 # js/. Invoked from the repo root as `just js <recipe>` via the `mod js`
 # import in the root justfile.
 
-set unstable
 set working-directory := '.'
 
 # Run all checks by default.

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.6...moq-audio-v0.0.7) - 2026-07-04
+
+### Other
+
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+
 ## [0.0.6](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.5...moq-audio-v0.0.6) - 2026-06-30
 
 ### Other

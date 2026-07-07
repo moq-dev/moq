@@ -5,7 +5,7 @@ description: Publish and subscribe to a moq-transport relay with moq-cli
 
 # Interoperability
 
-`moq-cli` speaks moq-transport drafts **14 through 18**, negotiated over ALPN at
+`moq-cli` speaks moq-transport drafts **14 through 19**, negotiated over ALPN at
 connect. Point it at your relay and it picks the newest version you both
 support. (You should try [moq-lite](/concept/layer/moq-lite) too, btw.)
 
@@ -47,4 +47,4 @@ If it plays, you interop. That's the whole test.
 - **Subscriber sees nothing?** If your relay doesn't replay existing
   announcements, start the subscriber before the publisher.
 - **Verbose logs:** prefix with `RUST_LOG=info,moq_net=debug`. It prints the
-  negotiated version (e.g. `connected version=moq-transport-18`).
+  negotiated version (e.g. `connected version=moq-transport-19`).
