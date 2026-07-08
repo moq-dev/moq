@@ -96,6 +96,11 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
+	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
+	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
+	// each get an independent mirror; the entry is evicted once the group closes.
+	#fetches = new Map<string, netGroup.Producer>();
+
 	// Recv bandwidth producer (Lite03+ only).
 	#recvBandwidth?: Bandwidth;
 
@@ -410,33 +415,61 @@ export class Subscriber {
 
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
-	async fetchGroup(
+	fetchGroup(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
 		options: track.FetchGroupOptions = {},
 	): Promise<netGroup.Consumer> {
-		if (!supportsTrackStream(this.version)) {
-			throw new Error("fetch group requires moq-lite-05 or newer");
-		}
+		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
+		// stream (and re-download it); each caller reads an independent mirror.
+		const key = JSON.stringify([broadcast, track, sequence]);
+		const existing = this.#fetches.get(key);
+		if (existing && !existing.isClosed) return Promise.resolve(existing.mirror());
 
-		const info = await this.#trackInfo(broadcast, track);
-		const priority = options.priority ?? 0;
-		const stream = await Stream.open(this.#quic, undefined, priority);
+		// Create and cache the group synchronously (before any await) so a concurrent fetch for
+		// the same group finds it and coalesces rather than racing to open its own stream.
 		const group = new netGroup.Producer(sequence);
+		this.#fetches.set(key, group);
+		void group.closed.then(() => {
+			if (this.#fetches.get(key) === group) this.#fetches.delete(key);
+		});
 
+		return this.#runFetch(broadcast, track, sequence, options, group);
+	}
+
+	// Open the FETCH stream and pump the response into the shared group. Setup errors close the
+	// group (so coalesced mirrors observe them and the entry evicts) and reject this caller.
+	async #runFetch(
+		broadcast: Path.Valid,
+		track: string,
+		sequence: number,
+		options: track.FetchGroupOptions,
+		group: netGroup.Producer,
+	): Promise<netGroup.Consumer> {
 		try {
-			await stream.writer.u53(StreamId.Fetch);
-			await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
-		} catch (err: unknown) {
-			const e = error(err);
-			group.close(e);
-			stream.abort(e);
-			throw e;
-		}
+			if (!supportsTrackStream(this.version)) {
+				throw new Error("fetch group requires moq-lite-05 or newer");
+			}
 
-		void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
-		return group.consume();
+			const info = await this.#trackInfo(broadcast, track);
+			const priority = options.priority ?? 0;
+			const stream = await Stream.open(this.#quic, undefined, priority);
+
+			try {
+				await stream.writer.u53(StreamId.Fetch);
+				await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
+			} catch (err: unknown) {
+				stream.abort(error(err));
+				throw err;
+			}
+
+			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
+			return group.mirror();
+		} catch (err: unknown) {
+			group.close(error(err));
+			throw err;
+		}
 	}
 
 	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
