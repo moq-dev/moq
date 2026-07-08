@@ -4,52 +4,87 @@ use crate::container::Frame;
 
 /// AAC importer.
 ///
-/// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
-/// an MP4 ESDS atom), so its catalog is known up front. Each packet passed to
-/// [`decode`](Self::decode) is published as one hang frame in its own group, so the relay can
-/// forward each frame without waiting for a group boundary. The codec's packet loss
-/// concealment handles drops. Build it with [`new`](Self::new), passing the track producer
-/// and the [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
+/// The catalog comes from an AudioSpecificConfig (variable-length, typically extracted from an MP4
+/// ESDS atom) passed to [`initialize`](Self::initialize), or from the [`new`](Self::new) hint. Each
+/// packet passed to [`decode`](Self::decode) is published as one hang frame in its own group, so the
+/// relay can forward each frame without waiting for a group boundary. The codec's packet loss
+/// concealment handles drops.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
+	/// The published config, so `initialize` (or a re-init) doesn't re-publish an unchanged catalog.
+	config: Option<hang::catalog::AudioConfig>,
 }
 
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
 	/// [`AudioHint::default`](crate::catalog::AudioHint) for none).
 	///
-	/// `config` is the codec config parsed from init bytes, or `None` to publish from the hint alone
-	/// (which then needs the codec, sample rate, and channel count).
+	/// The catalog rendition publishes as soon as the config is known: up front when the hint carries
+	/// the codec (with its profile), sample rate, and channel count, otherwise once
+	/// [`initialize`](Self::initialize) parses an AudioSpecificConfig. A codec [`Config`] converts
+	/// into a hint via `into()`.
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		config: Option<Config>,
 		hint: crate::catalog::AudioHint,
 	) -> crate::Result<Self> {
-		let detected = config.map(|config| {
-			let mut audio_config = hang::catalog::AudioConfig::new(
-				hang::catalog::AAC {
-					profile: config.profile,
-				},
-				config.sample_rate,
-				config.channel_count,
-			);
-			audio_config.container = hang::catalog::Container::Legacy;
-			audio_config.description = Some(config.encode());
-			audio_config
-		});
-		let audio_config = crate::codec::resolve_audio("aac", detected, &hint)?;
-
-		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
-
-		let mut rendition = reserved.audio_with_hint(track.name(), hint);
-		rendition.set(audio_config)?;
-
-		Ok(Self {
+		let initial = hint.to_config()?;
+		let rendition = reserved.audio_with_hint(track.name(), hint);
+		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-		})
+			config: None,
+		};
+		if let Some(config) = initial {
+			import.publish(config)?;
+		}
+		Ok(import)
+	}
+
+	/// Resolve the config from an AudioSpecificConfig, publishing the rendition. A no-op on an empty
+	/// buffer, and unnecessary when the hint already carried the codec, sample rate, and channels.
+	pub fn initialize(&mut self, data: &[u8]) -> crate::Result<()> {
+		if data.is_empty() {
+			return Ok(());
+		}
+		let mut cursor = data;
+		let config = Config::parse(&mut cursor)?;
+		let audio_config = hang::catalog::AudioConfig::new(
+			hang::catalog::AAC {
+				profile: config.profile,
+			},
+			config.sample_rate,
+			config.channel_count,
+		);
+		self.publish(audio_config)
+	}
+
+	/// Publish (or re-publish) the resolved config, synthesizing the AudioSpecificConfig `description`
+	/// for out-of-band consumers (fMP4/MKV export, WebCodecs) and validating against the hint via
+	/// [`Rendition::set`](crate::catalog::Rendition::set). A no-op if unchanged.
+	fn publish(&mut self, mut config: hang::catalog::AudioConfig) -> crate::Result<()> {
+		config.container = hang::catalog::Container::Legacy;
+		if config.description.is_none()
+			&& let hang::catalog::AudioCodec::AAC(aac) = &config.codec
+		{
+			config.description = Some(
+				Config {
+					profile: aac.profile,
+					sample_rate: config.sample_rate,
+					channel_count: config.channel_count,
+				}
+				.encode(),
+			);
+		}
+
+		if self.config.as_ref() == Some(&config) {
+			return Ok(());
+		}
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
+		self.rendition.set(config.clone())?;
+		self.config = Some(config);
+		Ok(())
 	}
 
 	/// The MoQ track name this importer publishes on.
@@ -104,5 +139,23 @@ impl<E: CatalogExt> Import<E> {
 		self.track.finish_group()?;
 		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
+	}
+}
+
+impl From<Config> for crate::catalog::AudioHint {
+	/// Seed a hint from a config resolved out of band (e.g. an ADTS header or gstreamer caps rather
+	/// than an AudioSpecificConfig); the importer synthesizes the description from it.
+	fn from(config: Config) -> Self {
+		crate::catalog::AudioHint {
+			codec: Some(
+				hang::catalog::AAC {
+					profile: config.profile,
+				}
+				.into(),
+			),
+			sample_rate: Some(config.sample_rate),
+			channel_count: Some(config.channel_count),
+			..Default::default()
+		}
 	}
 }

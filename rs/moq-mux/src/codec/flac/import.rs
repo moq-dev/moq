@@ -8,49 +8,69 @@ use crate::container::Frame;
 /// [`new`](Self::new), passing the track producer and the
 /// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 ///
-/// The STREAMINFO ([`Config`]) is required up front: it becomes the catalog
-/// `description` (the `fLaC` marker plus STREAMINFO) so a decoder can initialize
-/// from the catalog alone. Each FLAC frame is independently decodable, so every
-/// frame handed to [`decode`](Self::decode) is published in its own group and
-/// flagged as a keyframe.
+/// The STREAMINFO becomes the catalog `description` (the `fLaC` marker plus STREAMINFO) so a decoder
+/// can initialize from the catalog alone; pass it to [`initialize`](Self::initialize). Each FLAC
+/// frame is independently decodable, so every frame handed to [`decode`](Self::decode) is published
+/// in its own group and flagged as a keyframe.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
+	/// The published config, so `initialize` (or a re-init) doesn't re-publish an unchanged catalog.
+	config: Option<hang::catalog::AudioConfig>,
 }
 
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
 	/// [`AudioHint::default`](crate::catalog::AudioHint) for none).
 	///
-	/// `config` is the codec config parsed from init bytes, or `None` to publish from the hint alone
-	/// (which then needs the codec, sample rate, and channel count).
+	/// A FLAC decoder needs the STREAMINFO `description`, which only [`initialize`](Self::initialize)
+	/// can supply, so a hint-only catalog is incomplete until that runs.
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		config: Option<Config>,
 		hint: crate::catalog::AudioHint,
 	) -> crate::Result<Self> {
-		let detected = config.map(|config| {
-			let mut audio = hang::catalog::AudioConfig::new(
-				hang::catalog::AudioCodec::Flac,
-				config.sample_rate,
-				config.channel_count,
-			);
-			audio.container = hang::catalog::Container::Legacy;
-			audio.description = Some(config.description());
-			audio
-		});
-		let audio = crate::codec::resolve_audio("flac", detected, &hint)?;
-
-		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
-
-		let mut rendition = reserved.audio_with_hint(track.name(), hint);
-		rendition.set(audio)?;
-
-		Ok(Self {
+		let initial = hint.to_config()?;
+		let rendition = reserved.audio_with_hint(track.name(), hint);
+		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-		})
+			config: None,
+		};
+		if let Some(config) = initial {
+			import.publish(config)?;
+		}
+		Ok(import)
+	}
+
+	/// Resolve the config from a FLAC header (the `fLaC` marker plus STREAMINFO), publishing the
+	/// rendition with the `description` a decoder needs. A no-op on an empty buffer.
+	pub fn initialize(&mut self, data: &[u8]) -> crate::Result<()> {
+		if data.is_empty() {
+			return Ok(());
+		}
+		let mut cursor = data;
+		let config = Config::parse(&mut cursor)?;
+		let mut audio = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Flac,
+			config.sample_rate,
+			config.channel_count,
+		);
+		audio.description = Some(config.description());
+		self.publish(audio)
+	}
+
+	/// Publish (or re-publish) the resolved config, validating it against the hint via
+	/// [`Rendition::set`](crate::catalog::Rendition::set). A no-op if unchanged.
+	fn publish(&mut self, mut config: hang::catalog::AudioConfig) -> crate::Result<()> {
+		config.container = hang::catalog::Container::Legacy;
+		if self.config.as_ref() == Some(&config) {
+			return Ok(());
+		}
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
+		self.rendition.set(config.clone())?;
+		self.config = Some(config);
+		Ok(())
 	}
 
 	/// A watch-only handle to this track's subscriber demand.

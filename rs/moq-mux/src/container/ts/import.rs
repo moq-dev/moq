@@ -349,7 +349,7 @@ impl<E: catalog::Catalog> Import<E> {
 					channel_count,
 				};
 				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.catalog.reserve(), Some(config), Default::default())?,
+					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
@@ -1154,15 +1154,12 @@ impl<E: CatalogExt> AacStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					// Synthesize the AudioSpecificConfig from the first ADTS header so
-					// downstream consumers that need out-of-band config (fMP4/MKV export,
-					// WebCodecs) can configure the decoder. TS itself carries it inline.
-					let description = config.encode();
 					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
 					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					// The importer synthesizes the AudioSpecificConfig `description` from the config so
+					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
-					let mut aac = aac::Import::new(track, reserved, Some(config), Default::default())?;
-					aac.update_rendition(|rendition| rendition.description = Some(description));
+					let aac = aac::Import::new(track, reserved, config.into())?;
 					self.import.insert(aac)
 				}
 			};

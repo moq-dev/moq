@@ -14,40 +14,62 @@ use crate::container::Frame;
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
+	/// The published config, so `initialize` (or a re-init) doesn't re-publish an unchanged catalog.
+	config: Option<hang::catalog::AudioConfig>,
 }
 
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
 	/// [`AudioHint::default`](crate::catalog::AudioHint) for none).
 	///
-	/// `config` is the codec config parsed from init bytes, or `None` to publish from the hint alone
-	/// (which then needs the codec, sample rate, and channel count).
+	/// The catalog rendition publishes as soon as the config is known: up front when the hint carries
+	/// the codec, sample rate, and channel count, otherwise once [`initialize`](Self::initialize)
+	/// parses an OpusHead. A codec [`Config`] converts into a hint via `into()`.
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		config: Option<Config>,
 		hint: crate::catalog::AudioHint,
 	) -> crate::Result<Self> {
-		let detected = config.map(|config| {
-			let mut audio = hang::catalog::AudioConfig::new(
-				hang::catalog::AudioCodec::Opus,
-				config.sample_rate,
-				config.channel_count,
-			);
-			audio.container = hang::catalog::Container::Legacy;
-			audio
-		});
-		let audio = crate::codec::resolve_audio("opus", detected, &hint)?;
-
-		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
-
-		let mut rendition = reserved.audio_with_hint(track.name(), hint);
-		rendition.set(audio)?;
-
-		Ok(Self {
+		let initial = hint.to_config()?;
+		let rendition = reserved.audio_with_hint(track.name(), hint);
+		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-		})
+			config: None,
+		};
+		if let Some(config) = initial {
+			import.publish(config)?;
+		}
+		Ok(import)
+	}
+
+	/// Resolve the config from an OpusHead, publishing the rendition. A no-op on an empty buffer, and
+	/// unnecessary when the hint already carried the sample rate and channel count.
+	pub fn initialize(&mut self, data: &[u8]) -> crate::Result<()> {
+		if data.is_empty() {
+			return Ok(());
+		}
+		let mut cursor = data;
+		let config = Config::parse(&mut cursor)?;
+		let mut audio = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Opus,
+			config.sample_rate,
+			config.channel_count,
+		);
+		audio.container = hang::catalog::Container::Legacy;
+		self.publish(audio)
+	}
+
+	/// Publish (or re-publish) the resolved config, validating it against the hint via
+	/// [`Rendition::set`](crate::catalog::Rendition::set). A no-op if unchanged.
+	fn publish(&mut self, config: hang::catalog::AudioConfig) -> crate::Result<()> {
+		if self.config.as_ref() == Some(&config) {
+			return Ok(());
+		}
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
+		self.rendition.set(config.clone())?;
+		self.config = Some(config);
+		Ok(())
 	}
 
 	/// The MoQ track name this importer publishes on.
@@ -94,5 +116,17 @@ impl<E: CatalogExt> Import<E> {
 		self.track.finish_group()?;
 		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
+	}
+}
+
+impl From<Config> for crate::catalog::AudioHint {
+	/// Seed a hint from a config resolved out of band (e.g. gstreamer caps rather than an OpusHead).
+	fn from(config: Config) -> Self {
+		crate::catalog::AudioHint {
+			codec: Some(hang::catalog::AudioCodec::Opus),
+			sample_rate: Some(config.sample_rate),
+			channel_count: Some(config.channel_count),
+			..Default::default()
+		}
 	}
 }

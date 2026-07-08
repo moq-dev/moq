@@ -1,7 +1,6 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::Producer;
@@ -67,8 +66,6 @@ pub struct AudioHint {
 	pub sample_rate: Option<u32>,
 	/// The number of audio channels.
 	pub channel_count: Option<u32>,
-	/// Decoder initialization bytes (codec-specific).
-	pub description: Option<Bytes>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
 	/// The maximum jitter before the next frame is emitted.
@@ -84,8 +81,6 @@ pub struct AudioHint {
 pub struct VideoHint {
 	/// The video codec.
 	pub codec: Option<hang::catalog::VideoCodec>,
-	/// Decoder initialization bytes (codec-specific).
-	pub description: Option<Bytes>,
 	/// The encoded width in pixels.
 	pub coded_width: Option<u32>,
 	/// The encoded height in pixels.
@@ -141,7 +136,6 @@ impl AudioHint {
 		overlay_field!(req config, codec, "audio.codec", self.codec);
 		overlay_field!(req config, sample_rate, "audio.sample_rate", self.sample_rate);
 		overlay_field!(req config, channel_count, "audio.channel_count", self.channel_count);
-		overlay_field!(opt config, description, "audio.description", self.description);
 		overlay_field!(opt config, bitrate, "audio.bitrate", self.bitrate);
 		overlay_field!(opt config, jitter, "audio.jitter", self.jitter);
 		Ok(())
@@ -167,7 +161,6 @@ impl VideoHint {
 	/// Validate and overlay these fields onto a detected video config.
 	pub fn apply(&self, config: &mut hang::catalog::VideoConfig) -> crate::Result<()> {
 		overlay_field!(req config, codec, "video.codec", self.codec);
-		overlay_field!(opt config, description, "video.description", self.description);
 		overlay_field!(opt config, coded_width, "video.coded_width", self.coded_width);
 		overlay_field!(opt config, coded_height, "video.coded_height", self.coded_height);
 		overlay_field!(opt config, display_aspect_width, "video.display_aspect_width", self.display_aspect_width);

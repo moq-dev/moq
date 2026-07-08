@@ -186,39 +186,27 @@ impl<E: CatalogExt> Track<E> {
 				TrackKind::Vp9(import)
 			}
 			"aac" => {
-				let config = match data.is_empty() {
-					true => None,
-					false => Some(crate::codec::aac::Config::parse(&mut { data })?),
-				};
-				let import = crate::codec::aac::Import::new(track, reserved, config, audio_hint(&init, None))?;
+				let mut import = crate::codec::aac::Import::new(track, reserved, audio_hint(&init, None))?;
+				import.initialize(data)?;
 				TrackKind::Aac(import)
 			}
 			"opus" => {
-				let config = match data.is_empty() {
-					true => None,
-					false => Some(crate::codec::opus::Config::parse(&mut { data })?),
-				};
-				let hint = audio_hint(&init, Some(AudioCodec::Opus));
-				let import = crate::codec::opus::Import::new(track, reserved, config, hint)?;
+				let mut import =
+					crate::codec::opus::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Opus)))?;
+				import.initialize(data)?;
 				TrackKind::Opus(import)
 			}
 			"flac" => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
-				let config = match data.is_empty() {
-					true => None,
-					false => Some(crate::codec::flac::Config::parse(&mut { data })?),
-				};
-				let hint = audio_hint(&init, Some(AudioCodec::Flac));
-				let import = crate::codec::flac::Import::new(track, reserved, config, hint)?;
+				let mut import =
+					crate::codec::flac::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Flac)))?;
+				import.initialize(data)?;
 				TrackKind::Flac(import)
 			}
 			"mp3" => {
-				let config = match data.is_empty() {
-					true => None,
-					false => Some(crate::codec::mp3::Config::parse(data)?),
-				};
-				let hint = audio_hint(&init, Some(AudioCodec::Mp3));
-				let import = crate::codec::mp3::Import::new(track, reserved, config, hint)?;
+				let mut import =
+					crate::codec::mp3::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Mp3)))?;
+				import.initialize(data)?;
 				TrackKind::Mp3(import)
 			}
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
@@ -718,8 +706,7 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		};
-		let mut import =
-			crate::codec::opus::Import::new(track, catalog.reserve(), Some(config), Default::default()).unwrap();
+		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
 		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);

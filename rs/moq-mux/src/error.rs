@@ -110,15 +110,6 @@ pub enum Error {
 		actual: String,
 	},
 
-	/// A format was imported with neither init bytes nor enough hint fields to resolve its config.
-	#[error("{format} missing init: no bytes and hint lacks {field}")]
-	MissingInit {
-		/// The media format being imported.
-		format: String,
-		/// The field the hint would need to publish without init bytes.
-		field: &'static str,
-	},
-
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.
 	#[error("{0}")]
