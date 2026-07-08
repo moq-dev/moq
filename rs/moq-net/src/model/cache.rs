@@ -287,8 +287,7 @@ pub(crate) struct Charge {
 impl Charge {
 	/// Charge `n` more payload bytes and mark the group recently used.
 	///
-	/// Doesn't evict; callers trigger [`Pool::evict`] via [`Self::pool`] after
-	/// releasing their own locks.
+	/// Doesn't evict; callers trigger [`Pool::evict`] after releasing their own locks.
 	pub(crate) fn add(&self, n: u64) {
 		if let Some((inner, entry)) = &self.inner {
 			entry.bytes.fetch_add(n, Ordering::Relaxed);

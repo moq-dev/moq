@@ -42,7 +42,8 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
 ///
-/// Not `Copy`: it carries a handle to its parent broadcast (see [`Self::broadcast`]).
+/// Not `Copy`: it carries a crate-internal handle to its parent broadcast (the link
+/// a group walks to reach the shared cache pool).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
