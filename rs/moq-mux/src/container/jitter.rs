@@ -30,13 +30,13 @@ impl Metrics {
 	/// Record one frame's presentation timestamp and encoded byte count, returning the new
 	/// jitter if it changed. The bitrate is accumulated but only surfaces from
 	/// [`finish_group`](Self::finish_group).
-	pub fn observe_frame(&mut self, ts: Timestamp, bytes: usize) -> Option<Duration> {
+	pub fn record_frame(&mut self, ts: Timestamp, bytes: usize) -> Option<Duration> {
 		self.bitrate.observe_frame(ts, bytes);
 		self.jitter.observe(ts)
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`), returning the new jitter if it changed.
-	pub fn observe_reorder(&mut self, reorder: Timestamp) -> Option<Duration> {
+	pub fn record_reorder(&mut self, reorder: Timestamp) -> Option<Duration> {
 		self.jitter.observe_reorder(reorder)
 	}
 
@@ -261,15 +261,15 @@ mod tests {
 	fn bitrate_waits_for_group_boundaries_and_reports_max() {
 		let mut metrics = Metrics::new();
 
-		metrics.observe_frame(micros(0), 100_000);
-		metrics.observe_frame(micros(500_000), 100_000);
+		metrics.record_frame(micros(0), 100_000);
+		metrics.record_frame(micros(500_000), 100_000);
 		assert_eq!(metrics.finish_group(Some(micros(1_000_000))), Some(1_600_000));
 
-		metrics.observe_frame(micros(1_000_000), 25_000);
+		metrics.record_frame(micros(1_000_000), 25_000);
 		assert_eq!(metrics.finish_group(Some(micros(2_000_000))), None);
 		assert_eq!(metrics.bitrate(), Some(1_600_000));
 
-		metrics.observe_frame(micros(2_000_000), 250_000);
+		metrics.record_frame(micros(2_000_000), 250_000);
 		assert_eq!(metrics.finish_group(Some(micros(3_000_000))), Some(2_000_000));
 	}
 
@@ -277,13 +277,10 @@ mod tests {
 	fn metrics_report_jitter_and_bitrate_independently() {
 		let mut metrics = Metrics::new();
 
-		assert_eq!(metrics.observe_frame(micros(0), 1), None);
+		assert_eq!(metrics.record_frame(micros(0), 1), None);
+		assert_eq!(metrics.record_frame(micros(33_000), 1), Some(Duration::from_millis(33)));
 		assert_eq!(
-			metrics.observe_frame(micros(33_000), 1),
-			Some(Duration::from_millis(33))
-		);
-		assert_eq!(
-			metrics.observe_reorder(micros(100_000)),
+			metrics.record_reorder(micros(100_000)),
 			Some(Duration::from_millis(100))
 		);
 		assert_eq!(metrics.jitter(), Some(Duration::from_millis(100)));

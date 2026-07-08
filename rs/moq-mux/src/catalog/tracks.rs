@@ -173,6 +173,10 @@ pub struct Rendition<E: CatalogExt, K: Kind> {
 	present: bool,
 	/// Detects jitter and bitrate from the frames fed in, keeping the config's fields current.
 	metrics: Metrics,
+	/// Auto-fill `jitter` from the detector only while the config hasn't provided it.
+	detect_jitter: bool,
+	/// Auto-fill `bitrate` from the detector only while the config hasn't provided it.
+	detect_bitrate: bool,
 	_kind: PhantomData<fn() -> K>,
 }
 
@@ -189,6 +193,8 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 			name: name.into(),
 			present: false,
 			metrics: Metrics::new(),
+			detect_jitter: true,
+			detect_bitrate: true,
 			_kind: PhantomData,
 		}
 	}
@@ -205,14 +211,22 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
 	///
-	/// Seeds `config` with any metrics already accumulated: a dirty start or a B-frame reorder
-	/// can feed observations before the rendition exists, which would otherwise be lost.
+	/// A field the caller already set (`jitter` or `bitrate`) is treated as authoritative and left
+	/// alone; only an absent field is auto-detected. Any metrics accumulated before the rendition
+	/// existed (a dirty start or a B-frame reorder) are seeded into the fields being detected.
 	pub fn set(&mut self, mut config: K::Config) {
-		if let Some(jitter) = self.metrics.jitter() {
+		self.detect_jitter = K::jitter_mut(&mut config).is_none();
+		self.detect_bitrate = K::bitrate_mut(&mut config).is_none();
+
+		if self.detect_jitter
+			&& let Some(jitter) = self.metrics.jitter()
+		{
 			*K::jitter_mut(&mut config) = Some(jitter);
 		}
-		if let Some(bitrate) = self.metrics.bitrate() {
-			raise_bitrate(K::bitrate_mut(&mut config), bitrate);
+		if self.detect_bitrate
+			&& let Some(bitrate) = self.metrics.bitrate()
+		{
+			*K::bitrate_mut(&mut config) = Some(bitrate);
 		}
 
 		// Write the config first (still withheld, since we're holding our reservation), then release
@@ -234,29 +248,38 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 		K::with_mut(&mut guard, &self.name, f);
 	}
 
-	/// Record one frame (presentation timestamp + encoded size), republishing the jitter if it changed.
-	pub fn observe_frame(&mut self, ts: Timestamp, bytes: usize) {
-		if let Some(jitter) = self.metrics.observe_frame(ts, bytes) {
+	/// Record one frame (presentation timestamp + encoded size), auto-filling the jitter if the
+	/// config didn't provide it and the detected value changed.
+	pub fn record_frame(&mut self, ts: Timestamp, bytes: usize) {
+		if let Some(jitter) = self.metrics.record_frame(ts, bytes)
+			&& self.detect_jitter
+		{
 			self.update(|config| *K::jitter_mut(config) = Some(jitter));
 		}
 	}
 
-	/// Record a frame's reorder delay (`PTS - DTS`), republishing the jitter if it changed.
-	pub fn observe_reorder(&mut self, reorder: Timestamp) {
-		if let Some(jitter) = self.metrics.observe_reorder(reorder) {
+	/// Record a frame's reorder delay (`PTS - DTS`), auto-filling the jitter as for
+	/// [`record_frame`](Self::record_frame).
+	pub fn record_reorder(&mut self, reorder: Timestamp) {
+		if let Some(jitter) = self.metrics.record_reorder(reorder)
+			&& self.detect_jitter
+		{
 			self.update(|config| *K::jitter_mut(config) = Some(jitter));
 		}
 	}
 
-	/// Close the current group (`next` is its end timestamp when known), republishing the bitrate if it rose.
-	pub fn finish_group(&mut self, next: Option<Timestamp>) {
-		if let Some(bitrate) = self.metrics.finish_group(next) {
+	/// Close the current group (`next` is its end timestamp when known), auto-filling the bitrate
+	/// if the config didn't provide it and the detected maximum rose.
+	pub fn record_group_end(&mut self, next: Option<Timestamp>) {
+		if let Some(bitrate) = self.metrics.finish_group(next)
+			&& self.detect_bitrate
+		{
 			self.update(|config| raise_bitrate(K::bitrate_mut(config), bitrate));
 		}
 	}
 }
 
-/// Raise a catalog `bitrate` field, never lowering a larger declared or previously seen value.
+/// Raise a catalog `bitrate` field, never lowering a previously detected value.
 fn raise_bitrate(field: &mut Option<u64>, bitrate: u64) {
 	if field.is_none_or(|current| bitrate > current) {
 		*field = Some(bitrate);
@@ -273,5 +296,74 @@ impl<E: CatalogExt, K: Kind> Drop for Rendition<E, K> {
 		}
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
 		// staged change; if already released by `set`, this is a no-op.
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn video_track() -> (
+		moq_net::broadcast::Producer,
+		super::super::Producer,
+		Rendition<(), Video>,
+	) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		let reserved = catalog.reserve();
+		let rendition = reserved.video("v");
+		// Drop the standalone reservation so only the rendition's own gate remains, which `set`
+		// clears; the broadcast handle is returned so the produced tracks outlive the catalog.
+		drop(reserved);
+		(broadcast, catalog, rendition)
+	}
+
+	fn config(bitrate: Option<u64>, jitter: Option<Duration>) -> hang::catalog::VideoConfig {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.bitrate = bitrate;
+		config.jitter = jitter;
+		config
+	}
+
+	fn ts(micros: u64) -> Timestamp {
+		Timestamp::from_micros(micros).unwrap()
+	}
+
+	/// Feed ~40ms 100 kB frames (one per group) over more than the bitrate window.
+	fn feed(rendition: &mut Rendition<(), Video>) {
+		for i in 0..60u64 {
+			let t = ts(i * 40_000);
+			rendition.record_group_end(Some(t));
+			rendition.record_frame(t, 100_000);
+		}
+		rendition.record_group_end(None);
+	}
+
+	#[test]
+	fn detects_absent_jitter_and_bitrate() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, None));
+		feed(&mut rendition);
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.video.renditions.get("v").unwrap();
+		assert!(config.jitter.is_some(), "absent jitter should be auto-detected");
+		assert!(config.bitrate.is_some(), "absent bitrate should be auto-detected");
+	}
+
+	#[test]
+	fn keeps_provided_jitter_and_bitrate() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(Some(123), Some(Duration::from_millis(50))));
+		feed(&mut rendition);
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.video.renditions.get("v").unwrap();
+		assert_eq!(config.bitrate, Some(123), "a provided bitrate must not be overwritten");
+		assert_eq!(
+			config.jitter,
+			Some(Duration::from_millis(50)),
+			"a provided jitter must not be overwritten"
+		);
 	}
 }

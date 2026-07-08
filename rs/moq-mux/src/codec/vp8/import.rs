@@ -76,7 +76,7 @@ impl<E: CatalogExt> Import<E> {
 		let pts = self.rendition.timestamp(pts)?;
 		// A key frame starts a new group: close the previous one for the bitrate detector.
 		if header.keyframe {
-			self.rendition.finish_group(Some(pts));
+			self.rendition.record_group_end(Some(pts));
 		}
 		let bytes = frame.as_ref().len();
 		self.track.write(Frame {
@@ -86,7 +86,7 @@ impl<E: CatalogExt> Import<E> {
 			duration: None,
 		})?;
 
-		self.rendition.observe_frame(pts, bytes);
+		self.rendition.record_frame(pts, bytes);
 
 		Ok(())
 	}
@@ -98,7 +98,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.finish_group(None);
+		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
@@ -111,7 +111,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.finish_group(None);
+		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}

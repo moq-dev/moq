@@ -119,7 +119,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
-		self.rendition.finish_group(None);
+		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
@@ -132,7 +132,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.rendition.finish_group(None);
+		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -141,7 +141,7 @@ impl<E: CatalogExt> Import<E> {
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.
 	pub fn observe_reorder(&mut self, reorder: moq_net::Timestamp) {
-		self.rendition.observe_reorder(reorder);
+		self.rendition.record_reorder(reorder);
 	}
 
 	/// Resolve the avc3 config from an inline SPS, updating it in place.
@@ -206,14 +206,14 @@ impl<E: CatalogExt> Import<E> {
 
 			// A keyframe starts a new group: close the previous one for the bitrate detector.
 			if frame.keyframe {
-				self.rendition.finish_group(Some(frame.timestamp));
+				self.rendition.record_group_end(Some(frame.timestamp));
 			}
 
 			let pts = frame.timestamp;
 			let bytes = frame.payload.len();
 			self.track.write(frame)?;
 
-			self.rendition.observe_frame(pts, bytes);
+			self.rendition.record_frame(pts, bytes);
 		}
 		Ok(())
 	}

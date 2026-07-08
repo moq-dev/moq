@@ -63,7 +63,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.finish_group(None);
+		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
@@ -76,7 +76,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.finish_group(None);
+		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -84,7 +84,7 @@ impl<E: CatalogExt> Import<E> {
 	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
-		self.rendition.finish_group(Some(timestamp));
+		self.rendition.record_group_end(Some(timestamp));
 		let bytes = frame.as_ref().len();
 		self.track.write(Frame {
 			timestamp,
@@ -93,7 +93,7 @@ impl<E: CatalogExt> Import<E> {
 			duration: None,
 		})?;
 		self.track.finish_group()?;
-		self.rendition.observe_frame(timestamp, bytes);
+		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
 	}
 }
