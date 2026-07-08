@@ -8,6 +8,7 @@ import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -296,6 +297,43 @@ export class Publisher {
 	}
 
 	/**
+	 * Handles a FETCH stream by serving one group as bare frame records (lite-05+).
+	 *
+	 * @internal
+	 */
+	async runFetch(msg: Fetch, stream: Stream) {
+		if (!supportsTrackStream(this.version)) {
+			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+			return;
+		}
+
+		const broadcast = this.#broadcasts.peek()?.get(msg.broadcast);
+		if (!broadcast) {
+			console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
+			stream.writer.reset(new Error("not found"));
+			return;
+		}
+
+		let group: group.Consumer | undefined;
+		try {
+			// The timescale is immutable, so serve exactly what TRACK_INFO advertised.
+			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
+			group = await broadcast.track(msg.track).fetchGroup(msg.group, { priority: msg.priority });
+			await this.#runFetchGroup(group, stream.writer, Timescale(info.timescale));
+			console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+			stream.close();
+			group.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(
+				`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${e.message}`,
+			);
+			group?.close(e);
+			stream.abort(e);
+		}
+	}
+
+	/**
 	 * Runs a track and sends its data to the stream.
 	 * @param sub - The subscription ID
 	 * @param broadcast - The broadcast name
@@ -435,6 +473,23 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
+	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
+	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
+	async #runFetchGroup(group: group.Consumer, stream: Writer, timescale: Timescale) {
+		let prevTs = 0n;
+		for (;;) {
+			const frame = await Promise.race([group.readFrame(), stream.closed]);
+			if (!frame) break;
+
+			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
+			await stream.u62(zigzag(ts - prevTs));
+			prevTs = ts;
+
+			await stream.u53(frame.data.byteLength);
+			await stream.write(frame.data);
+		}
+	}
+
 	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {

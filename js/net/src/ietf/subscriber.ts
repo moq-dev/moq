@@ -200,7 +200,9 @@ export class Subscriber {
 	 * Consumes a broadcast from the connection.
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		const consumer = new broadcast.Consumer();
+		// moq-transport has no one-shot group fetch; ConsumeBroadcast rejects it. Track info
+		// is resolved by the subscribe path (the inherited resolveTrackInfo).
+		const consumer = new ConsumeBroadcast();
 
 		void (async () => {
 			for (;;) {
@@ -500,5 +502,16 @@ export class Subscriber {
 			producer.close(e);
 			stream.stop(e);
 		}
+	}
+}
+
+/**
+ * A broadcast consumed from a moq-transport session. Track info is resolved by the
+ * subscribe path (the inherited `resolveTrackInfo`), but the protocol has no one-shot
+ * group fetch, so `track.Consumer.fetchGroup()` is rejected.
+ */
+class ConsumeBroadcast extends broadcast.Consumer {
+	override fetchGroup(): Promise<netGroup.Consumer> {
+		return Promise.reject(new Error("fetch group is not supported for moq-transport"));
 	}
 }
