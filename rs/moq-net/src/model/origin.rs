@@ -38,33 +38,6 @@ impl fmt::Display for InvalidOrigin {
 
 impl std::error::Error for InvalidOrigin {}
 
-#[cfg(feature = "serde")]
-impl serde::Serialize for Origin {
-	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		use serde::ser::SerializeStruct;
-
-		let mut state = serializer.serialize_struct("Origin", 1)?;
-		state.serialize_field("id", &self.id)?;
-		state.end()
-	}
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for Origin {
-	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		#[derive(serde::Deserialize)]
-		struct OriginSerde {
-			id: u64,
-		}
-
-		let origin = <OriginSerde as serde::Deserialize>::deserialize(deserializer)?;
-		if origin.id >= 1u64 << 62 {
-			return Err(serde::de::Error::custom("origin id must be below 2^62"));
-		}
-		Ok(Self { id: origin.id })
-	}
-}
-
 impl Origin {
 	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
 	/// Also used for remote peers that choose the legal but loop-blind id 0.
@@ -155,7 +128,6 @@ pub(crate) const MAX_HOPS: usize = 32;
 /// Guarantees `len() <= MAX_HOPS`. Construct via [`OriginList::new`] +
 /// [`OriginList::push`], or fall back to the fallible [`TryFrom<Vec<Origin>>`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OriginList(Vec<Origin>);
 
 /// Returned when an operation would grow an [`OriginList`] past its hop-count cap.

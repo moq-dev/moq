@@ -72,7 +72,6 @@ impl<'a> AsPath for &'a String {
 /// assert_eq!(joined.as_str(), "api/v1/users");
 /// ```
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Path<'a>(Cow<'a, str>);
 
 impl<'a> Path<'a> {
@@ -344,18 +343,6 @@ where
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.as_str().encode(w, version)?;
 		Ok(())
-	}
-}
-
-// A custom deserializer is needed in order to sanitize
-#[cfg(feature = "serde")]
-impl<'de: 'a, 'a> serde::Deserialize<'de> for Path<'a> {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: serde::Deserializer<'de>,
-	{
-		let s = <&'a str as serde::Deserialize<'de>>::deserialize(deserializer)?;
-		Ok(Path::new(s))
 	}
 }
 

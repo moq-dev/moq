@@ -20,7 +20,7 @@ doctest = false
 bytes = "1"
 hex = "0.4"
 lazy_static = "1"
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 regex = "1"
 serde = { workspace = true }
 serde_json = "1"

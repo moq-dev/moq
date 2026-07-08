@@ -42,7 +42,6 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
@@ -51,58 +50,21 @@ pub struct Info {
 	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
 	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to wall-clock milliseconds.
-	#[cfg_attr(feature = "serde", serde(default))]
 	pub timescale: Timescale,
 	/// How long the publisher keeps old groups available before evicting them
 	/// (the newest group is always retained). A subscriber's
 	/// [`Subscription::stale`] window is clamped to this, since a group can't be
 	/// waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. Defaults to [`DEFAULT_CACHE`].
-	#[cfg_attr(
-		feature = "serde",
-		serde(
-			default = "default_cache",
-			skip_serializing_if = "is_default_cache",
-			with = "cache_millis"
-		)
-	)]
 	pub cache: Duration,
 	/// The publisher's priority for this track, used only to break ties between
-	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+);
-	/// kept out of the catalog (a transport property, not media metadata).
-	#[cfg_attr(feature = "serde", serde(skip))]
+	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
 	/// The publisher's group ordering preference (newest-first when `false`), used
-	/// only to break ties. Reported in TRACK_INFO (Lite05+); kept out of the catalog.
-	#[cfg_attr(feature = "serde", serde(skip))]
+	/// only to break ties. Reported in TRACK_INFO (Lite05+).
 	pub ordered: bool,
 }
 
-#[cfg(feature = "serde")]
-fn default_cache() -> Duration {
-	DEFAULT_CACHE
-}
-
-#[cfg(feature = "serde")]
-fn is_default_cache(cache: &Duration) -> bool {
-	*cache == DEFAULT_CACHE
-}
-
-/// Serialize [`Info::cache`] as a bare integer of milliseconds, matching the
-/// catalog's other durations (and the wire), rather than serde's `{secs, nanos}`.
-#[cfg(feature = "serde")]
-mod cache_millis {
-	use std::time::Duration;
-
-	pub fn serialize<S: serde::Serializer>(cache: &Duration, s: S) -> Result<S::Ok, S::Error> {
-		s.serialize_u64(cache.as_millis() as u64)
-	}
-
-	pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-		let ms = <u64 as serde::Deserialize>::deserialize(d)?;
-		Ok(Duration::from_millis(ms))
-	}
-}
 impl Default for Info {
 	fn default() -> Self {
 		Self {

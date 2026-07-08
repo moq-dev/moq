@@ -43,7 +43,7 @@ hex = "0.4"
 humantime = "2.3"
 humantime-serde = "1.1"
 
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }

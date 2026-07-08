@@ -20,7 +20,6 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// This is just the header; the payload is carried separately (as a completed
 /// [`Frame`] or streamed via [`Producer`] / [`Consumer`]).
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,

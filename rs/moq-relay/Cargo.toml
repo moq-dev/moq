@@ -43,7 +43,7 @@ http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "url-standard"], default-features = false }
 jsonwebtoken = "10"
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

@@ -33,7 +33,7 @@ clap = { version = "4", features = ["derive", "env"] }
 humantime = "2.3"
 humantime-serde = "1.1"
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 rand = "0.10.1"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 serde = { version = "1", features = ["derive"] }

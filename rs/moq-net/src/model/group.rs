@@ -29,7 +29,6 @@ const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
 ///
 /// You can use [track::Producer::append_group] if you just want to +1 the sequence number.
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Info {
 	/// Per-track sequence number used to detect ordering and gaps. Higher numbers
 	/// supersede lower ones; consumers may skip late arrivals.
