@@ -50,13 +50,16 @@ impl<E: CatalogExt> Import<E> {
 		}
 		let mut cursor = data;
 		let config = Config::parse(&mut cursor)?;
-		let audio_config = hang::catalog::AudioConfig::new(
+		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AAC {
 				profile: config.profile,
 			},
 			config.sample_rate,
 			config.channel_count,
 		);
+		// Keep the caller's AudioSpecificConfig verbatim rather than re-encoding the parsed fields,
+		// which would drop any SBR/PS extension the parse ignores.
+		audio_config.description = Some(bytes::Bytes::copy_from_slice(data));
 		self.publish(audio_config)
 	}
 

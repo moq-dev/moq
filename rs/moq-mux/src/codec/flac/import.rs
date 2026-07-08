@@ -56,7 +56,9 @@ impl<E: CatalogExt> Import<E> {
 			config.sample_rate,
 			config.channel_count,
 		);
-		audio.description = Some(config.description());
+		// Keep the caller's `fLaC` + STREAMINFO verbatim rather than re-encoding the parsed fields,
+		// which would drop any trailing metadata blocks the parse ignores.
+		audio.description = Some(bytes::Bytes::copy_from_slice(data));
 		self.publish(audio)
 	}
 
