@@ -711,15 +711,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use crate::{Timestamp, broadcast, cache};
+	use crate::{Timestamp, broadcast};
 
 	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
-		track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			name,
-			None,
-			&cache::Pool::default(),
-		)
+		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
 	}
 
 	#[tokio::test]

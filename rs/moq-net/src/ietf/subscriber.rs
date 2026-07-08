@@ -468,7 +468,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let broadcast = broadcast::Info { hops }.produce().with_pool(self.origin.pool());
+				let broadcast = broadcast::Info {
+					hops,
+					pool: self.origin.pool(),
+				}
+				.produce();
 
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a

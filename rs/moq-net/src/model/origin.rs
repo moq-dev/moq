@@ -897,7 +897,11 @@ impl Producer {
 	/// unannounces the broadcast. See [`publish_broadcast`](Self::publish_broadcast) for the
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<Broadcast, Error> {
-		let producer = broadcast::Info::new().produce().with_pool(self.pool.clone());
+		let producer = broadcast::Info {
+			pool: self.pool.clone(),
+			..Default::default()
+		}
+		.produce();
 		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(Broadcast { producer, publish })
 	}
@@ -1992,6 +1996,7 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
 			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			..Default::default()
 		}
 		.produce();
 		let b = broadcast::Info::new().produce();
@@ -2013,6 +2018,7 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
 			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			..Default::default()
 		}
 		.produce();
 		let b = broadcast::Info::new().produce();
@@ -2063,7 +2069,11 @@ mod tests {
 					.collect::<Vec<_>>(),
 			)
 			.unwrap();
-			broadcast::Info { hops }.produce()
+			broadcast::Info {
+				hops,
+				..Default::default()
+			}
+			.produce()
 		}
 
 		// Resolve the active route for "test" after publishing both routes in the given order.

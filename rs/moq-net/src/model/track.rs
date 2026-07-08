@@ -620,22 +620,22 @@ impl Producer {
 	///
 	/// Crate-private: tracks are born from their broadcast via
 	/// [`broadcast::Producer::create_track`] (or served on demand through a
-	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` and shared
-	/// [`cache::Pool`] down so the broadcast owns the namespace and there's a single
-	/// way to mint a track.
+	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` down so the
+	/// broadcast owns the namespace, and the track inherits its cache pool, from a
+	/// single link.
 	pub(crate) fn new(
 		broadcast: Arc<broadcast::Info>,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
-		pool: &cache::Pool,
 	) -> Self {
 		let info = info.into().unwrap_or_default();
+		let pool = broadcast.pool.clone();
 		Self {
 			name: name.into(),
 			broadcast,
 			state: kio::Producer::new(TrackState {
 				info: Some(info),
-				pool: pool.clone(),
+				pool,
 				..Default::default()
 			}),
 			prev_subscription: None,
@@ -1739,10 +1739,10 @@ pub struct Request {
 }
 
 impl Request {
-	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>, pool: &cache::Pool) -> Self {
+	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::new(TrackState {
-			pool: pool.clone(),
+			pool: broadcast.pool.clone(),
 			..Default::default()
 		});
 		let dynamic = Dynamic::new(name.clone(), state.clone());
@@ -1899,12 +1899,7 @@ mod test {
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
-		Producer::new(
-			Arc::new(broadcast::Info::default()),
-			name,
-			info,
-			&cache::Pool::default(),
-		)
+		Producer::new(Arc::new(broadcast::Info::default()), name, info)
 	}
 
 	/// Helper: count non-tombstoned groups in state.
@@ -3042,7 +3037,11 @@ mod test {
 	/// Mint a track whose groups register with a bounded [`cache::Pool`].
 	fn pooled_producer(capacity: u64) -> (Producer, cache::Pool) {
 		let pool = cache::Pool::new(capacity);
-		let producer = Producer::new(Arc::new(broadcast::Info::default()), "test", None, &pool);
+		let broadcast = broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let producer = Producer::new(Arc::new(broadcast), "test", None);
 		(producer, pool)
 	}
 

@@ -19,12 +19,19 @@ pub struct Info {
 	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
 	/// shortest-path preference.
 	pub hops: OriginList,
+
+	// The cache pool every track (and its groups) under this broadcast inherits,
+	// threaded down the ownership chain via the `Arc<Info>` a track holds. Not part
+	// of the public surface: a relay configures it once on its `origin::Info` and it
+	// flows origin -> broadcast -> track -> group. Unbounded by default.
+	pub(crate) pool: cache::Pool,
 }
 
 impl Default for Info {
 	fn default() -> Self {
 		Self {
 			hops: OriginList::new(),
+			pool: cache::Pool::default(),
 		}
 	}
 }
@@ -36,8 +43,7 @@ impl Info {
 	}
 
 	/// Consume this [Info] to create a producer that carries its metadata
-	/// (including the hop chain), with an unbounded cache pool. Use
-	/// [`Producer::with_pool`] to register groups against a shared budget.
+	/// (including the hop chain).
 	///
 	/// Keep the returned [`Producer`] alive for as long as the broadcast should stay
 	/// available, and end it with [`Producer::close`]. See the note on [`Producer`].
@@ -67,12 +73,6 @@ struct BroadcastState {
 	// Set by an explicit `Producer::close()` so `Drop` can tell a deliberate
 	// shutdown apart from a producer that was dropped by accident.
 	closed: bool,
-
-	// The cache pool every track (and its groups) under this broadcast registers
-	// with, set by `Producer::with_pool`. In the shared state so both the producer
-	// and its consumers (on-demand track requests) mint tracks against one budget.
-	// Unbounded by default.
-	pool: cache::Pool,
 }
 
 impl BroadcastState {
@@ -128,8 +128,7 @@ pub struct Producer {
 }
 
 impl Producer {
-	/// Create a producer for the given broadcast metadata, with an unbounded cache
-	/// pool. Prefer [`Info::produce`].
+	/// Create a producer for the given broadcast metadata. Prefer [`Info::produce`].
 	pub fn new(info: Info) -> Self {
 		Self {
 			info: Arc::new(info),
@@ -137,27 +136,8 @@ impl Producer {
 		}
 	}
 
-	/// Set the [`cache::Pool`] groups under this broadcast register with, returning
-	/// `self` for chaining. Set before creating any track (a relay stamps the origin's
-	/// shared pool here so every cached group draws on one memory budget).
-	///
-	/// Lives in the shared state so both this producer and its [`Consumer`]s reach it
-	/// (a consumer's on-demand [`track`](Consumer::track) request registers its groups
-	/// with the same pool).
-	pub fn with_pool(self, pool: cache::Pool) -> Self {
-		if let Ok(mut state) = BroadcastState::modify(&self.state) {
-			state.pool = pool;
-		}
-		self
-	}
-
 	pub fn info(&self) -> &Info {
 		&self.info
-	}
-
-	/// The cache pool groups under this broadcast register with.
-	fn pool(&self) -> cache::Pool {
-		self.state.read().pool.clone()
 	}
 
 	/// Remove a track from the lookup.
@@ -177,7 +157,7 @@ impl Producer {
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = track::Producer::new(self.info.clone(), name, info, &self.pool());
+		let track = track::Producer::new(self.info.clone(), name, info);
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())?;
 		drop(state);
@@ -192,7 +172,7 @@ impl Producer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`Dynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
-		let request = track::Request::new(self.info.clone(), name, &self.pool());
+		let request = track::Request::new(self.info.clone(), name);
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(request.weak())?;
 		drop(state);
@@ -456,11 +436,10 @@ impl Consumer {
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
-		// requests map, and the FIFO order. The request's groups register with the
-		// broadcast's shared pool, same as a producer-created track.
-		let pool = state.pool.clone();
+		// requests map, and the FIFO order. The request inherits the broadcast's
+		// cache pool through its `Arc<Info>`, same as a producer-created track.
 		let name: Arc<str> = name.into();
-		let request = track::Request::new(self.info.clone(), name.clone(), &pool);
+		let request = track::Request::new(self.info.clone(), name.clone());
 		let consumer = request.consume();
 
 		state.requests.insert(name.clone(), request);
