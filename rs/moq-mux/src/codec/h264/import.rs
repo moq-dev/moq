@@ -18,7 +18,6 @@ use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
-use crate::container::jitter::Metrics;
 
 /// H.264 importer: a pure frame publisher that resolves the catalog rendition.
 ///
@@ -35,7 +34,6 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_sps: Option<Bytes>,
-	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -48,7 +46,6 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_sps: None,
-			metrics: Metrics::new(),
 		}
 	}
 
@@ -122,14 +119,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -138,7 +135,7 @@ impl<E: CatalogExt> Import<E> {
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.
 	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
-		self.rendition.update_metrics(self.metrics.observe_reorder(reorder));
+		self.rendition.observe_reorder(reorder);
 	}
 
 	/// Resolve the avc3 config from an inline SPS, updating it in place.
@@ -175,10 +172,6 @@ impl<E: CatalogExt> Import<E> {
 		}
 		tracing::debug!(?config, "starting H.264 track");
 		self.rendition.set(config.clone());
-		// Seed metrics from whatever has accumulated: a dirty start (or a B-frame
-		// reorder observed via observe_reorder) can feed updates before this
-		// rendition exists, so those would otherwise be lost on (re)publish.
-		self.rendition.update_metrics(self.metrics.current());
 		self.config = Some(config);
 	}
 
@@ -206,15 +199,14 @@ impl<E: CatalogExt> Import<E> {
 			}
 
 			if frame.keyframe {
-				self.rendition
-					.update_metrics(self.metrics.finish_group(Some(frame.timestamp)));
+				self.rendition.finish_group(Some(frame.timestamp));
 			}
 
 			let pts = frame.timestamp;
 			let bytes = frame.payload.len();
 			self.track.write(frame)?;
 
-			self.rendition.update_metrics(self.metrics.observe_frame(pts, bytes));
+			self.rendition.observe_frame(pts, bytes);
 		}
 		Ok(())
 	}

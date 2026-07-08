@@ -10,7 +10,6 @@
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
 use crate::container::Timestamp;
-use crate::container::jitter::Metrics;
 
 /// Legacy audio (MP2 / AC-3 / E-AC-3) header parsing errors.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -116,7 +115,6 @@ pub(crate) struct Config {
 pub(crate) struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
-	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -144,7 +142,6 @@ impl<E: CatalogExt> Import<E> {
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-			metrics: Metrics::new(),
 		}
 	}
 
@@ -155,14 +152,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -170,8 +167,7 @@ impl<E: CatalogExt> Import<E> {
 	/// Publish one whole frame as a hang frame in its own group.
 	pub fn decode(&mut self, frame: &[u8], pts: Option<Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
-		self.rendition
-			.update_metrics(self.metrics.finish_group(Some(timestamp)));
+		self.rendition.finish_group(Some(timestamp));
 		self.track.write(Frame {
 			timestamp,
 			duration: None,
@@ -179,8 +175,7 @@ impl<E: CatalogExt> Import<E> {
 			keyframe: true,
 		})?;
 		self.track.finish_group()?;
-		self.rendition
-			.update_metrics(self.metrics.observe_frame(timestamp, frame.len()));
+		self.rendition.observe_frame(timestamp, frame.len());
 		Ok(())
 	}
 }

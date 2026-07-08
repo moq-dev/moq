@@ -19,7 +19,6 @@ use super::split::ObuIterator;
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::Metrics;
 
 /// A pure-publisher importer for AV1 with inline sequence headers.
 ///
@@ -32,7 +31,6 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_seq: Option<Bytes>,
-	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -44,7 +42,6 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_seq: None,
-			metrics: Metrics::new(),
 		}
 	}
 
@@ -169,7 +166,6 @@ impl<E: CatalogExt> Import<E> {
 		}
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
-		self.rendition.update_metrics(self.metrics.current());
 		self.config = Some(config);
 	}
 
@@ -202,14 +198,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -230,8 +226,7 @@ impl<E: CatalogExt> Import<E> {
 			}
 
 			if frame.keyframe {
-				self.rendition
-					.update_metrics(self.metrics.finish_group(Some(frame.timestamp)));
+				self.rendition.finish_group(Some(frame.timestamp));
 			}
 
 			let pts = frame.timestamp;
@@ -240,7 +235,7 @@ impl<E: CatalogExt> Import<E> {
 			// MissingKeyframe, which a caller joining mid-stream skips.
 			self.track.write(frame)?;
 
-			self.rendition.update_metrics(self.metrics.observe_frame(pts, bytes));
+			self.rendition.observe_frame(pts, bytes);
 		}
 		Ok(())
 	}

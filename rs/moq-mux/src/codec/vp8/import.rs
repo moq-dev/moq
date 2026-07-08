@@ -2,7 +2,6 @@ use bytes::Bytes;
 
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::Metrics;
 
 use super::FrameHeader;
 
@@ -22,9 +21,7 @@ pub struct Import<E: CatalogExt = ()> {
 
 	// The resolved config, used to detect resolution changes.
 	config: Option<hang::catalog::VideoConfig>,
-
 	// Tracks bitrate and jitter updates for the catalog.
-	metrics: Metrics,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -35,7 +32,6 @@ impl<E: CatalogExt> Import<E> {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
-			metrics: Metrics::new(),
 		}
 	}
 
@@ -64,7 +60,6 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
-		self.rendition.update_metrics(self.metrics.current());
 		self.config = Some(config);
 
 		Ok(())
@@ -84,7 +79,7 @@ impl<E: CatalogExt> Import<E> {
 
 		let pts = self.rendition.timestamp(pts)?;
 		if header.keyframe {
-			self.rendition.update_metrics(self.metrics.finish_group(Some(pts)));
+			self.rendition.finish_group(Some(pts));
 		}
 		self.track.write(Frame {
 			timestamp: pts,
@@ -93,8 +88,7 @@ impl<E: CatalogExt> Import<E> {
 			duration: None,
 		})?;
 
-		self.rendition
-			.update_metrics(self.metrics.observe_frame(pts, frame.len()));
+		self.rendition.observe_frame(pts, frame.len());
 
 		Ok(())
 	}
@@ -106,14 +100,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.update_metrics(self.metrics.finish_group(None));
+		self.rendition.finish_group(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}

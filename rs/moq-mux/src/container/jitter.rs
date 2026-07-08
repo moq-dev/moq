@@ -4,87 +4,16 @@ use crate::container::Timestamp;
 
 const BITRATE_WINDOW: Duration = Duration::from_secs(1);
 
-/// Catalog metric updates discovered from frame timing and sizes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Update {
-	/// The catalog jitter (minimum buffer duration), if it changed.
-	pub jitter: Option<Duration>,
-	/// The current maximum bitrate in bits per second, if it increased.
-	pub bitrate: Option<u64>,
-}
-
-impl Update {
-	fn jitter(jitter: Option<Duration>) -> Self {
-		Self { jitter, bitrate: None }
-	}
-
-	fn bitrate(bitrate: Option<u64>) -> Self {
-		Self { jitter: None, bitrate }
-	}
-
-	/// Apply the detected jitter and bitrate to a catalog config in place.
-	pub(crate) fn apply(&self, config: &mut impl MetricsTarget) {
-		if let Some(jitter) = self.jitter {
-			config.set_jitter(moq_net::Time::try_from(jitter).ok());
-		}
-		self.apply_bitrate(config);
-	}
-
-	/// Apply only the detected bitrate, keeping the maximum seen.
-	pub(crate) fn apply_bitrate(&self, config: &mut impl MetricsTarget) {
-		if let Some(bitrate) = self.bitrate
-			&& config.bitrate().is_none_or(|current| bitrate > current)
-		{
-			config.set_bitrate(bitrate);
-		}
-	}
-}
-
-/// A catalog rendition config the metrics detector refines in place.
+/// Tracks catalog metrics (jitter and bitrate) for one media track.
 ///
-/// Implemented for the video and audio configs so [`Update::apply`] works on either.
-pub(crate) trait MetricsTarget {
-	/// Set the jitter (minimum buffer duration) for this track.
-	fn set_jitter(&mut self, jitter: Option<moq_net::Time>);
-	/// The current bitrate in bits per second, if known.
-	fn bitrate(&self) -> Option<u64>;
-	/// Set the bitrate in bits per second.
-	fn set_bitrate(&mut self, bitrate: u64);
-}
-
-impl MetricsTarget for hang::catalog::VideoConfig {
-	fn set_jitter(&mut self, jitter: Option<moq_net::Time>) {
-		self.jitter = jitter;
-	}
-
-	fn bitrate(&self) -> Option<u64> {
-		self.bitrate
-	}
-
-	fn set_bitrate(&mut self, bitrate: u64) {
-		self.bitrate = Some(bitrate);
-	}
-}
-
-impl MetricsTarget for hang::catalog::AudioConfig {
-	fn set_jitter(&mut self, jitter: Option<moq_net::Time>) {
-		self.jitter = jitter;
-	}
-
-	fn bitrate(&self) -> Option<u64> {
-		self.bitrate
-	}
-
-	fn set_bitrate(&mut self, bitrate: u64) {
-		self.bitrate = Some(bitrate);
-	}
-}
-
-/// Tracks catalog metrics for one media track.
+/// Each event maps to a single catalog field: a frame can change the jitter, a finished group
+/// can raise the bitrate. The group boundary keeps a single large keyframe from being reported
+/// as the track bitrate on its own.
 ///
-/// Jitter is updated per frame, while bitrate is updated when the current group is
-/// finished. The group boundary keeps a single large keyframe from being reported as the
-/// track bitrate on its own.
+/// The importer feeds events; a change is reported back so the caller only republishes the
+/// catalog when a value actually moves. The `jitter`/`bitrate` accessors expose the current
+/// values without change-detection, to seed a freshly published rendition with whatever has
+/// already accumulated.
 #[derive(Default)]
 pub(crate) struct Metrics {
 	jitter: Jitter,
@@ -96,28 +25,32 @@ impl Metrics {
 		Self::default()
 	}
 
-	/// Record one frame's presentation timestamp and encoded byte count.
-	pub fn observe_frame(&mut self, ts: Timestamp, bytes: usize) -> Update {
+	/// Record one frame's presentation timestamp and encoded byte count, returning the new
+	/// jitter if it changed. The bitrate is accumulated but only surfaces from `finish_group`.
+	pub fn observe_frame(&mut self, ts: Timestamp, bytes: usize) -> Option<Duration> {
 		self.bitrate.observe_frame(ts, bytes);
-		Update::jitter(self.jitter.observe(ts))
+		self.jitter.observe(ts)
 	}
 
-	/// Record a frame's reorder delay (`PTS - DTS`).
-	pub fn observe_reorder(&mut self, reorder: Timestamp) -> Update {
-		Update::jitter(self.jitter.observe_reorder(reorder))
+	/// Record a frame's reorder delay (`PTS - DTS`), returning the new jitter if it changed.
+	pub fn observe_reorder(&mut self, reorder: Timestamp) -> Option<Duration> {
+		self.jitter.observe_reorder(reorder)
 	}
 
-	/// Finish the current group, using `next` as the group's end timestamp when known.
-	pub fn finish_group(&mut self, next: Option<Timestamp>) -> Update {
-		Update::bitrate(self.bitrate.finish_group(next))
+	/// Finish the current group (`next` is the group's end timestamp when known), returning the
+	/// new bitrate if it rose.
+	pub fn finish_group(&mut self, next: Option<Timestamp>) -> Option<u64> {
+		self.bitrate.finish_group(next)
 	}
 
-	/// The current metrics, without change-detection.
-	pub fn current(&self) -> Update {
-		Update {
-			jitter: self.jitter.current(),
-			bitrate: self.bitrate.current(),
-		}
+	/// The current jitter, without change-detection (to seed a freshly published rendition).
+	pub fn jitter(&self) -> Option<Duration> {
+		self.jitter.current()
+	}
+
+	/// The current bitrate, without change-detection (to seed a freshly published rendition).
+	pub fn bitrate(&self) -> Option<u64> {
+		self.bitrate.current()
 	}
 }
 
@@ -289,28 +222,25 @@ mod tests {
 	fn bitrate_waits_for_group_boundaries_and_reports_max() {
 		let mut metrics = Metrics::new();
 
-		assert_eq!(metrics.observe_frame(ts(0), 100_000).bitrate, None);
-		assert_eq!(metrics.observe_frame(ts(500), 100_000).bitrate, None);
-		assert_eq!(metrics.finish_group(Some(ts(1000))).bitrate, Some(1_600_000));
+		metrics.observe_frame(ts(0), 100_000);
+		metrics.observe_frame(ts(500), 100_000);
+		assert_eq!(metrics.finish_group(Some(ts(1000))), Some(1_600_000));
 
 		metrics.observe_frame(ts(1000), 25_000);
-		assert_eq!(metrics.finish_group(Some(ts(2000))).bitrate, None);
-		assert_eq!(metrics.current().bitrate, Some(1_600_000));
+		assert_eq!(metrics.finish_group(Some(ts(2000))), None);
+		assert_eq!(metrics.bitrate(), Some(1_600_000));
 
 		metrics.observe_frame(ts(2000), 250_000);
-		assert_eq!(metrics.finish_group(Some(ts(3000))).bitrate, Some(2_000_000));
+		assert_eq!(metrics.finish_group(Some(ts(3000))), Some(2_000_000));
 	}
 
 	#[test]
 	fn jitter_still_reports_larger_of_frame_duration_and_reorder() {
 		let mut metrics = Metrics::new();
 
-		assert_eq!(metrics.observe_frame(ts(0), 1).jitter, None);
-		assert_eq!(metrics.observe_frame(ts(33), 1).jitter, Some(Duration::from_millis(33)));
-		assert_eq!(
-			metrics.observe_reorder(ts(100)).jitter,
-			Some(Duration::from_millis(100))
-		);
-		assert_eq!(metrics.current().jitter, Some(Duration::from_millis(100)));
+		assert_eq!(metrics.observe_frame(ts(0), 1), None);
+		assert_eq!(metrics.observe_frame(ts(33), 1), Some(Duration::from_millis(33)));
+		assert_eq!(metrics.observe_reorder(ts(100)), Some(Duration::from_millis(100)));
+		assert_eq!(metrics.jitter(), Some(Duration::from_millis(100)));
 	}
 }
