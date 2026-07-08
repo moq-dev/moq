@@ -1249,8 +1249,18 @@ impl Drop for Request {
 	fn drop(&mut self) {
 		// Handed off but neither accepted nor rejected: drop the still-queued entry so its
 		// producer clone (plus this one) closes the channel, resolving coalesced requesters to
-		// `Unroutable` rather than hanging. A no-op after `accept`/`reject` already removed it.
-		if let Ok(mut state) = self.state.write() {
+		// `Unroutable` rather than hanging.
+		//
+		// Guard on channel identity: `accept`/`reject` already removed our entry and released the
+		// lock before we run, so a concurrent request for the same path may have registered a
+		// *new* one here. Removing unconditionally would clobber it (stranding its requesters and
+		// desyncing `request_order` from `requests`), so only remove while it's still ours.
+		if let Ok(mut state) = self.state.write()
+			&& state
+				.requests
+				.get(&self.path)
+				.is_some_and(|producer| producer.same_channel(&self.producer))
+		{
 			state.requests.remove(&self.path);
 		}
 	}
@@ -3269,6 +3279,28 @@ mod tests {
 		request.reject(Error::Cancel);
 
 		assert!(matches!(request_fut.await, Err(Error::Cancel)));
+	}
+
+	// After a rejected hand-off, a fresh request for the same path reaches the handler again:
+	// the rejected `Request`'s removal + `Drop` leave `requests` and `request_order` consistent
+	// (a stale/clobbered entry would strand this request or panic the handler).
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_rerequest_after_reject() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let f1 = consumer.request_broadcast("fallback");
+		dynamic.requested_broadcast().await.unwrap().reject(Error::Unroutable);
+		assert!(matches!(f1.await, Err(Error::Unroutable)));
+
+		// A fresh request re-reaches the handler and can be served.
+		let f2 = consumer.request_broadcast("fallback");
+		let request = dynamic.requested_broadcast().await.unwrap();
+		assert_eq!(request.path(), &Path::new("fallback"));
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		assert!(f2.await.unwrap().is_clone(&served.consume()));
 	}
 
 	// Dropping the last handler resolves queued requests with an error and reverts to
