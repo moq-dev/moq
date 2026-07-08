@@ -7,6 +7,9 @@ class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	tracks = new Map<string, track.Producer>();
+	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
+	// closes once the last one closes, so a shared consumer can be handed to several callers.
+	consumers = 0;
 }
 
 function closedPromise(state: BroadcastState): Promise<Error | undefined> {
@@ -30,7 +33,12 @@ function closeState(state: BroadcastState, abort?: Error) {
 	});
 }
 
-function subscribe(state: BroadcastState, name: string, priority: number): track.Subscriber {
+// `register` is set on the subscribing (consumer) side: the fresh producer is cached in
+// `state.tracks` so repeat subscriptions to the same track fan out from one upstream
+// subscription instead of opening a new one, mirroring the Rust `broadcast::Consumer::track`
+// weak-dedup. The publishing side leaves it false: `state.tracks` there holds only the tracks
+// the app inserted, and a dynamic serve stays one request per peer subscription.
+function subscribe(state: BroadcastState, name: string, priority: number, register = false): track.Subscriber {
 	if (state.closed.peek()) {
 		throw new Error(`broadcast is closed: ${state.closed.peek()}`);
 	}
@@ -43,6 +51,15 @@ function subscribe(state: BroadcastState, name: string, priority: number): track
 
 	const producer = new track.Producer(name);
 	const subscriber = producer.subscribe();
+
+	if (register) {
+		state.tracks.set(name, producer);
+		// Drop the cache entry once the subscription closes, so a later subscribe re-opens it.
+		void producer.closed.finally(() => {
+			if (state.tracks.get(name) === producer) state.tracks.delete(name);
+		});
+	}
+
 	state.requested.mutate((requested) => {
 		requested.push(new track.Request(name, producer, priority));
 		requested.sort((a, b) => a.priority - b.priority);
@@ -205,23 +222,54 @@ export class Producer implements track.Broadcast {
 export class Consumer implements track.Broadcast {
 	#state: BroadcastState;
 
+	// Guards against a double close() on this handle over-decrementing the consumer count.
+	#closed = false;
+
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
 	constructor(state?: never);
 	constructor(state?: BroadcastState) {
 		this.#state = state ?? new BroadcastState();
+		this.#state.consumers++;
 		this.closed = closedPromise(this.#state);
 	}
 
-	/** Get a lazy handle for a track on this broadcast. */
+	/**
+	 * Reactive closed state: `false` while open, `true` or the abort `Error` once closed.
+	 * Await {@link closed} (the promise) to block on it instead. The subscribing wire layer
+	 * reads this to evict a closed entry from its per-path consume cache.
+	 */
+	get closedSignal(): Signal<boolean | Error> {
+		return this.#state.closed;
+	}
+
+	/**
+	 * Return another handle to the same broadcast, reference-counted with this one.
+	 *
+	 * Both handles read the same tracks and share one {@link closed} state; the broadcast
+	 * closes only once *every* handle has {@link close}d. Used by the connection's per-path
+	 * consume cache to share one subscription across callers. Subclasses that resolve info over
+	 * the wire override this to preserve their type (see the wire layer's consumed broadcast).
+	 */
+	clone(): Consumer {
+		return new Consumer(this.shareState());
+	}
+
+	// Hand this consumer's backing state to a clone. Opaque (`never`) so the state type stays
+	// unexported; a subclass passes it straight back into its own `super(...)`.
+	protected shareState(): never {
+		return this.#state as never;
+	}
+
+	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */
 	track(name: string): track.Consumer {
 		return new track.Consumer(name, this);
 	}
 
-	/** Open a live subscription to a track. Used by the subscribing wire layer. */
+	/** Open a live subscription to a track. Used by the subscribing wire layer. Repeat subscriptions to the same track share one upstream subscription. */
 	subscribe(name: string, priority: number): track.Subscriber {
-		return subscribe(this.#state, name, priority);
+		return subscribe(this.#state, name, priority, true);
 	}
 
 	/** Return the next track requested by the local consumer. Used by the subscribing wire layer. */
@@ -255,8 +303,14 @@ export class Consumer implements track.Broadcast {
 		return fetchGroup(this.#state, name, sequence, options);
 	}
 
-	/** Close the broadcast, optionally with an error to abort waiters. */
+	/**
+	 * Release this handle. The broadcast is closed (optionally with an error to abort waiters)
+	 * once this was the last live handle; while other {@link clone}s remain open it stays live.
+	 */
 	close(abort?: Error) {
+		if (this.#closed) return;
+		this.#closed = true;
+		if (--this.#state.consumers > 0) return;
 		closeState(this.#state, abort);
 	}
 }

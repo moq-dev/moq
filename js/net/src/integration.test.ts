@@ -290,6 +290,49 @@ test("integration: ietf draft-19", async () => {
 	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_19);
 });
 
+// consume(path) dedupes per path: repeat calls for a still-live path share one reference-counted
+// broadcast, so it stays live until every handle closes and a closed path re-consumes fresh.
+async function runConsumeDedup(protocol: string, version?: number) {
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, version !== undefined ? { version } : undefined),
+	]);
+
+	// Two handles to the same path share one broadcast: closing the first leaves it live...
+	const first = client.consume(Path.from("shared"));
+	const second = client.consume(Path.from("shared"));
+	first.close();
+	expect(first.closedSignal.peek()).toBeFalsy();
+	expect(second.closedSignal.peek()).toBeFalsy();
+
+	// ...and closing the last handle closes the shared broadcast (both handles observe it).
+	second.close();
+	expect(first.closedSignal.peek()).toBeTruthy();
+	expect(second.closedSignal.peek()).toBeTruthy();
+
+	// A different path is independent: a lone handle closes the broadcast immediately.
+	const other = client.consume(Path.from("other"));
+	other.close();
+	expect(other.closedSignal.peek()).toBeTruthy();
+
+	// Once closed, the path re-consumes fresh (a new live handle).
+	const third = client.consume(Path.from("shared"));
+	expect(third.closedSignal.peek()).toBeFalsy();
+	third.close();
+
+	client.close();
+	server.close();
+}
+
+test("integration: lite consume dedup", async () => {
+	await runConsumeDedup(Lite.ALPN_05);
+});
+
+test("integration: ietf consume dedup", async () => {
+	await runConsumeDedup(Ietf.ALPN.DRAFT_17);
+});
+
 test("integration: subscribe to non-existent broadcast", async () => {
 	const pair = createMockTransportPair("");
 

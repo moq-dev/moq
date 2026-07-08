@@ -2,6 +2,7 @@ import { Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import * as broadcast from "../broadcast.ts";
+import { BroadcastCache } from "../consume.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -91,6 +92,9 @@ export class Subscriber {
 	// before decoding any frame, since a group's QUIC stream can race ahead.
 	#subscribes = new Map<bigint, SubscribeEntry>();
 	#subscribeNext = 0n;
+
+	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
+	#consumes = new BroadcastCache();
 
 	// Recv bandwidth producer (Lite03+ only).
 	#recvBandwidth?: Bandwidth;
@@ -215,10 +219,18 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
+	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
+	 * closed its handle, so callers close normally.
+	 *
 	 * @param name - The name of the broadcast to consume
 	 * @returns A Broadcast instance
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
+		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+	}
+
+	#createConsume(path: Path.Valid): broadcast.Consumer {
 		// A consumed broadcast resolves info() and fetchGroup() over the wire by reaching
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
@@ -713,10 +725,16 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	#subscriber: Subscriber;
 	#path: Path.Valid;
 
-	constructor(subscriber: Subscriber, path: Path.Valid) {
-		super();
+	constructor(subscriber: Subscriber, path: Path.Valid, state?: never) {
+		super(state);
 		this.#subscriber = subscriber;
 		this.#path = path;
+	}
+
+	// Preserve the subclass (and its wire-backed info/fetchGroup) when the consume cache shares
+	// this broadcast across callers.
+	override clone(): ConsumeBroadcast {
+		return new ConsumeBroadcast(this.#subscriber, this.#path, this.shareState());
 	}
 
 	override resolveTrackInfo(name: string): Promise<track.Info> {

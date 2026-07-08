@@ -1,5 +1,6 @@
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import { BroadcastCache } from "../consume.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
@@ -49,6 +50,9 @@ export class Subscriber {
 	// Our subscribed tracks, keyed by trackAlias for group routing.
 	// trackAlias -> the write side; incoming object streams are routed here.
 	#subscribes = new Map<bigint, track.Producer>();
+
+	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
+	#consumes = new BroadcastCache();
 
 	// Any currently active announcements.
 	#announced = new Set<Path.Valid>();
@@ -198,8 +202,16 @@ export class Subscriber {
 
 	/**
 	 * Consumes a broadcast from the connection.
+	 *
+	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
+	 * closed its handle, so callers close normally.
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
+		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+	}
+
+	#createConsume(path: Path.Valid): broadcast.Consumer {
 		// moq-transport has no one-shot group fetch; ConsumeBroadcast rejects it. Track info
 		// is resolved by the subscribe path (the inherited resolveTrackInfo).
 		const consumer = new ConsumeBroadcast();
@@ -511,6 +523,11 @@ export class Subscriber {
  * group fetch, so `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
+	// Preserve the subclass when the consume cache shares this broadcast across callers.
+	override clone(): ConsumeBroadcast {
+		return new ConsumeBroadcast(this.shareState());
+	}
+
 	override fetchGroup(): Promise<netGroup.Consumer> {
 		return Promise.reject(new Error("fetch group is not supported for moq-transport"));
 	}
