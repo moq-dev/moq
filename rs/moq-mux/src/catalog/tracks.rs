@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
+use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::Producer;
@@ -19,6 +20,8 @@ pub trait Kind: sealed::Sealed + 'static {
 	/// The catalog config type carried by this kind ([`VideoConfig`](hang::catalog::VideoConfig)
 	/// or [`AudioConfig`](hang::catalog::AudioConfig)).
 	type Config;
+	/// The all-optional caller-provided overlay for this kind ([`VideoHint`] or [`AudioHint`]).
+	type Hint: Clone + Default;
 
 	#[doc(hidden)]
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config);
@@ -33,6 +36,10 @@ pub trait Kind: sealed::Sealed + 'static {
 	/// The config's bitrate field, so [`Rendition`] can update it generically.
 	#[doc(hidden)]
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64>;
+
+	/// Validate a caller-provided hint against a detected config and overlay its extra fields.
+	#[doc(hidden)]
+	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) -> crate::Result<()>;
 }
 
 /// Video rendition marker for [`Rendition`] / [`Reserved::init`].
@@ -43,8 +50,151 @@ pub enum Audio {}
 impl sealed::Sealed for Video {}
 impl sealed::Sealed for Audio {}
 
+/// Caller-provided catalog fields for an audio track, overlaid onto what the importer detects.
+///
+/// Every field is optional. A field the caller sets is authoritative: the importer fills only the
+/// gaps from the encoded stream, and errors ([`Error::InitMismatch`](crate::Error::InitMismatch))
+/// if a detected value contradicts one the caller pinned. When the codec, sample rate, and channel
+/// count are all present the importer can publish the catalog before the first frame instead of
+/// waiting to parse it. Use it for fields the stream can't reveal (bitrate, language) or to skip
+/// that wait.
+#[derive(Clone, Default, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct AudioHint {
+	/// The audio codec.
+	pub codec: Option<hang::catalog::AudioCodec>,
+	/// The sample rate in Hz.
+	pub sample_rate: Option<u32>,
+	/// The number of audio channels.
+	pub channel_count: Option<u32>,
+	/// Decoder initialization bytes (codec-specific).
+	pub description: Option<Bytes>,
+	/// The maximum bitrate in bits per second.
+	pub bitrate: Option<u64>,
+	/// The maximum jitter before the next frame is emitted.
+	pub jitter: Option<Duration>,
+}
+
+/// Caller-provided catalog fields for a video track, overlaid onto what the importer detects.
+///
+/// The video counterpart of [`AudioHint`]. A [`codec`](Self::codec) alone is enough to publish the
+/// catalog before the first keyframe (the decoder config then arrives in band).
+#[derive(Clone, Default, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct VideoHint {
+	/// The video codec.
+	pub codec: Option<hang::catalog::VideoCodec>,
+	/// Decoder initialization bytes (codec-specific).
+	pub description: Option<Bytes>,
+	/// The encoded width in pixels.
+	pub coded_width: Option<u32>,
+	/// The encoded height in pixels.
+	pub coded_height: Option<u32>,
+	/// The display aspect ratio width.
+	pub display_aspect_width: Option<u32>,
+	/// The display aspect ratio height.
+	pub display_aspect_height: Option<u32>,
+	/// The maximum bitrate in bits per second.
+	pub bitrate: Option<u64>,
+	/// The frame rate in frames per second.
+	pub framerate: Option<f64>,
+	/// If true, the decoder optimizes for latency.
+	pub optimize_for_latency: Option<bool>,
+	/// The maximum jitter before the next frame is emitted.
+	pub jitter: Option<Duration>,
+}
+
+/// Error if `actual` disagrees with the caller-pinned `expected`, else `Ok`.
+fn check_field<T: PartialEq + std::fmt::Debug>(field: &'static str, actual: &T, expected: &T) -> crate::Result<()> {
+	if actual != expected {
+		return Err(crate::Error::InitMismatch {
+			field,
+			expected: format!("{expected:?}"),
+			actual: format!("{actual:?}"),
+		});
+	}
+	Ok(())
+}
+
+/// Overlay `hint` onto `config`: pinned fields already present must match, absent ones are filled.
+macro_rules! overlay_field {
+	// Optional config field: validate if both sides have a value, then fill from the hint.
+	(opt $config:expr, $field:ident, $name:literal, $hint:expr) => {
+		if let Some(value) = &$hint {
+			if let Some(actual) = &$config.$field {
+				check_field($name, actual, value)?;
+			}
+			$config.$field = Some(value.clone());
+		}
+	};
+	// Required config field: the hint can only validate it, never change it.
+	(req $config:expr, $field:ident, $name:literal, $hint:expr) => {
+		if let Some(value) = &$hint {
+			check_field($name, &$config.$field, value)?;
+		}
+	};
+}
+
+impl AudioHint {
+	/// Validate and overlay these fields onto a detected audio config.
+	pub fn apply(&self, config: &mut hang::catalog::AudioConfig) -> crate::Result<()> {
+		overlay_field!(req config, codec, "audio.codec", self.codec);
+		overlay_field!(req config, sample_rate, "audio.sample_rate", self.sample_rate);
+		overlay_field!(req config, channel_count, "audio.channel_count", self.channel_count);
+		overlay_field!(opt config, description, "audio.description", self.description);
+		overlay_field!(opt config, bitrate, "audio.bitrate", self.bitrate);
+		overlay_field!(opt config, jitter, "audio.jitter", self.jitter);
+		Ok(())
+	}
+
+	/// Build a config from these fields alone, or `None` if the codec, sample rate, or channel
+	/// count is missing.
+	pub fn to_config(&self) -> crate::Result<Option<hang::catalog::AudioConfig>> {
+		let (Some(codec), Some(sample_rate), Some(channel_count)) =
+			(self.codec.clone(), self.sample_rate, self.channel_count)
+		else {
+			return Ok(None);
+		};
+
+		let mut config = hang::catalog::AudioConfig::new(codec, sample_rate, channel_count);
+		config.container = hang::catalog::Container::Legacy;
+		self.apply(&mut config)?;
+		Ok(Some(config))
+	}
+}
+
+impl VideoHint {
+	/// Validate and overlay these fields onto a detected video config.
+	pub fn apply(&self, config: &mut hang::catalog::VideoConfig) -> crate::Result<()> {
+		overlay_field!(req config, codec, "video.codec", self.codec);
+		overlay_field!(opt config, description, "video.description", self.description);
+		overlay_field!(opt config, coded_width, "video.coded_width", self.coded_width);
+		overlay_field!(opt config, coded_height, "video.coded_height", self.coded_height);
+		overlay_field!(opt config, display_aspect_width, "video.display_aspect_width", self.display_aspect_width);
+		overlay_field!(opt config, display_aspect_height, "video.display_aspect_height", self.display_aspect_height);
+		overlay_field!(opt config, bitrate, "video.bitrate", self.bitrate);
+		overlay_field!(opt config, framerate, "video.framerate", self.framerate);
+		overlay_field!(opt config, optimize_for_latency, "video.optimize_for_latency", self.optimize_for_latency);
+		overlay_field!(opt config, jitter, "video.jitter", self.jitter);
+		Ok(())
+	}
+
+	/// Build a config from these fields alone, or `None` if the codec is missing.
+	pub fn to_config(&self) -> crate::Result<Option<hang::catalog::VideoConfig>> {
+		let Some(codec) = self.codec.clone() else {
+			return Ok(None);
+		};
+
+		let mut config = hang::catalog::VideoConfig::new(codec);
+		config.container = hang::catalog::Container::Legacy;
+		self.apply(&mut config)?;
+		Ok(Some(config))
+	}
+}
+
 impl Kind for Video {
 	type Config = hang::catalog::VideoConfig;
+	type Hint = VideoHint;
 
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
 		catalog.video.renditions.insert(name.to_string(), config);
@@ -64,10 +214,15 @@ impl Kind for Video {
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
 		&mut config.bitrate
 	}
+
+	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) -> crate::Result<()> {
+		hint.apply(config)
+	}
 }
 
 impl Kind for Audio {
 	type Config = hang::catalog::AudioConfig;
+	type Hint = AudioHint;
 
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
 		catalog.audio.renditions.insert(name.to_string(), config);
@@ -86,6 +241,10 @@ impl Kind for Audio {
 	}
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
 		&mut config.bitrate
+	}
+
+	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) -> crate::Result<()> {
+		hint.apply(config)
 	}
 }
 
@@ -113,7 +272,15 @@ impl<E: CatalogExt> Reserved<E> {
 	/// [`Rendition`] is [`set`](Rendition::set) (or dropped). Prefer [`video`](Self::video) /
 	/// [`audio`](Self::audio) at call sites.
 	pub fn init<K: Kind>(&self, name: impl Into<String>) -> Rendition<E, K> {
-		Rendition::new(self.clone(), name)
+		Rendition::new(self.clone(), name, K::Hint::default())
+	}
+
+	/// Reserve a rendition seeded with caller-provided catalog fields.
+	///
+	/// The `hint` is carried on the returned [`Rendition`]: every [`set`](Rendition::set) validates
+	/// the detected config against it and fills the gaps it declares. See [`AudioHint`] / [`VideoHint`].
+	pub fn init_with_hint<K: Kind>(&self, name: impl Into<String>, hint: K::Hint) -> Rendition<E, K> {
+		Rendition::new(self.clone(), name, hint)
 	}
 
 	/// Reserve a video rendition; shorthand for [`init::<Video>`](Self::init).
@@ -121,9 +288,19 @@ impl<E: CatalogExt> Reserved<E> {
 		self.init::<Video>(name)
 	}
 
+	/// Reserve a video rendition seeded with a [`VideoHint`]; shorthand for [`init_with_hint`](Self::init_with_hint).
+	pub fn video_with_hint(&self, name: impl Into<String>, hint: VideoHint) -> Rendition<E, Video> {
+		self.init_with_hint::<Video>(name, hint)
+	}
+
 	/// Reserve an audio rendition; shorthand for [`init::<Audio>`](Self::init).
 	pub fn audio(&self, name: impl Into<String>) -> Rendition<E, Audio> {
 		self.init::<Audio>(name)
+	}
+
+	/// Reserve an audio rendition seeded with an [`AudioHint`]; shorthand for [`init_with_hint`](Self::init_with_hint).
+	pub fn audio_with_hint(&self, name: impl Into<String>, hint: AudioHint) -> Rendition<E, Audio> {
+		self.init_with_hint::<Audio>(name, hint)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -177,6 +354,8 @@ pub struct Rendition<E: CatalogExt, K: Kind> {
 	detect_jitter: bool,
 	/// Auto-fill `bitrate` from the detector only while the config hasn't provided it.
 	detect_bitrate: bool,
+	/// Caller-provided fields, validated against and overlaid onto every [`set`](Self::set).
+	hint: K::Hint,
 	_kind: PhantomData<fn() -> K>,
 }
 
@@ -186,7 +365,7 @@ pub type VideoTrack<E = ()> = Rendition<E, Video>;
 pub type AudioTrack<E = ()> = Rendition<E, Audio>;
 
 impl<E: CatalogExt, K: Kind> Rendition<E, K> {
-	fn new(reserved: Reserved<E>, name: impl Into<String>) -> Self {
+	fn new(reserved: Reserved<E>, name: impl Into<String>, hint: K::Hint) -> Self {
 		Self {
 			catalog: reserved.catalog.clone(),
 			gate: Some(reserved),
@@ -195,6 +374,7 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 			metrics: Metrics::new(),
 			detect_jitter: true,
 			detect_bitrate: true,
+			hint,
 			_kind: PhantomData,
 		}
 	}
@@ -211,10 +391,14 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
 	///
-	/// A field the caller already set (`jitter` or `bitrate`) is treated as authoritative and left
-	/// alone; only an absent field is auto-detected. Any metrics accumulated before the rendition
-	/// existed (a dirty start or a B-frame reorder) are seeded into the fields being detected.
-	pub fn set(&mut self, mut config: K::Config) {
+	/// The rendition's [`hint`](Self::hint) is validated against `config` and overlaid first, so a
+	/// detected value that contradicts a caller-pinned one is an error
+	/// ([`Error::InitMismatch`](crate::Error::InitMismatch)). A field then present (`jitter` or
+	/// `bitrate`, whether from the caller or the hint) is authoritative and left alone; only an
+	/// absent field is auto-detected. Any metrics accumulated before the rendition existed (a dirty
+	/// start or a B-frame reorder) are seeded into the fields being detected.
+	pub fn set(&mut self, mut config: K::Config) -> crate::Result<()> {
+		K::apply_hint(&mut config, &self.hint)?;
 		self.detect_jitter = K::jitter_mut(&mut config).is_none();
 		self.detect_bitrate = K::bitrate_mut(&mut config).is_none();
 
@@ -237,6 +421,7 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 		}
 		self.present = true;
 		self.gate = None;
+		Ok(())
 	}
 
 	/// Refine the rendition in place (e.g. a synthesized description), publishing if present.
@@ -342,7 +527,7 @@ mod tests {
 	#[test]
 	fn detects_absent_jitter_and_bitrate() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(None, None));
+		rendition.set(config(None, None)).unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
@@ -354,7 +539,9 @@ mod tests {
 	#[test]
 	fn keeps_provided_jitter_and_bitrate() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(Some(123), Some(Duration::from_millis(50))));
+		rendition
+			.set(config(Some(123), Some(Duration::from_millis(50))))
+			.unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();

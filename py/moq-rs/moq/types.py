@@ -25,6 +25,9 @@ from moq_ffi import (
     MoqAudioFrame as AudioFrame,
 )
 from moq_ffi import (
+    MoqAudioHint as AudioHint,
+)
+from moq_ffi import (
     MoqCatalog as Catalog,
 )
 from moq_ffi import (
@@ -45,6 +48,9 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideo as Video,
 )
+from moq_ffi import (
+    MoqVideoHint as VideoHint,
+)
 
 __all__ = [
     "Audio",
@@ -54,6 +60,7 @@ __all__ = [
     "AudioEncoderOutput",
     "AudioFormat",
     "AudioFrame",
+    "AudioHint",
     "Catalog",
     "ConnectionStats",
     "Container",
@@ -62,4 +69,5 @@ __all__ = [
     "Subscription",
     "TrackInfo",
     "Video",
+    "VideoHint",
 ]

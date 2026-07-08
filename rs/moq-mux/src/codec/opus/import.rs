@@ -23,17 +23,34 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		config: Config,
 	) -> crate::Result<Self> {
-		let mut audio = hang::catalog::AudioConfig::new(
-			hang::catalog::AudioCodec::Opus,
-			config.sample_rate,
-			config.channel_count,
-		);
-		audio.container = hang::catalog::Container::Legacy;
+		Self::new_with_hint(track, reserved, Some(config), Default::default())
+	}
+
+	/// Publish on an existing track producer, seeding the rendition with caller-provided fields.
+	///
+	/// `config` is the codec config parsed from init bytes, or `None` to publish from the
+	/// [`AudioHint`](crate::catalog::AudioHint) alone (requires codec, sample rate, and channel count).
+	pub fn new_with_hint(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		config: Option<Config>,
+		hint: crate::catalog::AudioHint,
+	) -> crate::Result<Self> {
+		let detected = config.map(|config| {
+			let mut audio = hang::catalog::AudioConfig::new(
+				hang::catalog::AudioCodec::Opus,
+				config.sample_rate,
+				config.channel_count,
+			);
+			audio.container = hang::catalog::Container::Legacy;
+			audio
+		});
+		let audio = crate::codec::resolve_audio("opus", detected, &hint)?;
 
 		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
 
-		let mut rendition = reserved.audio(track.name());
-		rendition.set(audio);
+		let mut rendition = reserved.audio_with_hint(track.name(), hint);
+		rendition.set(audio)?;
 
 		Ok(Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),

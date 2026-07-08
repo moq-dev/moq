@@ -5,6 +5,7 @@ use moq_mux::catalog::hang::Extra;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
+use crate::media::MoqInit;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
@@ -235,8 +236,10 @@ impl MoqBroadcastProducer {
 
 	/// Create a new media track for this broadcast.
 	///
-	/// `format` controls the encoding of `init` and frame payloads.
-	pub fn publish_media(&self, format: String, init: Vec<u8>) -> Result<Arc<MoqMediaProducer>, MoqError> {
+	/// [`MoqInit::format`](crate::media::MoqInit) selects the codec (or container) for the init bytes
+	/// and frame payloads; its hints seed the catalog (see [`MoqInit`](crate::media::MoqInit)). Hints
+	/// apply to single-codec formats; container formats auto-detect every track.
+	pub fn publish_media(&self, init: MoqInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
@@ -244,28 +247,32 @@ impl MoqBroadcastProducer {
 		// A container may publish several tracks; a single codec fills one reserved
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track on the way to being recognized.
-		let (decoder, demand) =
-			match moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.reserve(), &format, &init) {
-				Ok(container) => (MediaDecoder::Container(container), None),
-				Err(moq_mux::Error::UnknownFormat(_)) => {
-					let mut broadcast = state.broadcast.clone();
-					let name = broadcast.unique_name(&format!(".{format}"));
-					let request = broadcast
-						.reserve_track(name)
-						.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-					match moq_mux::import::Track::new(request, state.catalog.reserve(), &format, &init) {
-						Ok(import) => {
-							let demand = import.demand();
-							(MediaDecoder::Track(Box::new(import)), Some(demand))
-						}
-						Err(moq_mux::Error::UnknownFormat(_)) => {
-							return Err(MoqError::Codec(format!("unknown format: {format}")));
-						}
-						Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
+		let (decoder, demand) = match moq_mux::import::Container::new(
+			state.broadcast.clone(),
+			state.catalog.reserve(),
+			&init.format,
+			&init.data,
+		) {
+			Ok(container) => (MediaDecoder::Container(container), None),
+			Err(moq_mux::Error::UnknownFormat(_)) => {
+				let mut broadcast = state.broadcast.clone();
+				let name = broadcast.unique_name(&format!(".{}", init.format));
+				let request = broadcast
+					.reserve_track(name)
+					.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+				match moq_mux::import::Track::new(request, state.catalog.reserve(), init.into()) {
+					Ok(import) => {
+						let demand = import.demand();
+						(MediaDecoder::Track(Box::new(import)), Some(demand))
 					}
+					Err(moq_mux::Error::UnknownFormat(format)) => {
+						return Err(MoqError::Codec(format!("unknown format: {format}")));
+					}
+					Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
 				}
-				Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
-			};
+			}
+			Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
+		};
 
 		Ok(Arc::new(MoqMediaProducer {
 			inner: std::sync::Mutex::new(Some(MediaProducer { decoder, demand })),
@@ -276,13 +283,12 @@ impl MoqBroadcastProducer {
 	/// [`MoqBroadcastDynamic::requested_track`].
 	///
 	/// The importer accepts the request, which is where the track's timescale is set.
-	/// `format` controls the encoding of `init` and frame payloads. Only single-track
-	/// formats are supported.
+	/// [`MoqInit`](crate::media::MoqInit) carries the format, init bytes, and catalog hints. Only
+	/// single-track formats are supported.
 	pub fn publish_media_on_track(
 		&self,
 		request: &MoqTrackRequest,
-		format: String,
-		init: Vec<u8>,
+		init: MoqInit,
 	) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
@@ -291,7 +297,7 @@ impl MoqBroadcastProducer {
 		// The importer accepts the request itself, which is where the track's timescale is set.
 		let request = request.take()?;
 
-		let import = moq_mux::import::Track::new(request, state.catalog.reserve(), &format, &init)
+		let import = moq_mux::import::Track::new(request, state.catalog.reserve(), init.into())
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		let demand = import.demand();
@@ -307,10 +313,11 @@ impl MoqBroadcastProducer {
 	/// Create a media track fed by a raw byte stream with unknown frame
 	/// boundaries (e.g. piped Annex-B H.264 straight from an encoder).
 	///
-	/// Unlike [`Self::publish_media`], the importer infers frame boundaries, so
-	/// the caller just pushes bytes via [`MoqMediaStreamProducer::write`]. Only
-	/// self-describing stream formats are supported (avc3, hev1, av01, fmp4, mkv).
-	pub fn publish_media_stream(&self, format: String) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
+	/// Unlike [`Self::publish_media`], the importer infers frame boundaries, so the caller just pushes
+	/// bytes via [`MoqMediaStreamProducer::write`]. Only self-describing stream formats are supported
+	/// (avc3, hev1, av01, fmp4, mkv). [`MoqInit`](crate::media::MoqInit) carries the format, any
+	/// seed bytes, and catalog hints.
+	pub fn publish_media_stream(&self, init: MoqInit) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
@@ -319,17 +326,18 @@ impl MoqBroadcastProducer {
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track before being recognized.
 		let decoder =
-			match moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), &format) {
+			match moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), &init.format)
+			{
 				Ok(container) => StreamDecoder::Container(container),
 				Err(moq_mux::Error::UnknownFormat(_)) => {
 					let mut broadcast = state.broadcast.clone();
-					let name = broadcast.unique_name(&format!(".{format}"));
+					let name = broadcast.unique_name(&format!(".{}", init.format));
 					let request = broadcast
 						.reserve_track(name)
 						.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-					match moq_mux::import::TrackStream::new(request, state.catalog.reserve(), &format) {
+					match moq_mux::import::TrackStream::new(request, state.catalog.reserve(), init.into()) {
 						Ok(import) => StreamDecoder::Track(Box::new(import)),
-						Err(moq_mux::Error::UnknownFormat(_)) => {
+						Err(moq_mux::Error::UnknownFormat(format)) => {
 							return Err(MoqError::Codec(format!("unknown stream format: {format}")));
 						}
 						Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),

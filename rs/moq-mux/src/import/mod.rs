@@ -18,9 +18,11 @@
 //! [`unique_track`] mints a track for the single-codec importers.
 
 mod container;
+mod init;
 mod track;
 
 pub use container::*;
+pub use init::Init;
 pub use track::*;
 
 /// Mint a fresh unique track for a legacy single-codec importer.

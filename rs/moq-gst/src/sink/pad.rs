@@ -171,7 +171,11 @@ impl Pad {
 	) -> Result<import::Track> {
 		let name = broadcast.unique_name(suffix);
 		let request = broadcast.reserve_track(name)?;
-		Ok(import::Track::new(request, catalog.reserve(), format, init)?)
+		Ok(import::Track::new(
+			request,
+			catalog.reserve(),
+			import::Init::new(format, init.to_vec()),
+		)?)
 	}
 
 	/// Drops the producer (closing its track) and marks the pad failed so further buffers are dropped.

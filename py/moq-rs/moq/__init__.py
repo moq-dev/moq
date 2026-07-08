@@ -36,6 +36,7 @@ from .types import (
     AudioEncoderOutput,
     AudioFormat,
     AudioFrame,
+    AudioHint,
     Catalog,
     ConnectionStats,
     Container,
@@ -44,6 +45,7 @@ from .types import (
     Subscription,
     TrackInfo,
     Video,
+    VideoHint,
 )
 
 __all__ = [
@@ -58,6 +60,7 @@ __all__ = [
     "AudioEncoderOutput",
     "AudioFormat",
     "AudioFrame",
+    "AudioHint",
     "AudioProducer",
     "BroadcastConsumer",
     "BroadcastDynamic",
@@ -87,6 +90,7 @@ __all__ = [
     "TrackRequest",
     "Transport",
     "Video",
+    "VideoHint",
     "connect",
     "log_level",
 ]

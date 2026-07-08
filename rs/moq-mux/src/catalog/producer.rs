@@ -452,14 +452,14 @@ mod test {
 		drop(reserved); // done reserving; both renditions still outstanding
 
 		// Audio resolves first: withheld, because video is still outstanding.
-		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		assert!(
 			matches!(consumer.poll_next(&waiter), Poll::Pending),
 			"an audio-only catalog must not publish while video is unresolved"
 		);
 
 		// Video resolves: the complete catalog publishes now, in one snapshot.
-		video.set(h264_config());
+		video.set(h264_config()).unwrap();
 		let snapshot = match consumer.poll_next(&waiter) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("expected the complete catalog, got {other:?}"),
@@ -486,7 +486,7 @@ mod test {
 		let video = reserved.video("video0");
 		drop(reserved);
 
-		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		// The video stream never resolves and is cancelled; the audio-only catalog publishes.
@@ -516,7 +516,7 @@ mod test {
 		// rendition alive (dropping it would retire the track), so bind it.
 		let early = catalog.reserve();
 		let mut a0 = early.audio("audio0");
-		a0.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		a0.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		drop(early);
 		assert!(
 			matches!(consumer.poll_next(&waiter), Poll::Pending),
@@ -527,7 +527,7 @@ mod test {
 		let mut late = deferred.audio("audio1");
 		drop(deferred); // the importer releases its own hold; only the rendition's remains
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
-		late.set(AudioConfig::new(AudioCodec::Opus, 48_000, 1));
+		late.set(AudioConfig::new(AudioCodec::Opus, 48_000, 1)).unwrap();
 
 		let snapshot = match consumer.poll_next(&waiter) {
 			Poll::Ready(Ok(Some(c))) => c,

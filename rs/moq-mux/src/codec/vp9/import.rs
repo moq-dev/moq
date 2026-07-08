@@ -24,12 +24,29 @@ pub struct Import<E: CatalogExt = ()> {
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, reserving the rendition from `reserved`.
 	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let rendition = reserved.video(track.name());
-		Self {
+		Self::new_with_hint(track, reserved, Default::default()).expect("empty hint cannot fail")
+	}
+
+	/// Publish on an existing track producer, seeding the rendition with caller-provided fields.
+	///
+	/// VP9 carries no out-of-band config, so a [`VideoHint`](crate::catalog::VideoHint) carrying a
+	/// codec publishes the catalog rendition up front instead of waiting for the first key frame.
+	pub fn new_with_hint(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		hint: crate::catalog::VideoHint,
+	) -> crate::Result<Self> {
+		let rendition = reserved.video_with_hint(track.name(), hint.clone());
+		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
+		};
+		if let Some(config) = hint.to_config()? {
+			import.rendition.set(config.clone())?;
+			import.config = Some(config);
 		}
+		Ok(import)
 	}
 
 	/// Initialize the importer.
@@ -56,7 +73,7 @@ impl<E: CatalogExt> Import<E> {
 		}
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.rendition.set(config.clone());
+		self.rendition.set(config.clone())?;
 		self.config = Some(config);
 
 		Ok(())

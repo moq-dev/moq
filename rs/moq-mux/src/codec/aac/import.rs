@@ -22,20 +22,37 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		config: Config,
 	) -> crate::Result<Self> {
-		let mut audio_config = hang::catalog::AudioConfig::new(
-			hang::catalog::AAC {
-				profile: config.profile,
-			},
-			config.sample_rate,
-			config.channel_count,
-		);
-		audio_config.container = hang::catalog::Container::Legacy;
-		audio_config.description = Some(config.encode());
+		Self::new_with_hint(track, reserved, Some(config), Default::default())
+	}
+
+	/// Publish on an existing track producer, seeding the rendition with caller-provided fields.
+	///
+	/// `config` is the codec config parsed from init bytes, or `None` to publish from the
+	/// [`AudioHint`](crate::catalog::AudioHint) alone (requires codec, sample rate, and channel count).
+	pub fn new_with_hint(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		config: Option<Config>,
+		hint: crate::catalog::AudioHint,
+	) -> crate::Result<Self> {
+		let detected = config.map(|config| {
+			let mut audio_config = hang::catalog::AudioConfig::new(
+				hang::catalog::AAC {
+					profile: config.profile,
+				},
+				config.sample_rate,
+				config.channel_count,
+			);
+			audio_config.container = hang::catalog::Container::Legacy;
+			audio_config.description = Some(config.encode());
+			audio_config
+		});
+		let audio_config = crate::codec::resolve_audio("aac", detected, &hint)?;
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
-		let mut rendition = reserved.audio(track.name());
-		rendition.set(audio_config);
+		let mut rendition = reserved.audio_with_hint(track.name(), hint);
+		rendition.set(audio_config)?;
 
 		Ok(Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),

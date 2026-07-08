@@ -39,14 +39,32 @@ pub struct Import<E: CatalogExt = ()> {
 impl<E: CatalogExt> Import<E> {
 	/// Publish on an existing track producer, reserving the rendition from `reserved`.
 	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let rendition = reserved.video(track.name());
-		Self {
+		Self::new_with_hint(track, reserved, Default::default()).expect("empty hint cannot fail")
+	}
+
+	/// Publish on an existing track producer, seeding the rendition with caller-provided fields.
+	///
+	/// A [`VideoHint`](crate::catalog::VideoHint) carrying a codec publishes the catalog rendition up
+	/// front (the SPS/PPS still refine it in band on the first keyframe), so subscribers see the track
+	/// without waiting for that frame.
+	pub fn new_with_hint(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		hint: crate::catalog::VideoHint,
+	) -> Result<Self> {
+		let rendition = reserved.video_with_hint(track.name(), hint.clone());
+		let mut import = Self {
 			avc1: false,
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 			last_sps: None,
+		};
+		if let Some(config) = hint.to_config()? {
+			import.rendition.set(config.clone())?;
+			import.config = Some(config);
 		}
+		Ok(import)
 	}
 
 	/// Resolve the codec config from the codec's leading bytes.
@@ -85,7 +103,7 @@ impl<E: CatalogExt> Import<E> {
 		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 		config.container = hang::catalog::Container::Legacy;
 
-		self.apply_config(config);
+		self.apply_config(config)?;
 		Ok(())
 	}
 
@@ -164,7 +182,7 @@ impl<E: CatalogExt> Import<E> {
 		config.container = hang::catalog::Container::Legacy;
 
 		self.last_sps = Some(sps_nal.clone());
-		self.apply_config(config);
+		self.apply_config(config)?;
 		Ok(())
 	}
 
@@ -172,13 +190,14 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
 	/// rendition; there are no fixed tracks to reject a reconfiguration.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
 		if self.config.as_ref() == Some(&config) {
-			return;
+			return Ok(());
 		}
 		tracing::debug!(?config, "starting H.264 track");
-		self.rendition.set(config.clone());
+		self.rendition.set(config.clone())?;
 		self.config = Some(config);
+		Ok(())
 	}
 
 	/// Write split frames to the track, resolving the avc3 config from the first

@@ -65,13 +65,13 @@ public final class BroadcastProducer: Sendable {
     /// Open a media track. `format` controls how `initData` and frame payloads
     /// are interpreted (e.g. `"opus"`, `"avc3"`).
     public func publishMedia(format: String, initData: Data) throws -> MediaProducer {
-        MediaProducer(try ffi.publishMedia(format: format, init: initData))
+        MediaProducer(try ffi.publishMedia(init: MoqInit(format: format, data: initData, audio: nil, video: nil)))
     }
 
     /// Open a media track fed by a raw byte stream with inferred frame boundaries
     /// (e.g. piped Annex-B H.264). Only self-describing formats are supported.
     public func publishMediaStream(format: String) throws -> MediaStreamProducer {
-        MediaStreamProducer(try ffi.publishMediaStream(format: format))
+        MediaStreamProducer(try ffi.publishMediaStream(init: MoqInit(format: format, data: Data(), audio: nil, video: nil)))
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
