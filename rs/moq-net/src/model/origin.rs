@@ -1150,7 +1150,12 @@ impl Dynamic {
 		}))?;
 
 		let path = state.request_order.pop_front().expect("predicate guaranteed a request");
-		let producer = state.requests.remove(&path).expect("request_order out of sync");
+		// Leave the request in `requests` (only drain it from `request_order`) so a repeat
+		// request in the window between hand-off and accept coalesces onto it instead of
+		// re-invoking the handler. The producer is a shared clone; `Request::{accept, reject,
+		// drop}` removes the entry. This mirrors how `poll_requested_track` keeps a served
+		// track discoverable via the weak cache across the same window.
+		let producer = state.requests.get(&path).expect("request_order out of sync").clone();
 		Poll::Ready(Ok(Request {
 			path,
 			producer,
@@ -1215,10 +1220,12 @@ impl Request {
 	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 
-		// Cache it weakly so repeat requests for this path share the same broadcast instead
-		// of asking the handler to serve (and subscribe upstream) again.
+		// Move the entry out of the in-flight queue and into the weak `served` cache, so repeat
+		// requests for this path share the same broadcast instead of asking the handler to serve
+		// (and subscribe upstream) again.
 		if let Ok(mut state) = self.state.write() {
 			state.served.insert(self.path.clone(), broadcast.weak());
+			state.requests.remove(&self.path);
 		}
 
 		if let Ok(mut pending) = self.producer.write() {
@@ -1229,8 +1236,22 @@ impl Request {
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.requests.remove(&self.path);
+		}
 		if let Ok(mut state) = self.producer.write() {
 			state.resolved = Some(Err(err));
+		}
+	}
+}
+
+impl Drop for Request {
+	fn drop(&mut self) {
+		// Handed off but neither accepted nor rejected: drop the still-queued entry so its
+		// producer clone (plus this one) closes the channel, resolving coalesced requesters to
+		// `Unroutable` rather than hanging. A no-op after `accept`/`reject` already removed it.
+		if let Ok(mut state) = self.state.write() {
+			state.requests.remove(&self.path);
 		}
 	}
 }
@@ -3190,6 +3211,49 @@ mod tests {
 		assert_eq!(request.path(), &Path::new("fallback"));
 		request.accept(&served);
 		assert!(request_fut.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// A repeat request in the window after the handler picks one up but before it accepts
+	// coalesces onto the in-flight request instead of queuing a duplicate.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_coalesces_after_handoff() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let f1 = consumer.request_broadcast("fallback");
+		// Handler drains the request but has not accepted yet.
+		let request = dynamic.requested_broadcast().await.unwrap();
+
+		// A second request in this window must not queue another handler request.
+		let f2 = consumer.request_broadcast("fallback");
+		assert!(
+			dynamic.requested_broadcast().now_or_never().is_none(),
+			"a repeat request during hand-off must coalesce, not re-queue"
+		);
+
+		// Accepting resolves both awaiting requesters with the same broadcast.
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		assert!(f1.await.unwrap().is_clone(&served.consume()));
+		assert!(f2.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// Dropping a handed-off request without accept/reject rejects every coalesced requester.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_dropped_after_handoff() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let f1 = consumer.request_broadcast("fallback");
+		let request = dynamic.requested_broadcast().await.unwrap();
+		let f2 = consumer.request_broadcast("fallback");
+
+		// Abandon it; both requesters resolve to Unroutable instead of hanging.
+		drop(request);
+		assert!(matches!(f1.await, Err(Error::Unroutable)));
+		assert!(matches!(f2.await, Err(Error::Unroutable)));
 	}
 
 	// Rejecting a request resolves the requester with the error.
