@@ -236,9 +236,9 @@ impl MoqBroadcastProducer {
 
 	/// Create a new media track for this broadcast.
 	///
-	/// [`MoqInit::format`](crate::media::MoqInit) selects the codec (or container) for the init bytes
-	/// and frame payloads; its hints seed the catalog (see [`MoqInit`](crate::media::MoqInit)). Hints
-	/// apply to single-codec formats; container formats auto-detect every track.
+	/// The [`MoqInit`] format selects the codec (or container) for the init bytes and frame payloads;
+	/// its hints seed the catalog. Hints apply to single-codec formats; container formats auto-detect
+	/// every track.
 	pub fn publish_media(&self, init: MoqInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
@@ -283,7 +283,7 @@ impl MoqBroadcastProducer {
 	/// [`MoqBroadcastDynamic::requested_track`].
 	///
 	/// The importer accepts the request, which is where the track's timescale is set.
-	/// [`MoqInit`](crate::media::MoqInit) carries the format, init bytes, and catalog hints. Only
+	/// [`MoqInit`] carries the format, init bytes, and catalog hints. Only
 	/// single-track formats are supported.
 	pub fn publish_media_on_track(
 		&self,
@@ -315,7 +315,7 @@ impl MoqBroadcastProducer {
 	///
 	/// Unlike [`Self::publish_media`], the importer infers frame boundaries, so the caller just pushes
 	/// bytes via [`MoqMediaStreamProducer::write`]. Only self-describing stream formats are supported
-	/// (avc3, hev1, av01, fmp4, mkv). [`MoqInit`](crate::media::MoqInit) carries the format, any
+	/// (avc3, hev1, av01, fmp4, mkv). [`MoqInit`] carries the format, any
 	/// seed bytes, and catalog hints.
 	pub fn publish_media_stream(&self, init: MoqInit) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();

@@ -391,8 +391,8 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
 	///
-	/// The rendition's [`hint`](Self::hint) is validated against `config` and overlaid first, so a
-	/// detected value that contradicts a caller-pinned one is an error
+	/// The rendition's hint (from [`Reserved::init_with_hint`]) is validated against `config` and
+	/// overlaid first, so a detected value that contradicts a caller-pinned one is an error
 	/// ([`Error::InitMismatch`](crate::Error::InitMismatch)). A field then present (`jitter` or
 	/// `bitrate`, whether from the caller or the hint) is authoritative and left alone; only an
 	/// absent field is auto-detected. Any metrics accumulated before the rendition existed (a dirty
