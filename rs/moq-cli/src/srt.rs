@@ -25,7 +25,7 @@ pub struct Args {
 	pub listen: Option<SocketAddr>,
 
 	/// SRT receive latency: the buffering delay traded for loss-recovery headroom.
-	#[arg(long, default_value = "200ms", value_parser = humantime::parse_duration)]
+	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
 	pub latency: Duration,
 }
 

@@ -66,7 +66,7 @@ pub struct Client<S = TcpStream> {
 	/// Session results queued during connect, drained by the first publish/pull.
 	work: VecDeque<ClientSessionResult>,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
-	/// before skipping. Zero (the default) drops stale groups aggressively.
+	/// before skipping. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY).
 	latency: Duration,
 }
 
@@ -145,13 +145,14 @@ impl<S: Stream> Client<S> {
 			stream,
 			session,
 			work,
-			latency: Duration::ZERO,
+			latency: crate::DEFAULT_LATENCY,
 		})
 	}
 
 	/// Set how long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping to a newer one (the moq-level frame-drop latency). Defaults
-	/// to zero, which drops stale groups aggressively.
+	/// to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); pass [`Duration::ZERO`] to
+	/// drop stale groups aggressively.
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self

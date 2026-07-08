@@ -34,7 +34,7 @@ use crate::Result;
 
 /// Default SRT receive latency: the negotiated buffer that trades delay for loss
 /// recovery. Override per-server with [`Server::bind`]'s `latency` argument.
-pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(500);
 
 /// SRT payload size for egress: 7 MPEG-TS packets (7 x 188), the de-facto
 /// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
@@ -59,7 +59,7 @@ impl Server {
 	/// Bind an SRT listener on `addr` (SRT has no well-known port; 9000 is common).
 	///
 	/// `latency` is the SRT receive latency, negotiated at handshake time; pass
-	/// `None` for a sensible default (200ms). It doubles as the egress skip
+	/// `None` for a sensible default (500ms). It doubles as the egress skip
 	/// threshold for [`Subscribe`] requests.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);

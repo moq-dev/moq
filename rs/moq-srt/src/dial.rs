@@ -31,7 +31,7 @@ use crate::server::{DEFAULT_LATENCY, serve_publish, serve_subscribe};
 /// `origin` to MPEG-TS, and send it until the broadcast ends.
 ///
 /// `latency` is the SRT receive latency negotiated at handshake time; pass `None`
-/// for the default (200ms). This future resolves when the broadcast ends, so
+/// for the default (500ms). This future resolves when the broadcast ends, so
 /// callers usually run it on its own task.
 pub async fn publish(
 	addr: SocketAddr,
@@ -50,7 +50,7 @@ pub async fn publish(
 /// publish the result at `path` until the remote ends.
 ///
 /// `latency` is the SRT receive latency negotiated at handshake time; pass `None`
-/// for the default (200ms). This future resolves when the remote stream ends, so
+/// for the default (500ms). This future resolves when the remote stream ends, so
 /// callers usually run it on its own task.
 pub async fn pull(
 	addr: SocketAddr,

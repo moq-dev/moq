@@ -502,7 +502,7 @@ pub struct Play<S = Conn> {
 	stream_key: String,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one. Zero (the default) drops stale groups aggressively; raise it with
+	/// one. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); override with
 	/// [`with_latency`](Self::with_latency).
 	latency: Duration,
 	/// Whether the player advertised enhanced-RTMP multitrack support (connect
@@ -531,9 +531,10 @@ impl<S: Stream> Play<S> {
 	}
 
 	/// Set how long the FLV muxer waits for a stalled group before skipping to a
-	/// newer one (the moq-level frame-drop latency). Defaults to zero, which drops
-	/// stale groups aggressively. RTMP is unpaced (tags go out as fast as the
-	/// socket accepts them), so this bounds buffering, not the wire rate.
+	/// newer one (the moq-level frame-drop latency). Defaults to
+	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY). RTMP is unpaced (tags go out as
+	/// fast as the socket accepts them), so this bounds buffering, not the wire
+	/// rate. Pass [`Duration::ZERO`] to drop stale groups aggressively.
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
@@ -736,7 +737,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
-							latency: Duration::ZERO,
+							latency: crate::DEFAULT_LATENCY,
 							multitrack: client_multitrack,
 						})));
 					}
