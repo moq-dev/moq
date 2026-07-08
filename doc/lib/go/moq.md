@@ -66,6 +66,29 @@ if moq.IsAuthError(err) {
 }
 ```
 
+## Publishing lifetime
+
+A broadcast stays live only while you hold its `MoqBroadcastProducer`. The origin keeps a consumer, not the producer, so publishing does not keep it alive: once the producer is garbage-collected the broadcast is torn down and subscribers get a reset mid-stream. This bites when the producer goes out of scope while a background goroutine is still writing to its tracks.
+
+Keep a reference for as long as you are publishing, then close it explicitly when done:
+
+```go
+mediaProducer, err := broadcast.PublishMedia("aac", asc)
+if err != nil {
+    // handle error
+}
+origin.Publish("my-broadcast.hang", broadcast)
+
+// Keep `broadcast` reachable while producing (e.g. store it on a struct the
+// publishing goroutine owns). Don't let it fall out of scope here.
+produceAudio(mediaProducer)
+
+// Finish() closes the broadcast cleanly so subscribers see a normal end.
+broadcast.Finish()
+```
+
+If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
+
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:

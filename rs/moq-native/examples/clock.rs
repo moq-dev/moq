@@ -76,10 +76,17 @@ async fn main() -> anyhow::Result<()> {
 
 			let reconnect = client.with_publisher(&origin).reconnect(config.url);
 
-			tokio::select! {
-				res = reconnect.closed() => Ok(res?),
+			// Keep the result out of the `select!` arm (a `?` there would return
+			// before the close below runs), so the broadcast is always closed.
+			let result = tokio::select! {
+				res = reconnect.closed() => res.map_err(Into::into),
 				_ = clock.run() => Ok(()),
-			}
+			};
+
+			// Cleanly close the broadcast on exit so subscribers see a normal end
+			// rather than Error::Dropped.
+			broadcast.close();
+			result
 		}
 		Command::Subscribe => {
 			let reconnect = client.with_subscriber(origin.clone()).reconnect(config.url);

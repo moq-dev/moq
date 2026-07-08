@@ -40,11 +40,11 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
-	#track: Moq.track.Producer;
-	#group?: Moq.group.Producer;
+	#track: Moq.Track.Producer;
+	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish legacy-container frames into it. */
-	constructor(track: Moq.track.Producer) {
+	constructor(track: Moq.Track.Producer) {
 		this.#track = track;
 	}
 

@@ -54,7 +54,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// timestamp), and is re-emitted at video keyframes and periodically for
 /// mid-stream tune-in. Returns `None` when the broadcast ends.
 pub struct Export<E: catalog::Catalog = ()> {
-	broadcast: moq_net::broadcast::Consumer,
+	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
 
@@ -154,44 +154,39 @@ struct PesUnit {
 }
 
 impl Export {
-	/// Subscribe to `broadcast`, using the default catalog format.
-	pub async fn new(broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
+	/// Subscribe to `source`, using the default catalog format.
+	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(source, CatalogFormat::default()).await
 	}
 
-	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
+	/// Subscribe to `source`, selecting an explicit catalog format. Media only;
 	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
 	pub async fn with_catalog_format(
-		broadcast: moq_net::broadcast::Consumer,
+		source: crate::Source,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format).await
+		Self::build(source, catalog_format).await
 	}
 }
 
 impl Export<catalog::Ext> {
-	/// Subscribe to `broadcast`, exporting its `mpegts` verbatim streams (SCTE-35,
+	/// Subscribe to `source`, exporting its `mpegts` verbatim streams (SCTE-35,
 	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
 	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
 	/// plain constructors are media-only).
-	pub async fn with_ts(
-		broadcast: moq_net::broadcast::Consumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format).await
+	pub async fn with_ts(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		Self::build(source, catalog_format).await
 	}
 }
 
 impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
-	async fn build(
-		broadcast: moq_net::broadcast::Consumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
+	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		let broadcast = source.broadcast().await?;
 		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
 		Ok(Self {
-			broadcast,
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			tracks: HashMap::new(),
@@ -413,7 +408,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+					let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 					self.insert_track(name, source, pid, kind, descriptors, reserve);
 				}
 			}
@@ -430,7 +425,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+					let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
 				}
 			}
@@ -454,7 +449,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), existing);
 				}
 				None => {
-					let source = ExportSource::for_stream(&self.broadcast, name, self.latency)?;
+					let source = ExportSource::for_stream(&self.source, name, self.latency)?;
 					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
 				}
 			}

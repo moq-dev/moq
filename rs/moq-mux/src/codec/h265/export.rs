@@ -18,7 +18,7 @@ use crate::container::ExportSource;
 
 /// Single-rendition H.265 Annex-B exporter.
 pub struct Export<S: Stream> {
-	broadcast: moq_net::broadcast::Consumer,
+	source: crate::Source,
 	catalog: Option<S>,
 	latency: Duration,
 	track: Option<H265Track>,
@@ -44,14 +44,14 @@ struct Hvc1Convert {
 }
 
 impl<S: Stream> Export<S> {
-	/// Subscribe to `broadcast` and emit an Annex-B H.265 byte stream.
+	/// Subscribe to `source` and emit an Annex-B H.265 byte stream.
 	///
 	/// `catalog` is expected to be narrowed to a single H.265 rendition. If
 	/// multiple H.265 renditions appear in a snapshot, the first by BTreeMap
 	/// order wins and a warning is logged.
-	pub fn new(broadcast: moq_net::broadcast::Consumer, catalog: S) -> Self {
+	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			broadcast,
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			track: None,
@@ -141,7 +141,7 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		}
 
-		let source = ExportSource::for_video_raw(&self.broadcast, name, config, self.latency)?;
+		let source = ExportSource::for_video_raw(&self.source, name, config, self.latency)?;
 		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
 			None => None,
 			Some(hvcc) => {
@@ -284,7 +284,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let consumer = broadcast.consume();
-		let mut export = Export::new(consumer, Once(Some(catalog)));
+		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");

@@ -153,12 +153,20 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
 
+	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
+	/// see the real cause rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		self.track.abort(err);
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -166,6 +174,8 @@ impl<E: CatalogExt> Import<E> {
 	/// Publish one whole frame as a hang frame in its own group.
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
+		self.rendition.record_group_end(Some(timestamp));
+		let bytes = frame.as_ref().len();
 		self.track.write(Frame {
 			timestamp,
 			duration: None,
@@ -173,6 +183,7 @@ impl<E: CatalogExt> Import<E> {
 			keyframe: true,
 		})?;
 		self.track.finish_group()?;
+		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
 	}
 }

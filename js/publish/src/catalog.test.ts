@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { track as NetTrack } from "@moq/net";
+import { Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "./catalog.ts";
 
@@ -14,7 +14,7 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	});
 
 	const effect = new Effect();
-	const track = new NetTrack.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
 	const consumer = new Json.Consumer<Catalog.Root>(track.subscribe());
 
@@ -39,7 +39,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const effect = new Effect();
-	const track = new NetTrack.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
 	const subscriber = track.subscribe();
 
@@ -69,12 +69,12 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 	// The first subscription drains and ends...
 	const first = new Effect();
-	catalog.serve(new NetTrack.Producer("catalog.json"), first);
+	catalog.serve(new Track.Producer("catalog.json"), first);
 	first.close();
 
 	// ...and a fresh subscription still gets the current catalog, not nothing.
 	const effect = new Effect();
-	const track = new NetTrack.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
 	const seeded = await new Json.Consumer<Catalog.Root>(track.subscribe()).next();
 	expect(seeded?.video).toEqual({ renditions: {} });

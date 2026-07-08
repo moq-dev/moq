@@ -19,7 +19,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 
 /// Subscribe to a moq broadcast and produce a single Matroska / WebM byte stream.
 ///
-/// Built from a [`moq_net::broadcast::Consumer`], `Export` subscribes to the hang catalog,
+/// Built from a [`Source`](crate::Source), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks, decodes them via a per-track source, and
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
 /// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
@@ -45,7 +45,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Only Legacy-container tracks (raw codec payloads) are supported. CMAF tracks
 /// (moof+mdat passthrough) are rejected with a clear error.
 pub struct Export<S: Stream> {
-	broadcast: moq_net::broadcast::Consumer,
+	source: crate::Source,
 	catalog: Option<S>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
@@ -152,15 +152,15 @@ impl ClusterBuilder {
 }
 
 impl<S: Stream> Export<S> {
-	/// Subscribe to `broadcast` and produce MKV byte chunks, driving track
+	/// Subscribe to `source` and produce MKV byte chunks, driving track
 	/// (un)subscription from `catalog`.
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(broadcast: moq_net::broadcast::Consumer, catalog: S) -> Self {
+	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			broadcast,
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,
@@ -329,7 +329,7 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			ensure_legacy(&config.container, "video", name)?;
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {
@@ -348,7 +348,7 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			ensure_legacy(&config.container, "audio", name)?;
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {

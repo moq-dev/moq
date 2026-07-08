@@ -194,6 +194,20 @@ impl<C: Container> Producer<C> {
 		Ok(())
 	}
 
+	/// Abort the track and any open group with the given error.
+	///
+	/// The counterpart to [`Self::finish`] for a failed teardown: consumers observe
+	/// `err` instead of the generic [`moq_net::Error::Dropped`] a bare drop surfaces,
+	/// so the real cause (a disconnect, a decode failure) reaches them. Any buffered
+	/// frames are discarded, not flushed.
+	pub fn abort(&mut self, err: moq_net::Error) {
+		self.buffer.clear();
+		if let Some(mut group) = self.group.take() {
+			let _ = group.abort(err.clone());
+		}
+		let _ = self.inner.abort(err);
+	}
+
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.subscribe(None)

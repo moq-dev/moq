@@ -132,7 +132,7 @@ async fn export_roundtrips_through_import() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	// The export must be a real FLV stream.
@@ -169,7 +169,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -253,7 +253,7 @@ async fn export_roundtrips_enhanced() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -316,7 +316,7 @@ async fn export_roundtrips_mp3() {
 	importer.decode(&bytes::BytesMut::from(flv.as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	// The audio is muxed as a legacy SoundFormat 2 (MP3) tag, no sequence header.
@@ -369,7 +369,7 @@ async fn export_roundtrips_av1() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 
@@ -424,7 +424,7 @@ async fn export_roundtrips_ac3() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 	assert!(
@@ -458,7 +458,7 @@ async fn export_roundtrips_eac3() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 	assert!(
@@ -588,7 +588,10 @@ async fn drain_to_end(mut exporter: Export, keepalive: Keepalive) -> Vec<u8> {
 async fn export_multitrack_roundtrips_all_renditions() {
 	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
 
-	let exporter = Export::new(consumer).await.unwrap().with_multitrack(true);
+	let exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_multitrack(true);
 	let exported = drain_to_end(exporter, keepalive).await;
 
 	assert_eq!(&exported[0..3], b"FLV");
@@ -645,7 +648,7 @@ async fn export_multitrack_roundtrips_all_renditions() {
 async fn export_without_multitrack_keeps_first_rendition() {
 	let (consumer, _, keepalive) = build_multitrack_broadcast();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_to_end(exporter, keepalive).await;
 
 	// No multitrack framing: the single video track is a legacy AVC tag.
@@ -709,7 +712,7 @@ async fn export_preserves_timestamps() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -782,7 +785,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	audio.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_exporter_chunks(exporter, 6).await;
 	let tags = parse_tags(&exported);
 

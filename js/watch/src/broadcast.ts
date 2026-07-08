@@ -7,6 +7,10 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 
 import { toHang } from "./msf";
 
+// Connections already warned about missing broadcast-discovery support, so the
+// per-rendition announcement check logs at most once per connection.
+const warnedNoDiscovery = new WeakSet<Moq.Connection.Established>();
+
 // Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
 // DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
 // catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
@@ -51,7 +55,7 @@ type BroadcastInput = {
 
 type BroadcastOutput = {
 	status: Signal<Status>;
-	active: Signal<Moq.broadcast.Consumer | undefined>;
+	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode.
 	catalog: Signal<Catalog.Root | undefined>;
@@ -63,7 +67,7 @@ export class Broadcast {
 
 	readonly #output: BroadcastOutput = {
 		status: new Signal<Status>("offline"),
-		active: new Signal<Moq.broadcast.Consumer | undefined>(undefined),
+		active: new Signal<Moq.Broadcast.Consumer | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
 	readonly output = readonlys(this.#output);
@@ -97,28 +101,36 @@ export class Broadcast {
 	}
 
 	#runAnnouncedNow(effect: Effect): void {
-		const reload = effect.get(this.input.reload);
-		if (!reload) {
-			this.#announcedNow.set(true);
-			return;
-		}
+		const name = effect.get(this.input.name);
+		this.#announcedNow.set(this.#isPathAnnounced(effect, name));
+	}
 
-		if (!this.#announced) {
-			this.#announcedNow.set(true);
-			return;
-		}
+	// Whether `name` is currently announced on the connection (or skipping the check
+	// because reload is off, no announced set is wired in, or the relay doesn't support
+	// announcements). Used by both `#runAnnouncedNow` (for `input.name`) and
+	// `relativeBroadcast` (for cross-broadcast refs, which reruns per rendition).
+	#isPathAnnounced(effect: Effect, name: Moq.Path.Valid): boolean {
+		const reload = effect.get(this.input.reload);
+		if (!reload) return true;
+
+		// Without an announced set to consult, subscribe immediately.
+		if (!this.#announced) return true;
 
 		// Cloudflare's relay does not yet support announcement subscriptions,
-		// so default to subscribing immediately instead of waiting forever.
+		// so default to subscribing immediately instead of waiting forever. This runs in a
+		// per-rendition reactive path, so warn at most once per connection instead of on
+		// every re-evaluation.
 		const conn = effect.get(this.input.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
-			this.#announcedNow.set(true);
-			return;
+			if (!warnedNoDiscovery.has(conn)) {
+				warnedNoDiscovery.add(conn);
+				console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
+			}
+			return true;
 		}
 
-		const name = effect.get(this.input.name);
 		const announced = effect.get(this.#announced);
-		this.#announcedNow.set(announced.has(name));
+		return announced.has(name);
 	}
 
 	#runBroadcast(effect: Effect): void {
@@ -199,6 +211,40 @@ export class Broadcast {
 				this.#output.status.set("offline");
 			}
 		});
+	}
+
+	/**
+	 * Resolve the `Moq.Broadcast.Consumer` that publishes a given track.
+	 *
+	 * If `rel` is set (a rendition's catalog `broadcast` field), treat it as a path
+	 * relative to this broadcast's name and consume the resolved broadcast on the same
+	 * connection. Otherwise return the catalog's own active broadcast.
+	 *
+	 * The consumer is scoped to the caller's `effect` (closed on its next run), so a
+	 * reference resolves lazily and reacts to `enabled` / connection / announcement
+	 * changes exactly like the catalog broadcast.
+	 */
+	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast.Consumer | undefined {
+		if (!rel) return effect.get(this.output.active);
+
+		const base = effect.get(this.input.name);
+		const resolved = Path.resolve(base, rel);
+
+		// A reference that walks back to the catalog's own broadcast (or resolves to
+		// the empty root, via excess `..`) is served by the catalog broadcast itself,
+		// avoiding a duplicate subscription on the same path.
+		if (resolved === base || resolved === Path.empty()) return effect.get(this.output.active);
+
+		if (!effect.get(this.input.enabled)) return undefined;
+
+		const conn = effect.get(this.input.connection);
+		if (!conn) return undefined;
+
+		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
+
+		const broadcast = conn.consume(resolved);
+		effect.cleanup(() => broadcast.close());
+		return broadcast;
 	}
 
 	close() {

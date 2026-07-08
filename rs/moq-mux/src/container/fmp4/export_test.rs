@@ -67,7 +67,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -162,7 +162,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
-	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -249,7 +249,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -336,7 +336,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -430,7 +430,7 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -498,7 +498,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -558,7 +558,7 @@ async fn single_track_export_init_matches_fragment_track_id() {
 		.await
 		.expect("catalog consumer");
 	let selected = catalog_stream.select(crate::select::Broadcast::default().audio(crate::select::Audio::default()));
-	let mut exporter = crate::container::fmp4::Export::new(consumer, selected);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), selected);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -674,8 +674,8 @@ async fn next_fragment_reports_segment_metadata() {
 		.await
 		.expect("catalog consumer");
 	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
-	let mut exporter =
-		crate::container::fmp4::Export::new(consumer, catalog_stream).with_fragment_duration(Duration::from_millis(20));
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), catalog_stream)
+		.with_fragment_duration(Duration::from_millis(20));
 
 	// First emit is the init segment.
 	let init = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())

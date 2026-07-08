@@ -62,14 +62,16 @@ export class Mse implements Backend {
 		const broadcast = effect.get(this.source.input.broadcast);
 		if (!broadcast) return;
 
-		const active = effect.get(broadcast.output.active);
-		if (!active) return;
-
 		const track = effect.get(this.source.output.track);
 		if (!track) return;
 
 		const config = effect.get(this.source.output.config);
 		if (!config) return;
+
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast.
+		const active = broadcast.relativeBroadcast(effect, config.broadcast);
+		if (!active) return;
 
 		const mime = `audio/mp4; codecs="${config.codec}"`;
 
@@ -109,7 +111,7 @@ export class Mse implements Backend {
 
 	#runCmafMedia(
 		effect: Effect,
-		sub: Moq.track.Subscriber,
+		sub: Moq.Track.Subscriber,
 		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
@@ -131,7 +133,7 @@ export class Mse implements Backend {
 				} catch (err) {
 					// Falling behind a group's eviction window drops frames; resync from
 					// the next group (a keyframe segment) rather than stopping playback.
-					if (err instanceof Moq.group.CacheFull) continue;
+					if (err instanceof Moq.Group.CacheFull) continue;
 					throw err;
 				}
 				if (!frame) return;
@@ -152,7 +154,7 @@ export class Mse implements Backend {
 
 	#runLegacyMedia(
 		effect: Effect,
-		sub: Moq.track.Subscriber,
+		sub: Moq.Track.Subscriber,
 		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,

@@ -61,4 +61,8 @@ impl session::MediaSink for IngestSink {
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
 		self.bridges.push(mid, frame)
 	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.bridges.abort(err);
+	}
 }

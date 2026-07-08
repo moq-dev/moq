@@ -33,4 +33,8 @@ impl codec::Bridge for Bridge {
 		self.import.decode(&frame.payload, Some(pts))?;
 		Ok(())
 	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
 }

@@ -463,9 +463,16 @@ impl<S: Stream> Publish<S> {
 		)
 		.await;
 
-		// Flush the importer so the final groups close cleanly before unannouncing.
-		if let Err(err) = publisher.finish() {
-			tracing::debug!(peer = %self.peer, %err, "error finishing RTMP publish");
+		match &result {
+			// Clean end: flush so the final groups close cleanly before unannouncing.
+			Ok(()) => {
+				if let Err(err) = publisher.finish() {
+					tracing::debug!(peer = %self.peer, %err, "error finishing RTMP publish");
+				}
+			}
+			// The pump failed (e.g. the client dropped mid-stream): abort with the
+			// real cause so subscribers see it instead of a bare drop's Error::Dropped.
+			Err(err) => publisher.abort(moq_net::Error::Transport(err.to_string())),
 		}
 
 		Ok(result?)
@@ -577,12 +584,14 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Some(broadcast) = broadcast else {
+		if broadcast.is_none() {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
-		};
+		}
 
-		let mut export = FlvExport::new(broadcast)
+		// The export re-resolves the broadcast (and any sibling broadcast a rendition's
+		// catalog `broadcast` field references) through the origin.
+		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.with_latency(self.latency)
@@ -1065,6 +1074,13 @@ impl Publisher {
 	/// Flush any buffered media and close out the broadcast's open groups.
 	fn finish(&mut self) -> anyhow::Result<()> {
 		Ok(self.importer.finish()?)
+	}
+
+	/// Abort the published tracks with `err` so subscribers see the real cause
+	/// (the client disconnected, a protocol error) rather than a generic
+	/// `Error::Dropped` from the importer being dropped.
+	fn abort(&mut self, err: moq_net::Error) {
+		self.importer.abort(err);
 	}
 }
 

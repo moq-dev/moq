@@ -161,10 +161,16 @@ impl<S: Stream> Client<S> {
 	/// mux the broadcast to FLV, and send each tag as an RTMP audio/video message
 	/// until the broadcast ends or the connection drops.
 	///
-	/// `broadcast` is the read side of whatever you want restreamed (e.g. from
-	/// `origin.consume().announced_broadcast(path)`). This future resolves when the
-	/// broadcast ends, so callers usually run it on its own task.
-	pub async fn publish(mut self, stream_key: &str, broadcast: broadcast::Consumer) -> Result<()> {
+	/// `path` names the broadcast to restream on `origin`; the FLV export resolves it
+	/// (and any sibling broadcast a rendition's catalog `broadcast` field references)
+	/// through the origin. This future resolves when the broadcast ends, so callers
+	/// usually run it on its own task.
+	pub async fn publish(
+		mut self,
+		stream_key: &str,
+		origin: origin::Consumer,
+		path: impl moq_net::AsPath,
+	) -> Result<()> {
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -178,7 +184,7 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let mut export = FlvExport::new(broadcast)
+		let mut export = FlvExport::new(moq_mux::Source::new(origin, path))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.with_latency(self.latency);
@@ -243,12 +249,33 @@ impl<S: Stream> Client<S> {
 		tracing::info!(%stream_key, %path, "rtmp play accepted by remote");
 
 		let mut publisher = Publisher::new(origin, path)?;
+
+		let result = self.pull_media(&mut publisher).await;
+		match &result {
+			// Clean end: flush so the final groups close cleanly before unannouncing.
+			Ok(()) => {
+				if let Err(err) = publisher.finish() {
+					tracing::debug!(%err, "error finishing RTMP pull");
+				}
+			}
+			// The read loop failed (the remote dropped, a protocol error): abort with
+			// the real cause so subscribers see it instead of a bare drop's Error::Dropped.
+			Err(err) => publisher.abort(moq_net::Error::Transport(err.to_string())),
+		}
+		Ok(result?)
+	}
+
+	/// Read FLV tags from the remote and feed them to `publisher` until EOF.
+	///
+	/// Split out from [`Self::pull`] so a read/demux error propagates to the caller,
+	/// which aborts the publisher with the cause rather than dropping it silently.
+	async fn pull_media(&mut self, publisher: &mut Publisher) -> anyhow::Result<()> {
 		let mut buffer = [0u8; READ_BUFFER];
 
 		// Drain anything queued alongside the play-accepted event (the server can bundle
 		// the first media messages in the same read), then keep reading.
 		let queued = std::mem::take(&mut self.work);
-		self.pull_results(queued, &mut publisher).await?;
+		self.pull_results(queued, publisher).await?;
 		loop {
 			let n = self.stream.read(&mut buffer).await?;
 			if n == 0 {
@@ -258,11 +285,7 @@ impl<S: Stream> Client<S> {
 				.session
 				.handle_input(&buffer[..n])
 				.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
-			self.pull_results(results, &mut publisher).await?;
-		}
-
-		if let Err(err) = publisher.finish() {
-			tracing::debug!(%err, "error finishing RTMP pull");
+			self.pull_results(results, publisher).await?;
 		}
 		Ok(())
 	}
@@ -449,6 +472,12 @@ impl Publisher {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		Ok(self.importer.finish()?)
+	}
+
+	/// Abort the published tracks with `err` so subscribers see the real cause
+	/// (the remote dropped, a protocol error) rather than a generic `Error::Dropped`.
+	fn abort(&mut self, err: moq_net::Error) {
+		self.importer.abort(err);
 	}
 }
 

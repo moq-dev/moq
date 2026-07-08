@@ -141,6 +141,17 @@ impl PublishDecoder {
 		}
 		Ok(())
 	}
+
+	/// Abort the tracks with `err` instead of finishing, so subscribers see the
+	/// real cause rather than `Error::Dropped`.
+	fn abort(&mut self, err: moq_net::Error) {
+		match self {
+			Self::Avc3 { import, .. } => import.abort(err),
+			Self::Fmp4(d) => d.abort(err),
+			Self::Ts(d) => d.abort(err),
+			Self::Flv(d) => d.abort(err),
+		}
+	}
 }
 
 // Exactly one Source exists per process, so the size gap between the small
@@ -242,16 +253,28 @@ impl Publish {
 				let mut stdin = tokio::io::stdin();
 				let mut buffer = bytes::BytesMut::new();
 
-				loop {
-					buffer.clear();
-					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
-					if n == 0 {
-						// EOF: flush the importer's buffered trailing frame and close the tracks.
-						decoder.finish()?;
-						return Ok(());
+				// Run the read/decode loop so an error surfaces here rather than
+				// dropping the decoder (and its tracks) with a bare Error::Dropped.
+				let result: anyhow::Result<()> = async {
+					loop {
+						buffer.clear();
+						let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
+						if n == 0 {
+							return Ok(()); // EOF
+						}
+						decoder.decode_chunk(&buffer)?;
 					}
-					decoder.decode_chunk(&buffer)?;
 				}
+				.await;
+
+				// Flush on a clean EOF; on any error (read, decode, or the flush
+				// itself) abort with the real cause so subscribers see it instead of
+				// a bare Error::Dropped.
+				let outcome = result.and_then(|()| decoder.finish());
+				if let Err(err) = &outcome {
+					decoder.abort(moq_net::Error::Transport(err.to_string()));
+				}
+				outcome
 			}
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {
@@ -393,6 +416,9 @@ mod tests {
 	async fn manufacture_input() -> Vec<u8> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
+		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
+		let origin = moq_net::Origin::random().produce();
+		let _publish = origin.publish_broadcast("cli", &consumer).unwrap();
 		let mut catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
 
@@ -458,7 +484,7 @@ mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(consumer, CatalogFormat::Hang)
+			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_latency(Duration::ZERO),
@@ -480,6 +506,9 @@ mod tests {
 		// streams land in the broadcast instead of being dropped by the media-only path.
 		let mut publish = Publish::new(&PublishFormat::Ts).unwrap();
 		let consumer = publish.consume();
+		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
+		let origin = moq_net::Origin::random().produce();
+		let _publish = origin.publish_broadcast("cli", &consumer).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream(decoder) = &mut publish.source else {
 			panic!("expected a stream source");
@@ -490,7 +519,7 @@ mod tests {
 		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(consumer, CatalogFormat::Hang)
+			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_latency(Duration::ZERO),

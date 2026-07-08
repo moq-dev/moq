@@ -58,6 +58,12 @@ impl Publisher {
 	pub fn finish(&mut self) -> Result<()> {
 		Ok(self.importer.finish()?)
 	}
+
+	/// Abort the published tracks with `err` so subscribers see the real cause
+	/// (the SRT caller dropped, a demux error) rather than a generic `Error::Dropped`.
+	pub fn abort(&mut self, err: moq_net::Error) {
+		self.importer.abort(err);
+	}
 }
 
 /// Muxes a single MoQ broadcast back into an MPEG-TS byte stream for egress.
@@ -85,11 +91,15 @@ impl Subscriber {
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
 	/// to be announced, so a caller may connect before the publisher does.
 	pub async fn new(origin: &origin::Consumer, path: &str, latency: Duration) -> Result<Option<Self>> {
-		let Some(broadcast) = origin.announced_broadcast(path).await else {
+		// Confirm the broadcast is in scope and wait for it to be announced (out-of-scope /
+		// origin-closed -> `None`). The export re-resolves it (and any referenced sibling
+		// broadcast, via the catalog `broadcast` field) through the origin.
+		if origin.announced_broadcast(path).await.is_none() {
 			return Ok(None);
-		};
+		}
 
-		let export = ts::Export::new(broadcast).await?.with_latency(latency);
+		let source = moq_mux::Source::new(origin.consume(), path);
+		let export = ts::Export::new(source).await?.with_latency(latency);
 		Ok(Some(Self { export }))
 	}
 

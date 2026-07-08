@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
-use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
 use tokio::io::AsyncWriteExt;
@@ -183,25 +182,22 @@ impl SubscribeArgs {
 
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
-	broadcast: moq_net::broadcast::Consumer,
+	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
 }
 
 impl Subscribe {
 	/// Wrap the broadcast + resolved settings; [`run`](Self::run) drives it.
-	pub fn new(broadcast: moq_net::broadcast::Consumer, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
-		Self {
-			broadcast,
-			catalog,
-			args,
-		}
+	pub fn new(source: moq_mux::Source, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		Self { source, catalog, args }
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
 	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
-		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog).await?;
+		let broadcast = self.source.broadcast().await?;
+		let consumer = catalog::Consumer::new(&broadcast, self.catalog).await?;
 		Ok(consumer.select(self.args.selection()?))
 	}
 
@@ -223,7 +219,7 @@ impl Subscribe {
 		// Fmp4 builds the merged init segment from the first catalog snapshot, then
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
-		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast, stream)
+		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -242,7 +238,7 @@ impl Subscribe {
 		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
-		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast, stream)
+		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -258,7 +254,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 = moq_mux::codec::h264::Export::new(self.broadcast, stream).with_latency(self.args.max_latency);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -272,7 +268,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 = moq_mux::codec::h265::Export::new(self.broadcast, stream).with_latency(self.args.max_latency);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -290,7 +286,7 @@ impl Subscribe {
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
-		let mut ts = moq_mux::container::ts::Export::with_ts(self.broadcast, self.catalog)
+		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
 			.with_latency(self.args.max_latency);
 
@@ -309,7 +305,7 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)
+		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
 			.await?
 			.with_latency(self.args.max_latency);
 

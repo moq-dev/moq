@@ -76,8 +76,9 @@ pub struct Broadcaster {
 }
 
 impl Broadcaster {
-	/// Subscribe to `broadcast` and start tracking its renditions.
-	pub fn new(broadcast: moq_net::broadcast::Consumer, config: Config) -> Arc<Self> {
+	/// Resolve `source`'s catalog broadcast and start tracking its renditions.
+	pub async fn new(source: moq_mux::Source, config: Config) -> Result<Arc<Self>, moq_mux::Error> {
+		let broadcast = source.broadcast().await?;
 		let (ready, _) = watch::channel(0);
 		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
@@ -89,9 +90,9 @@ impl Broadcaster {
 		});
 		// The watcher holds a Weak so it can't keep the Broadcaster alive; the
 		// Broadcaster owns the watcher's handle and aborts it on Drop.
-		let watcher = tokio::spawn(watch_catalog(broadcast, config, Arc::downgrade(&broadcaster)));
+		let watcher = tokio::spawn(watch_catalog(source, broadcast, config, Arc::downgrade(&broadcaster)));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
-		broadcaster
+		Ok(broadcaster)
 	}
 
 	/// Pause or resume pulling media from the broadcast.
@@ -169,12 +170,12 @@ impl Broadcaster {
 
 	/// Add renditions newly present in `catalog`. Renditions are not removed when
 	/// they disappear; their stores simply go stale (rare for a live broadcast).
-	fn sync(&self, broadcast: &moq_net::broadcast::Consumer, config: &Config, catalog: &Catalog) {
+	fn sync(&self, source: &moq_mux::Source, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
 			renditions.entry((Kind::Video, name.clone())).or_insert_with(|| {
 				let ctx = Context {
-					broadcast: broadcast.clone(),
+					source: source.clone(),
 					cfg: config,
 					paused: self.paused.subscribe(),
 				};
@@ -184,7 +185,7 @@ impl Broadcaster {
 		for (name, audio) in &catalog.audio.renditions {
 			renditions.entry((Kind::Audio, name.clone())).or_insert_with(|| {
 				let ctx = Context {
-					broadcast: broadcast.clone(),
+					source: source.clone(),
 					cfg: config,
 					paused: self.paused.subscribe(),
 				};
@@ -203,7 +204,12 @@ impl Drop for Broadcaster {
 	}
 }
 
-async fn watch_catalog(broadcast: moq_net::broadcast::Consumer, config: Config, broadcaster: Weak<Broadcaster>) {
+async fn watch_catalog(
+	source: moq_mux::Source,
+	broadcast: moq_net::broadcast::Consumer,
+	config: Config,
+	broadcaster: Weak<Broadcaster>,
+) {
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
@@ -220,7 +226,7 @@ async fn watch_catalog(broadcast: moq_net::broadcast::Consumer, config: Config, 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
 			Ok(Some(catalog)) => match broadcaster.upgrade() {
-				Some(broadcaster) => broadcaster.sync(&broadcast, &config, &catalog),
+				Some(broadcaster) => broadcaster.sync(&source, &config, &catalog),
 				// The Broadcaster was dropped; nothing left to sync into.
 				None => break,
 			},

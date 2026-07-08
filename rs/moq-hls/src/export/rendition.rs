@@ -50,12 +50,14 @@ impl std::str::FromStr for Kind {
 	}
 }
 
-/// Shared context passed to every rendition constructor: the broadcast to pull
-/// from, the export tuning, and the pause signal. Grouped so the constructors
-/// don't take a long list of easily-transposed positional arguments.
+/// Shared context passed to every rendition constructor: the export source (the
+/// catalog broadcast plus optional origin context for cross-broadcast renditions),
+/// the export tuning, and the pause signal. Grouped so the constructors don't take
+/// a long list of easily-transposed positional arguments.
 pub(crate) struct Context<'a> {
-	/// The broadcast whose track this rendition exports.
-	pub broadcast: moq_net::broadcast::Consumer,
+	/// The export source whose track this rendition exports. Carries origin context
+	/// so a rendition referencing a sibling broadcast (catalog `broadcast` field) resolves.
+	pub source: moq_mux::Source,
 	/// Export tuning shared across renditions.
 	pub cfg: &'a Config,
 	/// Pause signal shared with every rendition pump.
@@ -126,11 +128,11 @@ impl Drop for Rendition {
 }
 
 fn spawn_pump(name: String, kind: Kind, store: Arc<SegmentStore>, ctx: &Context<'_>) -> tokio::task::JoinHandle<()> {
-	let broadcast = ctx.broadcast.clone();
+	let source = ctx.source.clone();
 	let cfg = ctx.cfg.clone();
 	let paused = ctx.paused.clone();
 	tokio::spawn(async move {
-		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
+		if let Err(err) = run_pump(source, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
@@ -139,13 +141,17 @@ fn spawn_pump(name: String, kind: Kind, store: Arc<SegmentStore>, ctx: &Context<
 }
 
 async fn run_pump(
-	broadcast: moq_net::broadcast::Consumer,
+	source: moq_mux::Source,
 	name: &str,
 	kind: Kind,
 	store: &SegmentStore,
 	cfg: &Config,
 	mut paused: watch::Receiver<bool>,
 ) -> Result<()> {
+	// Resolve the catalog broadcast once; an announced broadcast resolves immediately and
+	// repeat requests share the subscription, so this matches the per-rendition subscribes
+	// the `Export` below makes through the same `source`.
+	let broadcast = source.broadcast().await?;
 	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
 
 	// Select this rendition's name on its own axis so the exporter sees exactly one track.
@@ -156,10 +162,10 @@ async fn run_pump(
 	let filtered = consumer.select(selection);
 
 	// A handle for noticing the broadcast close even while paused; the `Export`
-	// below takes its own clone for pulling fragments.
-	let closed = broadcast.clone();
+	// below subscribes per-rendition tracks through `source`.
+	let closed = broadcast;
 
-	let mut export = Export::new(broadcast, filtered)
+	let mut export = Export::new(source, filtered)
 		.with_fragment_duration(cfg.part_target)
 		.with_latency(cfg.latency);
 

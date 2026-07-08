@@ -88,7 +88,7 @@ export class Encoder {
 		this.#signals.run(this.#runDimensions.bind(this));
 	}
 
-	serve(track: Moq.track.Producer, effect: Effect): void {
+	serve(track: Moq.Track.Producer, effect: Effect): void {
 		if (!effect.get(this.enabled)) return;
 
 		const producer = new Container.Legacy.Producer(track);
