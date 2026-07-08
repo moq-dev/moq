@@ -217,6 +217,47 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	server.close();
 });
 
+test("integration: lite draft-05 coalesces concurrent fetches of one group", async () => {
+	const enc = new TextEncoder();
+	const dec = new TextDecoder();
+	const pair = createMockTransportPair(Lite.ALPN_05);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video");
+	server.publish(Path.from("test"), broadcast);
+
+	const group0 = producer.appendGroup();
+	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	group0.close();
+
+	const remote = client.consume(Path.from("test"));
+	const trackConsumer = remote.track("video");
+
+	// Two concurrent fetches of the same group coalesce onto one FETCH stream; each reads an
+	// independent mirror that still sees the full group.
+	const [a, b] = await Promise.all([trackConsumer.fetchGroup(0), trackConsumer.fetchGroup(0)]);
+
+	for (const fetched of [a, b]) {
+		expect(dec.decode((await fetched.readFrame())?.data)).toBe("alpha");
+		expect(dec.decode((await fetched.readFrame())?.data)).toBe("beta");
+		expect(await fetched.readFrame()).toBeUndefined();
+	}
+
+	// After the coalesced fetch completes and its cache entry evicts, the same group re-fetches.
+	const again = await trackConsumer.fetchGroup(0);
+	expect(dec.decode((await again.readFrame())?.data)).toBe("alpha");
+	expect(dec.decode((await again.readFrame())?.data)).toBe("beta");
+	expect(await again.readFrame()).toBeUndefined();
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: lite draft-05 fetches an in-progress group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
@@ -288,6 +329,49 @@ test("integration: ietf draft-18", async () => {
 
 test("integration: ietf draft-19", async () => {
 	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_19);
+});
+
+// consume(path) dedupes per path: repeat calls for a still-live path share one reference-counted
+// broadcast, so it stays live until every handle closes and a closed path re-consumes fresh.
+async function runConsumeDedup(protocol: string, version?: number) {
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, version !== undefined ? { version } : undefined),
+	]);
+
+	// Two handles to the same path share one broadcast: closing the first leaves it live...
+	const first = client.consume(Path.from("shared"));
+	const second = client.consume(Path.from("shared"));
+	first.close();
+	expect(first.closedSignal.peek()).toBeFalsy();
+	expect(second.closedSignal.peek()).toBeFalsy();
+
+	// ...and closing the last handle closes the shared broadcast (both handles observe it).
+	second.close();
+	expect(first.closedSignal.peek()).toBeTruthy();
+	expect(second.closedSignal.peek()).toBeTruthy();
+
+	// A different path is independent: a lone handle closes the broadcast immediately.
+	const other = client.consume(Path.from("other"));
+	other.close();
+	expect(other.closedSignal.peek()).toBeTruthy();
+
+	// Once closed, the path re-consumes fresh (a new live handle).
+	const third = client.consume(Path.from("shared"));
+	expect(third.closedSignal.peek()).toBeFalsy();
+	third.close();
+
+	client.close();
+	server.close();
+}
+
+test("integration: lite consume dedup", async () => {
+	await runConsumeDedup(Lite.ALPN_05);
+});
+
+test("integration: ietf consume dedup", async () => {
+	await runConsumeDedup(Ietf.ALPN.DRAFT_17);
 });
 
 test("integration: subscribe to non-existent broadcast", async () => {

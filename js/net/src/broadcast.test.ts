@@ -7,11 +7,91 @@ import { Producer as TrackProducer } from "./track.ts";
 
 // Observe whether an on-demand track request is pending without blocking: returns the
 // next request if one has already been emitted, or undefined if none is (yet) waiting.
-async function pendingRequest(broadcast: BroadcastProducer): Promise<TrackRequest | undefined> {
+async function pendingRequest(broadcast: Pick<BroadcastProducer, "requested">): Promise<TrackRequest | undefined> {
 	const none = Symbol("none");
 	const result = await Promise.race([broadcast.requested(), Promise.resolve(none)]);
 	return result === none ? undefined : (result as TrackRequest | undefined);
 }
+
+test("consumer dedupes repeat subscriptions onto one upstream request", async () => {
+	const consumer = new BroadcastConsumer();
+
+	// Two subscriptions to the same track share one upstream subscription...
+	const a = consumer.track("video").subscribe();
+	const b = consumer.subscribe("video", 0);
+
+	const request = await pendingRequest(consumer);
+	expect(request?.name).toBe("video");
+	// ...so only one on-demand request is emitted for it.
+	expect(await pendingRequest(consumer)).toBeUndefined();
+
+	// Serving that single request fans out to both subscribers.
+	if (!request) throw new Error("expected request");
+	const producer = request.accept();
+	producer.writeString("hello");
+	expect(await a.readString()).toBe("hello");
+	expect(await b.readString()).toBe("hello");
+
+	// A different track still opens its own request.
+	consumer.subscribe("audio", 0);
+	expect((await pendingRequest(consumer))?.name).toBe("audio");
+
+	// Once the shared track closes, a later subscribe re-opens it.
+	producer.close();
+	consumer.subscribe("video", 0);
+	expect((await pendingRequest(consumer))?.name).toBe("video");
+});
+
+test("a consumer clone shares the broadcast until every handle closes", () => {
+	const consumer = new BroadcastConsumer();
+	const clone = consumer.clone();
+
+	// Closing one handle leaves the shared broadcast live for the other...
+	consumer.close();
+	expect(consumer.closedSignal.peek()).toBeFalsy();
+	expect(clone.closedSignal.peek()).toBeFalsy();
+
+	// ...and closing the last handle closes it for both.
+	clone.close();
+	expect(consumer.closedSignal.peek()).toBeTruthy();
+	expect(clone.closedSignal.peek()).toBeTruthy();
+});
+
+test("double-closing a consumer handle does not prematurely close the broadcast", () => {
+	const consumer = new BroadcastConsumer();
+	const clone = consumer.clone();
+
+	// The double close must decrement the shared count only once...
+	clone.close();
+	clone.close();
+	expect(consumer.closedSignal.peek()).toBeFalsy();
+
+	// ...so the broadcast still stays live until the other handle closes.
+	consumer.close();
+	expect(consumer.closedSignal.peek()).toBeTruthy();
+});
+
+test("consumer track subscriptions fan out and close independently", async () => {
+	const consumer = new BroadcastConsumer();
+
+	// Two subscriptions to one track dedupe onto a single upstream request...
+	const a = consumer.subscribe("video", 0);
+	const b = consumer.subscribe("video", 0);
+
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+	expect(await pendingRequest(consumer)).toBeUndefined();
+
+	const producer = request.accept();
+	producer.writeString("one");
+	expect(await a.readString()).toBe("one");
+	expect(await b.readString()).toBe("one");
+
+	// ...and closing one subscriber leaves the other (and the shared upstream) delivering.
+	a.close();
+	producer.writeString("two");
+	expect(await b.readString()).toBe("two");
+});
 
 test("subscribe serves a statically inserted track without a request", async () => {
 	const broadcast = new BroadcastProducer();

@@ -2,6 +2,7 @@ import { Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import * as broadcast from "../broadcast.ts";
+import { BroadcastCache } from "../consume.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -91,6 +92,14 @@ export class Subscriber {
 	// before decoding any frame, since a group's QUIC stream can race ahead.
 	#subscribes = new Map<bigint, SubscribeEntry>();
 	#subscribeNext = 0n;
+
+	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
+	#consumes = new BroadcastCache();
+
+	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
+	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
+	// each get an independent mirror; the entry is evicted once the group closes.
+	#fetches = new Map<string, netGroup.Producer>();
 
 	// Recv bandwidth producer (Lite03+ only).
 	#recvBandwidth?: Bandwidth;
@@ -215,10 +224,18 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
+	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
+	 * closed its handle, so callers close normally.
+	 *
 	 * @param name - The name of the broadcast to consume
 	 * @returns A Broadcast instance
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
+		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+	}
+
+	#createConsume(path: Path.Valid): broadcast.Consumer {
 		// A consumed broadcast resolves info() and fetchGroup() over the wire by reaching
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
@@ -398,33 +415,61 @@ export class Subscriber {
 
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
-	async fetchGroup(
+	fetchGroup(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
 		options: track.FetchGroupOptions = {},
 	): Promise<netGroup.Consumer> {
-		if (!supportsTrackStream(this.version)) {
-			throw new Error("fetch group requires moq-lite-05 or newer");
-		}
+		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
+		// stream (and re-download it); each caller reads an independent mirror.
+		const key = JSON.stringify([broadcast, track, sequence]);
+		const existing = this.#fetches.get(key);
+		if (existing && !existing.isClosed) return Promise.resolve(existing.mirror());
 
-		const info = await this.#trackInfo(broadcast, track);
-		const priority = options.priority ?? 0;
-		const stream = await Stream.open(this.#quic, undefined, priority);
+		// Create and cache the group synchronously (before any await) so a concurrent fetch for
+		// the same group finds it and coalesces rather than racing to open its own stream.
 		const group = new netGroup.Producer(sequence);
+		this.#fetches.set(key, group);
+		void group.closed.then(() => {
+			if (this.#fetches.get(key) === group) this.#fetches.delete(key);
+		});
 
+		return this.#runFetch(broadcast, track, sequence, options, group);
+	}
+
+	// Open the FETCH stream and pump the response into the shared group. Setup errors close the
+	// group (so coalesced mirrors observe them and the entry evicts) and reject this caller.
+	async #runFetch(
+		broadcast: Path.Valid,
+		track: string,
+		sequence: number,
+		options: track.FetchGroupOptions,
+		group: netGroup.Producer,
+	): Promise<netGroup.Consumer> {
 		try {
-			await stream.writer.u53(StreamId.Fetch);
-			await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
-		} catch (err: unknown) {
-			const e = error(err);
-			group.close(e);
-			stream.abort(e);
-			throw e;
-		}
+			if (!supportsTrackStream(this.version)) {
+				throw new Error("fetch group requires moq-lite-05 or newer");
+			}
 
-		void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
-		return group.consume();
+			const info = await this.#trackInfo(broadcast, track);
+			const priority = options.priority ?? 0;
+			const stream = await Stream.open(this.#quic, undefined, priority);
+
+			try {
+				await stream.writer.u53(StreamId.Fetch);
+				await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
+			} catch (err: unknown) {
+				stream.abort(error(err));
+				throw err;
+			}
+
+			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
+			return group.mirror();
+		} catch (err: unknown) {
+			group.close(error(err));
+			throw err;
+		}
 	}
 
 	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
@@ -713,10 +758,16 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	#subscriber: Subscriber;
 	#path: Path.Valid;
 
-	constructor(subscriber: Subscriber, path: Path.Valid) {
-		super();
+	constructor(subscriber: Subscriber, path: Path.Valid, state?: never) {
+		super(state);
 		this.#subscriber = subscriber;
 		this.#path = path;
+	}
+
+	// Preserve the subclass (and its wire-backed info/fetchGroup) when the consume cache shares
+	// this broadcast across callers.
+	override clone(): ConsumeBroadcast {
+		return new ConsumeBroadcast(this.#subscriber, this.#path, this.shareState());
 	}
 
 	override resolveTrackInfo(name: string): Promise<track.Info> {
