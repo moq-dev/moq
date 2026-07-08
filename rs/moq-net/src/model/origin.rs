@@ -1050,6 +1050,12 @@ struct OriginDynamicState {
 	// Requested paths in FIFO order for the handler to drain.
 	request_order: VecDeque<PathOwned>,
 
+	// Broadcasts a handler has already served, kept weakly so a repeat request for the
+	// same path resolves to a shared clone instead of re-invoking the handler (which would
+	// open a duplicate upstream subscription). Weak so a served broadcast still closes once
+	// its real consumers drop; a stale (closed) entry is evicted lazily on the next request.
+	served: HashMap<PathOwned, broadcast::WeakConsumer>,
+
 	// The number of live `Dynamic` handlers. While zero, `request_broadcast`
 	// fails fast with `Unroutable` rather than queueing a request nobody will serve.
 	dynamic: usize,
@@ -1145,7 +1151,11 @@ impl Dynamic {
 
 		let path = state.request_order.pop_front().expect("predicate guaranteed a request");
 		let producer = state.requests.remove(&path).expect("request_order out of sync");
-		Poll::Ready(Ok(Request { path, producer }))
+		Poll::Ready(Ok(Request {
+			path,
+			producer,
+			state: self.state.clone(),
+		}))
 	}
 
 	/// Block until a consumer requests an unannounced broadcast, returning a
@@ -1186,6 +1196,9 @@ pub struct Request {
 	// Result channel back to the awaiting requester(s). Writing `resolved` and dropping
 	// this wakes them with the outcome.
 	producer: kio::Producer<PendingBroadcast>,
+
+	// Shared dynamic state, so `accept` can cache the served broadcast for repeat requests.
+	state: kio::Producer<OriginDynamicState>,
 }
 
 impl Request {
@@ -1200,8 +1213,16 @@ impl Request {
 	/// upstream); the requesters receive a consumer for it. The broadcast is *not*
 	/// announced.
 	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
-		if let Ok(mut state) = self.producer.write() {
-			state.resolved = Some(Ok(broadcast.consume()));
+		let broadcast = broadcast.consume();
+
+		// Cache it weakly so repeat requests for this path share the same broadcast instead
+		// of asking the handler to serve (and subscribe upstream) again.
+		if let Ok(mut state) = self.state.write() {
+			state.served.insert(self.path.clone(), broadcast.weak());
+		}
+
+		if let Ok(mut pending) = self.producer.write() {
+			pending.resolved = Some(Ok(broadcast));
 		}
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
@@ -1474,7 +1495,10 @@ impl Consumer {
 	/// [`Producer::dynamic`]), a fallback request is registered and the future resolves
 	/// when the handler [`accept`](Request::accept)s it (or errors if it
 	/// [`reject`](Request::reject)s or every handler drops). Concurrent requests for
-	/// the same unannounced path coalesce onto one handler request.
+	/// the same unannounced path coalesce onto one handler request, and once served the
+	/// broadcast is cached weakly so *later* requests for that path also share it (rather
+	/// than re-invoking the handler and opening a duplicate upstream subscription) for as
+	/// long as it stays live; a closed one is re-served on the next request.
 	///
 	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
 	/// dynamic handler exists, or [`Error::Dropped`] once the origin is gone. A request that is
@@ -1496,6 +1520,16 @@ impl Consumer {
 		let Ok(mut state) = self.dynamic.write() else {
 			return kio::Pending::new(Requested::failed(Error::Dropped));
 		};
+
+		// Reuse a still-live broadcast a handler already served for this path, so repeat
+		// requests share one upstream subscription. A closed entry is stale; drop it and
+		// re-serve below.
+		if let Some(weak) = state.served.get(&absolute) {
+			if !weak.is_closed() {
+				return kio::Pending::new(Requested::ready(weak.consume()));
+			}
+			state.served.remove(&absolute);
+		}
 
 		// Coalesce onto a queued request for the same path; otherwise register a new one.
 		let consumer = if let Some(producer) = state.requests.get(&absolute) {
@@ -3105,6 +3139,57 @@ mod tests {
 		request.accept(&served);
 		assert!(f1.await.unwrap().is_clone(&served.consume()));
 		assert!(f2.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// A repeat request for an already-served, still-live path shares the same broadcast
+	// instead of asking the handler again (no duplicate upstream subscription).
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_dedups_served() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let request_fut = consumer.request_broadcast("fallback");
+		let served = broadcast::Info::new().produce();
+		let request = dynamic.requested_broadcast().await.unwrap();
+		request.accept(&served);
+		let first = request_fut.await.unwrap();
+		assert!(first.is_clone(&served.consume()));
+
+		// The repeat resolves immediately to the same broadcast...
+		let second = consumer.request_broadcast("fallback").await.unwrap();
+		assert!(second.is_clone(&served.consume()));
+
+		// ...and the handler never sees a second request.
+		assert!(
+			dynamic.requested_broadcast().now_or_never().is_none(),
+			"a still-live served broadcast must not be re-requested from the handler"
+		);
+	}
+
+	// Once a served broadcast closes, its cache entry is stale, so the next request re-serves.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_reserves_after_close() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let request_fut = consumer.request_broadcast("fallback");
+		let served = broadcast::Info::new().produce();
+		let request = dynamic.requested_broadcast().await.unwrap();
+		request.accept(&served);
+		request_fut.await.unwrap();
+
+		// Close the first served broadcast; the weak cache entry goes stale.
+		drop(served);
+
+		// A fresh request must reach the handler again and resolve to the new broadcast.
+		let request_fut = consumer.request_broadcast("fallback");
+		let served = broadcast::Info::new().produce();
+		let request = dynamic.requested_broadcast().await.unwrap();
+		assert_eq!(request.path(), &Path::new("fallback"));
+		request.accept(&served);
+		assert!(request_fut.await.unwrap().is_clone(&served.consume()));
 	}
 
 	// Rejecting a request resolves the requester with the error.

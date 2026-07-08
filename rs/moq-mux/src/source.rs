@@ -50,7 +50,8 @@ impl Source {
 	/// A missing/empty `rel`, or one that resolves back to the catalog's own path (or
 	/// walks past the origin root), targets the catalog broadcast; anything else targets
 	/// the resolved sibling broadcast. Either way the broadcast is fetched from the origin,
-	/// which deduplicates repeat requests for an announced path.
+	/// which deduplicates repeat requests for the same live path (announced or dynamically
+	/// served) so the catalog and every rendition share one upstream subscription.
 	pub(crate) fn request(&self, rel: Option<&moq_net::PathRelative<'_>>) -> kio::Pending<moq_net::origin::Requested> {
 		let target = match rel.filter(|rel| !rel.is_empty()) {
 			// Excess `..` clamps to the (empty) origin root, which is not a broadcast; treat

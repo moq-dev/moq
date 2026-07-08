@@ -411,6 +411,42 @@ impl Consumer {
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
+
+	/// Create a weak reference that doesn't keep the broadcast alive.
+	///
+	/// Used to deduplicate dynamically-served broadcasts in the origin: a live weak yields
+	/// a shared clone, a closed one is discarded so the next request re-serves.
+	pub(crate) fn weak(&self) -> WeakConsumer {
+		WeakConsumer {
+			info: self.info.clone(),
+			state: self.state.weak(),
+		}
+	}
+}
+
+/// A weak reference to a broadcast that doesn't prevent it from closing.
+///
+/// Mirrors [`track::TrackWeak`]: held by the origin's dynamic cache to share one
+/// dynamically-served broadcast across repeat requests without pinning it alive.
+#[derive(Clone)]
+pub(crate) struct WeakConsumer {
+	info: Arc<Info>,
+	state: kio::Weak<BroadcastState>,
+}
+
+impl WeakConsumer {
+	/// True once every [`Producer`] has been dropped.
+	pub fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	/// Upgrade to a full [`Consumer`] sharing the same broadcast state.
+	pub fn consume(&self) -> Consumer {
+		Consumer {
+			info: self.info.clone(),
+			state: self.state.consume(),
+		}
+	}
 }
 
 #[cfg(test)]
