@@ -42,18 +42,15 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.optional(z.boolean()),
 
-	// Minimum additional latency required by this track in milliseconds.
-	// This is added to the subscriber's own latency target for steady playback.
+	// The maximum jitter before the next frame is emitted in milliseconds.
+	// The player's jitter buffer should be larger than this value.
+	// If not provided, the player should assume each frame is flushed immediately.
 	//
 	// ex:
 	// - If each frame is flushed immediately, this would be 1000/fps.
 	// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	// - If frames are buffered into 2s segments, this would be 2s.
-	latencyMin: z.optional(u53Schema),
-
-	// Deprecated: renamed to `latencyMin`. Still emitted (mirrored from `latencyMin`) so
-	// older consumers keep working; new code should read and write `latencyMin`.
-	jitter: z.optional(u53Schema).register(z.globalRegistry, { deprecated: true }),
+	jitter: z.optional(u53Schema),
 });
 
 /**

@@ -52,7 +52,6 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 		codedHeight: track.height != null ? u53(track.height) : undefined,
 		framerate: track.framerate,
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
-		latencyMin: track.jitter != null ? u53(track.jitter) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
 	};
 }
@@ -74,7 +73,6 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
-		latencyMin: track.jitter != null ? u53(track.jitter) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
 	};
 }

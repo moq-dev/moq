@@ -214,7 +214,7 @@ fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> 
 	config.bitrate = track.bitrate;
 	config.framerate = track.framerate;
 	config.container = container;
-	config.set_latency_min(track.jitter.and_then(|j| moq_net::Time::try_from(j).ok()));
+	config.jitter = track.jitter.and_then(|j| moq_net::Time::try_from(j).ok());
 	Ok(Some(config))
 }
 
@@ -253,7 +253,7 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> Result<Option<AudioConfig>> 
 	config.bitrate = track.bitrate;
 	config.description = legacy_description(track)?;
 	config.container = container;
-	config.set_latency_min(track.jitter.and_then(|j| moq_net::Time::try_from(j).ok()));
+	config.jitter = track.jitter.and_then(|j| moq_net::Time::try_from(j).ok());
 	Ok(Some(config))
 }
 

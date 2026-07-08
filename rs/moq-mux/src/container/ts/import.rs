@@ -1171,7 +1171,7 @@ impl<E: CatalogExt> AacStream<E> {
 
 		if let Some(import) = &mut self.import {
 			import.update_rendition(|rendition| {
-				rendition.set_latency_min(moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok());
+				rendition.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
 			});
 		}
 		Ok(())
@@ -2017,12 +2017,12 @@ mod test {
 			.values()
 			.find(|a| a.codec.to_string().starts_with("mp4a"))
 			.expect("AAC rendition");
-		let latency_min = std::time::Duration::from(aac_rendition.latency_min().expect("AAC publishes a latencyMin"));
+		let jitter = std::time::Duration::from(aac_rendition.jitter.expect("AAC publishes a jitter"));
 		// Anchored on its own PES: one 1024-sample frame at 48 kHz (~21 ms).
 		// Anchored on the MP2 PES it would be ~2 s.
 		assert!(
-			latency_min <= std::time::Duration::from_millis(100),
-			"AAC latencyMin anchored on a foreign PID: {latency_min:?}"
+			jitter <= std::time::Duration::from_millis(100),
+			"AAC jitter anchored on a foreign PID: {jitter:?}"
 		);
 	}
 

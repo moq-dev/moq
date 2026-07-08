@@ -88,17 +88,12 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// Minimum additional latency required by this track in milliseconds.
-	///
-	/// This is added to the subscriber's own latency target for steady playback.
+	/// The maximum jitter before the next frame is emitted in milliseconds.
+	/// The player's jitter buffer should be larger than this value.
+	/// If not provided, the player should assume each frame is flushed immediately.
 	///
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
-	#[serde(default)]
-	#[serde(rename = "latencyMin")]
-	pub latency_min: Option<moq_net::Time>,
-
-	#[doc(hidden)]
 	#[serde(default)]
 	pub jitter: Option<moq_net::Time>,
 }
@@ -118,40 +113,7 @@ impl AudioConfig {
 			bitrate: None,
 			description: None,
 			container: Container::default(),
-			latency_min: None,
 			jitter: None,
 		}
-	}
-
-	/// The minimum additional latency required by this track.
-	pub fn latency_min(&self) -> Option<moq_net::Time> {
-		self.latency_min.or(self.jitter)
-	}
-
-	/// Set the minimum additional latency required by this track.
-	pub fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>) {
-		self.latency_min = latency_min;
-		self.jitter = latency_min;
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn latency_min_accepts_legacy_jitter_and_serializes_both() {
-		let old: AudioConfig = serde_json::from_str(
-			r#"{"codec":"opus","sampleRate":48000,"numberOfChannels":2,"container":{"kind":"legacy"},"jitter":40}"#,
-		)
-		.unwrap();
-		assert_eq!(old.latency_min(), Some(moq_net::Time::from_millis(40).unwrap()));
-
-		let mut new = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		new.set_latency_min(Some(moq_net::Time::from_millis(40).unwrap()));
-
-		let json = serde_json::to_value(new).unwrap();
-		assert_eq!(json["latencyMin"], 40);
-		assert_eq!(json["jitter"], 40);
 	}
 }

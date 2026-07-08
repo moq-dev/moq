@@ -267,7 +267,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
-		track.jitter = config.latency_min().map(std::time::Duration::from);
+		track.jitter = config.jitter.map(std::time::Duration::from);
 		tracks.push(track);
 	}
 
@@ -298,7 +298,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		track.alt_group = if has_multiple_audio { Some(1) } else { None };
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
-		track.jitter = config.latency_min().map(std::time::Duration::from);
+		track.jitter = config.jitter.map(std::time::Duration::from);
 		tracks.push(track);
 	}
 
@@ -505,18 +505,14 @@ mod test {
 		video_config.coded_height = Some(720);
 		video_config.framerate = Some(30.0);
 		video_config.container = Container::Legacy;
-		video_config.set_latency_min(Some(
-			moq_net::Time::try_from(std::time::Duration::from_millis(100)).unwrap(),
-		));
+		video_config.jitter = Some(moq_net::Time::try_from(std::time::Duration::from_millis(100)).unwrap());
 
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0".to_string(), video_config);
 
 		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		audio_config.container = Container::Legacy;
-		audio_config.set_latency_min(Some(
-			moq_net::Time::try_from(std::time::Duration::from_millis(40)).unwrap(),
-		));
+		audio_config.jitter = Some(moq_net::Time::try_from(std::time::Duration::from_millis(40)).unwrap());
 
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio0".to_string(), audio_config);

@@ -707,7 +707,7 @@ fn author_dts(pts: u32, reserve: u32, last: Option<u32>) -> anyhow::Result<u32> 
 
 fn dts_reserve(config: &hang::catalog::VideoConfig) -> u32 {
 	config
-		.latency_min()
+		.jitter
 		.and_then(|t| u32::try_from(t.as_millis()).ok())
 		.filter(|reserve| *reserve > 0)
 		.unwrap_or(1)

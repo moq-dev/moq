@@ -7,31 +7,25 @@ const BITRATE_WINDOW: Duration = Duration::from_secs(1);
 /// Catalog metric updates discovered from frame timing and sizes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Update {
-	/// The minimum additional latency, if it changed.
-	pub latency_min: Option<Duration>,
+	/// The catalog jitter (minimum buffer duration), if it changed.
+	pub jitter: Option<Duration>,
 	/// The current maximum bitrate in bits per second, if it increased.
 	pub bitrate: Option<u64>,
 }
 
 impl Update {
-	fn latency_min(latency_min: Option<Duration>) -> Self {
-		Self {
-			latency_min,
-			bitrate: None,
-		}
+	fn jitter(jitter: Option<Duration>) -> Self {
+		Self { jitter, bitrate: None }
 	}
 
 	fn bitrate(bitrate: Option<u64>) -> Self {
-		Self {
-			latency_min: None,
-			bitrate,
-		}
+		Self { jitter: None, bitrate }
 	}
 
-	/// Apply the detected latency and bitrate to a catalog config in place.
+	/// Apply the detected jitter and bitrate to a catalog config in place.
 	pub(crate) fn apply(&self, config: &mut impl MetricsTarget) {
-		if let Some(latency_min) = self.latency_min {
-			config.set_latency_min(moq_net::Time::try_from(latency_min).ok());
+		if let Some(jitter) = self.jitter {
+			config.set_jitter(moq_net::Time::try_from(jitter).ok());
 		}
 		self.apply_bitrate(config);
 	}
@@ -50,8 +44,8 @@ impl Update {
 ///
 /// Implemented for the video and audio configs so [`Update::apply`] works on either.
 pub(crate) trait MetricsTarget {
-	/// Set the minimum additional latency required by this track.
-	fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>);
+	/// Set the jitter (minimum buffer duration) for this track.
+	fn set_jitter(&mut self, jitter: Option<moq_net::Time>);
 	/// The current bitrate in bits per second, if known.
 	fn bitrate(&self) -> Option<u64>;
 	/// Set the bitrate in bits per second.
@@ -59,8 +53,8 @@ pub(crate) trait MetricsTarget {
 }
 
 impl MetricsTarget for hang::catalog::VideoConfig {
-	fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>) {
-		hang::catalog::VideoConfig::set_latency_min(self, latency_min);
+	fn set_jitter(&mut self, jitter: Option<moq_net::Time>) {
+		self.jitter = jitter;
 	}
 
 	fn bitrate(&self) -> Option<u64> {
@@ -73,8 +67,8 @@ impl MetricsTarget for hang::catalog::VideoConfig {
 }
 
 impl MetricsTarget for hang::catalog::AudioConfig {
-	fn set_latency_min(&mut self, latency_min: Option<moq_net::Time>) {
-		hang::catalog::AudioConfig::set_latency_min(self, latency_min);
+	fn set_jitter(&mut self, jitter: Option<moq_net::Time>) {
+		self.jitter = jitter;
 	}
 
 	fn bitrate(&self) -> Option<u64> {
@@ -88,7 +82,7 @@ impl MetricsTarget for hang::catalog::AudioConfig {
 
 /// Tracks catalog metrics for one media track.
 ///
-/// Latency is updated per frame, while bitrate is updated when the current group is
+/// Jitter is updated per frame, while bitrate is updated when the current group is
 /// finished. The group boundary keeps a single large keyframe from being reported as the
 /// track bitrate on its own.
 #[derive(Default)]
@@ -105,12 +99,12 @@ impl Metrics {
 	/// Record one frame's presentation timestamp and encoded byte count.
 	pub fn observe_frame(&mut self, ts: Timestamp, bytes: usize) -> Update {
 		self.bitrate.observe_frame(ts, bytes);
-		Update::latency_min(self.jitter.observe(ts))
+		Update::jitter(self.jitter.observe(ts))
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`).
 	pub fn observe_reorder(&mut self, reorder: Timestamp) -> Update {
-		Update::latency_min(self.jitter.observe_reorder(reorder))
+		Update::jitter(self.jitter.observe_reorder(reorder))
 	}
 
 	/// Finish the current group, using `next` as the group's end timestamp when known.
@@ -121,7 +115,7 @@ impl Metrics {
 	/// The current metrics, without change-detection.
 	pub fn current(&self) -> Update {
 		Update {
-			latency_min: self.jitter.current(),
+			jitter: self.jitter.current(),
 			bitrate: self.bitrate.current(),
 		}
 	}
@@ -210,8 +204,8 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 	bits_per_second.min(u64::MAX as u128) as u64
 }
 
-/// Tracks the minimum catalog latency for a video/audio track: the maximum delay before a
-/// frame can be emitted, so a player sizes its buffer to at least this much.
+/// Tracks the catalog `jitter` for a video/audio track: the maximum delay before a frame can
+/// be emitted, so a player sizes its buffer to at least this much.
 ///
 /// It reports whichever is larger of two contributions:
 /// - the minimum frame duration (the steady inter-frame spacing), and
@@ -236,7 +230,7 @@ pub struct Jitter {
 
 impl Jitter {
 	/// Record a frame's presentation timestamp (decode order), updating the minimum frame
-	/// duration. Returns the new latency as a [`Duration`] if it changed, else `None`. The
+	/// duration. Returns the new jitter as a [`Duration`] if it changed, else `None`. The
 	/// first observation and non-monotonic timestamps (B-frames) only update state.
 	pub fn observe(&mut self, ts: Timestamp) -> Option<Duration> {
 		if let Some(last) = self.last_timestamp.replace(ts)
@@ -253,13 +247,13 @@ impl Jitter {
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`), updating the maximum. Returns the new
-	/// latency as a [`Duration`] if it changed, else `None`.
+	/// jitter as a [`Duration`] if it changed, else `None`.
 	pub fn observe_reorder(&mut self, reorder: Timestamp) -> Option<Duration> {
 		self.max_reorder = self.max_reorder.max(Duration::from(reorder));
 		self.report()
 	}
 
-	/// The current latency (the larger of the frame duration and the reorder delay), without
+	/// The current jitter (the larger of the frame duration and the reorder delay), without
 	/// the change-detection of [`observe`](Self::observe). Used to seed a freshly created
 	/// catalog rendition with whatever has accumulated, since per-frame updates before the
 	/// rendition exists would otherwise be lost.
@@ -272,14 +266,14 @@ impl Jitter {
 		self.min_duration.unwrap_or(Duration::ZERO).max(self.max_reorder)
 	}
 
-	/// Report the current latency only when it changes.
+	/// Report the current jitter only when it changes.
 	fn report(&mut self) -> Option<Duration> {
-		let latency_min = self.combined();
-		if latency_min.is_zero() || self.reported == Some(latency_min) {
+		let jitter = self.combined();
+		if jitter.is_zero() || self.reported == Some(jitter) {
 			return None;
 		}
-		self.reported = Some(latency_min);
-		Some(latency_min)
+		self.reported = Some(jitter);
+		Some(jitter)
 	}
 }
 
@@ -311,15 +305,12 @@ mod tests {
 	fn jitter_still_reports_larger_of_frame_duration_and_reorder() {
 		let mut metrics = Metrics::new();
 
-		assert_eq!(metrics.observe_frame(ts(0), 1).latency_min, None);
+		assert_eq!(metrics.observe_frame(ts(0), 1).jitter, None);
+		assert_eq!(metrics.observe_frame(ts(33), 1).jitter, Some(Duration::from_millis(33)));
 		assert_eq!(
-			metrics.observe_frame(ts(33), 1).latency_min,
-			Some(Duration::from_millis(33))
-		);
-		assert_eq!(
-			metrics.observe_reorder(ts(100)).latency_min,
+			metrics.observe_reorder(ts(100)).jitter,
 			Some(Duration::from_millis(100))
 		);
-		assert_eq!(metrics.current().latency_min, Some(Duration::from_millis(100)));
+		assert_eq!(metrics.current().jitter, Some(Duration::from_millis(100)));
 	}
 }

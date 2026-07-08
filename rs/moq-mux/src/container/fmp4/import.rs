@@ -757,8 +757,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								.renditions
 								.get_mut(track.track.name())
 								.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
-							config
-								.set_latency_min(moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok());
+							config.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -766,8 +765,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								.renditions
 								.get_mut(track.track.name())
 								.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
-							config
-								.set_latency_min(moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok());
+							config.jitter = moq_net::Time::from_scale(jitter.as_micros() as u64, 1_000_000).ok();
 						}
 					}
 				}
