@@ -42,8 +42,7 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
 ///
-/// Not `Copy`: it carries a crate-internal handle to its parent broadcast (the link
-/// a group walks to reach the shared cache pool).
+/// Not `Copy`: it carries a handle to its parent broadcast (see [`Self::broadcast`]).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
@@ -67,12 +66,12 @@ pub struct Info {
 	/// only to break ties. Reported in TRACK_INFO (Lite05+).
 	pub ordered: bool,
 
-	// The broadcast this track belongs to, bound when the track is created under a
-	// broadcast (create_track / reserve_track / Request::accept). Not public and not
-	// on the wire: it's the parent link a group walks to reach the shared cache pool
-	// (`track.broadcast.origin.pool`). Defaults to a standalone broadcast (unbounded
-	// pool) until bound.
-	pub(crate) broadcast: Arc<broadcast::Info>,
+	/// The broadcast this track belongs to, bound when the track is created under one
+	/// (`create_track` / `reserve_track` / `Request::accept`); until then it's a
+	/// standalone broadcast with an unbounded pool. Not on the wire. It's the parent
+	/// link a group walks to reach the shared cache pool
+	/// (`track.broadcast.origin.pool`); the pool itself stays crate-private.
+	pub broadcast: Arc<broadcast::Info>,
 }
 
 /// The shared parent for a not-yet-bound [`Info`]: a standalone broadcast with an

@@ -1015,13 +1015,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// matches what the upstream advertises (relays re-serve with the same bound).
 		// `broadcast` is left at its default here; the caller binds it via
 		// `Request::accept`, which stamps the track's real broadcast.
-		let model = track::Info {
-			timescale: info.timescale,
-			cache: info.cache,
-			priority: info.priority,
-			ordered: info.ordered,
-			..Default::default()
-		};
+		let model = track::Info::default()
+			.with_timescale(info.timescale)
+			.with_cache(info.cache)
+			.with_priority(info.priority)
+			.with_ordered(info.ordered);
 		Ok(model)
 	}
 
@@ -1249,12 +1247,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// Make the group available (resolving the downstream fetch) and fill it. The
 		// track::Info only takes effect if the track isn't accepted yet (a fetch with no
 		// live subscription); otherwise the group inherits the accepted timescale.
-		let group_info = track::Info {
-			// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
-			// default scale defensively rather than panicking.
-			timescale: timescale.unwrap_or_default(),
-			..Default::default()
-		};
+		// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
+		// default scale defensively rather than panicking.
+		let group_info = track::Info::default().with_timescale(timescale.unwrap_or_default());
 		let mut producer = match request.accept(group_info) {
 			Ok(producer) => producer,
 			Err(err) => {
