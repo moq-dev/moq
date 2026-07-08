@@ -446,11 +446,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = broadcast::Info {
-			hops,
-			pool: self.origin.pool(),
-		}
-		.produce();
+		let broadcast = broadcast::Info { hops }.produce().with_pool(self.origin.pool());
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -502,11 +498,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
-		let broadcast = broadcast::Info {
-			hops,
-			pool: self.origin.pool(),
-		}
-		.produce();
+		let broadcast = broadcast::Info { hops }.produce().with_pool(self.origin.pool());
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is

@@ -101,7 +101,48 @@ impl Origin {
 		self.id
 	}
 
-	/// Consume this [Origin] to create a producer that carries its id.
+	/// Consume this [Origin] to create a producer that carries its id, with an
+	/// unbounded cache pool. Use [`Info::produce`] to configure the pool.
+	pub fn produce(self) -> Producer {
+		Info::new(self).produce()
+	}
+}
+
+/// Construction config for an [origin `Producer`](Producer): its wire identity plus
+/// the cache pool its broadcasts inherit.
+///
+/// The origin owns the [`cache::Pool`] every group in the tree registers with, so a
+/// relay configures one bounded pool here and every broadcast, track, and group
+/// beneath it shares that single memory budget. Defaults to an unbounded pool
+/// ([`Origin::produce`] is the shorthand for that).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Info {
+	/// The origin's wire identity, appended to broadcast hop chains for loop
+	/// detection and shortest-path routing.
+	pub id: Origin,
+
+	/// The cache pool broadcasts created under this origin register their groups
+	/// with. Unbounded by default.
+	pub pool: cache::Pool,
+}
+
+impl Info {
+	/// Config for the given origin id with an unbounded cache pool.
+	pub fn new(id: Origin) -> Self {
+		Self {
+			id,
+			pool: cache::Pool::default(),
+		}
+	}
+
+	/// Set the cache pool this origin's broadcasts inherit, returning `self` for chaining.
+	pub fn with_pool(mut self, pool: cache::Pool) -> Self {
+		self.pool = pool;
+		self
+	}
+
+	/// Consume this config to create an origin [`Producer`].
 	pub fn produce(self) -> Producer {
 		Producer::new(self)
 	}
@@ -817,26 +858,17 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
-	/// Build a producer for the given origin id with no scoped prefix and no
-	/// pre-existing broadcasts. Prefer [`Origin::produce`].
-	pub fn new(info: Origin) -> Self {
+	/// Build a producer from an [`Info`] (identity + cache pool) with no scoped
+	/// prefix and no pre-existing broadcasts. Prefer [`Info::produce`] /
+	/// [`Origin::produce`].
+	pub fn new(info: Info) -> Self {
 		Self {
-			info,
+			info: info.id,
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
 			dynamic: kio::Producer::default(),
-			pool: cache::Pool::default(),
+			pool: info.pool,
 		}
-	}
-
-	/// Set the [`cache::Pool`] that broadcasts created under this origin register
-	/// their groups with, returning `self` for chaining.
-	///
-	/// A relay installs one bounded pool on its origin so every cached group in the
-	/// process shares a single memory budget. Defaults to an unbounded pool.
-	pub fn with_pool(mut self, pool: cache::Pool) -> Self {
-		self.pool = pool;
-		self
 	}
 
 	/// The cache pool broadcasts created under this origin inherit.
@@ -865,7 +897,7 @@ impl Producer {
 	/// unannounces the broadcast. See [`publish_broadcast`](Self::publish_broadcast) for the
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<Broadcast, Error> {
-		let producer = broadcast::Info::new().with_pool(self.pool.clone()).produce();
+		let producer = broadcast::Info::new().produce().with_pool(self.pool.clone());
 		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(Broadcast { producer, publish })
 	}
@@ -1960,7 +1992,6 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
 			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
-			..Default::default()
 		}
 		.produce();
 		let b = broadcast::Info::new().produce();
@@ -1982,7 +2013,6 @@ mod tests {
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
 			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
-			..Default::default()
 		}
 		.produce();
 		let b = broadcast::Info::new().produce();
@@ -2033,11 +2063,7 @@ mod tests {
 					.collect::<Vec<_>>(),
 			)
 			.unwrap();
-			broadcast::Info {
-				hops,
-				..Default::default()
-			}
-			.produce()
+			broadcast::Info { hops }.produce()
 		}
 
 		// Resolve the active route for "test" after publishing both routes in the given order.

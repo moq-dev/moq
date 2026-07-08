@@ -387,8 +387,12 @@ impl Cluster {
 	/// session's broadcasts cache into one memory budget. Call before deriving
 	/// any origin handles (e.g. [`with_stats`](Self::with_stats)) so they inherit
 	/// the pool.
+	///
+	/// Rebuilds the origin with the pool: safe because the cluster's origin is
+	/// still pristine here (no broadcasts published, no scopes derived).
 	pub fn with_cache(mut self, pool: moq_net::cache::Pool) -> Self {
-		self.origin = self.origin.with_pool(pool);
+		let id = *self.origin; // origin::Producer derefs to its Origin id.
+		self.origin = moq_net::origin::Info::new(id).with_pool(pool).produce();
 		self
 	}
 
