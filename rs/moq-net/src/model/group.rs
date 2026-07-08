@@ -45,7 +45,7 @@ impl Info {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
-		Producer::new(self, track::Info::default(), &cache::Pool::default())
+		Producer::new(self, track::Info::default())
 	}
 }
 
@@ -233,17 +233,18 @@ impl std::ops::Deref for Producer {
 impl Producer {
 	/// Create a group producer bound to its parent track's [`track::Info`].
 	///
-	/// Crate-private: groups are only constructed via [`track::Producer`],
-	/// which threads its [`track::Info`] down so properties like the timescale are
-	/// inherited rather than passed in. Every frame added to this group is
-	/// normalized to the track's timescale by [`Self::create_frame`].
+	/// Crate-private: groups are only constructed via [`track::Producer`], which
+	/// threads its [`track::Info`] down so properties like the timescale are inherited
+	/// rather than passed in. Every frame added to this group is normalized to the
+	/// track's timescale by [`Self::create_frame`].
 	///
-	/// Registers the group in `pool` so its cached bytes count against the shared
-	/// budget and it can be evicted under memory pressure.
-	pub(crate) fn new(info: Info, track: track::Info, pool: &cache::Pool) -> Self {
+	/// Registers the group in the shared cache pool reached through the track's
+	/// broadcast (`track.broadcast.origin.pool`), so its cached bytes count against
+	/// the budget and it can be evicted under memory pressure.
+	pub(crate) fn new(info: Info, track: track::Info) -> Self {
 		let state = kio::Producer::<GroupState>::default();
 		let weak = state.weak();
-		let charge = pool.register(Box::new(move || evict(&weak)));
+		let charge = track.broadcast.origin.pool.register(Box::new(move || evict(&weak)));
 		state.write().ok().expect("a new group is open").charge = charge;
 		Self { info, state, track }
 	}
@@ -285,12 +286,10 @@ impl Producer {
 		state.frames.push_back(Frame { timestamp, payload });
 		state.evict();
 
-		// The pool evicts other groups' state, so trigger it only after releasing our lock.
-		let pool = state.charge.pool();
+		// The pool evicts other groups' state, so trigger it only after releasing our
+		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
-		if let Some(pool) = pool {
-			pool.evict();
-		}
+		self.track.broadcast.origin.pool.evict();
 		Ok(())
 	}
 
@@ -332,12 +331,10 @@ impl Producer {
 		});
 		state.evict();
 
-		// The pool evicts other groups' state, so trigger it only after releasing our lock.
-		let pool = state.charge.pool();
+		// The pool evicts other groups' state, so trigger it only after releasing our
+		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
-		if let Some(pool) = pool {
-			pool.evict();
-		}
+		self.track.broadcast.origin.pool.evict();
 
 		let info = frame::Info {
 			size: frame.size,
@@ -420,7 +417,7 @@ impl Producer {
 		Consumer {
 			info: self.info,
 			state: self.state.consume(),
-			track: self.track,
+			track: self.track.clone(),
 			index: 0,
 			prefetch: Prefetch::default(),
 		}
@@ -446,7 +443,7 @@ impl Clone for Producer {
 		Self {
 			info: self.info,
 			state: self.state.clone(),
-			track: self.track,
+			track: self.track.clone(),
 		}
 	}
 }
@@ -559,7 +556,7 @@ impl Clone for Consumer {
 		Self {
 			state: self.state.clone(),
 			info: self.info,
-			track: self.track,
+			track: self.track.clone(),
 			index: self.index,
 			prefetch: Prefetch::default(),
 		}
@@ -1019,7 +1016,6 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
-			&cache::Pool::default(),
 		);
 		let frame = frame::Info {
 			size: 3,
@@ -1038,7 +1034,6 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
-			&cache::Pool::default(),
 		);
 		let writer = producer.create_frame_now(3).unwrap();
 		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);

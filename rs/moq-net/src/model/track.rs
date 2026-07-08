@@ -41,7 +41,9 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// while the track is alive. A subscriber learns them via
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Not `Copy`: it carries a handle to its parent broadcast (see [`Self::broadcast`]).
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
@@ -63,6 +65,22 @@ pub struct Info {
 	/// The publisher's group ordering preference (newest-first when `false`), used
 	/// only to break ties. Reported in TRACK_INFO (Lite05+).
 	pub ordered: bool,
+
+	// The broadcast this track belongs to, bound when the track is created under a
+	// broadcast (create_track / reserve_track / Request::accept). Not public and not
+	// on the wire: it's the parent link a group walks to reach the shared cache pool
+	// (`track.broadcast.origin.pool`). Defaults to a standalone broadcast (unbounded
+	// pool) until bound.
+	pub(crate) broadcast: Arc<broadcast::Info>,
+}
+
+/// The shared parent for a not-yet-bound [`Info`]: a standalone broadcast with an
+/// unbounded pool. Cheap to hand out (one `Arc` clone) and replaced the moment the
+/// track is bound to a real broadcast.
+fn default_broadcast() -> Arc<broadcast::Info> {
+	static DEFAULT: std::sync::LazyLock<Arc<broadcast::Info>> =
+		std::sync::LazyLock::new(|| Arc::new(broadcast::Info::default()));
+	DEFAULT.clone()
 }
 
 impl Default for Info {
@@ -72,6 +90,7 @@ impl Default for Info {
 			cache: DEFAULT_CACHE,
 			priority: 0,
 			ordered: true,
+			broadcast: default_broadcast(),
 		}
 	}
 }
@@ -114,14 +133,14 @@ impl Info {
 
 #[derive(Default)]
 struct TrackState {
-	// The info for the track; always Some for Subscriber/Producer.
-	// A small `Copy` value, inherited by each group it creates.
+	// The info for the track; always Some for Subscriber/Producer. Inherited (cloned)
+	// by each group it creates, which reaches the cache pool through its `broadcast`.
 	info: Option<Info>,
 
-	// The shared cache pool every group registers with, inherited from the parent
-	// broadcast. Unbounded by default; a relay installs a bounded pool so old
-	// groups are evicted under memory pressure.
-	pool: cache::Pool,
+	// The broadcast this track belongs to, the source for stamping `Info::broadcast`
+	// on groups (and on a not-yet-accepted track's default info). Its
+	// `origin.pool` is the shared cache pool every group registers with.
+	broadcast: Arc<broadcast::Info>,
 
 	// The pool registration of the current max_sequence group, pinned so the
 	// latest group is immune to pool eviction. `None` when the pool is detached
@@ -178,7 +197,7 @@ struct TrackState {
 impl TrackState {
 	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = &self.info {
-			Poll::Ready(Ok(*info))
+			Poll::Ready(Ok(info.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -515,7 +534,7 @@ impl TrackState {
 		if !existing.is_aborted() {
 			return Some(Err(Error::Duplicate));
 		}
-		let group = group::Producer::new(group::Info { sequence }, track, &self.pool);
+		let group = group::Producer::new(group::Info { sequence }, track);
 		*slot = Some((group.clone(), now));
 		// The replaced group can hold max_sequence when the publisher aborted the
 		// latest group itself; re-pin so the live edge stays eviction-immune.
@@ -538,9 +557,18 @@ impl TrackState {
 			return Err(Error::Closed);
 		}
 
-		// Adopt the supplied info only if the track hasn't been accepted yet.
-		let info = *self.info.get_or_insert_with(|| info.unwrap_or_default());
+		// Adopt the supplied info only if the track hasn't been accepted yet, binding
+		// it to this track's broadcast so its groups reach the shared pool.
 		let now = web_async::time::Instant::now();
+		let broadcast = self.broadcast.clone();
+		let info = self
+			.info
+			.get_or_insert_with(|| {
+				let mut info = info.unwrap_or_default();
+				info.broadcast = broadcast;
+				info
+			})
+			.clone();
 
 		if !self.duplicates.insert(sequence) {
 			// A pool-evicted group can be re-fetched into its old slot.
@@ -549,11 +577,12 @@ impl TrackState {
 				.unwrap_or(Err(Error::Duplicate));
 		}
 
-		let group = group::Producer::new(group::Info { sequence }, info, &self.pool);
+		let cache = info.cache;
+		let group = group::Producer::new(group::Info { sequence }, info);
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
 		self.groups.push_back(Some((group.clone(), now)));
 		self.pin_latest(&group);
-		self.evict_expired(now, info.cache);
+		self.evict_expired(now, cache);
 		Ok(group)
 	}
 
@@ -582,24 +611,24 @@ impl Producer {
 	///
 	/// Crate-private: tracks are born from their broadcast via
 	/// [`broadcast::Producer::create_track`] (or served on demand through a
-	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` down so the
-	/// broadcast owns the namespace, and the track inherits its cache pool, from a
-	/// single link.
+	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` down. The
+	/// track binds it onto its [`Info`] so every group reaches the shared cache pool
+	/// by walking `track.broadcast.origin.pool`.
 	pub(crate) fn new(
 		broadcast: Arc<broadcast::Info>,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
-		let info = info.into().unwrap_or_default();
-		let pool = broadcast.origin.pool.clone();
+		let mut info = info.into().unwrap_or_default();
+		info.broadcast = broadcast.clone();
 		Self {
 			name: name.into(),
-			broadcast,
 			state: kio::Producer::new(TrackState {
 				info: Some(info),
-				pool,
+				broadcast: broadcast.clone(),
 				..Default::default()
 			}),
+			broadcast,
 			prev_subscription: None,
 		}
 	}
@@ -622,7 +651,7 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		let info = state.info.as_ref().unwrap();
-		let track = *info;
+		let track = info.clone();
 		let cache = info.cache;
 		let now = web_async::time::Instant::now();
 
@@ -633,7 +662,7 @@ impl Producer {
 				.unwrap_or(Err(Error::Duplicate));
 		}
 
-		let group = group::Producer::new(group, track, &state.pool);
+		let group = group::Producer::new(group, track);
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.pin_latest(&group);
@@ -656,10 +685,10 @@ impl Producer {
 		}
 
 		let info = state.info.as_ref().unwrap();
-		let track = *info;
+		let track = info.clone();
 		let cache = info.cache;
 
-		let group = group::Producer::new(group::Info { sequence }, track, &state.pool);
+		let group = group::Producer::new(group::Info { sequence }, track);
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
@@ -881,7 +910,7 @@ impl Producer {
 		let mut preferences = subscription.into().unwrap_or_default();
 
 		let mut state = self.modify().expect("track producer state is never closed");
-		let info = *state.info.as_ref().expect("producer always has info");
+		let info = state.info.as_ref().expect("producer always has info").clone();
 		preferences.stale = info.clamp_stale(preferences.stale);
 		let subscription = kio::Producer::new(preferences);
 		state.subscriptions.push(subscription.consume());
@@ -1704,7 +1733,7 @@ impl Request {
 	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::new(TrackState {
-			pool: broadcast.origin.pool.clone(),
+			broadcast: broadcast.clone(),
 			..Default::default()
 		});
 		let dynamic = Dynamic::new(name.clone(), state.clone());
@@ -1747,7 +1776,9 @@ impl Request {
 	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
 	/// mismatch, or the broadcast's abort error if it closed while pending.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
-		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
+		let mut info = info.into().unwrap_or_default();
+		info.broadcast = self.broadcast.clone();
+		self.state.write().ok().unwrap().info = Some(info);
 		Producer {
 			name: self.name,
 			broadcast: self.broadcast,

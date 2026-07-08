@@ -1013,11 +1013,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		// Publisher Max Latency rides on the wire, so the local retention window
 		// matches what the upstream advertises (relays re-serve with the same bound).
+		// `broadcast` is left at its default here; the caller binds it via
+		// `Request::accept`, which stamps the track's real broadcast.
 		let model = track::Info {
 			timescale: info.timescale,
 			cache: info.cache,
 			priority: info.priority,
 			ordered: info.ordered,
+			..Default::default()
 		};
 		Ok(model)
 	}

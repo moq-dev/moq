@@ -325,12 +325,6 @@ impl Charge {
 	pub(crate) fn entry(&self) -> Option<Arc<Entry>> {
 		self.inner.as_ref().map(|(_, entry)| entry.clone())
 	}
-
-	/// A pool handle for triggering eviction outside the caller's locks.
-	/// `None` when detached.
-	pub(crate) fn pool(&self) -> Option<Pool> {
-		self.inner.as_ref().map(|(inner, _)| Pool { inner: inner.clone() })
-	}
 }
 
 impl Drop for Charge {
@@ -382,7 +376,6 @@ mod test {
 		charge.clear();
 		charge.touch();
 		assert!(charge.entry().is_none());
-		assert!(charge.pool().is_none());
 	}
 
 	#[tokio::test]
