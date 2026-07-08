@@ -244,7 +244,9 @@ class BroadcastProducer:
         video: VideoHint | None = None,
     ) -> MediaProducer:
         """Publish media onto a requested track. See :meth:`publish_media` for the arguments."""
-        return MediaProducer(self._inner.publish_media_on_track(request._inner, _media_init(format, init, audio, video)))
+        return MediaProducer(
+            self._inner.publish_media_on_track(request._inner, _media_init(format, init, audio, video))
+        )
 
     def publish_media_stream(
         self,
