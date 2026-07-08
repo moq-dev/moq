@@ -108,6 +108,15 @@ impl Producer {
 		}
 		Ok(())
 	}
+
+	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
+	/// see the real cause rather than [`moq_net::Error::Dropped`].
+	pub fn abort(&mut self, err: moq_net::Error) {
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.abort(err),
+			Codecs::H265 { import, .. } => import.abort(err),
+		}
+	}
 }
 
 /// Source-agnostic encode knobs for [`publish_capture`], where the geometry
@@ -153,11 +162,18 @@ pub async fn publish_capture(
 
 	let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
 
-	// Best-effort clean close. This runs only when the loop ends on its own (the
-	// track is usually already going away by then); a Ctrl+C cancels the future
-	// before this point, since async `Drop` can't finalize the track.
-	if let Err(err) = producer.finish() {
-		tracing::debug!(error = %err, "video track finish after capture ended");
+	// This runs only when the loop ends on its own (the track is usually already
+	// going away by then); a Ctrl+C cancels the future before this point, since
+	// async `Drop` can't finalize the track.
+	match &result {
+		// Clean end (the track was dropped): best-effort finish.
+		Ok(()) => {
+			if let Err(err) = producer.finish() {
+				tracing::debug!(error = %err, "video track finish after capture ended");
+			}
+		}
+		// The capture loop failed: abort with the real cause so subscribers see it.
+		Err(err) => producer.abort(moq_net::Error::Transport(err.to_string())),
 	}
 	result
 }

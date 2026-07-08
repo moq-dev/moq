@@ -181,6 +181,12 @@ impl<E: CatalogExt> AudioProducer<E> {
 		self.track.finish()?;
 		Ok(())
 	}
+
+	/// Abort the track with `err` instead of finishing it, so subscribers see the
+	/// real cause rather than [`moq_net::Error::Dropped`]. Pending samples are dropped.
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.track.abort(err);
+	}
 }
 
 impl<E: CatalogExt> Drop for AudioProducer<E> {

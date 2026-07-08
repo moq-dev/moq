@@ -34,6 +34,7 @@ web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 
 [dev-dependencies]
+criterion = "0.8"
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on
 # wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
@@ -45,3 +46,7 @@ tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
 wasm-bindgen-test = "=0.3.71"
+
+[[bench]]
+name = "group"
+harness = false

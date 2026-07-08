@@ -58,6 +58,12 @@ impl Publisher {
 	pub fn finish(&mut self) -> Result<()> {
 		Ok(self.importer.finish()?)
 	}
+
+	/// Abort the published tracks with `err` so subscribers see the real cause
+	/// (the SRT caller dropped, a demux error) rather than a generic `Error::Dropped`.
+	pub fn abort(&mut self, err: moq_net::Error) {
+		self.importer.abort(err);
+	}
 }
 
 /// Muxes a single MoQ broadcast back into an MPEG-TS byte stream for egress.

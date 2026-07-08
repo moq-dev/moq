@@ -147,7 +147,7 @@ export function decode(raw: Uint8Array): Catalog {
 }
 
 /** Read and decode the next catalog frame from a track, or undefined if the track ended. */
-export async function fetch(track: Moq.track.Subscriber): Promise<Catalog | undefined> {
+export async function fetch(track: Moq.Track.Subscriber): Promise<Catalog | undefined> {
 	const frame = await track.readFrame();
 	if (!frame) return undefined;
 	return decode(frame);

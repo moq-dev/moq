@@ -694,7 +694,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_frame(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		frame: &mut frame::Producer,
+		frame: &mut frame::Producer<'_>,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {

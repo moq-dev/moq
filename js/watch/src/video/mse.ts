@@ -104,7 +104,7 @@ export class Mse implements Backend {
 
 	#runCmafMedia(
 		effect: Effect,
-		active: Moq.broadcast.Consumer,
+		active: Moq.Broadcast.Consumer,
 		track: string,
 		config: Catalog.VideoConfig,
 		sourceBuffer: SourceBuffer,
@@ -133,7 +133,7 @@ export class Mse implements Backend {
 				} catch (err) {
 					// Falling behind a group's eviction window drops frames; resync from
 					// the next group (a keyframe segment) rather than stopping playback.
-					if (err instanceof Moq.group.CacheFull) continue;
+					if (err instanceof Moq.Group.CacheFull) continue;
 					throw err;
 				}
 				if (!frame) return;
@@ -154,7 +154,7 @@ export class Mse implements Backend {
 
 	#runLegacyMedia(
 		effect: Effect,
-		active: Moq.broadcast.Consumer,
+		active: Moq.Broadcast.Consumer,
 		track: string,
 		config: Catalog.VideoConfig,
 		sourceBuffer: SourceBuffer,

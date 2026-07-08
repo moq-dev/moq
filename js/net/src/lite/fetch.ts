@@ -26,14 +26,14 @@ export class Fetch {
 		this.group = group;
 	}
 
-	async #encode(w: Writer, _version: Version) {
+	async #encode(w: Writer) {
 		await w.string(this.broadcast);
 		await w.string(this.track);
 		await w.u8(this.priority);
 		await w.u53(this.group);
 	}
 
-	static async #decode(r: Reader, _version: Version): Promise<Fetch> {
+	static async #decode(r: Reader): Promise<Fetch> {
 		const broadcast = Path.from(await r.string());
 		const track = await r.string();
 		const priority = await r.u8();
@@ -44,11 +44,11 @@ export class Fetch {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardFetch(version);
-		return Message.encode(w, (w) => this.#encode(w, version));
+		return Message.encode(w, (w) => this.#encode(w));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<Fetch> {
 		guardFetch(version);
-		return Message.decode(r, (r) => Fetch.#decode(r, version));
+		return Message.decode(r, (r) => Fetch.#decode(r));
 	}
 }

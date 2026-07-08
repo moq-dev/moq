@@ -855,7 +855,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					let mut frame = match timestamp {
+					let frame = match timestamp {
 						Some(ts) => producer.create_frame(frame::Info { size: 0, timestamp: ts })?,
 						None => producer.create_frame_now(0)?,
 					};
@@ -875,7 +875,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				};
 				track_stats.frame();
 
-				if let Err(err) = self.run_frame(stream, frame.clone(), &track_stats).await {
+				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
@@ -890,7 +890,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_frame(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		mut frame: frame::Producer,
+		frame: &mut frame::Producer<'_>,
 		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {

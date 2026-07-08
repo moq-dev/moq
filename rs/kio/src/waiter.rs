@@ -1,4 +1,5 @@
 use std::{
+	cell::OnceCell,
 	fmt,
 	future::Future,
 	marker::PhantomData,
@@ -14,28 +15,33 @@ const INLINE_WAITERS: usize = 32;
 
 /// Handle passed to poll functions for registering with [`WaiterList`]s.
 ///
-/// Each waiter owns an `Arc<Waker>`; list entries hold a `Weak<Waker>` that
-/// becomes dead as soon as the owning [`Waiter`] is dropped. The list
-/// reclaims those dead slots in place on the next register call without
-/// needing to walk the whole list or do any explicit removal.
+/// Holds the task's [`Waker`] by value and, lazily, a shared `Arc<Waker>` that list
+/// entries reference weakly. The `Arc` is allocated on the first [`Self::register`],
+/// so a poll that resolves without ever parking never touches the heap. Its `Weak`s
+/// go dead the moment the owning [`Waiter`] drops, which is how a [`WaiterList`]
+/// reclaims slots with no explicit deregister.
 pub struct Waiter {
-	waker: Arc<Waker>,
+	// The task waker. Cloning it is cheap (an atomic bump, no allocation).
+	waker: Waker,
+
+	// The shared handle downgraded into every list this waiter registers with. Created on the
+	// first `register` (a poll that never parks never allocates it), then reused so multiple
+	// lists in one poll share a single allocation whose `Weak`s die together when the waiter drops.
+	shared: OnceCell<Arc<Waker>>,
 }
 
 impl Waiter {
 	/// Create a new waiter from an async [`Waker`].
 	pub fn new(waker: Waker) -> Self {
-		Self { waker: Arc::new(waker) }
+		Self {
+			waker,
+			shared: OnceCell::new(),
+		}
 	}
 
 	/// Create a no-op waiter that discards registrations.
-	///
-	/// Registrations are stored as `Weak<Waker>` refs, so a noop waiter's
-	/// weak ref will just be cleaned up on the next register call.
 	pub fn noop() -> Self {
-		Self {
-			waker: Arc::new(std::task::Waker::noop().clone()),
-		}
+		Self::new(Waker::noop().clone())
 	}
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
@@ -47,6 +53,12 @@ impl Waiter {
 	/// (e.g. `futures::task::AtomicWaker`) that needs a `Waker` directly.
 	pub fn waker(&self) -> &Waker {
 		&self.waker
+	}
+
+	/// The shared waker handle downgraded into lists, allocated on first use and cached so
+	/// repeat registrations (across polls, or across lists in one poll) share one allocation.
+	fn shared(&self) -> &Arc<Waker> {
+		self.shared.get_or_init(|| Arc::new(self.waker.clone()))
 	}
 }
 
@@ -77,7 +89,7 @@ impl WaiterList {
 	/// cursor advances on each append so the probe window covers the
 	/// whole list over time.
 	pub fn register(&mut self, waiter: &Waiter) {
-		let new_weak = Arc::downgrade(&waiter.waker);
+		let new_weak = Arc::downgrade(waiter.shared());
 
 		for _ in 0..self.entries.len().min(2) {
 			if self.entries[self.cursor].strong_count() == 0 {

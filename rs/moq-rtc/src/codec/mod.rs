@@ -41,6 +41,10 @@ pub struct Frame {
 /// moq-mux importer.
 pub trait Bridge: Send {
 	fn push(&mut self, frame: Frame) -> Result<()>;
+
+	/// Abort the published track with `err` so subscribers see the real cause
+	/// (the peer disconnected, an ICE failure) rather than a bare `Error::Dropped`.
+	fn abort(&mut self, err: moq_net::Error);
 }
 
 /// One RTP-ready codec frame produced by an egress [`Track`].

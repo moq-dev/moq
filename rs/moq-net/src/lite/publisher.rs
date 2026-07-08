@@ -675,7 +675,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = broadcast.await?;
 		let track = broadcast.track(&fetch.track)?;
 
-		let group = track
+		let mut group = track
 			.fetch_group(
 				fetch.group,
 				group::Fetch {
@@ -695,14 +695,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// the timescale from TRACK_INFO and the group sequence from its request.
 		track_stats.group();
 
-		// Stream the whole group in order. The delta-timestamp baseline starts at 0, so
-		// the first frame's delta is its absolute timestamp (the subscriber decodes
+		// Stream every frame in order. The delta-timestamp baseline resets to 0, so the
+		// first served frame's delta is its absolute timestamp (the subscriber decodes
 		// against the same baseline).
-		let mut index = 0usize;
 		let mut prev_ts: u64 = 0;
-		while let Some(mut frame) = group.get_frame(index).await? {
+		while let Some(mut frame) = group.next_frame().await? {
 			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts, &track_stats).await?;
-			index += 1;
 		}
 
 		stream.writer.finish()?;
@@ -809,6 +807,10 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, or the track finishing.
+// A `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the
+// others. This is a transient, one-at-a-time return value, so the padding is never held in
+// bulk; boxing would only add a per-group allocation.
+#[allow(clippy::large_enum_variant)]
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::Datagram),

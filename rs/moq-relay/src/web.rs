@@ -444,9 +444,6 @@ struct FetchParams {
 
 	#[serde(default)]
 	group: FetchGroup,
-
-	#[serde(default)]
-	frame: FetchFrame,
 }
 
 #[derive(Debug, Default)]
@@ -468,26 +465,6 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 			Ok(FetchGroup::Latest)
 		} else {
 			Err(serde::de::Error::custom(format!("invalid group value: {s}")))
-		}
-	}
-}
-
-#[derive(Debug, Default)]
-enum FetchFrame {
-	Num(usize),
-	#[default]
-	Chunked,
-}
-
-impl<'de> serde::Deserialize<'de> for FetchFrame {
-	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		let s = String::deserialize(deserializer)?;
-		if let Ok(num) = s.parse::<usize>() {
-			Ok(FetchFrame::Num(num))
-		} else if s == "chunked" {
-			Ok(FetchFrame::Chunked)
-		} else {
-			Err(serde::de::Error::custom(format!("invalid frame value: {s}")))
 		}
 	}
 }
@@ -600,22 +577,7 @@ async fn serve_fetch(
 
 		tracing::info!(%track, group = %group.sequence, "serving group");
 
-		match params.frame {
-			FetchFrame::Num(index) => match group.get_frame(index).await {
-				Ok(Some(frame)) => Ok(ServeGroup {
-					group: None,
-					frame: Some(frame),
-					deadline,
-				}),
-				Ok(None) => Err(StatusCode::NOT_FOUND),
-				Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-			},
-			FetchFrame::Chunked => Ok(ServeGroup {
-				group: Some(group),
-				frame: None,
-				deadline,
-			}),
-		}
+		Ok(ServeGroup { group, deadline })
 	})
 	.await;
 
@@ -627,33 +589,16 @@ async fn serve_fetch(
 }
 
 struct ServeGroup {
-	group: Option<moq_net::group::Consumer>,
-	frame: Option<moq_net::frame::Consumer>,
+	group: moq_net::group::Consumer,
 	deadline: tokio::time::Instant,
 }
 
 impl ServeGroup {
 	async fn next(&mut self) -> moq_net::Result<Option<Bytes>> {
-		while self.group.is_some() || self.frame.is_some() {
-			if let Some(frame) = self.frame.as_mut() {
-				let data = tokio::time::timeout_at(self.deadline, frame.read_all())
-					.await
-					.map_err(|_| moq_net::Error::Timeout)?;
-				self.frame.take();
-				return Ok(Some(data?));
-			}
-
-			if let Some(group) = self.group.as_mut() {
-				self.frame = tokio::time::timeout_at(self.deadline, group.next_frame())
-					.await
-					.map_err(|_| moq_net::Error::Timeout)??;
-				if self.frame.is_none() {
-					self.group.take();
-				}
-			}
+		match tokio::time::timeout_at(self.deadline, self.group.read_frame()).await {
+			Ok(res) => res,
+			Err(_) => Err(moq_net::Error::Timeout),
 		}
-
-		Ok(None)
 	}
 }
 

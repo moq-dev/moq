@@ -55,7 +55,7 @@ type BroadcastInput = {
 
 type BroadcastOutput = {
 	status: Signal<Status>;
-	active: Signal<Moq.broadcast.Consumer | undefined>;
+	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode.
 	catalog: Signal<Catalog.Root | undefined>;
@@ -67,7 +67,7 @@ export class Broadcast {
 
 	readonly #output: BroadcastOutput = {
 		status: new Signal<Status>("offline"),
-		active: new Signal<Moq.broadcast.Consumer | undefined>(undefined),
+		active: new Signal<Moq.Broadcast.Consumer | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
 	readonly output = readonlys(this.#output);
@@ -214,7 +214,7 @@ export class Broadcast {
 	}
 
 	/**
-	 * Resolve the `Moq.broadcast.Consumer` that publishes a given track.
+	 * Resolve the `Moq.Broadcast.Consumer` that publishes a given track.
 	 *
 	 * If `rel` is set (a rendition's catalog `broadcast` field), treat it as a path
 	 * relative to this broadcast's name and consume the resolved broadcast on the same
@@ -224,7 +224,7 @@ export class Broadcast {
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
 	 */
-	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.broadcast.Consumer | undefined {
+	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast.Consumer | undefined {
 		if (!rel) return effect.get(this.output.active);
 
 		const base = effect.get(this.input.name);
