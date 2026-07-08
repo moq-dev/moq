@@ -7,6 +7,10 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 
 import { toHang } from "./msf";
 
+// Connections already warned about missing broadcast-discovery support, so the
+// per-rendition announcement check logs at most once per connection.
+const warnedNoDiscovery = new WeakSet<Moq.Connection.Established>();
+
 // Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
 // DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
 // catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
@@ -103,8 +107,8 @@ export class Broadcast {
 
 	// Whether `name` is currently announced on the connection (or skipping the check
 	// because reload is off, no announced set is wired in, or the relay doesn't support
-	// announcements). Used by both `#runAnnouncedNow` (for `input.name`) and `#override`
-	// (for cross-broadcast refs).
+	// announcements). Used by both `#runAnnouncedNow` (for `input.name`) and
+	// `relativeBroadcast` (for cross-broadcast refs, which reruns per rendition).
 	#isPathAnnounced(effect: Effect, name: Moq.Path.Valid): boolean {
 		const reload = effect.get(this.input.reload);
 		if (!reload) return true;
@@ -113,10 +117,15 @@ export class Broadcast {
 		if (!this.#announced) return true;
 
 		// Cloudflare's relay does not yet support announcement subscriptions,
-		// so default to subscribing immediately instead of waiting forever.
+		// so default to subscribing immediately instead of waiting forever. This runs in a
+		// per-rendition reactive path, so warn at most once per connection instead of on
+		// every re-evaluation.
 		const conn = effect.get(this.input.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
-			console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
+			if (!warnedNoDiscovery.has(conn)) {
+				warnedNoDiscovery.add(conn);
+				console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
+			}
 			return true;
 		}
 
