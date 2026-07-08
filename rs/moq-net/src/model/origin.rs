@@ -97,11 +97,12 @@ pub struct Info {
 	/// detection and shortest-path routing.
 	pub id: Origin,
 
-	// The cache pool broadcasts under this origin register their groups with. Not
-	// public: a relay sets it via [`Self::with_pool`] and it flows down the ownership
-	// chain (origin -> broadcast -> track -> group), but consumers reading an
-	// `origin::Info` off a broadcast see only the identity. Unbounded by default.
-	pub(crate) pool: cache::Pool,
+	/// The cache pool broadcasts under this origin register their groups with. It
+	/// flows down the ownership chain (origin -> broadcast -> track -> group), so a
+	/// group reaches it via `track.broadcast.origin.pool`. Unbounded by default; a
+	/// relay sets a bounded one (via [`Self::with_pool`]) so cached groups across the
+	/// whole process share one memory budget.
+	pub pool: cache::Pool,
 }
 
 impl Default for Info {
