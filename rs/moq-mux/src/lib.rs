@@ -24,9 +24,11 @@ pub mod container;
 mod error;
 pub mod import;
 pub mod select;
+mod source;
 
 pub use clock::Clock;
 pub use error::*;
+pub use source::Source;
 
 /// Re-export of the [`mp4_atom`] crate, whose types appear in the public CMAF
 /// surface ([`container::fmp4`]). A major version bump of `mp4_atom` is a

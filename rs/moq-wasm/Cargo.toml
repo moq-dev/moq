@@ -29,7 +29,7 @@ bytes = "1"
 console_error_panic_hook = "0.1"
 getrandom = { version = "0.4", features = ["wasm_js"] } # wasm_js backend for rand-via-moq-net; cfg flag in .cargo/config.toml
 js-sys = "0.3"
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 thiserror = "2"
 tracing-wasm = "0.2"
 url = "2"

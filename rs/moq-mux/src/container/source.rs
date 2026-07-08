@@ -48,6 +48,9 @@ impl VideoTransform {
 
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
+	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
+	/// reference) to resolve; the track (by name) is subscribed once it does.
+	Requesting(kio::Pending<moq_net::origin::Requested>, String),
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(kio::Pending<moq_net::track::Subscribe>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
@@ -73,7 +76,7 @@ pub(crate) struct ExportSource {
 impl ExportSource {
 	/// Subscribe to a video rendition and build an `ExportSource`.
 	pub fn for_video(
-		broadcast: &moq_net::broadcast::Consumer,
+		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
 		latency: Duration,
@@ -83,7 +86,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
+			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
 			latency,
 			transform,
@@ -96,7 +99,7 @@ impl ExportSource {
 	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
 	pub fn for_video_raw(
-		broadcast: &moq_net::broadcast::Consumer,
+		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
 		latency: Duration,
@@ -105,7 +108,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
+			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -116,7 +119,7 @@ impl ExportSource {
 	/// Subscribe to an audio rendition. Audio has no codec-shape transform;
 	/// `description` is taken straight from the catalog.
 	pub fn for_audio(
-		broadcast: &moq_net::broadcast::Consumer,
+		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
 		latency: Duration,
@@ -125,7 +128,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
+			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -136,13 +139,9 @@ impl ExportSource {
 	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
 	/// No codec-shape transform and no description: the frames are Legacy-framed
 	/// verbatim bytes the muxer writes back out as PES or private sections.
-	pub fn for_stream(
-		broadcast: &moq_net::broadcast::Consumer,
-		name: &str,
-		latency: Duration,
-	) -> Result<Self, crate::Error> {
+	pub fn for_stream(source: &crate::Source, name: &str, latency: Duration) -> Result<Self, crate::Error> {
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)),
+			state: SourceState::Requesting(source.request(None), name.to_string()),
 			media: Some(HangContainer::Legacy),
 			latency,
 			transform: None,
@@ -167,6 +166,21 @@ impl ExportSource {
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		// Resolve a cross-broadcast reference into a broadcast before subscribing.
+		if matches!(self.state, SourceState::Requesting(..)) {
+			let (broadcast, name) = {
+				let SourceState::Requesting(pending, name) = &self.state else {
+					unreachable!("just matched Requesting");
+				};
+				match pending.poll_ok(waiter) {
+					Poll::Ready(Ok(broadcast)) => (broadcast, name.clone()),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+					Poll::Pending => return Poll::Pending,
+				}
+			};
+			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(None));
+		}
+
 		// Resolve the subscription before reading any frames.
 		if matches!(self.state, SourceState::Subscribing(_)) {
 			// Scope the `pending` borrow so it ends before we touch `self.media`/`self.state`.

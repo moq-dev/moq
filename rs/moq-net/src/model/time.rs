@@ -18,7 +18,6 @@ pub struct TimeOverflow;
 /// for runtime values, use [`Self::new`] which returns [`TimeOverflow`] for `0` or
 /// for values past the QUIC varint range.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timescale(NonZero<u64>);
 
 impl Timescale {
@@ -126,7 +125,6 @@ impl std::fmt::Display for Timescale {
 /// etc.) are infallible. Use [`Option<Timestamp>`] at call sites that need a "missing" sentinel
 /// instead of relying on a magic value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timestamp {
 	value: VarInt,
 	scale: Timescale,

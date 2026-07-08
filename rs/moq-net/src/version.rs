@@ -177,14 +177,12 @@ impl FromStr for Version {
 	}
 }
 
-#[cfg(feature = "serde")]
 impl serde::Serialize for Version {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		serializer.serialize_str(&self.to_string())
 	}
 }
 
-#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Version {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		let s = String::deserialize(deserializer)?;

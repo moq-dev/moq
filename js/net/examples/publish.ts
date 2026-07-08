@@ -5,7 +5,7 @@ async function main() {
 	const connection = await Moq.Connection.connect(url);
 
 	// Create a broadcast (a collection of tracks)
-	const broadcast = new Moq.broadcast.Producer();
+	const broadcast = new Moq.Broadcast.Producer();
 
 	// Insert the "chat" track up front. A subscriber is served directly from this
 	// track, no requested() round-trip needed. Mirrors the Rust createTrack/insertTrack.
@@ -26,7 +26,7 @@ async function main() {
 	}
 }
 
-async function publishTrack(track: Moq.track.Producer) {
+async function publishTrack(track: Moq.Track.Producer) {
 	console.log("Publishing to track:", track.name);
 
 	// Create a group (e.g., keyframe boundary)

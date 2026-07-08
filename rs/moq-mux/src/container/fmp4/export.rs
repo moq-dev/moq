@@ -15,7 +15,7 @@ use moq_net::Timestamp;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
-/// Built from a [`moq_net::broadcast::Consumer`], `Export` subscribes to the hang catalog,
+/// Built from a [`Source`](crate::Source), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init
 /// segment + moof+mdat fragments in presentation-timestamp order across tracks. This
@@ -35,7 +35,7 @@ use moq_net::Timestamp;
 /// onto segments and parts; narrow the catalog to a single rendition with
 /// [`Stream::select`](crate::catalog::Stream::select) so the fragments belong to one track.
 pub struct Export<S: Stream> {
-	broadcast: moq_net::broadcast::Consumer,
+	source: crate::Source,
 	catalog: Option<S>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
@@ -100,15 +100,15 @@ struct Fmp4Track {
 }
 
 impl<S: Stream> Export<S> {
-	/// Subscribe to `broadcast` and produce fMP4 byte chunks, driving track
+	/// Subscribe to `source` and produce fMP4 byte chunks, driving track
 	/// (un)subscription from `catalog`.
 	///
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(broadcast: moq_net::broadcast::Consumer, catalog: S) -> Self {
+	pub fn new(source: crate::Source, catalog: S) -> Self {
 		Self {
-			broadcast,
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,
@@ -314,7 +314,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			let timescale = catalog_timescale_video(config);
 			// A zero / NaN / infinite framerate would make `1.0 / fps` non-finite and panic
 			// `Duration::from_secs_f64`; fall back to the default in that case.
@@ -344,7 +344,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			let timescale = catalog_timescale_audio(config);
 			self.tracks.insert(
 				name.clone(),

@@ -1,4 +1,5 @@
 import { Signal } from "@moq/signals";
+import type { Consumer as GroupConsumer } from "./group.ts";
 import * as track from "./track.ts";
 
 /** Reactive backing state shared by broadcast producers and consumers. */
@@ -6,7 +7,6 @@ class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	tracks = new Map<string, track.Producer>();
-	infoResolver?: (name: string) => Promise<track.Info>;
 }
 
 function closedPromise(state: BroadcastState): Promise<Error | undefined> {
@@ -52,10 +52,6 @@ function subscribe(state: BroadcastState, name: string, priority: number): track
 }
 
 async function resolveTrackInfo(state: BroadcastState, name: string): Promise<track.Info> {
-	if (state.infoResolver) {
-		return state.infoResolver(name);
-	}
-
 	const existing = state.tracks.get(name);
 	if (existing && !existing.closedSignal.peek()) {
 		return existing.info();
@@ -78,12 +74,43 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 	}
 }
 
+// Serve a group from the local retained window by subscribing and scanning to the
+// requested sequence. The default for a produced broadcast; the consuming wire layer
+// overrides it to fetch over the network (or to reject when the transport has no FETCH).
+async function fetchGroup(
+	state: BroadcastState,
+	name: string,
+	sequence: number,
+	options: track.FetchGroupOptions = {},
+): Promise<GroupConsumer> {
+	const subscriber = subscribe(state, name, options.priority ?? 0);
+	try {
+		for (;;) {
+			const group = await subscriber.recvGroup();
+			if (!group) throw new Error(`group not found: ${sequence}`);
+			if (group.sequence === sequence) {
+				// Close the subscription when the returned group finishes, not now: an
+				// in-progress group must keep receiving frames for its lifetime (mirrors
+				// Rust poll_fetch). Also fires if the caller closes the group early.
+				void group.closed.then(() => subscriber.close());
+				return group;
+			}
+
+			group.close();
+			if (group.sequence > sequence) throw new Error(`group not found: ${sequence}`);
+		}
+	} catch (err) {
+		subscriber.close();
+		throw err;
+	}
+}
+
 /**
  * The write side of a broadcast.
  *
  * @public
  */
-export class Producer {
+export class Producer implements track.Broadcast {
 	#state = new BroadcastState();
 
 	/** Resolves with the abort error (or undefined) once closed. */
@@ -154,13 +181,14 @@ export class Producer {
 		return resolveTrackInfo(this.#state, name);
 	}
 
+	/** Fetch a single group from the local retained window. Used by track handles. */
+	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
+		return fetchGroup(this.#state, name, sequence, options);
+	}
+
 	/** A lazy read handle for a track on this broadcast. */
 	track(name: string): track.Consumer {
-		return new track.Consumer(
-			name,
-			(priority) => subscribe(this.#state, name, priority),
-			() => resolveTrackInfo(this.#state, name),
-		);
+		return new track.Consumer(name, this);
 	}
 
 	/** Close the broadcast, optionally with an error to abort waiters. */
@@ -174,7 +202,7 @@ export class Producer {
  *
  * @public
  */
-export class Consumer {
+export class Consumer implements track.Broadcast {
 	#state: BroadcastState;
 
 	/** Resolves with the abort error (or undefined) once closed. */
@@ -188,11 +216,7 @@ export class Consumer {
 
 	/** Get a lazy handle for a track on this broadcast. */
 	track(name: string): track.Consumer {
-		return new track.Consumer(
-			name,
-			(priority) => subscribe(this.#state, name, priority),
-			() => resolveTrackInfo(this.#state, name),
-		);
+		return new track.Consumer(name, this);
 	}
 
 	/** Open a live subscription to a track. Used by the subscribing wire layer. */
@@ -214,14 +238,21 @@ export class Consumer {
 		}
 	}
 
-	/** Install the read-side TRACK_INFO resolver. Used by the wire layer. */
-	onTrackInfo(resolver: (name: string) => Promise<track.Info>): void {
-		this.#state.infoResolver = resolver;
-	}
-
-	/** Resolve a track's immutable info. Used by track handles. */
+	/**
+	 * Resolve a track's immutable info. Used by track handles. This base resolves it from
+	 * the local producers; the consuming wire layer overrides it to fetch over the wire.
+	 */
 	resolveTrackInfo(name: string): Promise<track.Info> {
 		return resolveTrackInfo(this.#state, name);
+	}
+
+	/**
+	 * Fetch a single group by sequence. Used by track handles. This base serves from the
+	 * local retained window; the consuming wire layer overrides it to fetch over the wire
+	 * (or to reject when the transport has no FETCH).
+	 */
+	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
+		return fetchGroup(this.#state, name, sequence, options);
 	}
 
 	/** Close the broadcast, optionally with an error to abort waiters. */

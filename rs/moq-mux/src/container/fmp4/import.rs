@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::Error;
 use crate::Result;
+use crate::container::jitter::Metrics;
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -82,6 +83,13 @@ struct Fmp4Track {
 
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
+
+	// Detects the track bitrate from fragment sizes, used only when the CMAF descriptor didn't
+	// declare one. Jitter comes from the fragment timing above, not this detector.
+	metrics: Metrics,
+
+	// Whether the descriptor left the bitrate unset, so the detector should fill it.
+	detect_bitrate: bool,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -221,16 +229,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				moq_net::track::Info::default().with_timescale(timescale),
 			)?;
 
-			match kind {
+			let detect_bitrate = match kind {
 				TrackKind::Video => {
 					let config = self.init_video(trak, &moov)?;
+					let detect = config.bitrate.is_none();
 					catalog.video.renditions.insert(track.name().to_string(), config);
+					detect
 				}
 				TrackKind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
+					let detect = config.bitrate.is_none();
 					catalog.audio.renditions.insert(track.name().to_string(), config);
+					detect
 				}
-			}
+			};
 
 			self.tracks.insert(
 				track_id,
@@ -242,6 +254,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					last_timestamp: None,
 					min_duration: None,
 					pending_sequence: None,
+					metrics: Metrics::new(),
+					detect_bitrate,
 				},
 			);
 		}
@@ -414,6 +428,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					return Err(Error::UnsupportedMpeg2.into());
 				}
 
+				// The descriptor's bitrate is optional: a 0 means "unknown", so leave the field unset
+				// and let the frame-size detector fill it instead of publishing a bogus 0.
 				let bitrate = desc.avg_bitrate.max(desc.max_bitrate);
 				let profile = desc.dec_specific.profile;
 				let sample_rate = mp4a.audio.sample_rate.integer() as u32;
@@ -429,7 +445,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				.encode();
 
 				let mut config = AudioConfig::new(AAC { profile }, sample_rate, channel_count);
-				config.bitrate = Some(bitrate.into());
+				if bitrate > 0 {
+					config.bitrate = Some(bitrate.into());
+				}
 				config.description = Some(description);
 				config.container = container;
 				config
@@ -732,6 +750,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
+
+			// A keyframe fragment starts a new group: close the previous one for the bitrate
+			// detector (used only when the descriptor didn't declare a bitrate).
+			if track.detect_bitrate
+				&& contains_keyframe
+				&& let Some(bitrate) = track.metrics.finish_group(Some(timestamp))
+			{
+				set_detected_bitrate(&mut self.catalog, track, bitrate)?;
+			}
+			let fragment_len = fragment_bytes.len();
+
 			let mut frame = g.create_frame(moq_net::frame::Info {
 				size: fragment_bytes.len() as u64,
 				timestamp,
@@ -740,6 +769,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			frame.finish()?;
 
 			track.group = Some(g);
+
+			if track.detect_bitrate {
+				track.metrics.record_frame(timestamp, fragment_len);
+			}
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
@@ -779,6 +812,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
+			if track.detect_bitrate
+				&& let Some(bitrate) = track.metrics.finish_group(None)
+			{
+				set_detected_bitrate(&mut self.catalog, track, bitrate)?;
+			}
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -804,6 +842,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
+			if track.detect_bitrate
+				&& let Some(bitrate) = track.metrics.finish_group(None)
+			{
+				set_detected_bitrate(&mut self.catalog, track, bitrate)?;
+			}
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -811,6 +854,37 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		Ok(())
 	}
+}
+
+/// Apply a detector-supplied bitrate to a track's catalog config, keeping the maximum seen.
+fn set_detected_bitrate<E: crate::catalog::hang::CatalogExt>(
+	catalog: &mut crate::catalog::Producer<E>,
+	track: &Fmp4Track,
+	bitrate: u64,
+) -> Result<()> {
+	let mut catalog = catalog.lock();
+	let field = match track.kind {
+		TrackKind::Video => {
+			&mut catalog
+				.video
+				.renditions
+				.get_mut(track.track.name())
+				.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?
+				.bitrate
+		}
+		TrackKind::Audio => {
+			&mut catalog
+				.audio
+				.renditions
+				.get_mut(track.track.name())
+				.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?
+				.bitrate
+		}
+	};
+	if field.is_none_or(|current| bitrate > current) {
+		*field = Some(bitrate);
+	}
+	Ok(())
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {

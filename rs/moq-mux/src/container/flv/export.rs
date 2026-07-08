@@ -102,7 +102,7 @@ impl Flavor {
 /// keyframe). Only Legacy and LOC container tracks (raw codec payloads) are
 /// supported; CMAF tracks are rejected.
 pub struct Export {
-	broadcast: moq_net::broadcast::Consumer,
+	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
@@ -164,21 +164,22 @@ impl FlvTrack {
 }
 
 impl Export {
-	/// Subscribe to `broadcast` and produce FLV byte chunks, using the default
+	/// Subscribe to `source` and produce FLV byte chunks, using the default
 	/// catalog format ([`CatalogFormat::Hang`]).
-	pub async fn new(broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
+	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(source, CatalogFormat::default()).await
 	}
 
-	/// Subscribe to `broadcast` and produce FLV byte chunks, selecting an explicit
+	/// Subscribe to `source` and produce FLV byte chunks, selecting an explicit
 	/// `catalog_format` for track discovery.
 	pub async fn with_catalog_format(
-		broadcast: moq_net::broadcast::Consumer,
+		source: crate::Source,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
+		let broadcast = source.broadcast().await?;
 		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
 		Ok(Self {
-			broadcast,
+			source,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			multitrack: false,
@@ -348,7 +349,7 @@ impl Export {
 				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
 				_ => None,
 			};
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			let track_id = u8::try_from(self.video.len()).context("too many FLV video tracks")?;
 			self.video.push(FlvTrack {
 				name: name.clone(),
@@ -376,7 +377,7 @@ impl Export {
 			}
 			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;
 			self.audio.push(FlvTrack {
 				name: name.clone(),

@@ -54,7 +54,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 }
 
 /**
- * A request for a track the peer wants, yielded by `broadcast.Producer.requested`.
+ * A request for a track the peer wants, yielded by `Broadcast.Producer.requested`.
  *
  * @public
  */
@@ -83,6 +83,28 @@ export class Request {
 	}
 }
 
+/** Options for {@link Consumer.fetchGroup}. */
+export interface FetchGroupOptions {
+	/** Delivery priority for the fetch stream. Defaults to `0`. */
+	priority?: number;
+}
+
+/**
+ * The per-track operations a lazy {@link Consumer} delegates to the broadcast it came from.
+ *
+ * Implemented by `broadcast.Producer` / `broadcast.Consumer` (and the wire-layer subclasses
+ * that resolve them over the network), so a track handle holds a reference to its broadcast
+ * and calls methods on it rather than capturing a bag of callbacks.
+ */
+export interface Broadcast {
+	/** Open a live subscription to the named track. */
+	subscribe(name: string, priority: number): Subscriber;
+	/** Resolve the named track's immutable info. */
+	resolveTrackInfo(name: string): Promise<Info>;
+	/** Fetch a single group of the named track by sequence. */
+	fetchGroup(name: string, sequence: number, options?: FetchGroupOptions): Promise<GroupConsumer>;
+}
+
 /**
  * A lazy handle to a track on a consumed broadcast.
  *
@@ -92,23 +114,26 @@ export class Consumer {
 	/** The track name. */
 	readonly name: string;
 
-	#subscribe: (priority: number) => Subscriber;
-	#info: () => Promise<Info>;
+	#broadcast: Broadcast;
 
-	constructor(name: string, subscribe: (priority: number) => Subscriber, info: () => Promise<Info>) {
+	constructor(name: string, broadcast: Broadcast) {
 		this.name = name;
-		this.#subscribe = subscribe;
-		this.#info = info;
+		this.#broadcast = broadcast;
 	}
 
 	/** Open a live subscription to the track. */
 	subscribe(options?: { priority?: number }): Subscriber {
-		return this.#subscribe(options?.priority ?? 0);
+		return this.#broadcast.subscribe(this.name, options?.priority ?? 0);
 	}
 
 	/** Fetch the track's immutable publisher properties without subscribing. */
 	info(): Promise<Info> {
-		return this.#info();
+		return this.#broadcast.resolveTrackInfo(this.name);
+	}
+
+	/** Fetch a single group by sequence without holding a live subscription. */
+	fetchGroup(sequence: number, options?: FetchGroupOptions): Promise<GroupConsumer> {
+		return this.#broadcast.fetchGroup(this.name, sequence, options);
 	}
 }
 
@@ -432,7 +457,7 @@ export class Producer {
 /**
  * The read side of a live track subscription, mirroring the Rust `Subscriber`.
  *
- * Obtained from `broadcast.Consumer.subscribe` / `track.Consumer.subscribe`, or from
+ * Obtained from `Broadcast.Consumer.subscribe` / `Track.Consumer.subscribe`, or from
  * {@link Producer.subscribe} for an in-process track. Reads the groups a
  * {@link Producer} on the same underlying state writes.
  */

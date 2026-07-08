@@ -1,6 +1,5 @@
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::Jitter;
 
 use super::FrameHeader;
 
@@ -20,9 +19,6 @@ pub struct Import<E: CatalogExt = ()> {
 
 	// The resolved config, used to detect resolution / format changes.
 	config: Option<hang::catalog::VideoConfig>,
-
-	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -33,7 +29,6 @@ impl<E: CatalogExt> Import<E> {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
-			jitter: Jitter::new(),
 		}
 	}
 
@@ -79,6 +74,11 @@ impl<E: CatalogExt> Import<E> {
 		}
 
 		let pts = self.rendition.timestamp(pts)?;
+		// A key frame starts a new group: close the previous one for the bitrate detector.
+		if header.keyframe {
+			self.rendition.record_group_end(Some(pts));
+		}
+		let bytes = frame.as_ref().len();
 		self.track.write(Frame {
 			timestamp: pts,
 			payload: frame.into_bytes(),
@@ -86,9 +86,7 @@ impl<E: CatalogExt> Import<E> {
 			duration: None,
 		})?;
 
-		if let Some(jitter) = self.jitter.observe(pts) {
-			self.rendition.update(|c| c.jitter = Some(jitter));
-		}
+		self.rendition.record_frame(pts, bytes);
 
 		Ok(())
 	}
@@ -100,6 +98,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
@@ -112,6 +111,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}

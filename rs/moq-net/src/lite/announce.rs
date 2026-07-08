@@ -20,18 +20,9 @@ pub fn restart_supported(version: Version) -> bool {
 ///
 /// Carries the broadcast path suffix and the hop chain. Renamed from ANNOUNCE in lite-05.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AnnounceBroadcast<'a> {
-	Active {
-		#[cfg_attr(feature = "serde", serde(borrow))]
-		suffix: Path<'a>,
-		hops: OriginList,
-	},
-	Ended {
-		#[cfg_attr(feature = "serde", serde(borrow))]
-		suffix: Path<'a>,
-		hops: OriginList,
-	},
+	Active { suffix: Path<'a>, hops: OriginList },
+	Ended { suffix: Path<'a>, hops: OriginList },
 }
 
 impl Message for AnnounceBroadcast<'_> {
@@ -153,10 +144,8 @@ impl Encode<Version> for AnnounceStatus {
 ///
 /// Used by Draft01/Draft02 only. Draft03 uses individual Announce messages instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnounceInit<'a> {
 	/// List of currently active broadcasts, encoded as suffixes to be combined with the prefix.
-	#[cfg_attr(feature = "serde", serde(borrow))]
 	pub suffixes: Vec<Path<'a>>,
 }
 
@@ -207,7 +196,6 @@ impl Message for AnnounceInit<'_> {
 /// publisher sends as the initial set immediately after this message, letting the
 /// receiver block until the initial set has arrived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnounceOk {
 	pub origin: Origin,
 	pub active: u64,

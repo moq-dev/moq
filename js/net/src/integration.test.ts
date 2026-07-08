@@ -177,6 +177,95 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 	server.close();
 });
 
+test("integration: lite draft-05 fetches a cached group", async () => {
+	const enc = new TextEncoder();
+	const dec = new TextDecoder();
+	const pair = createMockTransportPair(Lite.ALPN_05);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video");
+	server.publish(Path.from("test"), broadcast);
+
+	const group0 = producer.appendGroup();
+	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	group0.close();
+
+	const group1 = producer.appendGroup();
+	group1.writeFrame({ data: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) });
+	group1.close();
+
+	// Fetch group 0 without holding a live subscription; the timestamps round-trip.
+	const remote = client.consume(Path.from("test"));
+	const fetched = await remote.track("video").fetchGroup(0);
+
+	const first = await fetched.readFrame();
+	expect(dec.decode(first?.data)).toBe("alpha");
+	expect(first?.timestamp.asMillis()).toBe(10);
+
+	const second = await fetched.readFrame();
+	expect(dec.decode(second?.data)).toBe("beta");
+	expect(second?.timestamp.asMillis()).toBe(15);
+
+	expect(await fetched.readFrame()).toBeUndefined();
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+test("integration: lite draft-05 fetches an in-progress group", async () => {
+	const enc = new TextEncoder();
+	const dec = new TextDecoder();
+	const pair = createMockTransportPair(Lite.ALPN_05);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video");
+	server.publish(Path.from("test"), broadcast);
+
+	// Open the group and write one frame, but leave it open (in-progress).
+	const group0 = producer.appendGroup();
+	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+
+	const remote = client.consume(Path.from("test"));
+	const fetched = await remote.track("video").fetchGroup(0);
+
+	const first = await fetched.readFrame();
+	expect(dec.decode(first?.data)).toBe("alpha");
+
+	// Frames appended after the fetch started must still stream through, not be truncated.
+	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	const second = await fetched.readFrame();
+	expect(dec.decode(second?.data)).toBe("beta");
+	expect(second?.timestamp.asMillis()).toBe(15);
+
+	group0.close();
+	expect(await fetched.readFrame()).toBeUndefined();
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+test("integration: ietf fetch group is unsupported", async () => {
+	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const remote = client.consume(Path.from("test"));
+	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
+
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: ietf draft-14", async () => {
 	await runPublishSubscribeFlow("", Ietf.Version.DRAFT_14);
 });

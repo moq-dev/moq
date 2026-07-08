@@ -23,7 +23,7 @@ hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 # Enable the NVENC / VAAPI hardware encoders (default-off at the workspace level).
 moq-video = { workspace = true, features = ["nvenc", "vaapi"] }
 serde_json = "1"

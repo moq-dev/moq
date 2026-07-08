@@ -20,7 +20,6 @@ use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
-use crate::container::jitter::Jitter;
 
 /// A pure-publisher importer for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
@@ -34,7 +33,6 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_sps: Option<Bytes>,
-	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -46,7 +44,6 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_sps: None,
-			jitter: Jitter::new(),
 		}
 	}
 
@@ -84,6 +81,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
+		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
@@ -96,6 +94,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -104,9 +103,7 @@ impl<E: CatalogExt> Import<E> {
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.
 	pub fn observe_reorder(&mut self, reorder: moq_net::Timestamp) {
-		if let Some(jitter) = self.jitter.observe_reorder(reorder) {
-			self.rendition.update(|c| c.jitter = Some(jitter));
-		}
+		self.rendition.record_reorder(reorder);
 	}
 
 	/// Resolve the config from an inline SPS, updating the rendition in place on a
@@ -146,12 +143,6 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
-		// Seed jitter from whatever has accumulated: a dirty start (or a B-frame
-		// reorder observed via observe_reorder) can feed updates before this
-		// rendition exists, so those would otherwise be lost on (re)publish.
-		if let Some(jitter) = self.jitter.current() {
-			self.rendition.update(|c| c.jitter = Some(jitter));
-		}
 		self.config = Some(config);
 		Ok(())
 	}
@@ -171,14 +162,18 @@ impl<E: CatalogExt> Import<E> {
 				return Err(Error::MissingSps.into());
 			}
 
+			// A keyframe starts a new group: close the previous one for the bitrate detector.
+			if frame.keyframe {
+				self.rendition.record_group_end(Some(frame.timestamp));
+			}
+
 			let pts = frame.timestamp;
+			let bytes = frame.payload.len();
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
 			self.track.write(frame)?;
 
-			if let Some(jitter) = self.jitter.observe(pts) {
-				self.rendition.update(|c| c.jitter = Some(jitter));
-			}
+			self.rendition.record_frame(pts, bytes);
 		}
 		Ok(())
 	}

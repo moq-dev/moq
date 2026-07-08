@@ -60,7 +60,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// so we pull until a `next()` blocks (`Pending`, surfaced as a timeout under
 /// paused time) or the stream ends.
 async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
-	drain_with(Export::new(consumer).await.unwrap()).await
+	drain_with(Export::new(crate::source::announced(&consumer)).await.unwrap()).await
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
@@ -267,7 +267,7 @@ async fn export_lead_audio() -> BytesMut {
 	video.finish().unwrap();
 	audio.finish().unwrap();
 
-	let exporter = Export::new(consumer).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	// The producers stay alive through the drain so the retained tracks are readable.
 	drain_with(exporter).await
 }
@@ -616,7 +616,7 @@ async fn export_scte35_roundtrip() {
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
 	// exporter must carry the extension to see the mpegts section.
 	let ts = drain_with(
-		Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap(),
 	)
@@ -730,7 +730,7 @@ async fn export_pes_verbatim_roundtrip() {
 
 	// `import`, `catalog`, and `data_producer` stay alive: retained tracks.
 	let ts = drain_with(
-		Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap(),
 	)
@@ -812,7 +812,7 @@ async fn scte35_without_video_export_is_rejected() {
 	producer.finish_group().unwrap();
 	producer.finish().unwrap();
 
-	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
 	let err = loop {
@@ -1262,7 +1262,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 
 		// Export and re-ingest.
 		let ts = drain_with(
-			Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang)
+			Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 				.await
 				.unwrap(),
 		)

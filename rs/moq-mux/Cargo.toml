@@ -27,7 +27,7 @@ memchr = "2"
 moq-json = { workspace = true }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }
-moq-net = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true }
 mp4-atom = { version = "0.12", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = "0.7"

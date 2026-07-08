@@ -124,7 +124,9 @@ pub async fn connect_export(
 	latency: Duration,
 ) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
-	let broadcast = origin
+	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
+	// the FLV export re-resolves it (and any referenced sibling broadcast) through the origin.
+	origin
 		.announced_broadcast(&name)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
@@ -133,7 +135,7 @@ pub async fn connect_export(
 	notify_ready();
 
 	let client = Client::connect(addr, &app).await?.with_latency(latency);
-	Ok(client.publish(&key, broadcast).await?)
+	Ok(client.publish(&key, origin, &name).await?)
 }
 
 /// Parse `rtmp://host[:1935]/<app>/<key>` into a resolved address, app, and stream key.

@@ -206,7 +206,9 @@ export class Decoder {
 		const config = effect.get(this.source.output.config);
 		if (!config) return;
 
-		const active = effect.get(broadcast.output.active);
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast.
+		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
 
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
@@ -219,7 +221,7 @@ export class Decoder {
 		}
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.track.Subscriber, config: Catalog.AudioConfig): void {
+	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
@@ -303,7 +305,7 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(effect: Effect, sub: Moq.track.Subscriber, config: Catalog.AudioConfig): void {
+	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);

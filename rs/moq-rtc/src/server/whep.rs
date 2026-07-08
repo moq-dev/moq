@@ -102,22 +102,20 @@ pub async fn accept(
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	// Look up the MoQ broadcast on the subscribe origin. `request_broadcast` resolves an
-	// already-announced broadcast immediately and falls back to a dynamic handler if the
-	// origin has one; with neither, it resolves to an error and the WHEP client retries (typical).
+	// Resolve the broadcast on the subscribe origin by path. The `Source` fetches it (and any
+	// sibling broadcast a rendition's catalog `broadcast` field references, e.g. `../source`)
+	// via `request_broadcast`, which resolves an announced broadcast immediately and falls back
+	// to a dynamic handler; with neither it errors and the WHEP client retries (typical).
 	let broadcast = broadcast.as_path().to_string();
-	let consumer = subscriber
-		.request_broadcast(&broadcast)
-		.await
-		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {broadcast} not announced")))?;
+	let source = moq_mux::Source::new(subscriber.clone(), &broadcast);
 
-	// Bound the wait for the first catalog: an announced-but-catalog-less broadcast
-	// would otherwise park this handler forever.
-	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(consumer))
+	// Bound the wait for resolution + the first catalog: an unannounced broadcast, or an
+	// announced-but-catalog-less one, would otherwise park this handler forever.
+	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(source))
 		.await
 		.map_err(|_| {
 			Error::Other(anyhow::anyhow!(
-				"broadcast {broadcast} sent no catalog within {CATALOG_TIMEOUT:?}"
+				"broadcast {broadcast} did not resolve with a catalog within {CATALOG_TIMEOUT:?}"
 			))
 		})??;
 	let codecs = source.catalog_codecs();

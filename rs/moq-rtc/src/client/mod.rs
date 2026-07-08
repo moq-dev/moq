@@ -54,9 +54,18 @@ impl Client {
 		whep::dial(self, url, broadcast).await
 	}
 
-	/// `client publish`: pull a local broadcast and push it to a remote
-	/// WHIP endpoint. Gated on the per-codec re-packetizer.
-	pub async fn publish(&self, url: Url, broadcast: moq_net::broadcast::Consumer) -> crate::Result<()> {
-		whip::dial(self, url, broadcast).await
+	/// `client publish`: pull the broadcast at `path` from `origin` and push it to a
+	/// remote WHIP endpoint. Gated on the per-codec re-packetizer.
+	///
+	/// Taking the origin plus path (rather than a resolved [`moq_net::broadcast::Consumer`])
+	/// lets the egress resolve a rendition whose catalog `broadcast` field references a
+	/// sibling broadcast, against the same origin.
+	pub async fn publish(
+		&self,
+		url: Url,
+		origin: moq_net::origin::Consumer,
+		path: impl moq_net::AsPath,
+	) -> crate::Result<()> {
+		whip::dial(self, url, origin, path).await
 	}
 }

@@ -67,6 +67,19 @@ impl Callback {
 		assert!(code <= 0, "expected terminal code <= 0, got {code}");
 		code
 	}
+
+	/// Like [`recv_terminal`](Self::recv_terminal), but first drains any mid-stream catalog
+	/// snapshot ids, freeing each. Auto-detected metrics (jitter, bitrate) republish the catalog
+	/// while frames flow, so the callback delivers extra snapshots before the terminal.
+	fn recv_catalog_terminal(&self) -> i32 {
+		loop {
+			let code = self.recv();
+			if code <= 0 {
+				return code;
+			}
+			assert_eq!(moq_consume_catalog_free(id(code)), 0);
+		}
+	}
 }
 
 impl Drop for Callback {
@@ -1237,7 +1250,11 @@ fn multiple_frames_ordering() {
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
-	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(
+		catalog_cb.recv_catalog_terminal(),
+		0,
+		"catalog close delivers terminal 0"
+	);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
