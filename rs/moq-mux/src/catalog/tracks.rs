@@ -1,7 +1,11 @@
 use std::marker::PhantomData;
+use std::time::Duration;
+
+use moq_net::Timestamp;
 
 use super::Producer;
 use super::hang::{Catalog, CatalogExt};
+use crate::container::jitter::Metrics;
 
 mod sealed {
 	pub trait Sealed {}
@@ -22,6 +26,13 @@ pub trait Kind: sealed::Sealed + 'static {
 	fn with_mut<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, f: impl FnOnce(&mut Self::Config));
 	#[doc(hidden)]
 	fn remove<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str);
+
+	/// The config's detected-jitter field, so [`Rendition`] can update it generically.
+	#[doc(hidden)]
+	fn jitter_mut(config: &mut Self::Config) -> &mut Option<Duration>;
+	/// The config's bitrate field, so [`Rendition`] can update it generically.
+	#[doc(hidden)]
+	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64>;
 }
 
 /// Video rendition marker for [`Rendition`] / [`Reserved::init`].
@@ -46,6 +57,13 @@ impl Kind for Video {
 	fn remove<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str) {
 		catalog.video.renditions.remove(name);
 	}
+
+	fn jitter_mut(config: &mut Self::Config) -> &mut Option<Duration> {
+		&mut config.jitter
+	}
+	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
+		&mut config.bitrate
+	}
 }
 
 impl Kind for Audio {
@@ -61,6 +79,13 @@ impl Kind for Audio {
 	}
 	fn remove<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str) {
 		catalog.audio.renditions.remove(name);
+	}
+
+	fn jitter_mut(config: &mut Self::Config) -> &mut Option<Duration> {
+		&mut config.jitter
+	}
+	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
+		&mut config.bitrate
 	}
 }
 
@@ -146,6 +171,8 @@ pub struct Rendition<E: CatalogExt, K: Kind> {
 	/// Whether a config has been published, so a lazily-configured importer (e.g. H.264 before its
 	/// SPS) holds the handle without a catalog entry, and drops without a spurious removal.
 	present: bool,
+	/// Detects jitter and bitrate from the frames fed in, keeping the config's fields current.
+	metrics: Metrics,
 	_kind: PhantomData<fn() -> K>,
 }
 
@@ -161,6 +188,7 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 			gate: Some(reserved),
 			name: name.into(),
 			present: false,
+			metrics: Metrics::new(),
 			_kind: PhantomData,
 		}
 	}
@@ -176,7 +204,17 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 	}
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
-	pub fn set(&mut self, config: K::Config) {
+	///
+	/// Seeds `config` with any metrics already accumulated: a dirty start or a B-frame reorder
+	/// can feed observations before the rendition exists, which would otherwise be lost.
+	pub fn set(&mut self, mut config: K::Config) {
+		if let Some(jitter) = self.metrics.jitter() {
+			*K::jitter_mut(&mut config) = Some(jitter);
+		}
+		if let Some(bitrate) = self.metrics.bitrate() {
+			raise_bitrate(K::bitrate_mut(&mut config), bitrate);
+		}
+
 		// Write the config first (still withheld, since we're holding our reservation), then release
 		// the reservation. If this was the last one, the release flushes a complete snapshot.
 		{
@@ -187,13 +225,41 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 		self.gate = None;
 	}
 
-	/// Refine the rendition in place (e.g. observed jitter), publishing if present.
+	/// Refine the rendition in place (e.g. a synthesized description), publishing if present.
 	pub fn update(&mut self, f: impl FnOnce(&mut K::Config)) {
 		if !self.present {
 			return;
 		}
 		let mut guard = self.catalog.lock();
 		K::with_mut(&mut guard, &self.name, f);
+	}
+
+	/// Record one frame (presentation timestamp + encoded size), republishing the jitter if it changed.
+	pub fn observe_frame(&mut self, ts: Timestamp, bytes: usize) {
+		if let Some(jitter) = self.metrics.observe_frame(ts, bytes) {
+			self.update(|config| *K::jitter_mut(config) = Some(jitter));
+		}
+	}
+
+	/// Record a frame's reorder delay (`PTS - DTS`), republishing the jitter if it changed.
+	pub fn observe_reorder(&mut self, reorder: Timestamp) {
+		if let Some(jitter) = self.metrics.observe_reorder(reorder) {
+			self.update(|config| *K::jitter_mut(config) = Some(jitter));
+		}
+	}
+
+	/// Close the current group (`next` is its end timestamp when known), republishing the bitrate if it rose.
+	pub fn finish_group(&mut self, next: Option<Timestamp>) {
+		if let Some(bitrate) = self.metrics.finish_group(next) {
+			self.update(|config| raise_bitrate(K::bitrate_mut(config), bitrate));
+		}
+	}
+}
+
+/// Raise a catalog `bitrate` field, never lowering a larger declared or previously seen value.
+fn raise_bitrate(field: &mut Option<u64>, bitrate: u64) {
+	if field.is_none_or(|current| bitrate > current) {
+		*field = Some(bitrate);
 	}
 }
 
