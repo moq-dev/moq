@@ -57,6 +57,42 @@ test("a consumer clone shares the broadcast until every handle closes", () => {
 	expect(clone.closedSignal.peek()).toBeTruthy();
 });
 
+test("double-closing a consumer handle does not prematurely close the broadcast", () => {
+	const consumer = new BroadcastConsumer();
+	const clone = consumer.clone();
+
+	// The double close must decrement the shared count only once...
+	clone.close();
+	clone.close();
+	expect(consumer.closedSignal.peek()).toBeFalsy();
+
+	// ...so the broadcast still stays live until the other handle closes.
+	consumer.close();
+	expect(consumer.closedSignal.peek()).toBeTruthy();
+});
+
+test("consumer track subscriptions fan out and close independently", async () => {
+	const consumer = new BroadcastConsumer();
+
+	// Two subscriptions to one track dedupe onto a single upstream request...
+	const a = consumer.subscribe("video", 0);
+	const b = consumer.subscribe("video", 0);
+
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+	expect(await pendingRequest(consumer)).toBeUndefined();
+
+	const producer = request.accept();
+	producer.writeString("one");
+	expect(await a.readString()).toBe("one");
+	expect(await b.readString()).toBe("one");
+
+	// ...and closing one subscriber leaves the other (and the shared upstream) delivering.
+	a.close();
+	producer.writeString("two");
+	expect(await b.readString()).toBe("two");
+});
+
 test("subscribe serves a statically inserted track without a request", async () => {
 	const broadcast = new BroadcastProducer();
 

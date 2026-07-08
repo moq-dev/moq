@@ -246,6 +246,12 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 		expect(await fetched.readFrame()).toBeUndefined();
 	}
 
+	// After the coalesced fetch completes and its cache entry evicts, the same group re-fetches.
+	const again = await trackConsumer.fetchGroup(0);
+	expect(dec.decode((await again.readFrame())?.data)).toBe("alpha");
+	expect(dec.decode((await again.readFrame())?.data)).toBe("beta");
+	expect(await again.readFrame()).toBeUndefined();
+
 	broadcast.close();
 	remote.close();
 	client.close();
