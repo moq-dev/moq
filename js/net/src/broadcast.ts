@@ -88,13 +88,20 @@ async function fetchGroup(
 		for (;;) {
 			const group = await subscriber.recvGroup();
 			if (!group) throw new Error(`group not found: ${sequence}`);
-			if (group.sequence === sequence) return group;
+			if (group.sequence === sequence) {
+				// Close the subscription when the returned group finishes, not now: an
+				// in-progress group must keep receiving frames for its lifetime (mirrors
+				// Rust poll_fetch). Also fires if the caller closes the group early.
+				void group.closed.then(() => subscriber.close());
+				return group;
+			}
 
 			group.close();
 			if (group.sequence > sequence) throw new Error(`group not found: ${sequence}`);
 		}
-	} finally {
+	} catch (err) {
 		subscriber.close();
+		throw err;
 	}
 }
 

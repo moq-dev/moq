@@ -217,6 +217,42 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	server.close();
 });
 
+test("integration: lite draft-05 fetches an in-progress group", async () => {
+	const enc = new TextEncoder();
+	const dec = new TextDecoder();
+	const pair = createMockTransportPair(Lite.ALPN_05);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video");
+	server.publish(Path.from("test"), broadcast);
+
+	// Open the group and write one frame, but leave it open (in-progress).
+	const group0 = producer.appendGroup();
+	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+
+	const remote = client.consume(Path.from("test"));
+	const fetched = await remote.track("video").fetchGroup(0);
+
+	const first = await fetched.readFrame();
+	expect(dec.decode(first?.data)).toBe("alpha");
+
+	// Frames appended after the fetch started must still stream through, not be truncated.
+	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	const second = await fetched.readFrame();
+	expect(dec.decode(second?.data)).toBe("beta");
+	expect(second?.timestamp.asMillis()).toBe(15);
+
+	group0.close();
+	expect(await fetched.readFrame()).toBeUndefined();
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: ietf fetch group is unsupported", async () => {
 	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
 
