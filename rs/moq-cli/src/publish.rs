@@ -204,7 +204,7 @@ impl Publish {
 		let source = match format {
 			PublishFormat::Avc3 => {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve());
+				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
 					split,

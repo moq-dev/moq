@@ -34,16 +34,12 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
-	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		Self::new_with_hint(track, reserved, Default::default()).expect("empty hint cannot fail")
-	}
-
-	/// Publish on an existing track producer, seeding the rendition with caller-provided fields.
+	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
+	/// [`VideoHint::default`](crate::catalog::VideoHint) for none).
 	///
-	/// A [`VideoHint`](crate::catalog::VideoHint) carrying a codec publishes the catalog rendition up
-	/// front (the sequence header still refines it in band on the first keyframe).
-	pub fn new_with_hint(
+	/// A hint carrying a codec publishes the catalog rendition up front (the sequence header still
+	/// refines it in band on the first keyframe).
+	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,

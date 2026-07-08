@@ -42,7 +42,7 @@ fn build_h264_avc3<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new_with_hint(track, reserved, hint)?;
+	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
 	let frames = split.decode(init, None)?;
@@ -59,7 +59,7 @@ fn build_h264_avc1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(usize, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new_with_hint(track, reserved, hint)?;
+	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let length_size = crate::codec::h264::Avcc::parse(init)?.length_size;
 	Ok((length_size, import))
@@ -72,7 +72,7 @@ fn build_h265<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
-	let mut import = crate::codec::h265::Import::new_with_hint(track, reserved, hint)?;
+	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
 	let frames = split.decode(init, None)?;
@@ -87,7 +87,7 @@ fn build_av1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
-	let mut import = crate::codec::av1::Import::new_with_hint(track, reserved, hint)?;
+	let mut import = crate::codec::av1::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::av1::Split::new();
 	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not an
@@ -175,16 +175,13 @@ impl<E: CatalogExt> Track<E> {
 				TrackKind::Av01 { split, import }
 			}
 			"vp8" | "vp08" => {
-				let mut import = crate::codec::vp8::Import::new_with_hint(
-					track,
-					reserved,
-					video_hint(&init, Some(VideoCodec::VP8)),
-				)?;
+				let mut import =
+					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)))?;
 				import.initialize(data)?;
 				TrackKind::Vp8(import)
 			}
 			"vp9" | "vp09" => {
-				let mut import = crate::codec::vp9::Import::new_with_hint(track, reserved, video_hint(&init, None))?;
+				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None))?;
 				import.initialize(data)?;
 				TrackKind::Vp9(import)
 			}
@@ -193,8 +190,7 @@ impl<E: CatalogExt> Track<E> {
 					true => None,
 					false => Some(crate::codec::aac::Config::parse(&mut { data })?),
 				};
-				let import =
-					crate::codec::aac::Import::new_with_hint(track, reserved, config, audio_hint(&init, None))?;
+				let import = crate::codec::aac::Import::new(track, reserved, config, audio_hint(&init, None))?;
 				TrackKind::Aac(import)
 			}
 			"opus" => {
@@ -203,7 +199,7 @@ impl<E: CatalogExt> Track<E> {
 					false => Some(crate::codec::opus::Config::parse(&mut { data })?),
 				};
 				let hint = audio_hint(&init, Some(AudioCodec::Opus));
-				let import = crate::codec::opus::Import::new_with_hint(track, reserved, config, hint)?;
+				let import = crate::codec::opus::Import::new(track, reserved, config, hint)?;
 				TrackKind::Opus(import)
 			}
 			"flac" => {
@@ -213,7 +209,7 @@ impl<E: CatalogExt> Track<E> {
 					false => Some(crate::codec::flac::Config::parse(&mut { data })?),
 				};
 				let hint = audio_hint(&init, Some(AudioCodec::Flac));
-				let import = crate::codec::flac::Import::new_with_hint(track, reserved, config, hint)?;
+				let import = crate::codec::flac::Import::new(track, reserved, config, hint)?;
 				TrackKind::Flac(import)
 			}
 			"mp3" => {
@@ -222,7 +218,7 @@ impl<E: CatalogExt> Track<E> {
 					false => Some(crate::codec::mp3::Config::parse(data)?),
 				};
 				let hint = audio_hint(&init, Some(AudioCodec::Mp3));
-				let import = crate::codec::mp3::Import::new_with_hint(track, reserved, config, hint)?;
+				let import = crate::codec::mp3::Import::new(track, reserved, config, hint)?;
 				TrackKind::Mp3(import)
 			}
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
@@ -438,15 +434,15 @@ impl<E: CatalogExt> TrackStream<E> {
 		let kind = match init.format.as_str() {
 			"avc3" | "h264" => TrackStreamKind::Avc3 {
 				split: crate::codec::h264::Split::new(),
-				import: crate::codec::h264::Import::new_with_hint(track, reserved, hint)?,
+				import: crate::codec::h264::Import::new(track, reserved, hint)?,
 			},
 			"hev1" => TrackStreamKind::Hev1 {
 				split: crate::codec::h265::Split::new(),
-				import: crate::codec::h265::Import::new_with_hint(track, reserved, hint)?,
+				import: crate::codec::h265::Import::new(track, reserved, hint)?,
 			},
 			"av01" | "av1" | "av1c" | "av1C" => TrackStreamKind::Av01 {
 				split: crate::codec::av1::Split::new(),
-				import: crate::codec::av1::Import::new_with_hint(track, reserved, hint)?,
+				import: crate::codec::av1::Import::new(track, reserved, hint)?,
 			},
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
@@ -722,7 +718,8 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		};
-		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config).unwrap();
+		let mut import =
+			crate::codec::opus::Import::new(track, catalog.reserve(), Some(config), Default::default()).unwrap();
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
 		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);

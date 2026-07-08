@@ -311,7 +311,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(h264::Import::new(track, self.catalog.reserve())),
+					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())?),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -319,7 +319,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(h265::Import::new(track, self.catalog.reserve())),
+					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())?),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -349,7 +349,7 @@ impl<E: catalog::Catalog> Import<E> {
 					channel_count,
 				};
 				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.catalog.reserve(), config)?,
+					import: opus::Import::new(track, self.catalog.reserve(), Some(config), Default::default())?,
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
@@ -1161,7 +1161,7 @@ impl<E: CatalogExt> AacStream<E> {
 					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
 					// Consume the reservation held since the PMT: this resolves the gated rendition.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
-					let mut aac = aac::Import::new(track, reserved, config)?;
+					let mut aac = aac::Import::new(track, reserved, Some(config), Default::default())?;
 					aac.update_rendition(|rendition| rendition.description = Some(description));
 					self.import.insert(aac)
 				}

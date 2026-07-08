@@ -17,20 +17,12 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
-	pub fn new(
-		track: moq_net::track::Producer,
-		reserved: crate::catalog::Reserved<E>,
-		config: Config,
-	) -> crate::Result<Self> {
-		Self::new_with_hint(track, reserved, Some(config), Default::default())
-	}
-
-	/// Publish on an existing track producer, seeding the rendition with caller-provided fields.
+	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
+	/// [`AudioHint::default`](crate::catalog::AudioHint) for none).
 	///
-	/// `config` is the codec config parsed from init bytes, or `None` to publish from the
-	/// [`AudioHint`](crate::catalog::AudioHint) alone (requires codec, sample rate, and channel count).
-	pub fn new_with_hint(
+	/// `config` is the codec config parsed from init bytes, or `None` to publish from the hint alone
+	/// (which then needs the codec, sample rate, and channel count).
+	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		config: Option<Config>,
