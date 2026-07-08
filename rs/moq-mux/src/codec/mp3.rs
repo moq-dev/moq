@@ -118,8 +118,8 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::AudioHint,
-	) -> crate::Result<Self> {
-		let initial = hint.to_config()?;
+	) -> Self {
+		let initial = hint.to_config();
 		let rendition = reserved.audio_with_hint(track.name(), hint);
 		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
@@ -127,9 +127,9 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 		};
 		if let Some(config) = initial {
-			import.publish(config)?;
+			import.publish(config);
 		}
-		Ok(import)
+		import
 	}
 
 	/// Resolve the config from an MP3 frame header, publishing the rendition. A no-op on an empty
@@ -141,20 +141,20 @@ impl<E: CatalogExt> Import<E> {
 		let config = Config::parse(data)?;
 		let audio =
 			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp3, config.sample_rate, config.channel_count);
-		self.publish(audio)
+		self.publish(audio);
+		Ok(())
 	}
 
 	/// Publish (or re-publish) the resolved config, validating it against the hint via
 	/// [`Rendition::set`](crate::catalog::Rendition::set). A no-op if unchanged.
-	fn publish(&mut self, mut config: hang::catalog::AudioConfig) -> crate::Result<()> {
+	fn publish(&mut self, mut config: hang::catalog::AudioConfig) {
 		config.container = hang::catalog::Container::Legacy;
 		if self.config.as_ref() == Some(&config) {
-			return Ok(());
+			return;
 		}
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.rendition.set(config.clone())?;
+		self.rendition.set(config.clone());
 		self.config = Some(config);
-		Ok(())
 	}
 
 	/// A watch-only handle to this track's subscriber demand.

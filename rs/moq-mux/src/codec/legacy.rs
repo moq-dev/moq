@@ -138,7 +138,7 @@ impl<E: CatalogExt> Import<E> {
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
 		let mut rendition = reserved.audio(track.name());
-		rendition.set(audio_config).expect("empty hint cannot fail");
+		rendition.set(audio_config);
 
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),

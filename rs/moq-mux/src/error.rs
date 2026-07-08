@@ -99,17 +99,6 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// A caller-provided catalog hint contradicts the value detected from the stream.
-	#[error("init hint mismatch for {field}: expected {expected}, got {actual}")]
-	InitMismatch {
-		/// The catalog field that disagreed.
-		field: &'static str,
-		/// The caller-pinned value.
-		expected: String,
-		/// The value detected from the stream.
-		actual: String,
-	},
-
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.
 	#[error("{0}")]

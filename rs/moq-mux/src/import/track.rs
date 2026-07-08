@@ -42,7 +42,7 @@ fn build_h264_avc3<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
+	let mut import = crate::codec::h264::Import::new(track, reserved, hint);
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
 	let frames = split.decode(init, None)?;
@@ -59,7 +59,7 @@ fn build_h264_avc1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(usize, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
+	let mut import = crate::codec::h264::Import::new(track, reserved, hint);
 	import.initialize(init)?;
 	let length_size = crate::codec::h264::Avcc::parse(init)?.length_size;
 	Ok((length_size, import))
@@ -72,7 +72,7 @@ fn build_h265<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
-	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
+	let mut import = crate::codec::h265::Import::new(track, reserved, hint);
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
 	let frames = split.decode(init, None)?;
@@ -87,7 +87,7 @@ fn build_av1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
-	let mut import = crate::codec::av1::Import::new(track, reserved, hint)?;
+	let mut import = crate::codec::av1::Import::new(track, reserved, hint);
 	import.initialize(init)?;
 	let mut split = crate::codec::av1::Split::new();
 	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not an
@@ -176,36 +176,36 @@ impl<E: CatalogExt> Track<E> {
 			}
 			"vp8" | "vp08" => {
 				let mut import =
-					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)))?;
+					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)));
 				import.initialize(data)?;
 				TrackKind::Vp8(import)
 			}
 			"vp9" | "vp09" => {
-				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None))?;
+				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None));
 				import.initialize(data)?;
 				TrackKind::Vp9(import)
 			}
 			"aac" => {
-				let mut import = crate::codec::aac::Import::new(track, reserved, audio_hint(&init, None))?;
+				let mut import = crate::codec::aac::Import::new(track, reserved, audio_hint(&init, None));
 				import.initialize(data)?;
 				TrackKind::Aac(import)
 			}
 			"opus" => {
 				let mut import =
-					crate::codec::opus::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Opus)))?;
+					crate::codec::opus::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Opus)));
 				import.initialize(data)?;
 				TrackKind::Opus(import)
 			}
 			"flac" => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
 				let mut import =
-					crate::codec::flac::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Flac)))?;
+					crate::codec::flac::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Flac)));
 				import.initialize(data)?;
 				TrackKind::Flac(import)
 			}
 			"mp3" => {
 				let mut import =
-					crate::codec::mp3::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Mp3)))?;
+					crate::codec::mp3::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Mp3)));
 				import.initialize(data)?;
 				TrackKind::Mp3(import)
 			}
@@ -422,15 +422,15 @@ impl<E: CatalogExt> TrackStream<E> {
 		let kind = match init.format.as_str() {
 			"avc3" | "h264" => TrackStreamKind::Avc3 {
 				split: crate::codec::h264::Split::new(),
-				import: crate::codec::h264::Import::new(track, reserved, hint)?,
+				import: crate::codec::h264::Import::new(track, reserved, hint),
 			},
 			"hev1" => TrackStreamKind::Hev1 {
 				split: crate::codec::h265::Split::new(),
-				import: crate::codec::h265::Import::new(track, reserved, hint)?,
+				import: crate::codec::h265::Import::new(track, reserved, hint),
 			},
 			"av01" | "av1" | "av1c" | "av1C" => TrackStreamKind::Av01 {
 				split: crate::codec::av1::Split::new(),
-				import: crate::codec::av1::Import::new(track, reserved, hint)?,
+				import: crate::codec::av1::Import::new(track, reserved, hint),
 			},
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
@@ -706,7 +706,7 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		};
-		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
+		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into());
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
 		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);
@@ -812,25 +812,24 @@ mod tests {
 		assert_eq!(audio.bitrate, Some(64_000), "carried from the hint");
 	}
 
-	/// A hint that contradicts what the stream says is an error, not silent drift.
+	/// The value the stream detects wins over a hint that guessed wrong; the catalog just updates.
 	#[tokio::test(start_paused = true)]
-	async fn audio_hint_mismatch_is_rejected() {
+	async fn detected_value_overrides_hint() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let hint = crate::catalog::AudioHint {
 			sample_rate: Some(44_100), // the OpusHead says 48000
 			..Default::default()
 		};
-		let result = Track::new(
+		let _import = Track::new(
 			request,
 			catalog.reserve(),
 			Init::new("opus", opus_head()).with_audio(hint),
-		);
-		match result {
-			Err(crate::Error::InitMismatch { .. }) => {}
-			Err(err) => panic!("expected InitMismatch, got {err:?}"),
-			Ok(_) => panic!("expected InitMismatch, got Ok"),
-		}
+		)
+		.unwrap();
+
+		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
+		assert_eq!(audio.sample_rate, 48_000, "the detected sample rate wins over the hint");
 	}
 
 	/// A video codec with no extra parameters (VP8) publishes the catalog before the first key frame.

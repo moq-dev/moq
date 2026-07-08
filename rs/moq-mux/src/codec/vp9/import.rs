@@ -31,18 +31,18 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
-	) -> crate::Result<Self> {
+	) -> Self {
 		let rendition = reserved.video_with_hint(track.name(), hint.clone());
 		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 		};
-		if let Some(config) = hint.to_config()? {
-			import.rendition.set(config.clone())?;
+		if let Some(config) = hint.to_config() {
+			import.rendition.set(config.clone());
 			import.config = Some(config);
 		}
-		Ok(import)
+		import
 	}
 
 	/// Initialize the importer.
@@ -69,7 +69,7 @@ impl<E: CatalogExt> Import<E> {
 		}
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.rendition.set(config.clone())?;
+		self.rendition.set(config.clone());
 		self.config = Some(config);
 
 		Ok(())
@@ -154,7 +154,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut import = super::Import::new(track, catalog.reserve(), Default::default());
 
 		import.initialize(&[]).unwrap();
 		assert!(catalog.snapshot().video.renditions.is_empty());
@@ -180,7 +180,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut import = super::Import::new(track, catalog.reserve(), Default::default());
 
 		let interframe = Bytes::from_static(&[0x84, 0x00, 0x00]);
 		assert!(

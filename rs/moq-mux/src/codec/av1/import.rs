@@ -43,7 +43,7 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
-	) -> Result<Self> {
+	) -> Self {
 		let rendition = reserved.video_with_hint(track.name(), hint.clone());
 		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
@@ -51,11 +51,11 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			last_seq: None,
 		};
-		if let Some(config) = hint.to_config()? {
-			import.rendition.set(config.clone())?;
+		if let Some(config) = hint.to_config() {
+			import.rendition.set(config.clone());
 			import.config = Some(config);
 		}
-		Ok(import)
+		import
 	}
 
 	/// Resolve the codec config from a sequence header / av1C and other metadata.
@@ -178,7 +178,7 @@ impl<E: CatalogExt> Import<E> {
 			return Ok(());
 		}
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.rendition.set(config.clone())?;
+		self.rendition.set(config.clone());
 		self.config = Some(config);
 		Ok(())
 	}

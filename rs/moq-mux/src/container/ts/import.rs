@@ -311,7 +311,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())?),
+					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -319,7 +319,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())?),
+					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -349,7 +349,7 @@ impl<E: catalog::Catalog> Import<E> {
 					channel_count,
 				};
 				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
+					import: opus::Import::new(track, self.catalog.reserve(), config.into()),
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
@@ -1159,7 +1159,7 @@ impl<E: CatalogExt> AacStream<E> {
 					// The importer synthesizes the AudioSpecificConfig `description` from the config so
 					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
-					let aac = aac::Import::new(track, reserved, config.into())?;
+					let aac = aac::Import::new(track, reserved, config.into());
 					self.import.insert(aac)
 				}
 			};
