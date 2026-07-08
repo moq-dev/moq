@@ -108,13 +108,15 @@ impl Origin {
 	}
 }
 
-/// Construction config for an [origin `Producer`](Producer): its wire identity plus
-/// the cache pool its broadcasts inherit.
+/// An origin's identity plus the cache pool its broadcasts inherit.
 ///
-/// The origin owns the [`cache::Pool`] every group in the tree registers with, so a
-/// relay configures one bounded pool here and every broadcast, track, and group
-/// beneath it shares that single memory budget. Defaults to an unbounded pool
-/// ([`Origin::produce`] is the shorthand for that).
+/// Doubles as the construction config for an [origin `Producer`](Producer) and as the
+/// parent handle every broadcast carries ([`broadcast::Info::origin`]): the origin owns
+/// the [`cache::Pool`] every group in the tree registers with, so a relay configures one
+/// bounded pool here and every broadcast, track, and group beneath it reaches that single
+/// budget by walking up the ownership chain. Defaults to an unbounded pool
+/// ([`Origin::produce`] is the shorthand for that). Cheap to clone (a `Copy` id plus an
+/// `Arc`-handle bump), so it's stored by value rather than behind another `Arc`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
@@ -122,9 +124,22 @@ pub struct Info {
 	/// detection and shortest-path routing.
 	pub id: Origin,
 
-	/// The cache pool broadcasts created under this origin register their groups
-	/// with. Unbounded by default.
-	pub pool: cache::Pool,
+	// The cache pool broadcasts under this origin register their groups with. Not
+	// public: a relay sets it via [`Self::with_pool`] and it flows down the ownership
+	// chain (origin -> broadcast -> track -> group), but consumers reading an
+	// `origin::Info` off a broadcast see only the identity. Unbounded by default.
+	pub(crate) pool: cache::Pool,
+}
+
+impl Default for Info {
+	/// An unknown origin (id `0`, no loop detection) with an unbounded pool. This is
+	/// what a standalone broadcast (no relay origin) inherits.
+	fn default() -> Self {
+		Self {
+			id: Origin::UNKNOWN,
+			pool: cache::Pool::default(),
+		}
+	}
 }
 
 impl Info {
@@ -871,9 +886,13 @@ impl Producer {
 		}
 	}
 
-	/// The cache pool broadcasts created under this origin inherit.
-	pub fn pool(&self) -> cache::Pool {
-		self.pool.clone()
+	/// This origin's [`Info`] (identity + cache pool), the parent handle a broadcast
+	/// created under this origin carries (see [`broadcast::Info::origin`]).
+	pub fn info(&self) -> Info {
+		Info {
+			id: self.info,
+			pool: self.pool.clone(),
+		}
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -898,7 +917,7 @@ impl Producer {
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<Broadcast, Error> {
 		let producer = broadcast::Info {
-			pool: self.pool.clone(),
+			origin: self.info(),
 			..Default::default()
 		}
 		.produce();

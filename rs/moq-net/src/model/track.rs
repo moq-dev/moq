@@ -629,7 +629,7 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let info = info.into().unwrap_or_default();
-		let pool = broadcast.pool.clone();
+		let pool = broadcast.origin.pool.clone();
 		Self {
 			name: name.into(),
 			broadcast,
@@ -1742,7 +1742,7 @@ impl Request {
 	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = kio::Producer::new(TrackState {
-			pool: broadcast.pool.clone(),
+			pool: broadcast.origin.pool.clone(),
 			..Default::default()
 		});
 		let dynamic = Dynamic::new(name.clone(), state.clone());
@@ -3038,7 +3038,7 @@ mod test {
 	fn pooled_producer(capacity: u64) -> (Producer, cache::Pool) {
 		let pool = cache::Pool::new(capacity);
 		let broadcast = broadcast::Info {
-			pool: pool.clone(),
+			origin: crate::origin::Info::default().with_pool(pool.clone()),
 			..Default::default()
 		};
 		let producer = Producer::new(Arc::new(broadcast), "test", None);

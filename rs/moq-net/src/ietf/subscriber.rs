@@ -470,7 +470,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.expect("an empty hop chain has room for one entry");
 				let broadcast = broadcast::Info {
 					hops,
-					pool: self.origin.pool(),
+					origin: self.origin.info(),
 				}
 				.produce();
 

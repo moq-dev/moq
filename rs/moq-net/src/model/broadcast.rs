@@ -1,4 +1,4 @@
-use crate::{cache, track};
+use crate::track;
 use std::{
 	collections::{HashMap, VecDeque, hash_map},
 	sync::Arc,
@@ -20,18 +20,19 @@ pub struct Info {
 	/// shortest-path preference.
 	pub hops: OriginList,
 
-	// The cache pool every track (and its groups) under this broadcast inherits,
-	// threaded down the ownership chain via the `Arc<Info>` a track holds. Not part
-	// of the public surface: a relay configures it once on its `origin::Info` and it
-	// flows origin -> broadcast -> track -> group. Unbounded by default.
-	pub(crate) pool: cache::Pool,
+	/// The origin this broadcast belongs to (its identity, and the cache pool its
+	/// tracks and groups inherit). A track reaches its pool by walking up this link,
+	/// so the pool has a single home on the origin rather than being copied per
+	/// broadcast. Defaults to an unknown origin with an unbounded pool (a standalone
+	/// broadcast with no relay origin).
+	pub origin: super::origin::Info,
 }
 
 impl Default for Info {
 	fn default() -> Self {
 		Self {
 			hops: OriginList::new(),
-			pool: cache::Pool::default(),
+			origin: super::origin::Info::default(),
 		}
 	}
 }

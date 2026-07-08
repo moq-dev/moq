@@ -448,7 +448,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let broadcast = broadcast::Info {
 			hops,
-			pool: self.origin.pool(),
+			origin: self.origin.info(),
 		}
 		.produce();
 
@@ -504,7 +504,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let broadcast = broadcast::Info {
 			hops,
-			pool: self.origin.pool(),
+			origin: self.origin.info(),
 		}
 		.produce();
 		let dynamic = broadcast.dynamic();
