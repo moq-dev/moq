@@ -291,7 +291,7 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcast = new Moq.broadcast.Producer();
+		const viewerBroadcast = new Moq.Broadcast.Producer();
 		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
 		effect.cleanup(() => {
 			viewerBroadcast.close();
@@ -315,7 +315,7 @@ export class Game {
 	}
 
 	#runCommandTrack(
-		track: Moq.track.Producer,
+		track: Moq.Track.Producer,
 		producer: Json.Producer<Record<string, unknown>>,
 		effect: Moq.Signals.Effect,
 	) {

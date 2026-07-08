@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { group as NetGroup, track as NetTrack, Time, Varint } from "@moq/net";
+import { Group, Time, Track, Varint } from "@moq/net";
 import type { InitSegment } from "./cmaf/decode.ts";
 import { encodeDataSegment } from "./cmaf/encode.ts";
 import { Format as CmafFormat } from "./cmaf/format.ts";
@@ -135,8 +135,8 @@ function encodeLegacy(timestamp: Time.Micro): Uint8Array {
 	return data;
 }
 
-function writeGroupWithLegacyFrames(track: NetTrack.Producer, sequence: number, timestamps: Time.Micro[]) {
-	const group = new NetGroup.Producer(sequence);
+function writeGroupWithLegacyFrames(track: Track.Producer, sequence: number, timestamps: Time.Micro[]) {
+	const group = new Group.Producer(sequence);
 	for (const ts of timestamps) {
 		group.writeFrame({ data: encodeLegacy(ts), timestamp: Time.Timestamp.now() });
 	}
@@ -163,7 +163,7 @@ async function drainFrames(
 }
 
 test("Consumer delivers frames from a single group", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
@@ -177,7 +177,7 @@ test("Consumer delivers frames from a single group", async () => {
 });
 
 test("Consumer forces keyframe true at index 0", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
@@ -201,10 +201,10 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 		},
 	};
 
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: multiFormat, latency: 500 as Time.Milli });
 
-	const group = new NetGroup.Producer(0);
+	const group = new Group.Producer(0);
 	group.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // first MoQ frame → 3 samples
 	group.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // second MoQ frame → 3 samples
 	group.close();
@@ -229,19 +229,19 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 		},
 	};
 
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: truncatingFormat, latency: 500 as Time.Milli });
 
-	// NetGroup.Producer 0: 2 valid frames then a tail-truncating error.
-	const g0 = new NetGroup.Producer(0);
+	// Group.Producer 0: 2 valid frames then a tail-truncating error.
+	const g0 = new Group.Producer(0);
 	g0.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
 	g0.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() });
 	g0.writeFrame({ data: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
 	g0.close();
 	track.writeGroup(g0);
 
-	// NetGroup.Producer 1 decodes cleanly.
-	const g1 = new NetGroup.Producer(1);
+	// Group.Producer 1 decodes cleanly.
+	const g1 = new Group.Producer(1);
 	g1.writeFrame({ data: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
 	g1.close();
 	track.writeGroup(g1);
@@ -256,7 +256,7 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 });
 
 test("Consumer close returns undefined from next()", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	const promise = consumer.next();
@@ -267,7 +267,7 @@ test("Consumer close returns undefined from next()", async () => {
 });
 
 test("Consumer throws on concurrent next() calls", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	// First call blocks waiting for data
@@ -279,7 +279,7 @@ test("Consumer throws on concurrent next() calls", async () => {
 });
 
 test("Consumer skips groups via PTS-span when over latency", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	// Zero latency = skip everything that's not the latest
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 0 as Time.Milli });
 
@@ -299,7 +299,7 @@ test("Consumer skips groups via PTS-span when over latency", async () => {
 // --- Ordering ---
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 2, [60_000 as Time.Micro]);
@@ -318,16 +318,16 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 });
 
 test("Consumer rejects stale groups", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
-	// NetGroup.Producer 5 arrives first (sets active = 5)
+	// Group.Producer 5 arrives first (sets active = 5)
 	writeGroupWithLegacyFrames(track, 5, [0 as Time.Micro]);
 	await new Promise((resolve) => setTimeout(resolve, 50));
 
-	// NetGroup.Producer 3 is stale
+	// Group.Producer 3 is stale
 	writeGroupWithLegacyFrames(track, 3, [100_000 as Time.Micro]);
-	// NetGroup.Producer 6 is valid
+	// Group.Producer 6 is valid
 	writeGroupWithLegacyFrames(track, 6, [30_000 as Time.Micro]);
 	track.close();
 
@@ -340,10 +340,10 @@ test("Consumer rejects stale groups", async () => {
 	consumer.close();
 });
 
-// --- NetGroup.Producer boundary signals ---
+// --- Group.Producer boundary signals ---
 
 test("Consumer next() returns group-done signals", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
@@ -374,7 +374,7 @@ test("Consumer next() returns group-done signals", async () => {
 // --- Buffered signal ---
 
 test("Consumer buffered signal updates as frames arrive", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	expect(consumer.buffered.peek()).toEqual([]);
@@ -396,7 +396,7 @@ test("Consumer buffered signal updates as frames arrive", async () => {
 // --- Gap recovery ---
 
 test("Consumer recovers from gap in group sequence numbers", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 100 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 20_000 as Time.Micro]);
@@ -426,10 +426,10 @@ test("Consumer handles empty decode result without deadlock", async () => {
 		},
 	};
 
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: emptyThenValid, latency: 500 as Time.Milli });
 
-	const group = new NetGroup.Producer(0);
+	const group = new Group.Producer(0);
 	group.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // empty decode
 	group.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // valid decode
 	group.close();
@@ -449,13 +449,13 @@ test("Consumer handles empty decode result without deadlock", async () => {
 // --- CMAF through Consumer ---
 
 test("Consumer with CmafFormat delivers correct timestamps", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new CmafFormat(TEST_INIT),
 		latency: 500 as Time.Milli,
 	});
 
-	const group = new NetGroup.Producer(0);
+	const group = new Group.Producer(0);
 	group.writeFrame({
 		data: encodeDataSegment({
 			data: new Uint8Array([0xca, 0xfe]),
@@ -521,16 +521,16 @@ const durationFormat: ContainerFormat = {
 };
 
 test("Consumer duration-skips a stalled group once it is covered", async () => {
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	// Latency dwarfs the gap, so only duration coverage can trigger the skip.
 	const consumer = new Consumer(track.subscribe(), { format: durationFormat, latency: 10_000 as Time.Milli });
 
-	// NetGroup.Producer 0: one frame at ts=0 lasting 33ms, never closed (stalled).
-	const g0 = new NetGroup.Producer(0);
+	// Group.Producer 0: one frame at ts=0 lasting 33ms, never closed (stalled).
+	const g0 = new Group.Producer(0);
 	g0.writeFrame({ data: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
 
-	// NetGroup.Producer 1: closed, starts exactly where group 0's frame ends.
-	const g1 = new NetGroup.Producer(1);
+	// Group.Producer 1: closed, starts exactly where group 0's frame ends.
+	const g1 = new Group.Producer(1);
 	g1.writeFrame({ data: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
 
@@ -559,15 +559,15 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 		},
 	};
 
-	const track = new NetTrack.Producer("test");
+	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: shortFormat, latency: 10_000 as Time.Milli });
 
-	// NetGroup.Producer 0 stays open and later receives a second frame; nothing covers the gap,
+	// Group.Producer 0 stays open and later receives a second frame; nothing covers the gap,
 	// so that late frame must survive rather than being skipped.
-	const g0 = new NetGroup.Producer(0);
+	const g0 = new Group.Producer(0);
 	g0.writeFrame({ data: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
 
-	const g1 = new NetGroup.Producer(1);
+	const g1 = new Group.Producer(1);
 	g1.writeFrame({ data: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
 

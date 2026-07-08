@@ -54,7 +54,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 }
 
 /**
- * A request for a track the peer wants, yielded by `broadcast.Producer.requested`.
+ * A request for a track the peer wants, yielded by `Broadcast.Producer.requested`.
  *
  * @public
  */
@@ -432,7 +432,7 @@ export class Producer {
 /**
  * The read side of a live track subscription, mirroring the Rust `Subscriber`.
  *
- * Obtained from `broadcast.Consumer.subscribe` / `track.Consumer.subscribe`, or from
+ * Obtained from `Broadcast.Consumer.subscribe` / `Track.Consumer.subscribe`, or from
  * {@link Producer.subscribe} for an in-process track. Reads the groups a
  * {@link Producer} on the same underlying state writes.
  */
