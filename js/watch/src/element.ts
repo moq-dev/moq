@@ -1,5 +1,4 @@
 import type * as Catalog from "@moq/hang/catalog";
-import * as Util from "@moq/hang/util";
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -47,19 +46,6 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
-// If the video stays stalled while the broadcast is still "live" for this long, the WebTransport
-// session has likely wedged silently (seen on Safari, where it stops delivering incoming streams
-// without settling `WebTransport.closed`), so force a reconnect. Backs off up to the max on repeats
-// so a genuinely idle-but-live broadcast doesn't reconnect in a tight loop.
-const STALL_RECOVERY_MS = 10_000;
-const STALL_RECOVERY_MAX_MS = 60_000;
-
-// On becoming visible while stalled, wait this long before forcing a reconnect. A briefly-suspended
-// Safari WebTransport (tab occluded by a window resize, or a quick tab-switch) usually resumes on its
-// own within a few hundred ms; reconnecting instantly turns that into a needless multi-second reload.
-// A frame arriving within the window clears `stalled` and the reconnect never fires.
-const VISIBILITY_RECOVERY_GRACE_MS = 1_000;
 
 // An optional web component that wraps a <canvas>
 export default class MoqWatch extends HTMLElement {
@@ -109,9 +95,6 @@ export default class MoqWatch extends HTMLElement {
 
 	// Stashed volume to restore on unmute.
 	#unmuteVolume = 0.5;
-
-	// Current stall-recovery delay; grows on repeated forced reconnects, resets when frames flow.
-	#stallDelay = STALL_RECOVERY_MS;
 
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
@@ -169,14 +152,6 @@ export default class MoqWatch extends HTMLElement {
 				if ((event as PageTransitionEvent).persisted) this.#suspended.set(false);
 			});
 		});
-
-		// Recover from a silently-wedged connection (see STALL_RECOVERY_MS). Safari-only: a backgrounded
-		// WebKit tab can leave playback stalled with no frames arriving, while Chrome/Firefox recover on
-		// their own and would be destabilized by reconnecting on any >10s stall.
-		if (Util.Hacks.isSafari) {
-			this.signals.run(this.#runStallRecovery.bind(this));
-			this.signals.run(this.#runVisibilityRecovery.bind(this));
-		}
 
 		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
 		// the policy lives here: muting stashes and zeroes the volume; a zero volume
@@ -316,52 +291,6 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
-	}
-
-	// Force a reconnect if playback stalls while the broadcast is still live: the WebTransport session
-	// can wedge silently (Safari) so `connection.closed` never rejects and the reconnect loop never
-	// fires. A new frame re-runs this effect and cancels the timer, so it only fires on a real stall.
-	#runStallRecovery(effect: Effect): void {
-		const stalled = effect.get(this.backend.video.output.stalled);
-		if (!stalled) {
-			// Healthy (or nothing playing): reset the backoff.
-			this.#stallDelay = STALL_RECOVERY_MS;
-			return;
-		}
-
-		// Only act while live; "loading"/"offline" recovery is owned by the normal connect path.
-		if (effect.get(this.broadcast.output.status) !== "live") return;
-
-		effect.timer(() => {
-			this.connection.reconnect();
-			this.#stallDelay = Math.min(this.#stallDelay * 2, STALL_RECOVERY_MAX_MS);
-		}, this.#stallDelay);
-	}
-
-	// Fast path for the Safari tab-switch wedge: returning to a hidden tab often leaves playback stalled
-	// against a suspended session. On becoming visible while stalled and still live, force a
-	// reconnect, but only after a short grace period: a briefly-suspended session (a quick tab-switch, or
-	// the tab occluded by a window resize) usually resumes on its own, so we re-check at the deadline and
-	// reconnect only if it's still wedged. A frame arriving first clears `stalled` and the timer no-ops.
-	#runVisibilityRecovery(effect: Effect): void {
-		// Subscribe to #enabled so this effect only listens while connected AND subscribes to a signal,
-		// which avoids the "will never rerun" warning for an otherwise listener-only effect.
-		if (!effect.get(this.#enabled)) return;
-
-		effect.event(document, "visibilitychange", () => {
-			if (document.hidden) return;
-			if (!this.backend.video.output.stalled.peek()) return;
-			if (this.broadcast.output.status.peek() !== "live") return;
-
-			effect.timer(() => {
-				if (document.hidden) return;
-				if (!this.backend.video.output.stalled.peek()) return;
-				if (this.broadcast.output.status.peek() !== "live") return;
-
-				this.connection.reconnect();
-				this.#stallDelay = STALL_RECOVERY_MS;
-			}, VISIBILITY_RECOVERY_GRACE_MS);
-		});
 	}
 
 	// Parse a single latency bound: absent or "real-time" is adaptive, otherwise a fixed ms value.

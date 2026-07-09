@@ -1,6 +1,7 @@
 import type * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
@@ -26,6 +27,9 @@ export class Connection implements Established {
 
 	// The negotiated protocol version.
 	readonly version: string;
+
+	// The wire transport this session runs over.
+	readonly transport: Transport;
 
 	// The established WebTransport session.
 	#quic: WebTransport;
@@ -67,6 +71,7 @@ export class Connection implements Established {
 	}) {
 		this.url = url;
 		this.version = versionName(version);
+		this.transport = transportOf(quic);
 		this.#quic = quic;
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams

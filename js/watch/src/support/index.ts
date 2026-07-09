@@ -1,3 +1,5 @@
+import * as Util from "@moq/hang/util";
+
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
 const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 
@@ -79,9 +81,10 @@ async function videoDecoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 
 export async function isSupported(): Promise<Full> {
 	return {
-		// Firefox's WebTransport drops server-initiated bidi streams, so we force the
-		// WebSocket fallback. Report "partial" to surface the degraded path in UI.
-		webtransport: typeof WebTransport !== "undefined" ? (isFirefox ? "partial" : "full") : "partial",
+		// Firefox drops server-initiated bidi streams, and reading datagrams kills the session on
+		// Safari, so both are forced onto the WebSocket fallback even though they define
+		// `WebTransport`. Report "partial" to surface the degraded path in UI.
+		webtransport: typeof WebTransport !== "undefined" && !isFirefox && !Util.Hacks.isSafari ? "full" : "partial",
 		audio: {
 			decoding: {
 				aac: await audioDecoderSupported("aac"),

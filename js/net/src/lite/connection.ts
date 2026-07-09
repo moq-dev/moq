@@ -3,6 +3,7 @@ import type * as announce from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
@@ -33,6 +34,9 @@ export class Connection implements Established {
 
 	// The version of the connection as a human-readable string.
 	readonly version: string;
+
+	// The wire transport this session runs over.
+	readonly transport: Transport;
 
 	// The version used for encoding/decoding.
 	#version: Version;
@@ -84,6 +88,7 @@ export class Connection implements Established {
 		this.#session = session;
 		this.version = versionName(version);
 		this.#version = version;
+		this.transport = transportOf(quic);
 
 		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
 		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";
@@ -120,14 +125,16 @@ export class Connection implements Established {
 	close() {
 		this.#closing = true;
 
+		this.#publisher.close();
+		this.#subscriber.close();
+
 		try {
-			this.#publisher.close();
-			this.#subscriber.close();
+			// TODO: For whatever reason, this try/catch doesn't seem to work..?
+			// Because the error that escapes a close is a rejection of `closed`, not a synchronous throw.
+			// It still guards a teardown race (closing an already-closed transport), so keep it.
 			this.#quic.close();
 		} catch {
-			// Teardown races (already-closed transport, etc.) are expected. The abnormal-close signal that
-			// drives reconnect comes from `closed` rejecting, not from a synchronous throw here. (The old
-			// try/catch "didn't work" because the escaping error was a promise rejection, handled elsewhere.)
+			// ignore
 		}
 	}
 

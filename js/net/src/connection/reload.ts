@@ -226,15 +226,6 @@ export class Reload {
 		});
 	}
 
-	/**
-	 * Force the current session to drop and reconnect immediately. Recovers from a session that has
-	 * silently wedged: it stops delivering incoming streams without ever settling `closed`, so the
-	 * reconnect loop cannot detect it on its own. No-op if disabled or no URL is set.
-	 */
-	reconnect() {
-		this.#tick.update((prev) => prev + 1);
-	}
-
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
 	close() {
 		this.signals.close();

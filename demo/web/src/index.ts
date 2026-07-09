@@ -355,6 +355,10 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
+	// Report the transport we actually negotiated: Safari and Firefox always land on WebSocket.
+	const conn = effect.get(connection.established);
+	$("network-transport").textContent = conn?.transport === "websocket" ? "WebSocket" : "WebTransport";
+
 	const video = effect.get(watch.backend.video.output.stats);
 	const audio = effect.get(watch.backend.audio.output.stats);
 	const bytes = (video?.bytesReceived ?? 0) + (audio?.bytesReceived ?? 0);

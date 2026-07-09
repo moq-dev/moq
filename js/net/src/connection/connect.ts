@@ -5,6 +5,7 @@ import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 import { exchangeSetup } from "./handshake.ts";
+import { pickTransport, transportOf } from "./transport.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
@@ -61,20 +62,6 @@ export interface ConnectProps {
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
-// Lowercased UA for the transport quirks below. Empty when navigator is absent
-// (SSR, some worker scopes, bun tests), so every flag is false there.
-const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
-
-// Firefox's WebTransport implementation drops server-initiated bidi streams,
-// breaking publish (the relay opens a subscribe bidi back to us). Force WebSocket.
-// TODO: remove once Firefox fixes incoming bidi delivery.
-const isFirefox = ua.includes("firefox");
-
-// Reading `WebTransport.datagrams.readable` tears down the whole session on Safari, and moq-lite-05
-// always reads it. There is no catchable failure, so keep Safari off WebTransport entirely. Matches
-// Safari-style WebKit: reports "safari" but is not Chrome or an Android WebView, which also carry it.
-const isSafari = ua.includes("safari") && !ua.includes("chrome") && !ua.includes("android");
-
 /**
  * Establishes a connection to a MOQ server.
  *
@@ -89,8 +76,10 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	// Create a cancel promise to kill whichever is still connecting.
 	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
 
+	// `navigator` is absent under SSR, some worker scopes, and bun tests.
+	const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
 	const webtransport =
-		globalThis.WebTransport && !isFirefox && !isSafari
+		pickTransport(userAgent, !!globalThis.WebTransport) === "webtransport"
 			? connectWebTransport(url, cancel, props?.webtransport)
 			: undefined;
 
@@ -122,7 +111,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	if (!session) throw new Error("no transport available");
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
-	if (session instanceof Session) {
+	// Same detection the connection exposes as `Established.transport`, so the log can't disagree with it.
+	if (transportOf(session) === "websocket") {
 		console.warn(url.toString(), "connected via WebSocket");
 		websocketWon.add(url.toString());
 	} else {
