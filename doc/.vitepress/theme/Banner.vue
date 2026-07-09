@@ -2,22 +2,17 @@
 /**
  * Site-wide notice shown at the top of every page.
  *
- * Two standing caveats for readers:
- * 1. The APIs and protocols are pre-1.0 and still change between releases.
- * 2. Most of these pages are AI generated and may be inaccurate.
+ * Reminds readers that MoQ is pre-1.0, so both the APIs/protocols and these
+ * (mostly AI-generated) docs are still in flux.
  */
 </script>
 
 <template>
 	<div class="moq-banner">
 		<p>
-			<strong>Heads up:</strong> MoQ is under active development. The APIs and
-			protocols are still evolving and subject to change without notice.
-		</p>
-		<p>
-			Most of this documentation is currently AI generated and may be
-			incomplete or inaccurate. Please
-			<a href="https://github.com/moq-dev/moq/issues">report anything wrong</a>.
+			<strong>btw:</strong> MoQ is under active development. The APIs and
+			protocols are still evolving and will change. Most of this documentation
+			is AI generated until things get more stable.
 		</p>
 	</div>
 </template>
