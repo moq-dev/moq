@@ -25,9 +25,6 @@ from moq_ffi import (
     MoqAudioFrame as AudioFrame,
 )
 from moq_ffi import (
-    MoqAudioHint as AudioHint,
-)
-from moq_ffi import (
     MoqCatalog as Catalog,
 )
 from moq_ffi import (
@@ -60,7 +57,6 @@ __all__ = [
     "AudioEncoderOutput",
     "AudioFormat",
     "AudioFrame",
-    "AudioHint",
     "Catalog",
     "ConnectionStats",
     "Container",

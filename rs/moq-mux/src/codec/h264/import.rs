@@ -98,7 +98,7 @@ impl<E: CatalogExt> Import<E> {
 		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 		config.container = hang::catalog::Container::Legacy;
 
-		self.apply_config(config)?;
+		self.apply_config(config);
 		Ok(())
 	}
 
@@ -177,7 +177,7 @@ impl<E: CatalogExt> Import<E> {
 		config.container = hang::catalog::Container::Legacy;
 
 		self.last_sps = Some(sps_nal.clone());
-		self.apply_config(config)?;
+		self.apply_config(config);
 		Ok(())
 	}
 
@@ -185,14 +185,13 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
 	/// rendition; there are no fixed tracks to reject a reconfiguration.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
 		if self.config.as_ref() == Some(&config) {
-			return Ok(());
+			return;
 		}
 		tracing::debug!(?config, "starting H.264 track");
 		self.rendition.set(config.clone());
 		self.config = Some(config);
-		Ok(())
 	}
 
 	/// Write split frames to the track, resolving the avc3 config from the first

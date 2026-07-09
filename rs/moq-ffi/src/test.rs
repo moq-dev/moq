@@ -14,7 +14,6 @@ fn media_init(format: &str, data: Vec<u8>) -> MoqInit {
 	MoqInit {
 		format: format.to_string(),
 		data,
-		audio: None,
 		video: None,
 	}
 }

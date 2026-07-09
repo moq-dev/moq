@@ -1,41 +1,33 @@
 use bytes::Bytes;
 
-use crate::catalog::{AudioHint, VideoHint};
+use crate::catalog::VideoHint;
 
-/// What a single-track importer needs to start: a format, its init bytes, and optional catalog fields.
+/// What a single-track importer needs to start: a format, its init bytes, and optional video fields.
 ///
-/// `format` selects the codec parser (e.g. `"avc3"`, `"opus"`). `data` carries the usual init bytes
-/// (an avcC record, an OpusHead, ...) when the caller has them. The [`audio`](Self::audio) /
-/// [`video`](Self::video) hints let the caller pin catalog fields the stream can't reveal (bitrate,
-/// language) or publish the catalog before the first frame; see [`AudioHint`] / [`VideoHint`].
+/// `format` selects the codec parser (e.g. `"avc3"`, `"opus"`). `data` carries the codec init bytes
+/// (an avcC record, an OpusHead, an AudioSpecificConfig, ...). Audio formats need those bytes up
+/// front (an audio importer can't resolve its config from frames); video formats may resolve lazily
+/// from the stream, and a [`video`](Self::video) hint can pin fields the stream can't reveal
+/// (bitrate) or publish the catalog before the first keyframe. See [`VideoHint`].
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Init {
 	/// The media format, e.g. `"avc3"`, `"opus"`, or `"aac"`.
 	pub format: String,
-	/// Codec init bytes, empty when the caller relies on a hint or in-band config.
+	/// Codec init bytes. Required for audio; may be empty for a video format that resolves in band.
 	pub data: Bytes,
-	/// Caller-provided fields for an audio track.
-	pub audio: Option<AudioHint>,
 	/// Caller-provided fields for a video track.
 	pub video: Option<VideoHint>,
 }
 
 impl Init {
-	/// An init with just a format and its bytes (either may be empty).
+	/// An init with just a format and its bytes (data may be empty for a lazy video format).
 	pub fn new(format: impl Into<String>, data: impl Into<Bytes>) -> Self {
 		Self {
 			format: format.into(),
 			data: data.into(),
-			audio: None,
 			video: None,
 		}
-	}
-
-	/// Attach caller-provided audio catalog fields.
-	pub fn with_audio(mut self, hint: AudioHint) -> Self {
-		self.audio = Some(hint);
-		self
 	}
 
 	/// Attach caller-provided video catalog fields.

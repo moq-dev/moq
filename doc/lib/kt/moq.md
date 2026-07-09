@@ -78,7 +78,7 @@ import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
-    val audio = broadcast.publishMedia("opus", opusInitBytes)
+    val audio = broadcast.publishMedia(MoqInit(format = "opus", data = opusInitBytes, video = null))
 
     moq.announce("my-stream", broadcast)
 

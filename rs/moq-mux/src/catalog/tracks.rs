@@ -19,7 +19,8 @@ pub trait Kind: sealed::Sealed + 'static {
 	/// The catalog config type carried by this kind ([`VideoConfig`](hang::catalog::VideoConfig)
 	/// or [`AudioConfig`](hang::catalog::AudioConfig)).
 	type Config;
-	/// The all-optional caller-provided overlay for this kind ([`VideoHint`] or [`AudioHint`]).
+	/// The caller-provided overlay for this kind: [`VideoHint`] for video, `()` for audio (which takes
+	/// a complete [`AudioConfig`](hang::catalog::AudioConfig) instead).
 	type Hint: Clone + Default;
 
 	#[doc(hidden)]
@@ -49,32 +50,16 @@ pub enum Audio {}
 impl sealed::Sealed for Video {}
 impl sealed::Sealed for Audio {}
 
-/// Caller-provided catalog fields for an audio track: a starting point for what the importer detects.
+/// Caller-provided catalog fields for a video track: a starting point for what the importer detects.
 ///
-/// Every field is optional and fills only a gap the stream leaves. A value the stream reveals (codec,
-/// sample rate, channel count, ...) always wins, so a detected change just updates the catalog rather
-/// than conflicting. When the codec, sample rate, and channel count are all present the importer
-/// publishes the catalog before the first frame instead of waiting to parse it. Use it for fields the
-/// stream can't reveal (bitrate, language) or to skip that wait.
-#[derive(Clone, Default, Debug, PartialEq)]
-#[non_exhaustive]
-pub struct AudioHint {
-	/// The audio codec.
-	pub codec: Option<hang::catalog::AudioCodec>,
-	/// The sample rate in Hz.
-	pub sample_rate: Option<u32>,
-	/// The number of audio channels.
-	pub channel_count: Option<u32>,
-	/// The maximum bitrate in bits per second.
-	pub bitrate: Option<u64>,
-	/// The maximum jitter before the next frame is emitted.
-	pub jitter: Option<Duration>,
-}
-
-/// Caller-provided catalog fields for a video track, overlaid onto what the importer detects.
+/// Every field is optional and fills only a gap the stream leaves; a value the stream reveals (the
+/// dimensions from an SPS, ...) always wins, so a detected change just updates the catalog. A
+/// [`codec`](Self::codec) alone is enough to publish the catalog before the first keyframe (the
+/// decoder config then arrives in band). Use it for fields the stream can't reveal (bitrate) or to
+/// skip that wait.
 ///
-/// The video counterpart of [`AudioHint`]. A [`codec`](Self::codec) alone is enough to publish the
-/// catalog before the first keyframe (the decoder config then arrives in band).
+/// Audio has no equivalent: an audio importer can't resolve its config from frames, so it takes a
+/// complete [`AudioConfig`](hang::catalog::AudioConfig) up front instead of a hint.
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct VideoHint {
@@ -103,32 +88,6 @@ pub struct VideoHint {
 fn fill<T>(slot: &mut Option<T>, value: Option<T>) {
 	if slot.is_none() {
 		*slot = value;
-	}
-}
-
-impl AudioHint {
-	/// Fill a detected audio config's absent optional fields from these hints.
-	///
-	/// Only the gaps: the codec, sample rate, and channel count come from the stream (or seed a
-	/// [`to_config`](Self::to_config) publish), and a value the stream detects is left untouched.
-	pub fn apply(&self, config: &mut hang::catalog::AudioConfig) {
-		fill(&mut config.bitrate, self.bitrate);
-		fill(&mut config.jitter, self.jitter);
-	}
-
-	/// Build a config from these fields alone, or `None` if the codec, sample rate, or channel
-	/// count is missing. Used to publish the catalog before the stream is parsed.
-	pub fn to_config(&self) -> Option<hang::catalog::AudioConfig> {
-		let (Some(codec), Some(sample_rate), Some(channel_count)) =
-			(self.codec.clone(), self.sample_rate, self.channel_count)
-		else {
-			return None;
-		};
-
-		let mut config = hang::catalog::AudioConfig::new(codec, sample_rate, channel_count);
-		config.container = hang::catalog::Container::Legacy;
-		self.apply(&mut config);
-		Some(config)
 	}
 }
 
@@ -189,7 +148,9 @@ impl Kind for Video {
 
 impl Kind for Audio {
 	type Config = hang::catalog::AudioConfig;
-	type Hint = AudioHint;
+	// Audio has no hint: importers publish a complete `AudioConfig` (see the crate docs on why audio
+	// is eager while video is lazy), so there's nothing to overlay.
+	type Hint = ();
 
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
 		catalog.audio.renditions.insert(name.to_string(), config);
@@ -210,9 +171,7 @@ impl Kind for Audio {
 		&mut config.bitrate
 	}
 
-	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) {
-		hint.apply(config);
-	}
+	fn apply_hint(_config: &mut Self::Config, _hint: &Self::Hint) {}
 }
 
 /// A clonable reservation context handed to importers so they declare their tracks up front.
@@ -242,11 +201,11 @@ impl<E: CatalogExt> Reserved<E> {
 		Rendition::new(self.clone(), name, K::Hint::default())
 	}
 
-	/// Reserve a rendition seeded with caller-provided catalog fields.
+	/// Reserve a video rendition seeded with caller-provided catalog fields.
 	///
-	/// The `hint` is carried on the returned [`Rendition`]: every [`set`](Rendition::set) validates
-	/// the detected config against it and fills the gaps it declares. See [`AudioHint`] / [`VideoHint`].
-	pub fn init_with_hint<K: Kind>(&self, name: impl Into<String>, hint: K::Hint) -> Rendition<E, K> {
+	/// The `hint` is carried on the returned [`Rendition`]: every [`set`](Rendition::set) fills the
+	/// gaps it declares (a detected value wins). See [`VideoHint`].
+	pub fn video_with_hint(&self, name: impl Into<String>, hint: VideoHint) -> Rendition<E, Video> {
 		Rendition::new(self.clone(), name, hint)
 	}
 
@@ -255,19 +214,9 @@ impl<E: CatalogExt> Reserved<E> {
 		self.init::<Video>(name)
 	}
 
-	/// Reserve a video rendition seeded with a [`VideoHint`]; shorthand for [`init_with_hint`](Self::init_with_hint).
-	pub fn video_with_hint(&self, name: impl Into<String>, hint: VideoHint) -> Rendition<E, Video> {
-		self.init_with_hint::<Video>(name, hint)
-	}
-
 	/// Reserve an audio rendition; shorthand for [`init::<Audio>`](Self::init).
 	pub fn audio(&self, name: impl Into<String>) -> Rendition<E, Audio> {
 		self.init::<Audio>(name)
-	}
-
-	/// Reserve an audio rendition seeded with an [`AudioHint`]; shorthand for [`init_with_hint`](Self::init_with_hint).
-	pub fn audio_with_hint(&self, name: impl Into<String>, hint: AudioHint) -> Rendition<E, Audio> {
-		self.init_with_hint::<Audio>(name, hint)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).

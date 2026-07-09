@@ -6,8 +6,8 @@
 //! directly rather than fallibly.
 
 use crate::Result;
+use crate::catalog::VideoHint;
 use crate::catalog::hang::CatalogExt;
-use crate::catalog::{AudioHint, VideoHint};
 
 pub use super::Init;
 
@@ -15,16 +15,6 @@ pub use super::Init;
 /// carries no extra parameters (VP8), so a hint with a codec can publish before the first frame.
 fn video_hint(init: &Init, default_codec: Option<hang::catalog::VideoCodec>) -> VideoHint {
 	let mut hint = init.video.clone().unwrap_or_default();
-	if hint.codec.is_none() {
-		hint.codec = default_codec;
-	}
-	hint
-}
-
-/// The caller-provided audio fields for `init`, defaulting the codec from the format for the
-/// parameter-less codecs (Opus, FLAC, MP3).
-fn audio_hint(init: &Init, default_codec: Option<hang::catalog::AudioCodec>) -> AudioHint {
-	let mut hint = init.audio.clone().unwrap_or_default();
 	if hint.codec.is_none() {
 		hint.codec = default_codec;
 	}
@@ -146,11 +136,11 @@ impl<E: CatalogExt> Track<E> {
 	///
 	/// The caller reserves the track (by name) with
 	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
-	/// the importer accepts it here, which is where the track's timescale is set. The catalog
-	/// rendition is registered once the codec config is resolved, or up front from the [`Init`] hints
-	/// when they carry enough to publish (see [`AudioHint`] / [`VideoHint`]).
+	/// the importer accepts it here, which is where the track's timescale is set. An audio format
+	/// publishes its rendition from the init bytes; a video format resolves in band, publishing up
+	/// front when the [`Init`] video hint carries enough (see [`VideoHint`]).
 	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, init: Init) -> Result<Self> {
-		use hang::catalog::{AudioCodec, VideoCodec};
+		use hang::catalog::VideoCodec;
 
 		// Accept at the legacy microsecond timescale, matching the frame timestamps
 		// the container stamps. A codec-specific timescale (e.g. the opus sample
@@ -185,29 +175,24 @@ impl<E: CatalogExt> Track<E> {
 				import.initialize(data)?;
 				TrackKind::Vp9(import)
 			}
+			// Audio can't resolve its config from frames, so it needs the init bytes up front (an
+			// OpusHead, AudioSpecificConfig, ...); `codec::config` errors when they're missing or bad.
 			"aac" => {
-				let mut import = crate::codec::aac::Import::new(track, reserved, audio_hint(&init, None));
-				import.initialize(data)?;
-				TrackKind::Aac(import)
+				let config = crate::codec::aac::config(data)?;
+				TrackKind::Aac(crate::codec::aac::Import::new(track, reserved, config))
 			}
 			"opus" => {
-				let mut import =
-					crate::codec::opus::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Opus)));
-				import.initialize(data)?;
-				TrackKind::Opus(import)
+				let config = crate::codec::opus::config(data)?;
+				TrackKind::Opus(crate::codec::opus::Import::new(track, reserved, config))
 			}
 			"flac" => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
-				let mut import =
-					crate::codec::flac::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Flac)));
-				import.initialize(data)?;
-				TrackKind::Flac(import)
+				let config = crate::codec::flac::config(data)?;
+				TrackKind::Flac(crate::codec::flac::Import::new(track, reserved, config))
 			}
 			"mp3" => {
-				let mut import =
-					crate::codec::mp3::Import::new(track, reserved, audio_hint(&init, Some(AudioCodec::Mp3)));
-				import.initialize(data)?;
-				TrackKind::Mp3(import)
+				let config = crate::codec::mp3::config(data)?;
+				TrackKind::Mp3(crate::codec::mp3::Import::new(track, reserved, config))
 			}
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
@@ -765,71 +750,27 @@ mod tests {
 			.unwrap();
 	}
 
-	/// A hint with the sample rate and channel count publishes the audio catalog before any frame,
-	/// even with no init bytes (the codec comes from the format).
+	/// An audio format publishes its catalog immediately from the init bytes.
 	#[tokio::test(start_paused = true)]
-	async fn audio_hint_publishes_before_first_frame() {
+	async fn audio_publishes_from_init() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
-		let hint = crate::catalog::AudioHint {
-			sample_rate: Some(48_000),
-			channel_count: Some(2),
-			bitrate: Some(96_000),
-			..Default::default()
-		};
-		let _import = Track::new(
-			request,
-			catalog.reserve(),
-			Init::new("opus", Vec::new()).with_audio(hint),
-		)
-		.unwrap();
+		let _import = Track::new(request, catalog.reserve(), Init::new("opus", opus_head())).unwrap();
 
 		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
 		assert_eq!(audio.codec.to_string(), "opus");
 		assert_eq!(audio.sample_rate, 48_000);
 		assert_eq!(audio.channel_count, 2);
-		assert_eq!(audio.bitrate, Some(96_000));
 	}
 
-	/// A hint carries a field the stream can't reveal (bitrate) through onto the detected config.
+	/// An audio format with no init bytes errors up front (audio can't resolve its config from frames),
+	/// rather than registering a track that never publishes.
 	#[tokio::test(start_paused = true)]
-	async fn audio_hint_bitrate_survives_detection() {
+	async fn audio_without_init_errors() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
-		let hint = crate::catalog::AudioHint {
-			bitrate: Some(64_000),
-			..Default::default()
-		};
-		let _import = Track::new(
-			request,
-			catalog.reserve(),
-			Init::new("opus", opus_head()).with_audio(hint),
-		)
-		.unwrap();
-
-		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
-		assert_eq!(audio.sample_rate, 48_000, "detected from the OpusHead");
-		assert_eq!(audio.bitrate, Some(64_000), "carried from the hint");
-	}
-
-	/// The value the stream detects wins over a hint that guessed wrong; the catalog just updates.
-	#[tokio::test(start_paused = true)]
-	async fn detected_value_overrides_hint() {
-		let (mut broadcast, catalog) = new_broadcast();
-		let request = broadcast.reserve_track("audio").unwrap();
-		let hint = crate::catalog::AudioHint {
-			sample_rate: Some(44_100), // the OpusHead says 48000
-			..Default::default()
-		};
-		let _import = Track::new(
-			request,
-			catalog.reserve(),
-			Init::new("opus", opus_head()).with_audio(hint),
-		)
-		.unwrap();
-
-		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
-		assert_eq!(audio.sample_rate, 48_000, "the detected sample rate wins over the hint");
+		let result = Track::new(request, catalog.reserve(), Init::new("opus", Vec::new()));
+		assert!(result.is_err(), "opus with no OpusHead should error, not hang");
 	}
 
 	/// A video codec with no extra parameters (VP8) publishes the catalog before the first key frame.

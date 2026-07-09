@@ -74,7 +74,7 @@ impl<E: CatalogExt> Import<E> {
 		// fixed 4-byte header is read here, so don't gate on a larger size or a short
 		// out-of-band record falls through to raw-OBU scanning and leaves the config unset.
 		if data.len() >= 4 && data[0] == 0x81 {
-			self.init_from_av1c(data)?;
+			self.init_from_av1c(data);
 			return Ok(());
 		}
 
@@ -85,7 +85,7 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn init_from_av1c(&mut self, data: &[u8]) -> Result<()> {
+	fn init_from_av1c(&mut self, data: &[u8]) {
 		let seq_profile = (data[1] >> 5) & 0x07;
 		let seq_level_idx = data[1] & 0x1F;
 		let tier = ((data[2] >> 7) & 0x01) == 1;
@@ -108,11 +108,10 @@ impl<E: CatalogExt> Import<E> {
 			full_range: false,
 		});
 		config.container = hang::catalog::Container::Legacy;
-		self.apply_config(config)?;
-		Ok(())
+		self.apply_config(config);
 	}
 
-	fn init(&mut self, seq_header: &SequenceHeaderObu) -> Result<()> {
+	fn init(&mut self, seq_header: &SequenceHeaderObu) {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_header.seq_profile,
 			level: seq_header
@@ -143,13 +142,12 @@ impl<E: CatalogExt> Import<E> {
 		config.coded_width = Some(seq_header.max_frame_width as u32);
 		config.coded_height = Some(seq_header.max_frame_height as u32);
 		config.container = hang::catalog::Container::Legacy;
-		self.apply_config(config)?;
-		Ok(())
+		self.apply_config(config);
 	}
 
 	/// Minimal config when sequence-header parsing fails, so the stream can still
 	/// flow (the catalog just won't carry full codec info).
-	fn init_minimal(&mut self) -> Result<()> {
+	fn init_minimal(&mut self) {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: 0,
 			level: 0,
@@ -165,22 +163,20 @@ impl<E: CatalogExt> Import<E> {
 			full_range: false,
 		});
 		config.container = hang::catalog::Container::Legacy;
-		self.apply_config(config)?;
-		Ok(())
+		self.apply_config(config);
 	}
 
 	/// Apply a resolved config, updating the catalog rendition in place.
 	///
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks
 	/// to reject a reconfiguration.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
 		if self.config.as_ref() == Some(&config) {
-			return Ok(());
+			return;
 		}
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
 		self.config = Some(config);
-		Ok(())
 	}
 
 	/// Resolve the config from a sequence-header OBU, falling back to a minimal
@@ -199,10 +195,11 @@ impl<E: CatalogExt> Import<E> {
 			Ok(seq_header) => self.init(&seq_header),
 			Err(_) if self.config.is_none() => {
 				tracing::debug!("sequence header parse failed, using minimal config");
-				self.init_minimal()
+				self.init_minimal();
 			}
-			Err(_) => Ok(()),
+			Err(_) => {}
 		}
+		Ok(())
 	}
 
 	/// A watch-only handle to this track's subscriber demand.

@@ -76,53 +76,40 @@ pub struct MoqFrame {
 	pub keyframe: bool,
 }
 
-/// Caller-provided audio catalog fields for [`MoqInit`].
-///
-/// Every field is optional and authoritative: the importer fills the rest from the encoded stream
-/// and errors if a value it detects contradicts one set here. The codec comes from the [`MoqInit`]
-/// format (and the init bytes); providing the sample rate and channel count lets the catalog publish
-/// before the first frame.
-#[derive(Clone, Default, uniffi::Record)]
-pub struct MoqAudioHint {
-	pub sample_rate: Option<u32>,
-	pub channel_count: Option<u32>,
-	pub bitrate: Option<u64>,
-}
-
 /// Caller-provided video catalog fields for [`MoqInit`].
 ///
-/// The video counterpart of [`MoqAudioHint`]; see it for the fill-and-validate semantics.
+/// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.
+/// Publishing the catalog before the first keyframe needs at least the codec, which comes from the
+/// [`MoqInit`] format. Audio has no equivalent: an audio format resolves entirely from its init bytes.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoHint {
+	/// The encoded pixel dimensions.
 	pub coded: Option<MoqDimensions>,
+	/// The display aspect ratio.
 	pub display_aspect: Option<MoqDimensions>,
+	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
+	/// The frame rate in frames per second.
 	pub framerate: Option<f64>,
+	/// Whether the decoder should optimize for latency.
 	pub optimize_for_latency: Option<bool>,
 }
 
-/// What a single-track media publish needs: a format, its init bytes, and optional catalog fields.
+/// What a single-track media publish needs: a format, its init bytes, and optional video fields.
 ///
 /// `format` selects the codec (e.g. `"opus"`, `"avc3"`); `data` carries the codec init bytes (an
-/// OpusHead, an avcC, ...) or is empty. The [`audio`](Self::audio) / [`video`](Self::video) hints
-/// pin catalog fields the stream can't reveal (bitrate) or publish the catalog before the first
-/// frame. See [`MoqBroadcastProducer::publish_media`](crate::producer::MoqBroadcastProducer::publish_media).
+/// OpusHead, an avcC, an AudioSpecificConfig, ...). Audio formats need those bytes up front; video
+/// formats may resolve in band, and a [`video`](Self::video) hint pins catalog fields the stream
+/// can't reveal (bitrate) or publishes the catalog before the first keyframe. See
+/// [`MoqBroadcastProducer::publish_media`](crate::producer::MoqBroadcastProducer::publish_media).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqInit {
+	/// The media format, e.g. `"opus"`, `"avc3"`, or `"aac"`.
 	pub format: String,
+	/// Codec init bytes. Required for audio; may be empty for a video format that resolves in band.
 	pub data: Vec<u8>,
-	pub audio: Option<MoqAudioHint>,
+	/// Caller-provided fields for a video track.
 	pub video: Option<MoqVideoHint>,
-}
-
-impl From<MoqAudioHint> for moq_mux::catalog::AudioHint {
-	fn from(hint: MoqAudioHint) -> Self {
-		let mut out = moq_mux::catalog::AudioHint::default();
-		out.sample_rate = hint.sample_rate;
-		out.channel_count = hint.channel_count;
-		out.bitrate = hint.bitrate;
-		out
-	}
 }
 
 impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
@@ -142,7 +129,6 @@ impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
 impl From<MoqInit> for moq_mux::import::Init {
 	fn from(init: MoqInit) -> Self {
 		let mut out = moq_mux::import::Init::new(init.format, init.data);
-		out.audio = init.audio.map(Into::into);
 		out.video = init.video.map(Into::into);
 		out
 	}
