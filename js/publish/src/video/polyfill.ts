@@ -162,7 +162,11 @@ function workerTrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
  * by requestAnimationFrame. The browser suspends rAF when the page is hidden or occluded, so this
  * freezes in the background; prefer the Worker path above wherever possible.
  */
+// Firefox doesn't support MediaStreamTrackProcessor so we need to use a polyfill.
+// Based on: https://jan-ivar.github.io/polyfills/mediastreamtrackprocessor.js
+// Thanks Jan-Ivar
 function rafTrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
+	// TODO Firefox supports this in a background worker.
 	console.warn("Using MediaStreamTrackProcessor polyfill; performance might suffer.");
 
 	const settings = track.getSettings();

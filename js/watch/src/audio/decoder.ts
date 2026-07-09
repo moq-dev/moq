@@ -97,8 +97,9 @@ export class Decoder {
 	// as a real decoder-rate change (-> #decodedRate rebuild) rather than something to resample.
 	#ringSourceRate: number | undefined;
 
-	// Expected timestamp (us) of the next decoded frame, used only on the resample path to snap
-	// near-contiguous frames (see SNAP_US). Reset at every re-anchor (discontinuity, reset, ring rebuild).
+	// Expected timestamp (us) of the next decoded frame. Every frame is snapped onto it when it lands
+	// within the window (see SNAP_US), which is an identity no-op on an already-contiguous stream. Reset
+	// at every re-anchor (discontinuity, reset, ring rebuild).
 	#expectedNext: Time.Micro | undefined;
 
 	// Decoder restart bookkeeping (see #onDecoderError), mirroring the video decoder.
@@ -152,6 +153,7 @@ export class Decoder {
 	#runWorklet(effect: Effect): void {
 		// It takes a second or so to initialize the AudioContext/AudioWorklet, so do it even if disabled.
 		// This is less efficient for video-only playback but makes muting/unmuting instant.
+		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
 
 		//const enabled = effect.get(this.enabled);
 		//if (!enabled) return;

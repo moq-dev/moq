@@ -669,7 +669,8 @@ export class Subscriber {
 				reader.releaseLock();
 			}
 		} catch (err: unknown) {
-			console.warn("datagram stream error", err);
+			// Best-effort loop: a deliberate session close resets this stream on every teardown.
+			console[isStreamAbort(err) ? "debug" : "warn"]("datagram stream error", err);
 		}
 	}
 
@@ -739,9 +740,9 @@ export class Subscriber {
 				}
 			}
 		} catch (err: unknown) {
-			// Best-effort bandwidth/RTT side channel: an error here just means no estimate right now (the
-			// stream closes on every reconnect/teardown). The finally resets state, so log at debug.
-			console.debug("probe stream error", err);
+			// Best-effort bandwidth/RTT side channel: a reset on reconnect/teardown just means no estimate
+			// right now, but a real fault (auth, protocol, unroutable) must still surface.
+			console[isStreamAbort(err) ? "debug" : "warn"]("probe stream error", err);
 		} finally {
 			this.#recvBandwidth.set(undefined);
 			this.#rtt?.set(undefined);

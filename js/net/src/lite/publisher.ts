@@ -591,9 +591,9 @@ export class Publisher {
 				}
 			}
 		} catch (err: unknown) {
-			// Best-effort bandwidth side channel: errors here are expected on every reconnect/teardown and
-			// never actionable, so log at debug rather than warn.
-			console.debug("probe stream error", err);
+			// Best-effort bandwidth side channel: a reset on reconnect/teardown is routine, but a real
+			// fault (auth, protocol, unroutable) must still surface.
+			console[isStreamAbort(err) ? "debug" : "warn"]("probe stream error", err);
 			stream.close();
 		}
 	}

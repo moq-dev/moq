@@ -37,27 +37,27 @@ const STREAM_FAULT_CODES = new Set<number>([
 export function isStreamAbort(err: unknown): boolean {
 	if (!(err instanceof Error)) return false;
 
-	// A write/close after the stream already ended surfaces as a generic Streams-API error rather than a
-	// coded RESET_STREAM/STOP_SENDING. This is routine teardown (a peer reset racing an in-flight write),
-	// common over the WebSocket/qmux fallback. Engines word it differently: Chromium/Firefox say the stream
-	// is "closed or closing"; Safari throws InvalidStateError ("the object is in an invalid state").
-	if (/closed or closing|invalid state/i.test(err.message)) return true;
-
-	let code: number | undefined;
+	// Coded stream resets decide first, so a client-actionable fault code always wins over the message
+	// heuristics below. It is a stream reset: routine unless the relay signalled a fault code.
 	if (err.name === "WebTransportError") {
 		// Trust the relay's numeric app code regardless of `source`: Chrome reports a WRITE-side abort
 		// (a downstream unsubscribe seen by the publisher) as source "session", not "stream", so gating on
 		// source would leave that routine teardown warning on every closed viewer.
 		const c = (err as { streamErrorCode?: number | null }).streamErrorCode;
-		code = typeof c === "number" ? c : undefined;
-	} else {
-		const match = /^(?:RESET_STREAM|STOP_SENDING): (\d+)/.exec(err.message);
-		if (!match) return false;
-		code = Number(match[1]);
+		const code = typeof c === "number" ? c : undefined;
+		return code === undefined || !STREAM_FAULT_CODES.has(code);
 	}
 
-	// It is a stream reset: routine unless the relay signalled a client-actionable fault code.
-	return code === undefined || !STREAM_FAULT_CODES.has(code);
+	const match = /^(?:RESET_STREAM|STOP_SENDING): (\d+)/.exec(err.message);
+	if (match) return !STREAM_FAULT_CODES.has(Number(match[1]));
+
+	// A write/close after the stream already ended surfaces as a generic Streams-API error rather than a
+	// coded RESET_STREAM/STOP_SENDING. This is routine teardown (a peer reset racing an in-flight write),
+	// common over the WebSocket/qmux fallback. Engines word it differently: Chromium/Firefox say the stream
+	// is "closed or closing"; Safari throws InvalidStateError. Key Safari on `name` rather than the prose,
+	// so an unrelated error that merely mentions an invalid state still surfaces.
+	if (err.name === "InvalidStateError") return true;
+	return /closed or closing/i.test(err.message);
 }
 
 export function unreachable(value: never): never {

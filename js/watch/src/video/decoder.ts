@@ -379,6 +379,7 @@ class DecoderTrack {
 					frame.close();
 				}
 			},
+			// TODO bubble up error
 			error: (error) => {
 				// Rebuild the decoder in place rather than permanently closing the track. WebCodecs has
 				// already closed the decoder here, so recovery needs a fresh one via a #run re-run.
