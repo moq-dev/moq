@@ -4,6 +4,15 @@ use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
 use rml_amf0::Amf0Value;
 
+/// The enhanced-RTMP FourCCs a peer advertised for one media kind.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct FourCcSupport {
+	/// Whether the peer advertised the `*` wildcard.
+	pub any: bool,
+	/// The explicit FourCC allow-list.
+	pub fourccs: Vec<[u8; 4]>,
+}
+
 /// Represents where RTMP playback should start from
 #[derive(PartialEq, Debug, Clone)]
 pub enum PlayStartValue {
@@ -26,11 +35,15 @@ pub enum ServerSessionEvent {
 
 	/// The client is requesting a connection on the specified RTMP application name.
 	/// `caps_ex` is the enhanced-RTMP `capsEx` capability bitmask the client
-	/// advertised in its `connect` command object (0 if absent).
+	/// advertised in its `connect` command object (0 if absent). The FourCC
+	/// support fields combine `fourCcList` with any per-kind `*FourCcInfoMap`
+	/// entries that set the `CanDecode` bit.
 	ConnectionRequested {
 		request_id: u32,
 		app_name: String,
 		caps_ex: u32,
+		video_fourccs: FourCcSupport,
+		audio_fourccs: FourCcSupport,
 	},
 
 	/// The client is requesting a stream key be released for use.

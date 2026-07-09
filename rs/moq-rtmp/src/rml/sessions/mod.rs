@@ -23,6 +23,7 @@ pub use self::client::ClientSessionResult;
 pub use self::client::ClientState;
 pub use self::client::PublishRequestType;
 
+pub use self::server::FourCcSupport;
 pub use self::server::PublishMode;
 pub use self::server::ServerSession;
 pub use self::server::ServerSessionConfig;

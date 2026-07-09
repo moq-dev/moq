@@ -4309,6 +4309,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "futures",
+ "hang",
  "hmac 0.13.0",
  "moq-mux",
  "moq-native",
