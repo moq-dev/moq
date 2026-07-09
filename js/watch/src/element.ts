@@ -170,9 +170,9 @@ export default class MoqWatch extends HTMLElement {
 			});
 		});
 
-		// Recover from a silently-wedged connection (see STALL_RECOVERY_MS). Safari-only: the wedge is
-		// a Safari WebTransport bug, and reconnecting on any >10s stall would destabilize healthy
-		// Chrome/Firefox sessions that recover on their own.
+		// Recover from a silently-wedged connection (see STALL_RECOVERY_MS). Safari-only: a backgrounded
+		// WebKit tab can leave playback stalled with no frames arriving, while Chrome/Firefox recover on
+		// their own and would be destabilized by reconnecting on any >10s stall.
 		if (Util.Hacks.isSafari) {
 			this.signals.run(this.#runStallRecovery.bind(this));
 			this.signals.run(this.#runVisibilityRecovery.bind(this));
@@ -339,7 +339,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	// Fast path for the Safari tab-switch wedge: returning to a hidden tab often leaves playback stalled
-	// against a suspended WebTransport session. On becoming visible while stalled and still live, force a
+	// against a suspended session. On becoming visible while stalled and still live, force a
 	// reconnect, but only after a short grace period: a briefly-suspended session (a quick tab-switch, or
 	// the tab occluded by a window resize) usually resumes on its own, so we re-check at the deadline and
 	// reconnect only if it's still wedged. A frame arriving first clears `stalled` and the timer no-ops.

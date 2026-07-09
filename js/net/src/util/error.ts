@@ -37,6 +37,12 @@ const STREAM_FAULT_CODES = new Set<number>([
 export function isStreamAbort(err: unknown): boolean {
 	if (!(err instanceof Error)) return false;
 
+	// A write/close after the stream already ended surfaces as a generic Streams-API error rather than a
+	// coded RESET_STREAM/STOP_SENDING. This is routine teardown (a peer reset racing an in-flight write),
+	// common over the WebSocket/qmux fallback. Engines word it differently: Chromium/Firefox say the stream
+	// is "closed or closing"; Safari throws InvalidStateError ("the object is in an invalid state").
+	if (/closed or closing|invalid state/i.test(err.message)) return true;
+
 	let code: number | undefined;
 	if (err.name === "WebTransportError") {
 		// Trust the relay's numeric app code regardless of `source`: Chrome reports a WRITE-side abort

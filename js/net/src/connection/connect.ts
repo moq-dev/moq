@@ -61,10 +61,19 @@ export interface ConnectProps {
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
+// Lowercased UA for the transport quirks below. Empty when navigator is absent
+// (SSR, some worker scopes, bun tests), so every flag is false there.
+const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
+
 // Firefox's WebTransport implementation drops server-initiated bidi streams,
 // breaking publish (the relay opens a subscribe bidi back to us). Force WebSocket.
 // TODO: remove once Firefox fixes incoming bidi delivery.
-const isFirefox = typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("firefox");
+const isFirefox = ua.includes("firefox");
+
+// Reading `WebTransport.datagrams.readable` tears down the whole session on Safari, and moq-lite-05
+// always reads it. There is no catchable failure, so keep Safari off WebTransport entirely. Matches
+// Safari-style WebKit: reports "safari" but is not Chrome or an Android WebView, which also carry it.
+const isSafari = ua.includes("safari") && !ua.includes("chrome") && !ua.includes("android");
 
 /**
  * Establishes a connection to a MOQ server.
@@ -81,7 +90,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
 
 	const webtransport =
-		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
+		globalThis.WebTransport && !isFirefox && !isSafari
+			? connectWebTransport(url, cancel, props?.webtransport)
+			: undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.

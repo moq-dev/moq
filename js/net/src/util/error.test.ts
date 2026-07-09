@@ -29,6 +29,13 @@ test("client-actionable fault codes surface (warn), not teardown", () => {
 	expect(isStreamAbort(new Error("STOP_SENDING: 6"))).toBe(false); // Unauthorized over qmux
 });
 
+test("write-after-close over the WebSocket/qmux fallback is teardown", () => {
+	// Generic Streams-API errors from writing after the stream ended (a peer reset racing an in-flight
+	// write). Chromium/Firefox and Safari word it differently; both are routine teardown, not faults.
+	expect(isStreamAbort(new Error("The stream is closed or closing"))).toBe(true);
+	expect(isStreamAbort(new Error("The object is in an invalid state."))).toBe(true);
+});
+
 test("non-WebTransport errors are surfaced", () => {
 	expect(isStreamAbort(new Error("first subscribe response must be SUBSCRIBE_OK"))).toBe(false);
 	expect(isStreamAbort("not an error")).toBe(false);

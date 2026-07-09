@@ -167,6 +167,8 @@ Requires modern browser features:
 - Firefox (behind flag)
 - Safari 18+ (publishing: hardware H.264/HEVC encode, Worker capture; older Safari falls back to a degraded capture that pauses while the tab is hidden). Opus audio uses the native WebCodecs codec on Safari 26+ and a WebAssembly polyfill on Safari 16.4 through 18.7, which ship no WebCodecs audio API.
 
+Safari always connects over the WebSocket fallback, because reading WebTransport datagrams terminates the session.
+
 ## Framework Integration
 
 The reactive API works with popular frameworks:
