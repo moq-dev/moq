@@ -70,6 +70,11 @@ let
   moqTokenPackage = craneLib.buildPackage moqTokenCliArgs;
   moqTokenX86DarwinPackage = craneLib.buildPackage (crossX86Darwin moqTokenCliArgs);
 
+  moqBenchArgs = crateInfo ../rs/moq-bench/Cargo.toml // {
+    src = craneLib.cleanCargoSource ../.;
+    cargoExtraArgs = "-p moq-bench";
+  };
+
   libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
   libmoqArgs = libmoqInfo // {
     # libmoq's build.rs reads moq.pc.in at compile time to generate the
@@ -226,6 +231,9 @@ in
 
   moq-cli = craneLib.buildPackage moqCliArgs;
   moq-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqCliArgs);
+
+  moq-bench = craneLib.buildPackage moqBenchArgs;
+  moq-bench-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqBenchArgs);
 
   moq-token = moqTokenPackage;
   moq-token-cli = moqTokenPackage;
