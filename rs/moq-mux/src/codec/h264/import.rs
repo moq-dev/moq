@@ -37,16 +37,29 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
-	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let rendition = reserved.video(track.name());
-		Self {
+	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
+	/// [`VideoHint::default`](crate::catalog::VideoHint) for none).
+	///
+	/// A hint carrying a codec publishes the catalog rendition up front (the SPS/PPS still refine it
+	/// in band on the first keyframe), so subscribers see the track without waiting for that frame.
+	pub fn new(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		hint: crate::catalog::VideoHint,
+	) -> Self {
+		let rendition = reserved.video_with_hint(track.name(), hint.clone());
+		let mut import = Self {
 			avc1: false,
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 			last_sps: None,
+		};
+		if let Some(config) = hint.to_config() {
+			import.rendition.set(config.clone());
+			import.config = Some(config);
 		}
+		import
 	}
 
 	/// Resolve the codec config from the codec's leading bytes.
@@ -277,7 +290,7 @@ mod tests {
 		avcc.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]); // num_pps + pps
 
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.reserve());
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
 		// initialize() must not consume the buffer (the split owns the consume).
 		let buf = bytes::BytesMut::from(avcc.as_slice());
 		import.initialize(&buf).expect("initialize avc1");
@@ -313,7 +326,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.reserve());
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
 		assert!(
 			catalog.snapshot().video.renditions.is_empty(),
 			"no config before any frame"
@@ -357,7 +370,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.reserve());
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split open-GOP AU");
@@ -389,7 +402,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.reserve());
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
@@ -412,7 +425,7 @@ mod tests {
 
 		let mut split = Split::new();
 		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.reserve());
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
 		let mut frames = split.decode(&annexb, pts).expect("split delta");

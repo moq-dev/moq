@@ -45,6 +45,9 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideo as Video,
 )
+from moq_ffi import (
+    MoqVideoHint as VideoHint,
+)
 
 __all__ = [
     "Audio",
@@ -62,4 +65,5 @@ __all__ = [
     "Subscription",
     "TrackInfo",
     "Video",
+    "VideoHint",
 ]

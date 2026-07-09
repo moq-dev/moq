@@ -106,25 +106,22 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
+	/// Publish on an existing track producer with a resolved catalog config.
+	///
+	/// Build one from a frame header with [`config`], or from an out-of-band [`Config`] via `into()`.
+	/// The rendition publishes immediately.
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		config: Config,
-	) -> crate::Result<Self> {
-		let mut audio =
-			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp3, config.sample_rate, config.channel_count);
-		audio.container = hang::catalog::Container::Legacy;
-
-		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
-
+		config: hang::catalog::AudioConfig,
+	) -> Self {
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		let mut rendition = reserved.audio(track.name());
-		rendition.set(audio);
-
-		Ok(Self {
+		rendition.set(config);
+		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-		})
+		}
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
@@ -166,6 +163,21 @@ impl<E: CatalogExt> Import<E> {
 		self.track.finish_group()?;
 		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
+	}
+}
+
+/// Build a catalog config from an MP3 frame header. Errors on a malformed or empty buffer.
+pub fn config(init: &[u8]) -> crate::Result<hang::catalog::AudioConfig> {
+	Ok(Config::parse(init)?.into())
+}
+
+impl From<Config> for hang::catalog::AudioConfig {
+	/// Build a catalog config from a config resolved out of band (e.g. gstreamer caps).
+	fn from(config: Config) -> Self {
+		let mut audio =
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp3, config.sample_rate, config.channel_count);
+		audio.container = hang::catalog::Container::Legacy;
+		audio
 	}
 }
 

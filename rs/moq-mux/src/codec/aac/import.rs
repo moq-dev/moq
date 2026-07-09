@@ -4,43 +4,33 @@ use crate::container::Frame;
 
 /// AAC importer.
 ///
-/// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
-/// an MP4 ESDS atom), so its catalog is known up front. Each packet passed to
-/// [`decode`](Self::decode) is published as one hang frame in its own group, so the relay can
-/// forward each frame without waiting for a group boundary. The codec's packet loss
-/// concealment handles drops. Build it with [`new`](Self::new), passing the track producer
-/// and the [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
+/// The catalog comes from an AudioSpecificConfig (variable-length, typically extracted from an MP4
+/// ESDS atom); build the config with [`config`]. Each packet passed to [`decode`](Self::decode) is
+/// published as one hang frame in its own group, so the relay can forward each frame without waiting
+/// for a group boundary. The codec's packet loss concealment handles drops.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
+	/// Publish on an existing track producer with a resolved catalog config.
+	///
+	/// Build one from an AudioSpecificConfig with [`config`] (which keeps its bytes as the catalog
+	/// `description`), or from an out-of-band [`Config`] via `into()` (which synthesizes the
+	/// description). The rendition publishes immediately.
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		config: Config,
-	) -> crate::Result<Self> {
-		let mut audio_config = hang::catalog::AudioConfig::new(
-			hang::catalog::AAC {
-				profile: config.profile,
-			},
-			config.sample_rate,
-			config.channel_count,
-		);
-		audio_config.container = hang::catalog::Container::Legacy;
-		audio_config.description = Some(config.encode());
-
-		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
-
+		config: hang::catalog::AudioConfig,
+	) -> Self {
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		let mut rendition = reserved.audio(track.name());
-		rendition.set(audio_config);
-
-		Ok(Self {
+		rendition.set(config);
+		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-		})
+		}
 	}
 
 	/// The MoQ track name this importer publishes on.
@@ -95,5 +85,32 @@ impl<E: CatalogExt> Import<E> {
 		self.track.finish_group()?;
 		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
+	}
+}
+
+/// Build a catalog config from an AudioSpecificConfig, keeping `init` verbatim as the catalog
+/// `description` (re-encoding the parsed fields would drop any SBR/PS extension the parse ignores).
+/// Errors on a malformed or empty buffer.
+pub fn config(init: &[u8]) -> crate::Result<hang::catalog::AudioConfig> {
+	let mut buf = init;
+	let mut audio: hang::catalog::AudioConfig = Config::parse(&mut buf)?.into();
+	audio.description = Some(bytes::Bytes::copy_from_slice(init));
+	Ok(audio)
+}
+
+impl From<Config> for hang::catalog::AudioConfig {
+	/// Build a catalog config from a config resolved out of band (an ADTS header, gstreamer caps),
+	/// synthesizing the AudioSpecificConfig `description` since no verbatim bytes are available.
+	fn from(config: Config) -> Self {
+		let mut audio = hang::catalog::AudioConfig::new(
+			hang::catalog::AAC {
+				profile: config.profile,
+			},
+			config.sample_rate,
+			config.channel_count,
+		);
+		audio.container = hang::catalog::Container::Legacy;
+		audio.description = Some(config.encode());
+		audio
 	}
 }

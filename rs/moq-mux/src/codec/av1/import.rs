@@ -34,15 +34,28 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
-	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let rendition = reserved.video(track.name());
-		Self {
+	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
+	/// [`VideoHint::default`](crate::catalog::VideoHint) for none).
+	///
+	/// A hint carrying a codec publishes the catalog rendition up front (the sequence header still
+	/// refines it in band on the first keyframe).
+	pub fn new(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		hint: crate::catalog::VideoHint,
+	) -> Self {
+		let rendition = reserved.video_with_hint(track.name(), hint.clone());
+		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 			last_seq: None,
+		};
+		if let Some(config) = hint.to_config() {
+			import.rendition.set(config.clone());
+			import.config = Some(config);
 		}
+		import
 	}
 
 	/// Resolve the codec config from a sequence header / av1C and other metadata.
@@ -61,7 +74,7 @@ impl<E: CatalogExt> Import<E> {
 		// fixed 4-byte header is read here, so don't gate on a larger size or a short
 		// out-of-band record falls through to raw-OBU scanning and leaves the config unset.
 		if data.len() >= 4 && data[0] == 0x81 {
-			self.init_from_av1c(data)?;
+			self.init_from_av1c(data);
 			return Ok(());
 		}
 
@@ -72,7 +85,7 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn init_from_av1c(&mut self, data: &[u8]) -> Result<()> {
+	fn init_from_av1c(&mut self, data: &[u8]) {
 		let seq_profile = (data[1] >> 5) & 0x07;
 		let seq_level_idx = data[1] & 0x1F;
 		let tier = ((data[2] >> 7) & 0x01) == 1;
@@ -96,10 +109,9 @@ impl<E: CatalogExt> Import<E> {
 		});
 		config.container = hang::catalog::Container::Legacy;
 		self.apply_config(config);
-		Ok(())
 	}
 
-	fn init(&mut self, seq_header: &SequenceHeaderObu) -> Result<()> {
+	fn init(&mut self, seq_header: &SequenceHeaderObu) {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_header.seq_profile,
 			level: seq_header
@@ -131,12 +143,11 @@ impl<E: CatalogExt> Import<E> {
 		config.coded_height = Some(seq_header.max_frame_height as u32);
 		config.container = hang::catalog::Container::Legacy;
 		self.apply_config(config);
-		Ok(())
 	}
 
 	/// Minimal config when sequence-header parsing fails, so the stream can still
 	/// flow (the catalog just won't carry full codec info).
-	fn init_minimal(&mut self) -> Result<()> {
+	fn init_minimal(&mut self) {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: 0,
 			level: 0,
@@ -153,7 +164,6 @@ impl<E: CatalogExt> Import<E> {
 		});
 		config.container = hang::catalog::Container::Legacy;
 		self.apply_config(config);
-		Ok(())
 	}
 
 	/// Apply a resolved config, updating the catalog rendition in place.
@@ -185,10 +195,11 @@ impl<E: CatalogExt> Import<E> {
 			Ok(seq_header) => self.init(&seq_header),
 			Err(_) if self.config.is_none() => {
 				tracing::debug!("sequence header parse failed, using minimal config");
-				self.init_minimal()
+				self.init_minimal();
 			}
-			Err(_) => Ok(()),
+			Err(_) => {}
 		}
+		Ok(())
 	}
 
 	/// A watch-only handle to this track's subscriber demand.

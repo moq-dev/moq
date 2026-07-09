@@ -84,7 +84,7 @@ impl Publish {
 				let mut broadcast = broadcast.clone();
 				let name = broadcast.unique_name(&format!(".{format}"));
 				let request = broadcast.reserve_track(name)?;
-				match import::Track::new(request, catalog.reserve(), format, init) {
+				match import::Track::new(request, catalog.reserve(), import::Init::new(format, init.to_vec())) {
 					Ok(track) => Media::Track(Box::new(track)),
 					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
 					Err(err) => return Err(err.into()),

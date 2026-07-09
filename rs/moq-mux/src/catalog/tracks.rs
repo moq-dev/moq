@@ -19,6 +19,9 @@ pub trait Kind: sealed::Sealed + 'static {
 	/// The catalog config type carried by this kind ([`VideoConfig`](hang::catalog::VideoConfig)
 	/// or [`AudioConfig`](hang::catalog::AudioConfig)).
 	type Config;
+	/// The caller-provided overlay for this kind: [`VideoHint`] for video, `()` for audio (which takes
+	/// a complete [`AudioConfig`](hang::catalog::AudioConfig) instead).
+	type Hint: Clone + Default;
 
 	#[doc(hidden)]
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config);
@@ -33,6 +36,10 @@ pub trait Kind: sealed::Sealed + 'static {
 	/// The config's bitrate field, so [`Rendition`] can update it generically.
 	#[doc(hidden)]
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64>;
+
+	/// Fill a detected config's absent optional fields from a caller-provided hint.
+	#[doc(hidden)]
+	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint);
 }
 
 /// Video rendition marker for [`Rendition`] / [`Reserved::init`].
@@ -43,8 +50,77 @@ pub enum Audio {}
 impl sealed::Sealed for Video {}
 impl sealed::Sealed for Audio {}
 
+/// Caller-provided catalog fields for a video track: a starting point for what the importer detects.
+///
+/// Every field is optional and fills only a gap the stream leaves; a value the stream reveals (the
+/// dimensions from an SPS, ...) always wins, so a detected change just updates the catalog. A
+/// [`codec`](Self::codec) alone is enough to publish the catalog before the first keyframe (the
+/// decoder config then arrives in band). Use it for fields the stream can't reveal (bitrate) or to
+/// skip that wait.
+///
+/// Audio has no equivalent: an audio importer can't resolve its config from frames, so it takes a
+/// complete [`AudioConfig`](hang::catalog::AudioConfig) up front instead of a hint.
+#[derive(Clone, Default, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct VideoHint {
+	/// The video codec.
+	pub codec: Option<hang::catalog::VideoCodec>,
+	/// The encoded width in pixels.
+	pub coded_width: Option<u32>,
+	/// The encoded height in pixels.
+	pub coded_height: Option<u32>,
+	/// The display aspect ratio width.
+	pub display_aspect_width: Option<u32>,
+	/// The display aspect ratio height.
+	pub display_aspect_height: Option<u32>,
+	/// The maximum bitrate in bits per second.
+	pub bitrate: Option<u64>,
+	/// The frame rate in frames per second.
+	pub framerate: Option<f64>,
+	/// If true, the decoder optimizes for latency.
+	pub optimize_for_latency: Option<bool>,
+	/// The maximum jitter before the next frame is emitted.
+	pub jitter: Option<Duration>,
+}
+
+/// Fill `slot` from `value` only when the slot is still empty, so a value the stream detected always
+/// wins over the caller's hint.
+fn fill<T>(slot: &mut Option<T>, value: Option<T>) {
+	if slot.is_none() {
+		*slot = value;
+	}
+}
+
+impl VideoHint {
+	/// Fill a detected video config's absent optional fields from these hints.
+	///
+	/// Only the gaps: a value the stream detects (e.g. the dimensions from an SPS) is left untouched,
+	/// so a resolution change updates the catalog instead of conflicting with the hint.
+	pub fn apply(&self, config: &mut hang::catalog::VideoConfig) {
+		fill(&mut config.coded_width, self.coded_width);
+		fill(&mut config.coded_height, self.coded_height);
+		fill(&mut config.display_aspect_width, self.display_aspect_width);
+		fill(&mut config.display_aspect_height, self.display_aspect_height);
+		fill(&mut config.bitrate, self.bitrate);
+		fill(&mut config.framerate, self.framerate);
+		fill(&mut config.optimize_for_latency, self.optimize_for_latency);
+		fill(&mut config.jitter, self.jitter);
+	}
+
+	/// Build a config from these fields alone, or `None` if the codec is missing. Used to publish
+	/// the catalog before the stream is parsed.
+	pub fn to_config(&self) -> Option<hang::catalog::VideoConfig> {
+		let codec = self.codec.clone()?;
+		let mut config = hang::catalog::VideoConfig::new(codec);
+		config.container = hang::catalog::Container::Legacy;
+		self.apply(&mut config);
+		Some(config)
+	}
+}
+
 impl Kind for Video {
 	type Config = hang::catalog::VideoConfig;
+	type Hint = VideoHint;
 
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
 		catalog.video.renditions.insert(name.to_string(), config);
@@ -64,10 +140,17 @@ impl Kind for Video {
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
 		&mut config.bitrate
 	}
+
+	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) {
+		hint.apply(config);
+	}
 }
 
 impl Kind for Audio {
 	type Config = hang::catalog::AudioConfig;
+	// Audio has no hint: importers publish a complete `AudioConfig` (see the crate docs on why audio
+	// is eager while video is lazy), so there's nothing to overlay.
+	type Hint = ();
 
 	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
 		catalog.audio.renditions.insert(name.to_string(), config);
@@ -87,6 +170,8 @@ impl Kind for Audio {
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
 		&mut config.bitrate
 	}
+
+	fn apply_hint(_config: &mut Self::Config, _hint: &Self::Hint) {}
 }
 
 /// A clonable reservation context handed to importers so they declare their tracks up front.
@@ -113,7 +198,15 @@ impl<E: CatalogExt> Reserved<E> {
 	/// [`Rendition`] is [`set`](Rendition::set) (or dropped). Prefer [`video`](Self::video) /
 	/// [`audio`](Self::audio) at call sites.
 	pub fn init<K: Kind>(&self, name: impl Into<String>) -> Rendition<E, K> {
-		Rendition::new(self.clone(), name)
+		Rendition::new(self.clone(), name, K::Hint::default())
+	}
+
+	/// Reserve a video rendition seeded with caller-provided catalog fields.
+	///
+	/// The `hint` is carried on the returned [`Rendition`]: every [`set`](Rendition::set) fills the
+	/// gaps it declares (a detected value wins). See [`VideoHint`].
+	pub fn video_with_hint(&self, name: impl Into<String>, hint: VideoHint) -> Rendition<E, Video> {
+		Rendition::new(self.clone(), name, hint)
 	}
 
 	/// Reserve a video rendition; shorthand for [`init::<Video>`](Self::init).
@@ -177,6 +270,8 @@ pub struct Rendition<E: CatalogExt, K: Kind> {
 	detect_jitter: bool,
 	/// Auto-fill `bitrate` from the detector only while the config hasn't provided it.
 	detect_bitrate: bool,
+	/// Caller-provided fields, validated against and overlaid onto every [`set`](Self::set).
+	hint: K::Hint,
 	_kind: PhantomData<fn() -> K>,
 }
 
@@ -186,7 +281,7 @@ pub type VideoTrack<E = ()> = Rendition<E, Video>;
 pub type AudioTrack<E = ()> = Rendition<E, Audio>;
 
 impl<E: CatalogExt, K: Kind> Rendition<E, K> {
-	fn new(reserved: Reserved<E>, name: impl Into<String>) -> Self {
+	fn new(reserved: Reserved<E>, name: impl Into<String>, hint: K::Hint) -> Self {
 		Self {
 			catalog: reserved.catalog.clone(),
 			gate: Some(reserved),
@@ -195,6 +290,7 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 			metrics: Metrics::new(),
 			detect_jitter: true,
 			detect_bitrate: true,
+			hint,
 			_kind: PhantomData,
 		}
 	}
@@ -211,10 +307,14 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
 	///
-	/// A field the caller already set (`jitter` or `bitrate`) is treated as authoritative and left
-	/// alone; only an absent field is auto-detected. Any metrics accumulated before the rendition
-	/// existed (a dirty start or a B-frame reorder) are seeded into the fields being detected.
+	/// The rendition's hint (a [`VideoHint`] from [`Reserved::video_with_hint`], or nothing for audio)
+	/// fills any gap `config` leaves first, so a value the stream detected wins over the hint. A field
+	/// then present (`jitter` or `bitrate`,
+	/// whether from the caller or the hint) is authoritative and left alone; only an absent field is
+	/// auto-detected. Any metrics accumulated before the rendition existed (a dirty start or a B-frame
+	/// reorder) are seeded into the fields being detected.
 	pub fn set(&mut self, mut config: K::Config) {
+		K::apply_hint(&mut config, &self.hint);
 		self.detect_jitter = K::jitter_mut(&mut config).is_none();
 		self.detect_bitrate = K::bitrate_mut(&mut config).is_none();
 

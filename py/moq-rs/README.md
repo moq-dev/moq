@@ -126,7 +126,7 @@ client = moq.Client(
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
   - `.dynamic() → BroadcastDynamic`
-  - `.publish_media(format, init) → MediaProducer`
+  - `.publish_media(format, init=b"", video=None) → MediaProducer`. Pass a `VideoHint` to pin catalog fields the stream can't reveal (bitrate) or publish the catalog before the first keyframe; audio formats resolve from their init bytes.
   - `.finish()`
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.

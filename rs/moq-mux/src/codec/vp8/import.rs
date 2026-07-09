@@ -22,14 +22,27 @@ pub struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track producer, reserving the rendition from `reserved`.
-	pub fn new(track: moq_net::track::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let rendition = reserved.video(track.name());
-		Self {
+	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
+	/// [`VideoHint::default`](crate::catalog::VideoHint) for none).
+	///
+	/// VP8 carries no out-of-band config, so a hint carrying a codec publishes the catalog rendition
+	/// up front instead of waiting for the first key frame.
+	pub fn new(
+		track: moq_net::track::Producer,
+		reserved: crate::catalog::Reserved<E>,
+		hint: crate::catalog::VideoHint,
+	) -> Self {
+		let rendition = reserved.video_with_hint(track.name(), hint.clone());
+		let mut import = Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
+		};
+		if let Some(config) = hint.to_config() {
+			import.rendition.set(config.clone());
+			import.config = Some(config);
 		}
+		import
 	}
 
 	/// Initialize the importer.
@@ -140,7 +153,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.reserve());
+		let mut import = super::Import::new(track, catalog.reserve(), Default::default());
 
 		// Empty init buffer: the catalog is filled on the first key frame.
 		import.initialize(&[]).unwrap();
@@ -171,7 +184,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.reserve());
+		let mut import = super::Import::new(track, catalog.reserve(), Default::default());
 
 		let interframe = Bytes::from_static(&[0x31, 0x00, 0x00, 0xaa, 0xbb]);
 		assert!(

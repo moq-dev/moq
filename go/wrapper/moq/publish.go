@@ -24,7 +24,7 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 // PublishMedia publishes a media track from an init segment, fed frame by
 // frame with explicit timestamps.
 func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProducer, error) {
-	inner, err := b.inner.PublishMedia(format, init)
+	inner, err := b.inner.PublishMedia(ffi.MoqInit{Format: format, Data: init})
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +35,7 @@ func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProd
 // unknown frame boundaries (e.g. Annex-B H.264). format is a stream format:
 // avc3, hev1, av01, fmp4, or mkv.
 func (b *BroadcastProducer) PublishMediaStream(format string) (*MediaStreamProducer, error) {
-	inner, err := b.inner.PublishMediaStream(format)
+	inner, err := b.inner.PublishMediaStream(ffi.MoqInit{Format: format})
 	if err != nil {
 		return nil, err
 	}

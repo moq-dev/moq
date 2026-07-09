@@ -44,6 +44,7 @@ from .types import (
     Subscription,
     TrackInfo,
     Video,
+    VideoHint,
 )
 
 __all__ = [
@@ -87,6 +88,7 @@ __all__ = [
     "TrackRequest",
     "Transport",
     "Video",
+    "VideoHint",
     "connect",
     "log_level",
 ]

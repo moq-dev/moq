@@ -3,10 +3,20 @@ use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
 use crate::error::MoqError;
+use crate::media::MoqInit;
 
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A bare [`MoqInit`] with a format and init bytes, no catalog hints.
+fn media_init(format: &str, data: Vec<u8>) -> MoqInit {
+	MoqInit {
+		format: format.to_string(),
+		data,
+		video: None,
+	}
+}
 
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
@@ -46,7 +56,7 @@ fn origin_lifecycle() {
 fn publish_media_lifecycle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	media.write_frame(b"opus frame".to_vec(), 1000).unwrap();
 	media.finish().unwrap();
 	broadcast.finish().unwrap();
@@ -164,7 +174,7 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(track.name().unwrap(), "requested-audio");
 
 	let media = broadcast
-		.publish_media_on_track(&track, "opus".into(), opus_head())
+		.publish_media_on_track(&track, media_init("opus", opus_head()))
 		.unwrap();
 	assert_eq!(media.name().unwrap(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
@@ -206,7 +216,7 @@ async fn dynamic_track_request_can_publish_media() {
 async fn media_track_activity_and_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	let track_name = media.name().unwrap();
 	assert_eq!(track_name, "0.opus");
 
@@ -241,7 +251,7 @@ async fn publish_media_aac_populates_description() {
 		channel_count: 2,
 	};
 	let init = config.encode();
-	let _media = broadcast.publish_media("aac".into(), init.to_vec()).unwrap();
+	let _media = broadcast.publish_media(media_init("aac", init.to_vec())).unwrap();
 
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
@@ -263,7 +273,7 @@ async fn publish_media_aac_populates_description() {
 fn unknown_format() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let err = broadcast
-		.publish_media("nope".into(), vec![])
+		.publish_media(media_init("nope", vec![]))
 		.err()
 		.expect("unknown format should fail");
 	assert!(
@@ -277,7 +287,7 @@ async fn local_publish_consume_audio() {
 	let origin = MoqOriginProducer::new();
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	origin.announce("live".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
@@ -330,7 +340,7 @@ async fn video_publish_consume() {
 	let origin = MoqOriginProducer::new();
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = h264_init();
-	let media = broadcast.publish_media("avc3".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("avc3", init)).unwrap();
 	origin.announce("video-test".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
@@ -386,7 +396,7 @@ async fn multiple_frames_ordering() {
 	let origin = MoqOriginProducer::new();
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	origin.announce("ordering-test".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
@@ -435,7 +445,7 @@ async fn catalog_update_on_new_track() {
 	let origin = MoqOriginProducer::new();
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media1 = broadcast.publish_media("opus".into(), init.clone()).unwrap();
+	let _media1 = broadcast.publish_media(media_init("opus", init.clone())).unwrap();
 	origin.announce("catalog-update".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
@@ -456,7 +466,7 @@ async fn catalog_update_on_new_track() {
 		.unwrap();
 	assert_eq!(catalog1.audio.len(), 1);
 
-	let _media2 = broadcast.publish_media("opus".into(), init).unwrap();
+	let _media2 = broadcast.publish_media(media_init("opus", init)).unwrap();
 
 	let catalog2 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -470,7 +480,7 @@ async fn catalog_update_on_new_track() {
 fn finish_closes_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media = broadcast.publish_media("opus".into(), init).unwrap();
+	let _media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	broadcast.finish().unwrap();
 
 	let err = broadcast.finish().unwrap_err();
@@ -507,7 +517,7 @@ fn without_runtime() {
 
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 		let init = opus_head();
-		let media = broadcast.publish_media("opus".into(), init).unwrap();
+		let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 		media.write_frame(b"hello".to_vec(), 1000).unwrap();
 		origin.announce("test".into(), &broadcast).unwrap();
 
@@ -577,7 +587,7 @@ async fn server_client_roundtrip() {
 	// Publish a broadcast on the server side.
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	server_origin.announce("hello".into(), &broadcast).unwrap();
 
 	// Receive the announcement on the client side via the consume origin.
@@ -671,7 +681,7 @@ async fn server_client_roundtrip_auto_origin() {
 	// Server publishes; client receives via the auto consumer.
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 	server_origin.announce("hello".into(), &broadcast).unwrap();
 
 	let announced = consumer.announced("".into()).unwrap();

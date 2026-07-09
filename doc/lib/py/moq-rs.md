@@ -60,6 +60,18 @@ broadcast.finish()
 
 Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
 
+`publish_media` fills the catalog by parsing the codec bitstream. For a video format you can pass a `VideoHint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
+
+```python
+video = broadcast.publish_media(
+    "avc3",
+    avc_init_bytes,
+    video=moq.VideoHint(bitrate=4_000_000),
+)
+```
+
+A value the stream later detects fills only a gap the hint left, so a detected value always wins. Audio formats resolve entirely from their init bytes, so they take no hint.
+
 ### Subscribing to media
 
 ```python
