@@ -218,6 +218,7 @@
           inherit (overlayPkgs)
             moq-relay
             moq-cli
+            moq-bench
             moq-token
             moq-token-cli
             moq-boy
@@ -241,6 +242,7 @@
           inherit (overlayPkgs)
             moq-relay-x86_64-apple-darwin
             moq-cli-x86_64-apple-darwin
+            moq-bench-x86_64-apple-darwin
             moq-token-x86_64-apple-darwin
             moq-token-cli-x86_64-apple-darwin
             libmoq-x86_64-apple-darwin
