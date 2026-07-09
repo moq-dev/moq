@@ -307,8 +307,9 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
 	///
-	/// The rendition's hint (from [`Reserved::init_with_hint`]) fills any gap `config` leaves first, so
-	/// a value the stream detected wins over the hint. A field then present (`jitter` or `bitrate`,
+	/// The rendition's hint (a [`VideoHint`] from [`Reserved::video_with_hint`], or nothing for audio)
+	/// fills any gap `config` leaves first, so a value the stream detected wins over the hint. A field
+	/// then present (`jitter` or `bitrate`,
 	/// whether from the caller or the hint) is authoritative and left alone; only an absent field is
 	/// auto-detected. Any metrics accumulated before the rendition existed (a dirty start or a B-frame
 	/// reorder) are seeded into the fields being detected.
