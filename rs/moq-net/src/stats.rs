@@ -380,6 +380,14 @@ struct StatsShared {
 struct BroadcastEntry {
 	publisher: [Counters; 2],
 	subscriber: [Counters; 2],
+	/// Legacy overlay: byte counters that accumulate ONLY for connections on the
+	/// internal Unix-socket listener (the out-of-process RTMP/SRT/WebRTC gateways).
+	/// A gateway connection bumps these IN ADDITION to its `publisher`/`subscriber`
+	/// tier counters, so legacy traffic is still counted as normal egress/ingress and
+	/// the overlay is a strict, additive superset (used to surcharge legacy protocols
+	/// downstream). Only `bytes` is populated; the other counter fields stay zero.
+	legacy_publisher: Counters,
+	legacy_subscriber: Counters,
 }
 
 impl BroadcastEntry {
@@ -387,6 +395,8 @@ impl BroadcastEntry {
 		Self {
 			publisher: Default::default(),
 			subscriber: Default::default(),
+			legacy_publisher: Default::default(),
+			legacy_subscriber: Default::default(),
 		}
 	}
 }
@@ -409,12 +419,16 @@ struct SlotState {
 struct EntrySnapState {
 	publisher: [SlotState; 2],
 	subscriber: [SlotState; 2],
+	/// Change-detection state for the two legacy overlay tracks (see
+	/// [`BroadcastEntry::legacy_publisher`]).
+	legacy_publisher: SlotState,
+	legacy_subscriber: SlotState,
 }
 
 impl EntrySnapState {
-	/// Iterate the four `(track_name, counters, slot_state)` slots in the
-	/// fixed order matching `TRACK_ORDER`.
-	fn zip_slots<'a>(&'a mut self, entry: &'a BroadcastEntry) -> [(&'static str, &'a Counters, &'a mut SlotState); 4] {
+	/// Iterate the `(track_name, counters, slot_state)` slots in the fixed order
+	/// matching `TRACK_ORDER`.
+	fn zip_slots<'a>(&'a mut self, entry: &'a BroadcastEntry) -> [(&'static str, &'a Counters, &'a mut SlotState); 6] {
 		let [pub_ext_state, pub_int_state] = &mut self.publisher;
 		let [sub_ext_state, sub_int_state] = &mut self.subscriber;
 		[
@@ -434,13 +448,23 @@ impl EntrySnapState {
 				&entry.subscriber[Tier::Internal.idx()],
 				sub_int_state,
 			),
+			(
+				"legacy/publisher.json",
+				&entry.legacy_publisher,
+				&mut self.legacy_publisher,
+			),
+			(
+				"legacy/subscriber.json",
+				&entry.legacy_subscriber,
+				&mut self.legacy_subscriber,
+			),
 		]
 	}
 }
 
-/// Number of `(side, tier)` slots, matching the four tracks per stats
-/// broadcast.
-const NUM_SLOTS: usize = 4;
+/// Number of per-broadcast track slots: `(side, tier)` for External + Internal,
+/// plus the two legacy overlay tracks.
+const NUM_SLOTS: usize = 6;
 
 /// Track names in the same order [`EntrySnapState::zip_slots`] returns
 /// them. Used to construct the per-broadcast track set up front.
@@ -449,6 +473,8 @@ const TRACK_ORDER: [&str; NUM_SLOTS] = [
 	"subscriber.json",
 	"internal/publisher.json",
 	"internal/subscriber.json",
+	"legacy/publisher.json",
+	"legacy/subscriber.json",
 ];
 
 /// Session track names, indexed by [`Tier::idx`]: external first, internal
@@ -514,6 +540,7 @@ impl Stats {
 		StatsHandle {
 			stats: self.clone(),
 			tier,
+			legacy: false,
 		}
 	}
 
@@ -560,6 +587,7 @@ impl Default for Stats {
 pub struct StatsHandle {
 	stats: Stats,
 	tier: Tier,
+	legacy: bool,
 }
 
 impl StatsHandle {
@@ -573,6 +601,16 @@ impl StatsHandle {
 		self.tier
 	}
 
+	/// Mark this handle's traffic as "legacy": bytes bumped through it also
+	/// accumulate into the per-broadcast legacy overlay counters (in addition to
+	/// the tier counters), so a connection over the internal Unix-socket listener
+	/// (an RTMP/SRT/WebRTC gateway) can be metered + surcharged separately. Set by
+	/// the relay for gateway connections; native QUIC connections leave it false.
+	pub fn with_legacy(mut self, legacy: bool) -> Self {
+		self.legacy = legacy;
+		self
+	}
+
 	/// Returns a per-broadcast handle scoped to this tier.
 	///
 	/// Paths under the aggregator's configured `prefix` return an empty handle
@@ -582,6 +620,7 @@ impl StatsHandle {
 		BroadcastStats {
 			entry: self.stats.entry(path),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 	}
 
@@ -626,6 +665,7 @@ impl Default for StatsHandle {
 pub struct BroadcastStats {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	legacy: bool,
 }
 
 impl BroadcastStats {
@@ -649,6 +689,7 @@ impl BroadcastStats {
 		PublisherStats {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 	}
 
@@ -665,6 +706,7 @@ impl BroadcastStats {
 		SubscriberStats {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 	}
 
@@ -682,6 +724,7 @@ impl BroadcastStats {
 		PublisherTrack {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 	}
 
@@ -718,6 +761,7 @@ impl BroadcastStats {
 		SubscriberTrack {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 	}
 }
@@ -876,6 +920,7 @@ impl Drop for SessionStats {
 pub struct PublisherStats {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	legacy: bool,
 }
 
 impl PublisherStats {
@@ -885,6 +930,7 @@ impl PublisherStats {
 		BroadcastStats {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 		.publisher_track(name)
 	}
@@ -908,6 +954,7 @@ impl Drop for PublisherStats {
 pub struct SubscriberStats {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	legacy: bool,
 }
 
 impl SubscriberStats {
@@ -916,6 +963,7 @@ impl SubscriberStats {
 		BroadcastStats {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			legacy: self.legacy,
 		}
 		.subscriber_track(name)
 	}
@@ -937,6 +985,7 @@ impl Drop for SubscriberStats {
 pub struct PublisherTrack {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	legacy: bool,
 }
 
 impl PublisherTrack {
@@ -947,10 +996,15 @@ impl PublisherTrack {
 		}
 	}
 
-	/// Bumps `bytes` by `n`.
+	/// Bumps `bytes` by `n`. On a legacy (gateway) connection this ALSO bumps the
+	/// legacy egress overlay, so the same bytes are counted both as tier egress and
+	/// as legacy egress.
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
 			entry.publisher[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
+			if self.legacy {
+				entry.legacy_publisher.bytes.fetch_add(n, Ordering::Relaxed);
+			}
 		}
 	}
 
@@ -978,6 +1032,7 @@ impl Drop for PublisherTrack {
 pub struct SubscriberTrack {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	legacy: bool,
 }
 
 impl SubscriberTrack {
@@ -988,10 +1043,15 @@ impl SubscriberTrack {
 		}
 	}
 
-	/// Bumps `bytes` by `n`.
+	/// Bumps `bytes` by `n`. On a legacy (gateway) connection this ALSO bumps the
+	/// legacy ingress overlay, so the same bytes are counted both as tier ingress and
+	/// as legacy ingress (the one metered ingress: native ingress stays free).
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
 			entry.subscriber[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
+			if self.legacy {
+				entry.legacy_subscriber.bytes.fetch_add(n, Ordering::Relaxed);
+			}
 		}
 	}
 
@@ -1539,6 +1599,31 @@ mod tests {
 		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
 		assert_eq!(entry.publisher[Tier::Internal.idx()].bytes.load(Relaxed), 0);
 		assert_eq!(entry.subscriber[Tier::Internal.idx()].bytes.load(Relaxed), 7);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn legacy_overlay_is_additive_over_tier_bytes() {
+		// A legacy (gateway/UDS) handle bumps the legacy overlay IN ADDITION to its
+		// tier counters, so the same bytes count as both external egress/ingress and
+		// legacy egress/ingress. A non-legacy handle leaves the overlay untouched.
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let legacy = stats.tier(Tier::External).with_legacy(true);
+		let native = stats.tier(Tier::External);
+
+		// Gateway ingest (publisher pushing in) + gateway egress (serving a viewer).
+		legacy.broadcast("demo/bbb").subscriber().track("audio").bytes(30);
+		legacy.broadcast("demo/bbb").publisher().track("video").bytes(100);
+		// A native viewer of the same broadcast: counts as external egress only.
+		native.broadcast("demo/bbb").publisher().track("video").bytes(5);
+
+		let entries = stats.shared().entries.lock();
+		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
+		// External egress includes BOTH the gateway and native bytes (overlay is additive).
+		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 105);
+		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 30);
+		// Legacy overlay captures only the gateway bytes, split by direction.
+		assert_eq!(entry.legacy_publisher.bytes.load(Relaxed), 100);
+		assert_eq!(entry.legacy_subscriber.bytes.load(Relaxed), 30);
 	}
 
 	#[tokio::test(start_paused = true)]

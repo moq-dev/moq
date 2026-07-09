@@ -76,7 +76,12 @@ impl Connection {
 			true => moq_net::Tier::Internal,
 			false => moq_net::Tier::External,
 		};
-		let stats = self.cluster.stats.tier(tier);
+		// Connections on the internal Unix-socket listener are the out-of-process
+		// RTMP/SRT/WebRTC gateways ("legacy" protocols). Mark their traffic so its
+		// bytes also land in the per-broadcast legacy overlay counters (additive on
+		// top of the tier counters), letting a billing service surcharge legacy
+		// protocols. Native QUIC/WebTransport connections report `"quic"`/`"websocket"`.
+		let stats = self.cluster.stats.tier(tier).with_legacy(transport == "unix");
 
 		// Count this session against its auth root for the whole connection,
 		// independent of any data flow, so presence-based billing sees a client
