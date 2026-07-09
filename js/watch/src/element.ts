@@ -86,8 +86,9 @@ export default class MoqWatch extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Set by the pagehide hook when the tab is torn down/frozen, so the connection closes immediately
-	// (freeing the relay's egress to this viewer) instead of lingering until the transport idle timeout.
+	// True while the page is torn down or frozen, so the connection closes immediately (freeing the
+	// relay's egress to this viewer) instead of lingering until the transport idle timeout. Set by
+	// `pagehide`, cleared by `pageshow` or the page becoming visible again.
 	#suspended = new Signal(false);
 
 	// The effective gate: connected to the DOM AND not page-suspended.
@@ -144,12 +145,19 @@ export default class MoqWatch extends HTMLElement {
 		// stays bfcache-eligible). Gated on #enabled so the window listeners drop on DOM disconnect.
 		this.signals.run((effect) => {
 			if (!effect.get(this.#enabled)) return;
+
 			effect.event(window, "pagehide", () => {
 				this.connection.established.peek()?.close();
 				this.#suspended.set(true);
 			});
-			effect.event(window, "pageshow", (event) => {
-				if ((event as PageTransitionEvent).persisted) this.#suspended.set(false);
+
+			// Resume on ANY pageshow, not just a bfcache restore, and on becoming visible again: Safari
+			// fires `pagehide` when it freezes a page and can resume it without a matching `pageshow`.
+			// Clearing only on `persisted` leaves `#suspended` latched, so the connection never returns.
+			const resume = () => this.#suspended.set(false);
+			effect.event(window, "pageshow", resume);
+			effect.event(document, "visibilitychange", () => {
+				if (!document.hidden) resume();
 			});
 		});
 

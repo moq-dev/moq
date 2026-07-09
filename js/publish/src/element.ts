@@ -55,8 +55,9 @@ export default class MoqPublish extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Set by the pagehide hook when the tab is being torn down (or bfcache-frozen), so the connection
-	// closes immediately and the relay unannounces without waiting for the transport idle timeout.
+	// True while the page is torn down or frozen, so the connection closes immediately and the relay
+	// unannounces without waiting for the transport idle timeout. Set by `pagehide`, cleared by
+	// `pageshow` or the page becoming visible again.
 	#suspended = new Signal(false);
 
 	// The effective gate: connected to the DOM AND not page-suspended. Drives the connection + publishing.
@@ -129,14 +130,23 @@ export default class MoqPublish extends HTMLElement {
 		// immediately instead of holding the broadcast route until the transport idle timeout (which would
 		// block a same-name republish). All browsers. Gated on #enabled so the window listeners are removed
 		// on DOM disconnect (element stays GC-eligible), and this effect never re-runs when #suspended flips.
+		// Every listener that sets #suspended must have a counterpart that clears it, or the connection
+		// stays disabled forever.
 		this.signals.run((effect) => {
 			if (!effect.get(this.#enabled)) return;
+
 			effect.event(window, "pagehide", () => {
 				this.connection.established.peek()?.close();
 				this.#suspended.set(true);
 			});
-			effect.event(window, "pageshow", (event) => {
-				if ((event as PageTransitionEvent).persisted) this.#suspended.set(false);
+
+			// Resume on ANY pageshow, not just a bfcache restore, and on becoming visible again: Safari
+			// fires `pagehide` when it freezes a page and can resume it without a matching `pageshow`.
+			// Clearing only on `persisted` leaves `#suspended` latched, so the connection never returns.
+			const resume = () => this.#suspended.set(false);
+			effect.event(window, "pageshow", resume);
+			effect.event(document, "visibilitychange", () => {
+				if (!document.hidden) resume();
 			});
 		});
 
