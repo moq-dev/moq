@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16](https://github.com/moq-dev/moq/compare/moq-net-v0.1.15...moq-net-v0.1.16) - 2026-07-09
+
+### Added
+
+- *(moq-net,js/net)* add moq-transport draft-19 (moqt-19) ([#2106](https://github.com/moq-dev/moq/pull/2106))
+
 ## [0.1.15](https://github.com/moq-dev/moq/compare/moq-net-v0.1.14...moq-net-v0.1.15) - 2026-07-05
 
 ### Fixed

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.8](https://github.com/moq-dev/moq/compare/moq-native-v0.17.7...moq-native-v0.17.8) - 2026-07-09
+
+### Added
+
+- *(moq-native)* optional client TLS host_name (SNI) override ([#2107](https://github.com/moq-dev/moq/pull/2107))
+- *(moq-net,js/net)* add moq-transport draft-19 (moqt-19) ([#2106](https://github.com/moq-dev/moq/pull/2106))
+
+### Fixed
+
+- *(moq-native)* compile for target_os="android" under jni 0.22 ([#2105](https://github.com/moq-dev/moq/pull/2105))
+
 ## [0.17.7](https://github.com/moq-dev/moq/compare/moq-native-v0.17.6...moq-native-v0.17.7) - 2026-07-05
 
 ### Other
