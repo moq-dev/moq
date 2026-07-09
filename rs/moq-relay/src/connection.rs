@@ -130,7 +130,11 @@ impl Connection {
 	///   for its path exactly like a tokenless QUIC client (`--auth-public`).
 	///   Unix peer-credential gating happens earlier, in the listener.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
-		let params = match self.request.url() {
+		// Forwarded to the auth API so it can bucket by connection type (e.g. tier
+		// the internal Unix-socket gateways separately). "quic"/"websocket"/"tcp"/
+		// "unix"/"iroh".
+		let transport = self.request.transport();
+		let mut params = match self.request.url() {
 			// URL-bearing transports: mTLS (QUIC only) can stand in for a JWT.
 			Some(url) => {
 				let params = self.auth.params_from_url(url);
@@ -140,7 +144,7 @@ impl Connection {
 					// vanity alias lands on the same tree a JWT would; cluster peers dial
 					// "/", which the API resolves (typically to an unscoped root). The API
 					// also returns the billing tier (defaulting to internal for trusted peers).
-					let mut token = self.auth.verify_mtls(&params.path).await?;
+					let mut token = self.auth.verify_mtls(&params.path, Some(transport)).await?;
 					// Close the session when the client certificate expires, mirroring
 					// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
 					token.expires = identity.expiry();
@@ -151,6 +155,7 @@ impl Connection {
 			// URL-less stream transports: path + `?jwt=` ride the SETUP.
 			None => AuthParams::from_path(self.request.path().unwrap_or("")),
 		};
+		params.transport = Some(transport.to_string());
 
 		Ok(self.auth.verify(&params).await?)
 	}

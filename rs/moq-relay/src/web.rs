@@ -484,10 +484,14 @@ async fn serve_announced(
 	let params = AuthParams {
 		path: prefix,
 		jwt: query.jwt,
+		..Default::default()
 	};
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&params.path).await?
+		state
+			.auth
+			.verify_mtls(&params.path, params.transport.as_deref())
+			.await?
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -526,10 +530,11 @@ async fn serve_fetch(
 	let auth = AuthParams {
 		path: path.join("/"),
 		jwt: params.auth.jwt,
+		..Default::default()
 	};
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&auth.path).await?
+		state.auth.verify_mtls(&auth.path, auth.transport.as_deref()).await?
 	} else {
 		state.auth.verify(&auth).await?
 	};

@@ -11,13 +11,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
 
-/// Parameters extracted from an incoming connection URL for authentication.
+/// Parameters extracted from an incoming connection for authentication: the
+/// request-derived path + JWT, plus metadata about the connection itself that the
+/// auth API can bucket on (e.g. the transport). Connection metadata is set by the
+/// relay after parsing the request (the URL/SETUP parsers don't know it).
 #[derive(Default, Debug)]
 pub struct AuthParams {
 	/// The URL path identifying the broadcast root.
 	pub path: String,
 	/// A JWT token, if provided via the `jwt` query parameter.
 	pub jwt: Option<String>,
+	/// The connection's transport, forwarded to the auth API as `transport=` so it
+	/// can bucket by connection type (e.g. bill traffic on the internal Unix-socket
+	/// listener -- the out-of-process RTMP/SRT/WebRTC gateways, `"unix"` -- into a
+	/// distinct tier). `Request::transport()` values: `"quic"`, `"websocket"`,
+	/// `"tcp"`, `"unix"`, `"iroh"`. Absent (`None`) sends no `transport` param.
+	pub transport: Option<String>,
 }
 
 impl AuthParams {
@@ -57,7 +66,11 @@ impl AuthParams {
 			}
 		}
 
-		Self { path, jwt }
+		Self {
+			path,
+			jwt,
+			..Default::default()
+		}
 	}
 
 	/// Extract `(path, jwt)` from a moq SETUP request path of the form
@@ -83,6 +96,7 @@ impl AuthParams {
 		Self {
 			path: path.to_string(),
 			jwt,
+			..Default::default()
 		}
 	}
 }
@@ -358,13 +372,16 @@ pub struct AuthConfig {
 	/// and `--auth-public-api` (configuring both is a startup error).
 	/// `--auth-domain` still applies (subdomain->path runs first).
 	///
-	/// Per connection the relay issues `GET <base>?root=<path>&kid=<kid>&mtls=true`
+	/// Per connection the relay issues
+	/// `GET <base>?root=<path>&kid=<kid>&mtls=true&transport=<transport>`
 	/// over the same cached, mTLS-gated HTTP client used by the other auth fetches.
 	/// `root` is the connection path (slashes preserved); `kid` is sent only when
 	/// the connection carries a JWT (value from its header); `mtls=true` is sent
-	/// only when the peer presented a verified client cert. All three are query
-	/// params (never path segments), so the base URL is used verbatim. The
-	/// response is a JSON object whose fields are ALL optional:
+	/// only when the peer presented a verified client cert; `transport` is the
+	/// connection's transport (`quic`/`websocket`/`tcp`/`unix`/`iroh`), so the API
+	/// can bucket by connection type (e.g. tier Unix-socket gateway traffic
+	/// separately). All are query params (never path segments), so the base URL is
+	/// used verbatim. The response is a JSON object whose fields are ALL optional:
 	///
 	/// - `alias`: the canonical full root to scope this connection to (the path
 	///   with its first segment resolved to the project's stable id, the rest
@@ -927,8 +944,8 @@ impl Auth {
 	/// This method applies the relay's canonical alias resolution and billing
 	/// tier decision, so embedded HTTP handlers get the same authorization scope
 	/// as the built-in relay routes.
-	pub async fn verify_mtls(&self, path: &str) -> Result<AuthToken, AuthError> {
-		let (root, tier) = self.resolve_mtls(path).await?;
+	pub async fn verify_mtls(&self, path: &str, transport: Option<&str>) -> Result<AuthToken, AuthError> {
+		let (root, tier) = self.resolve_mtls(path, transport).await?;
 		let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
 		token.tier = tier;
 		Ok(token)
@@ -948,12 +965,12 @@ impl Auth {
 	/// canonical root (e.g. `x7k2qp`), producing a zombie session: the publisher
 	/// believes it is connected and never reconnects, but nothing is ever served.
 	/// Failing closed lets the client retry and self-heal once the API recovers.
-	async fn resolve_mtls(&self, path: &str) -> Result<(String, Tier), AuthError> {
+	async fn resolve_mtls(&self, path: &str, transport: Option<&str>) -> Result<(String, Tier), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
 			return Ok((path.to_string(), self.mtls_tier.clone()));
 		};
 
-		let resp = Self::fetch_auth_api(client, base, path, None, true).await?;
+		let resp = Self::fetch_auth_api(client, base, path, None, true, transport).await?;
 		// Fall back to the configured mTLS tier when the API omits one.
 		let tier = resp.tier().unwrap_or_else(|| self.mtls_tier.clone());
 		Ok((resp.alias.unwrap_or_else(|| path.to_string()), tier))
@@ -963,7 +980,7 @@ impl Auth {
 	/// JWT `kid`, and the `mtls` flag are all query params on the base URL — never
 	/// path segments — so client-controlled values are percent-encoded by
 	/// `query_pairs_mut` and can't retarget the path/query.
-	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool) -> url::Url {
+	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool, transport: Option<&str>) -> url::Url {
 		let mut url = base.clone();
 		{
 			let mut q = url.query_pairs_mut();
@@ -973,6 +990,9 @@ impl Auth {
 			}
 			if mtls {
 				q.append_pair("mtls", "true");
+			}
+			if let Some(transport) = transport {
+				q.append_pair("transport", transport);
 			}
 		}
 		url
@@ -987,8 +1007,9 @@ impl Auth {
 		path: &str,
 		kid: Option<&str>,
 		mtls: bool,
+		transport: Option<&str>,
 	) -> Result<AuthApiResponse, AuthError> {
-		let url = Self::auth_api_url(base, path, kid, mtls);
+		let url = Self::auth_api_url(base, path, kid, mtls, transport);
 		let body = client.get(url).send().await?.error_for_status()?.text().await?;
 		serde_json::from_str(&body).map_err(AuthError::from)
 	}
@@ -1012,7 +1033,15 @@ impl Auth {
 			None => None,
 		};
 
-		let resp = Self::fetch_auth_api(client, base, &params.path, kid.as_deref(), false).await?;
+		let resp = Self::fetch_auth_api(
+			client,
+			base,
+			&params.path,
+			kid.as_deref(),
+			false,
+			params.transport.as_deref(),
+		)
+		.await?;
 		// Resolve the tier before consuming `resp`'s other fields below.
 		// Non-mTLS connections default to the unprefixed tier; the API may bucket
 		// specific ones (e.g. a first-party dashboard token to `internal`).
@@ -1331,6 +1360,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/any/path".into(),
 				jwt: Some("fake-token".into()),
+				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -1361,6 +1391,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -1401,6 +1432,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1434,6 +1466,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -1464,6 +1497,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -1496,6 +1530,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
@@ -1527,6 +1562,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec![]);
@@ -1558,6 +1594,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1591,6 +1628,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1624,6 +1662,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1657,6 +1696,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token.clone()),
+				..Default::default()
 			})
 			.await?;
 
@@ -1668,6 +1708,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1701,6 +1742,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users".into(),
 				jwt: Some(token.clone()),
+				..Default::default()
 			})
 			.await?;
 
@@ -1712,6 +1754,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users/alice".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1745,6 +1788,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1763,6 +1807,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -1793,6 +1838,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1857,6 +1903,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token1),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1873,6 +1920,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/2".into(),
 				jwt: Some(token2),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/2".as_path());
@@ -1928,6 +1976,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::MissingKeyId)));
@@ -1997,6 +2046,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(jwt),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "secret".as_path());
@@ -2030,6 +2080,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -2065,6 +2116,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 
@@ -2100,6 +2152,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -2132,6 +2185,7 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -2382,6 +2436,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -2410,6 +2465,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -2438,6 +2494,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -2464,6 +2521,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -2493,6 +2551,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::DecodeFailed)));
@@ -2529,6 +2588,7 @@ api = "https://api.example.com/access"
 			auth.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
+				..Default::default()
 			})
 			.await?;
 		}
@@ -2809,6 +2869,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -2830,6 +2891,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -2850,6 +2912,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(
@@ -3052,6 +3115,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/demo/room".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "x7k2qp/room".as_path());
@@ -3089,6 +3153,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/demo/room/cam".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "x7k2qp/room/cam".as_path());
@@ -3129,6 +3194,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/kixelated".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "uwwdyw61".as_path());
@@ -3200,6 +3266,34 @@ api = "https://api.example.com/access"
 	}
 
 	#[tokio::test]
+	async fn auth_api_forwards_transport_for_tiering() -> anyhow::Result<()> {
+		// The relay forwards the connection transport as `transport=`, so the API can
+		// bucket by connection type -- e.g. tier traffic on the internal Unix-socket
+		// listener (the RTMP/SRT/WebRTC gateways) into its own billing tier. The mock
+		// REQUIRES the param, so a missing `transport` fails the match (404 -> closed).
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "customer/live"))
+			.and(query_param("transport", "unix"))
+			.respond_with(
+				ResponseTemplate::new(200).set_body_string(r#"{"public":{"subscribe":[""]},"tier":"legacy"}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let params = AuthParams {
+			path: "/customer/live".into(),
+			transport: Some("unix".into()),
+			..Default::default()
+		};
+		let verified = auth.verify(&params).await?;
+		assert_eq!(verified.tier, Tier::new("legacy"));
+		Ok(())
+	}
+
+	#[tokio::test]
 	async fn auth_api_legacy_internal_bool_maps_to_tier() -> anyhow::Result<()> {
 		// Backward compatibility: an auth API written against the original
 		// contract returns `internal: bool`, not `tier`. `true` -> `internal`.
@@ -3257,6 +3351,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/unknown".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "unknown".as_path());
@@ -3285,6 +3380,7 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/demo".into(),
 				jwt: Some(token),
+				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -3321,7 +3417,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		assert_eq!(
-			auth.resolve_mtls("/demo/room").await?,
+			auth.resolve_mtls("/demo/room", None).await?,
 			("x7k2qp/room".to_string(), Tier::new("internal"))
 		);
 		Ok(())
@@ -3341,7 +3437,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		assert_eq!(
-			auth.resolve_mtls("/demo").await?,
+			auth.resolve_mtls("/demo", None).await?,
 			("x7k2qp".to_string(), Tier::default())
 		);
 		Ok(())
@@ -3361,7 +3457,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		assert_eq!(
-			auth.resolve_mtls("/").await?,
+			auth.resolve_mtls("/", None).await?,
 			("x7k2qp".to_string(), Tier::new("region"))
 		);
 		Ok(())
@@ -3378,10 +3474,13 @@ api = "https://api.example.com/access"
 		})
 		.await?;
 		assert_eq!(
-			auth.resolve_mtls("/demo").await?,
+			auth.resolve_mtls("/demo", None).await?,
 			("/demo".to_string(), Tier::new("internal"))
 		);
-		assert_eq!(auth.resolve_mtls("/").await?, ("/".to_string(), Tier::new("internal")));
+		assert_eq!(
+			auth.resolve_mtls("/", None).await?,
+			("/".to_string(), Tier::new("internal"))
+		);
 		Ok(())
 	}
 
@@ -3399,7 +3498,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let err = auth.resolve_mtls("/demo").await.unwrap_err();
+		let err = auth.resolve_mtls("/demo", None).await.unwrap_err();
 		assert!(matches!(err, AuthError::ApiUnavailable(_)));
 		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())
@@ -3418,7 +3517,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let err = auth.resolve_mtls("/demo").await.unwrap_err();
+		let err = auth.resolve_mtls("/demo", None).await.unwrap_err();
 		assert!(matches!(err, AuthError::ApiInvalidResponse(_)));
 		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())

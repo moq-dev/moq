@@ -42,10 +42,17 @@ pub(crate) async fn serve_ws(
 	// match `webtransport` or `qmux-00.moql` and negotiate via SETUP.
 	let ws = ws.protocols(supported_subprotocols());
 
-	let params = AuthParams { path, jwt: query.jwt };
+	let params = AuthParams {
+		path,
+		jwt: query.jwt,
+		transport: Some("websocket".to_string()),
+	};
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&params.path).await?
+		state
+			.auth
+			.verify_mtls(&params.path, params.transport.as_deref())
+			.await?
 	} else {
 		state.auth.verify(&params).await?
 	};
