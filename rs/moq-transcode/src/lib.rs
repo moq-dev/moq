@@ -124,15 +124,13 @@ pub async fn run(
 		}
 	}
 
-	// The rungs notice the source closing themselves; wait for them so every
-	// output track ends cleanly before the broadcast closes.
-	while let Some(result) = tasks.join_next().await {
-		match result {
-			Ok(Ok(())) => {}
-			Ok(Err(err)) => tracing::warn!(%err, "rung failed"),
-			Err(err) => tracing::warn!(%err, "rung panicked"),
-		}
-	}
+	// Wind the rungs down. On a clean source end they are already finishing on
+	// their own (the live path saw the source track end), so `shutdown` just
+	// joins them. But `run` also breaks on a catalog-track error while the
+	// source media and viewers are still live, and a rung task only self-ends on
+	// source-media-end or broadcast-close, not catalog-end. Aborting rather than
+	// awaiting keeps that case from hanging forever here.
+	tasks.shutdown().await;
 
 	derived.finish()?;
 	output.close();
@@ -276,5 +274,42 @@ mod tests {
 		assert_eq!(total, 5);
 
 		transcoder.abort();
+	}
+
+	/// `run` must terminate (not hang in its shutdown drain) when the source
+	/// broadcast goes away, even with a rung task that was never subscribed.
+	#[tokio::test]
+	async fn shuts_down_on_source_end() {
+		let source = source_broadcast(1, 3);
+
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		// Wait until the derivative catalog is up, so the transcoder is past
+		// startup and into its serve loop.
+		let track = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		catalogs.next().await.unwrap().unwrap();
+
+		// Drop the source: the catalog track ends and the broadcast closes, so
+		// `run` should observe the end and return rather than block in the drain.
+		drop(source);
+
+		let result = tokio::time::timeout(std::time::Duration::from_secs(5), transcoder).await;
+		result.expect("run did not shut down within 5s").unwrap().unwrap();
 	}
 }

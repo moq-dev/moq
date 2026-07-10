@@ -13,13 +13,24 @@
 //! output group N maps to source group N and a player switching renditions
 //! lands on the same content.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use hang::catalog::VideoConfig;
 use moq_mux::container::Container as _;
+use tokio::sync::Semaphore;
 
 use crate::Error;
 use crate::catalog::Resolved;
 use crate::scale::Scaler;
+
+/// Cap on transcode pipelines a single rung builds concurrently for on-demand
+/// group fetches. Each pipeline holds a decoder + encoder session, and hardware
+/// encoders expose only a few simultaneous sessions, so an unbounded fetch burst
+/// (a rendition-switching player requesting many past groups at once) would
+/// exhaust them and fail live viewers too. Global admission across rungs and
+/// nodes is the fleet's concern; this is the local backstop.
+const MAX_CONCURRENT_FETCHES: usize = 4;
 
 /// Everything a rung needs to build transcoding pipelines on demand.
 #[derive(Clone)]
@@ -105,7 +116,15 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					let info = moq_net::group::Info { sequence: source.sequence };
 					let mut output = match producer.create_group(info) {
 						Ok(output) => output,
-						// A fetch already produced this group; skip it.
+						// A fetch task is already serving this sequence (a consumer
+						// fetched a group at the live edge before the live loop
+						// reached it). The fetch is authoritative and its group
+						// reaches every subscriber through the shared track cache,
+						// so skip it here. Residual: if that fetch then fails and
+						// aborts the group, this rung skips one GOP until the next
+						// keyframe. Unifying live + fetch into one cache-backed
+						// serving loop (like the relay) would remove the two-writer
+						// race entirely; tracked as a follow-up.
 						Err(moq_net::Error::Duplicate) => continue,
 						Err(err) => return Err(err.into()),
 					};
@@ -124,14 +143,36 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 }
 
 /// The fetch path: serve requests for specific (past) groups.
+///
+/// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
+/// detached: when `serve` cancels this future (the live path ended, or the
+/// output track closed), dropping the set aborts every in-flight fetch, so none
+/// keep a source subscription or an encoder session alive past teardown. A
+/// semaphore bounds how many run at once.
 async fn fetches(rung: &Rung, dynamic: &moq_net::track::Dynamic) -> Result<(), Error> {
+	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+	let mut tasks = tokio::task::JoinSet::new();
+
 	loop {
+		// Reap finished fetches so the set doesn't grow without bound.
+		while tasks.try_join_next().is_some() {}
+
 		let Ok(request) = dynamic.requested_group().await else {
 			// The output track closed; nothing more to serve.
 			return Ok(());
 		};
+
+		// Take a slot before spawning the transcode. Under a burst this blocks
+		// here, so further requests queue in the dynamic handler (backpressure)
+		// instead of spawning unbounded pipelines. The semaphore is never closed,
+		// so acquire only fails if we drop it first.
+		let Ok(permit) = limit.clone().acquire_owned().await else {
+			return Ok(());
+		};
+
 		let rung = rung.clone();
-		tokio::spawn(async move {
+		tasks.spawn(async move {
+			let _permit = permit;
 			let sequence = request.sequence();
 			if let Err(err) = fetch(rung, request).await {
 				tracing::warn!(%err, sequence, "transcode fetch failed");
@@ -141,6 +182,11 @@ async fn fetches(rung: &Rung, dynamic: &moq_net::track::Dynamic) -> Result<(), E
 }
 
 /// Transcode one specifically requested group, fetching it from the source.
+///
+/// Every early exit rejects the request with a real error: dropping a
+/// `GroupRequest` auto-rejects with [`moq_net::Error::Dropped`], which reads as
+/// "the handler vanished" and hides the actual decode/encode/source failure from
+/// the waiting consumer.
 async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), Error> {
 	let options = moq_net::group::Fetch::default().with_priority(request.priority());
 	let mut source = match rung.source.fetch_group(request.sequence(), options).await {
@@ -153,9 +199,18 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
 	// so the encoder starts clean at the group's keyframe.
-	let mut pipeline = rung.pipeline()?;
-	let container = rung.container()?;
-	let mut output = request.accept(None)?;
+	let (mut pipeline, container) = match rung.pipeline().and_then(|p| rung.container().map(|c| (p, c))) {
+		Ok(built) => built,
+		Err(err) => {
+			request.reject(moq_net::Error::Cancel);
+			return Err(err);
+		}
+	};
+
+	let mut output = match request.accept(None) {
+		Ok(output) => output,
+		Err(err) => return Err(err.into()),
+	};
 	transcode_group(&mut pipeline, &container, &mut source, &mut output, None).await?;
 	Ok(())
 }
@@ -220,8 +275,13 @@ async fn transcode_group_inner(
 				.map_err(|_| moq_net::TimeOverflow)?;
 			last_timestamp = last_timestamp.max(timestamp);
 
-			// The first frame of a group is a keyframe by construction; force
-			// an IDR there so every output group opens self-contained.
+			// A group opens on a keyframe by construction, so the first frame is
+			// an IDR. The low-level `Container::read` the transcoder uses does not
+			// reconstruct the keyframe bit for legacy sources (that lives in the
+			// higher-level container consumer), so `first` is the reliable signal;
+			// OR in the container's own flag so CMAF mid-group keyframes still
+			// force an output IDR. This flag drives both the decoder (keyframe
+			// gating + parameter-set injection) and the encoder (forced IDR).
 			let keyframe = frame.keyframe || first;
 			first = false;
 
