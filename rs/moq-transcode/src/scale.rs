@@ -7,9 +7,10 @@ use crate::Error;
 
 /// Scales tightly-packed I420 frames to a fixed output resolution.
 ///
-/// Per-plane SIMD resize: Y at full size, U/V at quarter size. This is the CPU
-/// stage of the pipeline; the GPU-resident scale (CUDA/NPP) is tracked in
-/// moq-dev/moq#1837.
+/// Per-plane SIMD resize: Y at full size, U/V at quarter size. The fallback for
+/// decoders without a built-in scaler (openh264, VideoToolbox, Media
+/// Foundation); NVDEC scales on the GPU during decode instead, so its frames
+/// never come through here.
 pub(crate) struct Scaler {
 	resizer: Resizer,
 	options: ResizeOptions,

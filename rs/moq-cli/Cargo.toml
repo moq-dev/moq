@@ -18,7 +18,7 @@ name = "moq"
 path = "src/main.rs"
 
 [features]
-default = ["iroh", "noq", "websocket", "nvenc", "vaapi"]
+default = ["iroh", "noq", "websocket", "nvenc", "vaapi", "nvdec"]
 iroh = ["moq-native/iroh"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
@@ -31,12 +31,13 @@ websocket = ["moq-native/websocket"]
 # extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
 # Enable with `cargo build -p moq-cli --features capture`.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
-# NVENC / VAAPI hardware encoders for `capture` (Linux), on by default. Each just
-# turns on the matching moq-video feature, and only bites when `capture` pulls in
-# moq-video. For a `capture` build with no CUDA / libva system deps, drop them, e.g.
+# NVENC / VAAPI / NVDEC hardware codecs for `capture` (Linux), on by default. Each
+# just turns on the matching moq-video feature, and only bites when `capture` pulls
+# in moq-video. For a `capture` build with no CUDA / libva system deps, drop them, e.g.
 #   cargo build -p moq-cli --no-default-features --features "iroh noq websocket capture"
 nvenc = ["moq-video?/nvenc"]
 vaapi = ["moq-video?/vaapi"]
+nvdec = ["moq-video?/nvdec"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

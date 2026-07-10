@@ -35,9 +35,9 @@ use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
 };
 
-use super::{Backend, Codec};
+use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
-use crate::frame::I420;
+use crate::frame::{Frame, I420};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -84,7 +84,9 @@ unsafe impl Send for VideoToolbox {}
 impl VideoToolbox {
 	/// Open a decoder for `codec` (H.264 or H.265). The session is built lazily
 	/// once the first keyframe's parameter sets arrive.
-	pub(crate) fn open(codec: Codec) -> Result<Box<dyn Backend>, Error> {
+	/// `config` is accepted for signature parity; VideoToolbox decodes at the
+	/// stream's native size (callers scale the frames themselves).
+	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
 		Ok(Box::new(Self {
 			codec,
@@ -164,7 +166,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn decode(&mut self, access_unit: Bytes, _keyframe: bool) -> Result<Vec<I420>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
 		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
 		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
@@ -223,7 +225,15 @@ impl Backend for VideoToolbox {
 				"VideoToolbox decode callback failed: {error}"
 			)));
 		}
-		Ok(std::mem::take(&mut self.sink.frames))
+		// The decode callback fires synchronously inside `decode_frame`, so
+		// every output frame belongs to the access unit just submitted.
+		Ok(std::mem::take(&mut self.sink.frames)
+			.into_iter()
+			.map(|i420| Decoded {
+				timestamp_us,
+				frame: Frame::I420(i420),
+			})
+			.collect())
 	}
 
 	fn name(&self) -> &str {

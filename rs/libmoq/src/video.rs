@@ -57,7 +57,17 @@ pub struct moq_video_frame {
 #[derive(Default)]
 pub struct Video {
 	consumer_tasks: NonZeroSlab<Option<VideoTaskEntry>>,
-	frames: NonZeroSlab<moq_video::decode::Frame>,
+	frames: NonZeroSlab<VideoFrame>,
+}
+
+/// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
+/// out a stable byte pointer, so a GPU-decoded frame (e.g. NVDEC) is downloaded
+/// exactly once here.
+struct VideoFrame {
+	timestamp_us: u64,
+	width: u32,
+	height: u32,
+	data: bytes::Bytes,
 }
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
@@ -127,7 +137,14 @@ impl Video {
 				},
 			};
 
-			// Hold the lock only to buffer the frame; release it before the callback.
+			// Flatten to CPU bytes outside the lock (a GPU frame downloads here),
+			// then hold the lock only to buffer it; release before the callback.
+			let frame = VideoFrame {
+				timestamp_us: frame.timestamp_us,
+				width: frame.width,
+				height: frame.height,
+				data: frame.into_i420()?,
+			};
 			let frame_id = State::lock().video.frames.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}

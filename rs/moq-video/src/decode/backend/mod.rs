@@ -7,18 +7,18 @@
 //! keyframe: SPS/PPS for H.264, VPS/SPS/PPS for H.265) and returns zero or more
 //! decoded [`I420`] frames.
 //!
-//! [`open`] picks the best backend for a ([`Codec`], [`Kind`](super::Kind)) pair,
-//! trying hardware candidates (platform-gated: VideoToolbox on macOS, Media
-//! Foundation / DXVA on Windows) before the openh264 software fallback, exactly
-//! like the encode side. Only backends that support the requested codec are
-//! considered: there is no software H.265 decoder, so an H.265 track has no
+//! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
+//! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
+//! / DXVA on Windows, NVDEC on Linux) before the openh264 software fallback,
+//! exactly like the encode side. Only backends that support the requested codec
+//! are considered: there is no software H.265 decoder, so an H.265 track has no
 //! fallback below the hardware path.
 
 use bytes::Bytes;
 
-use super::decoder::Kind;
+use super::decoder::{Config, Kind};
 use crate::Error;
-use crate::frame::I420;
+use crate::frame::Frame;
 
 mod openh264;
 
@@ -27,6 +27,9 @@ mod videotoolbox;
 
 #[cfg(target_os = "windows")]
 mod mediafoundation;
+
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+mod nvdec;
 
 /// The video codec a decoder handles. Derived from the catalog, not chosen by the
 /// caller.
@@ -45,24 +48,39 @@ impl Codec {
 	}
 }
 
+/// One decoded picture: the raw frame plus its presentation timestamp.
+pub(crate) struct Decoded {
+	/// Presentation timestamp in microseconds. Backends that decode one-in
+	/// one-out echo the input timestamp; NVDEC threads timestamps through its
+	/// parser, so they survive decoder delay and frame reordering.
+	pub timestamp_us: u64,
+	/// The decoded picture: CPU I420, or a GPU frame the encode side can consume
+	/// without a CPU round trip.
+	pub frame: Frame,
+}
+
 /// An opened decoder. Feed it Annex-B access units in decode order; get back zero
-/// or more raw I420 frames (zero while the decoder is still buffering, e.g. before
+/// or more decoded frames (zero while the decoder is still buffering, e.g. before
 /// the first keyframe's parameter sets).
 pub(crate) trait Backend: Send {
-	/// Decode one Annex-B access unit. `keyframe` marks a keyframe (parameter sets
-	/// are inline ahead of it). Takes an owned [`Bytes`] so a backend can split
-	/// out NAL slices without copying.
-	fn decode(&mut self, access_unit: Bytes, keyframe: bool) -> Result<Vec<I420>, Error>;
+	/// Decode one Annex-B access unit stamped with its presentation time in
+	/// microseconds. `keyframe` marks a keyframe (parameter sets are inline ahead
+	/// of it). Takes an owned [`Bytes`] so a backend can split out NAL slices
+	/// without copying.
+	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, keyframe: bool) -> Result<Vec<Decoded>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;
 }
 
+/// A backend opener: builds a decoder for a codec and config.
+type Open = fn(Codec, &Config) -> Result<Box<dyn Backend>, Error>;
+
 /// A backend constructor: name, the codecs it can decode, and an opener.
 struct Candidate {
 	name: &'static str,
 	supports: fn(Codec) -> bool,
-	open: fn(Codec) -> Result<Box<dyn Backend>, Error>,
+	open: Open,
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
@@ -80,6 +98,12 @@ const HARDWARE: &[Candidate] = &[
 		supports: |_| true,
 		open: mediafoundation::MediaFoundation::open,
 	},
+	#[cfg(all(target_os = "linux", feature = "nvdec"))]
+	Candidate {
+		name: nvdec::NAME,
+		supports: |c| matches!(c, Codec::H264 | Codec::H265),
+		open: nvdec::Nvdec::open,
+	},
 ];
 
 const SOFTWARE: Candidate = Candidate {
@@ -88,11 +112,11 @@ const SOFTWARE: Candidate = Candidate {
 	open: openh264::Openh264::open,
 };
 
-/// Open the best decoder for `codec` and `kind`, trying candidates in priority
+/// Open the best decoder for `codec` and `config`, trying candidates in priority
 /// order and falling back until one succeeds. Candidates that don't support the
 /// codec are skipped before they're even tried.
-pub(crate) fn open(codec: Codec, kind: &Kind) -> Result<Box<dyn Backend>, Error> {
-	let candidates: Vec<&Candidate> = match kind {
+pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	let candidates: Vec<&Candidate> = match &config.kind {
 		Kind::Auto => HARDWARE.iter().chain(std::iter::once(&SOFTWARE)).collect(),
 		Kind::Hardware => HARDWARE.iter().collect(),
 		Kind::Software => vec![&SOFTWARE],
@@ -108,7 +132,7 @@ pub(crate) fn open(codec: Codec, kind: &Kind) -> Result<Box<dyn Backend>, Error>
 			continue;
 		}
 		tried.push(candidate.name);
-		match (candidate.open)(codec) {
+		match (candidate.open)(codec, config) {
 			Ok(backend) => return Ok(backend),
 			Err(e) => tracing::debug!(decoder = candidate.name, error = %e, "decoder unavailable, trying next"),
 		}

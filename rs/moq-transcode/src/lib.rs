@@ -13,10 +13,11 @@
 //!   transcodes just that group. Output groups mirror source sequence numbers
 //!   1:1, so group N of every rung is the same content as source group N.
 //!
-//! The codec work is `moq-video`: hardware where available (NVENC on Linux,
-//! VideoToolbox on macOS, Media Foundation on Windows) with openh264 as the
-//! H.264 software fallback. Scaling runs on the CPU; the GPU-resident
-//! NVDEC -> scale -> NVENC pipeline is tracked in moq-dev/moq#1837.
+//! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
+//! Linux, VideoToolbox on macOS, Media Foundation on Windows) with openh264 as
+//! the H.264 software fallback. On an NVIDIA GPU the whole pipeline is
+//! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
+//! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 
 mod catalog;
 mod config;
@@ -198,6 +199,72 @@ mod tests {
 			_catalog: catalog,
 			_track: track,
 		}
+	}
+
+	/// Whether a hardware decoder AND encoder are usable here (e.g. a Linux box
+	/// with the NVIDIA driver). Probed through the public API so the hardware
+	/// test skips cleanly on GPU-less CI.
+	fn hardware_available() -> bool {
+		let mut encode = moq_video::encode::Config::new(160, 120, 30);
+		encode.kind = moq_video::encode::Kind::Hardware;
+		if moq_video::encode::Encoder::new(&encode).is_err() {
+			return false;
+		}
+
+		let video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut decode = moq_video::decode::Config::new();
+		decode.kind = moq_video::decode::Kind::Hardware;
+		moq_video::decode::Decoder::new(&video, &decode).is_ok()
+	}
+
+	/// The GPU pipeline end to end: hardware decode (NVDEC, scaling in the
+	/// decoder) into hardware encode (NVENC, consuming the CUDA frame in place).
+	/// Skips on machines without both; on a Linux + NVIDIA box this is the
+	/// zero-copy transcode path under the real broadcast plumbing.
+	#[tokio::test]
+	async fn end_to_end_hardware() {
+		if !hardware_available() {
+			eprintln!("skipping: no hardware decoder + encoder available");
+			return;
+		}
+
+		let source = source_broadcast(2, 5);
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Hardware,
+			decoder: moq_video::decode::Kind::Hardware,
+			source: None,
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		// Fetch a specific group: runs a one-shot pipeline to completion, so all
+		// 5 source frames must come through the GPU path.
+		let track = loop {
+			match consumer.track("video/120p") {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("rung track: {err}"),
+			}
+		};
+		let mut fetched = track.fetch_group(0, None).await.unwrap();
+		let payload = fetched.read_frame().await.unwrap().unwrap();
+		let frame = hang::container::Frame::decode(payload).unwrap();
+		assert!(
+			frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
+			"hardware rung output is not Annex-B"
+		);
+		let total = fetched.finished().await.unwrap();
+		assert_eq!(total, 5, "hardware transcode dropped frames");
+
+		transcoder.abort();
 	}
 
 	#[tokio::test]
