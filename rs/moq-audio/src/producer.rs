@@ -71,10 +71,12 @@ impl<E: CatalogExt> AudioProducer<E> {
 			name.clone(),
 			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?;
-		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
+		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire);
 
 		let mut catalog_mut = catalog.clone();
-		catalog_mut.lock().audio.insert(&name, encoder.catalog())?;
+		let mut config = encoder.catalog();
+		config.timeline = Some(catalog.timeline_section(&name));
+		catalog_mut.lock().audio.insert(&name, config)?;
 
 		Ok(Self {
 			encoder,

@@ -7,9 +7,11 @@
 mod audio;
 mod container;
 mod root;
+mod timeline;
 mod video;
 
 pub use audio::*;
 pub use container::*;
 pub use root::*;
+pub use timeline::*;
 pub use video::*;

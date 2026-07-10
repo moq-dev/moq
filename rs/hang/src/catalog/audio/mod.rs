@@ -105,6 +105,11 @@ pub struct AudioConfig {
 	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
+
+	/// The companion timeline track indexing this rendition's groups, if the publisher
+	/// offers one. See [`Timeline`](crate::catalog::Timeline).
+	#[serde(default)]
+	pub timeline: Option<crate::catalog::Timeline>,
 }
 
 impl AudioConfig {
@@ -124,6 +129,7 @@ impl AudioConfig {
 			description: None,
 			container: Container::default(),
 			jitter: None,
+			timeline: None,
 		}
 	}
 }

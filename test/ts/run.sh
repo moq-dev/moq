@@ -202,20 +202,36 @@ timeout -k 3 $((DURATION + 20)) bash -c '
 ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" >"$TMP/pub.log" 2>&1 &
 PUB_PID=$!
 
-wait "$PUB_PID" 2>/dev/null || true
+# Keep the publisher's exit status: `timeout` returns 124 when it had to kill a
+# stalled `moq import ts`, non-zero/non-124 means the import itself errored. Both
+# explain a truncated capture, so surface it alongside the logs on failure.
+wait "$PUB_PID" 2>/dev/null && PUB_RC=0 || PUB_RC=$?
 PUB_PID=""
 sleep 3
 kill_tree "$SUB_PID" 2>/dev/null || true
 SUB_PID=""
 
-if [[ ! -s "$SUB_TS" ]]; then
-    echo "error: subscriber captured no data" >&2
+# shellcheck disable=SC2329  # invoked from multiple failure paths below
+dump_logs() {
+    echo "  publisher exit status: $PUB_RC" >&2
     sed 's/^/  pub: /' "$TMP/pub.log" >&2 || true
     sed 's/^/  sub: /' "$TMP/sub.log" >&2 || true
+}
+
+if [[ ! -s "$SUB_TS" ]]; then
+    echo "error: subscriber captured no data" >&2
+    dump_logs
     exit 1
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 echo
-# Pass the source so duration-fidelity can pin the exported stream's rate.
-analyze "$SUB_TS" "$SRC_TS"
+# Pass the source so duration-fidelity can pin the exported stream's rate. A tiny
+# capture still parses, so the round-trip can fail here with a non-empty file;
+# dump the logs and publisher status so the failure is diagnosable, not a mystery.
+if ! analyze "$SUB_TS" "$SRC_TS"; then
+    echo >&2
+    echo "error: compliance analysis failed (see round-trip logs below)" >&2
+    dump_logs
+    exit 1
+fi

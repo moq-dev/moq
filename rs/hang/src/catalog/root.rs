@@ -221,6 +221,7 @@ mod test {
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(100)),
+				timeline: None,
 			},
 		);
 
@@ -236,6 +237,7 @@ mod test {
 				description: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(40)),
+				timeline: None,
 			},
 		);
 

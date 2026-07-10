@@ -17,8 +17,8 @@
 //! Both legacy RTMP (H.264 + AAC, plus MP3) and enhanced RTMP (E-RTMP: the HEVC,
 //! AV1, VP9, Opus, AC-3, and MP3 FourCC payloads) are supported in each direction,
 //! because the codec handling lives entirely in the [`moq_mux`] FLV demuxer/muxer;
-//! this crate only translates the RTMP transport. Legacy players that speak only
-//! H.264 + AAC will of course reject the E-RTMP codecs on the play path.
+//! this crate only translates the RTMP transport. On the play path, enhanced
+//! codecs are sent only to clients that advertised the matching FourCC support.
 //!
 //! Two entry points, depending on how much control you need over each request:
 //!
@@ -59,6 +59,8 @@
 //! the vendored `rml` module (a fork of `rml_rtmp`), with no librtmp or ffmpeg
 //! dependency.
 
+use std::time::Duration;
+
 mod dial;
 mod error;
 mod flv;
@@ -66,6 +68,16 @@ mod listen;
 // Vendored fork of rml_rtmp; see the module docs.
 mod rml;
 mod server;
+
+/// Default FLV muxer latency: how long a stalled group is held before skipping to
+/// a newer one (the moq-level frame-drop latency).
+///
+/// RTMP is unpaced (tags go out as fast as the socket accepts them), so this
+/// bounds buffering rather than the wire rate. Zero would drop stale groups the
+/// instant a newer one arrives, which is too aggressive for RTMP's typical jitter,
+/// so the default holds a couple of seconds. Override per request with
+/// [`Play::with_latency`] / [`Client::with_latency`] or via [`Config::latency`].
+pub const DEFAULT_LATENCY: Duration = Duration::from_secs(2);
 
 pub use dial::Client;
 pub use error::{Error, Result};
