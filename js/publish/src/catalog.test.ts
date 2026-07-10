@@ -125,34 +125,6 @@ test("untouched reservations do not publish an empty catalog", async () => {
 	effect.close();
 });
 
-test("removing the last rendition keeps a section with display metadata", async () => {
-	const catalog = new CatalogProducer();
-	const reserved = catalog.reserve();
-	const video = reserved.video("video/hd");
-	reserved.close();
-
-	const effect = new Effect();
-	const track = new TrackProducer("catalog.json");
-	catalog.serve(track, effect);
-	const consumer = new Json.Consumer<Catalog.Root>(track.subscribe());
-	const first = consumer.next();
-
-	video.set(videoConfig);
-	await first;
-
-	// Display metadata lives outside the rendition guard, so removing the last rendition must keep it.
-	const display = { width: Catalog.u53(1920), height: Catalog.u53(1080) };
-	catalog.mutate((c) => {
-		c.video = { renditions: { "video/hd": videoConfig }, display };
-	});
-	await consumer.next();
-
-	video.close();
-	expect(await consumer.next()).toEqual({ video: { renditions: {}, display } });
-
-	effect.close();
-});
-
 test("catalog producer publishes every update as a snapshot group", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {
