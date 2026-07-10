@@ -74,7 +74,7 @@ mod threaded {
 				// Encode each request in arrival order. The encoder and its COM /
 				// MFT handles are created, used, and dropped only on this thread.
 				while let Some(req) = req_rx.blocking_recv() {
-					let result = encoder.encode(&req.frame, req.keyframe);
+					let result = encoder.encode_raw(&req.frame, req.keyframe);
 					let _ = req.resp.send(result);
 				}
 				// `encoder` drops here, on this thread, balancing the COM apartment.
@@ -153,7 +153,7 @@ mod inline {
 		}
 
 		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-			self.0.encode(&frame, keyframe)
+			self.0.encode_raw(&frame, keyframe)
 		}
 	}
 }

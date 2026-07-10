@@ -15,4 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and encodes each rung only while it is subscribed or fetched. Output groups
   mirror source group sequence numbers, so specific-group fetches map 1:1 to
   source groups. Encoding via `moq-video` (NVENC/VideoToolbox/Media Foundation
-  hardware, openh264 fallback) with CPU I420 scaling.
+  hardware, openh264 fallback). On an NVIDIA GPU the pipeline is zero-copy:
+  NVDEC decodes and scales in hardware and NVENC encodes the CUDA frame in
+  place; other decoders scale I420 on the CPU.

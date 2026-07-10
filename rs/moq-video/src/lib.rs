@@ -18,20 +18,24 @@
 //!     front, but the camera opens only while a subscriber is watching and is
 //!     released when the last one leaves.
 //!   - [`encode::Producer`] publishes packets you encoded yourself.
-//! - [`decode`] subscribes to an H.264 or H.265 track and decodes it to raw I420
-//!   frames with a native backend (VideoToolbox on macOS, Media Foundation / DXVA
-//!   on Windows, openh264 software fallback for H.264). [`decode::Consumer`] is
-//!   the mirror of `moq-audio`'s `AudioConsumer`.
+//! - [`decode`] subscribes to an H.264 or H.265 track and decodes it to raw
+//!   frames with a native backend (VideoToolbox on macOS, Media Foundation /
+//!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264).
+//!   [`decode::Consumer`] is the mirror of `moq-audio`'s `AudioConsumer`. An
+//!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
+//!   zero-copy (the transcode path), scaled in hardware via
+//!   [`decode::Config::resize`].
 //!
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
-//! variant names a backend (openh264 / VideoToolbox / NVENC) or a capture
-//! implementation. [`encode::Encoder`] takes raw RGBA bytes, [`decode::Consumer`]
-//! returns raw I420, and the camera capture path stays internal. So swapping or
-//! bumping any backend crate is not a breaking change for consumers. Config
-//! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
-//! fields, so new options stay additive.
+//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC) or a
+//! capture implementation. [`encode::Encoder`] takes raw RGBA bytes,
+//! [`decode::Consumer`] returns opaque [`decode::Frame`]s (CPU I420 on demand,
+//! GPU-resident when hardware decoded), and the camera capture path stays
+//! internal. So swapping or bumping any backend crate is not a breaking change
+//! for consumers. Config structs are `#[non_exhaustive]`: build them via
+//! `default()`/`new()` and set fields, so new options stay additive.
 
 pub mod capture;
 pub mod decode;

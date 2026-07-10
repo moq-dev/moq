@@ -17,11 +17,11 @@ Nothing is encoded until someone asks, Cloudflare-style just-in-time per rung:
   sequence numbers 1:1, so group N of every rung is the same content as source
   group N and rendition switches land cleanly.
 
-The codec work is [`moq-video`](../moq-video): hardware where available (NVENC
-on Linux, VideoToolbox on macOS, Media Foundation on Windows), openh264 as the
-H.264 software fallback. Scaling runs on the CPU; the GPU-resident
-NVDEC -> scale -> NVENC pipeline is tracked in
-[#1837](https://github.com/moq-dev/moq/issues/1837).
+The codec work is [`moq-video`](../moq-video): hardware where available (NVDEC +
+NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows), openh264 as
+the H.264 software fallback. On an NVIDIA GPU the pipeline is fully GPU-resident:
+NVDEC decodes and scales in hardware and NVENC encodes the CUDA frame in place,
+with no CPU copies. Other decoders fall back to CPU scaling.
 
 ## Library
 

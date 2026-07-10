@@ -309,6 +309,12 @@ fn write(output: &mut moq_net::group::Producer, packets: Vec<(u64, Bytes)>) -> R
 }
 
 /// Decode -> scale -> encode for one rung.
+///
+/// The decoder is asked to emit frames at the rung's resolution
+/// (`decode::Config::resize`). A decoder with a hardware scaler (NVDEC) does,
+/// and its GPU frames feed the encoder in place: the NVDEC -> NVENC path never
+/// touches the CPU. Frames that come back at any other size (software decode,
+/// or a hardware decoder without a scaler) fall back to the CPU [`Scaler`].
 struct Pipeline {
 	decoder: moq_video::decode::Decoder,
 	scaler: Scaler,
@@ -319,7 +325,10 @@ struct Pipeline {
 
 impl Pipeline {
 	fn new(rung: &Rung) -> Result<Self, Error> {
-		let decoder = moq_video::decode::Decoder::new(&rung.config, &rung.decoder)?;
+		let mut decode = moq_video::decode::Config::new();
+		decode.kind = rung.decoder.clone();
+		decode.resize = Some((rung.info.width, rung.info.height));
+		let decoder = moq_video::decode::Decoder::new(&rung.config, &decode)?;
 
 		let mut config = moq_video::encode::Config::new(rung.info.width, rung.info.height, rung.info.framerate);
 		config.bitrate = Some(rung.info.bitrate);
@@ -343,9 +352,18 @@ impl Pipeline {
 	fn process(&mut self, payload: &Bytes, timestamp: u64, keyframe: bool) -> Result<Vec<(u64, Bytes)>, Error> {
 		let mut packets = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
-			let scaled = self.scaler.scale(&raw.data, raw.width, raw.height)?;
-			for packet in self.encoder.encode_i420(scaled, self.width, self.height, keyframe)? {
-				packets.push((raw.timestamp_us, packet));
+			let raw_timestamp = raw.timestamp_us;
+			let encoded = if (raw.width, raw.height) == (self.width, self.height) {
+				// Already at the rung size (the decoder scaled): feed the frame
+				// through as-is, keeping a GPU frame on the GPU.
+				self.encoder.encode(&raw, keyframe)?
+			} else {
+				let (width, height) = (raw.width, raw.height);
+				let scaled = self.scaler.scale(&raw.into_i420()?, width, height)?;
+				self.encoder.encode_i420(scaled, self.width, self.height, keyframe)?
+			};
+			for packet in encoded {
+				packets.push((raw_timestamp, packet));
 			}
 		}
 		Ok(packets)
