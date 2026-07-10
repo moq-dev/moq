@@ -90,8 +90,10 @@ impl Api {
 			// SAFETY: each symbol is resolved by the exact name and signature the
 			// vendored `sys` bindings declare for it.
 			unsafe fn sym<T: Copy>(library: &'static libloading::Library, name: &str) -> Result<T, String> {
-				let symbol: libloading::Symbol<T> = unsafe { library.get(name.as_bytes()) }
-					.map_err(|e| format!("symbol {name} missing from the NVIDIA decode library: {e}"))?;
+				let symbol: libloading::Symbol<T> = unsafe { library.get(name.as_bytes()) }.map_err(|e| {
+					let name = name.trim_end_matches('\0');
+					format!("symbol {name} missing from the NVIDIA decode library: {e}")
+				})?;
 				Ok(*symbol)
 			}
 

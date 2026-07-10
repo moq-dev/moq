@@ -5,7 +5,7 @@
 //! gating, owned by [`Decoder`](super::Decoder)) and the codec itself. Every
 //! backend takes one **Annex-B** access unit (parameter sets inline ahead of each
 //! keyframe: SPS/PPS for H.264, VPS/SPS/PPS for H.265) and returns zero or more
-//! decoded [`I420`] frames.
+//! [`Decoded`] pictures (a raw CPU or GPU frame plus its timestamp).
 //!
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
 //! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation

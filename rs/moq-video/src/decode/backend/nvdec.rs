@@ -75,8 +75,11 @@ struct State {
 struct Decoder {
 	api: &'static cuvid::Api,
 	handle: CUvideodecoder,
-	/// The coded (not display) size it was created for, to detect reconfigures.
+	/// The coded size it was created for, to detect reconfigures.
 	coded: (u32, u32),
+	/// The display crop (left, top, right, bottom) it was created for; a crop
+	/// change alone also requires a new decoder.
+	display_area: (i32, i32, i32, i32),
 	/// Output size: cuvid scales to this while writing the output surface.
 	width: u32,
 	height: u32,
@@ -253,13 +256,24 @@ impl State {
 		);
 		let (width, height) = self.resize.unwrap_or(display);
 		let coded = (format.coded_width, format.coded_height);
+		let display_area = (
+			format.display_area.left,
+			format.display_area.top,
+			format.display_area.right,
+			format.display_area.bottom,
+		);
 
 		let surfaces = c_int::from(format.min_num_decode_surfaces.max(1));
 
 		// A repeated sequence header with unchanged geometry (common at every
-		// keyframe) keeps the existing decoder.
+		// keyframe) keeps the existing decoder. The display crop matters even at
+		// the same coded and target sizes: it selects the source rect the scaler
+		// reads from.
 		if let Some(decoder) = &self.decoder {
-			if decoder.coded == coded && (decoder.width, decoder.height) == (width, height) {
+			if decoder.coded == coded
+				&& decoder.display_area == display_area
+				&& (decoder.width, decoder.height) == (width, height)
+			{
 				return Ok(surfaces);
 			}
 		}
@@ -313,6 +327,7 @@ impl State {
 			api: self.api,
 			handle,
 			coded,
+			display_area,
 			width,
 			height,
 		});

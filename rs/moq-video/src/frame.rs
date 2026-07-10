@@ -27,8 +27,9 @@ pub(crate) enum Frame {
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
-	/// Zero-copy GPU buffer (Linux CUDA NV12, NVDEC output / NVENC input).
-	#[cfg(all(target_os = "linux", any(feature = "nvenc", feature = "nvdec")))]
+	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced only by the NVDEC
+	/// decoder, consumed in place by the NVENC encoder.
+	#[cfg(all(target_os = "linux", feature = "nvdec"))]
 	Cuda(cuda::Frame),
 	/// CPU-resident planar I420.
 	I420(I420),
@@ -41,7 +42,7 @@ impl Frame {
 			Frame::Surface(s) => s.width,
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => t.width,
-			#[cfg(all(target_os = "linux", any(feature = "nvenc", feature = "nvdec")))]
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Frame::Cuda(c) => c.width,
 			Frame::I420(i) => i.width,
 		}
@@ -53,7 +54,7 @@ impl Frame {
 			Frame::Surface(s) => s.height,
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => t.height,
-			#[cfg(all(target_os = "linux", any(feature = "nvenc", feature = "nvdec")))]
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Frame::Cuda(c) => c.height,
 			Frame::I420(i) => i.height,
 		}
@@ -66,7 +67,7 @@ impl Frame {
 			Frame::Surface(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
-			#[cfg(all(target_os = "linux", any(feature = "nvenc", feature = "nvdec")))]
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Frame::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
 			Frame::I420(i) => Ok(Cow::Borrowed(i)),
 		}
@@ -371,7 +372,7 @@ pub(crate) mod macos {
 	}
 }
 
-#[cfg(all(target_os = "linux", any(feature = "nvenc", feature = "nvdec")))]
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
 pub(crate) mod cuda {
 	use std::sync::Arc;
 
