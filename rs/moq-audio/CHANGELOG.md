@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.7...moq-audio-v0.0.8) - 2026-07-09
+
+### Other
+
+- Per-track timeline index for each media track ([#2109](https://github.com/moq-dev/moq/pull/2109))
+
 ## [0.0.7](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.6...moq-audio-v0.0.7) - 2026-07-04
 
 ### Other

@@ -8,7 +8,7 @@ repository = "https://github.com/moq-dev/moq"
 # src/rml/LICENSE and applies to that module regardless of which option you pick.
 license = "MIT OR Apache-2.0"
 
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -36,6 +36,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 byteorder = "1"
 bytes = "1"
 futures = "0.3"
+hang = { workspace = true }
 hmac = "0.13"
 moq-mux = { workspace = true }
 moq-net = { workspace = true }

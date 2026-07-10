@@ -282,6 +282,90 @@ fn accepted_connection_responds_with_same_object_encoding_value_as_connection_re
 }
 
 #[test]
+fn connect_request_reports_fourcc_list() {
+	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
+	let payload = RtmpMessage::Amf0Command {
+		command_name: "connect".to_string(),
+		transaction_id: 1.0,
+		command_object: Amf0Value::Object(HashMap::from([
+			("app".to_string(), Amf0Value::Utf8String("some_app".to_string())),
+			("capsEx".to_string(), Amf0Value::Number(2.0)),
+			(
+				"fourCcList".to_string(),
+				Amf0Value::StrictArray(vec![
+					Amf0Value::Utf8String("hvc1".to_string()),
+					Amf0Value::Utf8String("Opus".to_string()),
+				]),
+			),
+		])),
+		additional_arguments: vec![],
+	}
+	.into_message_payload(RtmpTimestamp::new(15), 0)
+	.unwrap();
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	let results = session.handle_input(&packet.bytes[..]).unwrap();
+
+	let (_, events) = split_results(&mut deserializer, results);
+	assert_eq!(events.len(), 1, "Unexpected number of events returned");
+	match &events[0] {
+		ServerSessionEvent::ConnectionRequested {
+			caps_ex,
+			video_fourccs,
+			audio_fourccs,
+			..
+		} => {
+			assert_eq!(*caps_ex, 2);
+			assert_eq!(video_fourccs.fourccs, vec![*b"hvc1", *b"Opus"]);
+			assert_eq!(audio_fourccs.fourccs, vec![*b"hvc1", *b"Opus"]);
+		}
+		_ => panic!("First event was not as expected: {:?}", events[0]),
+	}
+}
+
+#[test]
+fn connect_request_reports_decodable_fourcc_maps() {
+	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
+	let payload = RtmpMessage::Amf0Command {
+		command_name: "connect".to_string(),
+		transaction_id: 1.0,
+		command_object: Amf0Value::Object(HashMap::from([
+			("app".to_string(), Amf0Value::Utf8String("some_app".to_string())),
+			(
+				"videoFourCcInfoMap".to_string(),
+				Amf0Value::Object(HashMap::from([
+					("vp09".to_string(), Amf0Value::Number(1.0)),
+					("hvc1".to_string(), Amf0Value::Number(4.0)),
+				])),
+			),
+			(
+				"audioFourCcInfoMap".to_string(),
+				Amf0Value::Object(HashMap::from([("*".to_string(), Amf0Value::Number(1.0))])),
+			),
+		])),
+		additional_arguments: vec![],
+	}
+	.into_message_payload(RtmpTimestamp::new(15), 0)
+	.unwrap();
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	let results = session.handle_input(&packet.bytes[..]).unwrap();
+
+	let (_, events) = split_results(&mut deserializer, results);
+	assert_eq!(events.len(), 1, "Unexpected number of events returned");
+	match &events[0] {
+		ServerSessionEvent::ConnectionRequested {
+			video_fourccs,
+			audio_fourccs,
+			..
+		} => {
+			assert_eq!(video_fourccs.fourccs, vec![*b"vp09"]);
+			assert!(!video_fourccs.fourccs.contains(b"hvc1"));
+			assert!(audio_fourccs.any);
+		}
+		_ => panic!("First event was not as expected: {:?}", events[0]),
+	}
+}
+
+#[test]
 fn can_create_stream_on_connected_session() {
 	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
 	perform_connection("some_app", &mut session, &mut serializer, &mut deserializer);

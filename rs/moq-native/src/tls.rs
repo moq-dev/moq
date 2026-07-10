@@ -199,6 +199,18 @@ pub struct Client {
 	)]
 	pub disable_verify: Option<bool>,
 
+	/// Override the TLS SNI and certificate verification hostname for outbound connections.
+	///
+	/// When unset, the connect URL's host is used (default behavior). Useful when dialing a
+	/// raw IP address but needing to present/verify a DNS name the server certificate covers.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-tls-host-name",
+		long = "client-tls-host-name",
+		env = "MOQ_CLIENT_TLS_HOST_NAME"
+	)]
+	pub host_name: Option<String>,
+
 	/// Deprecated `--tls-*` spellings, folded into the canonical fields above with
 	/// a warning. Private and hidden so they stay off the public surface; not a
 	/// TOML field (config files use the canonical names).

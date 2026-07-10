@@ -1,8 +1,8 @@
 {
 	"name": "@moq/json",
 	"type": "module",
-	"version": "0.1.1",
-	"description": "Snapshot/delta JSON publishing over MoQ tracks using RFC 7396 JSON Merge Patch.",
+	"version": "0.1.2",
+	"description": "JSON publishing over MoQ tracks: snapshot/delta (RFC 7396 merge patch) objects, or append-log NDJSON streams.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"sideEffects": false,
@@ -26,6 +26,6 @@
 	"devDependencies": {
 		"@types/bun": "^1.3.14",
 		"rimraf": "^6.1.3",
-		"typescript": "7.0.1-rc"
+		"typescript": "7.0.2"
 	}
 }

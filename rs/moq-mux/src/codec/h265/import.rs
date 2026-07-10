@@ -48,7 +48,9 @@ impl<E: CatalogExt> Import<E> {
 	) -> Self {
 		let rendition = reserved.video_with_hint(track.name(), hint.clone());
 		let mut import = Self {
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			track: reserved
+				.producer()
+				.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
 			last_sps: None,

@@ -119,6 +119,8 @@ pub(crate) struct QuinnClient {
 	pub transport: Arc<quinn::TransportConfig>,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
+	/// Optional TLS SNI / verification hostname override (from config).
+	pub host_name: Option<String>,
 }
 
 impl QuinnClient {
@@ -149,6 +151,7 @@ impl QuinnClient {
 			quic,
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
+			host_name: config.tls.host_name.clone(),
 		})
 	}
 
@@ -223,7 +226,10 @@ impl QuinnClient {
 
 		tracing::debug!(%url, %ip, "connecting");
 
-		let connection = self.quic.connect_with(config, ip, &host)?.await?;
+		// Use the configured host_name override for SNI + cert verification, else the URL host.
+		let host_name = self.host_name.clone().unwrap_or(host);
+
+		let connection = self.quic.connect_with(config, ip, &host_name)?.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());

@@ -45,6 +45,9 @@ pub enum Error {
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
 
+	#[error("client tls host_name override is not supported with the quiche backend")]
+	HostNameUnsupported,
+
 	#[error("missing ALPN")]
 	MissingAlpn,
 
@@ -113,6 +116,14 @@ pub(crate) struct QuicheClient {
 
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
+		// web-transport-quiche's ClientBuilder::connect(host, port) uses `host` for BOTH
+		// DNS resolution (the dial target) AND the TLS SNI, so a host_name override that
+		// decouples them can't be applied without an upstream API change. Fail fast at
+		// init rather than silently ignoring the override on the first connect.
+		if config.tls.host_name.is_some() {
+			return Err(Error::HostNameUnsupported);
+		}
+
 		Ok(Self {
 			bind: config.bind,
 			verification: config.tls.verification()?,

@@ -28,7 +28,9 @@ impl<E: CatalogExt> Import<E> {
 		let mut rendition = reserved.audio(track.name());
 		rendition.set(config);
 		Self {
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			track: reserved
+				.producer()
+				.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 		}
 	}

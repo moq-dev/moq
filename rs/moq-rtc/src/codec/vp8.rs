@@ -20,7 +20,7 @@ impl Bridge {
 			broadcast.unique_name(".vp8"),
 			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		)?;
-		let producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let producer = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
 		Ok(Self {
 			catalog,
 			track: producer,
@@ -32,13 +32,11 @@ impl Bridge {
 		if self.announced {
 			return;
 		}
+		let name = self.track.track().name().to_string();
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;
-		self.catalog
-			.lock()
-			.video
-			.renditions
-			.insert(self.track.track().name().to_string(), config);
+		config.timeline = Some(self.catalog.timeline_section(&name));
+		self.catalog.lock().video.renditions.insert(name, config);
 		self.announced = true;
 	}
 }

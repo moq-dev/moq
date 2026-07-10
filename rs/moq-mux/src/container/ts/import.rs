@@ -663,10 +663,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	);
 	drop(guard);
 
-	Ok(crate::container::Producer::new(
-		track,
-		crate::catalog::hang::Container::Legacy,
-	))
+	Ok(catalog.media_producer(track, crate::catalog::hang::Container::Legacy))
 }
 
 /// Remove a verbatim track's entry from the `mpegts` catalog section on drop.

@@ -37,6 +37,10 @@ pub trait Kind: sealed::Sealed + 'static {
 	#[doc(hidden)]
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64>;
 
+	/// The config's timeline field, so [`Rendition`] can advertise the timeline track generically.
+	#[doc(hidden)]
+	fn timeline_mut(config: &mut Self::Config) -> &mut Option<hang::catalog::Timeline>;
+
 	/// Fill a detected config's absent optional fields from a caller-provided hint.
 	#[doc(hidden)]
 	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint);
@@ -140,6 +144,9 @@ impl Kind for Video {
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
 		&mut config.bitrate
 	}
+	fn timeline_mut(config: &mut Self::Config) -> &mut Option<hang::catalog::Timeline> {
+		&mut config.timeline
+	}
 
 	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) {
 		hint.apply(config);
@@ -169,6 +176,9 @@ impl Kind for Audio {
 	}
 	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
 		&mut config.bitrate
+	}
+	fn timeline_mut(config: &mut Self::Config) -> &mut Option<hang::catalog::Timeline> {
+		&mut config.timeline
 	}
 
 	fn apply_hint(_config: &mut Self::Config, _hint: &Self::Hint) {}
@@ -313,6 +323,9 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 	/// whether from the caller or the hint) is authoritative and left alone; only an absent field is
 	/// auto-detected. Any metrics accumulated before the rendition existed (a dirty start or a B-frame
 	/// reorder) are seeded into the fields being detected.
+	///
+	/// Also advertises the rendition's timeline track in the config, so a consumer can index its groups
+	/// without downloading media (see [`Producer::timeline_section`](crate::catalog::Producer::timeline_section)).
 	pub fn set(&mut self, mut config: K::Config) {
 		K::apply_hint(&mut config, &self.hint);
 		self.detect_jitter = K::jitter_mut(&mut config).is_none();
@@ -328,6 +341,8 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 		{
 			*K::bitrate_mut(&mut config) = Some(bitrate);
 		}
+
+		*K::timeline_mut(&mut config) = Some(self.catalog.timeline_section(&self.name));
 
 		// Write the config first (still withheld, since we're holding our reservation), then release
 		// the reservation. If this was the last one, the release flushes a complete snapshot.

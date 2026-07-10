@@ -1,7 +1,7 @@
 {
 	"name": "@moq/msf",
 	"type": "module",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"description": "MSF (MOQT Streaming Format) catalog types for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -20,6 +20,6 @@
 	},
 	"devDependencies": {
 		"rimraf": "^6.1.3",
-		"typescript": "7.0.1-rc"
+		"typescript": "7.0.2"
 	}
 }

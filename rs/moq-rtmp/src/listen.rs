@@ -34,7 +34,7 @@ use crate::server::{Request, Server};
 /// options stay additive. Ingest is disabled (and [`run`] stays pending) unless
 /// [`listen`](Config::listen) is set, letting an embedding relay run without
 /// RTMP until it's configured.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
 	/// Address to listen on for RTMP ingest (e.g. `0.0.0.0:1935`). When `None`,
@@ -46,7 +46,8 @@ pub struct Config {
 	pub prefix: String,
 
 	/// How long a play's FLV muxer waits for a stalled group before skipping to a
-	/// newer one (the moq-level frame-drop latency). Zero (the default) drops
+	/// newer one (the moq-level frame-drop latency). Defaults to
+	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); set [`Duration::ZERO`] to drop
 	/// stale groups aggressively. Only affects egress (plays); ingest ignores it.
 	pub latency: Duration,
 
@@ -62,6 +63,19 @@ pub struct Config {
 	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
 
 	active: ActivePaths,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			listen: None,
+			prefix: String::new(),
+			latency: crate::DEFAULT_LATENCY,
+			#[cfg(feature = "tls")]
+			tls: None,
+			active: ActivePaths::default(),
+		}
+	}
 }
 
 /// Run the RTMP listener until it fails, bridging each connection to `origin`:

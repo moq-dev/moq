@@ -9,7 +9,8 @@ type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
 
-// "always" announces immediately, "never" never announces, "source" waits until a source is selected.
+// "always" announces immediately, "never" never announces, "source" waits until media is
+// actually being captured (a live audio/video track, i.e. permission granted).
 // Defaults to "source" so we don't announce an empty broadcast with no audio/video.
 type AnnounceMode = "always" | "source" | "never";
 
@@ -90,8 +91,14 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => {
 			const enabled = effect.get(this.#enabled);
 			const announce = effect.get(this.state.announce);
-			const hasSource = effect.get(this.state.source) !== undefined;
-			const announcing = announce === "always" || (announce === "source" && hasSource);
+			// "source" waits until media is actually being captured -- a live audio or
+			// video track exists -- not merely a source *type* selected. Otherwise we'd
+			// announce an empty broadcast while the getUserMedia/getDisplayMedia
+			// permission prompt is still pending (or after the user denies it).
+			const hasMedia =
+				effect.get(this.broadcast.video.source) !== undefined ||
+				effect.get(this.broadcast.audio.source) !== undefined;
+			const announcing = announce === "always" || (announce === "source" && hasMedia);
 			this.#publishEnabled.set(enabled && announcing);
 		});
 

@@ -22,9 +22,11 @@ use rml_amf0::Amf0Value;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
+const FOURCC_CAN_DECODE: u32 = 0x01;
+
 pub use self::config::ServerSessionConfig;
 pub use self::errors::ServerSessionError;
-pub use self::events::{PlayStartValue, ServerSessionEvent};
+pub use self::events::{FourCcSupport, PlayStartValue, ServerSessionEvent};
 pub use self::publish_mode::PublishMode;
 pub use self::result::ServerSessionResult;
 
@@ -509,6 +511,18 @@ impl ServerSession {
 			Some(Amf0Value::Number(number)) if number >= 0.0 => number as u32,
 			_ => 0,
 		};
+		let combined_fourccs = properties
+			.remove("fourCcList")
+			.map(Self::parse_fourcc_list)
+			.unwrap_or_default();
+		let mut video_fourccs = combined_fourccs.clone();
+		let mut audio_fourccs = combined_fourccs;
+		if let Some(value) = properties.remove("videoFourCcInfoMap") {
+			Self::merge_fourcc_support(&mut video_fourccs, Self::parse_fourcc_info_map(value));
+		}
+		if let Some(value) = properties.remove("audioFourCcInfoMap") {
+			Self::merge_fourcc_support(&mut audio_fourccs, Self::parse_fourcc_info_map(value));
+		}
 
 		let request = OutstandingRequest::ConnectionRequest {
 			app_name: app_name.clone(),
@@ -523,9 +537,76 @@ impl ServerSession {
 			app_name: app_name,
 			request_id: request_number,
 			caps_ex,
+			video_fourccs,
+			audio_fourccs,
 		};
 
 		Ok(vec![ServerSessionResult::RaisedEvent(event)])
+	}
+
+	fn parse_fourcc_list(value: Amf0Value) -> FourCcSupport {
+		let mut support = FourCcSupport::default();
+		match value {
+			Amf0Value::StrictArray(values) => {
+				for value in values {
+					if let Amf0Value::Utf8String(name) = value {
+						Self::add_fourcc(&mut support, &name);
+					}
+				}
+			}
+			Amf0Value::Object(properties) => {
+				for (key, value) in properties {
+					Self::add_fourcc(&mut support, &key);
+					if let Amf0Value::Utf8String(name) = value {
+						Self::add_fourcc(&mut support, &name);
+					}
+				}
+			}
+			Amf0Value::Utf8String(s) => {
+				for part in s.split(|c: char| c == ',' || c == ';' || c.is_whitespace()) {
+					Self::add_fourcc(&mut support, part);
+				}
+			}
+			_ => {}
+		}
+		support
+	}
+
+	fn parse_fourcc_info_map(value: Amf0Value) -> FourCcSupport {
+		let mut support = FourCcSupport::default();
+		let Amf0Value::Object(properties) = value else {
+			return support;
+		};
+		for (name, value) in properties {
+			if let Amf0Value::Number(mask) = value
+				&& (mask as u32) & FOURCC_CAN_DECODE != 0
+			{
+				Self::add_fourcc(&mut support, &name);
+			}
+		}
+		support
+	}
+
+	fn add_fourcc(support: &mut FourCcSupport, name: &str) {
+		if name == "*" {
+			support.any = true;
+			return;
+		}
+		if name.as_bytes().len() == 4 {
+			let fourcc = name.as_bytes().try_into().expect("checked length");
+			if !support.fourccs.contains(&fourcc) {
+				support.fourccs.push(fourcc);
+			}
+		}
+	}
+
+	fn merge_fourcc_support(target: &mut FourCcSupport, source: FourCcSupport) {
+		target.any |= source.any;
+		for fourcc in source.fourccs {
+			if !target.fourccs.contains(&fourcc) {
+				target.fourccs.push(fourcc);
+			}
+		}
 	}
 
 	fn handle_command_close_stream(

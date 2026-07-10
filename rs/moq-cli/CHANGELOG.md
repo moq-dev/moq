@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.1...moq-cli-v0.8.2) - 2026-07-09
+
+### Added
+
+- *(moq-rtmp,moq-srt)* less aggressive default egress latency ([#2118](https://github.com/moq-dev/moq/pull/2118))
+
 ## [0.8.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.0...moq-cli-v0.8.1) - 2026-07-05
 
 ### Other
