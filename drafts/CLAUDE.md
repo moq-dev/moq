@@ -1,78 +1,59 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for AI coding agents working on the IETF Internet-Drafts under `drafts/`.
 
-## Repository Overview
+## Overview
 
-This is an IETF Internet-Draft repository for Media over QUIC (MOQ) protocol specifications authored by Luke Curley. It contains three draft documents:
+These are the IETF Internet-Draft specifications for Media over QUIC (MoQ),
+authored by Luke Curley. Each `draft-lcurley-*.md` is a standalone draft in
+[kramdown-rfc](https://github.com/cabo/kramdown-rfc) markdown with YAML
+frontmatter. This is a standards-documentation area, not a software
+implementation: the wire protocol and formats specified here are implemented by
+the Rust and JS code elsewhere in the monorepo (see the Cross-Package Sync
+table in the root `CLAUDE.md`).
 
-- **draft-lcurley-moq-lite.md**: A simplified MOQ transport protocol for real-time conferencing
-- **draft-lcurley-moq-hang.md**: Specification for handling connection hangs in MOQ
-- **draft-lcurley-moq-use-cases.md**: MOQ protocol use cases documentation
+Current drafts include `draft-lcurley-moq-lite` (the simplified MoQ transport),
+`draft-lcurley-moq-hang` (the media layer), and extension drafts
+(`-moq-timestamp`, `-moq-relay-hops`, `-compressed-mp4`, ...). Run
+`just drafts` to list them.
 
-## Build Commands
+## Build and publish
 
-Run `make` to build/validate drafts. **`make` self-bootstraps its toolchain** —
-on first run it clones the i-d-template submodule into `lib/`, creates a Python
-venv (`lib/.venv`, for xml2rfc), and bundler-installs kramdown-rfc into
-`lib/.gems`. No manual install of kramdown-rfc/xml2rfc is needed; you only need
-system `python3` (with venv+pip), `ruby` (with `bundle`), a C compiler, and
-network access on the first build. Do not claim the drafts can't be built — run
-`make`. (A successful kramdown-rfc step also validates a draft's syntax.)
-
-There is no separate format step: prettier is disabled (`.prettierignore` is
-`**`), so editing the markdown is the whole workflow.
+The toolchain (`kramdown-rfc`, `xml2rfc`, `mmark`) is provided by the nix dev
+shell, so run recipes through it for reproducible tool versions:
 
 ```bash
-# Build all drafts (generates HTML and text versions)
-make
+# List drafts
+nix develop --command just drafts
 
-# Build/validate a single draft (fast feedback while editing)
-make draft-lcurley-moq-lite.txt
+# Render one draft to <name>.txt + <name>.html (gitignored editor's copy)
+nix develop --command just drafts build draft-lcurley-moq-lite
 
-# Clean build artifacts
-make clean
+# Validate that every draft still parses
+nix develop --command just drafts check
 
-# Update GitHub Pages (typically done via CI)
-make gh-pages
+# Submit a version to the IETF datatracker (emails you a confirmation link)
+nix develop --command just drafts publish draft-lcurley-moq-lite 05 you@example.com
 ```
 
-## Development Workflow
+Publishing is deliberate and local: `publish` builds `<name>-<version>.xml` and
+POSTs it to the datatracker submission API. The datatracker emails the submitter
+a confirmation link, and the version is not final until that link is clicked.
+There is no CI tag-trigger and no API secret. For a brand-new draft (`-00`), set
+"Replaces" on the datatracker confirmation page.
 
-1. **Prerequisites**: The build system requires i-d-template tools. See [setup instructions](https://github.com/martinthomson/i-d-template/blob/main/doc/SETUP.md).
+`kramdown-rfc` fetches bibxml references into `.refcache/` on first build, so
+the initial build needs network access.
 
-2. **Building drafts**: Running `make` will:
-   - Initialize the i-d-template submodule if needed
-   - Convert Markdown drafts to RFC XML format
-   - Generate HTML and text versions
-   - Output files: `draft-*.html` and `draft-*.txt`
+## Conventions
 
-3. **Git workflow**:
-   - Main branch: `main`
-   - Pull requests automatically trigger CI builds
-   - GitHub Pages updates on push to main
-   - Draft versions are released to the IETF datatracker by pushing a tag: `draft-lcurley-<name>-XX` (e.g. `draft-lcurley-moq-lite-04`)
-
-## Architecture
-
-This is a standards documentation project, not a software implementation. Key components:
-
-- **Draft documents**: Root-level `draft-*.md` files in kramdown-rfc format
-- **Build system**: Uses i-d-template via git submodule in `lib/`
-- **CI/CD**: GitHub Actions workflows handle building and publishing
-- **Output**: Published to GitHub Pages at https://kixelated.github.io/moq-drafts/
-
-## Working Group Context
-
-- Part of IETF Media Over QUIC (MOQ) Working Group
-- Discussion: moq@ietf.org mailing list
-- Related to main MoqTransport specification (moq-lite is a simplified alternative)
-
-## Important Notes
-
-- Follow IETF contribution guidelines (BCP 78/79)
-- Draft format uses kramdown-rfc with YAML frontmatter
-- References are managed via bibxml includes
-- Do not edit generated files (*.html, *.txt)
-- When making a wire-format or semantic change to a draft, add a bullet to its changelog appendix (e.g. `# Appendix A: Changelog`) under the in-progress version's section. Drafts without a changelog section (typically unreleased ones) don't need one.
-- Keep changelog bullets concise and factual; list what changed without explaining the motivation or design reasoning.
+- Draft sources are kramdown-rfc markdown; `remark` (the repo's CommonMark
+  linter) skips them. A successful `kramdown-rfc` run also validates syntax.
+- The `docname` frontmatter field ends in `-latest`; `publish` rewrites it to
+  the versioned name at submission time. Don't hardcode a version in the source.
+- When making a wire-format or semantic change to a draft, add a bullet to its
+  changelog appendix (e.g. `# Appendix A: Changelog`) under the in-progress
+  version's section. Drafts without a changelog section (typically unreleased
+  ones) don't need one. Keep bullets concise and factual: list what changed,
+  not the motivation or design reasoning.
+- Follow IETF contribution guidelines (BCP 78/79); see `CONTRIBUTING.md`.

@@ -1,48 +1,41 @@
-<!-- regenerate: on (set to off if you edit this file) -->
+# MoQ Internet-Drafts
 
-# MOQ Drafts
+The IETF Internet-Draft specifications for Media over QUIC (MoQ), in
+[kramdown-rfc](https://github.com/cabo/kramdown-rfc) markdown. Each
+`draft-lcurley-*.md` is a standalone draft; the protocols and formats they
+specify are implemented by the Rust and JS code elsewhere in this repo.
 
-This is the working area for individual Internet-Drafts.
+## Building
 
-## Media over QUIC - Lite
+The toolchain comes from the nix dev shell, so no submodule or venv bootstrap
+is needed.
 
-* [Editor's Copy](https://kixelated.github.io/moq-drafts/#go.draft-lcurley-moq-lite.html)
-* [Datatracker Page](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite)
-* [Individual Draft](https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite)
-* [Compare Editor's Copy to Individual Draft](https://kixelated.github.io/moq-drafts/#go.draft-lcurley-moq-lite.diff)
+```bash
+# List the drafts
+nix develop --command just drafts
 
-## Media over QUIC - Hang
+# Render one draft to <name>.txt and <name>.html
+nix develop --command just drafts build draft-lcurley-moq-lite
 
-* [Editor's Copy](https://kixelated.github.io/moq-drafts/#go.draft-lcurley-moq-hang.html)
-* [Datatracker Page](https://datatracker.ietf.org/doc/draft-lcurley-moq-hang)
-* [Individual Draft](https://datatracker.ietf.org/doc/html/draft-lcurley-moq-hang)
-* [Compare Editor's Copy to Individual Draft](https://kixelated.github.io/moq-drafts/#go.draft-lcurley-moq-hang.diff)
+# Render all of them
+nix develop --command just drafts all
+```
 
-## Media over QUIC - Use Cases
+The rendered `.txt`/`.html` are gitignored; the canonical rendered copies live
+on the [IETF datatracker](https://datatracker.ietf.org/).
 
-* [Editor's Copy](https://kixelated.github.io/moq-drafts/#go.draft-lcurley-moq-use-cases.html)
-* [Datatracker Page](https://datatracker.ietf.org/doc/draft-lcurley-moq-use-cases)
-* [Individual Draft](https://datatracker.ietf.org/doc/html/draft-lcurley-moq-use-cases)
-* [Compare Editor's Copy to Individual Draft](https://kixelated.github.io/moq-drafts/#go.draft-lcurley-moq-use-cases.diff)
+## Publishing a new version
 
+```bash
+nix develop --command just drafts publish draft-lcurley-moq-lite 05 you@example.com
+```
+
+This builds `draft-lcurley-moq-lite-05.xml` and submits it to the datatracker,
+which emails you a confirmation link. The submission is final only once you
+click that link. For a brand-new draft (`-00`), set "Replaces" on the
+confirmation page.
 
 ## Contributing
 
-See the
-[guidelines for contributions](https://github.com/kixelated/moq-drafts/blob/main/CONTRIBUTING.md).
-
-Contributions can be made by creating pull requests.
-The GitHub interface supports creating pull requests using the Edit (✏) button.
-
-
-## Command Line Usage
-
-Formatted text and HTML versions of the draft can be built using `make`.
-
-```sh
-$ make
-```
-
-Command line usage requires that you have the necessary software installed.  See
-[the instructions](https://github.com/martinthomson/i-d-template/blob/main/doc/SETUP.md).
-
+All contributions are made under the IETF Standards Process; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
