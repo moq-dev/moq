@@ -1,0 +1,99 @@
+name: "Perform Initial Repository Setup"
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  setup:
+    name: "Setup Repository"
+    runs-on: ubuntu-latest
+    steps:
+    - name: "Checkout"
+      uses: actions/checkout@v3
+
+    - name: "Precondition Check"
+      id: pre
+      run: |
+        if ! ls draft-* rfc* 2>/dev/null | grep -qv draft-todo-yourname-protocol.md; then
+          echo "============================================================="
+          echo "Skipping setup for the first commit."
+          echo
+          echo "Rename draft-todo-yourname-protocol.md to start using this repository:"
+          echo
+          echo "    https://github.com/${{github.repository}}/edit/main/draft-todo-yourname-protocol.md"
+          echo
+          echo "Change the name of the file and its title."
+          echo "Commit the changes to the 'main' branch."
+          echo
+          echo "============================================================="
+          echo "skip=true" >>"$GITHUB_OUTPUT"
+        elif [ ! -f draft-todo-yourname-protocol.md -a -f Makefile ]; then
+          echo "============================================================="
+          echo "Skipping setup for an already-configured repository."
+          echo
+          echo "Delete .github/workflows/setup.yml to avoid running this action:"
+          echo
+          echo "    https://github.com/${{github.repository}}/delete/main/.github/workflows/setup.yml"
+          echo
+          echo "============================================================="
+          echo "skip=true" >>"$GITHUB_OUTPUT"
+        fi
+
+    - name: "Git Config"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      run: |
+        git config user.email "idbot@example.com"
+        git config user.name "I-D Bot"
+
+    - name: "Update Draft Name"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      run: |
+        for i in draft-*; do
+          if [ "$(head -1 "$i")" = "---" ]; then
+            sed -i -e '2,/^---/{/^###/,/^###/d
+              s|^docname: .*|docname: '"${i%.md}-latest"'|
+              s|^    fullname: Your Name Here|    fullname: "'"$(git show -q --format='format:%aN' @)"'"|
+              s|^    email: your\.email@example\.com|    email: "'"$(git show -q --format='format:%aE' @)"'"|
+            }' "$i"
+          fi
+          sed -i -e "s/draft-todo-yourname-protocol-latest/${i%.md}-latest/g" "$i"
+          git add "$i"
+        done
+        if [ -n "$(git status --porcelain draft-*)" ]; then
+          git commit -m "Update draft labels" draft-*
+        fi
+
+    - name: "Cleanup"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      run: |
+        git rm -rf .github/workflows/setup.yml README.md
+        git commit -m "Remove setup files"
+
+    - name: "Clone the i-d-template Repo"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      run: |
+        git clone --depth=1 https://github.com/martinthomson/i-d-template lib
+
+    - name: "Run i-d-template Setup"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      uses: martinthomson/i-d-template@v1
+      with:
+        make: setup
+
+    - name: "Update Venue Information"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      uses: martinthomson/i-d-template@v1
+      with:
+        make: update-venue
+
+    - name: "Update GitHub Pages"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      uses: martinthomson/i-d-template@v1
+      with:
+        make: gh-pages
+
+    - name: "Push Changes"
+      if: ${{ steps.pre.outputs.skip != 'true' }}
+      run: |
+        git push

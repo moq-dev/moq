@@ -1,0 +1,5 @@
+# Automatically generated CODEOWNERS
+# Regenerate with `make update-codeowners`
+draft-lcurley-moq-hang.md kixelated@gmail.com
+draft-lcurley-moq-lite.md kixelated@gmail.com
+draft-lcurley-moq-use-cases.md kixelated@gmail.com
