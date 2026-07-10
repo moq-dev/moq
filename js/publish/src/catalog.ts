@@ -212,7 +212,14 @@ const VIDEO_OPS: RenditionOps<Catalog.VideoConfig> = {
 		if (!video) return;
 
 		delete video.renditions[name];
-		if (sectionIsEmpty(video)) delete catalog.video;
+		if (
+			Object.keys(video.renditions).length === 0 &&
+			video.display === undefined &&
+			video.rotation === undefined &&
+			video.flip === undefined
+		) {
+			delete catalog.video;
+		}
 	},
 };
 
@@ -230,7 +237,7 @@ const AUDIO_OPS: RenditionOps<Catalog.AudioConfig> = {
 		if (!audio) return;
 
 		delete audio.renditions[name];
-		if (sectionIsEmpty(audio)) delete catalog.audio;
+		if (Object.keys(audio.renditions).length === 0) delete catalog.audio;
 	},
 };
 
@@ -260,15 +267,4 @@ function audioSection(catalog: Catalog.Root): AudioSection {
 function currentAudio(catalog: Catalog.Root): AudioSection | undefined {
 	if (!catalog.audio || !("renditions" in catalog.audio)) return undefined;
 	return catalog.audio as AudioSection;
-}
-
-/**
- * Whether a media section has nothing left worth keeping: no renditions and no other field carrying
- * a value. `structuredClone` preserves keys whose value is `undefined`, so this inspects values
- * rather than keys, and stays correct if the section gains fields later (e.g. video display or
- * rotation): any defined field keeps the section alive.
- */
-function sectionIsEmpty(section: { renditions: Record<string, unknown> }): boolean {
-	if (Object.keys(section.renditions).length > 0) return false;
-	return Object.entries(section).every(([key, value]) => key === "renditions" || value === undefined);
 }
