@@ -94,6 +94,56 @@ test("integration: lite draft-05", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_05);
 });
 
+test("integration: lite draft-06", async () => {
+	// Exercises announce ids: every active assigns an ordinal on the wire.
+	await runPublishSubscribeFlow(Lite.ALPN_06_WIP);
+});
+
+test("integration: lite draft-06 announce lifecycle", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	// Announced before the client asks, so it can ride the initial set.
+	const first = new BroadcastProducer();
+	server.publish(Path.from("first"), first);
+
+	const announced = client.announced();
+	let entry = await announced.next();
+	if (!entry) throw new Error("expected announce");
+	expect(entry.path).toBe("first" as Path.Valid);
+	expect(entry.active).toBe(true);
+
+	// A live announce.
+	const second = new BroadcastProducer();
+	server.publish(Path.from("second"), second);
+	entry = await announced.next();
+	if (!entry) throw new Error("expected announce");
+	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.active).toBe(true);
+
+	// Unannounce: retracted by announce id on the wire.
+	second.close();
+	entry = await announced.next();
+	if (!entry) throw new Error("expected unannounce");
+	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.active).toBe(false);
+
+	// Re-announce the same path: a fresh announce assigning a fresh id.
+	const secondAgain = new BroadcastProducer();
+	server.publish(Path.from("second"), secondAgain);
+	entry = await announced.next();
+	if (!entry) throw new Error("expected re-announce");
+	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.active).toBe(true);
+
+	// Cleanup
+	first.close();
+	secondAgain.close();
+	announced.close();
+	client.close();
+	server.close();
+});
+
 test("integration: lite draft-05 datagram delivery", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();

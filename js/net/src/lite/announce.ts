@@ -2,7 +2,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { type Origin, OriginSchema } from "./origin.ts";
-import { hasAnnounceOk, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, Version } from "./version.ts";
 
 // Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
 // hop chains are rejected; this keeps loop-detection bounded and rejects
@@ -16,91 +16,146 @@ const ANNOUNCE_RESTART = 2;
 /**
  * ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast.
  *
- * Carries the broadcast path suffix and the hop chain. Renamed from `Announce` in lite-05.
+ * On lite-06+ each `active` implicitly assigns the next announce id (a per-stream
+ * ordinal starting at 0); `endedId`/`restart` reference that id instead of repeating
+ * the path. Older versions retract by path (`ended`).
  */
-export class AnnounceBroadcast {
-	suffix: Path.Valid;
-	active: boolean;
-	hops: Origin[];
+export type AnnounceBroadcast =
+	/** A broadcast is now available, carrying the path suffix and the hop chain. */
+	| { status: "active"; suffix: Path.Valid; hops: Origin[] }
+	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
+	| { status: "ended"; suffix: Path.Valid }
+	/** Lite06+: a broadcast is no longer available, retracted by announce id.
+	 * The id is retired; referencing it again is a protocol violation. */
+	| { status: "endedId"; id: bigint }
+	/** Lite06+: atomically replace the announcement with this id (e.g. a new hop
+	 * chain after a relay failover). The id stays live. */
+	| { status: "restart"; id: bigint; hops: Origin[] };
 
-	constructor(props: { suffix: Path.Valid; active: boolean; hops?: Origin[] }) {
-		this.suffix = props.suffix;
-		this.active = props.active;
-		this.hops = props.hops ?? [];
-		if (this.hops.length > MAX_HOPS) {
-			throw new Error(`hop count ${this.hops.length} exceeds maximum ${MAX_HOPS}`);
+function checkHops(hops: Origin[]) {
+	if (hops.length > MAX_HOPS) {
+		throw new Error(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
+	}
+}
+
+async function encodeHops(w: Writer, version: Version, hops: Origin[]) {
+	checkHops(hops);
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+			break;
+		case Version.DRAFT_03:
+			await w.u53(hops.length);
+			break;
+		default:
+			// Lite04+: hop count + individual Origin varints.
+			await w.u53(hops.length);
+			for (const origin of hops) {
+				await w.u62(origin);
+			}
+			break;
+	}
+}
+
+async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+			return [];
+		case Version.DRAFT_03: {
+			const count = await r.u53();
+			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
+			// Lite03 carries only a hop count, not individual ids. Fill with
+			// the zero placeholder (OriginSchema accepts 0 as valid on-wire).
+			const placeholder = OriginSchema.parse(0n);
+			return new Array<Origin>(count).fill(placeholder);
+		}
+		default: {
+			// Lite04+: hop count + individual Origin varints.
+			const count = await r.u53();
+			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
+			const hops: Origin[] = [];
+			for (let i = 0; i < count; i++) {
+				hops.push(OriginSchema.parse(await r.u62()));
+			}
+			return hops;
 		}
 	}
+}
 
-	async #encode(w: Writer, version: Version) {
-		await w.u8(this.active ? ANNOUNCE_ACTIVE : ANNOUNCE_ENDED);
-		await w.string(this.suffix);
+async function encodeAnnounceBody(w: Writer, msg: AnnounceBroadcast, version: Version) {
+	switch (msg.status) {
+		case "active":
+			await w.u8(ANNOUNCE_ACTIVE);
+			await w.string(msg.suffix);
+			await encodeHops(w, version, msg.hops);
+			break;
+		case "ended":
+			// Lite06+ retracts by announce id (`endedId`), never by path.
+			if (hasAnnounceId(version)) throw new Error("ended-by-path not supported for this version");
+			await w.u8(ANNOUNCE_ENDED);
+			await w.string(msg.suffix);
+			await encodeHops(w, version, []);
+			break;
+		case "endedId":
+			if (!hasAnnounceId(version)) throw new Error("announce ids not supported for this version");
+			await w.u8(ANNOUNCE_ENDED);
+			await w.u62(msg.id);
+			break;
+		case "restart":
+			if (!hasAnnounceId(version)) throw new Error("announce ids not supported for this version");
+			await w.u8(ANNOUNCE_RESTART);
+			await w.u62(msg.id);
+			await encodeHops(w, version, msg.hops);
+			break;
+	}
+}
 
-		switch (version) {
-			case Version.DRAFT_01:
-			case Version.DRAFT_02:
-				break;
-			case Version.DRAFT_03:
-				await w.u53(this.hops.length);
-				break;
+async function decodeAnnounceBody(r: Reader, version: Version): Promise<AnnounceBroadcast> {
+	const status = await r.u8();
+
+	if (hasAnnounceId(version)) {
+		// Lite06+: the body depends on the status. Only `active` carries the path;
+		// `ended`/`restart` reference the announce id it implicitly assigned.
+		switch (status) {
+			case ANNOUNCE_ACTIVE:
+				return { status: "active", suffix: Path.from(await r.string()), hops: await decodeHops(r, version) };
+			case ANNOUNCE_ENDED:
+				return { status: "endedId", id: await r.u62() };
+			case ANNOUNCE_RESTART:
+				return { status: "restart", id: await r.u62(), hops: await decodeHops(r, version) };
 			default:
-				// Lite04+: hop count + individual Origin varints.
-				await w.u53(this.hops.length);
-				for (const origin of this.hops) {
-					await w.u62(origin);
-				}
-				break;
+				throw new Error("invalid announce status");
 		}
 	}
 
-	static async #decode(r: Reader, version: Version): Promise<AnnounceBroadcast> {
-		const status = await r.u8();
-		const active = status === ANNOUNCE_ACTIVE || (status === ANNOUNCE_RESTART && hasAnnounceOk(version));
-		if (status !== ANNOUNCE_ENDED && status !== ANNOUNCE_ACTIVE && !active) {
-			throw new Error("invalid announce status");
-		}
-		const suffix = Path.from(await r.string());
-
-		let hops: Origin[] = [];
-		switch (version) {
-			case Version.DRAFT_01:
-			case Version.DRAFT_02:
-				break;
-			case Version.DRAFT_03: {
-				const count = await r.u53();
-				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-				// Lite03 carries only a hop count, not individual ids. Fill with
-				// the zero placeholder (OriginSchema accepts 0 as valid on-wire).
-				const placeholder = OriginSchema.parse(0n);
-				hops = new Array<Origin>(count).fill(placeholder);
-				break;
-			}
-			default: {
-				// Lite04+: hop count + individual Origin varints.
-				const count = await r.u53();
-				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-				hops = [];
-				for (let i = 0; i < count; i++) {
-					hops.push(OriginSchema.parse(await r.u62()));
-				}
-				break;
-			}
-		}
-
-		return new AnnounceBroadcast({ suffix, active, hops });
+	// On lite-05 a restart travels as a duplicate `active`, but the explicit restart
+	// status is accepted on decode and treated the same. Older versions never defined it.
+	const active = status === ANNOUNCE_ACTIVE || (status === ANNOUNCE_RESTART && hasAnnounceOk(version));
+	if (status !== ANNOUNCE_ENDED && !active) {
+		throw new Error("invalid announce status");
 	}
+	const suffix = Path.from(await r.string());
+	const hops = await decodeHops(r, version);
+	return active ? { status: "active", suffix, hops } : { status: "ended", suffix };
+}
 
-	async encode(w: Writer, version: Version): Promise<void> {
-		return Message.encode(w, (w) => this.#encode(w, version));
-	}
+/** Encode one ANNOUNCE_BROADCAST message, including the length prefix. */
+export async function encodeAnnounceBroadcast(w: Writer, msg: AnnounceBroadcast, version: Version): Promise<void> {
+	return Message.encode(w, (w) => encodeAnnounceBody(w, msg, version));
+}
 
-	static async decode(r: Reader, version: Version): Promise<AnnounceBroadcast> {
-		return Message.decode(r, (r) => AnnounceBroadcast.#decode(r, version));
-	}
+/** Decode one ANNOUNCE_BROADCAST message, including the length prefix. */
+export async function decodeAnnounceBroadcast(r: Reader, version: Version): Promise<AnnounceBroadcast> {
+	return Message.decode(r, (r) => decodeAnnounceBody(r, version));
+}
 
-	static async decodeMaybe(r: Reader, version: Version): Promise<AnnounceBroadcast | undefined> {
-		return Message.decodeMaybe(r, (r) => AnnounceBroadcast.#decode(r, version));
-	}
+/** Like {@link decodeAnnounceBroadcast} but resolves `undefined` on a clean FIN. */
+export async function decodeAnnounceBroadcastMaybe(
+	r: Reader,
+	version: Version,
+): Promise<AnnounceBroadcast | undefined> {
+	return Message.decodeMaybe(r, (r) => decodeAnnounceBody(r, version));
 }
 
 /**

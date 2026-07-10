@@ -10,7 +10,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
+import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
@@ -20,7 +20,7 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
@@ -191,28 +191,74 @@ export class Subscriber {
 					break;
 			}
 
+			// Lite06+: announce ids. Each received `active` implicitly assigns the next
+			// per-stream ordinal; `endedId`/`restart` reference it. Tracked even for
+			// announces we skip via ignoreSelf, since the sender doesn't know we skipped.
+			let nextAnnounceId = 0n;
+			const announcedById = new Map<bigint, Path.Valid>();
+
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
 				const announce = await Promise.race([
-					AnnounceBroadcast.decodeMaybe(stream.reader, this.version),
+					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
 
-				// Optionally drop reflected announces so callers asking for
-				// "someone else's broadcasts" don't re-see their own publishes. In
-				// Lite05 the sender's origin arrives via AnnounceOk, not in each hop
-				// list, so fold it back in before checking.
-				const hops = responderOrigin !== undefined ? [...announce.hops, responderOrigin] : announce.hops;
-				if (options.ignoreSelf && hops.includes(this.origin)) {
-					continue;
+				let suffix: Path.Valid;
+				let active: boolean;
+				// Present on active/restart; ended messages never carry hops worth checking.
+				let hops: Origin[] | undefined;
+
+				switch (announce.status) {
+					case "active":
+						suffix = announce.suffix;
+						active = true;
+						hops = announce.hops;
+						if (hasAnnounceId(this.version)) {
+							announcedById.set(nextAnnounceId++, announce.suffix);
+						}
+						break;
+					case "ended":
+						suffix = announce.suffix;
+						active = false;
+						break;
+					case "endedId": {
+						// Resolve and retire the id; an unknown or retired id is a protocol violation.
+						const path = announcedById.get(announce.id);
+						if (path === undefined) throw new Error(`unknown announce id: ${announce.id}`);
+						announcedById.delete(announce.id);
+						suffix = path;
+						active = false;
+						break;
+					}
+					case "restart": {
+						// Resolve the id; it stays live (the replacement reuses it).
+						const path = announcedById.get(announce.id);
+						if (path === undefined) throw new Error(`unknown announce id: ${announce.id}`);
+						suffix = path;
+						active = true;
+						hops = announce.hops;
+						break;
+					}
 				}
 
-				const path = Path.join(prefix, announce.suffix);
+				// Optionally drop reflected announces so callers asking for
+				// "someone else's broadcasts" don't re-see their own publishes. In
+				// Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
+				// list, so fold it back in before checking.
+				if (hops !== undefined && options.ignoreSelf) {
+					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
+					if (full.includes(this.origin)) {
+						continue;
+					}
+				}
 
-				console.debug(`announced: broadcast=${path} active=${announce.active}`);
-				announced.append({ path: announce.suffix, active: announce.active });
+				const path = Path.join(prefix, suffix);
+
+				console.debug(`announced: broadcast=${path} active=${active}`);
+				announced.append({ path: suffix, active });
 			}
 
 			announced.close();
