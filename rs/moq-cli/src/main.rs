@@ -12,6 +12,8 @@ mod rtc;
 mod rtmp;
 mod srt;
 mod subscribe;
+#[cfg(feature = "transcode")]
+mod transcode;
 mod web;
 
 use args::{Cli, Direction, Export, ExportSink, Import, ImportSource, MoqSide};
@@ -66,6 +68,8 @@ async fn main() -> anyhow::Result<()> {
 	match cli.direction {
 		Direction::Import(import) => run_import(cli.moq, import, net).await,
 		Direction::Export(export) => run_export(cli.moq, export, net).await,
+		#[cfg(feature = "transcode")]
+		Direction::Transcode(args) => transcode::run(cli.moq, args, net).await,
 	}
 }
 

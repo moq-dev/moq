@@ -160,6 +160,35 @@ ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | \
     moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
 ```
 
+### Transcode a Broadcast
+
+The `transcode` verb consumes a broadcast from the relay and publishes a
+just-in-time transcoded ladder next to it. The derivative catalog references the
+source renditions directly and adds the lower rungs, which are only decoded and
+encoded while someone actually watches (or fetches) them. It is gated behind the
+`transcode` feature:
+
+```bash
+cargo build --release -p moq-cli --features transcode
+
+# Publish `cam.hang/transcode.hang` with the default ladder (1080p..240p,
+# filtered to rungs strictly below the source):
+moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode
+
+# Pick the ladder (height:bitrate in bits per second) and pin the codecs:
+moq --client-connect https://relay.example.com/anon --broadcast cam.hang     transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
+
+# Publish the derivative somewhere else (the catalog then omits the relative
+# source references):
+moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
+```
+
+On an NVIDIA GPU the pipeline is fully GPU-resident: one shared NVDEC session
+decodes the source for all active rungs, a CUDA kernel resizes each rung's copy,
+and NVENC encodes it in place, with no CPU copies. Without a GPU it falls back
+to openh264 and CPU scaling. Like `capture`, the hardware backends are on by
+default; drop the default features for a software-only build.
+
 ### Play a Broadcast
 
 Pull a broadcast back out and play it:

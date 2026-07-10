@@ -30,9 +30,6 @@ nvdec = ["moq-video/nvdec"]
 
 [dependencies]
 bytes = "1"
-# CPU I420 scaling between decode and re-encode (SIMD per-plane resize), for
-# decoders without a built-in scaler; NVDEC scales in hardware instead.
-fast_image_resize = "5"
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -46,5 +43,6 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # Default features on (unlike the workspace entry) so the example gets a QUIC backend.
 moq-native = { path = "../moq-native" }
-tokio = { workspace = true, features = ["full"] }
+# test-util unlocks tokio::time::pause for the deterministic live-feed tests.
+tokio = { workspace = true, features = ["full", "test-util"] }
 url = "2"

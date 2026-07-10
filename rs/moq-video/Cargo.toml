@@ -39,6 +39,9 @@ vaapi = ["dep:moq-vaapi"]
 [dependencies]
 anyhow = "1"
 bytes = "1"
+# CPU I420 resize (SIMD per-plane convolution), the software half of
+# decode::Frame::resize; CUDA frames resize on the GPU instead.
+fast_image_resize = "5"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
 moq-mux = { workspace = true }
@@ -61,7 +64,10 @@ yuv = "0.8.14"
 # links on a GPU-less builder and still starts on machines without the NVIDIA
 # driver, falling back to the next encoder (see backend::open). `cuda-12020` pins
 # the CUDA API version so the build needs no CUDA toolkit.
-cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+# The `nvrtc` feature only unlocks the `Ptx` type and `load_module` (both free of
+# extra dependencies); libnvrtc itself is never loaded since we ship pre-built PTX
+# (see frame/nv12_resize.ptx) that the driver JIT-compiles.
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020", "nvrtc"] }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.

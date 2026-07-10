@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Shared live decode: all rungs of a source with live demand now share one
+  subscription and one decoder (a broadcast feed of decoded frames), instead of
+  each rung decoding the source independently. NVDEC throughput and upstream
+  bandwidth now scale with source count, not ladder depth; each rung resizes
+  its copy on the GPU (`decode::Frame::resize`) and encodes it in place. Group
+  fetches keep their own one-shot pipeline.
+- `moq transcode`: the transcoder is now a moq-cli verb (behind the `transcode`
+  feature), publishing `<broadcast>/transcode.hang` with a configurable ladder
+  (`--rung height:bitrate`) and codec pins (`--encoder`, `--decoder`).
+
 - Initial release: just-in-time live transcoding of hang broadcasts.
   `run(source, output, config)` publishes a derivative catalog (ladder rungs
   strictly below the source, plus relative references to the source renditions)

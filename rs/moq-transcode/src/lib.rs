@@ -7,8 +7,10 @@
 //! strings are computed from the ladder, not the bitstream), but nothing is
 //! encoded until a subscriber actually asks:
 //!
-//! - Subscribing to a rung subscribes to the source track and transcodes live,
-//!   group for group, stopping when the last subscriber leaves.
+//! - Subscribing to a rung attaches it to a shared live decode of the source
+//!   (one subscription and one decoder per source, no matter how many rungs
+//!   are active); each rung resizes and encodes its own copy, group for group,
+//!   stopping when the last subscriber leaves.
 //! - Fetching a specific group fetches that same group from the source and
 //!   transcodes just that group. Output groups mirror source sequence numbers
 //!   1:1, so group N of every rung is the same content as source group N.
@@ -22,8 +24,8 @@
 mod catalog;
 mod config;
 mod error;
+mod feed;
 mod rung;
-mod scale;
 
 pub use config::{Config, Rung};
 pub use error::Error;
@@ -69,6 +71,14 @@ pub async fn run(
 	let rungs = catalog::resolve_rungs(&config.rungs, &source_name, &source_config)?;
 	tracing::info!(source = %source_name, rungs = rungs.len(), "transcoding");
 
+	// One shared live decode for every rung of this source: N active rungs
+	// share one subscription and one decoder instead of N.
+	let feed = feed::Feed::new(
+		source.track(&source_name)?,
+		source_config.clone(),
+		config.decoder.clone(),
+	);
+
 	// Publish the derivative catalog before any encoder exists, so subscribers
 	// can pick a rung immediately.
 	let entries: Vec<_> = rungs
@@ -94,6 +104,7 @@ pub async fn run(
 					Some(info) => {
 						let rung = rung::Rung {
 							source: source.track(&source_name)?,
+							feed: feed.clone(),
 							broadcast: source.clone(),
 							config: source_config.clone(),
 							encoder: config.encoder.clone(),
@@ -199,6 +210,173 @@ mod tests {
 			_catalog: catalog,
 			_track: track,
 		}
+	}
+
+	/// A source like [`source_broadcast`], but the groups arrive over (paused)
+	/// time instead of all at once, so several rungs can attach to the shared
+	/// live feed before the first group exists. Returns the broadcast plus the
+	/// producing task's handle (the track producer lives inside it).
+	fn source_broadcast_live(groups: u64, frames: u64) -> (Source, tokio::task::JoinHandle<()>) {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		video.coded_width = Some(320);
+		video.coded_height = Some(240);
+		video.bitrate = Some(1_000_000);
+		video.framerate = Some(30.0);
+		catalog.lock().video.insert("video", video).unwrap();
+
+		let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+		let mut track = broadcast.create_track("video", info).unwrap();
+
+		let source = Source {
+			broadcast,
+			_catalog: catalog,
+			// The producing task owns the real track producer; park a clone so
+			// the struct shape matches `source_broadcast`.
+			_track: track.clone(),
+		};
+
+		let task = tokio::spawn(async move {
+			let mut encoder = moq_video::encode::Encoder::new(&{
+				let mut config = moq_video::encode::Config::new(320, 240, 30);
+				config.kind = moq_video::encode::Kind::Software;
+				config
+			})
+			.unwrap();
+			let gray = vec![0x80u8; 320 * 240 * 4];
+
+			for sequence in 0..groups {
+				// Under `tokio::time::pause` this advances once every task is
+				// idle, i.e. once all rungs are attached and waiting.
+				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+				let mut group = track.create_group(sequence.into()).unwrap();
+				for index in 0..frames {
+					let timestamp = (sequence * frames + index) * 33_333;
+					for payload in encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
+						let frame = hang::container::Frame {
+							timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
+							payload,
+						};
+						frame.encode(&mut group).unwrap();
+					}
+				}
+				group.finish().unwrap();
+			}
+			// Keep the track open until aborted, like a live source.
+			std::future::pending::<()>().await;
+		});
+
+		(source, task)
+	}
+
+	/// Two rungs subscribed at once ride one shared live decode (the feed):
+	/// both must produce complete groups mirroring the source sequences.
+	#[tokio::test]
+	async fn live_multi_rung() {
+		tokio::time::pause();
+
+		let (source, producer_task) = source_broadcast_live(3, 5);
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000), Rung::new(60, 50_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		// Attach both rungs before the first source group exists (paused time:
+		// the producer's sleep only fires once every rung is parked on the feed).
+		let mut subscribers = Vec::new();
+		for name in ["video/120p", "video/60p"] {
+			let track = loop {
+				match consumer.track(name) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("rung track {name}: {err}"),
+				}
+			};
+			subscribers.push((name, track.subscribe(None).await.unwrap()));
+		}
+
+		// Every rung receives a complete group with all 5 source frames.
+		for (name, subscriber) in &mut subscribers {
+			let mut group = subscriber.next_group().await.unwrap().unwrap();
+			let payload = group.read_frame().await.unwrap().unwrap();
+			let frame = hang::container::Frame::decode(payload).unwrap();
+			assert!(
+				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
+				"{name} output is not Annex-B"
+			);
+			let total = group.finished().await.unwrap();
+			assert_eq!(total, 5, "{name} dropped frames");
+		}
+
+		producer_task.abort();
+		transcoder.abort();
+	}
+
+	/// The multi-rung live path on real hardware: one shared NVDEC session
+	/// decodes the source, the GPU box filter resizes per rung, and each rung's
+	/// NVENC session encodes the CUDA frame in place. Skips without a GPU.
+	#[tokio::test]
+	async fn live_multi_rung_hardware() {
+		if !hardware_available() {
+			eprintln!("skipping: no hardware decoder + encoder available");
+			return;
+		}
+		tokio::time::pause();
+
+		let (source, producer_task) = source_broadcast_live(3, 5);
+		// 180p and 120p: NVENC rejects tiny frames (80x60 is below its minimum
+		// encode resolution), so the hardware ladder stays a bit larger than the
+		// software test's.
+		let config = Config {
+			rungs: vec![Rung::new(180, 200_000), Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Hardware,
+			decoder: moq_video::decode::Kind::Hardware,
+			source: None,
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let mut subscribers = Vec::new();
+		for name in ["video/180p", "video/120p"] {
+			let track = loop {
+				match consumer.track(name) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("rung track {name}: {err}"),
+				}
+			};
+			subscribers.push((name, track.subscribe(None).await.unwrap()));
+		}
+
+		for (name, subscriber) in &mut subscribers {
+			let mut group = subscriber.next_group().await.unwrap().unwrap();
+			let payload = group.read_frame().await.unwrap().unwrap();
+			let frame = hang::container::Frame::decode(payload).unwrap();
+			assert!(
+				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
+				"{name} output is not Annex-B"
+			);
+			let total = group.finished().await.unwrap();
+			assert_eq!(total, 5, "{name} dropped frames");
+		}
+
+		producer_task.abort();
+		transcoder.abort();
 	}
 
 	/// Whether a hardware decoder AND encoder are usable here (e.g. a Linux box

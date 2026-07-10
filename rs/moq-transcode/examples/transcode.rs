@@ -43,10 +43,14 @@ async fn main() -> anyhow::Result<()> {
 	let remote = moq_net::Origin::random().produce();
 
 	let client = moq_native::ClientConfig::default().init()?;
-	let session = client
+	let mut session = client
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())
 		.reconnect(args.url.clone());
+
+	// Wait for the first session: the origin can't route a broadcast request
+	// until a connected session registers its handler.
+	while !matches!(session.status().await?, moq_native::Status::Connected) {}
 
 	// Request the source broadcast; the session subscribes upstream on demand.
 	let source = remote

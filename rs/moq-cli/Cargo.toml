@@ -31,13 +31,17 @@ websocket = ["moq-native/websocket"]
 # extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
 # Enable with `cargo build -p moq-cli --features capture`.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
+# Just-in-time transcoding (`moq ... transcode`). Off by default for the same
+# reason as `capture`: it pulls in moq-video, whose default-on `vaapi` feature
+# links libva on Linux. Enable with `cargo build -p moq-cli --features transcode`.
+transcode = ["dep:moq-transcode", "dep:moq-video"]
 # NVENC / VAAPI / NVDEC hardware codecs for `capture` (Linux), on by default. Each
 # just turns on the matching moq-video feature, and only bites when `capture` pulls
 # in moq-video. For a `capture` build with no CUDA / libva system deps, drop them, e.g.
 #   cargo build -p moq-cli --no-default-features --features "iroh noq websocket capture"
-nvenc = ["moq-video?/nvenc"]
-vaapi = ["moq-video?/vaapi"]
-nvdec = ["moq-video?/nvdec"]
+nvenc = ["moq-video?/nvenc", "moq-transcode?/nvenc"]
+vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
+nvdec = ["moq-video?/nvdec", "moq-transcode?/nvdec"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -55,6 +59,7 @@ moq-native = { workspace = true, default-features = false, features = ["aws-lc-r
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
+moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }

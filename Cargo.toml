@@ -88,6 +88,8 @@ moq-vaapi = "0.0.2"
 # default-features off (the `nvenc` / `vaapi` hardware encoders) so each consumer
 # opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a self-compiler can
 # leave them off to drop the CUDA / libva deps. moq-video itself still defaults them on.
+# Hardware codecs are also opt-in here, mirroring moq-video (see above).
+moq-transcode = { version = "0.0.1", path = "rs/moq-transcode", default-features = false }
 moq-video = { version = "0.0.6", path = "rs/moq-video", default-features = false }
 qmux = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
