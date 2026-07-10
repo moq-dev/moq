@@ -104,9 +104,9 @@ mod tests {
 
 	fn roundtrip(info: &TrackInfo) -> TrackInfo {
 		let mut buf = BytesMut::new();
-		info.encode(&mut buf, Version::Lite05Wip).unwrap();
+		info.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let decoded = TrackInfo::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let decoded = TrackInfo::decode(&mut slice, Version::Lite05).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		decoded
 	}
@@ -132,7 +132,7 @@ mod tests {
 				max_latency: Duration::ZERO,
 				timescale: 0,
 			}
-			.encode(&mut buf, Version::Lite05Wip),
+			.encode(&mut buf, Version::Lite05),
 			Err(EncodeError::InvalidState)
 		));
 	}
@@ -144,9 +144,9 @@ mod tests {
 			track: Cow::Borrowed("video"),
 		};
 		let mut buf = BytesMut::new();
-		track.encode(&mut buf, Version::Lite05Wip).unwrap();
+		track.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let decoded = Track::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let decoded = Track::decode(&mut slice, Version::Lite05).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		assert_eq!(decoded.broadcast, track.broadcast);
 		assert_eq!(decoded.track, track.track);

@@ -309,8 +309,9 @@ export class Subscriber {
 				if (done !== false) break;
 
 				if (hasTrackStream(this.version)) {
-					// moq-lite-05+ prefixes each frame with a zigzag timestamp delta. Decode it
-					// to stay aligned with the wire, but don't surface it yet.
+					// moq-lite-05+ prefixes each frame with a zigzag timestamp delta. It is not
+					// load-bearing: the presentation timestamp comes from the container payload,
+					// so we decode this only to stay aligned with the wire and discard it.
 					await stream.u62();
 				}
 

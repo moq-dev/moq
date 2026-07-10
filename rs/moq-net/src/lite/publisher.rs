@@ -609,7 +609,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats.group();
 
 		// moq-lite-05+ stamps each frame with a wall-clock millisecond timestamp, sent as a
-		// zigzag delta from the previous frame (the first frame is a delta from 0).
+		// zigzag delta from the previous frame (the first frame is a delta from 0). This is a
+		// placeholder: consumers read the presentation timestamp from the container payload, not
+		// from here, so the value is not yet load-bearing.
 		let mut prev_timestamp: i64 = 0;
 
 		loop {

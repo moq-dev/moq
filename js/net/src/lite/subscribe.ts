@@ -198,7 +198,7 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				await w.u8(this.priority ?? 0);
 				break;
-			case Version.DRAFT_05_WIP:
+			case Version.DRAFT_05:
 				// moq-lite-05+: just the resolved absolute start group (raw, 0 is valid).
 				await w.u53(this.startGroup ?? 0);
 				break;
@@ -226,7 +226,7 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				priority = await r.u8();
 				break;
-			case Version.DRAFT_05_WIP:
+			case Version.DRAFT_05:
 				// moq-lite-05+: just the resolved absolute start group (raw).
 				return new SubscribeOk({ startGroup: await r.u53() });
 			default:
@@ -340,7 +340,7 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 				throw new Error("only SUBSCRIBE_OK is supported for this version");
 			}
 			break;
-		case Version.DRAFT_05_WIP:
+		case Version.DRAFT_05:
 			// moq-lite-05+: 0x0 OK, 0x1 END, 0x2 DROP.
 			if ("ok" in resp) {
 				await w.u53(0x0);
@@ -373,7 +373,7 @@ async function decodeResponse(r: Reader, version: Version): Promise<SubscribeRes
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
 			return { ok: await SubscribeOk.decode(r, version) };
-		case Version.DRAFT_05_WIP: {
+		case Version.DRAFT_05: {
 			const typ = await r.u53();
 			switch (typ) {
 				case 0x0:

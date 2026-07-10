@@ -421,7 +421,7 @@ mod tests {
 			start_group: Some(42),
 			end_group: None,
 		});
-		match response_roundtrip(&resp, Version::Lite05Wip) {
+		match response_roundtrip(&resp, Version::Lite05) {
 			SubscribeResponse::Ok(ok) => assert_eq!(ok.start_group, Some(42)),
 			other => panic!("expected Ok, got {other:?}"),
 		}
@@ -430,7 +430,7 @@ mod tests {
 	#[test]
 	fn lite05_subscribe_end() {
 		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
-		match response_roundtrip(&resp, Version::Lite05Wip) {
+		match response_roundtrip(&resp, Version::Lite05) {
 			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
@@ -443,7 +443,7 @@ mod tests {
 			end: 3,
 			error: 0,
 		});
-		match response_roundtrip(&resp, Version::Lite05Wip) {
+		match response_roundtrip(&resp, Version::Lite05) {
 			SubscribeResponse::Drop(d) => {
 				assert_eq!(d.start, 1);
 				assert_eq!(d.end, 3);

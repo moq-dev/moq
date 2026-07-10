@@ -7,9 +7,9 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
-	/// Work-in-progress placeholder for lite-05. Not advertised over ALPN or
-	/// included in default version sets; callers must opt in explicitly.
-	Lite05Wip,
+	/// moq-lite-05. Not advertised over ALPN or included in default version sets;
+	/// callers must opt in explicitly.
+	Lite05,
 }
 
 impl Version {
@@ -17,7 +17,7 @@ impl Version {
 	///
 	/// Earlier versions negotiate purely via ALPN and exchange no SETUP message.
 	pub fn has_setup_stream(self) -> bool {
-		matches!(self, Self::Lite05Wip)
+		matches!(self, Self::Lite05)
 	}
 
 	/// Whether this version uses the moq-lite-05 framing bundle: the Track stream
@@ -25,7 +25,7 @@ impl Version {
 	/// distinct SUBSCRIBE_END, and a per-frame timestamp delta. Earlier versions carry
 	/// publisher properties inline in SUBSCRIBE_OK and frames without a timestamp.
 	pub fn has_track_stream(self) -> bool {
-		matches!(self, Self::Lite05Wip)
+		matches!(self, Self::Lite05)
 	}
 }
 
@@ -36,7 +36,7 @@ impl fmt::Display for Version {
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
-			Self::Lite05Wip => write!(f, "moq-lite-05-wip"),
+			Self::Lite05 => write!(f, "moq-lite-05"),
 		}
 	}
 }
@@ -48,7 +48,7 @@ impl From<Version> for crate::Version {
 			Version::Lite02 => crate::Version::Lite(Version::Lite02),
 			Version::Lite03 => crate::Version::Lite(Version::Lite03),
 			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-			Version::Lite05Wip => crate::Version::Lite(Version::Lite05Wip),
+			Version::Lite05 => crate::Version::Lite(Version::Lite05),
 		}
 	}
 }

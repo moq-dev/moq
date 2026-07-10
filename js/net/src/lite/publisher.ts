@@ -292,6 +292,8 @@ export class Publisher {
 			try {
 				// moq-lite-05+ stamps each frame with a wall-clock millisecond timestamp, sent
 				// as a zigzag delta from the previous frame (the first frame is a delta from 0).
+				// This is a placeholder: consumers read the presentation timestamp from the
+				// container payload, not from here, so the value is not yet load-bearing.
 				let prevTimestamp = 0n;
 
 				for (;;) {

@@ -33,8 +33,8 @@ test("TrackInfo round-trips on draft-05", async () => {
 		maxLatency: 2000,
 		timescale: 90000,
 	});
-	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05_WIP)));
-	const got = await TrackInfo.decode(reader, Version.DRAFT_05_WIP);
+	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05)));
+	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(false);
 	expect(got.maxLatency).toBe(2000);
@@ -43,8 +43,8 @@ test("TrackInfo round-trips on draft-05", async () => {
 
 test("Track request round-trips on draft-05", async () => {
 	const msg = new Track({ broadcast: Path.from("room"), track: "video" });
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05_WIP)));
-	const got = await Track.decode(reader, Version.DRAFT_05_WIP);
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const got = await Track.decode(reader, Version.DRAFT_05);
 	expect(got.broadcast).toBe(Path.from("room"));
 	expect(got.track).toBe("video");
 });

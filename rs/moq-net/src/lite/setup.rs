@@ -109,9 +109,9 @@ mod tests {
 
 	fn roundtrip(setup: &Setup) -> Setup {
 		let mut buf = BytesMut::new();
-		setup.encode(&mut buf, Version::Lite05Wip).unwrap();
+		setup.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = &buf[..];
-		let decoded = Setup::decode(&mut slice, Version::Lite05Wip).unwrap();
+		let decoded = Setup::decode(&mut slice, Version::Lite05).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		decoded
 	}
@@ -137,7 +137,7 @@ mod tests {
 			Setup {
 				path: Some("foo".into())
 			}
-			.encode(&mut buf, Version::Lite05Wip),
+			.encode(&mut buf, Version::Lite05),
 			Err(EncodeError::InvalidState)
 		));
 
@@ -145,12 +145,12 @@ mod tests {
 		let mut params = Parameters::default();
 		params.set(PARAM_PATH, b"foo".to_vec());
 		let mut body = BytesMut::new();
-		params.encode(&mut body, Version::Lite05Wip).unwrap();
+		params.encode(&mut body, Version::Lite05).unwrap();
 		let mut framed = BytesMut::new();
-		(body.len() as u64).encode(&mut framed, Version::Lite05Wip).unwrap();
+		(body.len() as u64).encode(&mut framed, Version::Lite05).unwrap();
 		framed.extend_from_slice(&body);
 		assert!(matches!(
-			Setup::decode(&mut framed, Version::Lite05Wip),
+			Setup::decode(&mut framed, Version::Lite05),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -172,14 +172,14 @@ mod tests {
 		params.set(0xbeef, b"whatever".to_vec());
 
 		let mut body = BytesMut::new();
-		params.encode(&mut body, Version::Lite05Wip).unwrap();
+		params.encode(&mut body, Version::Lite05).unwrap();
 
 		// Wrap with the message size prefix the Message impl expects.
 		let mut buf = BytesMut::new();
-		(body.len() as u64).encode(&mut buf, Version::Lite05Wip).unwrap();
+		(body.len() as u64).encode(&mut buf, Version::Lite05).unwrap();
 		buf.extend_from_slice(&body);
 
-		let decoded = Setup::decode(&mut buf, Version::Lite05Wip).unwrap();
+		let decoded = Setup::decode(&mut buf, Version::Lite05).unwrap();
 		assert_eq!(decoded.path.as_deref(), Some("/foo"));
 	}
 }

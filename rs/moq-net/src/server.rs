@@ -1,6 +1,6 @@
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP,
-	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, Error,
+	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -126,14 +126,14 @@ impl Server {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(ALPN_LITE_05_WIP) => {
+			Some(ALPN_LITE_05) => {
 				self.versions
-					.select(Version::Lite(lite::Version::Lite05Wip))
+					.select(Version::Lite(lite::Version::Lite05))
 					.ok_or(Error::Version)?;
 
 				// Gate on the client's SETUP: read it before serving so the caller can
 				// scope by the advertised path.
-				let client_setup = lite::accept_setup(&session, lite::Version::Lite05Wip).await?;
+				let client_setup = lite::accept_setup(&session, lite::Version::Lite05).await?;
 				return Ok(Request {
 					server: self.clone(),
 					path: client_setup.path,
@@ -302,10 +302,10 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.publish,
 					server.consume,
 					server.stats,
-					lite::Version::Lite05Wip,
+					lite::Version::Lite05,
 					lite::Setup::default(),
 				)?;
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
+				return Ok(Session::new(session, lite::Version::Lite05.into(), recv_bw));
 			}
 			Handshake::Legacy {
 				session,
@@ -498,7 +498,7 @@ mod tests {
 
 	/// Encode a lite-05 Setup stream: the `DataType::Setup` tag then the SETUP message.
 	fn lite05_setup(path: Option<&str>) -> Vec<u8> {
-		let v = lite::Version::Lite05Wip;
+		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
 		lite::DataType::Setup.encode(&mut buf, v).unwrap();
 		lite::Setup {
@@ -512,17 +512,15 @@ mod tests {
 	/// Encode a lite-05 Group uni stream header (just the `DataType::Group` tag).
 	fn lite05_group() -> Vec<u8> {
 		let mut buf = Vec::new();
-		lite::DataType::Group
-			.encode(&mut buf, lite::Version::Lite05Wip)
-			.unwrap();
+		lite::DataType::Group.encode(&mut buf, lite::Version::Lite05).unwrap();
 		buf
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_path() {
-		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_setup(Some("/team/room"))]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"))]);
 		let request = Server::new()
-			.with_versions(Version::Lite(lite::Version::Lite05Wip).into())
+			.with_versions(Version::Lite(lite::Version::Lite05).into())
 			.accept_request(session)
 			.await
 			.unwrap();
@@ -531,9 +529,9 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_lite05_without_path_is_none() {
-		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_setup(None)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None)]);
 		let request = Server::new()
-			.with_versions(Version::Lite(lite::Version::Lite05Wip).into())
+			.with_versions(Version::Lite(lite::Version::Lite05).into())
 			.accept_request(session)
 			.await
 			.unwrap();
@@ -544,9 +542,9 @@ mod tests {
 	async fn accept_request_skips_uni_stream_before_setup() {
 		// A Group racing ahead of the SETUP is reset and skipped; the gate keeps
 		// reading until it finds the SETUP.
-		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_group(), lite05_setup(Some("/team/room"))]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_group(), lite05_setup(Some("/team/room"))]);
 		let request = Server::new()
-			.with_versions(Version::Lite(lite::Version::Lite05Wip).into())
+			.with_versions(Version::Lite(lite::Version::Lite05).into())
 			.accept_request(session)
 			.await
 			.unwrap();

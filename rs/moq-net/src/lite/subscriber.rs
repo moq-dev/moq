@@ -476,7 +476,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn recv_setup(&self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		// The Setup stream only exists in moq-lite-05+; reject it on older versions.
-		if self.version != Version::Lite05Wip {
+		if self.version != Version::Lite05 {
 			return Err(Error::UnexpectedStream);
 		}
 
@@ -533,8 +533,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		loop {
 			let size = if self.version.has_track_stream() {
-				// moq-lite-05+: each frame is prefixed with a zigzag timestamp delta. We
-				// decode it to stay aligned with the wire, but don't surface it yet.
+				// moq-lite-05+: each frame is prefixed with a zigzag timestamp delta. It is
+				// not load-bearing: the presentation timestamp comes from the container payload,
+				// so we decode this only to stay aligned with the wire and discard it.
 				let Some(_timestamp_delta) = stream.decode_maybe::<u64>().await? else {
 					break;
 				};
