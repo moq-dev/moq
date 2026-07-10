@@ -17,7 +17,7 @@ export class Track {
 	}
 
 	async #encode(w: Writer) {
-		await w.string(this.broadcast);
+		await w.string(Path.encode(this.broadcast));
 		await w.string(this.track);
 	}
 

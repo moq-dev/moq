@@ -25,7 +25,7 @@ export class Announce {
 
 	async #encode(w: Writer, version: Version) {
 		await w.bool(this.active);
-		await w.string(this.suffix);
+		await w.string(Path.encode(this.suffix));
 
 		switch (version) {
 			case Version.DRAFT_01:
@@ -102,7 +102,7 @@ export class AnnounceInterest {
 	}
 
 	async #encode(w: Writer, version: Version) {
-		await w.string(this.prefix);
+		await w.string(Path.encode(this.prefix));
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -162,7 +162,7 @@ export class AnnounceInit {
 	async #encode(w: Writer) {
 		await w.u53(this.suffixes.length);
 		for (const path of this.suffixes) {
-			await w.string(path);
+			await w.string(Path.encode(path));
 		}
 	}
 

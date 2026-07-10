@@ -201,3 +201,9 @@ test("decode enforces the max part count", () => {
 	expect(Path.decode(atLimit)).toBe(atLimit as Path.Valid);
 	expect(() => Path.decode(`${atLimit}/extra`)).toThrow();
 });
+
+test("encode enforces the max part count", () => {
+	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/") as Path.Valid;
+	expect(Path.encode(atLimit)).toBe(atLimit);
+	expect(() => Path.encode(`${atLimit}/extra` as Path.Valid)).toThrow();
+});

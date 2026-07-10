@@ -57,6 +57,16 @@ export function parts(path: Valid): string[] {
  */
 export function decode(raw: string): Valid {
 	const path = from(raw);
+	return encode(path);
+}
+
+/**
+ * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS}.
+ *
+ * Throws when the path has too many parts; use at wire encode sites so we never
+ * emit a path the remote side is required to reject.
+ */
+export function encode(path: Valid): Valid {
 	if (parts(path).length > MAX_PARTS) {
 		throw new Error(`path exceeds ${MAX_PARTS} parts`);
 	}

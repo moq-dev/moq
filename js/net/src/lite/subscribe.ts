@@ -108,7 +108,7 @@ export class Subscribe {
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
-		await w.string(this.broadcast);
+		await w.string(Path.encode(this.broadcast));
 		await w.string(this.track);
 		await w.u8(this.priority);
 
