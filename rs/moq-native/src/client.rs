@@ -34,14 +34,10 @@ pub struct ClientConfig {
 	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
-	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "client-max-streams",
-		long = "client-max-streams",
-		env = "MOQ_CLIENT_MAX_STREAMS"
-	)]
-	pub max_streams: Option<u64>,
+	/// QUIC transport tuning (`--client-quic-*`): stream limits, GSO, timeouts.
+	#[command(flatten)]
+	#[serde(default)]
+	pub quic: crate::quic::Client,
 
 	/// Restrict the client to specific MoQ protocol version(s).
 	///
@@ -89,7 +85,7 @@ impl Default for ClientConfig {
 			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
-			max_streams: None,
+			quic: crate::quic::Client::default(),
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
 			backoff: Backoff::default(),

@@ -1,5 +1,6 @@
 use crate::client::ClientConfig;
 use crate::crypto;
+use crate::quic::Resolved;
 use crate::server::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -47,6 +48,9 @@ pub enum Error {
 
 	#[error("client tls host_name override is not supported with the quiche backend")]
 	HostNameUnsupported,
+
+	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
+	GsoUnsupported,
 
 	#[error("missing ALPN")]
 	MissingAlpn,
@@ -102,6 +106,17 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// Apply the resolved quic knobs quiche can honor to its settings.
+///
+/// quiche has no keep-alive interval knob, so [`Resolved::keep_alive`] is ignored;
+/// GSO is probed from the socket and rejected up front (see [`Error::GsoUnsupported`]).
+fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: Resolved) {
+	settings.initial_max_streams_bidi = quic.max_streams;
+	settings.initial_max_streams_uni = quic.max_streams;
+	settings.max_idle_timeout = Some(quic.idle_timeout);
+	settings.discover_path_mtu = quic.mtu_discovery;
+}
+
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -111,7 +126,7 @@ pub(crate) struct QuicheClient {
 	pub verification: crate::tls::Verification,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
-	pub max_streams: u64,
+	pub quic: Resolved,
 }
 
 impl QuicheClient {
@@ -124,11 +139,17 @@ impl QuicheClient {
 			return Err(Error::HostNameUnsupported);
 		}
 
+		let quic = config.quic.resolve();
+		// quiche probes GSO from the socket and has no knob to force it off.
+		if quic.gso_disabled() {
+			return Err(Error::GsoUnsupported);
+		}
+
 		Ok(Self {
 			bind: config.bind,
 			verification: config.tls.verification()?,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
-			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
+			quic,
 		})
 	}
 
@@ -169,8 +190,7 @@ impl QuicheClient {
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.verify_peer = !matches!(verification, Verification::Disabled);
 		settings.alpn = alpns;
-		settings.initial_max_streams_bidi = self.max_streams;
-		settings.initial_max_streams_uni = self.max_streams;
+		apply_settings(&mut settings, self.quic);
 
 		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
@@ -319,8 +339,14 @@ pub(crate) struct QuicheServer {
 
 impl QuicheServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
-		if config.quic_lb_id.is_some() {
+		if config.quic.quic_lb_id.is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
+		}
+
+		let quic = config.quic.resolve();
+		// quiche probes GSO from the socket and has no knob to force it off.
+		if quic.gso_disabled() {
+			return Err(Error::GsoUnsupported);
 		}
 
 		let listen =
@@ -362,12 +388,9 @@ impl QuicheServer {
 			.collect();
 		alpns.push(b"h3".to_vec());
 
-		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
-
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.alpn = alpns;
-		settings.initial_max_streams_bidi = max_streams;
-		settings.initial_max_streams_uni = max_streams;
+		apply_settings(&mut settings, quic);
 
 		let server = web_transport_quiche::ez::ServerBuilder::default()
 			.with_settings(settings)

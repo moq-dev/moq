@@ -49,57 +49,11 @@ pub struct ServerConfig {
 	#[arg(id = "server-backend", long = "server-backend", env = "MOQ_SERVER_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
-	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
-	/// If set, connection IDs will be derived semi-deterministically.
-	#[arg(id = "server-quic-lb-id", long = "server-quic-lb-id", env = "MOQ_SERVER_QUIC_LB_ID")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub quic_lb_id: Option<ServerId>,
-
-	/// Number of random nonce bytes in QUIC-LB connection IDs.
-	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
-	#[arg(
-		id = "server-quic-lb-nonce",
-		long = "server-quic-lb-nonce",
-		requires = "server-quic-lb-id",
-		env = "MOQ_SERVER_QUIC_LB_NONCE"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub quic_lb_nonce: Option<usize>,
-
-	/// IPv4 address advertised as the QUIC preferred_address.
-	///
-	/// Supporting clients (Chrome M131+, native Quinn) migrate to this address
-	/// shortly after the handshake completes. Typical use: handshake on an
-	/// anycast IP, steady-state on this host's unicast IP.
-	///
-	/// Honored by the Quinn and noq backends.
-	#[arg(
-		id = "server-preferred-v4",
-		long = "server-preferred-v4",
-		env = "MOQ_SERVER_PREFERRED_V4"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub preferred_v4: Option<net::SocketAddrV4>,
-
-	/// IPv6 address advertised as the QUIC preferred_address.
-	///
-	/// See [`Self::preferred_v4`].
-	#[arg(
-		id = "server-preferred-v6",
-		long = "server-preferred-v6",
-		env = "MOQ_SERVER_PREFERRED_V6"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub preferred_v6: Option<net::SocketAddrV6>,
-
-	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "server-max-streams",
-		long = "server-max-streams",
-		env = "MOQ_SERVER_MAX_STREAMS"
-	)]
-	pub max_streams: Option<u64>,
+	/// QUIC transport tuning (`--server-quic-*`): stream limits, GSO, timeouts,
+	/// plus the accept-side knobs (preferred address, QUIC-LB connection IDs).
+	#[command(flatten)]
+	#[serde(default)]
+	pub quic: crate::quic::Server,
 
 	/// Restrict the server to specific MoQ protocol version(s).
 	///

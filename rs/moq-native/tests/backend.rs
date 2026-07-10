@@ -262,7 +262,7 @@ async fn iroh_connect() {
 	let mut server_iroh_config = EndpointConfig::default();
 	server_iroh_config.enabled = Some(true);
 	let server_endpoint = server_iroh_config
-		.bind()
+		.bind(&moq_native::quic::Client::default())
 		.await
 		.expect("failed to bind server iroh endpoint")
 		.expect("server iroh endpoint not enabled");
@@ -291,7 +291,7 @@ async fn iroh_connect() {
 	let mut client_iroh_config = EndpointConfig::default();
 	client_iroh_config.enabled = Some(true);
 	let client_endpoint = client_iroh_config
-		.bind()
+		.bind(&moq_native::quic::Client::default())
 		.await
 		.expect("failed to bind client iroh endpoint")
 		.expect("client iroh endpoint not enabled");

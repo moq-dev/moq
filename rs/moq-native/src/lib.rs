@@ -10,9 +10,6 @@
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
 
-/// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
-pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
-
 pub mod bind;
 mod client;
 mod connect;
@@ -23,6 +20,7 @@ pub mod jemalloc;
 mod log;
 #[cfg(feature = "noq")]
 pub mod noq;
+pub mod quic;
 #[cfg(feature = "quinn")]
 pub mod quinn;
 mod reconnect;

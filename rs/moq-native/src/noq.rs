@@ -1,14 +1,34 @@
 use crate::client::ClientConfig;
+use crate::quic::Resolved;
 use crate::server::{ServerConfig, ServerId};
 use crate::tls::{FingerprintVerifier, ServeCerts};
+use std::net;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use std::{net, time};
 use url::Url;
 
 use web_transport_noq::noq;
 
 pub use web_transport_noq;
+
+/// Apply the resolved quic knobs to a noq transport config.
+fn apply_transport(transport: &mut noq::TransportConfig, quic: Resolved) {
+	transport.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
+	transport.keep_alive_interval(quic.keep_alive);
+
+	// noq enables MTU discovery by default; disable it unless asked.
+	if !quic.mtu_discovery {
+		transport.mtu_discovery_config(None);
+	}
+
+	let max_streams = noq::VarInt::from_u64(quic.max_streams).unwrap_or(noq::VarInt::MAX);
+	transport.max_concurrent_bidi_streams(max_streams);
+	transport.max_concurrent_uni_streams(max_streams);
+
+	if let Some(gso) = quic.gso {
+		transport.enable_segmentation_offload(gso);
+	}
+}
 
 /// Errors specific to the noq QUIC backend.
 #[derive(Debug, thiserror::Error)]
@@ -130,16 +150,8 @@ impl NoqClient {
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
-		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
-		transport.keep_alive_interval(Some(time::Duration::from_secs(5)));
-		transport.mtu_discovery_config(None); // Disable MTU discovery
 		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-
-		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
-		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
-		transport.max_concurrent_bidi_streams(max_streams);
-		transport.max_concurrent_uni_streams(max_streams);
-
+		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
@@ -316,16 +328,8 @@ pub(crate) struct NoqServer {
 impl NoqServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
 		let mut transport = noq::TransportConfig::default();
-		transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
-		transport.keep_alive_interval(Some(Duration::from_secs(5)));
-		transport.mtu_discovery_config(None); // Disable MTU discovery
 		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-
-		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
-		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
-		transport.max_concurrent_bidi_streams(max_streams);
-		transport.max_concurrent_uni_streams(max_streams);
-
+		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
 
 		let provider = crate::crypto::provider();
@@ -369,10 +373,10 @@ impl NoqServer {
 
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
 		// noq allocates a fresh CID + reset token for the address during the handshake.
-		if let Some(addr) = config.preferred_v4 {
+		if let Some(addr) = config.quic.preferred_v4 {
 			tls.preferred_address_v4(Some(addr));
 		}
-		if let Some(addr) = config.preferred_v6 {
+		if let Some(addr) = config.quic.preferred_v6 {
 			tls.preferred_address_v6(Some(addr));
 		}
 
@@ -384,8 +388,8 @@ impl NoqServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = noq::EndpointConfig::default();
-		if let Some(server_id) = config.quic_lb_id {
-			let nonce_len = config.quic_lb_nonce.unwrap_or(8);
+		if let Some(server_id) = config.quic.quic_lb_id {
+			let nonce_len = config.quic.quic_lb_nonce.unwrap_or(8);
 			if nonce_len < 4 {
 				return Err(Error::QuicLbNonceTooSmall);
 			}

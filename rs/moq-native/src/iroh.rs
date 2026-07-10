@@ -65,6 +65,9 @@ pub enum Error {
 
 	#[error("failed to receive WebTransport request")]
 	RecvRequest(#[source] web_transport_iroh::ServerError),
+
+	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quinn backend")]
+	GsoUnsupported,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -114,9 +117,21 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
-	pub async fn bind(self) -> Result<Option<Endpoint>> {
+	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Client`] knobs.
+	///
+	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
+	/// section (the per-connection knobs are symmetric). It only honors the knobs
+	/// its transport-config builder exposes (stream limits, idle timeout, MTU
+	/// discovery); it has no keep-alive knob and cannot disable GSO, so `gso = false`
+	/// fails with [`Error::GsoUnsupported`].
+	pub async fn bind(self, quic: &crate::quic::Client) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
+		}
+
+		let quic = quic.resolve();
+		if quic.gso_disabled() {
+			return Err(Error::GsoUnsupported);
 		}
 
 		// If the secret matches the expected format (hex encoded), use it directly.
@@ -143,13 +158,25 @@ impl EndpointConfig {
 		let mut alpns: Vec<Vec<u8>> = moq_net::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
+		// MoQ opens a stream per group, so raise the low default; also carry the
+		// shared idle-timeout / MTU knobs onto iroh's own transport config.
+		let max_streams = iroh::endpoint::VarInt::from_u64(quic.max_streams).unwrap_or(iroh::endpoint::VarInt::MAX);
+		let mut transport = iroh::endpoint::QuicTransportConfig::builder()
+			.max_concurrent_bidi_streams(max_streams)
+			.max_concurrent_uni_streams(max_streams)
+			.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
+		if !quic.mtu_discovery {
+			transport = transport.mtu_discovery_config(None);
+		}
+
 		let mut builder = if self.disable_relay.unwrap_or(false) {
 			Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
 		} else {
 			Endpoint::builder(iroh::endpoint::presets::N0)
 		}
 		.secret_key(secret_key)
-		.alpns(alpns);
+		.alpns(alpns)
+		.transport_config(transport.build());
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
 		}

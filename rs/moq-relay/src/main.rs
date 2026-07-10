@@ -16,8 +16,8 @@ async fn main() -> anyhow::Result<()> {
 
 	let mut config = Config::load()?;
 
-	config.client.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
-	config.server.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
+	config.client.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
+	config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
 	let mtls_enabled = !config.server.tls.root.is_empty();
 
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 
 	#[cfg(feature = "iroh")]
 	let (server, client) = {
-		let iroh = config.iroh.bind().await?;
+		let iroh = config.iroh.bind(&config.client.quic).await?;
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
 

@@ -180,7 +180,7 @@ depth = 2
 		}
 
 		let toml = r#"
-[server]
+[server.quic]
 preferred_v4 = "192.0.2.1:443"
 preferred_v6 = "[2001:db8::1]:443"
 "#;
@@ -193,14 +193,14 @@ preferred_v6 = "[2001:db8::1]:443"
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(
-			config.server.preferred_v4,
+			config.server.quic.preferred_v4,
 			Some("192.0.2.1:443".parse().unwrap()),
-			"TOML's server.preferred_v4 must not be clobbered by the CLI re-parse"
+			"TOML's server.quic.preferred_v4 must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
-			config.server.preferred_v6,
+			config.server.quic.preferred_v6,
 			Some("[2001:db8::1]:443".parse().unwrap()),
-			"TOML's server.preferred_v6 must not be clobbered by the CLI re-parse"
+			"TOML's server.quic.preferred_v6 must not be clobbered by the CLI re-parse"
 		);
 	}
 
