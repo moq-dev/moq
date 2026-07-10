@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `decode::Decoder` is public: the payload-in, frames-out layer under
+  `decode::Consumer`, for callers that don't read from a plain track
+  subscription (e.g. a transcoder decoding individually fetched groups).
+- `encode::Encoder::encode_i420`: encode a tightly-packed I420 frame directly,
+  the zero-conversion input path for callers that already hold I420 (decoder
+  output), alongside the existing `encode_rgba`.
 - Native H.264 decode: a `decode` module mirroring `encode`, with a
   `decode::Consumer` (the counterpart to `moq-audio`'s `AudioConsumer`) that
   subscribes to an H.264 track and returns raw I420 frames. Backends are

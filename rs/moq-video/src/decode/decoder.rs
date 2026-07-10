@@ -13,9 +13,9 @@ use bytes::Bytes;
 use hang::catalog::{VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
 
+use super::Frame;
 use super::backend::{self, Backend, Codec};
 use crate::Error;
-use crate::frame::I420;
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -66,8 +66,14 @@ enum Conversion {
 	LengthPrefixed { length_size: usize, keyframe_prefix: Bytes },
 }
 
-/// Drives a [`Backend`] from container frames.
-pub(crate) struct Decoder {
+/// Decodes container payloads (the codec bitstream) into raw [`Frame`]s.
+///
+/// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
+/// when the frames don't come from a plain track subscription, e.g. a transcoder
+/// serving individually fetched groups. Feed it the payload of each container
+/// frame in decode order; it handles avc1/hvc1 -> Annex-B conversion and gates
+/// output until the first keyframe.
+pub struct Decoder {
 	backend: Box<dyn Backend>,
 	conversion: Conversion,
 	got_keyframe: bool,
@@ -76,7 +82,7 @@ pub(crate) struct Decoder {
 impl Decoder {
 	/// Build a decoder for the catalog's video config. Errors if the codec is
 	/// neither H.264 nor H.265 (the codecs the native backends support).
-	pub(crate) fn new(catalog: &VideoConfig, kind: &Kind) -> Result<Self, Error> {
+	pub fn new(catalog: &VideoConfig, kind: &Kind) -> Result<Self, Error> {
 		let (codec, conversion) = match &catalog.codec {
 			VideoCodec::H264(h264) => {
 				let conversion = if h264.inline {
@@ -124,12 +130,13 @@ impl Decoder {
 	}
 
 	/// The decoder backend name in use, e.g. `"videotoolbox"`.
-	pub(crate) fn name(&self) -> &str {
+	pub fn name(&self) -> &str {
 		self.backend.name()
 	}
 
-	/// Decode one container frame, returning zero or more raw I420 frames.
-	pub(crate) fn decode(&mut self, payload: &Bytes, keyframe: bool) -> Result<Vec<I420>, Error> {
+	/// Decode one container frame, returning zero or more raw frames stamped with
+	/// `timestamp_us` (the container frame's presentation time in microseconds).
+	pub fn decode(&mut self, payload: &Bytes, timestamp_us: u64, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Wait for the first keyframe: a decoder started mid-GOP can't decode
 		// delta frames, and the parameter sets ride along with the keyframe.
 		if !self.got_keyframe {
@@ -151,7 +158,17 @@ impl Decoder {
 			}
 		};
 
-		self.backend.decode(annexb, keyframe)
+		Ok(self
+			.backend
+			.decode(annexb, keyframe)?
+			.into_iter()
+			.map(|i420| Frame {
+				timestamp_us,
+				width: i420.width,
+				height: i420.height,
+				data: Bytes::from(i420.data),
+			})
+			.collect())
 	}
 }
 

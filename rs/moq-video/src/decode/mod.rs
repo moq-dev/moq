@@ -20,7 +20,7 @@ mod consumer;
 mod decoder;
 
 pub use consumer::Consumer;
-pub use decoder::{Config, Kind};
+pub use decoder::{Config, Decoder, Kind};
 
 /// A decoded raw video frame in tightly-packed I420 (YUV 4:2:0), BT.601 limited
 /// range (studio swing, what H.264 carries by default).
