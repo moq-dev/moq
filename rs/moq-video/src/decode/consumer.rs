@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 
-use bytes::Bytes;
 use hang::catalog::VideoConfig;
 
 use super::Frame;
@@ -31,7 +30,7 @@ impl Consumer {
 		name: impl Into<String>,
 		config: Config,
 	) -> Result<Self, Error> {
-		let decoder = Decoder::new(catalog, &config.kind)?;
+		let decoder = Decoder::new(catalog, &config)?;
 
 		let name = name.into();
 		let track = broadcast.track(&name)?.subscribe(None).await?;
@@ -68,14 +67,10 @@ impl Consumer {
 				.try_into()
 				.map_err(|_| moq_net::TimeOverflow)?;
 
-			for i420 in self.decoder.decode(&mux_frame.payload, mux_frame.keyframe)? {
-				self.pending.push_back(Frame {
-					timestamp_us,
-					width: i420.width,
-					height: i420.height,
-					data: Bytes::from(i420.data),
-				});
-			}
+			self.pending.extend(
+				self.decoder
+					.decode(&mux_frame.payload, timestamp_us, mux_frame.keyframe)?,
+			);
 		}
 	}
 }

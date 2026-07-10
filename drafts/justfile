@@ -1,0 +1,70 @@
+#!/usr/bin/env just --justfile
+#
+# IETF Internet-Draft tooling for the drafts under drafts/. Invoked from the
+# repo root as `just drafts <recipe>` via the `mod drafts` import.
+#
+# The toolchain (kramdown-rfc, xml2rfc, mmark) comes from the nix dev shell
+# (see `draftsDeps` in flake.nix), so `nix develop --command just drafts build`
+# renders with the same tool versions everywhere. There is no submodule or
+# venv to bootstrap: `kramdown-rfc` turns the markdown into RFC XML, `xml2rfc`
+# renders the txt/html.
+
+set working-directory := '.'
+
+# Common xml2rfc flags. --allow-local-file-access lets it read the CSS/refs.
+xml2rfc := "xml2rfc -q --allow-local-file-access"
+
+# List the draft names (the argument to `build` / `publish`).
+default:
+    @for f in draft-*.md; do echo "${f%.md}"; done
+
+# Render one draft to <name>.txt and <name>.html (local editor's copy,
+# gitignored). Renders the -latest docname as-is; use `publish` for a version.
+build name:
+    kramdown-rfc --v3 < {{ name }}.md > {{ name }}.xml
+    {{ xml2rfc }} --text {{ name }}.xml -o {{ name }}.txt
+    {{ xml2rfc }} --html {{ name }}.xml -o {{ name }}.html
+    @echo "built {{ name }}.txt and {{ name }}.html"
+
+# Render every draft.
+all:
+    @for f in draft-*.md; do just build "${f%.md}"; done
+
+# Validate that every draft still parses (kramdown-rfc markdown -> RFC XML).
+check:
+    @for f in draft-*.md; do echo "checking $f"; kramdown-rfc --v3 < "$f" > /dev/null; done
+
+# Remove generated files and the reference cache.
+clean:
+    rm -f draft-*.xml draft-*.txt draft-*.html
+    rm -rf .refcache
+
+# Submit a new draft version to the IETF datatracker. The datatracker emails
+# the submitter a confirmation link; the submission is not final until that
+# link is clicked. For a brand-new draft (-00) set "Replaces" on the
+# confirmation page.
+# Example: just drafts publish draft-lcurley-moq-lite 05 you@example.com
+publish name version email:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ version }}" in
+        [0-9][0-9]) ;;
+        *) echo "version must be two digits, e.g. 05" >&2; exit 1 ;;
+    esac
+    doc="{{ name }}-{{ version }}"
+    if [ ! -f "{{ name }}.md" ]; then
+        echo "no such draft: {{ name }}.md" >&2; exit 1
+    fi
+    echo "Building $doc.xml"
+    sed "s/{{ name }}-latest/$doc/g" "{{ name }}.md" | kramdown-rfc --v3 > "$doc.xml"
+    echo "Submitting $doc.xml to the datatracker as {{ email }}"
+    resp="$(mktemp)"
+    code="$(curl -sS -o "$resp" -w '%{http_code}' \
+        -F "user={{ email }}" -F "xml=@$doc.xml" \
+        https://datatracker.ietf.org/api/submission)"
+    echo "HTTP $code"
+    cat "$resp"; echo; rm -f "$resp"
+    case "$code" in
+        200|201) echo "Submitted. Check {{ email }} for the confirmation link." ;;
+        *) echo "Submission failed." >&2; exit 1 ;;
+    esac

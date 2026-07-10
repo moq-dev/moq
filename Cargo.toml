@@ -24,6 +24,7 @@ members = [
     "rs/moq-srt",
     "rs/moq-token",
     "rs/moq-token-cli",
+    "rs/moq-transcode",
     "rs/moq-video",
     "rs/moq-wasm",
 ]
@@ -52,7 +53,7 @@ default-members = [
     "rs/moq-srt",
     "rs/moq-token",
     "rs/moq-token-cli",
-    # "rs/moq-wasm",  # wasm32-unknown-unknown target only
+    "rs/moq-transcode",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
 ]

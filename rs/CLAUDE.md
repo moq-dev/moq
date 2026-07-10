@@ -26,7 +26,8 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 
 - `moq-mux` (lib): the conversion layer. File/stream formats (`container/`: fmp4, flv, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts. `Container` trait + generic `Producer<C>`/`Consumer<C>`. Dual catalog (`catalog::hang`, `catalog::msf`).
 - `moq-audio` (lib): native PCM <-> Opus (`unsafe-libopus`). `AudioProducer`/`AudioConsumer`, `Encoder`/`Decoder`, `AudioFormat`. Optional `capture` feature (cpal microphone), `resample`.
-- `moq-video` (lib): native webcam capture + H.264 via `ffmpeg-next`. `capture::Config`, `encode::{Encoder, Producer, publish_capture}`. ffmpeg types kept out of the public signature (see `error/`).
+- `moq-video` (lib): native video capture, H.264/H.265 encode, and decode; no ffmpeg. Hardware backends (VideoToolbox / Media Foundation / NVENC / VAAPI / NVDEC) with openh264 as the software H.264 fallback; NVDEC frames stay in CUDA memory and feed NVENC zero-copy. `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`.
+- `moq-transcode` (lib): just-in-time live transcoding of hang broadcasts. `run(source, output, config)` publishes a derivative catalog (ladder rungs + relative refs to the source) and encodes each rung only while subscribed/fetched, via `moq-video`. Output groups mirror source group sequences 1:1.
 
 **Apps / binaries**
 

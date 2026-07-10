@@ -18,12 +18,6 @@ use crate::frame::Frame;
 /// Bounded depth; the oldest frame is dropped to favor latency over completeness.
 const DEPTH: usize = 4;
 
-/// A [`Frame`] is only `!Send` because of its macOS `CVPixelBuffer` (a
-/// reference-counted IOSurface wrapper that is in fact safe to move between
-/// threads). Producers run on a foreign thread; `recv` consumes on the runtime.
-struct SendFrame(Frame);
-unsafe impl Send for SendFrame {}
-
 /// The producer/consumer rendezvous for a single capture session.
 pub(super) struct FrameChannel {
 	state: Mutex<State>,
@@ -31,7 +25,7 @@ pub(super) struct FrameChannel {
 }
 
 struct State {
-	frames: VecDeque<SendFrame>,
+	frames: VecDeque<Frame>,
 	closed: bool,
 }
 
@@ -57,7 +51,7 @@ impl FrameChannel {
 			if state.frames.len() >= DEPTH {
 				state.frames.pop_front();
 			}
-			state.frames.push_back(SendFrame(frame));
+			state.frames.push_back(frame);
 		}
 		self.notify.notify_one();
 	}
@@ -77,7 +71,7 @@ impl FrameChannel {
 			{
 				let mut state = self.state.lock().unwrap();
 				if let Some(frame) = state.frames.pop_front() {
-					return Some(frame.0);
+					return Some(frame);
 				}
 				if state.closed {
 					return None;

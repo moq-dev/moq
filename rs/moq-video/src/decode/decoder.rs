@@ -13,9 +13,9 @@ use bytes::Bytes;
 use hang::catalog::{VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
 
+use super::Frame;
 use super::backend::{self, Backend, Codec};
 use crate::Error;
-use crate::frame::I420;
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -29,7 +29,8 @@ pub enum Kind {
 	Hardware,
 	/// Software (openh264) only.
 	Software,
-	/// A specific backend by name, e.g. `"videotoolbox"`, `"openh264"`.
+	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvdec"`,
+	/// `"openh264"`.
 	Named(String),
 }
 
@@ -46,6 +47,12 @@ pub struct Config {
 	/// the moq-mux default (skip aggressively); set it to your playout buffer for
 	/// a softer skip. Forwarded to the container consumer's `with_latency`.
 	pub latency_max: Option<Duration>,
+	/// Ask the decoder to emit frames at this `(width, height)` (both even)
+	/// instead of the stream's native size. Best effort: a hardware decoder with
+	/// a built-in scaler (NVDEC) honors it for free, other backends ignore it.
+	/// Check each [`Frame`](super::Frame)'s dimensions and scale the remainder
+	/// yourself.
+	pub resize: Option<(u32, u32)>,
 }
 
 impl Config {
@@ -66,8 +73,14 @@ enum Conversion {
 	LengthPrefixed { length_size: usize, keyframe_prefix: Bytes },
 }
 
-/// Drives a [`Backend`] from container frames.
-pub(crate) struct Decoder {
+/// Decodes container payloads (the codec bitstream) into raw [`Frame`]s.
+///
+/// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
+/// when the frames don't come from a plain track subscription, e.g. a transcoder
+/// serving individually fetched groups. Feed it the payload of each container
+/// frame in decode order; it handles avc1/hvc1 -> Annex-B conversion and gates
+/// output until the first keyframe.
+pub struct Decoder {
 	backend: Box<dyn Backend>,
 	conversion: Conversion,
 	got_keyframe: bool,
@@ -76,7 +89,7 @@ pub(crate) struct Decoder {
 impl Decoder {
 	/// Build a decoder for the catalog's video config. Errors if the codec is
 	/// neither H.264 nor H.265 (the codecs the native backends support).
-	pub(crate) fn new(catalog: &VideoConfig, kind: &Kind) -> Result<Self, Error> {
+	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 		let (codec, conversion) = match &catalog.codec {
 			VideoCodec::H264(h264) => {
 				let conversion = if h264.inline {
@@ -114,7 +127,7 @@ impl Decoder {
 			other => return Err(Error::UnsupportedCodec(other.to_string())),
 		};
 
-		let backend = backend::open(codec, kind)?;
+		let backend = backend::open(codec, config)?;
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
 		Ok(Self {
 			backend,
@@ -124,12 +137,13 @@ impl Decoder {
 	}
 
 	/// The decoder backend name in use, e.g. `"videotoolbox"`.
-	pub(crate) fn name(&self) -> &str {
+	pub fn name(&self) -> &str {
 		self.backend.name()
 	}
 
-	/// Decode one container frame, returning zero or more raw I420 frames.
-	pub(crate) fn decode(&mut self, payload: &Bytes, keyframe: bool) -> Result<Vec<I420>, Error> {
+	/// Decode one container frame, returning zero or more raw frames stamped with
+	/// `timestamp_us` (the container frame's presentation time in microseconds).
+	pub fn decode(&mut self, payload: &Bytes, timestamp_us: u64, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Wait for the first keyframe: a decoder started mid-GOP can't decode
 		// delta frames, and the parameter sets ride along with the keyframe.
 		if !self.got_keyframe {
@@ -151,7 +165,17 @@ impl Decoder {
 			}
 		};
 
-		self.backend.decode(annexb, keyframe)
+		Ok(self
+			.backend
+			.decode(annexb, timestamp_us, keyframe)?
+			.into_iter()
+			.map(|decoded| Frame {
+				timestamp_us: decoded.timestamp_us,
+				width: decoded.frame.width(),
+				height: decoded.frame.height(),
+				inner: decoded.frame,
+			})
+			.collect())
 	}
 }
 
@@ -194,16 +218,24 @@ mod tests {
 
 		let frame = gray_rgba(320, 240);
 		let mut decoded = Vec::new();
-		for i in 0..10 {
+		for i in 0..10u64 {
 			let keyframe = i == 0;
 			for packet in encoder.encode_rgba(&frame, 320, 240, keyframe).unwrap() {
-				decoded.extend(decoder.decode(packet, keyframe).unwrap());
+				decoded.extend(decoder.decode(packet, i * 33_333, keyframe).unwrap());
 			}
 		}
 
 		assert!(!decoded.is_empty(), "decoder produced no frames");
-		for i420 in &decoded {
-			assert_gray(i420, 320, 240);
+		for out in &decoded {
+			assert_gray(&out.frame.to_i420().unwrap(), 320, 240);
+		}
+	}
+
+	/// A decoder config selecting one backend by kind.
+	fn decode_config(kind: super::Kind) -> super::Config {
+		super::Config {
+			kind,
+			..super::Config::new()
 		}
 	}
 
@@ -218,15 +250,15 @@ mod tests {
 
 	#[test]
 	fn openh264_round_trip() {
-		let decoder = backend::open(Codec::H264, &super::Kind::Software).expect("openh264 decoder");
+		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
 		round_trip(h264_software_encoder(), decoder, "openh264");
 	}
 
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn videotoolbox_round_trip() {
-		let decoder =
-			backend::open(Codec::H264, &super::Kind::Named("videotoolbox".into())).expect("videotoolbox decoder");
+		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
+			.expect("videotoolbox decoder");
 		round_trip(h264_software_encoder(), decoder, "videotoolbox");
 	}
 
@@ -246,8 +278,8 @@ mod tests {
 			eprintln!("skipping: no VideoToolbox H.265 hardware encoder available");
 			return;
 		};
-		let decoder =
-			backend::open(Codec::H265, &super::Kind::Named("videotoolbox".into())).expect("videotoolbox H.265 decoder");
+		let decoder = backend::open(Codec::H265, &decode_config(super::Kind::Named("videotoolbox".into())))
+			.expect("videotoolbox H.265 decoder");
 		round_trip(encoder, decoder, "videotoolbox");
 	}
 
@@ -256,7 +288,10 @@ mod tests {
 	fn mediafoundation_round_trip() {
 		// Requires a hardware decoder MFT (GPU). Skip on machines without one
 		// rather than fail: CI runners are often headless.
-		let Ok(decoder) = backend::open(Codec::H264, &super::Kind::Named("mediafoundation".into())) else {
+		let Ok(decoder) = backend::open(
+			Codec::H264,
+			&decode_config(super::Kind::Named("mediafoundation".into())),
+		) else {
 			eprintln!("skipping: no Media Foundation H.264 hardware decoder available");
 			return;
 		};
@@ -279,7 +314,10 @@ mod tests {
 			eprintln!("skipping: no Media Foundation H.265 hardware encoder available");
 			return;
 		};
-		let Ok(decoder) = backend::open(Codec::H265, &super::Kind::Named("mediafoundation".into())) else {
+		let Ok(decoder) = backend::open(
+			Codec::H265,
+			&decode_config(super::Kind::Named("mediafoundation".into())),
+		) else {
 			eprintln!("skipping: no Media Foundation H.265 hardware decoder available");
 			return;
 		};

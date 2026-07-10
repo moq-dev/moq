@@ -11,7 +11,7 @@ use web_async::Lock;
 
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
-	coding::{Decode, DecodeError, Encode, EncodeError},
+	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 };
 
 /// A relay origin, identified by a 62-bit varint on the wire.
@@ -907,9 +907,11 @@ impl Producer {
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this producer may
 	/// publish under (after [`scope`](Self::scope) / [`with_root`](Self::with_root)). A full-scope
-	/// producer (the default from [`Origin::produce`]) never fails. Callers must not publish a
-	/// broadcast whose hop chain already contains this origin's id (it would form a routing loop);
-	/// relays filter such reflections before they reach here, checked by a `debug_assert`.
+	/// producer (the default from [`Origin::produce`]) never fails. Fails with
+	/// [`Error::BoundsExceeded`] if the full rooted path exceeds [`Path::MAX_PARTS`]. Callers must
+	/// not publish a broadcast whose hop chain already contains this origin's id (it would form a
+	/// routing loop); relays filter such reflections before they reach here, checked by a
+	/// `debug_assert`.
 	///
 	/// If there is already a broadcast with the same path, the new one replaces the active only
 	/// if it has a shorter hop path, or an equal-length path that wins a deterministic tie-break
@@ -936,8 +938,14 @@ impl Producer {
 		let (node, rest) = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
 		let full = self.root.join(&path).to_owned();
 
-		node.lock().publish(&full, &broadcast, &rest);
+		// A decoded announce prefix and suffix are each within the wire limit, but their
+		// join might not be. Enforcing here bounds the tree depth and guarantees the path
+		// can be re-encoded when forwarded.
+		if full.parts().count() > Path::MAX_PARTS {
+			return Err(BoundsExceeded.into());
+		}
 
+		node.lock().publish(&full, &broadcast, &rest);
 		Ok(Publish {
 			node,
 			full,
@@ -2273,6 +2281,25 @@ mod tests {
 		assert!(!limited_producer.publish_broadcast_spawn("notallowed", broadcast.consume()));
 		assert!(!limited_producer.publish_broadcast_spawn("allowed", broadcast.consume())); // Parent of allowed path
 		assert!(!limited_producer.publish_broadcast_spawn("other/path", broadcast.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_publish_max_parts() {
+		let origin = Origin::random().produce();
+		let broadcast = broadcast::Info::new().produce();
+
+		let at_limit = (0..Path::MAX_PARTS)
+			.map(|i| i.to_string())
+			.collect::<Vec<_>>()
+			.join("/");
+		assert!(origin.publish_broadcast_spawn(at_limit.as_str(), broadcast.consume()));
+
+		let too_deep = format!("{at_limit}/extra");
+		assert!(!origin.publish_broadcast_spawn(too_deep.as_str(), broadcast.consume()));
+
+		// The root counts toward the limit; a joined path past 32 parts is rejected.
+		let rooted = origin.with_root("root").expect("wildcard allows any root");
+		assert!(!rooted.publish_broadcast_spawn(at_limit.as_str(), broadcast.consume()));
 	}
 
 	#[tokio::test]

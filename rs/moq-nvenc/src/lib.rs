@@ -24,13 +24,15 @@
 //!
 //! # Decoding
 //!
-//! There is no safe wrapper yet.
+//! [`cuvid`] exposes the NVDEC (CUVID) entry points as a dlopen'd function
+//! table; there is no higher-level safe wrapper yet.
 
 // Vendored third-party bindings: keep the workspace's `clippy -D warnings` and
 // `rustdoc -D warnings` from churning upstream code (broken intra-doc links, the
 // strict clippy lints the crate opted into, etc.).
 #![allow(clippy::all, clippy::pedantic, rustdoc::all)]
 
+pub mod cuvid;
 pub mod safe;
 pub mod sys;
 

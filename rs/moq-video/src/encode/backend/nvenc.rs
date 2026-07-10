@@ -20,11 +20,19 @@
 //!      pitch is aligned (e.g. 512 for a 320-wide buffer) and usually exceeds the
 //!      width, so a flat copy would shear the image; [`Nvenc::encode`] writes
 //!      each plane pitched, which works for any (even) width.
+//!
+//! The session's input format is NV12 (NVENC's native layout). A CPU I420 frame
+//! is interleaved into an NVENC input buffer; a CUDA frame ([`Frame::Cuda`],
+//! NVDEC output, already NV12) is registered as an external resource and encoded
+//! in place, so the NVDEC -> NVENC transcode path never touches the CPU.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use cudarc::driver::CudaContext;
+// The CUDA zero-copy input path only exists when NVDEC (its producer) is on.
+#[cfg(feature = "nvdec")]
+use moq_nvenc::sys::nvEncodeAPI::NV_ENC_INPUT_RESOURCE_TYPE;
 use moq_nvenc::sys::nvEncodeAPI::{
 	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_PARAMS_RC_MODE,
 	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
@@ -34,7 +42,7 @@ use moq_nvenc::{Encoder, EncoderInitParams, Session};
 use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::{Frame, interleave_uv};
 
 pub(crate) const NAME: &str = "nvenc";
 
@@ -127,8 +135,10 @@ impl Nvenc {
 			.enable_picture_type_decision()
 			.encode_config(cfg);
 
+		// NV12 is NVENC's native input layout and what NVDEC emits, so a CUDA
+		// frame registers directly; the CPU path interleaves I420 chroma on write.
 		let session = encoder
-			.start_session(NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_IYUV, init)
+			.start_session(NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12, init)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC start session: {e}")))?;
 
 		tracing::info!(
@@ -148,37 +158,10 @@ impl Nvenc {
 
 impl Backend for Nvenc {
 	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		let mut input = self
-			.session
-			.create_input_buffer()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC input buffer: {e}")))?;
 		let mut output = self
 			.session
 			.create_output_bitstream()
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?;
-
-		// NVENC takes CPU I420; download a surface if capture handed us one.
-		let i420 = frame.to_i420()?;
-
-		// Copy the tightly-packed I420 planes into the input buffer honoring
-		// NVENC's chosen row stride: the buffer pitch can exceed the width even
-		// for aligned widths, so a flat write would shear the image. For IYUV the
-		// chroma planes use half the luma pitch.
-		let mut lock = input
-			.lock()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock input: {e}")))?;
-		let pitch = lock.pitch() as usize;
-		let (w, h) = (i420.width as usize, i420.height as usize);
-		let (cw, ch) = (w / 2, h / 2);
-		let cpitch = pitch / 2;
-		// SAFETY: offsets stay within the pitch*height*3/2 IYUV buffer and each
-		// source plane is exactly row_bytes * rows.
-		unsafe {
-			lock.write_rows(0, pitch, i420.y(), w, h);
-			lock.write_rows(pitch * h, cpitch, i420.u(), cw, ch);
-			lock.write_rows(pitch * h + cpitch * ch, cpitch, i420.v(), cw, ch);
-		}
-		drop(lock);
 
 		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
@@ -187,15 +170,71 @@ impl Backend for Nvenc {
 		};
 		self.timestamp += 1;
 
-		self.session
-			.encode_picture(&mut input, &mut output, params)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+		// Each arm drains the output *before* releasing its input (the registered
+		// resource / input buffer): the synchronous bitstream lock is what
+		// guarantees NVENC is done reading the input, so releasing the input
+		// first would race the encoder.
+		let data = match frame {
+			// A CUDA frame is already NV12 in device memory (NVDEC output):
+			// register its buffer as an external NVENC resource and encode in
+			// place, no CPU round trip and no GPU copy.
+			#[cfg(feature = "nvdec")]
+			Frame::Cuda(cuda) => {
+				// Registration keeps a raw pointer into the frame; the frame
+				// (borrowed) outlives the registration.
+				let mut resource = self
+					.session
+					.register_generic_resource(
+						(),
+						NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+						cuda.device_ptr() as *mut std::ffi::c_void,
+						cuda.pitch,
+					)
+					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
 
-		let data = output
-			.lock()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?
-			.data()
-			.to_vec();
+				self.session
+					.encode_picture(&mut resource, &mut output, params)
+					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+
+				drain_output(&mut output)?
+			}
+			// Everything else goes through a CPU NV12 input buffer.
+			frame => {
+				let mut input = self
+					.session
+					.create_input_buffer()
+					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC input buffer: {e}")))?;
+
+				let i420 = frame.to_i420()?;
+
+				// Interleave the I420 chroma planes into NV12's single UV plane.
+				let (w, h) = (i420.width as usize, i420.height as usize);
+				let mut uv = vec![0u8; w * h / 2];
+				interleave_uv(i420.u(), i420.v(), &mut uv);
+
+				// Write both planes honoring NVENC's chosen row stride: the
+				// buffer pitch can exceed the width even for aligned widths, so a
+				// flat write would shear the image. NV12 chroma rows are full
+				// width (interleaved U+V) at the luma pitch.
+				let mut lock = input
+					.lock()
+					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock input: {e}")))?;
+				let pitch = lock.pitch() as usize;
+				// SAFETY: offsets stay within the pitch*height*3/2 NV12 buffer and
+				// each source plane is exactly row_bytes * rows.
+				unsafe {
+					lock.write_rows(0, pitch, i420.y(), w, h);
+					lock.write_rows(pitch * h, pitch, &uv, w, h / 2);
+				}
+				drop(lock);
+
+				self.session
+					.encode_picture(&mut input, &mut output, params)
+					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+
+				drain_output(&mut output)?
+			}
+		};
 
 		Ok(if data.is_empty() {
 			Vec::new()
@@ -212,6 +251,17 @@ impl Backend for Nvenc {
 	fn name(&self) -> &str {
 		NAME
 	}
+}
+
+/// Block on the output bitstream and copy it out. The lock returning is also
+/// what guarantees NVENC finished reading the frame's input resource, so call
+/// this while that input is still alive.
+fn drain_output(output: &mut moq_nvenc::Bitstream) -> Result<Vec<u8>, Error> {
+	Ok(output
+		.lock()
+		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?
+		.data()
+		.to_vec())
 }
 
 /// Whether both NVIDIA driver libraries NVENC needs can be dlopen'd: libcuda
@@ -456,16 +506,19 @@ mod tests {
 		let rgba = gradient_rgba(w, h);
 		let expected = crate::frame::I420::from_rgba(&rgba, w, h).unwrap();
 
-		let mut decoder =
-			crate::decode::backend::open(crate::decode::backend::Codec::H264, &crate::decode::Kind::Software).unwrap();
+		let decode_config = crate::decode::Config {
+			kind: crate::decode::Kind::Software,
+			..crate::decode::Config::new()
+		};
+		let mut decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode_config).unwrap();
 
 		// A static image, so every decoded frame equals the input regardless of
 		// decoder latency or frame reordering.
 		let mut decoded = None;
-		for i in 0..10u32 {
+		for i in 0..10u64 {
 			for packet in encoder.encode_rgba(&rgba, w, h, i == 0).unwrap() {
-				for frame in decoder.decode(packet, i == 0).unwrap() {
-					decoded = Some(frame);
+				for out in decoder.decode(packet, i * 33_333, i == 0).unwrap() {
+					decoded = Some(out.frame.to_i420().unwrap().into_owned());
 				}
 			}
 		}

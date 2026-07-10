@@ -9,9 +9,9 @@ use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::formats::YUVSource;
 
-use super::{Backend, Codec};
+use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
-use crate::frame::I420;
+use crate::frame::{Frame, I420};
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -21,8 +21,9 @@ pub(crate) struct Openh264 {
 
 impl Openh264 {
 	/// openh264 decodes H.264 only; the backend selector never routes another
-	/// codec here, so `codec` is accepted for signature parity and ignored.
-	pub(crate) fn open(_codec: Codec) -> Result<Box<dyn Backend>, Error> {
+	/// codec here, so `codec` is accepted for signature parity and ignored, as is
+	/// `config` (no hardware scaler; callers scale the CPU frames themselves).
+	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let decoder = Decoder::with_api_config(OpenH264API::from_source(), DecoderConfig::new())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decoder init: {e}")))?;
 
@@ -32,7 +33,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn decode(&mut self, access_unit: Bytes, _keyframe: bool) -> Result<Vec<I420>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		let decoded = self
 			.decoder
 			.decode(&access_unit)
@@ -61,7 +62,11 @@ impl Backend for Openh264 {
 			width as u32,
 			height as u32,
 		);
-		Ok(vec![frame])
+		// openh264 is one-in one-out, so the input timestamp is the output's.
+		Ok(vec![Decoded {
+			timestamp_us,
+			frame: Frame::I420(frame),
+		}])
 	}
 
 	fn name(&self) -> &str {
