@@ -789,9 +789,10 @@ pub enum Announced {
 	/// The broadcast was replaced without an interruption in availability (e.g. a
 	/// relay failover or a shorter hop path arriving).
 	///
-	/// Carries the replacement broadcast. On the wire this is a duplicate ANNOUNCE
-	/// (an active announcement for a path that is already announced, with no
-	/// intervening unannounce); there is no distinct status byte.
+	/// Carries the replacement broadcast. On the wire this is the explicit `restart`
+	/// status referencing the announce id (lite-06+), or a duplicate ANNOUNCE (an
+	/// active announcement for a path that is already announced, with no intervening
+	/// unannounce) on lite-05.
 	Restart(broadcast::Consumer),
 	/// The broadcast is no longer available.
 	Ended,

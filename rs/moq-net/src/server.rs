@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, Consume,
-	Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
+	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream},
 	ietf, lite, setup,
 };
@@ -133,19 +133,25 @@ impl Server {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(ALPN_LITE_05) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite05))
-					.ok_or(Error::Version)?;
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
+				let version = match alpn {
+					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
+					_ => lite::Version::Lite05,
+				};
+				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
 
 				// Gate on the client's SETUP: read it before serving so the caller can
 				// scope by the advertised path. Seeded back into `start` on `ok()` so
 				// PROBE gating resolves without re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&session, lite::Version::Lite05).await?;
+				let client_setup = lite::accept_setup(&session, version).await?;
 				return Ok(Request {
 					server: self.clone(),
 					path: client_setup.path.clone(),
-					handshake: Handshake::Lite05 { session, client_setup },
+					handshake: Handshake::LiteSetup {
+						session,
+						version,
+						client_setup,
+					},
 				});
 			}
 			Some(ALPN_LITE_04) => {
@@ -276,7 +282,11 @@ enum Handshake<S: web_transport_trait::Session> {
 	},
 	/// moq-lite 05+: the client's Setup Stream has been read. `ok()` starts the
 	/// session, seeding the SETUP back so PROBE gating resolves.
-	Lite05 { session: S, client_setup: lite::Setup },
+	LiteSetup {
+		session: S,
+		version: lite::Version,
+		client_setup: lite::Setup,
+	},
 }
 
 impl<S: web_transport_trait::Session> Request<S> {
@@ -347,7 +357,11 @@ impl<S: web_transport_trait::Session> Request<S> {
 				)?;
 				return Ok(Session::new(session, version.into(), recv_bw));
 			}
-			Handshake::Lite05 { session, client_setup } => {
+			Handshake::LiteSetup {
+				session,
+				version,
+				client_setup,
+			} => {
 				// We report send bitrate; a server never advertises a request Path.
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
@@ -359,11 +373,11 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.publish,
 					server.subscribe,
 					server.stats,
-					lite::Version::Lite05,
+					version,
 					our_setup,
 					Some(client_setup),
 				)?;
-				return Ok(Session::new(session, lite::Version::Lite05.into(), recv_bw));
+				return Ok(Session::new(session, version.into(), recv_bw));
 			}
 			Handshake::Legacy {
 				session,
@@ -434,7 +448,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			Handshake::IetfModern { session, .. } => session,
 			Handshake::LiteBare { session, .. } => session,
 			Handshake::Legacy { session, .. } => session,
-			Handshake::Lite05 { session, .. } => session,
+			Handshake::LiteSetup { session, .. } => session,
 		};
 		session.close(err.to_code(), &err.to_string());
 	}
