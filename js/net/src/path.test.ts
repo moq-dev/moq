@@ -189,3 +189,15 @@ test("from sanitizes multiple arguments with slashes", () => {
 	expect(Path.from("/foo/", "/bar/", "/baz/")).toBe("foo/bar/baz" as Path.Valid);
 	expect(Path.from("foo//", "//bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
 });
+
+test("parts splits a path into its components", () => {
+	expect(Path.parts(Path.from(""))).toEqual([]);
+	expect(Path.parts(Path.from("foo"))).toEqual(["foo"]);
+	expect(Path.parts(Path.from("/foo//bar/"))).toEqual(["foo", "bar"]);
+});
+
+test("decode enforces the max part count", () => {
+	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/");
+	expect(Path.decode(atLimit)).toBe(atLimit as Path.Valid);
+	expect(() => Path.decode(`${atLimit}/extra`)).toThrow();
+});

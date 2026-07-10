@@ -46,7 +46,7 @@ export class Announce {
 
 	static async #decode(r: Reader, version: Version): Promise<Announce> {
 		const active = await r.bool();
-		const suffix = Path.from(await r.string());
+		const suffix = Path.decode(await r.string());
 
 		let hops: Origin[] = [];
 		switch (version) {
@@ -116,7 +116,7 @@ export class AnnounceInterest {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceInterest> {
-		const prefix = Path.from(await r.string());
+		const prefix = Path.decode(await r.string());
 		let excludeHop = 0n;
 		switch (version) {
 			case Version.DRAFT_01:
@@ -170,7 +170,7 @@ export class AnnounceInit {
 		const count = await r.u53();
 		const suffixes: Path.Valid[] = [];
 		for (let i = 0; i < count; i++) {
-			suffixes.push(Path.from(await r.string()));
+			suffixes.push(Path.decode(await r.string()));
 		}
 		return new AnnounceInit(suffixes);
 	}

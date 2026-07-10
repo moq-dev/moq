@@ -90,6 +90,13 @@ enum Repr<'a> {
 pub struct Path<'a>(Repr<'a>);
 
 impl<'a> Path<'a> {
+	/// Maximum number of slash-separated parts in a path.
+	///
+	/// Matches the IETF moq-transport limit of 32 fields in a namespace tuple.
+	/// moq-lite enforces the same bound: encoding or decoding a deeper path fails,
+	/// and publishing one to an origin is rejected.
+	pub const MAX_PARTS: usize = 32;
+
 	/// Create a new Path from a string slice.
 	///
 	/// Leading and trailing slashes are automatically trimmed.
@@ -191,6 +198,24 @@ impl<'a> Path<'a> {
 		}
 
 		Some(self.slice_from(prefix.len() + 1))
+	}
+
+	/// Iterate over the slash-separated parts of the path.
+	///
+	/// The empty path has no parts.
+	///
+	/// # Examples
+	/// ```
+	/// use moq_net::Path;
+	///
+	/// let path = Path::new("foo/bar/baz");
+	/// assert_eq!(path.parts().collect::<Vec<_>>(), ["foo", "bar", "baz"]);
+	/// assert_eq!(Path::empty().parts().count(), 0);
+	/// ```
+	pub fn parts(&self) -> impl Iterator<Item = &str> {
+		// Paths are normalized on creation so there are no empty parts to filter,
+		// except that splitting the empty path yields one empty item.
+		self.as_str().split('/').filter(|part| !part.is_empty())
 	}
 
 	/// Strip the directory component of the path, if any, and return the rest of the path.
@@ -369,7 +394,11 @@ where
 	String: Decode<V>,
 {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		Ok(String::decode(r, version)?.into())
+		let path: Path = String::decode(r, version)?.into();
+		if path.parts().count() > Path::MAX_PARTS {
+			return Err(DecodeError::BoundsExceeded);
+		}
+		Ok(path)
 	}
 }
 
@@ -378,6 +407,9 @@ where
 	for<'a> &'a str: Encode<V>,
 {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		if self.parts().count() > Path::MAX_PARTS {
+			return Err(EncodeError::BoundsExceeded);
+		}
 		self.as_str().encode(w, version)?;
 		Ok(())
 	}
@@ -1061,6 +1093,44 @@ mod tests {
 		let joined2 = joined.clone();
 		assert_eq!(joined.as_str(), "customer/room/broadcast/alice");
 		assert_eq!(joined.as_str().as_ptr(), joined2.as_str().as_ptr());
+	}
+
+	#[test]
+	fn test_parts() {
+		assert_eq!(Path::empty().parts().count(), 0);
+		assert_eq!(Path::new("foo").parts().collect::<Vec<_>>(), ["foo"]);
+		assert_eq!(Path::new("/foo//bar/").parts().collect::<Vec<_>>(), ["foo", "bar"]);
+	}
+
+	#[test]
+	fn test_wire_max_parts() {
+		use crate::lite::Version;
+
+		let ok = (0..Path::MAX_PARTS)
+			.map(|i| i.to_string())
+			.collect::<Vec<_>>()
+			.join("/");
+		let too_deep = format!("{ok}/extra");
+
+		// Encode enforces the limit.
+		let mut buf = bytes::BytesMut::new();
+		Path::new(&ok).encode(&mut buf, Version::Lite04).unwrap();
+		assert!(matches!(
+			Path::new(&too_deep).encode(&mut bytes::BytesMut::new(), Version::Lite04),
+			Err(EncodeError::BoundsExceeded)
+		));
+
+		// Decode round-trips at the limit.
+		let decoded = Path::decode(&mut buf.freeze(), Version::Lite04).unwrap();
+		assert_eq!(decoded.as_str(), ok);
+
+		// Decode enforces the limit on a raw string that encode would have refused.
+		let mut buf = bytes::BytesMut::new();
+		too_deep.as_str().encode(&mut buf, Version::Lite04).unwrap();
+		assert!(matches!(
+			Path::decode(&mut buf.freeze(), Version::Lite04),
+			Err(DecodeError::BoundsExceeded)
+		));
 	}
 
 	#[test]

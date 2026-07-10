@@ -127,7 +127,7 @@ export class Subscribe {
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
-		const broadcast = Path.from(await r.string());
+		const broadcast = Path.decode(await r.string());
 		const track = await r.string();
 		const priority = await r.u8();
 

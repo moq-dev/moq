@@ -34,7 +34,7 @@ export class Fetch {
 	}
 
 	static async #decode(r: Reader): Promise<Fetch> {
-		const broadcast = Path.from(await r.string());
+		const broadcast = Path.decode(await r.string());
 		const track = await r.string();
 		const priority = await r.u8();
 		const group = await r.u53();

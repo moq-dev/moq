@@ -732,7 +732,8 @@ impl OriginProducer {
 	/// When the active broadcast closes, the backup that wins the same ordering is promoted and
 	/// reannounced. Backups that close before being promoted are silently dropped.
 	///
-	/// Returns false if the broadcast is not allowed to be published.
+	/// Returns false if the broadcast is not allowed to be published, or if the full
+	/// path exceeds [`Path::MAX_PARTS`].
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
 		let path = path.as_path();
 
@@ -747,6 +748,13 @@ impl OriginProducer {
 		};
 
 		let full = self.root.join(&path);
+
+		// A decoded announce prefix and suffix are each within the wire limit, but their
+		// join might not be. Enforcing here bounds the tree depth and guarantees the path
+		// can be re-encoded when forwarded.
+		if full.parts().count() > Path::MAX_PARTS {
+			return false;
+		}
 
 		root.lock().publish(&full, &broadcast, &rest);
 		let root = root.clone();
@@ -1716,6 +1724,25 @@ mod tests {
 		assert!(!limited_producer.publish_broadcast("notallowed", broadcast.consume()));
 		assert!(!limited_producer.publish_broadcast("allowed", broadcast.consume())); // Parent of allowed path
 		assert!(!limited_producer.publish_broadcast("other/path", broadcast.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_publish_max_parts() {
+		let origin = Origin::random().produce();
+		let broadcast = Broadcast::new().produce();
+
+		let at_limit = (0..Path::MAX_PARTS)
+			.map(|i| i.to_string())
+			.collect::<Vec<_>>()
+			.join("/");
+		assert!(origin.publish_broadcast(at_limit.as_str(), broadcast.consume()));
+
+		let too_deep = format!("{at_limit}/extra");
+		assert!(!origin.publish_broadcast(too_deep.as_str(), broadcast.consume()));
+
+		// The root counts toward the limit; a joined path past 32 parts is rejected.
+		let rooted = origin.with_root("root").expect("wildcard allows any root");
+		assert!(!rooted.publish_broadcast(at_limit.as_str(), broadcast.consume()));
 	}
 
 	#[tokio::test]
