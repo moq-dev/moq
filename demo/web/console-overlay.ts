@@ -47,10 +47,21 @@ const BUFFER_MAX = 1000;
 const buffer = [];
 const sinks = new Set();
 
+// Safari and Firefox build Error.stack as a bare frame list, with no leading "Name: message" line.
+// Printing the stack alone therefore drops the only part that identifies the error (e.g. the code in
+// "RESET_STREAM: 24"). Key on whether the stack already carries the message so V8, which does include
+// the header, is not printed twice.
+function formatError(err) {
+	const head = err.message ? err.name + ": " + err.message : err.name;
+	if (!err.stack) return head;
+	if (!err.message || err.stack.includes(err.message)) return err.stack;
+	return head + "\\n" + err.stack;
+}
+
 function format(args) {
 	return args
 		.map((a) => {
-			if (a instanceof Error) return a.stack || a.message;
+			if (a instanceof Error) return formatError(a);
 			if (typeof a === "string") return a;
 			if (a === undefined) return "undefined";
 			try {
