@@ -8,9 +8,11 @@
 
 mod export;
 mod import;
+mod muxer;
 
 pub use export::*;
 pub use import::*;
+pub use muxer::*;
 
 #[cfg(test)]
 mod export_test;

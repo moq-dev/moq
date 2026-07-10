@@ -1,5 +1,5 @@
-//! HLS / LL-HLS endpoints: pull a remote playlist into MoQ (import), or serve
-//! HLS over HTTP from MoQ broadcasts (export).
+//! HLS endpoints: pull a remote playlist into MoQ (import), or serve HLS over
+//! HTTP from MoQ broadcasts (export), fetching media groups on demand.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -29,18 +29,10 @@ pub struct ExportArgs {
 	#[command(flatten)]
 	pub tls: moq_native::tls::Server,
 
-	/// LL-HLS part target duration.
-	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub part_target: Duration,
-
-	/// Minimum media kept in each rendition's sliding window.
+	/// Minimum media listed in each rendition's playlist window. Keep it within the
+	/// relay's group-cache retention, since segments are fetched from there on request.
 	#[arg(long, default_value = "16s", value_parser = humantime::parse_duration)]
 	pub window: Duration,
-
-	/// Maximum latency before skipping a stalled group. Generous by default so
-	/// live GOPs aren't skipped while segments build.
-	#[arg(long = "latency-max", default_value = "10s", value_parser = humantime::parse_duration)]
-	pub latency_max: Duration,
 
 	/// Browser CORS policy for the HLS listener.
 	#[command(flatten)]
@@ -65,7 +57,7 @@ pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: 
 	Ok(importer.run().await?)
 }
 
-/// Serve HLS/LL-HLS over HTTP for the single broadcast `name` (reached at
+/// Serve HLS over HTTP for the single broadcast `name` (reached at
 /// `/<name>/master.m3u8`); other broadcasts in the Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
 	let scoped = origin
@@ -73,9 +65,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();
-	config.part_target = args.part_target;
 	config.window = args.window;
-	config.latency = args.latency_max;
 	let server = moq_hls::Server::new(scoped, config);
 	let app = server.router().layer(args.cors.layer([Method::GET])?);
 
