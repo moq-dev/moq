@@ -143,10 +143,7 @@ test("removing the last rendition keeps a section with display metadata", async 
 	// Display metadata lives outside the rendition guard, so removing the last rendition must keep it.
 	const display = { width: Catalog.u53(1920), height: Catalog.u53(1080) };
 	catalog.mutate((c) => {
-		const section = c.video;
-		if (section && "renditions" in section) {
-			(section as { display?: typeof display }).display = display;
-		}
+		c.video = { renditions: { "video/hd": videoConfig }, display };
 	});
 	await consumer.next();
 
