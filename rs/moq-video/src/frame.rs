@@ -227,15 +227,30 @@ impl I420 {
 	/// convolution: Y at full size, U/V at quarter size. The CPU half of
 	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
 	pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
+		use std::cell::RefCell;
+
 		use fast_image_resize::images::{Image, ImageRef};
 		use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 
-		let mut resizer = Resizer::new();
+		// The resizer caches its convolution state; recreating it per frame on a
+		// live path would throw that away, so keep one per thread (decode/encode
+		// loops are single-threaded).
+		thread_local! {
+			static RESIZER: RefCell<Resizer> = RefCell::new(Resizer::new());
+		}
+
 		// Bilinear convolution: proper filter support at any downscale factor,
 		// the cheapest option that doesn't alias.
 		let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear));
 
-		let mut plane = |src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32| -> Result<(), Error> {
+		let plane = |resizer: &mut Resizer,
+		             src: &[u8],
+		             sw: u32,
+		             sh: u32,
+		             dst: &mut [u8],
+		             dw: u32,
+		             dh: u32|
+		 -> Result<(), Error> {
 			let src = ImageRef::new(sw, sh, src, PixelType::U8)
 				.map_err(|e| Error::Codec(anyhow::anyhow!("resize source: {e}")))?;
 			let mut dst = Image::from_slice_u8(dw, dh, dst, PixelType::U8)
@@ -250,11 +265,13 @@ impl I420 {
 		let (y_dst, chroma) = data.split_at_mut(luma);
 		let (u_dst, v_dst) = chroma.split_at_mut(luma / 4);
 
-		plane(self.y(), self.width, self.height, y_dst, width, height)?;
-		let (sw2, sh2) = (self.width / 2, self.height / 2);
-		let (dw2, dh2) = (width / 2, height / 2);
-		plane(self.u(), sw2, sh2, u_dst, dw2, dh2)?;
-		plane(self.v(), sw2, sh2, v_dst, dw2, dh2)?;
+		RESIZER.with_borrow_mut(|resizer| {
+			plane(resizer, self.y(), self.width, self.height, y_dst, width, height)?;
+			let (sw2, sh2) = (self.width / 2, self.height / 2);
+			let (dw2, dh2) = (width / 2, height / 2);
+			plane(resizer, self.u(), sw2, sh2, u_dst, dw2, dh2)?;
+			plane(resizer, self.v(), sw2, sh2, v_dst, dw2, dh2)
+		})?;
 
 		Ok(Self { width, height, data })
 	}

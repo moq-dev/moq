@@ -86,6 +86,13 @@ impl Feed {
 	pub(crate) fn listen(&self) -> Listener {
 		let mut state = self.inner.state.lock().unwrap();
 		state.listeners += 1;
+		// A finished session may not have cleared itself yet (its final lock
+		// races this one); subscribing to it would only ever yield Closed, so
+		// treat it as idle and start fresh.
+		if state.task.as_ref().is_some_and(|task| task.is_finished()) {
+			state.sender = None;
+			state.task = None;
+		}
 		if state.sender.is_none() {
 			let (sender, _) = broadcast::channel(CAPACITY);
 			state.task = Some(tokio::spawn(run(self.inner.clone(), sender.clone())));
