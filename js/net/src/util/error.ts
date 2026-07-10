@@ -51,6 +51,16 @@ export function isStreamAbort(err: unknown): boolean {
 	const match = /^(?:RESET_STREAM|STOP_SENDING): (\d+)/.exec(err.message);
 	if (match) return !STREAM_FAULT_CODES.has(Number(match[1]));
 
+	// The session itself ended, which fails every stream still open on it. qmux words this
+	// "Connection closed", optionally carrying the peer's CONNECTION_CLOSE code. Same rule as a stream
+	// reset: routine unless the peer signalled a client-actionable fault. (Native WebTransport reports
+	// the equivalent as a WebTransportError with no `streamErrorCode`, handled above.)
+	const closed = /^Connection closed(?::\s*(\d+))?/.exec(err.message);
+	if (closed) {
+		const code = closed[1] === undefined ? undefined : Number(closed[1]);
+		return code === undefined || !STREAM_FAULT_CODES.has(code);
+	}
+
 	// A write/close after the stream already ended surfaces as a generic Streams-API error rather than a
 	// coded RESET_STREAM/STOP_SENDING. This is routine teardown (a peer reset racing an in-flight write),
 	// common over the WebSocket/qmux fallback. Engines word it differently: Chromium/Firefox say the stream

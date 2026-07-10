@@ -43,6 +43,17 @@ test("write-after-close over the WebSocket/qmux fallback is teardown", () => {
 	expect(isStreamAbort(invalidState("The object is in an invalid state."))).toBe(true);
 });
 
+test("a session close is teardown, unless the peer signalled a fault", () => {
+	// The exact strings qmux constructs when the session ends (see @moq/qmux session.js).
+	expect(isStreamAbort(new Error("Connection closed"))).toBe(true); // local close()
+	expect(isStreamAbort(new Error("Connection closed: 0: "))).toBe(true); // peer CONNECTION_CLOSE, no error
+	expect(isStreamAbort(new Error("Connection closed: 1006 "))).toBe(true); // abnormal WebSocket closure
+
+	// A client-actionable code on the CONNECTION_CLOSE frame still surfaces.
+	expect(isStreamAbort(new Error("Connection closed: 6: unauthorized"))).toBe(false); // Unauthorized
+	expect(isStreamAbort(new Error("Connection closed: 15: bad frame"))).toBe(false); // ProtocolViolation
+});
+
 test("a coded fault wins over the teardown message heuristics", () => {
 	// A fault code must not be reclassified as teardown just because the browser's prose happens to
 	// mention a closing stream.
