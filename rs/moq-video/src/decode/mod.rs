@@ -59,3 +59,16 @@ impl Frame {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	/// Callers (libmoq, moq-transcode) hold these across `.await`s in spawned
+	/// tasks, so they must stay `Send` even when a platform's frame wraps a GPU
+	/// handle. Compile-time check; fails per-platform if a variant regresses.
+	#[test]
+	fn frame_and_consumer_are_send() {
+		fn assert_send<T: Send>() {}
+		assert_send::<super::Frame>();
+		assert_send::<super::Consumer>();
+	}
+}
