@@ -58,7 +58,7 @@ HTTPS is currently not supported.
 
 ## Clustering
 
-Relays can be joined together to proxy announcements and subscriptions. A viewer talks to whichever relay is closest; if their broadcast lives elsewhere in the cluster, the local relay fetches it from a neighbor and caches it. Hop tracking on every broadcast keeps loops out and picks the shortest path when there's more than one.
+Relays can be joined together to proxy announcements and subscriptions. A viewer talks to whichever relay is closest; if their broadcast lives elsewhere in the cluster, the local relay fetches it from a neighbor and caches it. Hop tracking on every broadcast keeps loops out; route selection picks the cheapest path when there's more than one (by default every hop costs 1, i.e. the shortest path).
 
 - `--cluster-connect <peer-url>` lists the peers this relay dials. Repeatable; defines the topology by hand. A simple chain like `eu-west <- us-east <- us-west` lets `us-east` cache and dedup the transatlantic fetches that fan out to many `us-west` viewers.
 - `--cluster-mesh <self-url>` is optional. When set, this relay advertises its own URL to connected peers and dials any peers it learns about, so larger clusters don't need each node hand-configured. You still need at least one connection (in or out) so the advertisement has a path to flow. A relay with `--cluster-mesh` set and no `--cluster-connect` is a passive rendezvous.

@@ -9,6 +9,8 @@ use super::{Message, Parameters, Version};
 const PARAM_PROBE: u64 = 0x1;
 /// Setup Parameter id for the request Path (client-only, URI-less transports).
 const PARAM_PATH: u64 = 0x2;
+/// Setup Parameter id for the link cost the dialer assigns to this connection.
+const PARAM_LINK_COST: u64 = 0x3;
 
 /// The probe capability an endpoint advertises in SETUP.
 ///
@@ -59,6 +61,13 @@ pub struct Setup {
 	/// qmux over TCP/TLS). Sent only by the client; a server never sends one and a
 	/// relay never forwards it. `None` on URI-carrying bindings.
 	pub path: Option<String>,
+
+	/// The route cost the dialer assigns to this connection (lite-06+), added to
+	/// the transit cost of every announce that crosses it. Sent only by the
+	/// dialing side (the link cost lives in its connect config); the accepting
+	/// side reads it here so both ends price the link identically. `None` means
+	/// the default cost of 1.
+	pub link_cost: Option<u64>,
 }
 
 impl Message for Setup {
@@ -82,8 +91,9 @@ impl Message for Setup {
 			}
 			None => None,
 		};
+		let link_cost = params.get_varint(PARAM_LINK_COST)?;
 
-		Ok(Self { probe, path })
+		Ok(Self { probe, path, link_cost })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -98,6 +108,9 @@ impl Message for Setup {
 		}
 		if let Some(path) = &self.path {
 			params.set_bytes(PARAM_PATH, path.as_bytes().to_vec());
+		}
+		if let Some(link_cost) = self.link_cost {
+			params.set_varint(PARAM_LINK_COST, link_cost);
 		}
 
 		params.encode(w, version)
@@ -129,15 +142,25 @@ impl PeerSetup {
 	///
 	/// The peer MUST send exactly one SETUP, so this resolves once that stream is read.
 	pub async fn probe_level(&self) -> ProbeLevel {
+		self.wait().await.map(|setup| setup.probe).unwrap_or_default()
+	}
+
+	/// Await the link cost the peer (the dialing side) declared in its SETUP,
+	/// blocking until the SETUP arrives. `None` when it declared none (default 1).
+	pub async fn link_cost(&self) -> Option<u64> {
+		self.wait().await.and_then(|setup| setup.link_cost)
+	}
+
+	/// Await the peer's SETUP. `None` if the sender dropped before sending one.
+	async fn wait(&self) -> Option<Setup> {
 		let mut rx = self.0.subscribe();
 		loop {
 			// Clone out of the borrow before awaiting so no guard crosses the await point.
 			if let Some(setup) = rx.borrow_and_update().clone() {
-				return setup.probe;
+				return Some(setup);
 			}
 			if rx.changed().await.is_err() {
-				// Sender dropped before sending: treat as no probe support.
-				return ProbeLevel::default();
+				return None;
 			}
 		}
 	}
@@ -165,7 +188,10 @@ mod tests {
 	#[test]
 	fn probe_levels_round_trip() {
 		for probe in [ProbeLevel::None, ProbeLevel::Report, ProbeLevel::Increase] {
-			let msg = Setup { probe, path: None };
+			let msg = Setup {
+				probe,
+				..Default::default()
+			};
 			assert_eq!(round_trip(&msg), msg);
 		}
 	}
@@ -175,8 +201,20 @@ mod tests {
 		let msg = Setup {
 			probe: ProbeLevel::Report,
 			path: Some("/room/123".to_string()),
+			link_cost: None,
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn link_cost_round_trip() {
+		for link_cost in [None, Some(0), Some(1), Some(7)] {
+			let msg = Setup {
+				link_cost,
+				..Default::default()
+			};
+			assert_eq!(round_trip(&msg), msg);
+		}
 	}
 
 	#[test]

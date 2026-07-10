@@ -12,6 +12,13 @@ pub enum Version {
 	/// SUBSCRIBE_OK/FETCH_OK. Advertised over ALPN and the preferred version in the
 	/// default version sets.
 	Lite05,
+	/// Work-in-progress lite-06. Adds the route cost carried on ANNOUNCE_BROADCAST
+	/// (a `base` set by the original publisher plus a `transit` accumulated per
+	/// link, replacing hop-count as the routing metric) and the ANNOUNCE_UPDATE
+	/// status that mutates a live announcement's cost in place. Not included in the
+	/// default version sets; endpoints opt in explicitly (e.g. a relay mesh) until
+	/// lite-06 ships.
+	Lite06Wip,
 }
 
 impl Version {
@@ -64,6 +71,20 @@ impl Version {
 			_ => true,
 		}
 	}
+
+	/// Whether announcements carry a route cost (ANNOUNCE_BROADCAST's `base` +
+	/// `transit` fields and the ANNOUNCE_UPDATE status). Added in lite-06 (WIP):
+	/// routing selects the lowest accumulated cost instead of the shortest hop
+	/// chain, letting relays advertise per-link costs and reset the transit cost
+	/// while actively carrying a broadcast (cache-aware routing).
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_route_cost(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
 }
 
 impl fmt::Display for Version {
@@ -74,6 +95,7 @@ impl fmt::Display for Version {
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
 			Self::Lite05 => write!(f, "moq-lite-05"),
+			Self::Lite06Wip => write!(f, "moq-lite-06-wip"),
 		}
 	}
 }
@@ -86,6 +108,7 @@ impl From<Version> for crate::Version {
 			Version::Lite03 => crate::Version::Lite(Version::Lite03),
 			Version::Lite04 => crate::Version::Lite(Version::Lite04),
 			Version::Lite05 => crate::Version::Lite(Version::Lite05),
+			Version::Lite06Wip => crate::Version::Lite(Version::Lite06Wip),
 		}
 	}
 }

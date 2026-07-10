@@ -266,7 +266,10 @@ pub struct ClusterConfig {
 
 	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
 	/// reloading at runtime without a restart. The source returns a JSON array
-	/// of peer hostnames: `["a.pop.example", "b.pop.example"]`. An http(s) URL is
+	/// of peer hostnames: `["a.pop.example", "b.pop.example"]`. An entry may also
+	/// be an object carrying a per-link route cost (lite-06+), e.g.
+	/// `{"host": "a.pop.example", "cost": 0}` for a free (same-datacenter) link;
+	/// a bare hostname gets the default cost of 1. An http(s) URL is
 	/// re-checked on a fixed cadence, with caching, conditional revalidation
 	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP
 	/// cache client, so the response's `Cache-Control` controls how often a real
@@ -543,7 +546,9 @@ impl Cluster {
 			let token = token.clone();
 			let peer_for_task = peer.clone();
 			let handle = tasks.spawn(async move {
-				if let Err(err) = this.run_remote(&peer_for_task, token).await {
+				// Static peers get the default link cost; per-link costs ride the
+				// `connect_api` list.
+				if let Err(err) = this.run_remote(&peer_for_task, token, None).await {
 					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 				}
 			});
@@ -651,7 +656,9 @@ impl Cluster {
 							let token = token.clone();
 							let peer_for_task = peer.clone();
 							let handle = tokio::spawn(async move {
-								if let Err(err) = this.run_remote(&peer_for_task, token).await {
+								// Gossiped peers get the default link cost; per-link costs
+								// ride the `connect_api` list.
+								if let Err(err) = this.run_remote(&peer_for_task, token, None).await {
 									tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 								}
 							});
@@ -762,7 +769,7 @@ impl Cluster {
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
 		match std::fs::read_to_string(path) {
-			Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {
+			Ok(body) => match serde_json::from_str::<Vec<PeerEntry>>(&body) {
 				Ok(list) => self.apply_peer_list(list, node, token, dialed),
 				Err(err) => {
 					tracing::warn!(%err, ?path, "cluster.connect_api file is not a JSON array; keeping current peers")
@@ -775,7 +782,7 @@ impl Cluster {
 	/// Fetch and parse the peer list. Caching, conditional revalidation, and
 	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
 	/// just issues the request and parses the (possibly cache-served) body.
-	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<String>> {
+	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<PeerEntry>> {
 		let body = http
 			.get(url)
 			.send()
@@ -787,30 +794,41 @@ impl Cluster {
 			.await
 			.context("failed to read cluster.connect_api body")?;
 
-		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of hostnames")
+		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of peers")
 	}
 
 	/// Reconcile a freshly fetched peer list into the dial map: dial peers that
 	/// are new and drop API peers that disappeared. The relay's own [`node`] URL
 	/// is filtered out so it never dials itself.
-	fn apply_peer_list(&self, list: Vec<String>, node: &Option<String>, token: &str, dialed: &DialMap) {
+	fn apply_peer_list(&self, list: Vec<PeerEntry>, node: &Option<String>, token: &str, dialed: &DialMap) {
 		// Dedupe against the shared dial map (and filter out self) on the canonical
 		// key, so an API entry matches the same peer reached via `connect`/gossip
 		// regardless of how each spells it. reconcile_api then yields canonical keys.
 		let self_key = node.as_deref().map(canonicalize_peer_key);
+		let mut link_costs: HashMap<String, u64> = HashMap::new();
 		let desired: HashSet<String> = list
 			.into_iter()
-			.map(|peer| canonicalize_peer_key(&peer))
-			.filter(|key| Some(key) != self_key.as_ref())
+			.filter_map(|entry| {
+				let (host, cost) = entry.into_parts();
+				let key = canonicalize_peer_key(&host);
+				if Some(&key) == self_key.as_ref() {
+					return None;
+				}
+				if let Some(cost) = cost {
+					link_costs.insert(key.clone(), cost);
+				}
+				Some(key)
+			})
 			.collect();
 
 		for peer in dialed.reconcile_api(&desired) {
-			tracing::info!(%peer, "cluster.connect_api peer; dialing");
+			let link_cost = link_costs.get(&peer).copied();
+			tracing::info!(%peer, ?link_cost, "cluster.connect_api peer; dialing");
 			let this = self.clone();
 			let token = token.to_string();
 			let peer_for_task = peer.clone();
 			let handle = tokio::spawn(async move {
-				if let Err(err) = this.run_remote(&peer_for_task, token).await {
+				if let Err(err) = this.run_remote(&peer_for_task, token, link_cost).await {
 					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 				}
 			});
@@ -819,7 +837,7 @@ impl Cluster {
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
-	async fn run_remote(self, remote: &str, token: String) -> anyhow::Result<()> {
+	async fn run_remote(self, remote: &str, token: String, link_cost: Option<u64>) -> anyhow::Result<()> {
 		let mut url = peer_url(remote)?;
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (an inline token on a static `connect` peer wins; the
@@ -840,7 +858,7 @@ impl Cluster {
 
 		loop {
 			let started = tokio::time::Instant::now();
-			let result = self.run_remote_once(&url).await;
+			let result = self.run_remote_once(&url, link_cost).await;
 			let elapsed = started.elapsed();
 
 			match result {
@@ -859,7 +877,7 @@ impl Cluster {
 		}
 	}
 
-	async fn run_remote_once(&self, url: &Url) -> anyhow::Result<()> {
+	async fn run_remote_once(&self, url: &Url, link_cost: Option<u64>) -> anyhow::Result<()> {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
@@ -871,10 +889,14 @@ impl Cluster {
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
 		// Cluster-to-cluster traffic is internal by definition.
-		let cs = client
+		let mut client = client
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
-			.with_stats(self.stats.tier(self.cluster_tier()))
+			.with_stats(self.stats.tier(self.cluster_tier()));
+		if let Some(cost) = link_cost {
+			client = client.with_link_cost(cost);
+		}
+		let cs = client
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
@@ -924,6 +946,34 @@ fn canonicalize_peer_key(peer: &str) -> String {
 			url.into()
 		}
 		Err(_) => peer.to_string(),
+	}
+}
+
+/// One entry in a `--cluster-connect-api` peer list: either a bare hostname
+/// (`"a.pop.example"`) or an object with an optional per-link route cost
+/// (`{"host": "a.pop.example", "cost": 0}`). The cost prices this link for
+/// route selection (lite-06+): it's added to the transit cost of every announce
+/// crossing the session, in both directions (the dialer declares it in its
+/// SETUP so the acceptor prices the link identically). Absent means the default
+/// cost of 1; 0 marks a free link (e.g. same-datacenter peers), steering routing
+/// onto it. A changed cost applies the next time the peer is dialed.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum PeerEntry {
+	Host(String),
+	Detailed {
+		host: String,
+		#[serde(default)]
+		cost: Option<u64>,
+	},
+}
+
+impl PeerEntry {
+	fn into_parts(self) -> (String, Option<u64>) {
+		match self {
+			Self::Host(host) => (host, None),
+			Self::Detailed { host, cost } => (host, cost),
+		}
 	}
 }
 
@@ -1114,14 +1164,20 @@ mod tests {
 		assert!(dialed.contains("shared:4443"));
 	}
 
-	/// The peer-list wire format is a bare JSON array of host strings.
+	/// The peer-list wire format is a JSON array whose entries are bare host
+	/// strings or `{host, cost}` objects; a bare host has no per-link cost.
 	#[test]
-	fn peer_list_parses_as_string_array() {
-		let body = r#"["a.pop.example", "b.pop.example:4443"]"#;
-		let list: Vec<String> = serde_json::from_str(body).expect("parse peer list");
+	fn peer_list_parses_hosts_and_costs() {
+		let body = r#"["a.pop.example", {"host": "b.pop.example:4443", "cost": 0}, {"host": "c.pop.example"}]"#;
+		let list: Vec<PeerEntry> = serde_json::from_str(body).expect("parse peer list");
+		let parts: Vec<(String, Option<u64>)> = list.into_iter().map(PeerEntry::into_parts).collect();
 		assert_eq!(
-			list,
-			vec!["a.pop.example".to_string(), "b.pop.example:4443".to_string()]
+			parts,
+			vec![
+				("a.pop.example".to_string(), None),
+				("b.pop.example:4443".to_string(), Some(0)),
+				("c.pop.example".to_string(), None),
+			]
 		);
 	}
 

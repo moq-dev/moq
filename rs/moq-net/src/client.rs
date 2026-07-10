@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, Consume,
-	Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
+	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -14,6 +14,7 @@ pub struct Client {
 	stats: StatsHandle,
 	versions: Versions,
 	setup_path: Option<String>,
+	link_cost: Option<u64>,
 }
 
 impl Client {
@@ -78,6 +79,17 @@ impl Client {
 	/// request path (lite 01-04).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		self.setup_path = Some(path.into());
+		self
+	}
+
+	/// Price this connection's link for route costs (lite-06+): the cost is added
+	/// to the transit of every announce that crosses the session (both directions;
+	/// we advertise it in our SETUP so the server prices the link identically).
+	/// Unset means the default cost of 1, matching the legacy hop-count metric.
+	/// A relay mesh sets 0 on free links (same-datacenter peers) so routing
+	/// prefers them.
+	pub fn with_link_cost(mut self, cost: u64) -> Self {
+		self.link_cost = Some(cost);
 		self
 	}
 
@@ -182,6 +194,37 @@ impl Client {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
+			Some(ALPN_LITE_06_WIP) => {
+				self.versions
+					.select(Version::Lite(lite::Version::Lite06Wip))
+					.ok_or(Error::Version)?;
+
+				// Same shape as lite-05, plus the link cost we (the dialing side)
+				// assign to this connection, so the server prices the link identically.
+				let our_setup = lite::Setup {
+					probe: lite::ProbeLevel::Report,
+					path: self.setup_path.clone(),
+					link_cost: self.link_cost,
+				};
+
+				let (recv_bw, connecting) = lite::start(
+					session.clone(),
+					None,
+					self.publish.clone(),
+					self.subscribe.clone(),
+					self.stats.clone(),
+					lite::Version::Lite06Wip,
+					our_setup,
+					None,
+					self.link_cost,
+				)?;
+
+				// Block until the initial announce set has landed (reported via
+				// AnnounceOk + N, same as lite-05).
+				connecting.ready().await;
+
+				return Ok(Session::new(session, lite::Version::Lite06Wip.into(), recv_bw));
+			}
 			Some(ALPN_LITE_05) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite05))
@@ -192,6 +235,7 @@ impl Client {
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
 					path: self.setup_path.clone(),
+					link_cost: None,
 				};
 
 				let (recv_bw, connecting) = lite::start(
@@ -203,6 +247,7 @@ impl Client {
 					lite::Version::Lite05,
 					our_setup,
 					None,
+					self.link_cost,
 				)?;
 
 				// Block until the initial announce set has landed (Lite05 reports it
@@ -226,6 +271,7 @@ impl Client {
 					lite::Version::Lite04,
 					lite::Setup::default(),
 					None,
+					self.link_cost,
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
@@ -248,6 +294,7 @@ impl Client {
 					lite::Version::Lite03,
 					lite::Setup::default(),
 					None,
+					self.link_cost,
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
@@ -305,6 +352,7 @@ impl Client {
 					// (pre-lite-05), which have no Setup Stream.
 					lite::Setup::default(),
 					None,
+					self.link_cost,
 				)?;
 
 				// Block until the initial announce set has landed (for versions that

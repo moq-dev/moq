@@ -34,12 +34,26 @@ pub(crate) const ALPN_LITE: &str = "moql";
 pub(crate) const ALPN_LITE_03: &str = "moq-lite-03";
 pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
 pub(crate) const ALPN_LITE_05: &str = "moq-lite-05";
+/// WIP lite-06 ALPN. Deliberately absent from [`ALPNS`] and [`Versions::all`]:
+/// endpoints opt in explicitly (e.g. a relay mesh) until lite-06 ships.
+pub(crate) const ALPN_LITE_06_WIP: &str = "moq-lite-06-wip";
 pub(crate) const ALPN_14: &str = "moq-00";
 pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
 pub(crate) const ALPN_19: &str = "moqt-19";
+
+/// Whether an ALPN string identifies a moq session this library can speak.
+///
+/// The recognizer for transport-level accept dispatch: it covers the default
+/// advertised set ([`ALPNS`], including the shared `moql` ALPN that needs SETUP
+/// negotiation) plus any individually-parseable version, so an opt-in WIP
+/// version (absent from [`ALPNS`] and [`Versions::all`]) is still routed as a
+/// moq session when an endpoint explicitly advertises it.
+pub fn is_moq_alpn(alpn: &str) -> bool {
+	ALPNS.contains(&alpn) || Version::from_alpn(alpn).is_some()
+}
 
 /// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,6 +72,7 @@ impl Version {
 			0xff0dad03 => Some(Self::Lite(lite::Version::Lite03)),
 			0xff0dad04 => Some(Self::Lite(lite::Version::Lite04)),
 			0xff0dad05 => Some(Self::Lite(lite::Version::Lite05)),
+			0xff0dad06 => Some(Self::Lite(lite::Version::Lite06Wip)),
 			0xff00000e => Some(Self::Ietf(ietf::Version::Draft14)),
 			0xff00000f => Some(Self::Ietf(ietf::Version::Draft15)),
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -76,6 +91,7 @@ impl Version {
 			Self::Lite(lite::Version::Lite03) => 0xff0dad03,
 			Self::Lite(lite::Version::Lite04) => 0xff0dad04,
 			Self::Lite(lite::Version::Lite05) => 0xff0dad05,
+			Self::Lite(lite::Version::Lite06Wip) => 0xff0dad06,
 			Self::Ietf(ietf::Version::Draft14) => 0xff00000e,
 			Self::Ietf(ietf::Version::Draft15) => 0xff00000f,
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
@@ -95,6 +111,7 @@ impl Version {
 			ALPN_LITE_03 => Some(Self::Lite(lite::Version::Lite03)),
 			ALPN_LITE_04 => Some(Self::Lite(lite::Version::Lite04)),
 			ALPN_LITE_05 => Some(Self::Lite(lite::Version::Lite05)),
+			ALPN_LITE_06_WIP => Some(Self::Lite(lite::Version::Lite06Wip)),
 			ALPN_14 => Some(Self::Ietf(ietf::Version::Draft14)),
 			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -108,6 +125,7 @@ impl Version {
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
 		match self {
+			Self::Lite(lite::Version::Lite06Wip) => ALPN_LITE_06_WIP,
 			Self::Lite(lite::Version::Lite05) => ALPN_LITE_05,
 			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
 			Self::Lite(lite::Version::Lite03) => ALPN_LITE_03,
@@ -166,6 +184,7 @@ impl FromStr for Version {
 			"moq-lite-03" => Ok(Self::Lite(lite::Version::Lite03)),
 			"moq-lite-04" => Ok(Self::Lite(lite::Version::Lite04)),
 			"moq-lite-05" => Ok(Self::Lite(lite::Version::Lite05)),
+			"moq-lite-06-wip" => Ok(Self::Lite(lite::Version::Lite06Wip)),
 			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
 			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
@@ -229,6 +248,9 @@ pub struct Versions(Vec<Version>);
 
 impl Versions {
 	/// All supported versions exposed by default.
+	///
+	/// WIP versions (lite-06) are deliberately excluded; opt in with
+	/// [`Self::with_preferred`].
 	pub fn all() -> Self {
 		Self(vec![
 			Version::Lite(lite::Version::Lite05),
@@ -243,6 +265,16 @@ impl Versions {
 			Version::Ietf(ietf::Version::Draft15),
 			Version::Ietf(ietf::Version::Draft14),
 		])
+	}
+
+	/// Prepend a version as the most-preferred, deduplicating it from the rest.
+	///
+	/// The opt-in for versions outside [`Self::all`], e.g. a relay mesh advertising
+	/// WIP lite-06 on cluster sessions while public endpoints stay on the defaults.
+	pub fn with_preferred(self, version: Version) -> Self {
+		let mut versions = vec![version];
+		versions.extend(self.0.into_iter().filter(|v| *v != version));
+		Self(versions)
 	}
 
 	/// Compute the unique ALPN strings needed for these versions.

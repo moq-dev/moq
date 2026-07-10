@@ -7,7 +7,7 @@ description: Run multiple moq-relay instances across multiple hosts/regions
 
 Relays can be joined together to proxy announcements and subscriptions between each other. A viewer talks to whichever relay is closest; if their broadcast lives somewhere else in the cluster, the local relay fetches it from a neighbor and caches it.
 
-A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one. When two paths are the same length, every relay breaks the tie the same way (a hash of the broadcast name and hop list), so the whole cluster converges on one route instead of flapping between equals.
+A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught. Route selection minimizes a cost: by default every hop costs 1, so the network picks the shortest path when there's more than one. On moq-lite-06 (WIP) the cost is carried explicitly and gets smarter: each connection can be priced individually (a free same-datacenter link can cost 0), a publisher can attach a standing base cost to a source, and a relay actively carrying a broadcast advertises its accumulated cost as zero (its upstream path is already paid for, so pulling through it adds nothing - cache-aware routing). When two routes cost the same, every relay breaks the tie the same way (a hash of the broadcast name and hop list), so the whole cluster converges on one route instead of flapping between equals.
 
 ## Topology
 
@@ -52,7 +52,7 @@ A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits a
 
 ## Origin id
 
-Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
+Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
 
 Set `cluster.id` to pin a stable id across restarts:
 
@@ -78,6 +78,8 @@ The source returns a bare JSON array of peer hostnames:
 ```json
 ["eu-west.example.com:4443", "us-east.example.com:4443"]
 ```
+
+An entry may also be an object carrying a per-link route cost (moq-lite-06, WIP): `{"host": "us-east.example.com:4443", "cost": 0}`. The cost prices the connection for route selection in both directions (the dialer declares it in its SETUP so the accepting side prices the link identically); a bare hostname gets the default cost of 1, and 0 marks a free link (e.g. same-datacenter peers) that routing should prefer.
 
 The relay reconciles that list against its live dials: new entries are dialed, entries that disappear are dropped. It composes with `connect` (static seeds that are never reconciled away) and `mesh` (gossip). The relay's own `node` value, when set, is sent as a `?node=` query parameter so the endpoint can return the peers for that specific node; for mTLS-gated endpoints the cluster client certificate identifies the caller as well.
 

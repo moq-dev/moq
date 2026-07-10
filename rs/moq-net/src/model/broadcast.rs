@@ -9,6 +9,67 @@ use crate::Error;
 
 use super::OriginList;
 
+/// The mutable route cost of a broadcast, shared by every clone of its
+/// producer/consumer (they all hold the same [`Info`]).
+///
+/// The hop chain is immutable for a broadcast's lifetime; the cost is the one
+/// dynamic routing input, updated in place (via lite-06 ANNOUNCE_UPDATE) without
+/// re-announcing. `base` is set by the original publisher and forwarded
+/// unchanged; `transit` accumulates per-link costs along the route and is reset
+/// to zero by a relay actively carrying the broadcast (its upstream path is
+/// already paid for). A `transit` of `None` means "derive from the hop count",
+/// which keeps pre-lite-06 sessions and plain local publishes on the legacy
+/// shortest-hop-chain ordering.
+#[derive(Clone, Default)]
+pub struct Cost(kio::Producer<CostState>);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CostState {
+	base: u64,
+	transit: Option<u64>,
+}
+
+impl Cost {
+	pub fn new(base: u64, transit: Option<u64>) -> Self {
+		Self(kio::Producer::new(CostState { base, transit }))
+	}
+
+	/// The publisher-set base cost, forwarded unchanged along the route.
+	pub fn base(&self) -> u64 {
+		self.0.read().base
+	}
+
+	/// The accumulated transit cost, or `None` when it derives from the hop count.
+	pub fn transit(&self) -> Option<u64> {
+		self.0.read().transit
+	}
+
+	/// Replace both components, waking any watcher polling for a change.
+	pub fn set(&self, base: u64, transit: Option<u64>) {
+		if let Ok(mut state) = self.0.write() {
+			*state = CostState { base, transit };
+		}
+	}
+
+	/// The value routing compares: `base + transit`, saturating, with an unset
+	/// transit derived from the hop count (`hops_len`), so a broadcast that never
+	/// carried a wire cost orders exactly as it did before lite-06.
+	pub fn total(&self, hops_len: usize) -> u64 {
+		let state = self.0.read();
+		state.base.saturating_add(state.transit.unwrap_or(hops_len as u64))
+	}
+}
+
+impl std::fmt::Debug for Cost {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let state = self.0.read();
+		f.debug_struct("Cost")
+			.field("base", &state.base)
+			.field("transit", &state.transit)
+			.finish()
+	}
+}
+
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
@@ -16,9 +77,13 @@ use super::OriginList;
 #[non_exhaustive]
 pub struct Info {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
-	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
-	/// shortest-path preference.
+	/// [`crate::Origin`] when forwarding, so the list is used for loop detection.
+	/// Immutable for the broadcast's lifetime.
 	pub hops: OriginList,
+
+	/// The route cost, the metric routing minimizes (see [`Cost`]). Shared and
+	/// mutable: an ANNOUNCE_UPDATE flips it in place without re-announcing.
+	pub cost: Cost,
 
 	/// The origin this broadcast belongs to (its identity, and the cache pool its
 	/// tracks and groups inherit). A track reaches its pool by walking up this link,
@@ -32,6 +97,7 @@ impl Default for Info {
 	fn default() -> Self {
 		Self {
 			hops: OriginList::new(),
+			cost: Cost::default(),
 			origin: super::origin::Info::default(),
 		}
 	}
@@ -41,6 +107,14 @@ impl Info {
 	/// Create a new broadcast with an empty hop chain.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the publisher-side base cost: a standing penalty (or, at zero, a
+	/// preference) applied to this source wherever the broadcast is routed,
+	/// independent of distance. Forwarded unchanged along the route.
+	pub fn with_cost_base(self, base: u64) -> Self {
+		self.cost.set(base, self.cost.transit());
+		self
 	}
 
 	/// Consume this [Info] to create a producer that carries its metadata
@@ -449,6 +523,19 @@ impl Consumer {
 		Ok(consumer)
 	}
 
+	/// True while media is actively flowing through this broadcast: some track has a
+	/// live producer (a consumer is pulling it), or a track request is pending.
+	///
+	/// This is the relay's cache signal: an announced-but-idle broadcast is "cold"
+	/// (pulling it triggers a fresh upstream fetch), one with live tracks is "hot"
+	/// (its upstream path is already paid for). Note the transition back to idle
+	/// doesn't wake state watchers (a track producer closing doesn't write the
+	/// broadcast state), so callers poll this on a coarse tick rather than an edge.
+	pub fn is_active(&self) -> bool {
+		let state = self.state.read();
+		!state.requests.is_empty() || state.tracks.values().any(|weak| !weak.is_closed())
+	}
+
 	/// Block until the broadcast is closed (every producer dropped) and return the cause.
 	///
 	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
@@ -716,6 +803,29 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
+	}
+
+	// `is_active` is the relay's cache signal: false while merely announced, true
+	// while any track has a live producer or a request is pending, false again
+	// once everything is torn down.
+	#[tokio::test]
+	async fn is_active_tracks_lifecycle() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		assert!(!consumer.is_active(), "no tracks yet");
+
+		let mut track = producer.assert_create_track("video", None);
+		assert!(consumer.is_active(), "live track producer");
+
+		track.abort(Error::Cancel).unwrap();
+		assert!(!consumer.is_active(), "aborted track is stale, not active");
+
+		// A pending consumer request also counts as demand.
+		let dynamic = producer.dynamic();
+		let _pending = subscribe_pending!(consumer, "audio");
+		assert!(consumer.is_active(), "pending request counts as active");
+		drop(dynamic);
 	}
 
 	// Cloning a `Dynamic` and dropping the clone must not flip

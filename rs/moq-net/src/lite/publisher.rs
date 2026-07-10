@@ -17,6 +17,28 @@ use crate::{
 
 use super::Version;
 
+/// How often forwarded route costs are re-evaluated (lite-06+). Doubles as the
+/// debounce for cost decreases: activity is detected by polling (a track closing
+/// doesn't wake state watchers), so a hot flip propagates within one tick.
+const COST_TICK: Duration = Duration::from_secs(1);
+
+/// Hold-down before a cost increase is forwarded (lite-06+). Cost increases
+/// (going cold, an upstream getting more expensive) are damped so viewer churn
+/// doesn't flap routes across the mesh; the increase is re-checked at each tick
+/// and only sent once it has held this long. Decreases forward promptly.
+const COST_INCREASE_HOLDDOWN: Duration = Duration::from_secs(30);
+
+/// One broadcast currently announced to this peer (lite-06+): what's needed to
+/// notice its route cost changed and send an ANNOUNCE_UPDATE.
+struct CostEntry {
+	broadcast: crate::broadcast::Consumer,
+	suffix: crate::PathOwned,
+	last_sent: lite::RouteCost,
+	/// When the current divergence from `last_sent` was first observed; the
+	/// hold-down for increases counts from here.
+	pending_since: Option<web_async::time::Instant>,
+}
+
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin we read local broadcasts from.
@@ -211,6 +233,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
 
+		// Broadcasts announced to this peer, keyed by absolute path (lite-06+ only):
+		// the tick below re-evaluates each one's route cost and sends an
+		// ANNOUNCE_UPDATE when it diverges from what the peer last saw.
+		let mut cost_entries: std::collections::HashMap<crate::PathOwned, CostEntry> = std::collections::HashMap::new();
+		let mut cost_tick = web_async::time::interval(COST_TICK);
+
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
@@ -254,10 +282,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			_ if version.has_announce_ok() => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
-				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
-				// them afterward. The receiver stamps our origin onto each hop chain, so we
-				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
+				// stashing suffix+hops+cost so we can both COUNT them for AnnounceOk and
+				// re-send them afterward. The receiver stamps our origin onto each hop
+				// chain, so we forward the stored chain as-is (no self push here).
+				let mut initial: Vec<(crate::PathOwned, OriginList, Option<lite::RouteCost>)> = Vec::new();
 				while let Some((path, event)) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
@@ -280,14 +308,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							tracing::debug!(broadcast = %absolute, "announce");
 							let guard = stats.broadcast(&absolute).publisher();
 							stats_guards.entry(absolute.clone()).or_insert(guard);
-							initial.retain(|(s, _)| s != &suffix);
-							initial.push((suffix, hops.clone()));
+							let cost = version.has_route_cost().then(|| {
+								let cost = Self::wire_cost(&broadcast);
+								cost_entries.insert(
+									absolute.clone(),
+									CostEntry {
+										broadcast: broadcast.clone(),
+										suffix: suffix.clone(),
+										last_sent: cost,
+										pending_since: None,
+									},
+								);
+								cost
+							});
+							initial.retain(|(s, _, _)| s != &suffix);
+							initial.push((suffix, hops.clone(), cost));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
 							tracing::debug!(broadcast = %absolute, "unannounce");
 							stats_guards.remove(&absolute);
-							initial.retain(|(s, _)| s != &suffix);
+							cost_entries.remove(&absolute);
+							initial.retain(|(s, _, _)| s != &suffix);
 						}
 					}
 				}
@@ -300,10 +342,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				};
 				let mut buf = bytes::BytesMut::new();
 				ok.encode(&mut buf, version)?;
-				for (suffix, hops) in &initial {
+				for (suffix, hops, cost) in &initial {
 					lite::AnnounceBroadcast::Active {
 						suffix: suffix.as_path(),
 						hops: hops.clone(),
+						cost: *cost,
 					}
 					.encode(&mut buf, version)?;
 				}
@@ -328,6 +371,32 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
+
+				// Re-evaluate forwarded route costs (lite-06+): activity flips and
+				// upstream cost changes don't re-announce, they mutate the shared cost
+				// cells, so this tick polls each announced broadcast and sends an
+				// ANNOUNCE_UPDATE when the advertised cost diverges. Decreases (going
+				// hot) forward at the next tick; increases hold down (see the constants).
+				_ = cost_tick.tick(), if version.has_route_cost() && !cost_entries.is_empty() => {
+					let mut due: Vec<(crate::PathOwned, lite::RouteCost)> = Vec::new();
+					for entry in cost_entries.values_mut() {
+						let desired = Self::wire_cost(&entry.broadcast);
+						if desired == entry.last_sent {
+							entry.pending_since = None;
+							continue;
+						}
+						let since = *entry.pending_since.get_or_insert_with(web_async::time::Instant::now);
+						if desired.total() <= entry.last_sent.total() || since.elapsed() >= COST_INCREASE_HOLDDOWN {
+							entry.last_sent = desired;
+							entry.pending_since = None;
+							due.push((entry.suffix.clone(), desired));
+						}
+					}
+					for (suffix, cost) in due {
+						stream.writer.encode(&lite::AnnounceBroadcast::Update { suffix: suffix.as_path(), cost }).await?;
+					}
+				}
+
 				next = announced.next() => {
 						let Some((path, event)) = next else {
 							stream.writer.finish()?;
@@ -350,7 +419,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 								let prev = stats_guards.insert(absolute.clone(), bs.publisher());
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
+								let cost = version.has_route_cost().then(|| {
+									let cost = Self::wire_cost(&active);
+									cost_entries.insert(
+										absolute.clone(),
+										CostEntry {
+											broadcast: active.clone(),
+											suffix: suffix.clone(),
+											last_sent: cost,
+											pending_since: None,
+										},
+									);
+									cost
+								});
+								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost }).await?;
 							}
 							announce::Event::Restart(active) => {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
@@ -361,11 +443,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									Some(hops) => {
 										tracing::debug!(broadcast = %absolute, "restart");
 										let bs = stats.broadcast(&absolute);
+										let cost = version.has_route_cost().then(|| {
+											let cost = Self::wire_cost(&active);
+											cost_entries.insert(
+												absolute.clone(),
+												CostEntry {
+													broadcast: active.clone(),
+													suffix: suffix.clone(),
+													last_sent: cost,
+													pending_since: None,
+												},
+											);
+											cost
+										});
 										// Continuity: keep the existing stats guard (no close + reopen).
 										if lite::restart_supported(version) {
 											// One Active message on the wire, one name-length count.
 											bs.publisher_announced_bytes(absolute.as_str().len() as u64);
-											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
+											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost }).await?;
 										} else {
 											// Ended + Active pair, so count the name twice.
 											bs.publisher_announced_bytes(2 * absolute.as_str().len() as u64);
@@ -376,7 +471,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 													hops: OriginList::new(),
 												})
 												.await?;
-											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
+											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost }).await?;
 										}
 									}
 									None => {
@@ -385,6 +480,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 										stats.broadcast(&absolute)
 											.publisher_announced_bytes(absolute.as_str().len() as u64);
 										stats_guards.remove(&absolute);
+										cost_entries.remove(&absolute);
 										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 									}
 								}
@@ -396,12 +492,32 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								stats.broadcast(&absolute)
 									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								stats_guards.remove(&absolute);
+								cost_entries.remove(&absolute);
 								// An ended announce doesn't need hops; the receiver matches on path only.
 								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 							}
 						}
 					}
 			}
+		}
+	}
+
+	/// The route cost to advertise for a broadcast right now: the publisher-set
+	/// base plus the accumulated transit, except that a broadcast actively flowing
+	/// through this relay advertises zero transit (marginal-cost routing: the
+	/// upstream path is already paid for, so a peer pulling through here adds no
+	/// new upstream transfer). An unset transit derives from the hop count,
+	/// matching the legacy metric.
+	fn wire_cost(broadcast: &crate::broadcast::Consumer) -> lite::RouteCost {
+		let info = broadcast.info();
+		let transit = if broadcast.is_active() {
+			0
+		} else {
+			info.cost.transit().unwrap_or(info.hops.len() as u64)
+		};
+		lite::RouteCost {
+			base: info.cost.base(),
+			transit,
 		}
 	}
 

@@ -16,19 +16,88 @@ pub fn restart_supported(version: Version) -> bool {
 	)
 }
 
-/// ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast.
+/// The route cost carried on an announcement (lite-06+).
 ///
-/// Carries the broadcast path suffix and the hop chain. Renamed from ANNOUNCE in lite-05.
+/// `base` is set by the original publisher and forwarded unchanged: a standing
+/// penalty (or preference) for using this source at all, whatever its distance.
+/// `transit` is the accumulated cost of pulling the broadcast along this route:
+/// each relay adds its configured cost for the link the announce crossed, and a
+/// relay actively carrying the broadcast resets it to zero when forwarding (its
+/// upstream path is already paid for, so sharing is free). Routing picks the
+/// lowest `base + transit`; with every link at the default cost of 1 and no
+/// resets, `transit` equals the hop count, matching pre-lite-06 routing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RouteCost {
+	pub base: u64,
+	pub transit: u64,
+}
+
+impl RouteCost {
+	/// The value routing compares: `base + transit`, saturating.
+	pub fn total(&self) -> u64 {
+		self.base.saturating_add(self.transit)
+	}
+}
+
+impl Decode<Version> for RouteCost {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let base = u64::decode(r, version)?;
+		let transit = u64::decode(r, version)?;
+		Ok(Self { base, transit })
+	}
+}
+
+impl Encode<Version> for RouteCost {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.base.encode(w, version)?;
+		self.transit.encode(w, version)
+	}
+}
+
+/// ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast,
+/// or (lite-06+) to update a live announcement's route cost in place.
+///
+/// Carries the broadcast path suffix and the hop chain, plus the route cost on
+/// lite-06+. Renamed from ANNOUNCE in lite-05.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
-	Active { suffix: Path<'a>, hops: OriginList },
-	Ended { suffix: Path<'a>, hops: OriginList },
+	Active {
+		suffix: Path<'a>,
+		hops: OriginList,
+		/// The route cost (lite-06+). `None` on older versions, where the receiver
+		/// derives it from the hop count.
+		cost: Option<RouteCost>,
+	},
+	Ended {
+		suffix: Path<'a>,
+		hops: OriginList,
+	},
+	/// ANNOUNCE_UPDATE (lite-06+): mutate a live announcement's route cost without
+	/// re-announcing. The hop chain is immutable for an announcement's lifetime;
+	/// cost is the only dynamic field, so a hot/cold flip travels as this small
+	/// message instead of an Ended+Active pair (which would abort in-flight
+	/// subscriptions downstream).
+	Update {
+		suffix: Path<'a>,
+		cost: RouteCost,
+	},
 }
 
 impl Message for AnnounceBroadcast<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
+
+		// ANNOUNCE_UPDATE carries no hop chain: the chain is immutable for the
+		// announcement's lifetime, only the cost changes.
+		if let AnnounceStatus::Update = status {
+			if !version.has_route_cost() {
+				return Err(DecodeError::InvalidValue);
+			}
+			let cost = RouteCost::decode(r, version)?;
+			return Ok(Self::Update { suffix, cost });
+		}
+
 		let hops = match version {
 			Version::Lite01 | Version::Lite02 => OriginList::new(),
 			Version::Lite03 => {
@@ -44,30 +113,50 @@ impl Message for AnnounceBroadcast<'_> {
 			_ => OriginList::decode(r, version)?,
 		};
 
+		// The route cost rides only on Active (an Ended just retracts the path).
+		let cost = match status {
+			AnnounceStatus::Ended => None,
+			_ if version.has_route_cost() => Some(RouteCost::decode(r, version)?),
+			_ => None,
+		};
+
 		Ok(match status {
-			AnnounceStatus::Active => Self::Active { suffix, hops },
+			AnnounceStatus::Active => Self::Active { suffix, hops, cost },
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// We encode a restart as a duplicate ANNOUNCE (a second `Active`), but on versions that
 			// support restart we also accept the draft's explicit `restart` status and treat it the
 			// same. For an already-announced path the subscriber turns it into a restart; for an
 			// unknown path it's a fresh announce. Older versions never defined this status, so it's
 			// an invalid value there.
-			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops },
+			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops, cost },
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
+			AnnounceStatus::Update => unreachable!("handled above"),
 		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
-			Self::Active { suffix, hops } => {
+			Self::Active { suffix, hops, cost } => {
 				AnnounceStatus::Active.encode(w, version)?;
 				suffix.encode(w, version)?;
 				encode_hops(w, version, hops)?;
+				if version.has_route_cost() {
+					// The sender must supply a cost on versions that carry one.
+					cost.as_ref().ok_or(EncodeError::Version)?.encode(w, version)?;
+				}
 			}
 			Self::Ended { suffix, hops } => {
 				AnnounceStatus::Ended.encode(w, version)?;
 				suffix.encode(w, version)?;
 				encode_hops(w, version, hops)?;
+			}
+			Self::Update { suffix, cost } => {
+				if !version.has_route_cost() {
+					return Err(EncodeError::Version);
+				}
+				AnnounceStatus::Update.encode(w, version)?;
+				suffix.encode(w, version)?;
+				cost.encode(w, version)?;
 			}
 		}
 
@@ -125,6 +214,8 @@ enum AnnounceStatus {
 	/// The draft's explicit restart status. We never encode it (a restart goes out as a duplicate
 	/// `Active`), but we accept it on decode for forward/cross-compatibility.
 	Restart = 2,
+	/// ANNOUNCE_UPDATE (lite-06+): a route-cost update for a live announcement.
+	Update = 3,
 }
 
 impl Decode<Version> for AnnounceStatus {
@@ -234,6 +325,7 @@ mod tests {
 		AnnounceBroadcast::Active {
 			suffix: Path::new("foo/bar"),
 			hops: OriginList::new(),
+			cost: version.has_route_cost().then(RouteCost::default),
 		}
 		.encode(&mut buf, version)
 		.expect("encode");
@@ -312,13 +404,18 @@ mod tests {
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		// Decode borrows from `buf`; re-own so the value can outlive this frame.
 		match got {
-			AnnounceBroadcast::Active { suffix, hops } => AnnounceBroadcast::Active {
+			AnnounceBroadcast::Active { suffix, hops, cost } => AnnounceBroadcast::Active {
 				suffix: suffix.to_owned(),
 				hops,
+				cost,
 			},
 			AnnounceBroadcast::Ended { suffix, hops } => AnnounceBroadcast::Ended {
 				suffix: suffix.to_owned(),
 				hops,
+			},
+			AnnounceBroadcast::Update { suffix, cost } => AnnounceBroadcast::Update {
+				suffix: suffix.to_owned(),
+				cost,
 			},
 		}
 	}
@@ -330,6 +427,7 @@ mod tests {
 		let msg = AnnounceBroadcast::Active {
 			suffix: Path::new("room/cam"),
 			hops: hops.clone(),
+			cost: None,
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
@@ -372,5 +470,69 @@ mod tests {
 		let got = AnnounceOk::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(got.origin.id(), 0);
 		assert_eq!(got.active, 0);
+	}
+
+	// Lite06 carries the route cost on Active and round-trips ANNOUNCE_UPDATE.
+	#[test]
+	fn announce_cost_round_trip_on_lite06() {
+		let mut hops = OriginList::new();
+		hops.push(Origin::new(7).unwrap()).unwrap();
+		let msg = AnnounceBroadcast::Active {
+			suffix: Path::new("room/cam"),
+			hops,
+			cost: Some(RouteCost { base: 10, transit: 3 }),
+		};
+		assert_eq!(broadcast_round_trip(&msg, Version::Lite06Wip), msg);
+
+		let update = AnnounceBroadcast::Update {
+			suffix: Path::new("room/cam"),
+			cost: RouteCost { base: 0, transit: 2 },
+		};
+		assert_eq!(broadcast_round_trip(&update, Version::Lite06Wip), update);
+	}
+
+	// Encoding an Active without a cost on lite-06 is a caller bug, not a silent default.
+	#[test]
+	fn announce_active_requires_cost_on_lite06() {
+		let msg = AnnounceBroadcast::Active {
+			suffix: Path::new("room/cam"),
+			hops: OriginList::new(),
+			cost: None,
+		};
+		let mut buf = bytes::BytesMut::new();
+		assert!(matches!(
+			msg.encode(&mut buf, Version::Lite06Wip),
+			Err(EncodeError::Version)
+		));
+	}
+
+	// ANNOUNCE_UPDATE doesn't exist before lite-06: encode refuses, decode rejects the status.
+	#[test]
+	fn announce_update_rejected_before_lite06() {
+		let update = AnnounceBroadcast::Update {
+			suffix: Path::new("room/cam"),
+			cost: RouteCost::default(),
+		};
+		let mut buf = bytes::BytesMut::new();
+		assert!(matches!(
+			update.encode(&mut buf, Version::Lite05),
+			Err(EncodeError::Version)
+		));
+
+		// Forge an Update status byte on a lite-05 message.
+		let mut buf = bytes::BytesMut::new();
+		AnnounceBroadcast::Active {
+			suffix: Path::new("foo"),
+			hops: OriginList::new(),
+			cost: None,
+		}
+		.encode(&mut buf, Version::Lite05)
+		.unwrap();
+		buf[1] = u8::from(AnnounceStatus::Update);
+		let mut slice = buf.freeze();
+		assert!(matches!(
+			AnnounceBroadcast::decode(&mut slice, Version::Lite05),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 }

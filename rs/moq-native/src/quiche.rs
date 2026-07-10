@@ -475,7 +475,7 @@ impl QuicheRequest {
 					.map_err(Error::AcceptRequest)?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_net::ALPNS.contains(&alpn) => Ok(Self::Raw {
+			alpn if moq_net::is_moq_alpn(alpn) => Ok(Self::Raw {
 				connection: conn,
 				request: ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap()),
 				response: web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn),

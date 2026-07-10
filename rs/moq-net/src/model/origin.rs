@@ -331,13 +331,15 @@ struct OriginBroadcast {
 
 /// Ordering key used to pick the active route among broadcasts at the same path.
 ///
-/// Lower wins. Shorter hop chains sort first (routing prefers the shortest path);
-/// remaining ties break on a deterministic hash of the broadcast name and hop
-/// chain. Every node in the cluster, given the same candidate routes, converges
-/// on the same winner: the hops are forwarded unchanged, and the hash is
-/// build-stable. Mixing the name in spreads equal routes across different
-/// upstreams rather than funneling onto one.
-fn route_key(name: &Path, info: &broadcast::Info) -> (usize, u64) {
+/// Lower wins. The cheapest route cost sorts first ([`broadcast::Cost::total`]:
+/// the publisher's base cost plus the accumulated per-link transit cost, which
+/// defaults to the hop count when no wire cost was carried, so pre-lite-06 routes
+/// order by shortest hop chain exactly as before); remaining ties break on a
+/// deterministic hash of the broadcast name and hop chain. Every node in the
+/// cluster, given the same candidate routes, converges on the same winner: the
+/// hops are forwarded unchanged, and the hash is build-stable. Mixing the name in
+/// spreads equal routes across different upstreams rather than funneling onto one.
+fn route_key(name: &Path, info: &broadcast::Info) -> (u64, u64) {
 	// FNV-1a, not the std hasher: its output is fixed across Rust versions and
 	// builds, which matters when nodes run mismatched binaries during a rolling
 	// deploy and still need to agree on the same route. SEED is a custom basis
@@ -356,7 +358,7 @@ fn route_key(name: &Path, info: &broadcast::Info) -> (usize, u64) {
 		}
 	}
 
-	(info.hops.len(), hash)
+	(info.cost.total(info.hops.len()), hash)
 }
 
 /// One coalesced update queued for an `AnnounceConsumer`.
@@ -690,6 +692,48 @@ impl OriginNode {
 		}
 	}
 
+	/// Re-evaluate the active route at `relative` after a cost change: if a backup
+	/// now orders below the active, promote it and emit a restart, exactly like the
+	/// swap in [`Self::publish`]. Costs are read at comparison time, so this is the
+	/// only work needed after a [`broadcast::Cost`] mutation. Returns whether the
+	/// active route changed; a no-op (winner unchanged, unknown path) emits nothing.
+	fn refresh(&mut self, full: impl AsPath, relative: impl AsPath) -> bool {
+		let full = full.as_path();
+		let relative = relative.as_path();
+
+		if let Some((dir, relative)) = relative.next_part() {
+			let Some(next) = self.nested.get(dir) else {
+				return false;
+			};
+			let next = next.clone();
+			return next.lock().refresh(&full, &relative);
+		}
+
+		let Some(entry) = &mut self.broadcast else {
+			return false;
+		};
+
+		let active_key = route_key(&full, entry.active.info());
+		let best = entry
+			.backup
+			.iter()
+			.enumerate()
+			.min_by_key(|(_, b)| route_key(&full, b.info()))
+			.map(|(i, _)| i);
+		let Some(idx) = best else {
+			return false;
+		};
+		if route_key(&full, entry.backup[idx].info()) >= active_key {
+			return false;
+		}
+
+		let promoted = entry.backup.remove(idx).expect("index in range");
+		let old = std::mem::replace(&mut entry.active, promoted);
+		entry.backup.push_back(old);
+		self.notify.lock().restart(full, &entry.active);
+		true
+	}
+
 	fn is_empty(&self) -> bool {
 		self.broadcast.is_none() && self.nested.is_empty() && self.notify.lock().consumers.is_empty()
 	}
@@ -944,6 +988,22 @@ impl Producer {
 			rest,
 			broadcast: Some(broadcast),
 		})
+	}
+
+	/// Re-evaluate the active route for `path` after a broadcast's
+	/// [`cost`](broadcast::Info::cost) changed: if a backup route now orders below
+	/// the active one, promote it and emit a restart (the same swap a
+	/// better-ordered [`Self::publish_broadcast`] performs). Costs are read at
+	/// comparison time, so callers mutate the shared [`broadcast::Cost`] first and
+	/// then call this. Returns whether the active route changed; unknown paths and
+	/// unchanged winners are a no-op.
+	pub fn refresh_broadcast(&self, path: impl AsPath) -> bool {
+		let path = path.as_path();
+		let Some((node, rest)) = self.nodes.get(&path) else {
+			return false;
+		};
+		let full = self.root.join(&path).to_owned();
+		node.lock().refresh(&full, &rest)
 	}
 
 	/// Returns a new Producer restricted to publishing under one of `prefixes`.
@@ -2155,6 +2215,107 @@ mod tests {
 		// A strictly shorter chain always wins regardless of the hash.
 		assert_eq!(winner(&[10, 20], &[30]).len(), 1);
 		assert_eq!(winner(&[30], &[10, 20]).len(), 1);
+	}
+
+	// A route carrying an explicit (lite-06) cost orders by that cost, beating a
+	// shorter chain whose default cost derives from its hop count.
+	#[tokio::test]
+	async fn test_cost_beats_hops() {
+		tokio::time::pause();
+
+		fn route(ids: &[u64], cost: broadcast::Cost) -> broadcast::Producer {
+			let hops = OriginList::try_from(
+				ids.iter()
+					.copied()
+					.map(|id| Origin::new(id).unwrap())
+					.collect::<Vec<_>>(),
+			)
+			.unwrap();
+			broadcast::Info {
+				hops,
+				cost,
+				..Default::default()
+			}
+			.produce()
+		}
+
+		let origin = Origin::random().produce();
+		// One hop, default cost -> total 1.
+		let short = route(&[10], broadcast::Cost::default());
+		// Two hops, but a hot upstream reset the transit to zero -> total 0.
+		let hot = route(&[20, 30], broadcast::Cost::new(0, Some(0)));
+
+		origin.publish_broadcast_spawn("test", short.consume());
+		origin.publish_broadcast_spawn("test", hot.consume());
+
+		let active = origin.consume().get_broadcast("test").unwrap();
+		assert_eq!(active.info().hops.len(), 2, "the cheaper (hot) route must win");
+
+		// A publisher-set base cost penalizes a source regardless of distance.
+		let origin = Origin::random().produce();
+		let near_penalized = route(&[10], broadcast::Cost::new(10, Some(0)));
+		let far = route(&[20, 30], broadcast::Cost::new(0, Some(2)));
+		origin.publish_broadcast_spawn("test", near_penalized.consume());
+		origin.publish_broadcast_spawn("test", far.consume());
+		let active = origin.consume().get_broadcast("test").unwrap();
+		assert_eq!(active.info().hops.len(), 2, "base cost must count against the route");
+
+		drop((short, hot, near_penalized, far));
+	}
+
+	// After a cost mutation, `refresh_broadcast` re-ranks the candidates: a backup
+	// that became cheaper is promoted with a single restart, and a no-op refresh
+	// (winner unchanged, or unknown path) emits nothing.
+	#[tokio::test]
+	async fn test_refresh_promotes_cheaper_backup() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let mut announced = origin.consume().announced();
+
+		let near = broadcast::Info {
+			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			cost: broadcast::Cost::new(0, Some(1)),
+			..Default::default()
+		}
+		.produce();
+		let far = broadcast::Info {
+			hops: OriginList::try_from(vec![Origin::new(2u64).unwrap(), Origin::new(3u64).unwrap()]).unwrap(),
+			cost: broadcast::Cost::new(0, Some(2)),
+			..Default::default()
+		}
+		.produce();
+		let far_cost = far.info().cost.clone();
+
+		origin.publish_broadcast_spawn("test", near.consume());
+		origin.publish_broadcast_spawn("test", far.consume());
+		announced.assert_next("test", &near.consume());
+
+		// Refresh without a cost change: the winner is unchanged, nothing fires.
+		assert!(!origin.refresh_broadcast("test"));
+		announced.assert_next_wait();
+
+		// The far route goes hot upstream (transit reset to 0): now cheaper.
+		far_cost.set(0, Some(0));
+		assert!(origin.refresh_broadcast("test"));
+		announced.assert_next_restart("test", &far.consume());
+
+		// It cools back down: the near route wins again.
+		far_cost.set(0, Some(2));
+		assert!(origin.refresh_broadcast("test"));
+		announced.assert_next_restart("test", &near.consume());
+
+		// At an equal cost the deterministic hash tie-break decides (same rule as
+		// publish, so every node converges); either way a second refresh with no
+		// further change is a no-op.
+		far_cost.set(0, Some(1));
+		origin.refresh_broadcast("test");
+		assert!(!origin.refresh_broadcast("test"));
+
+		// Unknown paths are a no-op.
+		assert!(!origin.refresh_broadcast("nonexistent"));
+
+		drop((near, far));
 	}
 
 	#[tokio::test]

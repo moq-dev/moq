@@ -254,6 +254,13 @@ impl Client {
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions opened by this client.
+	/// Price this connection's link for route costs (lite-06+); see
+	/// [`moq_net::Client::with_link_cost`].
+	pub fn with_link_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_link_cost(cost);
+		self
+	}
+
 	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
