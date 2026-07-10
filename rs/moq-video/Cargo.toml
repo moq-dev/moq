@@ -16,16 +16,21 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 doctest = false
 
 [features]
-# Hardware encoders are enabled by default. Disable them (e.g. `--no-default-features`)
+# Hardware codecs are enabled by default. Disable them (e.g. `--no-default-features`)
 # for a slimmer self-compiled Linux build that drops the CUDA / libva deps: openh264
-# stays as the always-compiled software fallback and V4L2 capture is unaffected. Both
-# features are no-ops off Linux (their deps are Linux-only).
-default = ["nvenc", "vaapi"]
+# stays as the always-compiled software fallback and V4L2 capture is unaffected. All
+# three features are no-ops off Linux (their deps are Linux-only).
+default = ["nvenc", "vaapi", "nvdec"]
 # NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + moq-nvenc,
 # which loads libnvidia-encode), with a libloading probe for the driver libs, so
 # an nvenc build still links GPU-less and starts driverless, falling back to the
 # next encoder.
 nvenc = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
+# NVIDIA NVDEC hardware decoder (Linux). Same runtime story as `nvenc`: cudarc
+# loads libcuda and moq-nvenc's cuvid table loads libnvcuvid, so an nvdec build
+# links GPU-less and starts driverless, falling back to the next decoder. Decoded
+# frames stay in CUDA memory and feed NVENC zero-copy (the transcode path).
+nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi 0.0.2 hard-links libva (the
 # binary carries NEEDED libva.so.2 / libva-drm.so.2), so disable this feature for a
 # build with no libva dependency. See #1837.

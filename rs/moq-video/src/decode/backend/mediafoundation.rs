@@ -41,10 +41,10 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::{GUID, Interface};
 
-use super::{Backend, Codec};
+use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
-use crate::frame::I420;
 use crate::frame::d3d11::Texture;
+use crate::frame::{Frame, I420};
 use crate::mf::{ComGuard, create_d3d_device, mf_err, unpack_2x32};
 
 pub(crate) const NAME: &str = "mediafoundation";
@@ -87,7 +87,9 @@ pub(crate) struct MediaFoundation {
 unsafe impl Send for MediaFoundation {}
 
 impl MediaFoundation {
-	pub(crate) fn open(codec: Codec) -> Result<Box<dyn Backend>, Error> {
+	/// `config` is accepted for signature parity; the decoder MFT emits frames
+	/// at the stream's native size (callers scale the frames themselves).
+	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let (input_subtype, label) = match codec {
 			Codec::H264 => (MFVideoFormat_H264, "H.264"),
 			Codec::H265 => (MFVideoFormat_HEVC, "H.265"),
@@ -351,7 +353,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn decode(&mut self, access_unit: Bytes, _keyframe: bool) -> Result<Vec<I420>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		let mut out = Vec::new();
 
 		let sample = self.build_sample(&access_unit)?;
@@ -376,7 +378,15 @@ impl Backend for MediaFoundation {
 		}
 
 		self.drain_output(&mut out)?;
-		Ok(out)
+		// The synchronous MFT drains within the call, so every output frame
+		// belongs to the access unit just submitted.
+		Ok(out
+			.into_iter()
+			.map(|i420| Decoded {
+				timestamp_us,
+				frame: Frame::I420(i420),
+			})
+			.collect())
 	}
 
 	fn name(&self) -> &str {

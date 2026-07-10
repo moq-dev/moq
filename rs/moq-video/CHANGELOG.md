@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- H.264 / H.265 hardware decode on Linux via NVIDIA NVDEC, behind the
+  default-on `nvdec` feature. Decoded frames stay in CUDA device memory and
+  feed the NVENC encoder zero-copy through the new
+  `encode::Encoder::encode(frame)` entry point; `decode::Config::resize` scales
+  in the decoder for free. Like NVENC, everything is dlopen'd at runtime, so a
+  driverless host falls back to the next decoder.
+- `decode::Frame` pixels are now private: `into_i420()` returns the packed
+  I420 bytes (downloading a GPU frame), replacing the public `data` field, and
+  each frame's `timestamp_us` now rides the decoder (correct across reordering)
+  instead of echoing the input.
+- `decode::Decoder::new` takes the full `decode::Config` instead of just the
+  `Kind`, so decoder knobs (like `resize`) stay additive.
+
 - `decode::Decoder` is public: the payload-in, frames-out layer under
   `decode::Consumer`, for callers that don't read from a plain track
   subscription (e.g. a transcoder decoding individually fetched groups).

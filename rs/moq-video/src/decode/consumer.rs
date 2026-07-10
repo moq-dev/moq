@@ -30,7 +30,7 @@ impl Consumer {
 		name: impl Into<String>,
 		config: Config,
 	) -> Result<Self, Error> {
-		let decoder = Decoder::new(catalog, &config.kind)?;
+		let decoder = Decoder::new(catalog, &config)?;
 
 		let name = name.into();
 		let track = broadcast.track(&name)?.subscribe(None).await?;

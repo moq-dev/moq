@@ -175,7 +175,7 @@ impl Encoder {
 		}
 
 		let frame = Frame::I420(I420::from_rgba(rgba, width, height)?);
-		self.encode(&frame, keyframe)
+		self.encode_raw(&frame, keyframe)
 	}
 
 	/// Encode one tightly-packed I420 frame (`width * height * 3 / 2` bytes: Y
@@ -203,12 +203,22 @@ impl Encoder {
 		}
 
 		let frame = Frame::I420(I420 { width, height, data });
-		self.encode(&frame, keyframe)
+		self.encode_raw(&frame, keyframe)
+	}
+
+	/// Encode a decoded [`Frame`](crate::decode::Frame), the transcode input
+	/// path: a hardware frame feeds a hardware encoder on the same device
+	/// directly (NVDEC -> NVENC stays on the GPU); everything else falls back to
+	/// a CPU I420 upload. The frame must already be at the encoder's resolution;
+	/// decode with [`decode::Config::resize`](crate::decode::Config) (or scale
+	/// yourself) first.
+	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		self.encode_raw(&frame.inner, keyframe)
 	}
 
 	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
 	/// already be at the encoder's resolution.
-	pub(crate) fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	pub(crate) fn encode_raw(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		if frame.width() != self.width || frame.height() != self.height {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"frame {}x{} does not match encoder {}x{}",
@@ -455,7 +465,7 @@ mod tests {
 		let mut packets = Vec::new();
 		for i in 0..10 {
 			let frame = Frame::Surface(nv12_surface(320, 240));
-			packets.extend(encoder.encode(&frame, i == 0).unwrap());
+			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -479,7 +489,7 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 
 		let frame = Frame::Surface(nv12_surface(320, 240));
-		let mut packets = encoder.encode(&frame, true).unwrap();
+		let mut packets = encoder.encode_raw(&frame, true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty());
@@ -595,7 +605,7 @@ mod tests {
 			if matches!(frame, Frame::Texture(_)) {
 				textures += 1;
 			}
-			packets.extend(encoder.encode(&frame, i == 0).unwrap());
+			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 

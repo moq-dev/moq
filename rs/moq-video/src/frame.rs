@@ -27,6 +27,10 @@ pub(crate) enum Frame {
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
+	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced only by the NVDEC
+	/// decoder, consumed in place by the NVENC encoder.
+	#[cfg(all(target_os = "linux", feature = "nvdec"))]
+	Cuda(cuda::Frame),
 	/// CPU-resident planar I420.
 	I420(I420),
 }
@@ -38,6 +42,8 @@ impl Frame {
 			Frame::Surface(s) => s.width,
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => t.width,
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Frame::Cuda(c) => c.width,
 			Frame::I420(i) => i.width,
 		}
 	}
@@ -48,6 +54,8 @@ impl Frame {
 			Frame::Surface(s) => s.height,
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => t.height,
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Frame::Cuda(c) => c.height,
 			Frame::I420(i) => i.height,
 		}
 	}
@@ -59,6 +67,8 @@ impl Frame {
 			Frame::Surface(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Frame::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
 			Frame::I420(i) => Ok(Cow::Borrowed(i)),
 		}
 	}
@@ -248,7 +258,7 @@ impl I420 {
 
 /// Interleave separate U and V planes into a packed NV12 chroma plane
 /// (`u[i], v[i]` -> `uv[2i], uv[2i+1]`). `uv` must be twice the length of `u`.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "nvenc")))]
 pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
 	for (pair, (u, v)) in uv.chunks_exact_mut(2).zip(u.iter().zip(v)) {
 		pair[0] = *u;
@@ -358,6 +368,123 @@ pub(crate) mod macos {
 	impl Drop for UnlockGuard<'_> {
 		fn drop(&mut self) {
 			unsafe { CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY) };
+		}
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+pub(crate) mod cuda {
+	use std::sync::Arc;
+
+	use cudarc::driver::{CudaContext, result};
+
+	use super::I420;
+	use crate::Error;
+
+	/// An owned device allocation. Plain `cuMemAlloc` on purpose: NVENC's
+	/// resource registration rejects stream-ordered pool memory
+	/// (`cuMemAllocAsync`), which is what cudarc's `CudaSlice` uses on any GPU
+	/// with memory-pool support.
+	struct Buffer {
+		ctx: Arc<CudaContext>,
+		ptr: cudarc::driver::sys::CUdeviceptr,
+		len: usize,
+	}
+
+	impl Drop for Buffer {
+		fn drop(&mut self) {
+			// Drop may run on any thread; freeing needs the context current.
+			if self.ctx.bind_to_thread().is_ok() {
+				// SAFETY: the pointer came from `malloc_sync` and is freed once.
+				let _ = unsafe { result::free_sync(self.ptr) };
+			}
+		}
+	}
+
+	/// A GPU NV12 frame in CUDA device memory: NVDEC's output and NVENC's
+	/// zero-copy input. One buffer holds both planes at a shared row `pitch`:
+	/// `height` luma rows, then `height / 2` interleaved-UV rows. Cloning bumps
+	/// refcounts (no pixel copy), which keeps decode -> encode on the GPU.
+	///
+	/// Both codecs use the device's primary CUDA context (`CudaContext::new`
+	/// retains it), so a frame decoded by NVDEC is directly addressable by NVENC.
+	#[derive(Clone)]
+	pub(crate) struct Frame {
+		buf: Arc<Buffer>,
+		pub(crate) width: u32,
+		pub(crate) height: u32,
+		/// Row pitch in bytes of both planes (>= `width`).
+		pub(crate) pitch: u32,
+	}
+
+	impl Frame {
+		/// Allocate an NV12 buffer for `width` x `height` (both even) at row
+		/// pitch `pitch`. Uninitialized: the caller copies the full extent in.
+		pub(crate) fn alloc(ctx: &Arc<CudaContext>, width: u32, height: u32, pitch: u32) -> Result<Self, Error> {
+			debug_assert!(pitch >= width && width % 2 == 0 && height % 2 == 0);
+			let len = pitch as usize * height as usize * 3 / 2;
+			ctx.bind_to_thread()
+				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
+			// SAFETY: a plain device allocation; ownership lands in `Buffer`,
+			// whose Drop frees it exactly once.
+			let ptr = unsafe { result::malloc_sync(len) }
+				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA alloc of {len} bytes: {e:?}")))?;
+			Ok(Self {
+				buf: Arc::new(Buffer {
+					ctx: ctx.clone(),
+					ptr,
+					len,
+				}),
+				width,
+				height,
+				pitch,
+			})
+		}
+
+		/// The raw device pointer, for FFI (the NVDEC copy destination, the
+		/// NVENC resource registration). Valid while `self` is alive.
+		pub(crate) fn device_ptr(&self) -> u64 {
+			self.buf.ptr
+		}
+
+		/// Download and de-pitch to packed I420 (the CPU fallback: a software
+		/// encoder, or a caller that wants bytes).
+		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
+			self.buf
+				.ctx
+				.bind_to_thread()
+				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
+			let mut host = vec![0u8; self.buf.len];
+			// SAFETY: the buffer is `len` bytes of device memory and stays alive
+			// for the synchronous copy.
+			unsafe { result::memcpy_dtoh_sync(&mut host, self.buf.ptr) }
+				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA download: {e:?}")))?;
+
+			let (w, h) = (self.width as usize, self.height as usize);
+			let (cw, ch) = (w / 2, h / 2);
+			let pitch = self.pitch as usize;
+
+			let mut data = vec![0u8; I420::len(self.width, self.height)];
+			let (luma, chroma) = data.split_at_mut(w * h);
+			let (u_dst, v_dst) = chroma.split_at_mut(cw * ch);
+
+			for row in 0..h {
+				luma[row * w..row * w + w].copy_from_slice(&host[row * pitch..row * pitch + w]);
+			}
+			let uv_base = pitch * h;
+			for row in 0..ch {
+				let src = &host[uv_base + row * pitch..uv_base + row * pitch + w];
+				for col in 0..cw {
+					u_dst[row * cw + col] = src[col * 2];
+					v_dst[row * cw + col] = src[col * 2 + 1];
+				}
+			}
+
+			Ok(I420 {
+				width: self.width,
+				height: self.height,
+				data,
+			})
 		}
 	}
 }
