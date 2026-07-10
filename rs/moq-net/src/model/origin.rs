@@ -9,6 +9,7 @@ use std::{
 use rand::RngExt;
 use web_async::Lock;
 
+use super::WeakCache;
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{Decode, DecodeError, Encode, EncodeError},
@@ -1104,8 +1105,9 @@ struct OriginDynamicState {
 	// Broadcasts a handler has already served, kept weakly so a repeat request for the
 	// same path resolves to a shared clone instead of re-invoking the handler (which would
 	// open a duplicate upstream subscription). Weak so a served broadcast still closes once
-	// its real consumers drop; a stale (closed) entry is evicted lazily on the next request.
-	served: HashMap<PathOwned, broadcast::WeakConsumer>,
+	// its real consumers drop. The cache reclaims closed entries incrementally on insert, so a
+	// long-lived origin serving many distinct one-shot paths stays bounded by the live count.
+	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
 
 	// The number of live `Dynamic` handlers. While zero, `request_broadcast`
 	// fails fast with `Unroutable` rather than queueing a request nobody will serve.
@@ -1273,14 +1275,19 @@ impl Request {
 
 		// Move the entry out of the in-flight queue and into the weak `served` cache, so repeat
 		// requests for this path share the same broadcast instead of asking the handler to serve
-		// (and subscribe upstream) again.
-		if let Ok(mut state) = self.state.write() {
-			state.served.insert(self.path.clone(), broadcast.weak());
+		// (and subscribe upstream) again. Re-check under the lock: if a live broadcast was already
+		// served for this path while we were fetching upstream, dedup onto it and drop ours rather
+		// than replace a good entry with a duplicate subscription.
+		let resolved = if let Ok(mut state) = self.state.write() {
+			let existing = state.served.insert(self.path.clone(), broadcast.weak());
 			state.requests.remove(&self.path);
-		}
+			existing.map(|weak| weak.consume()).unwrap_or(broadcast)
+		} else {
+			broadcast
+		};
 
 		if let Ok(mut pending) = self.producer.write() {
-			pending.resolved = Some(Ok(broadcast));
+			pending.resolved = Some(Ok(resolved));
 		}
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
@@ -1604,13 +1611,10 @@ impl Consumer {
 		};
 
 		// Reuse a still-live broadcast a handler already served for this path, so repeat
-		// requests share one upstream subscription. A closed entry is stale; drop it and
-		// re-serve below.
+		// requests share one upstream subscription. A closed entry is stale; `get` drops it
+		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			if !weak.is_closed() {
-				return kio::Pending::new(Requested::ready(weak.consume()));
-			}
-			state.served.remove(&absolute);
+			return kio::Pending::new(Requested::ready(weak.consume()));
 		}
 
 		// Coalesce onto a queued request for the same path; otherwise register a new one.
@@ -3278,6 +3282,34 @@ mod tests {
 		assert_eq!(request.path(), &Path::new("fallback"));
 		request.accept(&served);
 		assert!(request_fut.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// Serving many distinct one-shot paths that each close must not grow the `served` cache
+	// unboundedly: the amortized GC on `accept` reclaims the stale entries left by closed ones.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_served_cache_bounded() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		for i in 0..100 {
+			let path = format!("one-shot/{i}");
+			let request_fut = consumer.request_broadcast(&path);
+			let served = broadcast::Info::new().produce();
+			let request = dynamic.requested_broadcast().await.unwrap();
+			request.accept(&served);
+			request_fut.await.unwrap();
+			// Close the served broadcast; its cache entry is now stale.
+			drop(served);
+		}
+
+		// The GC keeps the map bounded by the live count (zero here) plus a small probe window,
+		// rather than one entry per distinct path.
+		assert!(
+			origin.dynamic.read().served.len() <= 4,
+			"stale served entries must be reclaimed, not accumulate per distinct path: {}",
+			origin.dynamic.read().served.len()
+		);
 	}
 
 	// A repeat request in the window after the handler picks one up but before it accepts
