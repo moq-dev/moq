@@ -3,22 +3,27 @@
 //! Nothing is encoded until someone asks, via the two demand paths moq-net
 //! exposes on the output track:
 //!
-//! - A live subscription (`used`) starts a live loop that subscribes to the
+//! - A live subscription (`used`) starts a live session that subscribes to the
 //!   source track (mirroring the aggregate subscription) and transcodes group
 //!   for group until the track goes `unused` again.
 //! - A fetch of a specific group (`requested_group`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder.
 //!
+//! Both paths are driven by one serving loop ([`Serve`]) that owns every
+//! output sequence, so the two can never race to write the same group.
+//!
 //! Output groups mirror the source group sequence numbers 1:1, so a fetch for
 //! output group N maps to source group N and a player switching renditions
 //! lands on the same content.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use hang::catalog::VideoConfig;
 use moq_mux::container::Container as _;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::Error;
 use crate::catalog::Resolved;
@@ -64,120 +69,445 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.dynamic();
 	let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
-	let mut producer = request.accept(info);
+	let producer = request.accept(info);
 
-	let result = tokio::select! {
-		res = live(&rung, &mut producer) => res,
-		res = fetches(&rung, &dynamic) => res,
-	};
-	if result.is_err() {
-		// End the track so subscribers see an error rather than a stall.
-		let _ = producer.abort(moq_net::Error::Cancel);
+	Serve {
+		demand: producer.demand(),
+		producer,
+		dynamic,
+		rung,
+		live: None,
+		live_latest: None,
+		fetches: JoinSet::new(),
+		fetching: HashMap::new(),
+		limit: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
+		parked: Vec::new(),
 	}
-	result
+	.run()
+	.await
 }
 
-/// The live path: wait for demand, mirror the aggregate subscription upstream,
-/// and transcode group for group until demand goes away.
-async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<(), Error> {
-	let demand = producer.demand();
-	loop {
-		tokio::select! {
-			used = demand.used() => if used.is_err() {
-				// The output track closed; nothing more to serve.
-				return Ok(());
-			},
-			err = rung.broadcast.closed() => {
-				// The source went away while idle; end the rung with it.
-				producer.abort(err)?;
-				return Ok(());
-			}
-		}
-
-		// Mirror the downstream demand upstream (priority, ordering, start).
-		let subscription = producer.subscription().unwrap_or_default();
-		let mut subscriber = rung.source.subscribe(subscription).await?;
-
-		// One pipeline per demand session: rate control persists across groups,
-		// while every group still opens with a forced IDR.
-		let mut pipeline = rung.pipeline()?;
-		let container = rung.container()?;
-
-		'session: loop {
-			tokio::select! {
-				group = subscriber.next_group() => {
-					let Some(mut source) = group? else {
-						// The source track ended: the derivative ends with it.
-						producer.finish()?;
-						return Ok(());
-					};
-					// Mirror the source sequence so fetches and rendition
-					// switches map 1:1.
-					let info = moq_net::group::Info { sequence: source.sequence };
-					let mut output = match producer.create_group(info) {
-						Ok(output) => output,
-						// A fetch task is already serving this sequence (a consumer
-						// fetched a group at the live edge before the live loop
-						// reached it). The fetch is authoritative and its group
-						// reaches every subscriber through the shared track cache,
-						// so skip it here. Residual: if that fetch then fails and
-						// aborts the group, this rung skips one GOP until the next
-						// keyframe. Unifying live + fetch into one cache-backed
-						// serving loop (like the relay) would remove the two-writer
-						// race entirely; tracked as a follow-up.
-						Err(moq_net::Error::Duplicate) => continue,
-						Err(err) => return Err(err.into()),
-					};
-					let done = transcode_group(&mut pipeline, &container, &mut source, &mut output, Some(&demand)).await?;
-					if !done {
-						// Demand disappeared mid-group; back to waiting.
-						break 'session;
-					}
-				}
-				_ = demand.unused() => break 'session,
-			}
-		}
-		// Dropping the subscriber releases the upstream subscription (and the
-		// encoder) until someone subscribes again.
-	}
-}
-
-/// The fetch path: serve requests for specific (past) groups.
+/// The serving loop for one rung's output track.
 ///
-/// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
-/// detached: when `serve` cancels this future (the live path ended, or the
-/// output track closed), dropping the set aborts every in-flight fetch, so none
-/// keep a source subscription or an encoder session alive past teardown. A
-/// semaphore bounds how many run at once.
-async fn fetches(rung: &Rung, dynamic: &moq_net::track::Dynamic) -> Result<(), Error> {
-	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
-	let mut tasks = tokio::task::JoinSet::new();
+/// Live transcoding and on-demand fetches write into the same track, so this
+/// loop is the single owner of every output sequence: it decides, per group,
+/// whether the live session or a fetch task produces it, and nothing writes a
+/// sequence it wasn't granted. That leaves no two-writer race:
+///
+/// - A fetch request for a sequence the live session is heading toward (or one
+///   already granted to a fetch task) is parked instead of served twice; it
+///   resolves from the shared track cache once the group exists.
+/// - When the live session reaches a sequence granted to an in-flight fetch,
+///   it defers that group until the fetch reports back: on success the fetched
+///   group already serves every subscriber through the cache, and on failure
+///   the live session re-creates the aborted group and transcodes it itself.
+struct Serve {
+	rung: Rung,
+	/// The only producer handle for the output track.
+	producer: moq_net::track::Producer,
+	/// Surfaces consumer fetches of uncached groups.
+	dynamic: moq_net::track::Dynamic,
+	/// Watches whether anyone consumes the output track.
+	demand: moq_net::track::Demand,
 
-	loop {
-		// Reap finished fetches so the set doesn't grow without bound.
-		while tasks.try_join_next().is_some() {}
+	/// The live path's state; `None` while nobody subscribes.
+	live: Option<Live>,
+	/// The highest sequence the live path has handled, across sessions.
+	live_latest: Option<u64>,
 
-		let Ok(request) = dynamic.requested_group().await else {
-			// The output track closed; nothing more to serve.
-			return Ok(());
+	/// In-flight fetch tasks, local (not detached) so dropping the set on
+	/// teardown aborts them all: none keep a source subscription or an encoder
+	/// session alive past the track.
+	fetches: JoinSet<bool>,
+	/// The sequence each in-flight fetch task was granted, by task id.
+	fetching: HashMap<tokio::task::Id, u64>,
+	/// Bounds concurrent fetch pipelines (decoder + encoder sessions).
+	limit: Arc<Semaphore>,
+
+	/// Fetch requests whose group someone else already owns (the live session
+	/// ahead of them, or an in-flight fetch for the same sequence). They resolve
+	/// from the cache when the group appears, or become real fetches if the
+	/// owner skips or fails.
+	parked: Vec<moq_net::track::GroupRequest>,
+}
+
+/// The live path's state, driven by subscriber demand on the output track.
+enum Live {
+	/// Waiting for the source subscription to resolve.
+	Subscribing(moq_net::kio::Pending<moq_net::track::Subscribe>),
+	/// Subscribed and transcoding group for group. Boxed: a [`Session`] is an
+	/// order of magnitude bigger than the other variant.
+	Active(Box<Session>),
+}
+
+/// One live demand session. The pipeline persists across groups so rate
+/// control carries over, while every group still opens with a forced IDR.
+struct Session {
+	subscriber: moq_net::track::Subscriber,
+	pipeline: Pipeline,
+	container: moq_mux::catalog::hang::Container,
+	state: SessionState,
+}
+
+enum SessionState {
+	/// Waiting for the next source group.
+	Idle,
+	/// The next source group's sequence is granted to an in-flight fetch;
+	/// waiting for its verdict before skipping (success) or transcoding it
+	/// (failure).
+	Deferred(moq_net::group::Consumer),
+	/// Transcoding a source group into an output group.
+	Transcoding {
+		source: moq_net::group::Consumer,
+		output: moq_net::group::Producer,
+		/// True until the first frame is processed (drives the forced IDR).
+		first: bool,
+	},
+}
+
+/// One actionable input to the serving loop.
+// One short-lived value per loop turn; boxing the big variants buys nothing.
+#[allow(clippy::large_enum_variant)]
+enum Event {
+	/// A consumer appeared while idle: start a live session.
+	Demand,
+	/// The last consumer left: tear the live session down.
+	Unused,
+	/// The source subscription resolved (or failed).
+	Subscribed(Result<moq_net::track::Subscriber, moq_net::Error>),
+	/// The live session's next source group (`None`: the source track ended).
+	Group(Result<Option<moq_net::group::Consumer>, moq_net::Error>),
+	/// Frames from the live session's current group (`None`: the group ended).
+	Frames(Result<Option<Vec<moq_mux::container::Frame>>, Error>),
+	/// A consumer requested a group that isn't cached.
+	Request(moq_net::track::GroupRequest),
+	/// A fetch task reported back for its granted sequence.
+	Fetched { sequence: u64, success: bool },
+	/// The source broadcast went away while idle.
+	SourceClosed(moq_net::Error),
+	/// The output track closed; nothing more to serve.
+	Closed,
+}
+
+impl Serve {
+	async fn run(mut self) -> Result<(), Error> {
+		let result = self.events().await;
+		// Never leave a live group dangling: downstream must see an incomplete
+		// group as aborted, not silently short.
+		self.abort_live_group();
+		if result.is_err() {
+			// End the track so subscribers see an error rather than a stall.
+			let _ = self.producer.abort(moq_net::Error::Cancel);
+		}
+		result
+	}
+
+	/// Dispatch events until the track closes, the source ends, or an error.
+	async fn events(&mut self) -> Result<(), Error> {
+		loop {
+			match self.next_event().await {
+				Event::Demand => {
+					// Mirror the downstream demand upstream (priority, ordering, start).
+					let subscription = self.producer.subscription().unwrap_or_default();
+					self.live = Some(Live::Subscribing(self.rung.source.subscribe(subscription)));
+				}
+				Event::Unused => self.stop_live(),
+				Event::Subscribed(subscriber) => {
+					self.live = Some(Live::Active(Box::new(Session {
+						subscriber: subscriber?,
+						pipeline: self.rung.pipeline()?,
+						container: self.rung.container()?,
+						state: SessionState::Idle,
+					})));
+				}
+				Event::Group(group) => match group? {
+					Some(source) => self.on_group(source)?,
+					None => {
+						// The source track ended: the derivative ends with it.
+						self.producer.finish()?;
+						return Ok(());
+					}
+				},
+				Event::Frames(frames) => self.on_frames(frames)?,
+				Event::Request(request) => self.on_request(request),
+				Event::Fetched { sequence, success } => self.on_fetched(sequence, success)?,
+				Event::SourceClosed(err) => {
+					// The source went away while idle; end the rung with it.
+					self.producer.abort(err)?;
+					return Ok(());
+				}
+				Event::Closed => return Ok(()),
+			}
+		}
+	}
+
+	/// Wait for the next event across every input: output-track demand, the
+	/// live session's next step, fetch requests, and fetch completions.
+	async fn next_event(&mut self) -> Event {
+		let Self {
+			rung,
+			demand,
+			dynamic,
+			live,
+			fetches,
+			fetching,
+			..
+		} = self;
+
+		// The live path waits on exactly one thing, depending on its state.
+		let live_event = async {
+			let Some(live) = live else {
+				// Nobody is subscribed: wait for demand, or the source dying.
+				return tokio::select! {
+					used = demand.used() => match used {
+						Ok(()) => Event::Demand,
+						Err(_) => Event::Closed,
+					},
+					err = rung.broadcast.closed() => Event::SourceClosed(err),
+				};
+			};
+
+			let step = async {
+				match live {
+					Live::Subscribing(pending) => Event::Subscribed(pending.await),
+					Live::Active(session) => match &mut session.state {
+						SessionState::Idle => Event::Group(session.subscriber.next_group().await),
+						// Waiting on a fetch verdict; it arrives as `Fetched` below.
+						SessionState::Deferred(_) => std::future::pending::<Event>().await,
+						SessionState::Transcoding { source, .. } => {
+							Event::Frames(session.container.read(source).await.map_err(Error::from))
+						}
+					},
+				}
+			};
+			tokio::select! {
+				unused = demand.unused() => match unused {
+					Ok(()) => Event::Unused,
+					Err(_) => Event::Closed,
+				},
+				event = step => event,
+			}
 		};
 
-		// Take a slot before spawning the transcode. Under a burst this blocks
-		// here, so further requests queue in the dynamic handler (backpressure)
-		// instead of spawning unbounded pipelines. The semaphore is never closed,
-		// so acquire only fails if we drop it first.
-		let Ok(permit) = limit.clone().acquire_owned().await else {
+		tokio::select! {
+			event = live_event => event,
+			request = dynamic.requested_group() => match request {
+				Ok(request) => Event::Request(request),
+				Err(_) => Event::Closed,
+			},
+			Some(task) = fetches.join_next_with_id(), if !fetches.is_empty() => {
+				let (id, success) = match task {
+					Ok((id, success)) => (id, success),
+					// The task panicked; treat its group as failed.
+					Err(err) => (err.id(), false),
+				};
+				let sequence = fetching.remove(&id).expect("fetch task not tracked");
+				Event::Fetched { sequence, success }
+			}
+		}
+	}
+
+	/// A new source group arrived on the live session.
+	fn on_group(&mut self, source: moq_net::group::Consumer) -> Result<(), Error> {
+		if self.fetching_sequence(source.sequence) {
+			// The sequence is granted to an in-flight fetch. Defer rather than
+			// skip: if the fetch fails, the group gets transcoded here instead
+			// of leaving an aborted GOP behind.
+			self.session().state = SessionState::Deferred(source);
 			return Ok(());
+		}
+		self.start_group(source)
+	}
+
+	/// Create the output group for a live source group and start transcoding.
+	fn start_group(&mut self, source: moq_net::group::Consumer) -> Result<(), Error> {
+		let sequence = source.sequence;
+		// Mirror the source sequence so fetches and rendition switches map 1:1.
+		let output = match self.producer.create_group(moq_net::group::Info { sequence }) {
+			Ok(output) => Some(output),
+			// A completed fetch already produced this group (an aborted one
+			// would have been replaced in place): every subscriber reads it
+			// from the shared cache, so don't transcode it a second time.
+			Err(moq_net::Error::Duplicate) => None,
+			Err(err) => return Err(err.into()),
 		};
 
-		let rung = rung.clone();
-		tasks.spawn(async move {
-			let _permit = permit;
+		self.live_latest = Some(self.live_latest.unwrap_or(0).max(sequence));
+		self.session().state = match output {
+			Some(output) => SessionState::Transcoding {
+				source,
+				output,
+				first: true,
+			},
+			None => SessionState::Idle,
+		};
+		self.unpark(sequence);
+		Ok(())
+	}
+
+	/// Frames arrived on the live session's current group (or it ended/failed).
+	fn on_frames(&mut self, frames: Result<Option<Vec<moq_mux::container::Frame>>, Error>) -> Result<(), Error> {
+		let session = self.session();
+		let SessionState::Transcoding {
+			source,
+			mut output,
+			mut first,
+		} = std::mem::replace(&mut session.state, SessionState::Idle)
+		else {
+			unreachable!("frames event without a live group");
+		};
+
+		let fed = (|| {
+			let Some(frames) = frames? else {
+				// The group ended cleanly.
+				return Ok(None);
+			};
+			for frame in &frames {
+				process_frame(&mut session.pipeline, &mut output, frame, first)?;
+				first = false;
+			}
+			Ok(Some(()))
+		})();
+
+		match fed {
+			Ok(Some(())) => {
+				// More frames to come: put the group back.
+				session.state = SessionState::Transcoding { source, output, first };
+				Ok(())
+			}
+			Ok(None) => Ok(output.finish()?),
+			Err(err) => {
+				let _ = output.abort(moq_net::Error::Cancel);
+				Err(err)
+			}
+		}
+	}
+
+	/// Decide who serves a requested group: an existing owner (park until its
+	/// group lands in the cache), the live session (park until it gets there),
+	/// or a new fetch task.
+	fn on_request(&mut self, request: moq_net::track::GroupRequest) {
+		let sequence = request.sequence();
+		let live_ahead = self.live.is_some() && self.live_latest.is_none_or(|latest| sequence > latest);
+		if self.fetching_sequence(sequence) || live_ahead {
+			self.parked.push(request);
+		} else {
+			self.spawn_fetch(request);
+		}
+	}
+
+	/// A fetch task reported back for its granted sequence.
+	fn on_fetched(&mut self, sequence: u64, success: bool) -> Result<(), Error> {
+		// A deferred live group first: the verdict decides who transcodes it.
+		if let Some(Live::Active(session)) = self.live.as_mut()
+			&& matches!(&session.state, SessionState::Deferred(source) if source.sequence == sequence)
+		{
+			let SessionState::Deferred(source) = std::mem::replace(&mut session.state, SessionState::Idle) else {
+				unreachable!()
+			};
+			if success {
+				// The fetched group serves every subscriber via the cache; the
+				// live session skips it and moves on.
+				self.live_latest = Some(self.live_latest.unwrap_or(0).max(sequence));
+				self.unpark(sequence);
+			} else {
+				// The fetch failed and aborted its group: take the sequence
+				// back and transcode it live (`create_group` replaces an
+				// aborted group in place).
+				self.start_group(source)?;
+			}
+			return Ok(());
+		}
+
+		if success {
+			// The group is in the cache; parked requests resolve from there.
+			self.parked.retain(|request| request.sequence() != sequence);
+		} else if let Some(at) = self.parked.iter().position(|request| request.sequence() == sequence) {
+			// The fetch failed but consumers still wait; retry with one of them.
+			let request = self.parked.remove(at);
+			self.spawn_fetch(request);
+		}
+		Ok(())
+	}
+
+	/// Re-route parked requests once the live session has handled `reached`:
+	/// a request at it resolves from the cache (dropping the request is fine,
+	/// the cache wins over its auto-rejection), older ones the live session
+	/// skipped become real fetches, newer or already-granted ones keep waiting.
+	fn unpark(&mut self, reached: u64) {
+		for request in std::mem::take(&mut self.parked) {
 			let sequence = request.sequence();
-			if let Err(err) = fetch(rung, request).await {
-				tracing::warn!(%err, sequence, "transcode fetch failed");
+			if sequence > reached || self.fetching_sequence(sequence) {
+				self.parked.push(request);
+			} else if sequence < reached {
+				self.spawn_fetch(request);
+			}
+			// sequence == reached: dropped, the group is in the cache.
+		}
+	}
+
+	/// Tear the live session down (the last subscriber left), aborting any
+	/// group it was mid-transcode and re-routing requests that waited on it.
+	fn stop_live(&mut self) {
+		self.abort_live_group();
+		self.live = None;
+
+		for request in std::mem::take(&mut self.parked) {
+			if self.fetching_sequence(request.sequence()) {
+				self.parked.push(request);
+			} else {
+				// Nobody will produce this group live anymore; fetch it.
+				self.spawn_fetch(request);
+			}
+		}
+	}
+
+	/// Abort the live session's in-progress output group, if any, so demand
+	/// loss (or teardown) mid-group reads as aborted downstream, not finished
+	/// short.
+	fn abort_live_group(&mut self) {
+		if let Some(Live::Active(session)) = self.live.as_mut()
+			&& let SessionState::Transcoding { output, .. } = &mut session.state
+		{
+			let _ = output.abort(moq_net::Error::Cancel);
+		}
+	}
+
+	/// Grant `request`'s sequence to a new fetch task; it owns the sequence
+	/// until it reports back via [`Event::Fetched`].
+	fn spawn_fetch(&mut self, request: moq_net::track::GroupRequest) {
+		let rung = self.rung.clone();
+		let limit = self.limit.clone();
+		let sequence = request.sequence();
+		let task = self.fetches.spawn(async move {
+			// Take a slot before any real work, so a burst queues here instead
+			// of building unbounded pipelines. The semaphore is never closed,
+			// so acquire only fails if the whole rung is torn down first.
+			let Ok(_permit) = limit.acquire_owned().await else {
+				return false;
+			};
+			match fetch(rung, request).await {
+				Ok(()) => true,
+				Err(err) => {
+					tracing::warn!(%err, sequence, "transcode fetch failed");
+					false
+				}
 			}
 		});
+		self.fetching.insert(task.id(), sequence);
+	}
+
+	/// Whether `sequence` is granted to an in-flight fetch task.
+	fn fetching_sequence(&self, sequence: u64) -> bool {
+		self.fetching.values().any(|&granted| granted == sequence)
+	}
+
+	/// The active live session; only called from events that imply one exists.
+	fn session(&mut self) -> &mut Session {
+		match self.live.as_mut() {
+			Some(Live::Active(session)) => session,
+			_ => unreachable!("live event without an active session"),
+		}
 	}
 }
 
@@ -209,35 +539,25 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 
 	let mut output = match request.accept(None) {
 		Ok(output) => output,
+		// Someone else produced the group between the request queueing and the
+		// grant (the live session racing the queue): it's in the cache and the
+		// waiting consumer reads it from there, so there's nothing to do.
+		Err(moq_net::Error::Duplicate) => return Ok(()),
 		Err(err) => return Err(err.into()),
 	};
-	transcode_group(&mut pipeline, &container, &mut source, &mut output, None).await?;
-	Ok(())
+	transcode_group(&mut pipeline, &container, &mut source, &mut output).await
 }
 
-/// Transcode one source group into one output group.
-///
-/// With a `demand` handle (the live path) the group is abandoned as soon as the
-/// track goes unused, returning `Ok(false)`; without one (the fetch path) the
-/// group always runs to completion and the encoder is drained at the end.
+/// Transcode one fetched source group into one output group, start to finish:
+/// the group is finished (and the encoder drained) on success, aborted on error.
 async fn transcode_group(
 	pipeline: &mut Pipeline,
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
 	output: &mut moq_net::group::Producer,
-	demand: Option<&moq_net::track::Demand>,
-) -> Result<bool, Error> {
-	match transcode_group_inner(pipeline, container, source, output, demand).await {
-		Ok(done) => {
-			if done {
-				output.finish()?;
-			} else {
-				// Demand disappeared mid-group: signal downstream that the
-				// group is incomplete rather than leaving it short-but-finished.
-				output.abort(moq_net::Error::Cancel)?;
-			}
-			Ok(done)
-		}
+) -> Result<(), Error> {
+	match transcode_group_inner(pipeline, container, source, output).await {
+		Ok(()) => Ok(output.finish()?),
 		Err(err) => {
 			let _ = output.abort(moq_net::Error::Cancel);
 			Err(err)
@@ -250,50 +570,46 @@ async fn transcode_group_inner(
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
 	output: &mut moq_net::group::Producer,
-	demand: Option<&moq_net::track::Demand>,
-) -> Result<bool, Error> {
+) -> Result<(), Error> {
 	let mut first = true;
 	let mut last_timestamp = 0u64;
 
-	loop {
-		let frames = match demand {
-			Some(demand) => tokio::select! {
-				frames = container.read(source) => frames,
-				_ = demand.unused() => return Ok(false),
-			},
-			None => container.read(source).await,
-		};
-		let Some(frames) = frames? else {
-			break;
-		};
-
-		for frame in frames {
-			let timestamp: u64 = frame
-				.timestamp
-				.as_micros()
-				.try_into()
-				.map_err(|_| moq_net::TimeOverflow)?;
-			last_timestamp = last_timestamp.max(timestamp);
-
-			// A group opens on a keyframe by construction, so the first frame is
-			// an IDR. The low-level `Container::read` the transcoder uses does not
-			// reconstruct the keyframe bit for legacy sources (that lives in the
-			// higher-level container consumer), so `first` is the reliable signal;
-			// OR in the container's own flag so CMAF mid-group keyframes still
-			// force an output IDR. This flag drives both the decoder (keyframe
-			// gating + parameter-set injection) and the encoder (forced IDR).
-			let keyframe = frame.keyframe || first;
+	while let Some(frames) = container.read(source).await? {
+		for frame in &frames {
+			last_timestamp = last_timestamp.max(process_frame(pipeline, output, frame, first)?);
 			first = false;
-
-			write(output, pipeline.process(&frame.payload, timestamp, keyframe)?)?;
 		}
 	}
 
-	if demand.is_none() {
-		// One-shot group: drain whatever the encoder still buffers.
-		write(output, pipeline.finish(last_timestamp)?)?;
-	}
-	Ok(true)
+	// One-shot group: drain whatever the encoder still buffers.
+	write(output, pipeline.finish(last_timestamp)?)?;
+	Ok(())
+}
+
+/// Transcode one media frame into the output group, returning its timestamp in
+/// microseconds.
+///
+/// A group opens on a keyframe by construction, so the first frame is an IDR.
+/// The low-level `Container::read` the transcoder uses does not reconstruct the
+/// keyframe bit for legacy sources (that lives in the higher-level container
+/// consumer), so `first` is the reliable signal; OR in the container's own flag
+/// so CMAF mid-group keyframes still force an output IDR. This flag drives both
+/// the decoder (keyframe gating + parameter-set injection) and the encoder
+/// (forced IDR).
+fn process_frame(
+	pipeline: &mut Pipeline,
+	output: &mut moq_net::group::Producer,
+	frame: &moq_mux::container::Frame,
+	first: bool,
+) -> Result<u64, Error> {
+	let timestamp: u64 = frame
+		.timestamp
+		.as_micros()
+		.try_into()
+		.map_err(|_| moq_net::TimeOverflow)?;
+	let keyframe = frame.keyframe || first;
+	write(output, pipeline.process(&frame.payload, timestamp, keyframe)?)?;
+	Ok(timestamp)
 }
 
 /// Append encoded packets to the output group in the legacy hang framing.

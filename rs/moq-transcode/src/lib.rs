@@ -147,7 +147,27 @@ mod tests {
 	struct Source {
 		broadcast: moq_net::broadcast::Producer,
 		_catalog: moq_mux::catalog::Producer,
-		_track: moq_net::track::Producer,
+		track: moq_net::track::Producer,
+		encoder: moq_video::encode::Encoder,
+	}
+
+	impl Source {
+		/// Append one group of `frames` gray frames to the video track.
+		fn append_group(&mut self, sequence: u64, frames: u64) {
+			let gray = vec![0x80u8; 320 * 240 * 4];
+			let mut group = self.track.create_group(sequence.into()).unwrap();
+			for index in 0..frames {
+				let timestamp = (sequence * frames + index) * 33_333;
+				for payload in self.encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
+					let frame = hang::container::Frame {
+						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
+						payload,
+					};
+					frame.encode(&mut group).unwrap();
+				}
+			}
+			group.finish().unwrap();
+		}
 	}
 
 	/// Build a 320x240 avc3 source broadcast: a catalog plus a video track with
@@ -169,36 +189,25 @@ mod tests {
 		catalog.lock().video.insert("video", video).unwrap();
 
 		let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
-		let mut track = broadcast.create_track("video", info).unwrap();
+		let track = broadcast.create_track("video", info).unwrap();
 
-		let mut encoder = moq_video::encode::Encoder::new(&{
+		let encoder = moq_video::encode::Encoder::new(&{
 			let mut config = moq_video::encode::Config::new(320, 240, 30);
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
 		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
 
-		for sequence in 0..groups {
-			let mut group = track.create_group(sequence.into()).unwrap();
-			for index in 0..frames {
-				let timestamp = (sequence * frames + index) * 33_333;
-				for payload in encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
-					let frame = hang::container::Frame {
-						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
-						payload,
-					};
-					frame.encode(&mut group).unwrap();
-				}
-			}
-			group.finish().unwrap();
-		}
-
-		Source {
+		let mut source = Source {
 			broadcast,
 			_catalog: catalog,
-			_track: track,
+			track,
+			encoder,
+		};
+		for sequence in 0..groups {
+			source.append_group(sequence, frames);
 		}
+		source
 	}
 
 	/// Whether a hardware decoder AND encoder are usable here (e.g. a Linux box
@@ -339,6 +348,60 @@ mod tests {
 		// finished transcode carries them all through.
 		let total = fetched.finished().await.unwrap();
 		assert_eq!(total, 5);
+
+		transcoder.abort();
+	}
+
+	/// A fetch for a group that doesn't exist yet parks in the rung's serving
+	/// loop until the live session produces it, then resolves from the shared
+	/// cache. The in-process source can't serve fetches at all (no dynamic
+	/// handler), so this only passes if the rung never spawns a fetch task for
+	/// a sequence the live session is heading toward.
+	#[tokio::test]
+	async fn live_edge_fetch_waits_for_live() {
+		let mut source = source_broadcast(1, 3);
+
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		// Subscribe and drain the first group, so the live session is provably
+		// active before the fetch goes out.
+		let track = loop {
+			match consumer.track("video/120p") {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("rung track: {err}"),
+			}
+		};
+		let mut subscriber = track.subscribe(None).await.unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
+		assert_eq!(group.sequence, 0);
+		group.finished().await.unwrap();
+
+		// Request tomorrow's group and give the serving loop time to route it.
+		// Nothing can serve it yet; the rung must hold the request, not fail it.
+		let pending = track.fetch_group(1, None);
+		for _ in 0..50 {
+			tokio::task::yield_now().await;
+		}
+
+		// The source produces group 1: the live session transcodes it once, and
+		// the subscriber and the parked fetch read that same cached group.
+		source.append_group(1, 3);
+		let mut fetched = pending.await.unwrap();
+		assert_eq!(fetched.finished().await.unwrap(), 3);
+
+		let mut live = subscriber.next_group().await.unwrap().unwrap();
+		assert_eq!(live.sequence, 1);
+		assert_eq!(live.finished().await.unwrap(), 3);
 
 		transcoder.abort();
 	}
