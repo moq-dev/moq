@@ -29,6 +29,7 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
 	IMF2DBuffer, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample, IMFTransform, MF_E_NO_MORE_TYPES,
@@ -353,7 +354,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		let mut out = Vec::new();
 
 		let sample = self.build_sample(&access_unit)?;
@@ -383,7 +384,7 @@ impl Backend for MediaFoundation {
 		Ok(out
 			.into_iter()
 			.map(|i420| Decoded {
-				timestamp_us,
+				timestamp,
 				frame: Frame::I420(i420),
 			})
 			.collect())

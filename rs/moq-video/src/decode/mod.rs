@@ -11,6 +11,7 @@
 //! yields [`Error::UnsupportedCodec`](crate::Error).
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 
 use crate::Error;
 
@@ -32,8 +33,10 @@ pub use decoder::{Config, Decoder, Kind};
 /// (the zero-copy transcode path), while [`into_i420`](Self::into_i420)
 /// downloads it.
 pub struct Frame {
-	/// Presentation timestamp in microseconds (from the container).
-	pub timestamp_us: u64,
+	/// Presentation timestamp, carried through from the container. It rides out of
+	/// the decoder with each picture, so a reordered frame (B-frames) keeps its own
+	/// time rather than the input access unit's.
+	pub timestamp: Timestamp,
 	/// Frame width in pixels (even).
 	pub width: u32,
 	/// Frame height in pixels (even).
