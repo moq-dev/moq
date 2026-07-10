@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
@@ -9,7 +9,7 @@ pub type PathOwned = Path<'static>;
 /// A trait for types that can be converted to a `Path`.
 ///
 /// When providing a String/str, any leading/trailing slashes are trimmed and multiple consecutive slashes are collapsed.
-/// When already a Path, normalization is skipped as a reference is returned.
+/// When already a Path, normalization is skipped and the underlying buffer is reused without copying.
 pub trait AsPath {
 	fn as_path(&self) -> Path<'_>;
 }
@@ -22,14 +22,14 @@ impl<'a> AsPath for &'a str {
 
 impl<'a> AsPath for &'a Path<'a> {
 	fn as_path(&self) -> Path<'a> {
-		// We don't normalize again nor do we make a copy.
-		Path(Cow::Borrowed(self.as_str()))
+		// We don't normalize again nor do we copy the bytes.
+		self.borrow()
 	}
 }
 
 impl AsPath for Path<'_> {
 	fn as_path(&self) -> Path<'_> {
-		Path(Cow::Borrowed(self.0.as_ref()))
+		self.borrow()
 	}
 }
 
@@ -45,14 +45,29 @@ impl<'a> AsPath for &'a String {
 	}
 }
 
+/// A borrowed slice of the path, or a suffix of a shared reference-counted buffer.
+///
+/// The `Shared` variant is what makes owned paths cheap: cloning bumps a refcount and
+/// suffix operations (strip_prefix, next_part) only advance `start`, so one allocation
+/// serves every copy of a path as it fans out to consumers.
+#[derive(Clone)]
+enum Repr<'a> {
+	Borrowed(&'a str),
+	Shared { buf: Arc<str>, start: usize },
+}
+
 /// A broadcast path that provides safe prefix matching operations.
 ///
-/// This type wraps a String but provides path-aware operations that respect
+/// This type wraps a string but provides path-aware operations that respect
 /// delimiter boundaries, preventing issues like "foo" matching "foobar".
 ///
 /// Paths are automatically trimmed of leading and trailing slashes on creation,
 /// making all slashes implicit at boundaries.
 /// All paths are RELATIVE; you cannot join with a leading slash to make an absolute path.
+///
+/// Owned paths ([`PathOwned`]) share one reference-counted allocation: cloning, converting
+/// a shared path with [`Path::to_owned`], and suffix operations like [`Path::strip_prefix`]
+/// do not copy the underlying bytes.
 ///
 /// # Examples
 /// ```
@@ -71,9 +86,8 @@ impl<'a> AsPath for &'a String {
 /// let joined = base.join("users");
 /// assert_eq!(joined.as_str(), "api/v1/users");
 /// ```
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Path<'a>(Cow<'a, str>);
+#[derive(Clone)]
+pub struct Path<'a>(Repr<'a>);
 
 impl<'a> Path<'a> {
 	/// Create a new Path from a string slice.
@@ -91,10 +105,24 @@ impl<'a> Path<'a> {
 				.filter(|s| !s.is_empty())
 				.collect::<Vec<_>>()
 				.join("/");
-			Self(Cow::Owned(normalized))
+			Self(Repr::Shared {
+				buf: normalized.into(),
+				start: 0,
+			})
 		} else {
 			// No normalization needed - use borrowed string
-			Self(Cow::Borrowed(trimmed))
+			Self(Repr::Borrowed(trimmed))
+		}
+	}
+
+	// A copy of this path skipping the first `n` bytes, reusing the shared buffer when possible.
+	fn slice_from(&'a self, n: usize) -> Path<'a> {
+		match &self.0 {
+			Repr::Borrowed(s) => Path(Repr::Borrowed(&s[n..])),
+			Repr::Shared { buf, start } => Path(Repr::Shared {
+				buf: buf.clone(),
+				start: start + n,
+			}),
 		}
 	}
 
@@ -126,17 +154,18 @@ impl<'a> Path<'a> {
 			return true;
 		}
 
-		if !self.0.starts_with(prefix.as_str()) {
+		let s = self.as_str();
+		if !s.starts_with(prefix.as_str()) {
 			return false;
 		}
 
 		// Check if the prefix is the exact match
-		if self.0.len() == prefix.len() {
+		if s.len() == prefix.len() {
 			return true;
 		}
 
 		// Otherwise, ensure the character after the prefix is a delimiter
-		self.0.as_bytes().get(prefix.len()) == Some(&b'/')
+		s.as_bytes().get(prefix.len()) == Some(&b'/')
 	}
 
 	pub fn strip_prefix(&'a self, prefix: impl AsPath) -> Option<Path<'a>> {
@@ -146,64 +175,85 @@ impl<'a> Path<'a> {
 			return Some(self.borrow());
 		}
 
-		if !self.0.starts_with(prefix.as_str()) {
+		let s = self.as_str();
+		if !s.starts_with(prefix.as_str()) {
 			return None;
 		}
 
 		// Check if the prefix is the exact match
-		if self.0.len() == prefix.len() {
-			return Some(Path(Cow::Borrowed("")));
+		if s.len() == prefix.len() {
+			return Some(Path::empty());
 		}
 
 		// Otherwise, ensure the character after the prefix is a delimiter
-		if self.0.as_bytes().get(prefix.len()) != Some(&b'/') {
+		if s.as_bytes().get(prefix.len()) != Some(&b'/') {
 			return None;
 		}
 
-		Some(Path(Cow::Borrowed(&self.0[prefix.len() + 1..])))
+		Some(self.slice_from(prefix.len() + 1))
 	}
 
 	/// Strip the directory component of the path, if any, and return the rest of the path.
 	pub fn next_part(&'a self) -> Option<(&'a str, Path<'a>)> {
-		if self.0.is_empty() {
+		let s = self.as_str();
+		if s.is_empty() {
 			return None;
 		}
 
-		if let Some(i) = self.0.find('/') {
-			let dir = &self.0[..i];
-			let rest = Path(Cow::Borrowed(&self.0[i + 1..]));
-			Some((dir, rest))
+		if let Some(i) = s.find('/') {
+			Some((&s[..i], self.slice_from(i + 1)))
 		} else {
-			Some((&self.0, Path(Cow::Borrowed(""))))
+			Some((s, Path::empty()))
 		}
 	}
 
 	pub fn as_str(&self) -> &str {
-		&self.0
+		match &self.0 {
+			Repr::Borrowed(s) => s,
+			Repr::Shared { buf, start } => &buf[*start..],
+		}
 	}
 
 	pub fn empty() -> Path<'static> {
-		Path(Cow::Borrowed(""))
+		Path(Repr::Borrowed(""))
 	}
 
 	pub fn is_empty(&self) -> bool {
-		self.0.is_empty()
+		self.as_str().is_empty()
 	}
 
 	pub fn len(&self) -> usize {
-		self.0.len()
+		self.as_str().len()
 	}
 
 	pub fn to_owned(&self) -> PathOwned {
-		Path(Cow::Owned(self.0.to_string()))
+		match &self.0 {
+			Repr::Borrowed("") => Path::empty(),
+			Repr::Borrowed(s) => Path(Repr::Shared {
+				buf: Arc::from(*s),
+				start: 0,
+			}),
+			Repr::Shared { buf, start } => Path(Repr::Shared {
+				buf: buf.clone(),
+				start: *start,
+			}),
+		}
 	}
 
 	pub fn into_owned(self) -> PathOwned {
-		Path(Cow::Owned(self.0.to_string()))
+		match self.0 {
+			Repr::Borrowed("") => Path::empty(),
+			Repr::Borrowed(s) => Path(Repr::Shared {
+				buf: Arc::from(s),
+				start: 0,
+			}),
+			Repr::Shared { buf, start } => Path(Repr::Shared { buf, start }),
+		}
 	}
 
+	/// A copy of this path bound to `self`'s lifetime, without copying the underlying bytes.
 	pub fn borrow(&'a self) -> Path<'a> {
-		Path(Cow::Borrowed(&self.0))
+		self.slice_from(0)
 	}
 
 	/// Join this path with another path component.
@@ -222,15 +272,58 @@ impl<'a> Path<'a> {
 	pub fn join(&self, other: impl AsPath) -> PathOwned {
 		let other = other.as_path();
 
-		if self.0.is_empty() {
-			Path(Cow::Owned(other.0.to_string()))
+		if self.is_empty() {
+			other.to_owned()
 		} else if other.is_empty() {
-			// Technically, we could avoid allocating here, but it's nicer to return a PathOwned.
 			self.to_owned()
 		} else {
 			// Since paths are trimmed, we always need to add a slash
-			Path(Cow::Owned(format!("{}/{}", self.0, other.as_str())))
+			Path(Repr::Shared {
+				buf: format!("{}/{}", self.as_str(), other.as_str()).into(),
+				start: 0,
+			})
 		}
+	}
+}
+
+// Comparisons, ordering, and hashing all go through `as_str()` so a borrowed and a
+// shared path with the same content behave identically (e.g. as map keys).
+impl<'b> PartialEq<Path<'b>> for Path<'_> {
+	fn eq(&self, other: &Path<'b>) -> bool {
+		self.as_str() == other.as_str()
+	}
+}
+
+impl Eq for Path<'_> {}
+
+impl PartialOrd for Path<'_> {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for Path<'_> {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		self.as_str().cmp(other.as_str())
+	}
+}
+
+impl std::hash::Hash for Path<'_> {
+	fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+		self.as_str().hash(state)
+	}
+}
+
+impl fmt::Debug for Path<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_tuple("Path").field(&self.as_str()).finish()
+	}
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Path<'_> {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(self.as_str())
 	}
 }
 
@@ -249,43 +342,25 @@ impl<'a> From<&'a String> for Path<'a> {
 
 impl Default for Path<'_> {
 	fn default() -> Self {
-		Self(Cow::Borrowed(""))
+		Path::empty()
 	}
 }
 
 impl From<String> for Path<'_> {
 	fn from(s: String) -> Self {
-		// It's annoying that this logic is duplicated, but I couldn't figure out how to reuse Path::new.
-		let trimmed = s.trim_start_matches('/').trim_end_matches('/');
-
-		// Check if we need to normalize (has multiple consecutive slashes)
-		if trimmed.contains("//") {
-			// Only allocate if we actually need to normalize
-			let normalized = trimmed
-				.split('/')
-				.filter(|s| !s.is_empty())
-				.collect::<Vec<_>>()
-				.join("/");
-			Self(Cow::Owned(normalized))
-		} else if trimmed == s {
-			// String is already trimmed and normalized, use it directly
-			Self(Cow::Owned(s))
-		} else {
-			// Need to trim but don't need to normalize internal slashes
-			Self(Cow::Owned(trimmed.to_string()))
-		}
+		Path::new(&s).into_owned()
 	}
 }
 
 impl AsRef<str> for Path<'_> {
 	fn as_ref(&self) -> &str {
-		&self.0
+		self.as_str()
 	}
 }
 
 impl Display for Path<'_> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "{}", self.0)
+		write!(f, "{}", self.as_str())
 	}
 }
 
@@ -954,6 +1029,50 @@ mod tests {
 		let list = PathPrefixes::new(["demo", "anon"]);
 		// Canonical order: sorted by length, then lexicographically
 		assert_eq!(list, vec!["anon".as_path(), "demo".as_path()]);
+	}
+
+	// Pointer-equality checks that owned paths share one allocation through the
+	// clone / to_owned / strip_prefix flow used by origin announce fan-out.
+	#[test]
+	fn test_owned_paths_share_allocation() {
+		let path = Path::new("customer/room/broadcast").to_owned();
+
+		// Cloning an owned path shares the buffer.
+		let cloned = path.clone();
+		assert_eq!(path.as_str().as_ptr(), cloned.as_str().as_ptr());
+
+		// as_path + to_owned (how notify queues a path per consumer) shares too.
+		let requeued = path.as_path().to_owned();
+		assert_eq!(path.as_str().as_ptr(), requeued.as_str().as_ptr());
+
+		// Stripping a prefix from an owned path is offset arithmetic, not a copy.
+		let stripped = path.strip_prefix("customer").unwrap().to_owned();
+		assert_eq!(stripped.as_str(), "room/broadcast");
+		assert_eq!(stripped.as_str().as_ptr(), path.as_str()["customer/".len()..].as_ptr());
+
+		// next_part shares the rest as well.
+		let (dir, rest) = path.next_part().unwrap();
+		assert_eq!(dir, "customer");
+		let rest = rest.to_owned();
+		assert_eq!(rest.as_str().as_ptr(), stripped.as_str().as_ptr());
+
+		// join produces an owned path whose clones share.
+		let joined = path.join("alice");
+		let joined2 = joined.clone();
+		assert_eq!(joined.as_str(), "customer/room/broadcast/alice");
+		assert_eq!(joined.as_str().as_ptr(), joined2.as_str().as_ptr());
+	}
+
+	#[test]
+	fn test_owned_empty_paths() {
+		// Empty paths never allocate and stay well-behaved.
+		let empty = Path::new("").to_owned();
+		assert!(empty.is_empty());
+		assert_eq!(empty, Path::empty());
+
+		let path = Path::new("foo").to_owned();
+		let rest = path.strip_prefix("foo").unwrap().to_owned();
+		assert!(rest.is_empty());
 	}
 
 	#[test]
