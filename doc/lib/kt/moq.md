@@ -89,6 +89,35 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+### Fetching raw groups
+
+Fetch retrieves one group by track name and group sequence without keeping a live subscription:
+
+```kotlin
+val group = consumer.fetchGroup(
+    "events",
+    42uL,
+    FetchGroupOptions(priority = 10u),
+)
+group.frames().collect { frame ->
+    println(frame.decodeToString())
+}
+```
+
+A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
+
+```kotlin
+val dynamic = track.dynamic()
+
+dynamic.requestedGroups().collect { request ->
+    val group = request.accept()
+    group.writeFrame(loadArchivedFrame(request.sequence()))
+    group.finish()
+}
+```
+
+Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
 ### On-demand raw tracks
 
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:

@@ -16,6 +16,7 @@ type (
 	Catalog            = ffi.MoqCatalog
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame
+	FetchGroupOptions  = ffi.MoqFetchGroupOptions
 	Subscription       = ffi.MoqSubscription
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo

@@ -25,7 +25,9 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
+typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
+typealias GroupRequest = uniffi.moq.MoqGroupRequest
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
@@ -44,6 +46,7 @@ typealias Video = uniffi.moq.MoqVideo
 typealias Audio = uniffi.moq.MoqAudio
 typealias Dimensions = uniffi.moq.MoqDimensions
 typealias Subscription = uniffi.moq.MoqSubscription
+typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
 typealias AudioCodec = uniffi.moq.MoqAudioCodec

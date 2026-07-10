@@ -9,9 +9,11 @@ from moq_ffi import (
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
     MoqGroupProducer,
+    MoqGroupRequest,
     MoqInit,
     MoqMediaProducer,
     MoqMediaStreamProducer,
+    MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
 )
@@ -118,6 +120,10 @@ class TrackProducer:
         """Wait until this track has no active subscribers."""
         await self._inner.unused()
 
+    def dynamic(self) -> TrackDynamic:
+        """Serve fetches for groups that are not currently cached."""
+        return TrackDynamic(self._inner.dynamic())
+
     def append_group(self) -> GroupProducer:
         """Start a new group; write frames into it, then finish()."""
         return GroupProducer(self._inner.append_group())
@@ -165,9 +171,59 @@ class TrackRequest:
         """
         return TrackProducer(self._inner.accept(info))
 
+    def dynamic(self) -> TrackDynamic:
+        """Create a fetch handler before accepting this requested track."""
+        return TrackDynamic(self._inner.dynamic())
+
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""
         self._inner.abort(error_code)
+
+
+class GroupRequest:
+    """A request to produce one uncached group for a fetch consumer."""
+
+    def __init__(self, inner: MoqGroupRequest) -> None:
+        self._inner = inner
+
+    @property
+    def sequence(self) -> int:
+        """The requested group sequence within the track."""
+        return self._inner.sequence()
+
+    @property
+    def priority(self) -> int:
+        """The consumer's delivery priority for this fetch."""
+        return self._inner.priority()
+
+    def accept(self) -> GroupProducer:
+        """Accept the request and return a producer for the group."""
+        return GroupProducer(self._inner.accept())
+
+    def abort(self, error_code: int) -> None:
+        """Reject the fetch with an application error code."""
+        self._inner.abort(error_code)
+
+
+class TrackDynamic:
+    """Async source of uncached group requests for one track."""
+
+    def __init__(self, inner: MoqTrackDynamic) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> GroupRequest:
+        return await self.requested_group()
+
+    async def requested_group(self) -> GroupRequest:
+        """Wait for the next uncached group request."""
+        return GroupRequest(await self._inner.requested_group())
+
+    def cancel(self) -> None:
+        """Cancel current and future group request waits."""
+        self._inner.cancel()
 
 
 class AudioProducer:

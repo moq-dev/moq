@@ -130,8 +130,26 @@ pub struct MoqBroadcastDynamic {
 	task: Task<DynamicProducer>,
 }
 
+/// Serves on-demand fetches of uncached groups for one track.
+#[derive(uniffi::Object)]
+pub struct MoqTrackDynamic {
+	task: Task<TrackDynamicProducer>,
+}
+
+impl MoqTrackDynamic {
+	fn new(inner: moq_net::track::Dynamic) -> Self {
+		Self {
+			task: Task::new(TrackDynamicProducer { inner }),
+		}
+	}
+}
+
 struct DynamicProducer {
 	inner: moq_net::broadcast::Dynamic,
+}
+
+struct TrackDynamicProducer {
+	inner: moq_net::track::Dynamic,
 }
 
 impl DynamicProducer {
@@ -141,6 +159,13 @@ impl DynamicProducer {
 		// The subscriber's subscribe stays pending until then.
 		let request = self.inner.requested_track().await?;
 		Ok(Arc::new(MoqTrackRequest::new(request)))
+	}
+}
+
+impl TrackDynamicProducer {
+	async fn requested_group(&mut self) -> Result<Arc<MoqGroupRequest>, MoqError> {
+		let request = self.inner.requested_group().await?;
+		Ok(Arc::new(MoqGroupRequest::new(request)))
 	}
 }
 
@@ -407,6 +432,79 @@ impl MoqBroadcastDynamic {
 	}
 }
 
+// ---- Dynamic Track Producer ----
+
+#[uniffi::export]
+impl MoqTrackDynamic {
+	/// Wait for the next fetch of an uncached group.
+	///
+	/// Accept the returned request to produce the group, or abort it with an
+	/// application error. Cached groups are served without reaching this method.
+	pub async fn requested_group(&self) -> Result<Arc<MoqGroupRequest>, MoqError> {
+		self.task
+			.run(|mut state| async move { state.requested_group().await })
+			.await
+	}
+
+	/// Cancel all current and future `requested_group()` calls.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
+}
+
+/// An uncached group requested by a fetch consumer.
+#[derive(uniffi::Object)]
+pub struct MoqGroupRequest {
+	sequence: u64,
+	priority: u8,
+	inner: std::sync::Mutex<Option<moq_net::track::GroupRequest>>,
+}
+
+impl MoqGroupRequest {
+	fn new(request: moq_net::track::GroupRequest) -> Self {
+		Self {
+			sequence: request.sequence(),
+			priority: request.priority(),
+			inner: std::sync::Mutex::new(Some(request)),
+		}
+	}
+
+	fn take(&self) -> Result<moq_net::track::GroupRequest, MoqError> {
+		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
+	}
+}
+
+#[uniffi::export]
+impl MoqGroupRequest {
+	/// The requested group sequence within the track.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// The consumer's delivery priority for this fetch.
+	pub fn priority(&self) -> u8 {
+		self.priority
+	}
+
+	/// Accept the request and return a producer for filling the fetched group.
+	pub fn accept(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let group = self.take()?.accept(None)?;
+		Ok(Arc::new(MoqGroupProducer {
+			sequence: group.sequence,
+			inner: std::sync::Mutex::new(Some(group)),
+		}))
+	}
+
+	/// Reject the fetch with an application error code.
+	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
+		self.take()?.reject(moq_net::Error::App(error_code));
+		Ok(())
+	}
+}
+
 // ---- Track Request ----
 
 /// A track requested by a subscriber that hasn't been accepted yet.
@@ -440,6 +538,18 @@ impl MoqTrackRequest {
 		let guard = self.inner.lock().unwrap();
 		let request = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(request.name().to_string())
+	}
+
+	/// Create a handler for uncached group fetches before accepting this track.
+	///
+	/// Obtain and retain this handle before `accept()` when the track itself was
+	/// requested by a fetch. This keeps the pending group request serviceable across
+	/// the transition from request to producer.
+	pub fn dynamic(&self) -> Result<Arc<MoqTrackDynamic>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.inner.lock().unwrap();
+		let request = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(Arc::new(MoqTrackDynamic::new(request.dynamic())))
 	}
 
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
@@ -480,6 +590,17 @@ impl MoqTrackProducer {
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(track.name().to_string())
+	}
+
+	/// Create a handler for uncached group fetches on this track.
+	///
+	/// Hold the returned object for as long as cache misses should wait to be
+	/// served. Without a live dynamic handler, a missing group fails with `NotFound`.
+	pub fn dynamic(&self) -> Result<Arc<MoqTrackDynamic>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.inner.lock().unwrap();
+		let track = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(Arc::new(MoqTrackDynamic::new(track.dynamic())))
 	}
 
 	/// Wait until this track has at least one active consumer.

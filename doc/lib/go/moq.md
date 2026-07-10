@@ -89,6 +89,44 @@ broadcast.Finish()
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
 
+## Fetching raw groups
+
+Fetch retrieves one group by track name and group sequence without keeping a live subscription:
+
+```go
+group, err := consumer.FetchGroup("events", 42, &moq.FetchGroupOptions{Priority: 10})
+if err != nil {
+    log.Fatal(err)
+}
+for frame, err := range group.Frames(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%s\n", frame)
+}
+```
+
+A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
+
+```go
+dynamic, err := track.Dynamic()
+if err != nil {
+    log.Fatal(err)
+}
+request, err := dynamic.RequestedGroup(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+producer, err := request.Accept()
+if err != nil {
+    log.Fatal(err)
+}
+_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()))
+_ = producer.Finish()
+```
+
+Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:
