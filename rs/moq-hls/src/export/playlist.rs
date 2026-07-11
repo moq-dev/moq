@@ -1,65 +1,65 @@
-//! Hand-written HLS / LL-HLS media playlist generation.
+//! Hand-written HLS media playlist generation.
 //!
-//! `m3u8-rs` can parse classic playlists but cannot emit the LL-HLS tags
-//! (`EXT-X-PART`, `EXT-X-PART-INF`, `EXT-X-SERVER-CONTROL`,
-//! `EXT-X-PRELOAD-HINT`), so the export playlists are written by hand. URIs are
-//! relative to the media playlist (`/<broadcast>/<kind>/<rendition>/media.m3u8`),
-//! so they resolve against the rendition directory.
+//! Rendered purely from timeline records: each segment is a starting group plus the gap to
+//! the next record. URIs are relative to the media playlist
+//! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
+//! directory.
 
 use std::fmt::Write;
+use std::time::SystemTime;
 
-use super::store::Snapshot;
+/// fMP4 segments via `EXT-X-MAP` require protocol version 6.
+const VERSION: u32 = 6;
 
-/// LL-HLS compatibility version: required for `EXT-X-PART` and friends.
-const VERSION: u32 = 9;
+/// Everything a media playlist render needs; built by
+/// [`Rendition::playlist`](super::Rendition::playlist).
+pub struct Snapshot {
+	/// `EXT-X-TARGETDURATION`, in whole seconds.
+	pub target_duration: u64,
+	/// `EXT-X-MEDIA-SEQUENCE` of the first listed segment.
+	pub media_sequence: u64,
+	/// Listed segments, oldest first.
+	pub segments: Vec<Segment>,
+	/// Whether the broadcast ended (`EXT-X-ENDLIST`).
+	pub finished: bool,
+	/// Wall-clock time of the first listed segment (`EXT-X-PROGRAM-DATE-TIME`), when the
+	/// timeline advertises a wall-clock anchor.
+	pub program_date_time: Option<SystemTime>,
+}
+
+/// One listed segment.
+pub struct Segment {
+	/// The starting group sequence; the URI is `seg/{group}.m4s`.
+	pub group: u64,
+	/// `EXTINF` duration in seconds.
+	pub duration: f64,
+}
 
 /// Render a media playlist for one rendition from a [`Snapshot`].
 pub fn render_media(snapshot: &Snapshot) -> String {
-	// PART-HOLD-BACK must be at least 3x the part target (HLS spec).
-	let part_hold_back = snapshot.part_target * 3.0;
-
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
 	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
-	let _ = writeln!(
-		out,
-		"#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={part_hold_back:.3}"
-	);
-	let _ = writeln!(out, "#EXT-X-PART-INF:PART-TARGET={:.3}", snapshot.part_target);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
-	if snapshot.discontinuity_sequence > 0 {
-		let _ = writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{}", snapshot.discontinuity_sequence);
-	}
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
 
-	for segment in &snapshot.segments {
-		if segment.discontinuity {
-			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
-		}
-		for (index, part) in segment.parts.iter().enumerate() {
-			let independent = if part.independent { ",INDEPENDENT=YES" } else { "" };
+	for (index, segment) in snapshot.segments.iter().enumerate() {
+		if index == 0
+			&& let Some(pdt) = snapshot.program_date_time
+		{
 			let _ = writeln!(
 				out,
-				"#EXT-X-PART:DURATION={:.5},URI=\"part/{}/{}.m4s\"{}",
-				part.duration, segment.sequence, index, independent
+				"#EXT-X-PROGRAM-DATE-TIME:{}",
+				humantime::format_rfc3339_millis(pdt)
 			);
 		}
-		if segment.complete {
-			let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
-			let _ = writeln!(out, "seg/{}.m4s", segment.sequence);
-		}
+		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
+		let _ = writeln!(out, "seg/{}.m4s", segment.group);
 	}
 
 	if snapshot.finished {
 		let _ = writeln!(out, "#EXT-X-ENDLIST");
-	} else {
-		// Hint the next part at the live edge so the player can pre-request it.
-		let (sequence, index) = match snapshot.segments.last() {
-			Some(last) if !last.complete => (last.sequence, last.parts.len()),
-			_ => (snapshot.next_sequence, 0),
-		};
-		let _ = writeln!(out, "#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part/{sequence}/{index}.m4s\"");
 	}
 
 	out
@@ -67,149 +67,55 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::export::store::{PartMeta, SegmentMeta};
+	use std::time::Duration;
 
-	fn part(duration: f64, independent: bool) -> PartMeta {
-		PartMeta { duration, independent }
-	}
+	use super::*;
 
 	#[test]
-	fn renders_ll_hls_tags() {
+	fn renders_live_playlist() {
 		let snapshot = Snapshot {
-			init_ready: true,
-			part_target: 0.5,
-			target_duration: 1,
+			target_duration: 2,
 			media_sequence: 10,
-			discontinuity_sequence: 0,
-			next_sequence: 12,
 			segments: vec![
-				SegmentMeta {
-					sequence: 10,
-					parts: vec![part(0.5, true), part(0.5, false)],
-					duration: 1.0,
-					complete: true,
-					discontinuity: false,
+				Segment {
+					group: 10,
+					duration: 2.0,
 				},
-				SegmentMeta {
-					sequence: 11,
-					parts: vec![part(0.5, true)],
-					duration: 0.5,
-					complete: false,
-					discontinuity: false,
+				Segment {
+					group: 11,
+					duration: 1.96,
 				},
 			],
 			finished: false,
+			program_date_time: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 		};
 
 		let out = render_media(&snapshot);
-
-		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
-		assert!(!out.contains("#EXT-X-DISCONTINUITY"));
-		assert!(out.contains("#EXT-X-TARGETDURATION:1\n"));
-		// PART-HOLD-BACK must be >= 3x PART-TARGET.
-		assert!(out.contains("PART-HOLD-BACK=1.500"));
-		assert!(out.contains("CAN-BLOCK-RELOAD=YES"));
-		assert!(out.contains("#EXT-X-PART-INF:PART-TARGET=0.500\n"));
+		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:6\n"));
+		assert!(out.contains("#EXT-X-TARGETDURATION:2\n"));
 		assert!(out.contains("#EXT-X-MEDIA-SEQUENCE:10\n"));
 		assert!(out.contains("#EXT-X-MAP:URI=\"init.mp4\"\n"));
-		// First part of the complete segment is independent; the second is not.
-		assert!(out.contains("#EXT-X-PART:DURATION=0.50000,URI=\"part/10/0.m4s\",INDEPENDENT=YES\n"));
-		assert!(out.contains("#EXT-X-PART:DURATION=0.50000,URI=\"part/10/1.m4s\"\n"));
-		assert!(!out.contains("part/10/1.m4s\",INDEPENDENT"));
-		// Completed segment gets an EXTINF + segment URI.
-		assert!(out.contains("#EXTINF:1.00000,\nseg/10.m4s\n"));
-		// Live edge: preload hint points at the next (not-yet-present) part.
-		assert!(out.contains("#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part/11/1.m4s\"\n"));
+		assert!(out.contains("#EXT-X-PROGRAM-DATE-TIME:2025-07-07T00:00:00.123Z\n"));
+		assert!(out.contains("#EXTINF:2.00000,\nseg/10.m4s\n"));
+		assert!(out.contains("#EXTINF:1.96000,\nseg/11.m4s\n"));
 		assert!(!out.contains("#EXT-X-ENDLIST"));
 	}
 
 	#[test]
-	fn finished_playlist_has_endlist_and_no_preload() {
+	fn finished_playlist_has_endlist() {
 		let snapshot = Snapshot {
-			init_ready: true,
-			part_target: 1.0,
-			target_duration: 1,
+			target_duration: 4,
 			media_sequence: 0,
-			discontinuity_sequence: 0,
-			next_sequence: 1,
-			segments: vec![SegmentMeta {
-				sequence: 0,
-				parts: vec![part(1.0, true)],
-				duration: 1.0,
-				complete: true,
-				discontinuity: false,
+			segments: vec![Segment {
+				group: 0,
+				duration: 4.0,
 			}],
 			finished: true,
+			program_date_time: None,
 		};
 
 		let out = render_media(&snapshot);
 		assert!(out.contains("#EXT-X-ENDLIST\n"));
-		assert!(!out.contains("#EXT-X-PRELOAD-HINT"));
-	}
-
-	#[test]
-	fn discontinuity_precedes_resumed_segment() {
-		let snapshot = Snapshot {
-			init_ready: true,
-			part_target: 1.0,
-			target_duration: 1,
-			media_sequence: 0,
-			discontinuity_sequence: 0,
-			next_sequence: 2,
-			segments: vec![
-				SegmentMeta {
-					sequence: 0,
-					parts: vec![part(1.0, true)],
-					duration: 1.0,
-					complete: true,
-					discontinuity: false,
-				},
-				// First segment after a resume: tagged discontinuous.
-				SegmentMeta {
-					sequence: 1,
-					parts: vec![part(1.0, true)],
-					duration: 1.0,
-					complete: true,
-					discontinuity: true,
-				},
-			],
-			finished: false,
-		};
-
-		let out = render_media(&snapshot);
-		// The tag precedes seg 1's parts, not seg 0's.
-		let disc = out.find("#EXT-X-DISCONTINUITY").expect("discontinuity tag");
-		let seg0 = out.find("part/0/0.m4s").expect("seg 0 part");
-		let seg1 = out.find("part/1/0.m4s").expect("seg 1 part");
-		assert!(
-			seg0 < disc && disc < seg1,
-			"discontinuity must sit between seg 0 and seg 1"
-		);
-	}
-
-	#[test]
-	fn emits_discontinuity_sequence_when_nonzero() {
-		let snapshot = Snapshot {
-			init_ready: true,
-			part_target: 1.0,
-			target_duration: 6,
-			media_sequence: 8,
-			discontinuity_sequence: 2,
-			next_sequence: 9,
-			segments: vec![SegmentMeta {
-				sequence: 8,
-				parts: vec![part(1.0, true)],
-				duration: 1.0,
-				complete: true,
-				discontinuity: false,
-			}],
-			finished: false,
-		};
-
-		let out = render_media(&snapshot);
-
-		assert!(out.contains("#EXT-X-TARGETDURATION:6\n"));
-		assert!(out.contains("#EXT-X-DISCONTINUITY-SEQUENCE:2\n"));
+		assert!(!out.contains("PROGRAM-DATE-TIME"));
 	}
 }

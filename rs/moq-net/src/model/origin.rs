@@ -9,9 +9,10 @@ use std::{
 use rand::RngExt;
 use web_async::Lock;
 
+use super::WeakCache;
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
-	coding::{Decode, DecodeError, Encode, EncodeError},
+	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 };
 
 /// A relay origin, identified by a 62-bit varint on the wire.
@@ -951,9 +952,11 @@ impl Producer {
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this producer may
 	/// publish under (after [`scope`](Self::scope) / [`with_root`](Self::with_root)). A full-scope
-	/// producer (the default from [`Origin::produce`]) never fails. Callers must not publish a
-	/// broadcast whose hop chain already contains this origin's id (it would form a routing loop);
-	/// relays filter such reflections before they reach here, checked by a `debug_assert`.
+	/// producer (the default from [`Origin::produce`]) never fails. Fails with
+	/// [`Error::BoundsExceeded`] if the full rooted path exceeds [`Path::MAX_PARTS`]. Callers must
+	/// not publish a broadcast whose hop chain already contains this origin's id (it would form a
+	/// routing loop); relays filter such reflections before they reach here, checked by a
+	/// `debug_assert`.
 	///
 	/// If there is already a broadcast with the same path, the new one replaces the active only
 	/// if it has a shorter hop path, or an equal-length path that wins a deterministic tie-break
@@ -980,8 +983,14 @@ impl Producer {
 		let (node, rest) = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
 		let full = self.root.join(&path).to_owned();
 
-		node.lock().publish(&full, &broadcast, &rest);
+		// A decoded announce prefix and suffix are each within the wire limit, but their
+		// join might not be. Enforcing here bounds the tree depth and guarantees the path
+		// can be re-encoded when forwarded.
+		if full.parts().count() > Path::MAX_PARTS {
+			return Err(BoundsExceeded.into());
+		}
 
+		node.lock().publish(&full, &broadcast, &rest);
 		Ok(Publish {
 			node,
 			full,
@@ -1164,8 +1173,9 @@ struct OriginDynamicState {
 	// Broadcasts a handler has already served, kept weakly so a repeat request for the
 	// same path resolves to a shared clone instead of re-invoking the handler (which would
 	// open a duplicate upstream subscription). Weak so a served broadcast still closes once
-	// its real consumers drop; a stale (closed) entry is evicted lazily on the next request.
-	served: HashMap<PathOwned, broadcast::WeakConsumer>,
+	// its real consumers drop. The cache reclaims closed entries incrementally on insert, so a
+	// long-lived origin serving many distinct one-shot paths stays bounded by the live count.
+	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
 
 	// The number of live `Dynamic` handlers. While zero, `request_broadcast`
 	// fails fast with `Unroutable` rather than queueing a request nobody will serve.
@@ -1333,14 +1343,19 @@ impl Request {
 
 		// Move the entry out of the in-flight queue and into the weak `served` cache, so repeat
 		// requests for this path share the same broadcast instead of asking the handler to serve
-		// (and subscribe upstream) again.
-		if let Ok(mut state) = self.state.write() {
-			state.served.insert(self.path.clone(), broadcast.weak());
+		// (and subscribe upstream) again. Re-check under the lock: if a live broadcast was already
+		// served for this path while we were fetching upstream, dedup onto it and drop ours rather
+		// than replace a good entry with a duplicate subscription.
+		let resolved = if let Ok(mut state) = self.state.write() {
+			let existing = state.served.insert(self.path.clone(), broadcast.weak());
 			state.requests.remove(&self.path);
-		}
+			existing.map(|weak| weak.consume()).unwrap_or(broadcast)
+		} else {
+			broadcast
+		};
 
 		if let Ok(mut pending) = self.producer.write() {
-			pending.resolved = Some(Ok(broadcast));
+			pending.resolved = Some(Ok(resolved));
 		}
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
@@ -1664,13 +1679,10 @@ impl Consumer {
 		};
 
 		// Reuse a still-live broadcast a handler already served for this path, so repeat
-		// requests share one upstream subscription. A closed entry is stale; drop it and
-		// re-serve below.
+		// requests share one upstream subscription. A closed entry is stale; `get` drops it
+		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			if !weak.is_closed() {
-				return kio::Pending::new(Requested::ready(weak.consume()));
-			}
-			state.served.remove(&absolute);
+			return kio::Pending::new(Requested::ready(weak.consume()));
 		}
 
 		// Coalesce onto a queued request for the same path; otherwise register a new one.
@@ -2434,6 +2446,25 @@ mod tests {
 		assert!(!limited_producer.publish_broadcast_spawn("notallowed", broadcast.consume()));
 		assert!(!limited_producer.publish_broadcast_spawn("allowed", broadcast.consume())); // Parent of allowed path
 		assert!(!limited_producer.publish_broadcast_spawn("other/path", broadcast.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_publish_max_parts() {
+		let origin = Origin::random().produce();
+		let broadcast = broadcast::Info::new().produce();
+
+		let at_limit = (0..Path::MAX_PARTS)
+			.map(|i| i.to_string())
+			.collect::<Vec<_>>()
+			.join("/");
+		assert!(origin.publish_broadcast_spawn(at_limit.as_str(), broadcast.consume()));
+
+		let too_deep = format!("{at_limit}/extra");
+		assert!(!origin.publish_broadcast_spawn(too_deep.as_str(), broadcast.consume()));
+
+		// The root counts toward the limit; a joined path past 32 parts is rejected.
+		let rooted = origin.with_root("root").expect("wildcard allows any root");
+		assert!(!rooted.publish_broadcast_spawn(at_limit.as_str(), broadcast.consume()));
 	}
 
 	#[tokio::test]
@@ -3439,6 +3470,34 @@ mod tests {
 		assert_eq!(request.path(), &Path::new("fallback"));
 		request.accept(&served);
 		assert!(request_fut.await.unwrap().is_clone(&served.consume()));
+	}
+
+	// Serving many distinct one-shot paths that each close must not grow the `served` cache
+	// unboundedly: the amortized GC on `accept` reclaims the stale entries left by closed ones.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_served_cache_bounded() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		for i in 0..100 {
+			let path = format!("one-shot/{i}");
+			let request_fut = consumer.request_broadcast(&path);
+			let served = broadcast::Info::new().produce();
+			let request = dynamic.requested_broadcast().await.unwrap();
+			request.accept(&served);
+			request_fut.await.unwrap();
+			// Close the served broadcast; its cache entry is now stale.
+			drop(served);
+		}
+
+		// The GC keeps the map bounded by the live count (zero here) plus a small probe window,
+		// rather than one entry per distinct path.
+		assert!(
+			origin.dynamic.read().served.len() <= 4,
+			"stale served entries must be reclaimed, not accumulate per distinct path: {}",
+			origin.dynamic.read().served.len()
+		);
 	}
 
 	// A repeat request in the window after the handler picks one up but before it accepts

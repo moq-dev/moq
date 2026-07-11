@@ -140,7 +140,9 @@ impl Video {
 			// Flatten to CPU bytes outside the lock (a GPU frame downloads here),
 			// then hold the lock only to buffer it; release before the callback.
 			let frame = VideoFrame {
-				timestamp_us: frame.timestamp_us,
+				// The C ABI carries microseconds; the decoded frame's Timestamp is
+				// constrained to a QUIC VarInt, so the microsecond value fits a u64.
+				timestamp_us: frame.timestamp.as_micros() as u64,
 				width: frame.width,
 				height: frame.height,
 				data: frame.into_i420()?,

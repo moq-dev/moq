@@ -253,7 +253,11 @@ async fn transcode_group_inner(
 	demand: Option<&moq_net::track::Demand>,
 ) -> Result<bool, Error> {
 	let mut first = true;
-	let mut last_timestamp = 0u64;
+	// The latest presentation time seen, tracked so a one-shot group can stamp any
+	// packets the encoder still holds at the end. `None` until the first frame:
+	// `Timestamp` compares by raw value at a fixed scale, so there's no scale-neutral
+	// zero to seed it with (the source's scale isn't known until a frame arrives).
+	let mut last_timestamp: Option<moq_net::Timestamp> = None;
 
 	loop {
 		let frames = match demand {
@@ -268,12 +272,9 @@ async fn transcode_group_inner(
 		};
 
 		for frame in frames {
-			let timestamp: u64 = frame
-				.timestamp
-				.as_micros()
-				.try_into()
-				.map_err(|_| moq_net::TimeOverflow)?;
-			last_timestamp = last_timestamp.max(timestamp);
+			let timestamp = frame.timestamp;
+			// All source frames share one scale, so this `max` never crosses scales.
+			last_timestamp = Some(last_timestamp.map_or(timestamp, |last| last.max(timestamp)));
 
 			// A group opens on a keyframe by construction, so the first frame is
 			// an IDR. The low-level `Container::read` the transcoder uses does not
@@ -289,20 +290,18 @@ async fn transcode_group_inner(
 		}
 	}
 
-	if demand.is_none() {
-		// One-shot group: drain whatever the encoder still buffers.
+	if let (None, Some(last_timestamp)) = (demand, last_timestamp) {
+		// One-shot group: drain whatever the encoder still buffers, stamping it with
+		// the last presentation time we saw. No frames read means nothing to drain.
 		write(output, pipeline.finish(last_timestamp)?)?;
 	}
 	Ok(true)
 }
 
 /// Append encoded packets to the output group in the legacy hang framing.
-fn write(output: &mut moq_net::group::Producer, packets: Vec<(u64, Bytes)>) -> Result<(), Error> {
+fn write(output: &mut moq_net::group::Producer, packets: Vec<(moq_net::Timestamp, Bytes)>) -> Result<(), Error> {
 	for (timestamp, payload) in packets {
-		let frame = hang::container::Frame {
-			timestamp: moq_net::Timestamp::from_micros(timestamp)?,
-			payload,
-		};
+		let frame = hang::container::Frame { timestamp, payload };
 		frame.encode(output)?;
 	}
 	Ok(())
@@ -348,11 +347,16 @@ impl Pipeline {
 	}
 
 	/// Transcode one container payload into zero or more encoded packets, each
-	/// paired with its presentation timestamp in microseconds.
-	fn process(&mut self, payload: &Bytes, timestamp: u64, keyframe: bool) -> Result<Vec<(u64, Bytes)>, Error> {
+	/// paired with its presentation timestamp.
+	fn process(
+		&mut self,
+		payload: &Bytes,
+		timestamp: moq_net::Timestamp,
+		keyframe: bool,
+	) -> Result<Vec<(moq_net::Timestamp, Bytes)>, Error> {
 		let mut packets = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
-			let raw_timestamp = raw.timestamp_us;
+			let raw_timestamp = raw.timestamp;
 			let encoded = if (raw.width, raw.height) == (self.width, self.height) {
 				// Already at the rung size (the decoder scaled): feed the frame
 				// through as-is, keeping a GPU frame on the GPU.
@@ -370,7 +374,7 @@ impl Pipeline {
 	}
 
 	/// Drain the encoder, pairing any buffered packets with `timestamp`.
-	fn finish(&mut self, timestamp: u64) -> Result<Vec<(u64, Bytes)>, Error> {
+	fn finish(&mut self, timestamp: moq_net::Timestamp) -> Result<Vec<(moq_net::Timestamp, Bytes)>, Error> {
 		Ok(self
 			.encoder
 			.finish()?

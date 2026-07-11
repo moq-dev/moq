@@ -27,6 +27,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"], optional = true }
 bytes = "1"
 hang = { workspace = true }
+humantime = "2"
 kio = { workspace = true }
 m3u8-rs = "6"
 moq-mux = { workspace = true }

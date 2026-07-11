@@ -16,9 +16,11 @@ import uniffi.moq.MoqCatalogConsumer
 import uniffi.moq.MoqException
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
+import uniffi.moq.MoqGroupRequest
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqOriginConsumer
 import uniffi.moq.MoqTrackConsumer
+import uniffi.moq.MoqTrackDynamic
 import uniffi.moq.MoqTrackRequest
 
 /**
@@ -99,6 +101,16 @@ fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(requestedTrack())
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of uncached group requests for one track. */
+fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(requestedGroup())
     }
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()

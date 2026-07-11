@@ -19,6 +19,8 @@ public typealias AudioFormat = MoqFFI.MoqAudioFormat
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias Container = MoqFFI.Container
 public typealias Subscription = MoqFFI.MoqSubscription
+/// Options for fetching one complete group by sequence.
+public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet

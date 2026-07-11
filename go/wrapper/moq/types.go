@@ -14,11 +14,14 @@ type (
 	AudioFormat        = ffi.MoqAudioFormat
 	AudioFrame         = ffi.MoqAudioFrame
 	Catalog            = ffi.MoqCatalog
+	ConnectionStats    = ffi.MoqConnectionStats
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame
+	FetchGroupOptions  = ffi.MoqFetchGroupOptions
 	Subscription       = ffi.MoqSubscription
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo
+	VideoHint          = ffi.MoqVideoHint
 
 	// Container selects how subscribed media frames are demuxed. Build one with
 	// LegacyContainer, CmafContainer, or LocContainer.

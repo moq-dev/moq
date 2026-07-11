@@ -30,12 +30,12 @@ export class Track {
 	}
 
 	async #encode(w: Writer) {
-		await w.string(this.broadcast);
+		await w.string(Path.encode(this.broadcast));
 		await w.string(this.track);
 	}
 
 	static async #decode(r: Reader): Promise<Track> {
-		const broadcast = Path.from(await r.string());
+		const broadcast = Path.decode(await r.string());
 		const track = await r.string();
 		return new Track(broadcast, track);
 	}

@@ -60,6 +60,14 @@ pub enum MoqError {
 	#[error("forbidden")]
 	Forbidden,
 
+	/// The requested track or group is not available.
+	#[error("not found")]
+	NotFound,
+
+	/// The negotiated protocol does not support the requested operation.
+	#[error("unsupported")]
+	Unsupported,
+
 	#[error("log: {0}")]
 	Log(String),
 }

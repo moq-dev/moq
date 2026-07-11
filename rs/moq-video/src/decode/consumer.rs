@@ -61,15 +61,10 @@ impl Consumer {
 			let Some(mux_frame) = self.track.read().await? else {
 				return Ok(None);
 			};
-			let timestamp_us: u64 = mux_frame
-				.timestamp
-				.as_micros()
-				.try_into()
-				.map_err(|_| moq_net::TimeOverflow)?;
 
 			self.pending.extend(
 				self.decoder
-					.decode(&mux_frame.payload, timestamp_us, mux_frame.keyframe)?,
+					.decode(&mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)?,
 			);
 		}
 	}

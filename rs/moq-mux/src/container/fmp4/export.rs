@@ -478,7 +478,7 @@ impl<S: Stream> Export<S> {
 /// loads an init declaring track N and then a fragment claiming a different track
 /// and rejects it ("no tfhd for track"). It also keeps a merged multi-track moov
 /// from colliding when two single-track source inits both used id `1`.
-fn extract_init(
+pub(crate) fn extract_init(
 	init: &Bytes,
 	track_id: u32,
 	ftyp_data: &mut Option<mp4_atom::Ftyp>,
@@ -612,7 +612,11 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 	((max - min) + default_frame).as_secs_f64()
 }
 
-fn infer_missing_durations(mut frames: Vec<Frame>, successor: Option<&Frame>, default_frame: Duration) -> Vec<Frame> {
+pub(crate) fn infer_missing_durations(
+	mut frames: Vec<Frame>,
+	successor: Option<&Frame>,
+	default_frame: Duration,
+) -> Vec<Frame> {
 	let infer_from_pts = pts_monotonic(&frames, successor);
 	// Express the fallback at the frames' own timescale so it matches the durations derived from
 	// their timestamps (a `Timestamp` carries its scale, and `try_from(Duration)` is nanosecond-scale).
@@ -654,7 +658,7 @@ fn next_timestamp(frames: &[Frame], successor: Option<&Frame>, index: usize) -> 
 		.or_else(|| successor.map(|next| next.timestamp))
 }
 
-fn catalog_timescale_video(config: &VideoConfig) -> u64 {
+pub(crate) fn catalog_timescale_video(config: &VideoConfig) -> u64 {
 	match &config.container {
 		Container::Cmaf { init, .. } => {
 			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::default_video_timescale(config))
@@ -663,7 +667,7 @@ fn catalog_timescale_video(config: &VideoConfig) -> u64 {
 	}
 }
 
-fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> u64 {
+pub(crate) fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> u64 {
 	match &config.container {
 		Container::Cmaf { init, .. } => parse_timescale_from_init(init).unwrap_or(config.sample_rate as u64),
 		Container::Loc | Container::Legacy => config.sample_rate as u64,

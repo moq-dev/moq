@@ -15,6 +15,9 @@ mod bytes;
 mod datagram;
 mod subscription;
 mod time;
+mod weak_cache;
+
+pub(crate) use weak_cache::{WeakCache, WeakEntry};
 
 pub use bandwidth::*;
 pub use bytes::*;

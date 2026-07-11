@@ -15,6 +15,7 @@
 //! fallback below the hardware path.
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 
 use super::decoder::{Config, Kind};
 use crate::Error;
@@ -50,10 +51,10 @@ impl Codec {
 
 /// One decoded picture: the raw frame plus its presentation timestamp.
 pub(crate) struct Decoded {
-	/// Presentation timestamp in microseconds. Backends that decode one-in
-	/// one-out echo the input timestamp; NVDEC threads timestamps through its
-	/// parser, so they survive decoder delay and frame reordering.
-	pub timestamp_us: u64,
+	/// Presentation timestamp. Backends that decode one-in one-out echo the input
+	/// timestamp; NVDEC threads timestamps through its parser, so they survive
+	/// decoder delay and frame reordering.
+	pub timestamp: Timestamp,
 	/// The decoded picture: CPU I420, or a GPU frame the encode side can consume
 	/// without a CPU round trip.
 	pub frame: Frame,
@@ -63,11 +64,10 @@ pub(crate) struct Decoded {
 /// or more decoded frames (zero while the decoder is still buffering, e.g. before
 /// the first keyframe's parameter sets).
 pub(crate) trait Backend: Send {
-	/// Decode one Annex-B access unit stamped with its presentation time in
-	/// microseconds. `keyframe` marks a keyframe (parameter sets are inline ahead
-	/// of it). Takes an owned [`Bytes`] so a backend can split out NAL slices
-	/// without copying.
-	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, keyframe: bool) -> Result<Vec<Decoded>, Error>;
+	/// Decode one Annex-B access unit stamped with its presentation `timestamp`.
+	/// `keyframe` marks a keyframe (parameter sets are inline ahead of it). Takes an
+	/// owned [`Bytes`] so a backend can split out NAL slices without copying.
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Decoded>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;

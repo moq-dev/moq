@@ -254,6 +254,34 @@ async def test_publish_track_info_and_subscription():
     track.finish()
 
 
+async def test_fetch_group_and_serve_dynamic_miss():
+    """Fetch a cached group, then serve an uncached sequence through TrackDynamic."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("events")
+    consumer = broadcast.consume()
+
+    cached = track.append_group()
+    cached.write_frame(b"cached")
+    cached.finish()
+
+    fetched = await consumer.fetch_group("events", 0, moq.FetchGroupOptions(priority=3))
+    assert fetched.sequence == 0
+    assert [frame async for frame in fetched] == [b"cached"]
+
+    dynamic = track.dynamic()
+    pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
+    request = await asyncio.wait_for(dynamic.requested_group(), timeout=5.0)
+    assert request.sequence == 7
+    assert request.priority == 11
+
+    produced = request.accept()
+    produced.write_frame(b"archive")
+    produced.finish()
+
+    fetched = await asyncio.wait_for(pending, timeout=5.0)
+    assert [frame async for frame in fetched] == [b"archive"]
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()

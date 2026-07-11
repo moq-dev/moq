@@ -30,6 +30,22 @@ pub struct MoqSubscription {
 	pub group_end: Option<u64>,
 }
 
+/// Options for fetching one past group by sequence.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqFetchGroupOptions {
+	/// Delivery priority for the fetch stream; higher values preempt lower ones.
+	#[uniffi(default = 0)]
+	pub priority: u8,
+}
+
+impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
+	fn from(options: MoqFetchGroupOptions) -> Self {
+		Self {
+			priority: options.priority,
+		}
+	}
+}
+
 impl From<MoqSubscription> for moq_net::Subscription {
 	fn from(s: MoqSubscription) -> Self {
 		moq_net::Subscription::default()
@@ -144,6 +160,23 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
+	/// Fetch one complete group by track name and group sequence.
+	///
+	/// This does not create a live subscription. A retained group resolves immediately;
+	/// otherwise the request waits for a dynamic producer to serve it. The returned
+	/// group may still be in progress, so read frames until `read_frame()` returns `None`.
+	pub async fn fetch_group(
+		&self,
+		name: String,
+		sequence: u64,
+		options: Option<MoqFetchGroupOptions>,
+	) -> Result<Arc<MoqGroupConsumer>, MoqError> {
+		let options = options.map(moq_net::group::Fetch::from);
+		let track = self.inner.track(&name).map_err(map_fetch_error)?;
+		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+		Ok(Arc::new(MoqGroupConsumer::new(group)))
+	}
+
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `container` is the track container from the catalog.
@@ -169,6 +202,14 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))
+	}
+}
+
+fn map_fetch_error(err: moq_net::Error) -> MoqError {
+	match err {
+		moq_net::Error::NotFound => MoqError::NotFound,
+		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
+		err => err.into(),
 	}
 }
 

@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cudarc::driver::CudaContext;
+use moq_net::Timestamp;
 use moq_nvenc::cuvid;
 use moq_nvenc::sys::cuviddec::{
 	CUVIDDECODECAPS, CUVIDDECODECREATEINFO, CUVIDPICPARAMS, CUVIDPROCPARAMS, CUvideodecoder, cudaVideoChromaFormat,
@@ -161,7 +162,7 @@ impl Nvdec {
 }
 
 impl Backend for Nvdec {
-	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		// The parser callbacks (decoder create, decode) and the map/copy below
 		// all need the CUDA context current on this thread.
 		self.state
@@ -177,7 +178,8 @@ impl Backend for Nvdec {
 				| (CUvideopacketflags::CUVID_PKT_ENDOFPICTURE as c_ulong),
 			payload_size: access_unit.len() as c_ulong,
 			payload: access_unit.as_ptr(),
-			timestamp: timestamp_us as i64,
+			// cuvid's clock rate is microseconds (set at parser creation).
+			timestamp: timestamp.as_micros() as i64,
 		};
 
 		// SAFETY: parser and packet are valid; the payload outlives the call
@@ -384,7 +386,7 @@ impl State {
 
 		Ok(Decoded {
 			// Timestamps rode the parser from `decode` (microseconds, unsigned).
-			timestamp_us: disp.timestamp.max(0) as u64,
+			timestamp: Timestamp::from_micros(disp.timestamp.max(0) as u64).unwrap_or(Timestamp::ZERO),
 			frame: Frame::Cuda(copied?),
 		})
 	}
@@ -512,10 +514,11 @@ mod tests {
 		let rgba = gradient_rgba(w, h);
 		let mut out = Vec::new();
 		for i in 0..10u64 {
+			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
 			for packet in encoder.encode_rgba(&rgba, w, h, i == 0).unwrap() {
-				for decoded in decoder.decode(packet, i * 33_333, i == 0).unwrap() {
+				for decoded in decoder.decode(packet, timestamp, i == 0).unwrap() {
 					let i420 = decoded.frame.to_i420().unwrap().into_owned();
-					out.push((decoded.timestamp_us, i420));
+					out.push((decoded.timestamp.as_micros() as u64, i420));
 				}
 			}
 		}
@@ -646,8 +649,9 @@ mod tests {
 			let mut decoder = decoder;
 			let mut frames = Vec::new();
 			for i in 0..10u64 {
+				let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
 				for packet in source.encode_rgba(&rgba, w, h, i == 0).unwrap() {
-					frames.extend(decoder.decode(packet, i * 33_333, i == 0).unwrap());
+					frames.extend(decoder.decode(packet, timestamp, i == 0).unwrap());
 				}
 			}
 			frames
@@ -686,7 +690,10 @@ mod tests {
 		.unwrap();
 		let mut last = None;
 		for (i, packet) in packets.into_iter().enumerate() {
-			for out in check.decode(packet, i as u64, i == 0).unwrap() {
+			for out in check
+				.decode(packet, Timestamp::from_micros(i as u64).unwrap(), i == 0)
+				.unwrap()
+			{
 				last = Some(out.frame.to_i420().unwrap().into_owned());
 			}
 		}

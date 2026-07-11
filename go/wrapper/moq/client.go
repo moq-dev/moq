@@ -11,15 +11,47 @@ import (
 type ClientOption func(*clientConfig)
 
 type clientConfig struct {
-	tlsDisableVerify bool
-	bind             *string
-	publish          *OriginProducer
-	subscribe        *OriginProducer
+	tlsDisableVerify   bool
+	tlsRoots           []string
+	tlsRootsSet        bool
+	tlsSystemRoots     bool
+	tlsSystemRootsSet  bool
+	tlsFingerprints    []string
+	tlsFingerprintsSet bool
+	bind               *string
+	publish            *OriginProducer
+	subscribe          *OriginProducer
 }
 
 // WithTLSDisableVerify disables TLS certificate verification (development only).
 func WithTLSDisableVerify() ClientOption {
 	return func(c *clientConfig) { c.tlsDisableVerify = true }
+}
+
+// WithTLSRoots trusts PEM root certificate files instead of the system roots.
+func WithTLSRoots(paths ...string) ClientOption {
+	roots := append([]string(nil), paths...)
+	return func(c *clientConfig) {
+		c.tlsRoots = roots
+		c.tlsRootsSet = true
+	}
+}
+
+// WithTLSSystemRoots controls whether platform roots are trusted with custom roots.
+func WithTLSSystemRoots(systemRoots bool) ClientOption {
+	return func(c *clientConfig) {
+		c.tlsSystemRoots = systemRoots
+		c.tlsSystemRootsSet = true
+	}
+}
+
+// WithTLSFingerprints pins the peer to one of these SHA-256 certificate fingerprints.
+func WithTLSFingerprints(fingerprints ...string) ClientOption {
+	pins := append([]string(nil), fingerprints...)
+	return func(c *clientConfig) {
+		c.tlsFingerprints = pins
+		c.tlsFingerprintsSet = true
+	}
 }
 
 // WithBind sets the local UDP socket bind address (default "[::]:0").
@@ -74,6 +106,15 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	inner := ffi.NewMoqClient()
 	if cfg.tlsDisableVerify {
 		inner.SetTlsDisableVerify(true)
+	}
+	if cfg.tlsRootsSet {
+		inner.SetTlsRoots(cfg.tlsRoots)
+	}
+	if cfg.tlsSystemRootsSet {
+		inner.SetTlsSystemRoots(cfg.tlsSystemRoots)
+	}
+	if cfg.tlsFingerprintsSet {
+		inner.SetTlsFingerprints(cfg.tlsFingerprints)
 	}
 	if cfg.bind != nil {
 		if err := inner.SetBind(*cfg.bind); err != nil {

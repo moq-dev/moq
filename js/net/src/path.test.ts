@@ -239,3 +239,21 @@ test("normalizeRelative drops empty and dot segments", () => {
 	expect(Path.normalizeRelative("/foo/")).toBe("foo");
 	expect(Path.normalizeRelative("../foo")).toBe("../foo");
 });
+
+test("parts splits a path into its components", () => {
+	expect(Path.parts(Path.from(""))).toEqual([]);
+	expect(Path.parts(Path.from("foo"))).toEqual(["foo"]);
+	expect(Path.parts(Path.from("/foo//bar/"))).toEqual(["foo", "bar"]);
+});
+
+test("decode enforces the max part count", () => {
+	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/");
+	expect(Path.decode(atLimit)).toBe(atLimit as Path.Valid);
+	expect(() => Path.decode(`${atLimit}/extra`)).toThrow();
+});
+
+test("encode enforces the max part count", () => {
+	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/") as Path.Valid;
+	expect(Path.encode(atLimit)).toBe(atLimit);
+	expect(() => Path.encode(`${atLimit}/extra` as Path.Valid)).toThrow();
+});

@@ -112,8 +112,10 @@ jobs:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
       ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
       ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
-      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+      # Signing credentials are scoped to the real publish step below, NOT here:
+      # fork PRs can't read repo secrets, and an empty `signingInMemoryKey` makes
+      # signAllPublications() attempt (and fail) instead of no-op. The dry-run
+      # doesn't publish, so it doesn't need to sign.
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -150,6 +152,8 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
         run: |
           gradle -p kt \
             -Pmoq.version="$MOQ_VERSION" \

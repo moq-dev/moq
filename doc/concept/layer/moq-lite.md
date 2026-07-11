@@ -163,7 +163,7 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
-- **No FETCH**: Use HTTP for VOD instead of reinventing the wheel.
+- **Single-group FETCH only (lite-05+)**: Fetch one complete group by sequence. Ranges and joining fetches are not supported.
 - **No Joining Fetch**: Subscriptions start at the latest group, not the latest frame.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.

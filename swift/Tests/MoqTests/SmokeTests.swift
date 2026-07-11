@@ -38,4 +38,24 @@ final class SmokeTests: XCTestCase {
         try track.finish()
         try broadcast.finish()
     }
+
+    func testBroadcastConsumerFetchesCachedGroup() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "events")
+        let group = try track.appendGroup()
+        try group.writeFrame(Data("cached".utf8))
+        try group.finish()
+
+        let consumer = try broadcast.consume()
+        let fetched = try await consumer.fetchGroup(
+            name: "events",
+            sequence: 0,
+            options: FetchGroupOptions(priority: 3)
+        )
+        XCTAssertEqual(fetched.sequence, 0)
+        let frame = try await fetched.readFrame()
+        XCTAssertEqual(frame, Data("cached".utf8))
+        let end = try await fetched.readFrame()
+        XCTAssertNil(end)
+    }
 }

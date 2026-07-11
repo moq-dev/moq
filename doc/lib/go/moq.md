@@ -55,6 +55,83 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## TLS and stats
+
+Use certificate roots or fingerprints when a client needs to trust a private or
+self-signed endpoint without disabling verification:
+
+```go
+client, err := moq.Dial(ctx, "https://relay.example.com",
+    moq.WithTLSRoots("/etc/ssl/custom-ca.pem"),
+    moq.WithTLSSystemRoots(true),
+    moq.WithTLSFingerprints("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+stats := client.Session().Stats()
+fmt.Printf("rtt: %v\n", stats.RttUs)
+```
+
+`Stats()` returns a snapshot. Individual fields are nil when the transport does
+not report that metric yet.
+
+## Dynamic tracks
+
+`BroadcastProducer.Dynamic()` lets a publisher accept tracks that subscribers
+request before they exist:
+
+```go
+broadcast, err := moq.NewBroadcastProducer()
+if err != nil {
+    log.Fatal(err)
+}
+defer broadcast.Finish()
+
+dynamic, err := broadcast.Dynamic()
+if err != nil {
+    log.Fatal(err)
+}
+defer dynamic.Cancel()
+
+go func() {
+    request, err := dynamic.RequestedTrack(ctx)
+    if err != nil {
+        return
+    }
+    track, err := request.Accept(nil)
+    if err != nil {
+        return
+    }
+    _ = track.WriteFrame([]byte("ready"))
+}()
+```
+
+For media tracks, let the importer accept the request:
+
+```go
+request, err := dynamic.RequestedTrack(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+media, err := broadcast.PublishMediaOnTrack(request, "opus", opusInit)
+if err != nil {
+    log.Fatal(err)
+}
+_ = media.WriteFrame(opusFrame, 20_000)
+```
+
+Video catalog fields that are known before the first keyframe can be supplied
+with `WithVideoHint`:
+
+```go
+media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{
+    Coded: &moq.Dimensions{Width: 1920, Height: 1080},
+}))
+```
+
 ## Error handling
 
 A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
@@ -88,6 +165,44 @@ broadcast.Finish()
 ```
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
+
+## Fetching raw groups
+
+Fetch retrieves one group by track name and group sequence without keeping a live subscription:
+
+```go
+group, err := consumer.FetchGroup("events", 42, &moq.FetchGroupOptions{Priority: 10})
+if err != nil {
+    log.Fatal(err)
+}
+for frame, err := range group.Frames(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%s\n", frame)
+}
+```
+
+A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
+
+```go
+dynamic, err := track.Dynamic()
+if err != nil {
+    log.Fatal(err)
+}
+request, err := dynamic.RequestedGroup(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+producer, err := request.Accept()
+if err != nil {
+    log.Fatal(err)
+}
+_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()))
+_ = producer.Finish()
+```
+
+Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
 ## Local development
 

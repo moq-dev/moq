@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::consumer::MoqFetchGroupOptions;
 use crate::error::MoqError;
 use crate::media::MoqInit;
 
@@ -147,6 +148,144 @@ async fn dynamic_track_request_can_abort() {
 		.expect("timed out waiting for subscribe")
 		.expect("subscribe task panicked");
 	assert!(result.is_err(), "subscribe to a rejected track should fail");
+}
+
+#[tokio::test]
+async fn fetches_cached_group_without_subscribing() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	group.write_frame(b"first".to_vec()).unwrap();
+	group.write_frame(b"second".to_vec()).unwrap();
+	group.finish().unwrap();
+
+	let consumer = broadcast.consume().unwrap();
+	let fetched = consumer
+		.fetch_group("events".into(), 0, Some(MoqFetchGroupOptions { priority: 7 }))
+		.await
+		.unwrap();
+
+	assert_eq!(fetched.sequence(), 0);
+	assert_eq!(
+		fetched.read_frame().await.unwrap().as_deref(),
+		Some(b"first".as_slice())
+	);
+	assert_eq!(
+		fetched.read_frame().await.unwrap().as_deref(),
+		Some(b"second".as_slice())
+	);
+	assert_eq!(fetched.read_frame().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn dynamic_track_serves_fetch_miss_and_priority() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move {
+		consumer
+			.fetch_group("events".into(), 5, Some(MoqFetchGroupOptions { priority: 11 }))
+			.await
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+		.await
+		.expect("timed out waiting for group request")
+		.unwrap();
+	assert_eq!(request.sequence(), 5);
+	assert_eq!(request.priority(), 11);
+
+	let group = request.accept().unwrap();
+	group.write_frame(b"fetched".to_vec()).unwrap();
+	group.finish().unwrap();
+
+	let fetched = tokio::time::timeout(TIMEOUT, fetch)
+		.await
+		.expect("timed out waiting for fetch")
+		.expect("fetch task panicked")
+		.unwrap();
+	assert_eq!(fetched.sequence(), 5);
+	assert_eq!(
+		fetched.read_frame().await.unwrap().as_deref(),
+		Some(b"fetched".as_slice())
+	);
+}
+
+#[tokio::test]
+async fn dynamic_track_rejects_fetch_miss() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+		.await
+		.expect("timed out waiting for group request")
+		.unwrap();
+	request.abort(404).unwrap();
+
+	let result = tokio::time::timeout(TIMEOUT, fetch)
+		.await
+		.expect("timed out waiting for rejected fetch")
+		.expect("fetch task panicked");
+	assert!(matches!(result, Err(MoqError::Protocol(moq_net::Error::App(404)))));
+	assert!(matches!(request.accept(), Err(MoqError::Closed)));
+}
+
+#[tokio::test]
+async fn fetch_miss_without_dynamic_is_not_found() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("events".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let result = consumer.fetch_group("events".into(), 5, None).await;
+	assert!(matches!(result, Err(MoqError::NotFound)));
+}
+
+#[tokio::test]
+async fn fetch_unknown_track_is_not_found() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let result = consumer.fetch_group("missing".into(), 0, None).await;
+	assert!(matches!(result, Err(MoqError::NotFound)));
+}
+
+#[tokio::test]
+async fn requested_track_dynamic_survives_accept() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast_dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("archive".into(), 9, None).await });
+	let request = tokio::time::timeout(TIMEOUT, broadcast_dynamic.requested_track())
+		.await
+		.expect("timed out waiting for track request")
+		.unwrap();
+	let track_dynamic = request.dynamic().unwrap();
+	let _track = request.accept(None).unwrap();
+
+	let group_request = tokio::time::timeout(TIMEOUT, track_dynamic.requested_group())
+		.await
+		.expect("timed out waiting for group request")
+		.unwrap();
+	assert_eq!(group_request.sequence(), 9);
+	let group = group_request.accept().unwrap();
+	group.write_frame(b"archive".to_vec()).unwrap();
+	group.finish().unwrap();
+
+	let fetched = tokio::time::timeout(TIMEOUT, fetch)
+		.await
+		.expect("timed out waiting for fetch")
+		.expect("fetch task panicked")
+		.unwrap();
+	assert_eq!(
+		fetched.read_frame().await.unwrap().as_deref(),
+		Some(b"archive".as_slice())
+	);
 }
 
 #[tokio::test]

@@ -34,6 +34,9 @@ from moq_ffi import (
     MoqDimensions as Dimensions,
 )
 from moq_ffi import (
+    MoqFetchGroupOptions as FetchGroupOptions,
+)
+from moq_ffi import (
     MoqFrame as Frame,
 )
 from moq_ffi import (
@@ -62,6 +65,7 @@ __all__ = [
     "Container",
     "Dimensions",
     "Frame",
+    "FetchGroupOptions",
     "Subscription",
     "TrackInfo",
     "Video",

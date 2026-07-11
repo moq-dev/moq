@@ -31,10 +31,10 @@
 //!
 //! ## Bitstream gotcha
 //!
-//! The WebRTC ↔ MoQ shape conversion for H.264 is handled by `moq-mux`'s
-//! `Avc3` importer: str0m hands us Annex-B (start-code NALs with inline
-//! SPS/PPS) and that's exactly what the importer wants, so no extra
-//! transform is needed in the gateway. Opus, VP8, and VP9 pass through.
+//! The WebRTC ↔ MoQ shape conversion for H.264 and H.265 is handled by
+//! `moq-mux` importers: str0m hands us Annex-B (start-code NALs with inline
+//! parameter sets) and that's exactly what the importers want. AV1 uses the
+//! shared OBU splitter/importer. Opus, VP8, and VP9 pass through.
 
 pub mod client;
 pub mod server;

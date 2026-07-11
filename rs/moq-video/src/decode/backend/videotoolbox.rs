@@ -22,6 +22,7 @@ use std::ptr::{self, NonNull};
 
 use bytes::Bytes;
 use moq_mux::codec::annexb::NalIterator;
+use moq_net::Timestamp;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 use objc2_core_media::{
 	CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreateFromH264ParameterSets,
@@ -166,7 +167,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
 		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
 		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
@@ -230,7 +231,7 @@ impl Backend for VideoToolbox {
 		Ok(std::mem::take(&mut self.sink.frames)
 			.into_iter()
 			.map(|i420| Decoded {
-				timestamp_us,
+				timestamp,
 				frame: Frame::I420(i420),
 			})
 			.collect())

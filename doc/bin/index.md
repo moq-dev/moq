@@ -37,7 +37,7 @@ remote WebRTC server. Ingest and egress both work for H.264, VP8, VP9, and Opus.
 
 ## [moq-hls](/bin/hls)
 
-An HLS / LL-HLS <-> MoQ gateway. Serves a MoQ broadcast as HLS and
+An HLS <-> MoQ gateway. Serves a MoQ broadcast as HLS (fetching media on demand) and
 Low-Latency HLS over HTTP, or imports a remote HLS playlist into MoQ.
 
 ## [moq-rtmp](/bin/rtmp)

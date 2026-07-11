@@ -516,8 +516,9 @@ mod tests {
 		// decoder latency or frame reordering.
 		let mut decoded = None;
 		for i in 0..10u64 {
+			let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
 			for packet in encoder.encode_rgba(&rgba, w, h, i == 0).unwrap() {
-				for out in decoder.decode(packet, i * 33_333, i == 0).unwrap() {
+				for out in decoder.decode(packet, timestamp, i == 0).unwrap() {
 					decoded = Some(out.frame.to_i420().unwrap().into_owned());
 				}
 			}

@@ -230,11 +230,11 @@ for raw elementary streams instead of combining those sinks with a contradictory
 
 Every export sink caps how long a stalled group is waited on before the muxer
 skips to a newer one. Each owns the knob so its default fits the transport: the
-stdout containers and `rtmp` take `--latency-max` (default `500ms`), `hls` takes
-`--latency-max` (default `10s`, generous so live GOPs aren't skipped while
-segments build), and `srt` reuses its `--latency` (the receive buffer doubles as
-the skip threshold). WebRTC (`rtc`) is real-time and doesn't buffer, so it has no
-such knob.
+stdout containers and `rtmp` take `--latency-max` (default `500ms`), and `srt`
+reuses its `--latency` (the receive buffer doubles as the skip threshold).
+WebRTC (`rtc`) is real-time and doesn't buffer, so it has no such knob. HLS
+export doesn't subscribe to media at all (segments are fetched on demand), so
+it has no latency knob either.
 
 ### MPEG-TS
 
@@ -276,7 +276,7 @@ FLV is the classic RTMP container: H.264 video and AAC audio, each with an
 out-of-band header. The enhanced E-RTMP FourCC payloads (HEVC, AV1, Opus) and the
 older codecs (VP6, MP3) are not supported on the stdin/stdout container path.
 
-## HLS / LL-HLS
+## HLS
 
 Import a remote HLS master/media playlist into a MoQ broadcast:
 
@@ -285,7 +285,7 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
     import hls https://example.com/live/master.m3u8
 ```
 
-Serve one MoQ broadcast as HLS / LL-HLS over HTTP (reached at
+Serve one MoQ broadcast as HLS over HTTP (reached at
 `http://host:8089/<broadcast>/master.m3u8`):
 
 ```bash

@@ -2,9 +2,36 @@ package moq
 
 import (
 	"context"
+	"errors"
+	"iter"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
+
+// MediaOption configures media tracks published by a BroadcastProducer.
+type MediaOption func(*mediaConfig)
+
+type mediaConfig struct {
+	video *VideoHint
+}
+
+var errNilTrackRequest = errors.New("moq: nil track request")
+
+// WithVideoHint seeds catalog fields that a video stream cannot reveal itself.
+func WithVideoHint(hint VideoHint) MediaOption {
+	return func(c *mediaConfig) {
+		h := hint
+		c.video = &h
+	}
+}
+
+func mediaInit(format string, init []byte, opts []MediaOption) ffi.MoqInit {
+	var cfg mediaConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return ffi.MoqInit{Format: format, Data: init, Video: cfg.video}
+}
 
 // BroadcastProducer publishes a collection of tracks. Build one, publish tracks
 // onto it, then publish the broadcast itself to an origin/client/server.
@@ -21,10 +48,31 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
+// Dynamic accepts subscriptions to tracks that are not published yet.
+func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
+	inner, err := b.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastDynamic{inner: inner}, nil
+}
+
 // PublishMedia publishes a media track from an init segment, fed frame by
 // frame with explicit timestamps.
-func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProducer, error) {
-	inner, err := b.inner.PublishMedia(ffi.MoqInit{Format: format, Data: init})
+func (b *BroadcastProducer) PublishMedia(format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {
+	inner, err := b.inner.PublishMedia(mediaInit(format, init, opts))
+	if err != nil {
+		return nil, err
+	}
+	return &MediaProducer{inner: inner}, nil
+}
+
+// PublishMediaOnTrack publishes media onto a subscriber-requested track.
+func (b *BroadcastProducer) PublishMediaOnTrack(request *TrackRequest, format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {
+	if request == nil {
+		return nil, errNilTrackRequest
+	}
+	inner, err := b.inner.PublishMediaOnTrack(request.inner, mediaInit(format, init, opts))
 	if err != nil {
 		return nil, err
 	}
@@ -34,8 +82,8 @@ func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProd
 // PublishMediaStream publishes a media track fed by a raw byte stream with
 // unknown frame boundaries (e.g. Annex-B H.264). format is a stream format:
 // avc3, hev1, av01, fmp4, or mkv.
-func (b *BroadcastProducer) PublishMediaStream(format string) (*MediaStreamProducer, error) {
-	inner, err := b.inner.PublishMediaStream(ffi.MoqInit{Format: format})
+func (b *BroadcastProducer) PublishMediaStream(format string, opts ...MediaOption) (*MediaStreamProducer, error) {
+	inner, err := b.inner.PublishMediaStream(mediaInit(format, nil, opts))
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +119,15 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
+// Dynamic accepts requests for tracks that are not published yet.
+func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
+	inner, err := b.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastDynamic{inner: inner}, nil
+}
+
 // SetCatalogSection sets (or replaces) an untyped application catalog section by
 // name. json is any JSON document as a string; it rides alongside video/audio and
 // reaches subscribers via Catalog.Sections. name must not be a reserved media
@@ -88,6 +145,54 @@ func (b *BroadcastProducer) RemoveCatalogSection(name string) error {
 // Finish closes the broadcast.
 func (b *BroadcastProducer) Finish() error {
 	return b.inner.Finish()
+}
+
+// BroadcastDynamic is a stream of subscriber-requested tracks.
+type BroadcastDynamic struct {
+	inner *ffi.MoqBroadcastDynamic
+}
+
+// RequestedTrack waits for the next subscriber-requested track.
+func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackRequest{inner: inner}, nil
+}
+
+// Requests ranges over subscriber-requested tracks until the dynamic source ends.
+func (d *BroadcastDynamic) Requests(ctx context.Context) iter.Seq2[*TrackRequest, error] {
+	return streamSeq(ctx, d.RequestedTrack)
+}
+
+// Cancel stops the dynamic request stream.
+func (d *BroadcastDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// TrackRequest is a subscriber-requested track that has not been accepted yet.
+type TrackRequest struct {
+	inner *ffi.MoqTrackRequest
+}
+
+// Name is the requested track name.
+func (r *TrackRequest) Name() (string, error) {
+	return r.inner.Name()
+}
+
+// Accept accepts the request as a raw track. For media, use PublishMediaOnTrack.
+func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
+	inner, err := r.inner.Accept(info)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackProducer{inner: inner}, nil
+}
+
+// Abort rejects the request with an application error code.
+func (r *TrackRequest) Abort(errorCode uint16) error {
+	return r.inner.Abort(int32(errorCode))
 }
 
 // MediaProducer writes timestamped frames into a media track.
@@ -161,6 +266,15 @@ func (t *TrackProducer) Unused(ctx context.Context) error {
 	return runErr(ctx, nil, t.inner.Unused)
 }
 
+// Dynamic serves fetches for groups that are not currently cached.
+func (t *TrackProducer) Dynamic() (*TrackDynamic, error) {
+	inner, err := t.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDynamic{inner: inner}, nil
+}
+
 // AppendGroup starts a new group; write frames into it, then Finish.
 func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
 	inner, err := t.inner.AppendGroup()
@@ -173,6 +287,11 @@ func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
 // WriteFrame writes a single-frame group in one call.
 func (t *TrackProducer) WriteFrame(payload []byte) error {
 	return t.inner.WriteFrame(payload)
+}
+
+// Abort closes the track with an application error code.
+func (t *TrackProducer) Abort(errorCode uint16) error {
+	return t.inner.Abort(int32(errorCode))
 }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
@@ -217,6 +336,106 @@ func (g *GroupProducer) WriteFrame(payload []byte) error {
 // Finish closes the group.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
+}
+
+// BroadcastDynamic yields tracks requested by subscribers.
+type BroadcastDynamic struct {
+	inner *ffi.MoqBroadcastDynamic
+}
+
+// RequestedTrack waits for the next requested track.
+func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackRequest{inner: inner}, nil
+}
+
+// Cancel stops current and future requested-track waits.
+func (d *BroadcastDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// TrackRequest is a subscriber-requested track that has not been accepted yet.
+type TrackRequest struct {
+	inner *ffi.MoqTrackRequest
+}
+
+// Name is the requested track name.
+func (r *TrackRequest) Name() (string, error) {
+	return r.inner.Name()
+}
+
+// Dynamic creates a fetch handler before accepting this requested track.
+func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
+	inner, err := r.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDynamic{inner: inner}, nil
+}
+
+// Accept accepts the request as a raw track.
+func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
+	inner, err := r.inner.Accept(info)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackProducer{inner: inner}, nil
+}
+
+// Abort rejects the requested track with an application error code.
+func (r *TrackRequest) Abort(errorCode int32) error {
+	return r.inner.Abort(errorCode)
+}
+
+// TrackDynamic yields uncached groups requested by fetch consumers.
+type TrackDynamic struct {
+	inner *ffi.MoqTrackDynamic
+}
+
+// RequestedGroup waits for the next uncached group request.
+func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+	if err != nil {
+		return nil, err
+	}
+	return &GroupRequest{inner: inner}, nil
+}
+
+// Cancel stops current and future requested-group waits.
+func (d *TrackDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// GroupRequest requests one uncached group from a track producer.
+type GroupRequest struct {
+	inner *ffi.MoqGroupRequest
+}
+
+// Sequence is the requested group sequence within the track.
+func (r *GroupRequest) Sequence() uint64 {
+	return r.inner.Sequence()
+}
+
+// Priority is the consumer's delivery priority for this fetch.
+func (r *GroupRequest) Priority() uint8 {
+	return r.inner.Priority()
+}
+
+// Accept accepts the request and returns a producer for the group.
+func (r *GroupRequest) Accept() (*GroupProducer, error) {
+	inner, err := r.inner.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &GroupProducer{inner: inner}, nil
+}
+
+// Abort rejects the fetch with an application error code.
+func (r *GroupRequest) Abort(errorCode int32) error {
+	return r.inner.Abort(errorCode)
 }
 
 // AudioProducer pushes raw PCM and lets libopus encode it on the way out.
