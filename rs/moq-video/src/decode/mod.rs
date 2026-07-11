@@ -81,7 +81,7 @@ impl Frame {
 		};
 
 		Ok(Frame {
-			timestamp_us: self.timestamp_us,
+			timestamp: self.timestamp,
 			width,
 			height,
 			inner,

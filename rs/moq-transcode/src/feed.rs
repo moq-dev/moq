@@ -182,11 +182,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		let mut first = true;
 		while let Some(frames) = container.read(&mut group).await? {
 			for frame in frames {
-				let timestamp: u64 = frame
-					.timestamp
-					.as_micros()
-					.try_into()
-					.map_err(|_| moq_net::TimeOverflow)?;
+				let timestamp = frame.timestamp;
 				// The first frame of a group is a keyframe by construction.
 				let keyframe = frame.keyframe || first;
 				first = false;

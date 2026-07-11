@@ -174,7 +174,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 						let scaled = frame.resize(rung.info.width, rung.info.height)?;
 						encoder.encode(&scaled, keyframe)?
 					};
-					let timestamp = frame.timestamp_us;
+					let timestamp = frame.timestamp;
 					write(output, encoded.into_iter().map(|packet| (timestamp, packet)).collect())?;
 				}
 				Some(Item::End) => {
