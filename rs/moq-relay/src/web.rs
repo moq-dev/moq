@@ -45,6 +45,11 @@ pub struct WebConfig {
 	#[serde(default)]
 	pub https: HttpsConfig,
 
+	/// Internal operational listener for `/metrics` and `/health`.
+	#[command(flatten)]
+	#[serde(default)]
+	pub internal: InternalConfig,
+
 	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
@@ -58,6 +63,29 @@ pub struct WebConfig {
 pub struct HttpConfig {
 	/// Socket address to bind the HTTP listener to.
 	#[arg(long = "web-http-listen", id = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
+	pub listen: Option<net::SocketAddr>,
+}
+
+/// Internal operational listener configuration (plain HTTP).
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct InternalConfig {
+	/// Socket address for the internal plain-HTTP listener serving `/metrics`
+	/// and `/health`.
+	///
+	/// This endpoint is unauthenticated, so bind it only to a trusted plane:
+	/// loopback (e.g. `127.0.0.1:9100`) for a co-located scraper/agent, or a
+	/// private overlay address. Never the public internet. Plain HTTP is
+	/// intentional: on loopback there's nothing to encrypt, and a private
+	/// overlay (e.g. a mesh VPN) already provides transport encryption and peer
+	/// identity. Unset (the default) disables the listener, and `/metrics` is
+	/// then not served anywhere.
+	#[arg(
+		long = "web-internal-listen",
+		id = "web-internal-listen",
+		env = "MOQ_WEB_INTERNAL_LISTEN"
+	)]
 	pub listen: Option<net::SocketAddr>,
 }
 
@@ -170,12 +198,16 @@ impl Web {
 
 	/// Build the default relay web router.
 	///
+	/// This is the public-facing router (customer media routes plus a liveness
+	/// probe). `/metrics` is deliberately NOT here: it rides the separate
+	/// internal listener ([`internal_routes`](Self::internal_routes)) so node
+	/// counters are never exposed on the public listener.
+	///
 	/// The returned router already has relay state applied, so embedders can
 	/// merge in their own state-applied routers before calling [`serve`](Self::serve).
 	pub fn routes(&self) -> Router {
 		let app = Router::new()
 			.route("/health", get(serve_health))
-			.route("/metrics", get(serve_metrics))
 			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
@@ -197,6 +229,19 @@ impl Web {
 		};
 
 		app.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
+			.with_state(self.state.clone())
+	}
+
+	/// Build the internal operational router served on [`InternalConfig::listen`].
+	///
+	/// Carries `/metrics` (this node's traffic counters) and a `/health` mirror.
+	/// Both are unauthenticated, which is why this router belongs on a listener
+	/// bound to a trusted plane (loopback or a private overlay), never the
+	/// public one.
+	pub fn internal_routes(&self) -> Router {
+		Router::new()
+			.route("/health", get(serve_health))
+			.route("/metrics", get(serve_metrics))
 			.with_state(self.state.clone())
 	}
 
@@ -242,9 +287,22 @@ impl Web {
 			None
 		};
 
+		// Separate plain-HTTP listener for operational endpoints (`/metrics`,
+		// `/health`), kept off the public listeners. Serves the internal router
+		// only, not the embedder-merged `app`.
+		let internal = if let Some(listen) = self.config.internal.listen {
+			let router = self.internal_routes().into_make_service();
+			let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
+			let server = axum_server::from_tcp(listener)?;
+			Some(server.serve(router))
+		} else {
+			None
+		};
+
 		tokio::select! {
 			Some(res) = async move { Some(http?.await) } => res?,
 			Some(res) = async move { Some(https?.await) } => res?,
+			Some(res) = async move { Some(internal?.await) } => res?,
 			else => {},
 		};
 
@@ -425,12 +483,12 @@ async fn serve_health() -> Response {
 /// (bytes/frames/groups, subscriptions, viewers, and connected sessions),
 /// summed across broadcasts and split by `tier`/`role`.
 ///
-/// Unauthenticated like `/health`, so a scraper needs no JWT; expose the web
-/// listener only where that's acceptable (e.g. a private metrics plane). Host
-/// system metrics (CPU/memory/disk/network) are deliberately out of scope: run
-/// a dedicated node exporter for those, per the relay's separation of concerns.
-/// Returns the current cumulative snapshot; a downstream scraper derives rates
-/// and live counts (`open - closed`).
+/// Unauthenticated, so it's served only on the internal listener
+/// ([`InternalConfig::listen`]), never the public one; a scraper needs no JWT.
+/// Host system metrics (CPU/memory/disk/network) are deliberately out of scope:
+/// run a dedicated node exporter for those, per the relay's separation of
+/// concerns. Returns the current cumulative snapshot; a downstream scraper
+/// derives rates and live counts (`open - closed`).
 async fn serve_metrics(State(state): State<Arc<WebState>>) -> Response {
 	let body = render_metrics(&state.cluster.stats.snapshot());
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
