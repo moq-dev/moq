@@ -29,6 +29,85 @@ func opusHead() []byte {
 func TestOriginLifecycle(t *testing.T) {
 	origin := moq.NewOriginProducer()
 	_ = origin.Consume()
+	origin.Dynamic().Cancel()
+}
+
+func TestDynamicBroadcastRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	dynamic := origin.Dynamic()
+	defer dynamic.Cancel()
+
+	type result struct {
+		broadcast *moq.BroadcastConsumer
+		err       error
+	}
+	requested := make(chan result, 1)
+	go func() {
+		broadcast, err := origin.Consume().RequestBroadcast("dynamic/broadcast")
+		requested <- result{broadcast: broadcast, err: err}
+	}()
+
+	request, err := dynamic.RequestedBroadcast(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := request.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "dynamic/broadcast" {
+		t.Fatalf("path = %q, want %q", path, "dynamic/broadcast")
+	}
+
+	served, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := served.PublishTrack("status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.Accept(served); err != nil {
+		t.Fatal(err)
+	}
+
+	var res result
+	select {
+	case res = <-requested:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+
+	trackConsumer, err := res.broadcast.SubscribeTrack("status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer trackConsumer.Cancel()
+
+	payload := []byte("served dynamically")
+	if err := track.WriteFrame(payload); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := trackConsumer.ReadFrame(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(frame) != string(payload) {
+		t.Fatalf("frame = %q, want %q", frame, payload)
+	}
+
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := served.Finish(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPublishMediaLifecycle(t *testing.T) {

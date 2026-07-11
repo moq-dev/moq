@@ -17,12 +17,22 @@ type OriginProducer struct {
 
 // NewOriginProducer creates an empty origin.
 func NewOriginProducer() *OriginProducer {
-	return &OriginProducer{inner: ffi.NewMoqOriginProducer()}
+	return NewOriginProducerWithOptions(OriginOptions{})
+}
+
+// NewOriginProducerWithOptions creates an origin with explicit options.
+func NewOriginProducerWithOptions(options OriginOptions) *OriginProducer {
+	return &OriginProducer{inner: ffi.NewMoqOriginProducer(options)}
 }
 
 // Consume returns a consumer that observes broadcasts published to this origin.
 func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
+}
+
+// Dynamic serves broadcasts that consumers request without an announcement.
+func (o *OriginProducer) Dynamic() *OriginDynamic {
+	return &OriginDynamic{inner: o.inner.Dynamic()}
 }
 
 // Announce advertises a broadcast at the given path so subscribers can discover it.
@@ -36,6 +46,53 @@ func (o *OriginProducer) Announce(path string, broadcast *BroadcastProducer) err
 // Deprecated: use Announce.
 func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) error {
 	return o.Announce(path, broadcast)
+}
+
+// OriginDynamic streams broadcast requests for paths that are not announced.
+type OriginDynamic struct {
+	inner *ffi.MoqOriginDynamic
+}
+
+// RequestedBroadcast blocks until a consumer requests an unannounced broadcast.
+func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastRequest{inner: inner}, nil
+}
+
+// All ranges over requested broadcasts until the stream errors or the loop breaks.
+func (d *OriginDynamic) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
+	return streamSeq(ctx, d.RequestedBroadcast)
+}
+
+// Cancel stops serving requested broadcasts.
+func (d *OriginDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// BroadcastRequest is a requested broadcast that has not been accepted yet.
+type BroadcastRequest struct {
+	inner *ffi.MoqBroadcastRequest
+}
+
+// Path returns the requested broadcast path.
+func (r *BroadcastRequest) Path() (string, error) {
+	return r.inner.Path()
+}
+
+// Accept serves the request with an unannounced broadcast.
+func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
+	if broadcast == nil {
+		return errors.New("moq: nil broadcast producer")
+	}
+	return r.inner.Accept(broadcast.inner)
+}
+
+// Reject fails the request with an application error code.
+func (r *BroadcastRequest) Reject(errorCode int32) error {
+	return r.inner.Reject(errorCode)
 }
 
 // OriginConsumer discovers broadcasts announced to an origin.

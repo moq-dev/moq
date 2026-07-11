@@ -127,6 +127,57 @@ _ = producer.Finish()
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+## On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```go
+capacity := uint64(256 * 1024 * 1024)
+origin := moq.NewOriginProducerWithOptions(moq.OriginOptions{
+	CacheCapacityBytes: &capacity,
+})
+
+dynamic := origin.Dynamic()
+defer dynamic.Cancel()
+
+for request, err := range dynamic.All(ctx) {
+	if err != nil {
+		if moq.IsShutdown(err) {
+			break
+		}
+		log.Fatal(err)
+	}
+
+	path, err := request.Path()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if path != "events" {
+		if err := request.Reject(404); err != nil {
+			log.Fatal(err)
+		}
+		continue
+	}
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		log.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("status", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := request.Accept(broadcast); err != nil {
+		log.Fatal(err)
+	}
+	if err := track.WriteFrame([]byte("ready")); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Reject(code)` to fail the requester.
+
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:

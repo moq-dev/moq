@@ -147,6 +147,28 @@ for try await request in dynamic {
 
 Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber.
 
+### On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```swift
+let origin = OriginProducer(cacheCapacityBytes: 256 * 1024 * 1024)
+let dynamic = origin.dynamic()
+
+for try await request in dynamic {
+    if try request.path == "events" {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "status")
+        try request.accept(broadcast: broadcast)
+        try track.writeFrame(Data("ready".utf8))
+    } else {
+        try request.reject(errorCode: 404)
+    }
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `reject(errorCode:)` to fail the requester.
+
 ## Cancellation
 
 All async sequences cooperate with structured concurrency. Cancelling the surrounding `Task` propagates to the underlying `cancel()` on the consumer:

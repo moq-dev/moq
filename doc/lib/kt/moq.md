@@ -145,6 +145,30 @@ Moq.connect("https://relay.example.com").use { moq ->
 
 Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber.
 
+### On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```kotlin
+import dev.moq.*
+
+val origin = OriginProducer(OriginOptions(cacheCapacityBytes = 256UL * 1024UL * 1024UL))
+val dynamic = origin.dynamic()
+
+dynamic.requestedBroadcasts().collect { request ->
+    if (request.path() == "events") {
+        val broadcast = BroadcastProducer()
+        val track = broadcast.publishTrack("status", null)
+        request.accept(broadcast)
+        track.writeFrame("ready".encodeToByteArray())
+    } else {
+        request.reject(404)
+    }
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `reject(code)` to fail the requester.
+
 ## Cancellation
 
 The wrapper exposes consumers as Kotlin `Flow`s. Cancelling the collector's coroutine scope calls `cancel()` on the native side via the wrapper's `onCompletion` hook, releasing resources promptly:

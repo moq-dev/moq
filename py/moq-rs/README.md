@@ -149,9 +149,13 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 
 ### Origin (advanced)
 
-- **`OriginProducer()`**. Manage broadcast announcements.
+- **`OriginProducer(cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
+  - `.dynamic() → OriginDynamic`
   - `.announce(path, broadcast)`
+- **`OriginDynamic`**. Async source of broadcasts requested by consumers.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
+  - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix) → Announced` (async iterator)
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
