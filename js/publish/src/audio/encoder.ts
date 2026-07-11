@@ -18,8 +18,8 @@ const OPUS_FRAME_DURATION = Time.Milli(20);
 // be e.g. 16 kHz on Safari's voice-processed mic) stays private to the encoder.
 const OPUS_OUTPUT_RATE = 48000;
 // When resampling capture PCM to the encoder rate (Safari's non-canonical hardware rate -> 48 kHz), the
-// output-clock timestamp is synthesized from a running sample counter. If the capture clock drifts more
-// than one frame from that synthesized clock (chunks dropped during a mute/unmute channel-count flip),
+// output-clock timestamp is synthesized from a running sample counter. If the capture clock ever drifts
+// more than one frame from that synthesized clock (e.g. a dropped capture chunk or a clock jump),
 // re-anchor to the live capture timestamp so audio never lags real time (and video) forever.
 const RESAMPLE_REANCHOR_US = 20000;
 const AAC_BITRATE_PER_CHANNEL = 64_000;
@@ -78,6 +78,11 @@ export type EncoderProps = {
 // channel count (which can differ from the requested count on some platforms, e.g. Safari/macOS).
 type Captured = { sampleRate: number; channelCount: number };
 
+// The capture format derived from the live source: the AudioContext rate, the worklet channel count,
+// and the audio kind. Persisted across a mute so the pipeline (context + worklet + catalog) survives
+// the audio source being released, publishing silence instead of dropping the audio track.
+type Format = { sampleRate: number; channelCount: number; kind: Kind };
+
 export class Encoder {
 	static readonly TRACK = "audio/data";
 	static readonly PRIORITY = Catalog.PRIORITY.audio;
@@ -99,13 +104,12 @@ export class Encoder {
 	// worklet handlers only ever write here, never read-modify-write #config.
 	#captured = new Signal<Captured | undefined>(undefined);
 
+	// The capture format derived from the live source, persisted so a mute (which clears `source`)
+	// leaves it intact and #runPipeline keeps the AudioContext + worklet + catalog up. See #runFormat.
+	#format = new Signal<Format | undefined>(undefined);
+
 	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
-
-	// Just the codec mime ("opus"/"aac"), value-deduped. #runSource only needs to know which codec
-	// (Opus captures at 48 kHz), not its knobs, so reading this instead of the whole codec signal
-	// keeps a bitrate/complexity tweak from tearing down and rebuilding the AudioContext.
-	#codecMime: Getter<"opus" | "aac" | undefined>;
 
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 
@@ -125,17 +129,18 @@ export class Encoder {
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
 
-		// Created before the effects below so its microtask runs first: #runSource then reads a
-		// populated mime rather than the initial undefined.
-		this.#codecMime = this.#signals.computed((effect) => normalizeCodec(effect.get(this.codec)).mime);
-
+		this.#signals.run(this.#runFormat.bind(this));
+		this.#signals.run(this.#runPipeline.bind(this));
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
 
-	#runSource(effect: Effect): void {
+	// Derive the capture format from the live source and persist it. NOT effect.set: a mute clears
+	// `source`, and we deliberately keep the last format so #runPipeline holds the AudioContext,
+	// worklet, and catalog up while the audio source is detached. Only a real change rebuilds.
+	#runFormat(effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.source]);
 		if (!values) return;
 		const [_, rawSource] = values;
@@ -146,33 +151,55 @@ export class Encoder {
 		// For Opus, default the capture context to 48 kHz instead of the device rate: Web Audio
 		// resamples the source transparently, low-rate devices (Bluetooth telephony at 8/16 kHz)
 		// lose their quirks, and device rates libopus rejects (44.1 kHz) never reach a native
-		// encoder's configure(). An explicit sampleRate override still wins. Reading the deduped
-		// mime (not the whole codec) means Opus knob tweaks don't rebuild the context.
-		const codecDefaultRate = effect.get(this.#codecMime) === "opus" ? OPUS_OUTPUT_RATE : settings.sampleRate;
+		// encoder's configure(). An explicit sampleRate override still wins.
+		const codecDefaultRate =
+			normalizeCodec(effect.get(this.codec)).mime === "opus" ? OPUS_OUTPUT_RATE : settings.sampleRate;
 		const sampleRate = overrideSampleRate ?? codecDefaultRate;
 
 		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
 		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
 		// encodes) duplicated mono as stereo. Prefer an explicitly requested channel count, from
-		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
-		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
+		// the prop or the track's applied getUserMedia constraint; fall back to the settings count,
+		// then 2 (the source-node default). The worklet is pinned to this fixed count so it stays
+		// stable when the source detaches on mute and only the mono silence source drives the graph.
+		const channelCount =
+			effect.get(this.channelCount) ?? requestedChannelCount(source.track) ?? settings.channelCount ?? 2;
+
+		// Signal.set's deep-equality dedupe drops a rebuilt-but-identical format, so codec knob
+		// tweaks that rerun this effect never tear down the AudioContext.
+		this.#format.set({ sampleRate, channelCount, kind: source.kind });
+	}
+
+	// Build and hold the capture pipeline (AudioContext -> GainNode -> capture worklet) from the
+	// persisted #format. It outlives a mute, so the catalog never flaps. A silent ConstantSourceNode
+	// keeps the 0-output worklet pulled while no mic is attached, so it keeps emitting silence frames.
+	#runPipeline(effect: Effect): void {
+		const enabled = effect.get(this.enabled);
+		const format = effect.get(this.#format);
+		if (!enabled || !format) return;
 
 		const context = new AudioContext({
 			latencyHint: "interactive",
-			sampleRate,
+			sampleRate: format.sampleRate,
 		});
 		effect.cleanup(() => context.close());
-
-		const root = new MediaStreamAudioSourceNode(context, {
-			mediaStream: new MediaStream([source.track]),
-		});
-		effect.cleanup(() => root.disconnect());
 
 		const gain = new GainNode(context, {
 			gain: this.volume.peek(),
 		});
-		root.connect(gain);
 		effect.cleanup(() => gain.disconnect());
+
+		// A muted broadcast detaches its audio source (see element.ts), so nothing else drives the graph.
+		// This always-running silent source keeps the 0-output worklet processing so it keeps emitting
+		// silence frames on the same clock; without it the worklet would stop and the catalog flap. Its
+		// mono zeros up-mix to the worklet's fixed channel count, so a muted broadcast is true silence.
+		const silence = new ConstantSourceNode(context, { offset: 0 });
+		silence.connect(gain);
+		silence.start();
+		effect.cleanup(() => {
+			silence.stop();
+			silence.disconnect();
+		});
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
@@ -183,24 +210,22 @@ export class Encoder {
 			await context.audioWorklet.addModule(captureWorklet);
 			if (context.state === "closed") return;
 
-			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
-				channelCount,
-				// "explicit" forces Web Audio to (down)mix the input to channelCount before the
-				// worklet sees it. The default "max" just follows the input, which is the unreliable
-				// path on macOS. Only force it when we actually have a requested count to honor.
-				channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
+				channelCount: format.channelCount,
+				// "explicit" pins the count so it can't drift when the source detaches on mute and only the
+				// mono silence source drives the graph; the worklet (down)mixes every input to it.
+				channelCountMode: "explicit",
 				// Stamp audio against the same wall clock as video (see video/polyfill.ts), so both
-				// tracks share an epoch and stay in sync.
+				// tracks share an epoch. Fixed once per pipeline, so the epoch survives a mute/unmute.
 				processorOptions: { zero: performance.now() * 1000 },
 			});
 
 			effect.set(this.#worklet, worklet);
 
-			// The information about channels count can be unreliable on different platforms (Apple's Safari).
-			// Try to get the first audio frame and only then record the captured format.
+			// The channel count can be unreliable across platforms (Apple's Safari). Record the captured
+			// format from the first frame the worklet emits (silence or mic, both at the fixed count).
 			effect.event(
 				worklet.port,
 				"message",
@@ -224,6 +249,23 @@ export class Encoder {
 			// Only set the gain after the worklet is registered.
 			effect.set(this.#gain, gain);
 		});
+	}
+
+	// Attach the live source track to the pipeline gain. Keyed on `source` alone: a mute clears it and
+	// this effect tears the source node down, leaving the silent keep-alive to drive the worklet.
+	// Unmuting re-attaches the source (re-acquiring the mic when there is one) and reconnects here,
+	// all on the same AudioContext (no catalog flap).
+	#runSource(effect: Effect): void {
+		const rawSource = effect.get(this.source);
+		const gain = effect.get(this.#gain);
+		if (!rawSource || !gain) return;
+
+		const track = normalizeSource(rawSource).track;
+		const root = new MediaStreamAudioSourceNode(gain.context as AudioContext, {
+			mediaStream: new MediaStream([track]),
+		});
+		root.connect(gain);
+		effect.cleanup(() => root.disconnect());
 	}
 
 	#createConfig(captured: Captured, codec: OpusConfig | AacConfig): Catalog.AudioConfig {
@@ -377,8 +419,9 @@ export class Encoder {
 				config = effect.get(this.#config);
 				if (!config) return;
 
-				const source = effect.get(this.source);
-				const kind: Kind = source ? normalizeSource(source).kind : "auto";
+				// Read the persisted format's kind, not `source`: a mute clears `source` but must not
+				// reconfigure the encoder (voice -> auto would drop DTX) while it publishes silence.
+				const kind: Kind = effect.get(this.#format)?.kind ?? "auto";
 				const encoderConfig = toEncoderConfig(
 					config,
 					// Opus is configured at the canonical 48 kHz to match the resampled AudioData (see the
@@ -422,9 +465,9 @@ export class Encoder {
 							`audio: capture at ${captureRate} Hz, resampling to ${encodeRate} Hz for the encoder`,
 						);
 					} else {
-						// Re-anchor if the capture clock has run far past our synthesized output clock, which
-						// happens when chunks are dropped (mute/unmute channel-count flip). Otherwise the
-						// synthesized timestamps would keep counting from the pre-gap anchor and lag real time.
+						// Defensive re-anchor: if the capture clock ever runs far past our synthesized output
+						// clock (e.g. a dropped capture chunk or a clock jump), snap to it instead of letting
+						// the synthesized timestamps keep counting from a stale anchor and lag real time forever.
 						const expected = anchor + (resampler.emitted / encodeRate) * 1e6;
 						if (Math.abs(data.timestamp - expected) > RESAMPLE_REANCHOR_US) {
 							resampler = new StreamResampler(captureRate, encodeRate);
@@ -528,19 +571,20 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
 // no such knobs, so it just uses the shared base fields (codec/channels/bitrate).
 //
-// captureRate is the capture AudioContext's rate, which every AudioData is stamped with. The
+// encodeRate is the sample rate of the AudioData fed to the encoder: the capture context's rate,
+// or 48 kHz once the Opus path has resampled it (see the port "message" handler above). The
 // encoder MUST be configured at that rate (native encoders reject mismatched input), while the
 // catalog can advertise a different decode rate (48 kHz for Opus).
 
 function toEncoderConfig(
 	config: Catalog.AudioConfig,
-	captureRate: number,
+	encodeRate: number,
 	kind: Kind,
 	opusOptions: OpusEncoderConfigExt,
 ): AudioEncoderConfig {
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,
-		sampleRate: captureRate,
+		sampleRate: encodeRate,
 		numberOfChannels: config.numberOfChannels,
 		bitrate: config.bitrate,
 	};
