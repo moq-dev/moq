@@ -281,16 +281,21 @@ Each ANNOUNCE_BROADCAST message contains one of the following statuses:
 
 - `active`: a matching broadcast is available.
 - `ended`: a previously `active` broadcast is no longer available.
+- `restart`: a previously `active` broadcast was atomically replaced.
+
+Each `active` implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per `active`.
+The id never appears inside the `active` message itself; both endpoints derive it from the message order on the (reliable, ordered) stream.
+`ended` and `restart` reference the Announce ID instead of repeating the broadcast path, since the path can be arbitrarily long while the id is a compact ordinal.
 
 Each broadcast starts as `ended`.
-An `active` announcement makes the broadcast available; a subsequent `ended` makes it unavailable again.
+An `active` announcement makes the broadcast available; a subsequent `ended` makes it unavailable again and retires its Announce ID.
 
 A publisher SHOULD advertise only the best path it knows for each broadcast.
-If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send another `active` for that broadcast: the new announcement atomically replaces the prior one (equivalent to UNANNOUNCE+ANNOUNCE_BROADCAST).
-A publisher MUST NOT keep multiple `active` advertisements for the same broadcast on the same stream — each broadcast has at most one current advertisement at a time.
+If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send a `restart` referencing the advertisement's Announce ID: the new announcement atomically replaces the prior one (equivalent to UNANNOUNCE+ANNOUNCE_BROADCAST) and the id stays live.
+A publisher MUST NOT keep multiple `active` advertisements for the same broadcast on the same stream — each broadcast has at most one current advertisement at a time, and a second `active` for an already-`active` path is a protocol violation (use `restart`).
 A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the advertisement with the shortest total path length (see [ANNOUNCE_BROADCAST](#announce-broadcast)).
 
-The subscriber MUST reset the stream if it receives an `ended` for a broadcast that is not currently `active`, or any ANNOUNCE_BROADCAST before ANNOUNCE_OK.
+The subscriber MUST reset the stream if it receives an `ended` or `restart` referencing an Announce ID that was never assigned or already retired, an `active` for a path that is already `active`, or any ANNOUNCE_BROADCAST before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now `ended`.
 
 Path prefix matching and equality is done on a byte-by-byte basis.
@@ -330,7 +335,7 @@ A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher p
 The subscriber sends a TRACK message containing the broadcast path and track name.
 The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
 The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO and reuse it across every SUBSCRIBE and FETCH for that track rather than requesting it again.
-When the track was discovered via an ANNOUNCE_BROADCAST, the cached value is tied to that advertisement: if the broadcast is re-announced (a new `active` ANNOUNCE_BROADCAST that atomically replaces the prior one), the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale may have changed.
+When the track was discovered via an ANNOUNCE_BROADCAST, the cached value is tied to that advertisement: if the broadcast is re-announced (a `restart` ANNOUNCE_BROADCAST that atomically replaces the prior advertisement), the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale may have changed.
 If FRAME messages cannot be decoded against the cached TRACK_INFO (for example a malformed delta or payload after a missed re-announcement), the subscriber MUST reset the affected stream with a protocol violation and re-request TRACK_INFO.
 A subscriber that reached the track without an advertisement (e.g. a path known out of band) has no such invalidation signal; it MAY re-request TRACK_INFO whenever it needs to confirm freshness (for example on a new session). A stale cache only risks misparsing frames from a changed track, so the subscriber that cannot observe re-announcements SHOULD NOT cache TRACK_INFO beyond a single connection.
 
@@ -674,28 +679,47 @@ A value of `0` is valid and means the publisher is offering no initial active br
 
 ## ANNOUNCE_BROADCAST {#announce-broadcast}
 A publisher sends an ANNOUNCE_BROADCAST message to advertise a change in broadcast availability.
-Only the suffix is encoded on the wire, as the full path can be constructed by prepending the requested prefix.
 
-The status is relative to all prior ANNOUNCE_BROADCAST messages for the same path on the same stream.
-A publisher MAY send an `active` for a path that is already `active`: the new announcement atomically replaces the prior one, including any change to the Hop ID list.
-An `ended` MUST follow a corresponding `active`; an `ended` for a path that is not currently `active` is a protocol violation.
+The Announce Status determines the body that follows.
+Only an `active` carries the broadcast path; each `active` implicitly assigns the next Announce ID on the stream (a counter starting at 0), and `ended`/`restart` reference that id instead of repeating the path.
+Only the suffix is encoded on the wire, as the full path can be constructed by prepending the requested prefix.
 An ANNOUNCE_BROADCAST before ANNOUNCE_OK is a protocol violation.
 
 ~~~
 ANNOUNCE_BROADCAST Message {
   Message Length (i)
   Announce Status (i),
+  [Announce Body (..)]
+}
+
+Announce Active Body {
   Broadcast Path Suffix (s),
+  Hop Count (i),
+  Hop ID (i) ...,
+}
+
+Announce Ended Body {
+  Announce ID (i),
+}
+
+Announce Restart Body {
+  Announce ID (i),
   Hop Count (i),
   Hop ID (i) ...,
 }
 ~~~
 
 **Announce Status**:
-A flag indicating the announce status.
+A flag indicating the announce status and the body that follows.
 
-- `ended` (0): A path is no longer available.
-- `active` (1): A path is now available. If the path is already `active`, this announcement atomically replaces the prior one — the Hop ID list MAY differ (e.g. after a relay failover or upstream restart).
+- `ended` (0): The broadcast with this Announce ID is no longer available. The id is retired.
+- `active` (1): A path is now available, implicitly assigned the next Announce ID. An `active` for a path that is already `active` on this stream is a protocol violation.
+- `restart` (2): The advertisement with this Announce ID is atomically replaced — the Hop ID list MAY differ (e.g. after a relay failover or upstream restart). The id stays live.
+
+**Announce ID**:
+The ordinal implicitly assigned by a prior `active` on this stream.
+Referencing an id that was never assigned, or one already retired by an `ended`, is a protocol violation.
+Announce IDs are never reused within a stream; a broadcast that is announced again after an `ended` gets a fresh id.
 
 **Broadcast Path Suffix**:
 This is combined with the broadcast path prefix to form the full broadcast path.
@@ -1036,6 +1060,11 @@ The `Message Length` describes the payload size on the wire.
 
 
 # Appendix A: Changelog
+
+## moq-lite-06
+- Added implicit Announce IDs: each `active` ANNOUNCE_BROADCAST assigns the next per-stream ordinal.
+- ANNOUNCE_BROADCAST `ended` references the Announce ID instead of repeating the broadcast path.
+- Added an explicit `restart` status referencing the Announce ID, replacing the duplicate-`active` idiom; a duplicate `active` for an already-`active` path is now a protocol violation.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
