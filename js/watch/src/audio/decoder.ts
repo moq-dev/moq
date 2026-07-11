@@ -297,6 +297,12 @@ export class Decoder {
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
 		effect.cleanup(() => sub.close());
 
+		// Both branches below build a fresh container Consumer, whose rewind counter restarts at zero.
+		// This field outlives the subscription (unlike video, which keeps it on a per-track object), so a
+		// count left over from the previous stream would make the first frame look like a rewind and reset
+		// the Sync reference that video shares. Re-anchor the count with the consumer that reports it.
+		this.#discontinuity = 0;
+
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
 		} else {

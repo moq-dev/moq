@@ -585,3 +585,25 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
 	consumer.close();
 });
+
+// A fresh Consumer always starts at zero, on both a fresh track and a resubscribe of a track that has
+// already been read. Downstream decoders that outlive their subscription rely on this to re-anchor their
+// own copy of the count; a nonzero start would make the first frame of a new stream look like a rewind.
+test("Consumer starts at discontinuity 0, including on resubscribe", async () => {
+	const track = new Track.Producer("test");
+
+	const first = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	expect(first.discontinuity).toBe(0);
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
+	await drainFrames(first, 200);
+	expect(first.discontinuity).toBe(0);
+	first.close();
+
+	// Resubscribing the same track builds a new Consumer, whose counter restarts rather than resuming.
+	const second = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	expect(second.discontinuity).toBe(0);
+	second.close();
+
+	track.close();
+});
