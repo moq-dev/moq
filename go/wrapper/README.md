@@ -44,6 +44,23 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## Common APIs
+
+Client TLS can be configured with `WithTLSRoots`, `WithTLSSystemRoots`, and
+`WithTLSFingerprints`. Use fingerprints with `Server.CertFingerprints()` when
+pinning a generated self-signed certificate.
+
+`Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
+when the transport backend does not report that metric yet.
+
+`BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
+`TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishMediaOnTrack()`
+for media tracks whose timescale should be selected by the importer.
+
+`PublishMedia`, `PublishMediaOnTrack`, and `PublishMediaStream` accept
+`WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
+before the stream reveals them.
+
 ## Errors
 
 All FFI errors come back as the `moq.Error` type. The error variants are

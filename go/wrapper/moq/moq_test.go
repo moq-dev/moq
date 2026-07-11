@@ -3,6 +3,7 @@ package moq_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -95,6 +96,9 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann.Path() != "live" {
 		t.Fatalf("path = %q, want %q", ann.Path(), "live")
 	}
+	if hops := ann.Hops(); len(hops) != 0 {
+		t.Fatalf("hops = %v, want empty for local origin", hops)
+	}
 
 	catalog, err := ann.Broadcast().Catalog(ctx)
 	if err != nil {
@@ -164,6 +168,172 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	if string(frame) != "hello" {
 		t.Fatalf("frame = %q, want %q", frame, "hello")
+	}
+}
+
+func TestDynamicTrackRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	dynamic, err := broadcast.Dynamic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type subscribeResult struct {
+		track *moq.TrackConsumer
+		err   error
+	}
+	subscribe := make(chan subscribeResult, 1)
+	go func() {
+		track, err := consumer.SubscribeTrack("events", nil)
+		subscribe <- subscribeResult{track: track, err: err}
+	}()
+
+	request, err := dynamic.RequestedTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := request.Name()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "events" {
+		t.Fatalf("request name = %q, want events", name)
+	}
+
+	track, err := request.Accept(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("hello dynamic track")
+	if err := track.WriteFrame(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	var trackConsumer *moq.TrackConsumer
+	select {
+	case res := <-subscribe:
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		trackConsumer = res.track
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	defer trackConsumer.Cancel()
+
+	frame, err := trackConsumer.ReadFrame(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(frame) != string(payload) {
+		t.Fatalf("frame = %q, want %q", frame, payload)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDynamicTrackRequestCanPublishMedia(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	dynamic, err := broadcast.Dynamic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type subscribeResult struct {
+		media *moq.MediaConsumer
+		err   error
+	}
+	subscribe := make(chan subscribeResult, 1)
+	go func() {
+		media, err := consumer.SubscribeMedia("requested-audio", moq.LegacyContainer(), 10_000, nil)
+		subscribe <- subscribeResult{media: media, err: err}
+	}()
+
+	request, err := dynamic.RequestedTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := request.Name()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "requested-audio" {
+		t.Fatalf("request name = %q, want requested-audio", name)
+	}
+
+	media, err := broadcast.PublishMediaOnTrack(request, "opus", opusHead())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaName, err := media.Name()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaName != "requested-audio" {
+		t.Fatalf("media name = %q, want requested-audio", mediaName)
+	}
+	if _, err := request.Name(); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
+	}
+
+	var mediaConsumer *moq.MediaConsumer
+	select {
+	case res := <-subscribe:
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		mediaConsumer = res.media
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	defer mediaConsumer.Cancel()
+
+	payload := []byte("dynamic opus frame")
+	if err := media.WriteFrame(payload, 20_000); err != nil {
+		t.Fatal(err)
+	}
+
+	frame, err := mediaConsumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil {
+		t.Fatal("expected a frame")
+	}
+	if string(frame.Payload) != string(payload) || frame.TimestampUs != 20_000 {
+		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
+	}
+	if err := media.Finish(); err != nil {
+		t.Fatal(err)
 	}
 }
 
