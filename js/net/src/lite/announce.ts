@@ -87,14 +87,14 @@ async function encodeAnnounceBody(w: Writer, msg: AnnounceBroadcast, version: Ve
 	switch (msg.status) {
 		case "active":
 			await w.u8(ANNOUNCE_ACTIVE);
-			await w.string(msg.suffix);
+			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, msg.hops);
 			break;
 		case "ended":
 			// Lite06+ retracts by announce id (`endedId`), never by path.
 			if (hasAnnounceId(version)) throw new Error("ended-by-path not supported for this version");
 			await w.u8(ANNOUNCE_ENDED);
-			await w.string(msg.suffix);
+			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, []);
 			break;
 		case "endedId":
@@ -119,7 +119,7 @@ async function decodeAnnounceBody(r: Reader, version: Version): Promise<Announce
 		// `ended`/`restart` reference the announce id it implicitly assigned.
 		switch (status) {
 			case ANNOUNCE_ACTIVE:
-				return { status: "active", suffix: Path.from(await r.string()), hops: await decodeHops(r, version) };
+				return { status: "active", suffix: Path.decode(await r.string()), hops: await decodeHops(r, version) };
 			case ANNOUNCE_ENDED:
 				return { status: "endedId", id: await r.u62() };
 			case ANNOUNCE_RESTART:
@@ -135,7 +135,7 @@ async function decodeAnnounceBody(r: Reader, version: Version): Promise<Announce
 	if (status !== ANNOUNCE_ENDED && !active) {
 		throw new Error("invalid announce status");
 	}
-	const suffix = Path.from(await r.string());
+	const suffix = Path.decode(await r.string());
 	const hops = await decodeHops(r, version);
 	return active ? { status: "active", suffix, hops } : { status: "ended", suffix };
 }
@@ -174,7 +174,7 @@ export class AnnounceRequest {
 	}
 
 	async #encode(w: Writer, version: Version) {
-		await w.string(this.prefix);
+		await w.string(Path.encode(this.prefix));
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -188,7 +188,7 @@ export class AnnounceRequest {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
-		const prefix = Path.from(await r.string());
+		const prefix = Path.decode(await r.string());
 		let excludeHop = 0n;
 		switch (version) {
 			case Version.DRAFT_01:
@@ -234,7 +234,7 @@ export class AnnounceInit {
 	async #encode(w: Writer) {
 		await w.u53(this.suffixes.length);
 		for (const path of this.suffixes) {
-			await w.string(path);
+			await w.string(Path.encode(path));
 		}
 	}
 
@@ -242,7 +242,7 @@ export class AnnounceInit {
 		const count = await r.u53();
 		const suffixes: Path.Valid[] = [];
 		for (let i = 0; i < count; i++) {
-			suffixes.push(Path.from(await r.string()));
+			suffixes.push(Path.decode(await r.string()));
 		}
 		return new AnnounceInit(suffixes);
 	}

@@ -46,11 +46,17 @@ impl session::MediaSink for IngestSink {
 			str0m::format::Codec::H264 => {
 				Box::new(codec::h264::Bridge::new(self.broadcast.clone(), self.catalog.clone())?)
 			}
+			str0m::format::Codec::H265 => {
+				Box::new(codec::h265::Bridge::new(self.broadcast.clone(), self.catalog.clone())?)
+			}
 			str0m::format::Codec::Vp8 => {
 				Box::new(codec::vp8::Bridge::new(self.broadcast.clone(), self.catalog.clone())?)
 			}
 			str0m::format::Codec::Vp9 => {
 				Box::new(codec::vp9::Bridge::new(self.broadcast.clone(), self.catalog.clone())?)
+			}
+			str0m::format::Codec::Av1 => {
+				Box::new(codec::av1::Bridge::new(self.broadcast.clone(), self.catalog.clone())?)
 			}
 			other => return Err(Error::UnsupportedCodec(format!("{other:?}"))),
 		};
