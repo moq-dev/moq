@@ -175,6 +175,7 @@ impl Web {
 	pub fn routes(&self) -> Router {
 		let app = Router::new()
 			.route("/health", get(serve_health))
+			.route("/metrics", get(serve_metrics))
 			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
@@ -418,6 +419,114 @@ async fn serve_landing() -> Response {
 /// process, not the relay.
 async fn serve_health() -> Response {
 	(StatusCode::OK, "ok\n").into_response()
+}
+
+/// Prometheus text-exposition metrics for this node's own MoQ traffic counters
+/// (bytes/frames/groups, subscriptions, viewers, and connected sessions),
+/// summed across broadcasts and split by `tier`/`role`.
+///
+/// Unauthenticated like `/health`, so a scraper needs no JWT; expose the web
+/// listener only where that's acceptable (e.g. a private metrics plane). Host
+/// system metrics (CPU/memory/disk/network) are deliberately out of scope: run
+/// a dedicated node exporter for those, per the relay's separation of concerns.
+/// Returns the current cumulative snapshot; a downstream scraper derives rates
+/// and live counts (`open - closed`).
+async fn serve_metrics(State(state): State<Arc<WebState>>) -> Response {
+	let body = render_metrics(&state.cluster.stats.snapshot());
+	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+}
+
+/// Render a [`moq_net::StatsSnapshot`] as Prometheus text exposition (v0.0.4).
+///
+/// Hand-formatted rather than pulling in a metrics registry crate: the atomics
+/// already are the registry, and a snapshot is a fixed handful of labeled
+/// counters, so a registry would only add a second source of truth to keep in
+/// sync.
+fn render_metrics(snap: &moq_net::StatsSnapshot) -> String {
+	use std::fmt::Write as _;
+
+	let traffic = snap.traffic();
+	let mut out = String::new();
+
+	// One HELP/TYPE header followed by the four (tier, role) rows for a counter
+	// selected out of `CounterTotals` by `field`.
+	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::CounterTotals) -> u64| {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, role, totals) in &traffic {
+			let _ = writeln!(
+				out,
+				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
+				tier.as_str(),
+				role.as_str(),
+				field(totals)
+			);
+		}
+	};
+
+	counter(
+		&mut out,
+		"moq_relay_bytes_total",
+		"Media payload bytes transferred.",
+		|c| c.bytes,
+	);
+	counter(&mut out, "moq_relay_frames_total", "Media frames transferred.", |c| {
+		c.frames
+	});
+	counter(&mut out, "moq_relay_groups_total", "Media groups transferred.", |c| {
+		c.groups
+	});
+	counter(
+		&mut out,
+		"moq_relay_subscriptions_opened_total",
+		"Track subscriptions opened.",
+		|c| c.subscriptions,
+	);
+	counter(
+		&mut out,
+		"moq_relay_subscriptions_closed_total",
+		"Track subscriptions closed; subtract from opened for live subscriptions.",
+		|c| c.subscriptions_closed,
+	);
+	counter(
+		&mut out,
+		"moq_relay_viewers_opened_total",
+		"Distinct (broadcast, session) subscriptions opened.",
+		|c| c.broadcasts,
+	);
+	counter(
+		&mut out,
+		"moq_relay_viewers_closed_total",
+		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
+		|c| c.broadcasts_closed,
+	);
+
+	// Sessions are per-tier only (no role), so they don't fit the helper above.
+	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
+	let _ = writeln!(out, "# TYPE moq_relay_sessions_opened_total counter");
+	for (tier, sessions) in &snap.sessions() {
+		let _ = writeln!(
+			out,
+			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
+			tier.as_str(),
+			sessions.sessions
+		);
+	}
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_sessions_closed_total Connected sessions closed; subtract from opened for live sessions."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_sessions_closed_total counter");
+	for (tier, sessions) in &snap.sessions() {
+		let _ = writeln!(
+			out,
+			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
+			tier.as_str(),
+			sessions.sessions_closed
+		);
+	}
+
+	out
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
@@ -814,6 +923,44 @@ mod tests {
 		assert!(
 			res.is_err(),
 			"empty PEM must be rejected to avoid a silently disabled verifier"
+		);
+	}
+
+	/// The `/metrics` renderer emits well-formed Prometheus exposition: a
+	/// HELP/TYPE header per metric and a labeled line carrying the live counter
+	/// value, summed across broadcasts.
+	#[tokio::test]
+	async fn metrics_render_exposition() {
+		use moq_net::{Origin, Stats, StatsConfig, Tier};
+
+		let origin = Origin::random().produce();
+		let stats = Stats::new(StatsConfig::new().with_origin(origin));
+
+		let track = stats
+			.tier(Tier::External)
+			.broadcast("demo/x")
+			.publisher()
+			.track("video");
+		track.bytes(1234);
+		let _session = stats.tier(Tier::External).session("acme");
+
+		let body = render_metrics(&stats.snapshot());
+
+		assert!(
+			body.contains("# TYPE moq_relay_bytes_total counter"),
+			"type header:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_bytes_total{tier=\"external\",role=\"publisher\"} 1234"),
+			"external egress bytes:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_bytes_total{tier=\"internal\",role=\"subscriber\"} 0"),
+			"idle tier still emitted:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_sessions_opened_total{tier=\"external\"} 1"),
+			"session presence:\n{body}"
 		);
 	}
 
