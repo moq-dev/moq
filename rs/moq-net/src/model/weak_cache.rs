@@ -108,6 +108,10 @@ where
 		K: Borrow<Q>,
 		Q: Hash + Eq + ?Sized,
 	{
+		// Prune the ring too. Unlike a lazily-dropped closed entry (which a later insert's GC
+		// sweeps), an explicit remove has no follow-up insert to rely on, so scan it out now
+		// rather than pin the handle (and its kio state) until one happens to arrive.
+		self.ring.retain(|(k, _)| k.borrow() != key);
 		self.map.remove(key)
 	}
 
@@ -209,6 +213,21 @@ mod tests {
 		entry.close();
 		assert!(cache.get("a").is_none(), "a closed entry must not resolve");
 		assert_eq!(cache.len(), 0, "the closed entry is dropped on lookup");
+	}
+
+	#[test]
+	fn remove_prunes_ring() {
+		// An explicit remove must free the handle from the ring too, not just the map, so a
+		// batch of removes with no follow-up insert doesn't pin the handles until GC runs.
+		let mut cache = WeakCache::default();
+		cache.insert("a", Fake::open());
+		cache.insert("b", Fake::open());
+		assert_eq!(cache.ring_len(), 2);
+
+		assert!(cache.remove("a").is_some());
+		assert_eq!(cache.len(), 1);
+		assert_eq!(cache.ring_len(), 1, "remove must prune the ring, not just the map");
+		assert!(cache.remove("a").is_none(), "already removed");
 	}
 
 	#[test]
