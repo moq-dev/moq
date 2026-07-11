@@ -121,11 +121,30 @@ producer, err := request.Accept()
 if err != nil {
     log.Fatal(err)
 }
-_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()))
+_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()), request.Sequence()*20_000)
 _ = producer.Finish()
 ```
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+## Raw track timestamps
+
+Raw tracks carry arbitrary byte payloads. `WriteFrame` takes a caller-supplied
+presentation timestamp in microseconds, and raw tracks default to a microsecond
+timescale. `ReadFrame` returns the timestamped raw frame:
+
+```go
+track, _ := broadcast.PublishTrack("events", nil)
+consumer, _ := track.Consume(nil)
+
+_ = track.WriteFrame([]byte("ready"), 20_000)
+
+frame, err := consumer.ReadFrame(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(string(frame.Payload), frame.TimestampUs)
+```
 
 ## Local development
 

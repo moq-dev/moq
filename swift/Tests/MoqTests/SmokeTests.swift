@@ -43,7 +43,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")
         let group = try track.appendGroup()
-        try group.writeFrame(Data("cached".utf8))
+        try group.writeFrame(Data("cached".utf8), timestampUs: 0)
         try group.finish()
 
         let consumer = try broadcast.consume()
@@ -54,8 +54,34 @@ final class SmokeTests: XCTestCase {
         )
         XCTAssertEqual(fetched.sequence, 0)
         let frame = try await fetched.readFrame()
-        XCTAssertEqual(frame, Data("cached".utf8))
+        XCTAssertEqual(frame?.payload, Data("cached".utf8))
         let end = try await fetched.readFrame()
         XCTAssertNil(end)
+    }
+
+    func testRawTrackTimestamps() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "events")
+        let consumer = try track.consume()
+
+        let payload = Data("ready".utf8)
+        try track.writeFrame(payload, timestampUs: 12_345)
+
+        let frame = try await consumer.readFrame()
+        XCTAssertEqual(frame?.payload, payload)
+        XCTAssertEqual(frame?.timestampUs, 12_345)
+
+        let group = try track.appendGroup()
+        let groupConsumer = try group.consume()
+        let groupPayload = Data("group".utf8)
+        try group.writeFrame(groupPayload, timestampUs: 23_456)
+        try group.finish()
+
+        let groupFrame = try await groupConsumer.readFrame()
+        XCTAssertEqual(groupFrame?.payload, groupPayload)
+        XCTAssertEqual(groupFrame?.timestampUs, 23_456)
+
+        try track.finish()
+        try broadcast.finish()
     }
 }

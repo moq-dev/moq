@@ -50,7 +50,7 @@ class MediaConsumer:
 
 
 class GroupConsumer:
-    """Async iterator of byte payloads within a single group."""
+    """Async iterator of timestamped frames within a single group."""
 
     def __init__(self, inner: MoqGroupConsumer) -> None:
         self._inner = inner
@@ -69,7 +69,7 @@ class GroupConsumer:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> bytes:
+    async def __anext__(self) -> Frame:
         frame = await self._inner.read_frame()
         if frame is None:
             raise StopAsyncIteration
@@ -82,7 +82,7 @@ class GroupConsumer:
 class TrackConsumer:
     """Async iterator of groups from a track.
 
-    Each group is itself an async iterator of byte payloads. Same pattern as
+    Each group is itself an async iterator of timestamped frames. Same pattern as
     moq-boy's status/command tracks (one frame per group), but multi-frame
     groups are also supported.
     """
@@ -127,8 +127,8 @@ class TrackConsumer:
             return None
         return GroupConsumer(group)
 
-    async def read_frame(self) -> bytes | None:
-        """Read the first frame of the next group.
+    async def read_frame(self) -> Frame | None:
+        """Read the first timestamped frame of the next group.
 
         Convenience for tracks using one-frame-per-group (like moq-boy's
         status/command tracks). Returns `None` when the track ends.

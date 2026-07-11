@@ -96,6 +96,16 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
     if (cause is CancellationException) cancel()
 }
 
+/** Stream of timestamped raw frames from one-frame-per-group tracks. */
+fun MoqTrackConsumer.frames(): Flow<MoqFrame> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(readFrame() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
 /** Stream of tracks requested by subscribers. */
 fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {
     while (true) {
@@ -116,8 +126,8 @@ fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/** Stream of raw frame payloads within a group. */
-fun MoqGroupConsumer.frames(): Flow<ByteArray> = flow {
+/** Stream of timestamped raw frames within a group. */
+fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(readFrame() ?: break)

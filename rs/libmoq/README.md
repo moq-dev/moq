@@ -47,6 +47,12 @@ int32_t moq_publish_close(uint32_t broadcast);
 int32_t moq_publish_media_ordered(uint32_t broadcast, const char *format, uintptr_t format_len, const uint8_t *init, uintptr_t init_size);
 int32_t moq_publish_media_close(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len);
+int32_t moq_publish_track_group(uint32_t track);
+int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_group_close(uint32_t group);
+int32_t moq_publish_track_close(uint32_t track);
 
 // Consuming
 int32_t moq_consume_close(uint32_t consume);
@@ -69,4 +75,14 @@ int32_t moq_consume_audio_close(uint32_t track);
 // Consuming: Frames
 int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_frame_close(uint32_t frame);
+int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
+int32_t moq_consume_track_frame_close(uint32_t frame);
+int32_t moq_consume_track_close(uint32_t track);
 ```
+
+Raw track frames use the same `moq_frame` record as media frames. Use
+`moq_publish_track_frame` or `moq_publish_group_frame` to provide microsecond
+presentation timestamps; `moq_consume_track_frame` returns that timestamp in
+`moq_frame.timestamp_us`. libmoq creates raw tracks with a microsecond
+timescale, matching the C ABI's timestamp units.

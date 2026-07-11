@@ -88,9 +88,9 @@ generated header at `../../target/release/moq.h`.
 
 Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_video_raw`, `moq_consume_audio_raw`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
-- **`> 0`** — a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
-- **`0`** — closed cleanly. **Terminal.**
-- **`< 0`** — closed with an error. **Terminal.**
+- **`> 0`**: a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
+- **`0`**: closed cleanly. **Terminal.**
+- **`< 0`**: closed with an error. **Terminal.**
 
 A positive result that is itself a handle must be freed once you're done with it (e.g. a broadcast from `moq_origin_request` via `moq_consume_close`). `moq_origin_announced` is the notable repeat case: it delivers a fresh announce ID for *every* announce / unannounce event, so free each one with `moq_origin_announced_free` after reading it with `moq_origin_announced_info`, or they accumulate for the life of the listener.
 
@@ -116,6 +116,19 @@ if (rc < 0) {
 A server can reject the connection on auth grounds: unauthorized (HTTP 401) or forbidden (HTTP 403). Each returns its own distinct negative code (with `moq_error()` reporting `"unauthorized"` / `"forbidden"`). These are terminal, so distinguish them from a transient transport failure and stop rather than reconnecting.
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
+
+## Raw Tracks
+
+Raw tracks carry arbitrary byte payloads without catalog or codec parsing. Use
+`moq_publish_track_frame` / `moq_publish_group_frame` to provide presentation
+timestamps in microseconds.
+libmoq creates raw tracks with a microsecond timescale, matching the C ABI's
+timestamp units.
+
+Subscribers receive raw frame handles from `moq_consume_track`; read each one
+with `moq_consume_track_frame`. The returned `moq_frame.timestamp_us` carries
+the timestamp, and `keyframe` is always false because raw tracks do not parse
+codec metadata.
 
 ## Use cases
 

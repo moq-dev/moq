@@ -188,9 +188,9 @@ func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
 	return &GroupProducer{inner: inner}, nil
 }
 
-// WriteFrame writes a single-frame group in one call.
-func (t *TrackProducer) WriteFrame(payload []byte) error {
-	return t.inner.WriteFrame(payload)
+// WriteFrame writes a single-frame group with a timestamp in microseconds.
+func (t *TrackProducer) WriteFrame(payload []byte, timestampUs uint64) error {
+	return t.inner.WriteFrame(payload, timestampUs)
 }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
@@ -227,9 +227,9 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends a frame to the group.
-func (g *GroupProducer) WriteFrame(payload []byte) error {
-	return g.inner.WriteFrame(payload)
+// WriteFrame appends a frame with a timestamp in microseconds.
+func (g *GroupProducer) WriteFrame(payload []byte, timestampUs uint64) error {
+	return g.inner.WriteFrame(payload, timestampUs)
 }
 
 // Finish closes the group.

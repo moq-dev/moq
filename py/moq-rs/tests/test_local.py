@@ -235,7 +235,7 @@ async def test_announced_broadcast():
 def test_publish_lifecycle():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    track.write_frame(b'{"cmd": "ready"}')
+    track.write_frame(b'{"cmd": "ready"}', 0)
     track.finish()
     broadcast.finish()
 
@@ -247,10 +247,11 @@ async def test_publish_track_info_and_subscription():
     track = broadcast.publish_track("status", info)
 
     consumer = track.consume(moq.Subscription(priority=3))
-    track.write_frame(b"ready")
+    track.write_frame(b"ready", 0)
 
     frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
-    assert frame == b"ready"
+    assert frame is not None
+    assert frame.payload == b"ready"
     track.finish()
 
 
@@ -261,12 +262,12 @@ async def test_fetch_group_and_serve_dynamic_miss():
     consumer = broadcast.consume()
 
     cached = track.append_group()
-    cached.write_frame(b"cached")
+    cached.write_frame(b"cached", 0)
     cached.finish()
 
     fetched = await consumer.fetch_group("events", 0, moq.FetchGroupOptions(priority=3))
     assert fetched.sequence == 0
-    assert [frame async for frame in fetched] == [b"cached"]
+    assert [frame.payload async for frame in fetched] == [b"cached"]
 
     dynamic = track.dynamic()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
@@ -275,11 +276,11 @@ async def test_fetch_group_and_serve_dynamic_miss():
     assert request.priority == 11
 
     produced = request.accept()
-    produced.write_frame(b"archive")
+    produced.write_frame(b"archive", 140_000)
     produced.finish()
 
     fetched = await asyncio.wait_for(pending, timeout=5.0)
-    assert [frame async for frame in fetched] == [b"archive"]
+    assert [frame.payload async for frame in fetched] == [b"archive"]
 
 
 async def test_dynamic_track_request():
@@ -296,11 +297,12 @@ async def test_dynamic_track_request():
     # Accept the request as a raw track (which unblocks the subscribe), then write.
     track = request.accept()
     payload = b"hello dynamic track"
-    track.write_frame(payload)
+    track.write_frame(payload, 0)
 
     track_consumer = await asyncio.wait_for(subscribe, timeout=5.0)
     frame = await asyncio.wait_for(track_consumer.read_frame(), timeout=5.0)
-    assert frame == payload
+    assert frame is not None
+    assert frame.payload == payload
 
     track.finish()
 
@@ -365,7 +367,7 @@ def test_raw_group_write_multiple_frames():
 
     group = track.append_group()
     for i in range(10):
-        group.write_frame(f"frame-{i}".encode())
+        group.write_frame(f"frame-{i}".encode(), i)
     group.finish()
 
 
@@ -375,7 +377,7 @@ def test_raw_group_empty_payload():
     track = broadcast.publish_track("empty")
 
     group = track.append_group()
-    group.write_frame(b"")
+    group.write_frame(b"", 0)
     group.finish()
 
 
@@ -386,7 +388,7 @@ def test_raw_group_write_after_finish_fails():
     group.finish()
 
     with pytest.raises(Exception):
-        group.write_frame(b"too late")
+        group.write_frame(b"too late", 0)
 
 
 def test_raw_group_finish_twice_fails():
@@ -405,7 +407,7 @@ def test_raw_track_write_after_finish_fails():
     track.finish()
 
     with pytest.raises(Exception):
-        track.write_frame(b"late")
+        track.write_frame(b"late", 0)
 
     with pytest.raises(Exception):
         track.append_group()
@@ -422,9 +424,9 @@ def test_raw_parallel_groups():
     assert g0.sequence == 0
     assert g1.sequence == 1
 
-    g0.write_frame(b"a0")
-    g1.write_frame(b"b0")
-    g0.write_frame(b"a1")
+    g0.write_frame(b"a0", 0)
+    g1.write_frame(b"b0", 0)
+    g0.write_frame(b"a1", 1)
     g0.finish()
     g1.finish()
 
@@ -487,11 +489,11 @@ async def test_raw_publish_consume():
         raw_consumer = await announcement.broadcast.subscribe_track("events")
 
         payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
-        raw.write_frame(payload)
+        raw.write_frame(payload, 0)
 
         async for group in raw_consumer:
             async for frame in group:
-                assert frame == payload
+                assert frame.payload == payload
                 break
             break
 
@@ -515,12 +517,12 @@ async def test_raw_multiple_frames():
             b'{"cmd": "tone_stop", "arm": "right"}',
         ]
         for msg in messages:
-            raw.write_frame(msg)
+            raw.write_frame(msg, 0)
 
         received = []
         async for group in raw_consumer:
             async for frame in group:
-                received.append(frame)
+                received.append(frame.payload)
             if len(received) == len(messages):
                 break
 
@@ -534,13 +536,13 @@ async def test_raw_producer_consume_direct():
     track = broadcast.publish_track("direct")
     consumer = track.consume()
 
-    track.write_frame(b"hello")
-    track.write_frame(b"world")
+    track.write_frame(b"hello", 0)
+    track.write_frame(b"world", 0)
 
     received = []
     async for group in consumer:
         async for frame in group:
-            received.append(frame)
+            received.append(frame.payload)
         if len(received) == 2:
             break
 
@@ -555,11 +557,11 @@ async def test_raw_group_producer_consume_direct():
     group_consumer = group.consume()
     assert group_consumer.sequence == group.sequence
 
-    group.write_frame(b"a")
-    group.write_frame(b"b")
+    group.write_frame(b"a", 0)
+    group.write_frame(b"b", 0)
     group.finish()
 
-    received = [frame async for frame in group_consumer]
+    received = [frame.payload async for frame in group_consumer]
     assert received == [b"a", b"b"]
 
 
@@ -570,11 +572,11 @@ async def test_broadcast_producer_consume_direct():
     consumer = broadcast.consume()
 
     raw_consumer = await consumer.subscribe_track("events")
-    raw.write_frame(b"event-0")
+    raw.write_frame(b"event-0", 0)
 
     async for group in raw_consumer:
         async for frame in group:
-            assert frame == b"event-0"
+            assert frame.payload == b"event-0"
             break
         break
 
@@ -595,7 +597,7 @@ async def test_raw_group_sequence():
         for i in range(3):
             group = raw.append_group()
             sent_sequences.append(group.sequence)
-            group.write_frame(f"msg-{i}".encode())
+            group.write_frame(f"msg-{i}".encode(), i)
             group.finish()
 
         received_sequences = []
@@ -625,11 +627,11 @@ async def test_raw_multi_frame_group():
         group_producer = raw.append_group()
         chunks = [b"chunk-0", b"chunk-1", b"chunk-2"]
         for chunk in chunks:
-            group_producer.write_frame(chunk)
+            group_producer.write_frame(chunk, 0)
         group_producer.finish()
 
         async for group in raw_consumer:
-            received = [frame async for frame in group]
+            received = [frame.payload async for frame in group]
             assert received == chunks
             break
 
@@ -642,13 +644,44 @@ async def test_read_frame_one_per_group():
     track = broadcast.publish_track("status")
     consumer = track.consume()
 
-    track.write_frame(b"ready")
-    track.write_frame(b"running")
-    track.write_frame(b"done")
+    track.write_frame(b"ready", 0)
+    track.write_frame(b"running", 0)
+    track.write_frame(b"done", 0)
 
-    assert await consumer.read_frame() == b"ready"
-    assert await consumer.read_frame() == b"running"
-    assert await consumer.read_frame() == b"done"
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"ready"
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"running"
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"done"
+
+
+async def test_raw_read_frame_preserves_timestamp():
+    """read_frame() returns raw payloads with their presentation timestamp."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status")
+    consumer = track.consume()
+
+    track.write_frame(b"ready", 12_345)
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"ready"
+    assert frame.timestamp_us == 12_345
+    assert not frame.keyframe
+
+    group = track.append_group()
+    group_consumer = group.consume()
+    group.write_frame(b"group", 23_456)
+    group.finish()
+
+    frame = await group_consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"group"
+    assert frame.timestamp_us == 23_456
+    assert not frame.keyframe
 
 
 async def test_read_frame_skips_remaining_frames_in_group():
@@ -658,14 +691,18 @@ async def test_read_frame_skips_remaining_frames_in_group():
     consumer = track.consume()
 
     group = track.append_group()
-    group.write_frame(b"first")
-    group.write_frame(b"second-ignored")
+    group.write_frame(b"first", 0)
+    group.write_frame(b"second-ignored", 0)
     group.finish()
 
-    track.write_frame(b"next-group-first")
+    track.write_frame(b"next-group-first", 0)
 
-    assert await consumer.read_frame() == b"first"
-    assert await consumer.read_frame() == b"next-group-first"
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"first"
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"next-group-first"
 
 
 async def test_read_frame_returns_none_when_track_finished():
@@ -674,8 +711,10 @@ async def test_read_frame_returns_none_when_track_finished():
     track = broadcast.publish_track("done")
     consumer = track.consume()
 
-    track.write_frame(b"only")
+    track.write_frame(b"only", 0)
     track.finish()
 
-    assert await consumer.read_frame() == b"only"
+    frame = await consumer.read_frame()
+    assert frame is not None
+    assert frame.payload == b"only"
     assert await consumer.read_frame() is None

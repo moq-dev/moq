@@ -106,7 +106,7 @@ let group = try await consumer.fetchGroup(
     options: FetchGroupOptions(priority: 10)
 )
 for try await frame in group {
-    print(frame)
+    print(frame.timestampUs, frame.payload)
 }
 ```
 
@@ -117,7 +117,7 @@ let dynamic = try track.dynamic()
 
 for try await request in dynamic {
     let group = try request.accept()
-    try group.writeFrame(loadArchivedFrame(request.sequence))
+    try group.writeFrame(loadArchivedFrame(request.sequence), timestampUs: request.sequence * 20_000)
     try group.finish()
 }
 ```
@@ -137,7 +137,7 @@ try session.publisher.announce(path: "events", broadcast: broadcast)
 for try await request in dynamic {
     if try request.name == "alerts" {
         let track = try request.accept()
-        try track.writeFrame(Data("ready".utf8))
+        try track.writeFrame(Data("ready".utf8), timestampUs: 20_000)
         try track.finish()
     } else {
         try request.abort(errorCode: 404)
@@ -145,7 +145,7 @@ for try await request in dynamic {
 }
 ```
 
-Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber.
+Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber. Use `writeFrame(_:timestampUs:)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `Frame` values from `readFrame()` and group iteration.
 
 ## Cancellation
 

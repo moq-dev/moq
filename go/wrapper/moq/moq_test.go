@@ -72,7 +72,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cached.WriteFrame([]byte("cached")); err != nil {
+	if err := cached.WriteFrame([]byte("cached"), 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := cached.Finish(); err != nil {
@@ -84,8 +84,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 	frame, err := fetched.ReadFrame(ctx)
-	if err != nil || string(frame) != "cached" {
-		t.Fatalf("cached fetch: frame=%q err=%v", frame, err)
+	if err != nil || frame == nil || string(frame.Payload) != "cached" {
+		t.Fatalf("cached fetch: frame=%+v err=%v", frame, err)
 	}
 
 	dynamic, err := track.Dynamic()
@@ -113,7 +113,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame([]byte("archive")); err != nil {
+	if err := produced.WriteFrame([]byte("archive"), request.Sequence()*20_000); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -125,8 +125,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal(res.err)
 	}
 	frame, err = res.group.ReadFrame(ctx)
-	if err != nil || string(frame) != "archive" {
-		t.Fatalf("dynamic fetch: frame=%q err=%v", frame, err)
+	if err != nil || frame == nil || string(frame.Payload) != "archive" {
+		t.Fatalf("dynamic fetch: frame=%+v err=%v", frame, err)
 	}
 }
 
@@ -233,7 +233,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	if err := track.WriteFrame([]byte("hello")); err != nil {
+	if err := track.WriteFrame([]byte("hello"), 12_345); err != nil {
 		t.Fatal(err)
 	}
 
@@ -241,8 +241,37 @@ func TestTrackPublishConsume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(frame) != "hello" {
-		t.Fatalf("frame = %q, want %q", frame, "hello")
+	if frame == nil {
+		t.Fatal("expected a frame")
+	}
+	if string(frame.Payload) != "hello" || frame.TimestampUs != 12_345 {
+		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
+	}
+
+	group, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupConsumer, err := group.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer groupConsumer.Cancel()
+	if err := group.WriteFrame([]byte("group"), 23_456); err != nil {
+		t.Fatal(err)
+	}
+	if err := group.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	frame, err = groupConsumer.ReadFrame(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil {
+		t.Fatal("expected a group frame")
+	}
+	if string(frame.Payload) != "group" || frame.TimestampUs != 23_456 {
+		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
 	}
 }
 

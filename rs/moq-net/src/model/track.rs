@@ -14,7 +14,7 @@
 //! The track is closed with [Error] when all writers or readers are dropped.
 
 use crate::{Error, Result, Subscription, Timescale, Timestamp, coding};
-use crate::{broadcast, cache, group};
+use crate::{broadcast, cache, frame, group};
 
 use super::{Datagram, MAX_DATAGRAM_PAYLOAD};
 
@@ -269,7 +269,7 @@ impl TrackState {
 		index: usize,
 		next_sequence: u64,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<(bytes::Bytes, usize, u64)>>> {
+	) -> Poll<Result<Option<(frame::Frame, usize, u64)>>> {
 		let start = index.saturating_sub(self.offset);
 		let mut pending_seen = false;
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
@@ -279,7 +279,7 @@ impl TrackState {
 			}
 
 			let mut consumer = group.consume();
-			match consumer.poll_read_frame(waiter) {
+			match consumer.poll_read_frame_full(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
 					return Poll::Ready(Ok(Some((frame, self.offset + i, group.sequence))));
 				}
@@ -294,7 +294,7 @@ impl TrackState {
 			}
 		}
 
-		// A pending group can still produce a frame even after finish() — finish only
+		// A pending group can still produce a frame even after finish(). Finish only
 		// blocks new groups at/above final_sequence, not frames on existing groups.
 		if pending_seen {
 			Poll::Pending
@@ -1523,7 +1523,7 @@ impl Subscriber {
 
 	/// Poll for the next group in arrival order, without blocking.
 	///
-	/// Returns every group exactly once in the order it landed on the wire — which may be
+	/// Returns every group exactly once in the order it landed on the wire, which may be
 	/// out of sequence due to network reordering or loss. Use [`Self::poll_next_group`] if
 	/// you only want groups whose sequence number is higher than any previously returned.
 	///
@@ -1544,7 +1544,7 @@ impl Subscriber {
 
 	/// Receive the next group in arrival order.
 	///
-	/// Every group is returned exactly once, in the order it landed on the wire — which may
+	/// Every group is returned exactly once, in the order it landed on the wire, which may
 	/// be out of sequence due to network reordering or loss. Use [`Self::next_group`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
 	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
@@ -1612,7 +1612,7 @@ impl Subscriber {
 	/// A helper that calls [`Self::poll_next_group`] and returns its first frame,
 	/// skipping the rest of the group. Intended for single-frame groups (see
 	/// [`Producer::write_frame`]).
-	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
+	pub fn poll_read_frame_full(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		let lower = self.min_sequence.max(self.next_sequence);
 		let Some((frame, found_index, sequence)) =
 			ready!(self.poll(waiter, |state| { state.poll_read_frame(self.index, lower, waiter) })?)
@@ -1625,11 +1625,25 @@ impl Subscriber {
 		Poll::Ready(Ok(Some(frame)))
 	}
 
+	/// A helper that calls [`Self::poll_next_group`] and returns its first frame's
+	/// payload, skipping the rest of the group.
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
+		let frame = ready!(self.poll_read_frame_full(waiter))?;
+		Poll::Ready(Ok(frame.map(|frame| frame.payload)))
+	}
+
+	/// Read a single full frame from the next group in sequence order, including timestamp.
+	///
+	/// See [`Self::poll_read_frame_full`] for semantics.
+	pub async fn read_frame_full(&mut self) -> Result<Option<frame::Frame>> {
+		kio::wait(|waiter| self.poll_read_frame_full(waiter)).await
+	}
+
 	/// Read a single full frame from the next group in sequence order.
 	///
 	/// See [`Self::poll_read_frame`] for semantics.
 	pub async fn read_frame(&mut self) -> Result<Option<bytes::Bytes>> {
-		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+		Ok(self.read_frame_full().await?.map(|frame| frame.payload))
 	}
 
 	/// Poll for the group with the given sequence.
@@ -2464,11 +2478,11 @@ mod test {
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 5);
 
-		// Seq 3 arrives late — skipped because 3 <= 5.
+		// Seq 3 arrives late, skipped because 3 <= 5.
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
-		// Seq 4 arrives late — also skipped.
+		// Seq 4 arrives late and is also skipped.
 		producer.create_group(group::Info { sequence: 4 }).unwrap();
-		// Seq 7 arrives — returned.
+		// Seq 7 arrives and is returned.
 		producer.create_group(group::Info { sequence: 7 }).unwrap();
 
 		let group = consumer
@@ -2479,7 +2493,7 @@ mod test {
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 7);
 
-		// No more groups — would block.
+		// No more groups. This would block.
 		assert!(
 			consumer.next_group().now_or_never().is_none(),
 			"should block waiting for a higher sequence"
@@ -2491,7 +2505,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
+		// Seq 3 arrives first, then seq 5. Both should be returned in arrival order.
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
@@ -2726,6 +2740,25 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn read_frame_full_preserves_timestamp() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		producer
+			.write_frame(Timestamp::from_micros(20_000).unwrap(), b"hello".as_slice())
+			.unwrap();
+
+		let frame = consumer
+			.read_frame_full()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(frame.timestamp.as_micros(), 20_000);
+		assert_eq!(&frame.payload[..], b"hello");
+	}
+
+	#[tokio::test]
 	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
@@ -2737,14 +2770,14 @@ mod test {
 		g5.write_frame_now(bytes::Bytes::from_static(b"later")).unwrap();
 		g5.finish().unwrap();
 
-		// read_frame should not block on the stalled seq 3 — it returns seq 5's frame.
+		// read_frame should not block on the stalled seq 3. It returns seq 5's frame.
 		let frame = consumer
-			.read_frame()
+			.read_frame_full()
 			.now_or_never()
 			.expect("should not block on stalled earlier group")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"later");
+		assert_eq!(&frame.payload[..], b"later");
 	}
 
 	#[tokio::test]
@@ -2789,7 +2822,7 @@ mod test {
 		let mut g0 = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		producer.finish().unwrap();
 
-		// Track is finished but group 0 has no frame yet — must block, not return None.
+		// Track is finished but group 0 has no frame yet. It must block, not return None.
 		assert!(
 			consumer.read_frame().now_or_never().is_none(),
 			"read_frame must block on a pending group even after finish()"
@@ -2814,7 +2847,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 		consumer.start_at(5);
 
-		// Seq 3 has a frame but is below min_sequence — must be skipped.
+		// Seq 3 has a frame but is below min_sequence, so it must be skipped.
 		let mut g3 = producer.create_group(group::Info { sequence: 3 }).unwrap();
 		g3.write_frame_now(bytes::Bytes::from_static(b"skip-me")).unwrap();
 		g3.finish().unwrap();

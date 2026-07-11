@@ -618,12 +618,12 @@ impl Consumer {
 		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
 	}
 
-	/// Read the next frame's data all at once, without blocking.
-	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+	/// Read the next complete frame, including timestamp and payload, without blocking.
+	pub fn poll_read_frame_full(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>>> {
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
-			return Poll::Ready(Ok(Some(frame.payload)));
+			return Poll::Ready(Ok(Some(frame)));
 		}
 
 		// The batch is drained: refill it under a single lock, registering the waiter if
@@ -666,18 +666,29 @@ impl Consumer {
 
 		Poll::Ready(Ok(self.prefetch.pop().map(|frame| {
 			self.index += 1;
-			frame.payload
+			frame
 		})))
+	}
+
+	/// Read the next frame's data all at once, without blocking.
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let frame = ready!(self.poll_read_frame_full(waiter))?;
+		Poll::Ready(Ok(frame.map(|frame| frame.payload)))
+	}
+
+	/// Read the next complete frame, including timestamp and payload.
+	pub async fn read_frame_full(&mut self) -> Result<Option<Frame>> {
+		// Serve from the prefetched batch without building a future or allocating a waker.
+		if let Some(frame) = self.prefetch.pop() {
+			self.index += 1;
+			return Ok(Some(frame));
+		}
+		kio::wait(|waiter| self.poll_read_frame_full(waiter)).await
 	}
 
 	/// Read the next frame's data all at once.
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		// Serve from the prefetched batch without building a future or allocating a waker.
-		if let Some(frame) = self.prefetch.pop() {
-			self.index += 1;
-			return Ok(Some(frame.payload));
-		}
-		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+		Ok(self.read_frame_full().await?.map(|frame| frame.payload))
 	}
 
 	/// Poll for the final number of frames in the group.
@@ -736,6 +747,19 @@ mod test {
 		let mut consumer = producer.consume();
 		let data = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(data, Bytes::from_static(b"hello"));
+	}
+
+	#[test]
+	fn read_frame_full_preserves_timestamp() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let timestamp = Timestamp::from_micros(20_000).unwrap();
+		producer.write_frame(timestamp, Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let frame = consumer.read_frame_full().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.timestamp.as_micros(), 20_000);
+		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	#[test]
@@ -915,7 +939,7 @@ mod test {
 		// Read one frame from c1
 		let _ = c1.next_frame().now_or_never().unwrap().unwrap().unwrap();
 
-		// Clone c1 — inherits index (past first frame)
+		// Clone c1, inheriting its index (past first frame).
 		let mut c2 = c1.clone();
 
 		producer.write_frame_now(Bytes::from_static(b"b")).unwrap();

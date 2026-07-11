@@ -100,7 +100,7 @@ val group = consumer.fetchGroup(
     FetchGroupOptions(priority = 10u),
 )
 group.frames().collect { frame ->
-    println(frame.decodeToString())
+    println("${frame.timestampUs}: ${frame.payload.decodeToString()}")
 }
 ```
 
@@ -111,7 +111,7 @@ val dynamic = track.dynamic()
 
 dynamic.requestedGroups().collect { request ->
     val group = request.accept()
-    group.writeFrame(loadArchivedFrame(request.sequence()))
+    group.writeFrame(loadArchivedFrame(request.sequence()), timestampUs = request.sequence() * 20_000uL)
     group.finish()
 }
 ```
@@ -134,7 +134,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     dynamic.requestedTracks().collect { request ->
         if (request.name() == "alerts") {
             val track = request.accept(null)
-            track.writeFrame("ready".encodeToByteArray())
+            track.writeFrame(payload = "ready".encodeToByteArray(), timestampUs = 20_000u)
             track.finish()
         } else {
             request.abort(404)
@@ -143,7 +143,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber.
+Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber. Use `writeFrame(payload, timestampUs)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `MoqFrame` values from `readFrame()` or the `frames()` Flow extension.
 
 ## Cancellation
 

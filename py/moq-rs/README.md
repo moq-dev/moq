@@ -134,6 +134,8 @@ client = moq.Client(
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
   - `.finish()`
+- **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
+  - `.write_frame(payload, timestamp_us)` writes a payload with a presentation timestamp in microseconds.
 
 ### Subscribing
 
@@ -144,6 +146,9 @@ client = moq.Client(
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
+- **`TrackConsumer` / `GroupConsumer`**.
+  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
+  - Async iteration over `GroupConsumer` yields `Frame`.
 
 All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
 

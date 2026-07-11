@@ -104,7 +104,7 @@ async fn dynamic_track_request() {
 	// Accept the request as a raw track (which unblocks the subscribe), then write.
 	let track = request.accept(None).unwrap();
 	let payload = b"hello dynamic track".to_vec();
-	track.write_frame(payload.clone()).unwrap();
+	track.write_frame(payload.clone(), 0).unwrap();
 
 	let track_consumer = tokio::time::timeout(TIMEOUT, subscribe)
 		.await
@@ -118,7 +118,44 @@ async fn dynamic_track_request() {
 		.unwrap()
 		.expect("expected a frame");
 
-	assert_eq!(frame, payload);
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 0);
+	track.finish().unwrap();
+}
+
+#[tokio::test]
+async fn raw_frame_timestamps() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	let payload = b"ready".to_vec();
+	track.write_frame(payload.clone(), 12_345).unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+		.await
+		.expect("timed out waiting for raw track frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 12_345);
+	assert!(!frame.keyframe);
+
+	let group = track.append_group().unwrap();
+	let group_consumer = group.consume().unwrap();
+	let payload = b"group frame".to_vec();
+	group.write_frame(payload.clone(), 23_456).unwrap();
+	group.finish().unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, group_consumer.read_frame())
+		.await
+		.expect("timed out waiting for raw group frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 23_456);
+	assert!(!frame.keyframe);
+
 	track.finish().unwrap();
 }
 
@@ -155,8 +192,8 @@ async fn fetches_cached_group_without_subscribing() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let group = track.append_group().unwrap();
-	group.write_frame(b"first".to_vec()).unwrap();
-	group.write_frame(b"second".to_vec()).unwrap();
+	group.write_frame(b"first".to_vec(), 0).unwrap();
+	group.write_frame(b"second".to_vec(), 20_000).unwrap();
 	group.finish().unwrap();
 
 	let consumer = broadcast.consume().unwrap();
@@ -166,15 +203,13 @@ async fn fetches_cached_group_without_subscribing() {
 		.unwrap();
 
 	assert_eq!(fetched.sequence(), 0);
-	assert_eq!(
-		fetched.read_frame().await.unwrap().as_deref(),
-		Some(b"first".as_slice())
-	);
-	assert_eq!(
-		fetched.read_frame().await.unwrap().as_deref(),
-		Some(b"second".as_slice())
-	);
-	assert_eq!(fetched.read_frame().await.unwrap(), None);
+	let frame = fetched.read_frame().await.unwrap().expect("expected first frame");
+	assert_eq!(frame.payload, b"first".to_vec());
+	assert_eq!(frame.timestamp_us, 0);
+	let frame = fetched.read_frame().await.unwrap().expect("expected second frame");
+	assert_eq!(frame.payload, b"second".to_vec());
+	assert_eq!(frame.timestamp_us, 20_000);
+	assert!(fetched.read_frame().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -198,7 +233,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 	assert_eq!(request.priority(), 11);
 
 	let group = request.accept().unwrap();
-	group.write_frame(b"fetched".to_vec()).unwrap();
+	group.write_frame(b"fetched".to_vec(), 100_000).unwrap();
 	group.finish().unwrap();
 
 	let fetched = tokio::time::timeout(TIMEOUT, fetch)
@@ -207,10 +242,9 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.expect("fetch task panicked")
 		.unwrap();
 	assert_eq!(fetched.sequence(), 5);
-	assert_eq!(
-		fetched.read_frame().await.unwrap().as_deref(),
-		Some(b"fetched".as_slice())
-	);
+	let frame = fetched.read_frame().await.unwrap().expect("expected fetched frame");
+	assert_eq!(frame.payload, b"fetched".to_vec());
+	assert_eq!(frame.timestamp_us, 100_000);
 }
 
 #[tokio::test]
@@ -274,7 +308,7 @@ async fn requested_track_dynamic_survives_accept() {
 		.unwrap();
 	assert_eq!(group_request.sequence(), 9);
 	let group = group_request.accept().unwrap();
-	group.write_frame(b"archive".to_vec()).unwrap();
+	group.write_frame(b"archive".to_vec(), 180_000).unwrap();
 	group.finish().unwrap();
 
 	let fetched = tokio::time::timeout(TIMEOUT, fetch)
@@ -282,10 +316,9 @@ async fn requested_track_dynamic_survives_accept() {
 		.expect("timed out waiting for fetch")
 		.expect("fetch task panicked")
 		.unwrap();
-	assert_eq!(
-		fetched.read_frame().await.unwrap().as_deref(),
-		Some(b"archive".as_slice())
-	);
+	let frame = fetched.read_frame().await.unwrap().expect("expected archive frame");
+	assert_eq!(frame.payload, b"archive".to_vec());
+	assert_eq!(frame.timestamp_us, 180_000);
 }
 
 #[tokio::test]
@@ -800,7 +833,7 @@ async fn server_client_roundtrip_auto_origin() {
 		request.ok().await.expect("handshake failed")
 	});
 
-	// No set_publish / set_consume — auto-origin path.
+	// No set_publish / set_consume, so this uses the auto-origin path.
 	let client = MoqClient::new();
 	client.set_tls_disable_verify(true);
 	client.set_bind("127.0.0.1:0".into()).unwrap();

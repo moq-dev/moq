@@ -110,17 +110,18 @@ if "transcript" in catalog.sections:
 # Publish
 broadcast = moq.BroadcastProducer()
 track = broadcast.publish_track("events")
-track.write_frame(b'{"cmd": "ready"}')
+track.write_frame(b'{"cmd": "ready"}', 0)
+track.write_frame(b'{"cmd": "tick"}', 20_000)
 track.finish()
 
 # Subscribe
 track = await broadcast_consumer.subscribe_track("events")
 async for group in track:
     async for frame in group:
-        print(frame)
+        print(frame.timestamp_us, frame.payload)
 ```
 
-`write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+`write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, including `payload`, `timestamp_us`, and `keyframe`. Use `append_group()` for multi-frame groups (e.g., a video GOP).
 
 ### Fetching raw groups
 
@@ -133,7 +134,7 @@ group = await broadcast_consumer.fetch_group(
     options=moq.FetchGroupOptions(priority=10),
 )
 async for frame in group:
-    print(frame)
+    print(frame.timestamp_us, frame.payload)
 ```
 
 A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
@@ -143,7 +144,7 @@ dynamic = track.dynamic()
 
 async for request in dynamic:
     group = request.accept()
-    group.write_frame(load_archived_frame(request.sequence))
+    group.write_frame(load_archived_frame(request.sequence), request.sequence * 20_000)
     group.finish()
 ```
 
@@ -161,7 +162,7 @@ client.announce("events", broadcast)
 async for request in dynamic:
     if request.name == "alerts":
         track = request.accept()
-        track.write_frame(b"ready")
+        track.write_frame(b"ready", 0)
         track.finish()
 ```
 

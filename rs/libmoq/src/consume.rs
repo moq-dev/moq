@@ -52,7 +52,7 @@ pub struct Consume {
 	raw_task: NonZeroSlab<Option<TaskEntry>>,
 
 	/// Buffered raw frames ready for consumption.
-	raw_frame: NonZeroSlab<bytes::Bytes>,
+	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
 }
 
 impl Consume {
@@ -419,7 +419,7 @@ impl Consume {
 
 	/// Read the payload of a frame as a single contiguous slice.
 	///
-	/// Frames are not chunked — the payload pointer is valid until the frame is closed
+	/// Frames are not chunked. The payload pointer is valid until the frame is closed
 	/// via [`Self::frame_close`].
 	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
@@ -502,17 +502,17 @@ impl Consume {
 			};
 
 			loop {
-				let payload = tokio::select! {
+				let frame = tokio::select! {
 					biased;
 					_ = &mut close => return Ok(()),
-					payload = group.read_frame() => match payload? {
-						Some(payload) => payload,
+					frame = group.read_frame_full() => match frame? {
+						Some(frame) => frame,
 						None => break,
 					},
 				};
 
 				// Hold the lock only to buffer the frame; release it before the callback.
-				let frame_id = State::lock().consume.raw_frame.insert(payload)?;
+				let frame_id = State::lock().consume.raw_frame.insert(frame)?;
 				callback.call(Ok(frame_id));
 			}
 		}
@@ -533,12 +533,17 @@ impl Consume {
 	/// Fill `dst` with a raw frame's payload. The pointer is valid until the
 	/// frame is released with [`Self::raw_frame_close`].
 	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
-		let payload = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+		let timestamp_us = frame
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))?;
 
 		*dst = moq_frame {
-			payload: payload.as_ptr(),
-			payload_size: payload.len(),
-			timestamp_us: 0,
+			payload: frame.payload.as_ptr(),
+			payload_size: frame.payload.len(),
+			timestamp_us,
 			keyframe: false,
 		};
 
@@ -551,7 +556,7 @@ impl Consume {
 	}
 
 	/// Look up a video rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// (broadcast, config, name) tuple needed to subscribe, mirroring
 	/// the index-based selection in `video_ordered`.
 	pub fn video_rendition(
 		&self,
@@ -570,7 +575,7 @@ impl Consume {
 	}
 
 	/// Look up an audio rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// (broadcast, config, name) tuple needed to subscribe, mirroring
 	/// the index-based selection in `audio_ordered`.
 	pub fn audio_rendition(
 		&self,
