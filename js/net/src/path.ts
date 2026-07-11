@@ -30,11 +30,47 @@
  */
 export type Valid = string & { __brand: "Name" };
 
+/**
+ * Maximum number of slash-separated parts in a path.
+ *
+ * Matches the IETF moq-transport limit of 32 fields in a namespace tuple.
+ * moq-lite enforces the same bound when decoding paths off the wire.
+ */
+export const MAX_PARTS = 32;
+
 /** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
 export function from(...paths: string[]): Valid {
 	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
 	const joined = paths.join("/");
 	return joined.replace(/\/+/g, "/").replace(/^\/+/, "").replace(/\/+$/, "") as Valid;
+}
+
+/** Split a path into its slash-separated parts. The empty path has no parts. */
+export function parts(path: Valid): string[] {
+	return path === "" ? [] : path.split("/");
+}
+
+/**
+ * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS}.
+ *
+ * Throws when the path has too many parts; use at wire decode sites.
+ */
+export function decode(raw: string): Valid {
+	const path = from(raw);
+	return encode(path);
+}
+
+/**
+ * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS}.
+ *
+ * Throws when the path has too many parts; use at wire encode sites so we never
+ * emit a path the remote side is required to reject.
+ */
+export function encode(path: Valid): Valid {
+	if (parts(path).length > MAX_PARTS) {
+		throw new Error(`path exceeds ${MAX_PARTS} parts`);
+	}
+	return path;
 }
 
 /**

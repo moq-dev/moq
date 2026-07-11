@@ -302,6 +302,13 @@ pub(crate) mod macos {
 		pub(crate) height: u32,
 	}
 
+	// SAFETY: CVPixelBuffer is a reference-counted CoreFoundation wrapper around
+	// an IOSurface. Retain/release are thread-safe and the pixel data is only
+	// touched under CVPixelBufferLockBaseAddress, so the handle can move between
+	// threads (capture delegate -> encode loop, decode task -> caller). objc2
+	// leaves CoreVideo types !Send out of conservatism.
+	unsafe impl Send for Surface {}
+
 	impl Surface {
 		pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>, width: u32, height: u32) -> Self {
 			Self { buffer, width, height }

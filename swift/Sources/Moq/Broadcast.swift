@@ -21,6 +21,16 @@ public final class BroadcastConsumer: Sendable {
         TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
+    /// Fetch one complete group by track name and group sequence without holding
+    /// a live subscription. The group may still be receiving frames.
+    public func fetchGroup(
+        name: String,
+        sequence: UInt64,
+        options: FetchGroupOptions? = nil
+    ) async throws -> GroupConsumer {
+        GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
+    }
+
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog; `maxLatencyMs` bounds buffering before skipping a GoP.
     /// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.

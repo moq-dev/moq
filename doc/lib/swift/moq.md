@@ -95,6 +95,35 @@ try audio.finish()
 try broadcast.finish()
 ```
 
+### Fetching raw groups
+
+Fetch retrieves one group by track name and group sequence without keeping a live subscription:
+
+```swift
+let group = try await consumer.fetchGroup(
+    name: "events",
+    sequence: 42,
+    options: FetchGroupOptions(priority: 10)
+)
+for try await frame in group {
+    print(frame)
+}
+```
+
+A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
+
+```swift
+let dynamic = try track.dynamic()
+
+for try await request in dynamic {
+    let group = try request.accept()
+    try group.writeFrame(loadArchivedFrame(request.sequence))
+    try group.finish()
+}
+```
+
+Call `request.abort(errorCode:)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
 ### On-demand raw tracks
 
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:

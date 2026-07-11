@@ -66,6 +66,19 @@ impl Source {
 		self.origin.request_broadcast(&target)
 	}
 
+	/// Resolve an optional cross-broadcast reference to its broadcast.
+	///
+	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty / self
+	/// reference) resolves the catalog broadcast itself; anything else fetches the
+	/// referenced sibling broadcast from the origin. Use it when you need the broadcast
+	/// handle itself (e.g. to FETCH individual groups) rather than a subscription.
+	pub async fn resolve(
+		&self,
+		rel: Option<&moq_net::PathRelative<'_>>,
+	) -> crate::Result<moq_net::broadcast::Consumer> {
+		Ok(self.request(rel).await?)
+	}
+
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
 	/// awaiting SUBSCRIBE_OK.
 	///

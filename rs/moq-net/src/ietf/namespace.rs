@@ -4,22 +4,16 @@ use super::Version;
 
 /// Helper function to encode namespace as tuple of strings
 pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: Version) -> Result<(), EncodeError> {
-	// Split the path by '/' to get individual parts
-	let path_str = namespace.as_str();
-	if path_str.is_empty() {
-		0u64.encode(w, version)?;
-	} else {
-		let parts: Vec<&str> = path_str.split('/').collect();
+	let parts: Vec<&str> = namespace.parts().collect();
 
-		// The IETF draft limits namespaces to 32 parts.
-		if parts.len() > 32 {
-			return Err(BoundsExceeded.into());
-		}
+	// The IETF draft limits namespaces to 32 parts.
+	if parts.len() > Path::MAX_PARTS {
+		return Err(BoundsExceeded.into());
+	}
 
-		(parts.len() as u64).encode(w, version)?;
-		for part in parts {
-			part.encode(w, version)?;
-		}
+	(parts.len() as u64).encode(w, version)?;
+	for part in parts {
+		part.encode(w, version)?;
 	}
 	Ok(())
 }
@@ -33,7 +27,7 @@ pub fn decode_namespace<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Pa
 	}
 
 	// The IETF draft limits namespaces to 32 parts.
-	if count > 32 {
+	if count > Path::MAX_PARTS as u64 {
 		return Err(DecodeError::BoundsExceeded);
 	}
 

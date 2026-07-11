@@ -122,6 +122,33 @@ async for group in track:
 
 `write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
 
+### Fetching raw groups
+
+Fetch retrieves one group by track name and group sequence without keeping a live subscription:
+
+```python
+group = await broadcast_consumer.fetch_group(
+    "events",
+    sequence=42,
+    options=moq.FetchGroupOptions(priority=10),
+)
+async for frame in group:
+    print(frame)
+```
+
+A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
+
+```python
+dynamic = track.dynamic()
+
+async for request in dynamic:
+    group = request.accept()
+    group.write_frame(load_archived_frame(request.sequence))
+    group.finish()
+```
+
+Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
 ### On-demand raw tracks
 
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:

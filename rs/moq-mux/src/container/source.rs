@@ -31,14 +31,14 @@ pub(crate) enum VideoTransform {
 }
 
 impl VideoTransform {
-	fn codec_private(&self) -> Option<&Bytes> {
+	pub(crate) fn codec_private(&self) -> Option<&Bytes> {
 		match self {
 			VideoTransform::Avc1(t) => t.avcc(),
 			VideoTransform::Hvc1(t) => t.hvcc(),
 		}
 	}
 
-	fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
+	pub(crate) fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
 		match self {
 			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
 			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
@@ -252,7 +252,7 @@ impl ExportSource {
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog
 /// already provides an out-of-band description.
-fn build_video_transform(config: &VideoConfig) -> Option<VideoTransform> {
+pub(crate) fn build_video_transform(config: &VideoConfig) -> Option<VideoTransform> {
 	let needs_transform = config.description.as_ref().map(|d| d.is_empty()).unwrap_or(true);
 	if !needs_transform {
 		return None;

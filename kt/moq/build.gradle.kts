@@ -18,8 +18,8 @@
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
-// release-kt-lib.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set,
-// signAllPublications() becomes a no-op so local builds still work.
+// release-kt-lib.yml (ORG_GRADLE_PROJECT_*). Signing is only wired up when a key
+// is present (see mavenPublishing below), so keyless local and fork-PR builds work.
 
 import com.android.build.gradle.LibraryExtension
 import com.vanniktech.maven.publish.SonatypeHost
@@ -128,7 +128,12 @@ if (androidEnabled) {
 
 mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
-    signAllPublications()
+    // Only sign when a key is actually configured. signAllPublications() registers a
+    // *required* sign task, so calling it unconditionally makes publishToMavenLocal
+    // fail ("no configured signatory") on fork-PR dry-runs, which run without secrets.
+    if (!providers.gradleProperty("signingInMemoryKey").orNull.isNullOrBlank()) {
+        signAllPublications()
+    }
     coordinates("dev.moq", "moq", version.toString())
 
     pom {

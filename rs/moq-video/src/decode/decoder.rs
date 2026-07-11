@@ -12,6 +12,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
+use moq_net::Timestamp;
 
 use super::Frame;
 use super::backend::{self, Backend, Codec};
@@ -141,9 +142,12 @@ impl Decoder {
 		self.backend.name()
 	}
 
-	/// Decode one container frame, returning zero or more raw frames stamped with
-	/// `timestamp_us` (the container frame's presentation time in microseconds).
-	pub fn decode(&mut self, payload: &Bytes, timestamp_us: u64, keyframe: bool) -> Result<Vec<Frame>, Error> {
+	/// Decode one container frame, returning zero or more raw frames. `timestamp` is
+	/// this frame's presentation time; it rides through the decoder and comes back on
+	/// each output frame, so a reordering decoder (B-frames) stamps every picture
+	/// with its own presentation time rather than this access unit's. With no
+	/// reordering the two coincide.
+	pub fn decode(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Wait for the first keyframe: a decoder started mid-GOP can't decode
 		// delta frames, and the parameter sets ride along with the keyframe.
 		if !self.got_keyframe {
@@ -167,10 +171,10 @@ impl Decoder {
 
 		Ok(self
 			.backend
-			.decode(annexb, timestamp_us, keyframe)?
+			.decode(annexb, timestamp, keyframe)?
 			.into_iter()
 			.map(|decoded| Frame {
-				timestamp_us: decoded.timestamp_us,
+				timestamp: decoded.timestamp,
 				width: decoded.frame.width(),
 				height: decoded.frame.height(),
 				inner: decoded.frame,
@@ -181,6 +185,8 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
+	use moq_net::Timestamp;
+
 	use super::backend::{self, Codec};
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind};
 	use crate::frame::I420;
@@ -220,8 +226,10 @@ mod tests {
 		let mut decoded = Vec::new();
 		for i in 0..10u64 {
 			let keyframe = i == 0;
+			// Distinct, spread-apart timestamps so a round-tripped value is unambiguous.
+			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
 			for packet in encoder.encode_rgba(&frame, 320, 240, keyframe).unwrap() {
-				decoded.extend(decoder.decode(packet, i * 33_333, keyframe).unwrap());
+				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
 			}
 		}
 
@@ -229,6 +237,19 @@ mod tests {
 		for out in &decoded {
 			assert_gray(&out.frame.to_i420().unwrap(), 320, 240);
 		}
+
+		// The timestamp rides through the codec and comes back on each picture. These
+		// backends don't reorder, so it returns in feed order: strictly increasing and
+		// drawn from the values we fed.
+		let micros: Vec<u128> = decoded.iter().map(|d| d.timestamp.as_micros()).collect();
+		assert!(
+			micros.windows(2).all(|w| w[0] < w[1]),
+			"decoded timestamps not strictly increasing: {micros:?}"
+		);
+		assert!(
+			micros.iter().all(|&t| t % 33_333 == 0 && t < 333_330),
+			"decoded timestamp outside the fed set: {micros:?}"
+		);
 	}
 
 	/// A decoder config selecting one backend by kind.

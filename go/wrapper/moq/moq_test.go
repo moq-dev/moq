@@ -51,6 +51,85 @@ func TestPublishMediaLifecycle(t *testing.T) {
 	}
 }
 
+func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cached, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cached.WriteFrame([]byte("cached")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cached.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	fetched, err := consumer.FetchGroup("events", 0, &moq.FetchGroupOptions{Priority: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := fetched.ReadFrame(ctx)
+	if err != nil || string(frame) != "cached" {
+		t.Fatalf("cached fetch: frame=%q err=%v", frame, err)
+	}
+
+	dynamic, err := track.Dynamic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	type fetchResult struct {
+		group *moq.GroupConsumer
+		err   error
+	}
+	result := make(chan fetchResult, 1)
+	go func() {
+		group, err := consumer.FetchGroup("events", 7, &moq.FetchGroupOptions{Priority: 11})
+		result <- fetchResult{group: group, err: err}
+	}()
+
+	request, err := dynamic.RequestedGroup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Sequence() != 7 || request.Priority() != 11 {
+		t.Fatalf("unexpected request: sequence=%d priority=%d", request.Sequence(), request.Priority())
+	}
+	produced, err := request.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := produced.WriteFrame([]byte("archive")); err != nil {
+		t.Fatal(err)
+	}
+	if err := produced.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	res := <-result
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	frame, err = res.group.ReadFrame(ctx)
+	if err != nil || string(frame) != "archive" {
+		t.Fatalf("dynamic fetch: frame=%q err=%v", frame, err)
+	}
+}
+
 func TestUnknownFormat(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

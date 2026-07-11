@@ -27,14 +27,14 @@ export class Fetch {
 	}
 
 	async #encode(w: Writer) {
-		await w.string(this.broadcast);
+		await w.string(Path.encode(this.broadcast));
 		await w.string(this.track);
 		await w.u8(this.priority);
 		await w.u53(this.group);
 	}
 
 	static async #decode(r: Reader): Promise<Fetch> {
-		const broadcast = Path.from(await r.string());
+		const broadcast = Path.decode(await r.string());
 		const track = await r.string();
 		const priority = await r.u8();
 		const group = await r.u53();

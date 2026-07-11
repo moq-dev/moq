@@ -31,6 +31,16 @@ func (b *BroadcastConsumer) SubscribeTrack(name string, subscription *Subscripti
 	return &TrackConsumer{inner: inner}, nil
 }
 
+// FetchGroup fetches one complete group by track name and group sequence
+// without holding a live subscription.
+func (b *BroadcastConsumer) FetchGroup(name string, sequence uint64, options *FetchGroupOptions) (*GroupConsumer, error) {
+	inner, err := b.inner.FetchGroup(name, sequence, options)
+	if err != nil {
+		return nil, err
+	}
+	return &GroupConsumer{inner: inner}, nil
+}
+
 // SubscribeMedia subscribes to a media track, decoded with the given container.
 // maxLatencyMs bounds buffering before a stalled group is skipped. subscription
 // tunes delivery (priority, ordering, group range); pass nil for defaults.

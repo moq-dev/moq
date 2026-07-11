@@ -147,6 +147,16 @@
           opentofu
         ];
 
+        # IETF Internet-Draft tooling (drafts/justfile). kramdown-rfc renders
+        # the kramdown-rfc markdown to RFC XML; xml2rfc produces the txt/html;
+        # mmark covers any mmark-format drafts; libxml2 provides xmllint.
+        draftsDeps = with pkgs; [
+          rubyPackages.kramdown-rfc2629
+          xml2rfc
+          mmark
+          libxml2
+        ];
+
         # Tools for producing .deb/.rpm artifacts. Cross-platform so that
         # `just rs package` works from `nix develop` on both Linux and macOS.
         packagingDeps = with pkgs; [
@@ -271,7 +281,15 @@
 
         devShells.default = pkgs.mkShell {
           packages =
-            rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps ++ obsDeps ++ devTools;
+            rustDeps
+            ++ jsDeps
+            ++ pyDeps
+            ++ cdnDeps
+            ++ draftsDeps
+            ++ packagingDeps
+            ++ lintDeps
+            ++ obsDeps
+            ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

@@ -42,6 +42,8 @@ var (
 	ErrInvalidErrorCode = ffi.ErrMoqErrorInvalidErrorCode
 	ErrUnauthorized     = ffi.ErrMoqErrorUnauthorized
 	ErrForbidden        = ffi.ErrMoqErrorForbidden
+	ErrNotFound         = ffi.ErrMoqErrorNotFound
+	ErrUnsupported      = ffi.ErrMoqErrorUnsupported
 	ErrLog              = ffi.ErrMoqErrorLog
 )
 

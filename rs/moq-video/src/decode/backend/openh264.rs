@@ -5,6 +5,7 @@
 //! inline ahead of each keyframe) and returns packed I420.
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::formats::YUVSource;
@@ -33,7 +34,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn decode(&mut self, access_unit: Bytes, timestamp_us: u64, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
 		let decoded = self
 			.decoder
 			.decode(&access_unit)
@@ -64,7 +65,7 @@ impl Backend for Openh264 {
 		);
 		// openh264 is one-in one-out, so the input timestamp is the output's.
 		Ok(vec![Decoded {
-			timestamp_us,
+			timestamp,
 			frame: Frame::I420(frame),
 		}])
 	}

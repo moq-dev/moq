@@ -17,6 +17,8 @@ mod test
 # Demos and infra.
 mod demo
 mod infra
+# IETF Internet-Drafts (`just drafts build`, `just drafts publish`).
+mod drafts
 # GitHub Actions workflow linting.
 mod gh '.github'
 # Shortcuts to avoid `demo::` prefix.

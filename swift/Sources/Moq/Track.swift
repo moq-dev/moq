@@ -111,6 +111,11 @@ public final class TrackProducer: Sendable {
         try await ffi.unused()
     }
 
+    /// Serve fetches for groups that are not currently cached.
+    public func dynamic() throws -> TrackDynamic {
+        TrackDynamic(try ffi.dynamic())
+    }
+
     /// Append a new group, returning a producer for its frames.
     public func appendGroup() throws -> GroupProducer {
         GroupProducer(try ffi.appendGroup())

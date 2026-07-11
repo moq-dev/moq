@@ -1,13 +1,13 @@
 use crate::track;
 use std::{
-	collections::{HashMap, VecDeque, hash_map},
+	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
 };
 
 use crate::Error;
 
-use super::OriginList;
+use super::{OriginList, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -57,7 +57,9 @@ impl Info {
 struct BroadcastState {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
 	// Keyed by the track's shared `Arc<str>` name (the same Arc the handle holds).
-	tracks: HashMap<Arc<str>, track::TrackWeak>,
+	// The cache reclaims closed entries incrementally on insert so a long-lived
+	// broadcast churning distinct track names stays bounded by the live count.
+	tracks: WeakCache<Arc<str>, track::TrackWeak>,
 
 	// Pending requests keyed by track name, waiting for the dynamic handler to
 	// accept or deny them.
@@ -81,13 +83,13 @@ impl BroadcastState {
 		state.write().map_err(|_| Error::Dropped)
 	}
 
-	/// Insert a track weak handle into the lookup, returning an error on duplicate.
+	/// Insert a track weak handle into the lookup, returning an error if a live
+	/// track already holds the name. A closed entry under the name is reclaimed.
 	fn insert_track(&mut self, weak: track::TrackWeak) -> Result<(), Error> {
-		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.name().clone()) else {
-			return Err(Error::Duplicate);
-		};
-		entry.insert(weak);
-		Ok(())
+		match self.tracks.insert(weak.name().clone(), weak) {
+			Some(_) => Err(Error::Duplicate),
+			None => Ok(()),
+		}
 	}
 
 	/// Reject any pending dynamic track requests. Called when the last dynamic handler
@@ -337,7 +339,9 @@ impl Dynamic {
 
 		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
 		let pending = state.requests.remove(&name).expect("request_order out of sync");
-		state.tracks.insert(name, pending.weak());
+		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
+		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
+		let _ = state.tracks.insert(name, pending.weak());
 		Poll::Ready(Ok(pending))
 	}
 
@@ -418,13 +422,10 @@ impl Consumer {
 			Err(_) => return Err(Error::Dropped),
 		};
 
-		// Reuse a live producer if one is already publishing the track.
+		// Reuse a live producer if one is already publishing the track. `get` drops a
+		// closed entry and returns `None`, so we fall through to a fresh request.
 		if let Some(weak) = state.tracks.get(name) {
-			if !weak.is_closed() {
-				return Ok(weak.consume());
-			}
-			// Drop the stale entry and fall through to a fresh request.
-			state.tracks.remove(name);
+			return Ok(weak.consume());
 		}
 
 		if let Some(pending) = state.requests.get_mut(name) {
@@ -500,17 +501,22 @@ pub(crate) struct WeakConsumer {
 }
 
 impl WeakConsumer {
-	/// True once every [`Producer`] has been dropped.
-	pub fn is_closed(&self) -> bool {
-		self.state.is_closed()
-	}
-
 	/// Upgrade to a full [`Consumer`] sharing the same broadcast state.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
 		}
+	}
+}
+
+impl super::WeakEntry for WeakConsumer {
+	fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	fn same_channel(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
 	}
 }
 

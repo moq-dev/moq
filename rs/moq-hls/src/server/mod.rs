@@ -1,13 +1,12 @@
-//! HTTP server: serves HLS / LL-HLS for MoQ broadcasts.
+//! HTTP server: serves HLS for MoQ broadcasts, fetching media on demand.
 //!
 //! Routes are path-based, so one server can expose many broadcasts:
 //!
 //! ```text
 //! GET /{broadcast}/master.m3u8
-//! GET /{broadcast}/{kind}/{rendition}/media.m3u8   (LL-HLS blocking reload via ?_HLS_msn=&_HLS_part=)
+//! GET /{broadcast}/{kind}/{rendition}/media.m3u8
 //! GET /{broadcast}/{kind}/{rendition}/init.mp4
-//! GET /{broadcast}/{kind}/{rendition}/seg/{seq}.m4s
-//! GET /{broadcast}/{kind}/{rendition}/part/{seq}/{idx}.m4s
+//! GET /{broadcast}/{kind}/{rendition}/seg/{group}.m4s
 //! ```
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a

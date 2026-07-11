@@ -11,7 +11,17 @@ from moq_ffi import (
     MoqTrackConsumer,
 )
 
-from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Container, Frame, Subscription, Video
+from .types import (
+    Audio,
+    AudioDecoderOutput,
+    AudioFrame,
+    Catalog,
+    Container,
+    FetchGroupOptions,
+    Frame,
+    Subscription,
+    Video,
+)
 
 
 class MediaConsumer:
@@ -199,6 +209,19 @@ class BroadcastConsumer:
         ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
         """
         return TrackConsumer(await self._inner.subscribe_track(name, subscription))
+
+    async def fetch_group(
+        self,
+        name: str,
+        sequence: int,
+        options: FetchGroupOptions | None = None,
+    ) -> GroupConsumer:
+        """Fetch one complete group by track name and group sequence.
+
+        This does not hold a live subscription. The returned group may still be
+        receiving frames, so iterate it until completion.
+        """
+        return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
 
     async def subscribe_media(
         self,

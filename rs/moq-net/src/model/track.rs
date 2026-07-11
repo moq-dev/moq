@@ -1160,10 +1160,6 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn is_closed(&self) -> bool {
-		self.state.is_closed()
-	}
-
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			name: self.name.clone(),
@@ -1175,6 +1171,16 @@ impl TrackWeak {
 	/// refcount bump, and the same `Arc` is shared with the track's handles).
 	pub(crate) fn name(&self) -> &Arc<str> {
 		&self.name
+	}
+}
+
+impl super::WeakEntry for TrackWeak {
+	fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	fn same_channel(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
 	}
 }
 

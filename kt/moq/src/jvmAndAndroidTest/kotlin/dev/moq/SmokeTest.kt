@@ -3,7 +3,9 @@ package dev.moq
 import kotlinx.coroutines.test.runTest
 import uniffi.moq.MoqException
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SmokeTest {
@@ -32,6 +34,25 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer().use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
+        }
+    }
+
+    @Test
+    fun `broadcast consumer fetches cached group`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("events", null)
+            val group = track.appendGroup()
+            group.writeFrame("cached".encodeToByteArray())
+            group.finish()
+
+            val fetched = broadcast.consume().fetchGroup(
+                "events",
+                0uL,
+                FetchGroupOptions(priority = 3u),
+            )
+            assertEquals(0uL, fetched.sequence())
+            assertEquals("cached", fetched.readFrame()?.decodeToString())
+            assertNull(fetched.readFrame())
         }
     }
 }

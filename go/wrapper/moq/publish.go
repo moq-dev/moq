@@ -71,6 +71,15 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
+// Dynamic accepts requests for tracks that are not published yet.
+func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
+	inner, err := b.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastDynamic{inner: inner}, nil
+}
+
 // SetCatalogSection sets (or replaces) an untyped application catalog section by
 // name. json is any JSON document as a string; it rides alongside video/audio and
 // reaches subscribers via Catalog.Sections. name must not be a reserved media
@@ -161,6 +170,15 @@ func (t *TrackProducer) Unused(ctx context.Context) error {
 	return runErr(ctx, nil, t.inner.Unused)
 }
 
+// Dynamic serves fetches for groups that are not currently cached.
+func (t *TrackProducer) Dynamic() (*TrackDynamic, error) {
+	inner, err := t.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDynamic{inner: inner}, nil
+}
+
 // AppendGroup starts a new group; write frames into it, then Finish.
 func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
 	inner, err := t.inner.AppendGroup()
@@ -217,6 +235,106 @@ func (g *GroupProducer) WriteFrame(payload []byte) error {
 // Finish closes the group.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
+}
+
+// BroadcastDynamic yields tracks requested by subscribers.
+type BroadcastDynamic struct {
+	inner *ffi.MoqBroadcastDynamic
+}
+
+// RequestedTrack waits for the next requested track.
+func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackRequest{inner: inner}, nil
+}
+
+// Cancel stops current and future requested-track waits.
+func (d *BroadcastDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// TrackRequest is a subscriber-requested track that has not been accepted yet.
+type TrackRequest struct {
+	inner *ffi.MoqTrackRequest
+}
+
+// Name is the requested track name.
+func (r *TrackRequest) Name() (string, error) {
+	return r.inner.Name()
+}
+
+// Dynamic creates a fetch handler before accepting this requested track.
+func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
+	inner, err := r.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDynamic{inner: inner}, nil
+}
+
+// Accept accepts the request as a raw track.
+func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
+	inner, err := r.inner.Accept(info)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackProducer{inner: inner}, nil
+}
+
+// Abort rejects the requested track with an application error code.
+func (r *TrackRequest) Abort(errorCode int32) error {
+	return r.inner.Abort(errorCode)
+}
+
+// TrackDynamic yields uncached groups requested by fetch consumers.
+type TrackDynamic struct {
+	inner *ffi.MoqTrackDynamic
+}
+
+// RequestedGroup waits for the next uncached group request.
+func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+	if err != nil {
+		return nil, err
+	}
+	return &GroupRequest{inner: inner}, nil
+}
+
+// Cancel stops current and future requested-group waits.
+func (d *TrackDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// GroupRequest requests one uncached group from a track producer.
+type GroupRequest struct {
+	inner *ffi.MoqGroupRequest
+}
+
+// Sequence is the requested group sequence within the track.
+func (r *GroupRequest) Sequence() uint64 {
+	return r.inner.Sequence()
+}
+
+// Priority is the consumer's delivery priority for this fetch.
+func (r *GroupRequest) Priority() uint8 {
+	return r.inner.Priority()
+}
+
+// Accept accepts the request and returns a producer for the group.
+func (r *GroupRequest) Accept() (*GroupProducer, error) {
+	inner, err := r.inner.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &GroupProducer{inner: inner}, nil
+}
+
+// Abort rejects the fetch with an application error code.
+func (r *GroupRequest) Abort(errorCode int32) error {
+	return r.inner.Abort(errorCode)
 }
 
 // AudioProducer pushes raw PCM and lets libopus encode it on the way out.
