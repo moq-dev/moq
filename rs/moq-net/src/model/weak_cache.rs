@@ -47,7 +47,9 @@ pub(crate) struct WeakCache<K, V> {
 	// removed from `map`, and superseded duplicates (a key re-inserted with a fresh
 	// handle after the old one closed). GC discards both when it reaches them,
 	// telling a live entry from its superseded twin via `same_channel`, so the ring
-	// stays bounded by `map`'s size.
+	// stays bounded by the live-handle count. It can reach ~2x the map when one key
+	// churns behind many live keys (its twins wait their turn under the probe cursor),
+	// but that is still O(live), not a per-key leak.
 	ring: VecDeque<(K, V)>,
 }
 
