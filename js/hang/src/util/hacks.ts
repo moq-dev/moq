@@ -15,6 +15,11 @@ function detectFirefox(ua: string): boolean {
  * True for Safari-style WebKit user agents: those that report "safari" but are not Chrome or an
  * Android WebView (both of which also carry "safari"). This also matches every iOS browser, since
  * Chrome, Firefox, etc. on iOS are all WebKit.
+ *
+ * This rule must agree with `pickTransport` in `@moq/net`'s `connection/transport.ts`, which decides
+ * the transport this predicate is used to report. The two cannot share code: `@moq/net` is a
+ * dependency and `pickTransport` is internal. The shared test corpus in `hacks.test.ts` and
+ * `transport.test.ts` is what catches a drift.
  */
 export function detectSafari(ua: string): boolean {
 	const s = ua.toLowerCase();
@@ -60,9 +65,6 @@ export const isFirefox = detectFirefox(userAgent);
 
 /** True for Safari-style WebKit user agents (see {@link detectSafari}). */
 export const isSafari = detectSafari(userAgent);
-
-/** Major Safari version when {@link isSafari}, else undefined (see {@link detectSafariVersion}). */
-export const safariVersion = isSafari ? detectSafariVersion(userAgent) : undefined;
 
 /**
  * True when this WebKit browser can capture video in a Worker (see {@link detectSafariWorkerCapture}).
