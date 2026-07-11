@@ -45,7 +45,8 @@ export default class MoqPublish extends HTMLElement {
 	audio = new Signal<Source.Microphone | Source.Screen | undefined>(undefined);
 	file = new Signal<Source.File | undefined>(undefined);
 
-	// The inverse of the `muted` and `invisible` signals.
+	// Whether to capture each kind of media. Audio capture stays on even while `muted`, so mute is a
+	// gain ramp inside the encoder rather than a teardown of the mic, the encoder, and the catalog entry.
 	#videoEnabled: Signal<boolean>;
 	#audioEnabled: Signal<boolean>;
 	#eitherEnabled: Signal<boolean>;
@@ -84,10 +85,11 @@ export default class MoqPublish extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		// The inverse of the `muted` and `invisible` signals.
 		// TODO make this.signals.computed to simplify the code.
 		this.#videoEnabled = new Signal(false);
-		this.#audioEnabled = new Signal(false);
+		// Always on: `muted` soft-mutes the encoder instead of stopping capture. Nothing is captured
+		// until a source is selected, so an idle element still never touches the microphone.
+		this.#audioEnabled = new Signal(true);
 		this.#eitherEnabled = new Signal(false);
 		this.#sdEnabled = new Signal(false);
 
@@ -96,7 +98,6 @@ export default class MoqPublish extends HTMLElement {
 			const invisible = effect.get(this.state.invisible);
 			const simulcast = effect.get(this.state.simulcast);
 			this.#videoEnabled.set(!invisible);
-			this.#audioEnabled.set(!muted);
 			this.#eitherEnabled.set(!muted || !invisible);
 			this.#sdEnabled.set(simulcast && !invisible);
 		});
@@ -121,6 +122,9 @@ export default class MoqPublish extends HTMLElement {
 
 			audio: {
 				enabled: this.#audioEnabled,
+				// Ramps the encoder's gain to zero, so a muted broadcast keeps publishing its audio
+				// track (as silence) rather than dropping it from the catalog.
+				muted: this.state.muted,
 			},
 			video: {
 				hd: {
@@ -269,16 +273,16 @@ export default class MoqPublish extends HTMLElement {
 		if (!source) return;
 
 		if (source === "camera") {
+			// These proxies are scoped to this run so they close before the capture below, which would
+			// otherwise clear its `source` signal and let a stale proxy write over the next source.
 			const video = new Source.Camera({ enabled: this.#videoEnabled });
-			this.signals.run((effect) => {
-				const source = effect.get(video.source);
-				this.broadcast.video.source.set(source);
+			effect.run((effect) => {
+				effect.set(this.broadcast.video.source, effect.get(video.source));
 			});
 
 			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
-			this.signals.run((effect) => {
-				const source = effect.get(audio.source);
-				this.broadcast.audio.source.set(source);
+			effect.run((effect) => {
+				effect.set(this.broadcast.audio.source, effect.get(audio.source));
 			});
 
 			effect.set(this.video, video);
@@ -297,7 +301,7 @@ export default class MoqPublish extends HTMLElement {
 				enabled: this.#eitherEnabled,
 			});
 
-			this.signals.run((effect) => {
+			effect.run((effect) => {
 				const source = effect.get(screen.source);
 				if (!source) return;
 
@@ -330,10 +334,10 @@ export default class MoqPublish extends HTMLElement {
 
 			effect.set(this.file, fileSource);
 
-			this.signals.run((effect) => {
+			effect.run((effect) => {
 				const source = effect.get(fileSource.source);
-				this.broadcast.video.source.set(source.video);
-				this.broadcast.audio.source.set(source.audio);
+				effect.set(this.broadcast.video.source, source.video);
+				effect.set(this.broadcast.audio.source, source.audio);
 			});
 
 			effect.cleanup(() => {

@@ -54,7 +54,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 - `url` (required) - Relay server URL
 - `name` (required) - Broadcast name
 - `source` - "camera", "screen", or "file"
-- `muted` - Disable audio capture (boolean)
+- `muted` - Silence the published audio; the microphone keeps capturing so unmuting is instant (boolean)
 - `invisible` - Disable video capture (boolean)
 - `simulcast` - Also publish a lower-resolution `video/sd` rendition (a fraction of the source resolution) alongside `video/hd` (boolean)
 
