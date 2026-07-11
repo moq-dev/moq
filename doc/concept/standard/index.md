@@ -44,4 +44,4 @@ They are too early/unstable to be useful, so we're using a custom [hang](/concep
 - [Website](https://moq.dev)
 - [GitHub](https://github.com/moq-dev/moq)
 - [Documentation](https://doc.moq.dev)
-- [Discord](https://discord.gg/FCYF3p99mr)
+- [Discord](https://discord.moq.dev)

@@ -3,7 +3,7 @@
 </p>
 
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
-[![Discord](https://img.shields.io/discord/1124083992740761730)](https://discord.gg/FCYF3p99mr)
+[![Discord](https://img.shields.io/discord/1124083992740761730)](https://discord.moq.dev)
 [![Crates.io](https://img.shields.io/crates/v/moq-net)](https://crates.io/crates/moq-net)
 [![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)
 
