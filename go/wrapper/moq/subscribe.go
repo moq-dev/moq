@@ -193,6 +193,16 @@ func (t *TrackConsumer) ReadFrame(ctx context.Context) ([]byte, error) {
 	return *res, nil
 }
 
+// Info returns the publisher-side track properties learned during subscription.
+func (t *TrackConsumer) Info(ctx context.Context) (TrackInfo, error) {
+	return runCancellable(ctx, nil, t.inner.Info)
+}
+
+// Update changes this subscriber's delivery preferences.
+func (t *TrackConsumer) Update(subscription Subscription) {
+	t.inner.Update(subscription)
+}
+
 // Groups ranges over groups in sequence order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return streamSeq(ctx, t.NextGroup)

@@ -3,6 +3,7 @@ use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
 use crate::consumer::MoqFetchGroupOptions;
+use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
 use crate::media::MoqInit;
 
@@ -80,6 +81,56 @@ async fn raw_track_activity() {
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
+}
+
+#[tokio::test]
+async fn raw_track_info_reports_publisher_properties() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let info = MoqTrackInfo {
+		priority: 7,
+		ordered: false,
+		cache_ms: Some(2_500),
+		timescale: Some(90_000),
+	};
+	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	let got = consumer.info().await.unwrap();
+	assert_eq!(got.priority, 7);
+	assert!(!got.ordered);
+	assert_eq!(got.cache_ms, Some(2_500));
+	assert_eq!(got.timescale, Some(90_000));
+}
+
+#[tokio::test]
+async fn raw_track_update_does_not_wait_for_pending_read() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	let read = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.read_frame().await })
+	};
+
+	consumer.update(MoqSubscription {
+		priority: 10,
+		ordered: false,
+		stale_ms: 25,
+		group_start: Some(0),
+		group_end: None,
+	});
+
+	let payload = b"updated subscription".to_vec();
+	track.write_frame(payload.clone()).unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, read)
+		.await
+		.expect("timed out waiting for raw frame")
+		.expect("read task panicked")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame, payload);
 }
 
 #[tokio::test]

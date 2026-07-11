@@ -81,6 +81,16 @@ for try await announcement in announced {
 }
 ```
 
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```swift
+let track = try await announcement.broadcast.subscribeTrack(
+    name: "events",
+    subscription: Subscription(priority: 10))
+let info = try await track.info()
+track.update(subscription: Subscription(priority: 20, ordered: false))
+```
+
 ## Publish
 
 ```swift

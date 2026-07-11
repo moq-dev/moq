@@ -71,6 +71,17 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```kotlin
+val track = announcement.broadcast().subscribeTrack(
+    "events",
+    Subscription(priority = 10u.toUByte()),
+)
+val info = track.info()
+track.update(Subscription(priority = 20u.toUByte(), ordered = false))
+```
+
 ## Publish
 
 ```kotlin

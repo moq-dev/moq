@@ -48,6 +48,21 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	}
 }
 
+impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
+	type Error = MoqError;
+
+	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
+		let cache_ms = u64::try_from(info.cache.as_millis())
+			.map_err(|_| MoqError::Codec("track cache duration overflow".into()))?;
+		Ok(Self {
+			priority: info.priority,
+			ordered: info.ordered,
+			cache_ms: Some(cache_ms),
+			timescale: Some(info.timescale.as_u64()),
+		})
+	}
+}
+
 // ---- UniFFI Objects ----
 
 pub(crate) struct BroadcastProducer {

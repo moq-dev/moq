@@ -166,6 +166,28 @@ broadcast.Finish()
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
 
+## Raw Track Controls
+
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```go
+subscription := moq.Subscription{Priority: 10, Ordered: true}
+track, err := broadcast.SubscribeTrack("events", &subscription)
+if err != nil {
+	log.Fatal(err)
+}
+
+info, err := track.Info(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+if info.Timescale != nil {
+	fmt.Println("timescale", *info.Timescale)
+}
+
+track.Update(moq.Subscription{Priority: 20, Ordered: false})
+```
+
 ## Fetching raw groups
 
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:

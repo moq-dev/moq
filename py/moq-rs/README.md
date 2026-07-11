@@ -139,11 +139,14 @@ client = moq.Client(
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `await .subscribe_catalog() → CatalogConsumer`
-  - `await .subscribe_track(name) → TrackConsumer`
-  - `await .subscribe_media(name, track, max_latency_ms=10000) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
+  - `await .subscribe_track(name, subscription=None) → TrackConsumer`
+  - `await .subscribe_media(name, track, max_latency_ms=10000, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
+- **`TrackConsumer`**. Async iterator of raw groups.
+  - `await .info() → TrackInfo`
+  - `.update(subscription)`. Change priority, ordering, staleness, or group range after subscribing.
 
 All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
 
@@ -163,6 +166,8 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
+- **`Subscription`**. Subscriber delivery preferences: priority, ordering, staleness, and optional group range.
+- **`TrackInfo`**. Publisher track properties: priority, ordering, cache window, and timescale.
 - **`Dimensions`**. `.width: int`, `.height: int`.
 - **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 

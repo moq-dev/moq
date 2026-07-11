@@ -1500,6 +1500,32 @@ pub struct Subscriber {
 	end_sequence: Option<u64>,
 }
 
+/// A cloneable handle to a subscriber's delivery preferences.
+///
+/// This updates the same subscription as the owning [`Subscriber`] without
+/// borrowing its read cursor, so callers can change priority, ordering, or
+/// group bounds while another task is waiting for groups.
+#[derive(Clone)]
+pub struct SubscriberControl {
+	subscription: kio::Producer<Subscription>,
+}
+
+impl SubscriberControl {
+	/// This subscriber's current preferences.
+	pub fn subscription(&self) -> Subscription {
+		self.subscription.read().clone()
+	}
+
+	/// Replace this subscriber's preferences, updating the producer's aggregate.
+	pub fn update(&self, subscription: Subscription) {
+		if let Ok(mut state) = self.subscription.write() {
+			*state = subscription;
+		} else {
+			panic!("subscription is closed");
+		}
+	}
+}
+
 impl Subscriber {
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -1507,6 +1533,13 @@ impl Subscriber {
 
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// Create a handle for updating this subscriber's delivery preferences.
+	pub fn control(&self) -> SubscriberControl {
+		SubscriberControl {
+			subscription: self.subscription.clone(),
+		}
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -1701,16 +1734,12 @@ impl Subscriber {
 
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
-		self.subscription.read().clone()
+		self.control().subscription()
 	}
 
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
 	pub fn update(&mut self, subscription: Subscription) {
-		if let Ok(mut state) = self.subscription.write() {
-			*state = subscription;
-		} else {
-			panic!("subscription is closed");
-		}
+		self.control().update(subscription);
 	}
 
 	/// Return the latest sequence number in the track.
@@ -2251,6 +2280,22 @@ mod test {
 
 		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
 		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
+	}
+
+	#[test]
+	fn subscriber_control_updates_while_read_future_is_pending() {
+		let producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let control = subscriber.control();
+
+		let mut recv = Box::pin(subscriber.recv_group());
+		assert!(recv.as_mut().now_or_never().is_none());
+
+		control.update(Subscription::default().with_priority(7).with_ordered(false));
+
+		let aggregate = producer.subscription().expect("expected an active subscription");
+		assert_eq!(aggregate.priority, 7);
+		assert!(!aggregate.ordered);
 	}
 
 	#[tokio::test]

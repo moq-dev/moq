@@ -114,13 +114,19 @@ track.write_frame(b'{"cmd": "ready"}')
 track.finish()
 
 # Subscribe
-track = await broadcast_consumer.subscribe_track("events")
+track = await broadcast_consumer.subscribe_track(
+    "events",
+    subscription=moq.Subscription(priority=10),
+)
+info = await track.info()
+track.update(moq.Subscription(priority=20, ordered=False))
 async for group in track:
     async for frame in group:
         print(frame)
 ```
 
 `write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering), and `update()` changes this subscriber's delivery preferences without resubscribing.
 
 ### Fetching raw groups
 

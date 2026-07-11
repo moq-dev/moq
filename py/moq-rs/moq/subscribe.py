@@ -20,6 +20,7 @@ from .types import (
     FetchGroupOptions,
     Frame,
     Subscription,
+    TrackInfo,
     Video,
 )
 
@@ -134,6 +135,14 @@ class TrackConsumer:
         status/command tracks). Returns `None` when the track ends.
         """
         return await self._inner.read_frame()
+
+    async def info(self) -> TrackInfo:
+        """Return the publisher-side track properties."""
+        return await self._inner.info()
+
+    def update(self, subscription: Subscription) -> None:
+        """Change this subscriber's delivery preferences."""
+        self._inner.update(subscription)
 
     def cancel(self) -> None:
         self._inner.cancel()
