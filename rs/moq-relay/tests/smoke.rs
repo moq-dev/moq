@@ -606,7 +606,7 @@ async fn internal_unix_round_trip() {
 fn path_versions() -> Vec<moq_net::Version> {
 	[
 		"moq-lite-05",
-		"moq-lite-06-wip",
+		"moq-lite-06",
 		"moq-transport-14",
 		"moq-transport-15",
 		"moq-transport-16",

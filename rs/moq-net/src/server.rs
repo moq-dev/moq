@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
+	ALPN_LITE_06, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream},
 	ietf, lite, setup,
 };
@@ -133,9 +133,9 @@ impl Server {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06)) => {
 				let version = match alpn {
-					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
+					ALPN_LITE_06 => lite::Version::Lite06Wip,
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;

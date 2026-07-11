@@ -143,7 +143,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === Lite.ALPN_06_WIP) {
+	} else if (protocol === Lite.ALPN_06) {
 		// moq-lite draft-06 doesn't use a session stream, so we return immediately.
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_06, undefined);
 	} else if (protocol === Lite.ALPN_05) {
@@ -233,7 +233,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === Lite.ALPN_06_WIP) {
+	} else if (protocol === Lite.ALPN_06) {
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_06, undefined);
 	} else if (protocol === Lite.ALPN_05) {
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_05, undefined);
@@ -366,7 +366,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		protocols: [
-			Lite.ALPN_06_WIP,
+			Lite.ALPN_06,
 			Lite.ALPN_05,
 			Lite.ALPN_04,
 			Lite.ALPN_03,
@@ -445,7 +445,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	// advertises every QMux draft it knows about and the server picks one.
 	// Insertion order is the negotiation preference on the wire.
 	const versions = {
-		[Lite.ALPN_06_WIP]: null,
+		[Lite.ALPN_06]: null,
 		[Lite.ALPN_05]: null,
 		[Lite.ALPN_04]: null,
 		[Lite.ALPN_03]: null,

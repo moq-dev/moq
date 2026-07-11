@@ -17,11 +17,12 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
 /// newest moq-lite ALPN that both sides converge on.
 ///
-/// Includes `ALPN_LITE_06_WIP` so the demo and end-to-end tests negotiate lite-06
-/// by default. lite-06 is still work-in-progress; revisit this default before
-/// promoting the branch to `main`.
+/// Includes `ALPN_LITE_06` so the demo and end-to-end tests negotiate lite-06
+/// by default. lite-06's wire format is still work-in-progress (the internal
+/// `Lite06Wip` variant), but the ALPN carries no `-wip` suffix so finalizing is a
+/// pure rename with no wire change; revisit this default before promoting to `main`.
 pub const ALPNS: &[&str] = &[
-	ALPN_LITE_06_WIP,
+	ALPN_LITE_06,
 	ALPN_LITE_05,
 	ALPN_LITE_04,
 	ALPN_LITE_03,
@@ -39,7 +40,7 @@ pub(crate) const ALPN_LITE: &str = "moql";
 pub(crate) const ALPN_LITE_03: &str = "moq-lite-03";
 pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
 pub(crate) const ALPN_LITE_05: &str = "moq-lite-05";
-pub(crate) const ALPN_LITE_06_WIP: &str = "moq-lite-06-wip";
+pub(crate) const ALPN_LITE_06: &str = "moq-lite-06";
 pub(crate) const ALPN_14: &str = "moq-00";
 pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
@@ -103,7 +104,7 @@ impl Version {
 			ALPN_LITE_03 => Some(Self::Lite(lite::Version::Lite03)),
 			ALPN_LITE_04 => Some(Self::Lite(lite::Version::Lite04)),
 			ALPN_LITE_05 => Some(Self::Lite(lite::Version::Lite05)),
-			ALPN_LITE_06_WIP => Some(Self::Lite(lite::Version::Lite06Wip)),
+			ALPN_LITE_06 => Some(Self::Lite(lite::Version::Lite06Wip)),
 			ALPN_14 => Some(Self::Ietf(ietf::Version::Draft14)),
 			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -117,7 +118,7 @@ impl Version {
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
 		match self {
-			Self::Lite(lite::Version::Lite06Wip) => ALPN_LITE_06_WIP,
+			Self::Lite(lite::Version::Lite06Wip) => ALPN_LITE_06,
 			Self::Lite(lite::Version::Lite05) => ALPN_LITE_05,
 			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
 			Self::Lite(lite::Version::Lite03) => ALPN_LITE_03,
@@ -176,7 +177,7 @@ impl FromStr for Version {
 			"moq-lite-03" => Ok(Self::Lite(lite::Version::Lite03)),
 			"moq-lite-04" => Ok(Self::Lite(lite::Version::Lite04)),
 			"moq-lite-05" => Ok(Self::Lite(lite::Version::Lite05)),
-			"moq-lite-06-wip" => Ok(Self::Lite(lite::Version::Lite06Wip)),
+			"moq-lite-06" => Ok(Self::Lite(lite::Version::Lite06Wip)),
 			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
 			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),

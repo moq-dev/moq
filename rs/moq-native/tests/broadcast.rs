@@ -578,7 +578,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
-	server_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+	server_config.version = vec!["moq-lite-06".parse().unwrap()];
 	let mut server = server_config.init().expect("init server");
 	let addr = server.local_addr().expect("local addr");
 
@@ -587,7 +587,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
-	client_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+	client_config.version = vec!["moq-lite-06".parse().unwrap()];
 	let client = client_config.init().expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
@@ -678,7 +678,7 @@ async fn broadcast_moq_lite_03() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06() {
-	broadcast_test("moqt", Some("moq-lite-06-wip"), Some("moq-lite-06-wip")).await;
+	broadcast_test("moqt", Some("moq-lite-06"), Some("moq-lite-06")).await;
 }
 
 #[tracing_test::traced_test]
@@ -1221,7 +1221,7 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
-const NEWEST_LITE: &str = "moq-lite-06-wip";
+const NEWEST_LITE: &str = "moq-lite-06";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)

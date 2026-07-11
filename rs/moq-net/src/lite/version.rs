@@ -13,9 +13,9 @@ pub enum Version {
 	Lite05,
 	/// Work-in-progress lite-06. Adds announce ids: each `active` ANNOUNCE_BROADCAST
 	/// implicitly assigns the next ordinal, and `ended`/`restart` reference that id
-	/// instead of repeating the path. Advertised over ALPN and included in the
-	/// default version sets as the preferred version; still WIP, revisit before
-	/// promoting the branch to `main`.
+	/// instead of repeating the path. Advertised over ALPN (`moq-lite-06`, no `-wip`
+	/// suffix on the wire) and the preferred version in the default sets. The wire
+	/// format is still WIP; finalizing is a pure rename to `Lite06` with no wire change.
 	Lite06Wip,
 }
 
@@ -91,7 +91,7 @@ impl fmt::Display for Version {
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
 			Self::Lite05 => write!(f, "moq-lite-05"),
-			Self::Lite06Wip => write!(f, "moq-lite-06-wip"),
+			Self::Lite06Wip => write!(f, "moq-lite-06"),
 		}
 	}
 }
