@@ -1,5 +1,5 @@
-use std::ffi::c_char;
-use tokio::sync::oneshot;
+use std::{ffi::c_char, future::Future, pin::Pin, task::Poll};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_string, moq_video_config};
@@ -31,6 +31,13 @@ struct TaskEntry {
 	callback: OnStatus,
 }
 
+/// A raw track task also accepts subscription updates while it is running.
+struct RawTaskEntry {
+	close: Option<oneshot::Sender<()>>,
+	update: mpsc::UnboundedSender<Option<moq_net::Subscription>>,
+	callback: OnStatus,
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -49,7 +56,7 @@ pub struct Consume {
 	frame: NonZeroSlab<moq_mux::container::Frame>,
 
 	/// Raw track consumer tasks (no media/container framing).
-	raw_task: NonZeroSlab<Option<TaskEntry>>,
+	raw_task: NonZeroSlab<Option<RawTaskEntry>>,
 
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<bytes::Bytes>,
@@ -419,7 +426,7 @@ impl Consume {
 
 	/// Read the payload of a frame as a single contiguous slice.
 	///
-	/// Frames are not chunked — the payload pointer is valid until the frame is closed
+	/// Frames are not chunked. The payload pointer is valid until the frame is closed
 	/// via [`Self::frame_close`].
 	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
@@ -450,14 +457,22 @@ impl Consume {
 	///
 	/// No catalog lookup or container parsing. This is the moq-net primitive for
 	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
-	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
-	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
+	/// in sequence order. Frames must be released with [`Self::raw_frame_close`].
+	pub fn raw_track(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		subscription: Option<moq_net::Subscription>,
+		on_frame: OnStatus,
+	) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
-		let entry = TaskEntry {
+		let (update, updates) = mpsc::unbounded_channel();
+		let entry = RawTaskEntry {
 			close: Some(channel.0),
+			update,
 			callback: on_frame,
 		};
 		let id = self.raw_task.insert(Some(entry))?;
@@ -465,8 +480,9 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = broadcast.track(&name)?.subscribe(None).await?;
-				Self::run_raw(on_frame, track, channel.1).await
+				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?;
+				Self::apply_raw_subscription(&mut track, subscription);
+				Self::run_raw(on_frame, track, channel.1, updates).await
 			}
 			.await;
 
@@ -481,34 +497,76 @@ impl Consume {
 		Ok(id)
 	}
 
+	fn apply_raw_subscription(track: &mut moq_net::track::Subscriber, subscription: Option<moq_net::Subscription>) {
+		let subscription = subscription.unwrap_or_default();
+		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
+			track.start_at(start);
+		}
+		track.end_at(subscription.group_end);
+		track.update(subscription);
+	}
+
 	async fn run_raw(
 		callback: OnStatus,
 		mut track: moq_net::track::Subscriber,
 		mut close: oneshot::Receiver<()>,
+		mut updates: mpsc::UnboundedReceiver<Option<moq_net::Subscription>>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
 		// producer wrote, regardless of how it was grouped.
 		loop {
-			// `biased` so a pending close always wins over a ready group.
-			let mut group = tokio::select! {
-				biased;
-				_ = &mut close => return Ok(()),
-				group = track.next_group() => match group? {
-					Some(group) => group,
-					None => return Ok(()),
-				},
+			let Some(mut group) =
+				moq_net::kio::wait(|waiter| -> Poll<Result<Option<moq_net::group::Consumer>, Error>> {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if Pin::new(&mut close).poll(&mut cx).is_ready() {
+						return Poll::Ready(Ok(None));
+					}
+
+					loop {
+						match updates.poll_recv(&mut cx) {
+							Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(&mut track, subscription),
+							Poll::Ready(None) => return Poll::Ready(Ok(None)),
+							Poll::Pending => break,
+						}
+					}
+
+					match track.poll_next_group(waiter) {
+						Poll::Ready(Ok(group)) => Poll::Ready(Ok(group)),
+						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
+						Poll::Pending => Poll::Pending,
+					}
+				})
+				.await?
+			else {
+				return Ok(());
 			};
 
 			loop {
-				let payload = tokio::select! {
-					biased;
-					_ = &mut close => return Ok(()),
-					payload = group.read_frame() => match payload? {
-						Some(payload) => payload,
-						None => break,
-					},
+				let Some(payload) = moq_net::kio::wait(|waiter| -> Poll<Result<Option<bytes::Bytes>, Error>> {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if Pin::new(&mut close).poll(&mut cx).is_ready() {
+						return Poll::Ready(Ok(None));
+					}
+
+					loop {
+						match updates.poll_recv(&mut cx) {
+							Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(&mut track, subscription),
+							Poll::Ready(None) => return Poll::Ready(Ok(None)),
+							Poll::Pending => break,
+						}
+					}
+
+					match group.poll_read_frame(waiter) {
+						Poll::Ready(Ok(payload)) => Poll::Ready(Ok(payload)),
+						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
+						Poll::Pending => Poll::Pending,
+					}
+				})
+				.await?
+				else {
+					break;
 				};
 
 				// Hold the lock only to buffer the frame; release it before the callback.
@@ -516,6 +574,16 @@ impl Consume {
 				callback.call(Ok(frame_id));
 			}
 		}
+	}
+
+	pub fn raw_track_update(&mut self, track: Id, subscription: Option<moq_net::Subscription>) -> Result<(), Error> {
+		let entry = self
+			.raw_task
+			.get_mut(track)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::TrackNotFound)?;
+		entry.update.send(subscription).map_err(|_| Error::TrackNotFound)?;
+		Ok(())
 	}
 
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
@@ -551,7 +619,7 @@ impl Consume {
 	}
 
 	/// Look up a video rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// (broadcast, config, name) tuple needed to subscribe. Mirrors
 	/// the index-based selection in `video_ordered`.
 	pub fn video_rendition(
 		&self,
@@ -570,7 +638,7 @@ impl Consume {
 	}
 
 	/// Look up an audio rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// (broadcast, config, name) tuple needed to subscribe. Mirrors
 	/// the index-based selection in `audio_ordered`.
 	pub fn audio_rendition(
 		&self,

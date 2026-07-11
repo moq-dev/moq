@@ -88,9 +88,9 @@ generated header at `../../target/release/moq.h`.
 
 Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_video_raw`, `moq_consume_audio_raw`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
-- **`> 0`** — a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
-- **`0`** — closed cleanly. **Terminal.**
-- **`< 0`** — closed with an error. **Terminal.**
+- **`> 0`**: a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
+- **`0`**: closed cleanly. **Terminal.**
+- **`< 0`**: closed with an error. **Terminal.**
 
 A positive result that is itself a handle must be freed once you're done with it (e.g. a broadcast from `moq_origin_request` via `moq_consume_close`). `moq_origin_announced` is the notable repeat case: it delivers a fresh announce ID for *every* announce / unannounce event, so free each one with `moq_origin_announced_free` after reading it with `moq_origin_announced_info`, or they accumulate for the life of the listener.
 
@@ -116,6 +116,55 @@ if (rc < 0) {
 A server can reject the connection on auth grounds: unauthorized (HTTP 401) or forbidden (HTTP 403). Each returns its own distinct negative code (with `moq_error()` reporting `"unauthorized"` / `"forbidden"`). These are terminal, so distinguish them from a transient transport failure and stop rather than reconnecting.
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
+
+## Raw Track Options
+
+`moq_publish_track` accepts optional publisher-side track properties:
+
+```c
+struct moq_track_info info = {0};
+info.priority = 3;
+info.ordered = true;
+info.ordered_valid = true;
+info.cache_ms = 1000;
+info.cache_valid = true;
+info.timescale = 1000000;
+info.timescale_valid = true;
+
+int track = moq_publish_track(
+    broadcast,
+    name,
+    name_len,
+    &info);
+```
+
+`moq_consume_track` accepts optional subscriber delivery preferences.
+`moq_consume_track_update` changes them while the callback task is running.
+Fields ending in `_valid` decide whether the matching value overrides the default:
+
+```c
+struct moq_subscription sub = {0};
+sub.priority = 5;
+sub.ordered = true;
+sub.ordered_valid = true;
+sub.stale_ms = 25;
+sub.group_start = 10;
+sub.group_start_valid = true;
+
+int consumer = moq_consume_track(
+    broadcast,
+    name,
+    name_len,
+    &sub,
+    on_frame,
+    user_data);
+
+sub.group_end = 20;
+sub.group_end_valid = true;
+moq_consume_track_update(consumer, &sub);
+```
+
+Pass `NULL` for either options pointer to use the moq-net defaults.
 
 ## Use cases
 

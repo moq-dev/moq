@@ -177,9 +177,9 @@ impl Publish {
 	/// No codec, container, or catalog framing. This is the moq-net primitive
 	/// for non-media tracks. Pair it with [`Self::video_config`] / [`Self::audio_config`]
 	/// if you want to describe the track in the catalog as well.
-	pub fn track(&mut self, broadcast: Id, name: &str) -> Result<Id, Error> {
+	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
 		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.create_track(name, None)?;
+		let track = broadcast.create_track(name, info)?;
 		self.tracks.insert(track)
 	}
 
