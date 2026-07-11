@@ -224,7 +224,7 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 		label.className = "w-10 shrink-0 text-[10px] text-neutral-500";
 		label.textContent = name;
 		const canvas = document.createElement("canvas");
-		canvas.style.cssText = "display: block; flex: 1; height: 20px;";
+		canvas.style.cssText = "display: block; flex: 1; min-width: 0; height: 20px;";
 		row.append(label, canvas);
 		return { row, canvas };
 	};
