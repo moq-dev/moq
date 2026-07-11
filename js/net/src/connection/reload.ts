@@ -160,7 +160,7 @@ export class Reload {
 				// the catch below. qmux never rejects it, and WebTransport rejects only on an abnormal
 				// close, so without an explicit retry a viewer whose session drops keeps a dead
 				// `established` and a status that still reads "connected", forever. Safari and Firefox are
-				// always on the qmux WebSocket, so they never recovered from any drop at all.
+				// always on the qmux WebSocket, so this is their only path to drop recovery.
 				if ((await Promise.race([cancelled, connection.closed])) === CANCELLED) return;
 				if (abort.aborted) return;
 
@@ -241,15 +241,10 @@ export class Reload {
 						}
 					});
 
-					// Bump a MONOTONIC per-path generation on each active announce so a same-name republish
-					// is always observable, even when the unannounce+announce coalesce and the presence Set
-					// never visibly flips (the watcher re-consumes on any generation change). Never delete on
-					// unannounce: resetting a path back to 1 would make a coalesced republish look unchanged
-					// (1 -> 1), so the watcher would stay bound to the dead route. The map therefore grows by
-					// one entry per DISTINCT path ever announced on this connection (cumulative, not just the
-					// active set), freed only by the wholesale reset on reconnect above. Pruning inactive paths
-					// here is unsafe (a pending coalesced re-announce could reset the counter), so the growth is
-					// an accepted tradeoff; a very-high-churn relay may want an epoch-based redesign instead.
+					// Never delete on unannounce: resetting a path back to 1 would make a coalesced republish
+					// look unchanged (1 -> 1), leaving the watcher bound to the dead route. The map therefore
+					// grows by one entry per distinct path ever announced (an accepted tradeoff), freed only
+					// by the reconnect reset above.
 					if (entry.active) {
 						this.#announcedGen.mutate((gens) => {
 							gens.set(entry.path, (gens.get(entry.path) ?? 0) + 1);

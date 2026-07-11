@@ -252,17 +252,11 @@ export class Source {
 
 		const renditions = effect.get(this.#output.catalog)?.renditions ?? {};
 
-		// Synchronously drop any already-available rendition whose CODEC or container no longer matches the
-		// new catalog, BEFORE the async probe below. The Source and its Decoder are long-lived (per element,
-		// not per broadcast), and #config only updates after the async `supported()` probe finishes. Without
-		// this prune, during that window a publisher/codec switch on the same broadcast (e.g. Safari HEVC ->
-		// Chrome VP9 on "me.hang") leaves #config on the previous codec, so the decoder decodes the new
-		// stream with the wrong codec and floods "key frame required / fill out the description field". We do
-		// NOT prune on a description-only change (same codec): that is handled by the normal decoder
-		// reconfigure (description is a reload field), and pruning on it would needlessly yank the HD
-		// rendition down to SD when the encoder briefly republishes a description. Renditions that still
-		// match keep their identical value, so this dedupes to a no-op and benign catalog updates cause no
-		// decoder churn.
+		// Drop renditions whose codec/container no longer match BEFORE the async probe: #config only
+		// updates after `supported()` resolves, so a publisher codec switch in that window would decode
+		// the new stream under the old config. A description-only change is NOT pruned: description is a
+		// decoder-reload field handled by the normal reconfigure, and pruning would yank HD down to SD on
+		// a benign description republish. Still-matching renditions keep their identical value (a no-op set).
 		const stillValid: Record<string, Catalog.VideoConfig> = {};
 		for (const [name, cfg] of Object.entries(this.#output.available.peek())) {
 			const next = renditions[name];

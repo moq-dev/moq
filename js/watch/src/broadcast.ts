@@ -109,6 +109,7 @@ export class Broadcast {
 	constructor(
 		props?: Inputs<BroadcastInput> & {
 			announced?: Getter<Set<Moq.Path.Valid>>;
+			/** Per-path announce generations from the connection; a bump re-runs the broadcast so a same-name republish is re-consumed. Pairs with `announced`. */
 			announcedGenerations?: Getter<ReadonlyMap<Moq.Path.Valid, number>>;
 		},
 	) {
@@ -301,8 +302,7 @@ export class Broadcast {
 			this.#catalogAttempts += 1;
 			this.#output.status.set("loading");
 
-			const retry = this.#catalogRetry.peek() + 1;
-			effect.timer(() => this.#catalogRetry.update((prev) => Math.max(prev, retry)), this.#catalogDelay);
+			effect.timer(() => this.#catalogRetry.update((n) => n + 1), this.#catalogDelay);
 			this.#catalogDelay = Math.min(this.#catalogDelay * CATALOG_RETRY_MULTIPLIER, CATALOG_RETRY_MAX_MS);
 		});
 	}

@@ -54,16 +54,14 @@ export class Encoder {
 
 	// The decoder init the encoder actually produced (authoritative codec + hvcC/av1C description),
 	// captured from keyframe metadata in serve(), tagged with the requested codec + dimensions it was
-	// measured against. #runCatalog (via videoCatalog) folds it into the catalog only while that tag still
-	// matches, so it survives the bitrate churn that rebuilds #config ~10x/s (bandwidth adaptation) without
-	// flapping the description, yet a real codec/resolution change invalidates it until the next keyframe.
+	// measured against. See videoCatalog's doc comment for why it survives bitrate churn but not a real
+	// codec/resolution change.
 	#decoderConfig = new Signal<
 		{ reqCodec: string; width: number; height: number; codec: string; description?: string } | undefined
 	>(undefined);
 
-	// Cumulative encoded bytes, for a measured (transport-agnostic) upload bitrate in the stats UI.
-	// Monotonic; the reader diffs it per tick. Grows only while a subscriber is being served.
 	#bytesEncoded = new Signal(0);
+	/** Cumulative bytes encoded while serving a subscriber; monotonic, diff per tick for an upload bitrate. */
 	readonly bytesEncoded: Getter<number> = this.#bytesEncoded;
 
 	#signals = new Effect();

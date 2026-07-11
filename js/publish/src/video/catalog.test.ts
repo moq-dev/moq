@@ -27,7 +27,7 @@ test("uses the encoder's authoritative codec + hex description when codec+dimens
 test("matches by value, not identity, so bitrate churn (a rebuilt config object) keeps the description", () => {
 	// Bandwidth adaptation rebuilds the VideoEncoderConfig ~10x/s as a NEW object with the same codec +
 	// dimensions; a value match keeps the HEVC description stable (an identity check would flap it off and
-	// make watchers yank HD down to SD). This pins the R4-A fix.
+	// make watchers yank HD down to SD).
 	const churned: VideoEncoderConfig = { ...base, bitrate: 3_500_000 };
 	const catalog = videoCatalog(churned, {
 		reqCodec: "hev1.1.6.L93.B0",

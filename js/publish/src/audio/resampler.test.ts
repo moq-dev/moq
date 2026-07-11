@@ -52,9 +52,10 @@ describe("StreamResampler", () => {
 		}
 	});
 
-	it("raw capture-clock timestamps would NOT be contiguous (documents the bug the fix avoids)", () => {
-		// Stamp each chunk with the capture-clock time of its first input sample (the old behavior) and
-		// index the ring with it: consecutive chunks land off-by-a-sample, forcing zero-fill/overwrite.
+	it("raw capture-clock timestamps would NOT be contiguous (why the encoder synthesizes timestamps)", () => {
+		// Stamp each chunk with the capture-clock time of its first input sample and index the ring with
+		// it: consecutive chunks land off-by-a-sample, forcing zero-fill/overwrite. That is why the
+		// encoder instead synthesizes timestamps from the sample counter (see the previous test).
 		const r = new StreamResampler(CAPTURE_RATE, ENCODE_RATE);
 		let captureSamples = 0;
 		let prevStart: number | undefined;

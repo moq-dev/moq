@@ -1,6 +1,6 @@
 import * as Util from "@moq/hang/util";
 import { Time } from "@moq/net";
-import type { CaptureToHost } from "./capture-worker.ts";
+import type { CaptureToHost } from "./capture-worker";
 import type { StreamTrack } from "./types";
 
 /**
@@ -223,7 +223,7 @@ function rafTrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 					}
 
 					const now = Time.Milli.now();
-					if (Time.Milli.sub(now, last) < ((1000 / frameRate) as Time.Milli)) {
+					if (Time.Milli.sub(now, last) < Time.Milli(1000 / frameRate)) {
 						await new Promise((r) => requestAnimationFrame(r));
 						continue;
 					}

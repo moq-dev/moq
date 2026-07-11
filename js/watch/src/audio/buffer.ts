@@ -3,6 +3,9 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Data, InitPost, InitShared, Latency, Reset, State } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
+// A parked backpressure waiter; `cleanup` detaches its abort listener when it resolves.
+type Waiter = { timestamp: Time.Micro; resolve: () => void; cleanup?: () => void };
+
 /**
  * Timestamp-based backpressure for buffered playback. The decoded PCM ring only holds the latency
  * floor; everything above it (the buffered lookahead, up to the ceiling) stays upstream as encoded
@@ -11,9 +14,6 @@ import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
  * floor-sized ring. Both transports share this; they differ only in how they observe the playhead
  * (Atomics poll vs worklet state messages). A no-op when not buffered (the ring bounds itself).
  */
-// A parked backpressure waiter; `cleanup` detaches its abort listener when it resolves.
-type Waiter = { timestamp: Time.Micro; resolve: () => void; cleanup?: () => void };
-
 class Backpressure {
 	readonly #enabled: boolean;
 	#headroom: Time.Micro;
@@ -104,6 +104,8 @@ export interface AudioBuffer {
 	 * applies backpressure: it stays pending while decoding `timestamp` would run more than the latency
 	 * floor ahead of the playhead, so the caller holds the (encoded) frame instead of decoding it too
 	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
+	 * `signal` cancels the wait: the promise resolves (never rejects) immediately on abort, so check
+	 * `signal.aborted` after awaiting.
 	 */
 	wait(timestamp: Time.Micro, signal?: AbortSignal): Promise<void>;
 
@@ -187,6 +189,9 @@ class SharedAudioBuffer implements AudioBuffer {
 			// A buffered ring that has fully drained while un-stalled is a deadlock: only the parked decode
 			// loop can refill it, but it is blocked on wait(). Re-stall so the loop resumes and re-anchors
 			// (the fall-through stalled branch flushes backpressure). Never in live mode (no lookahead).
+			// `.length` is normally not for control-flow (see its doc), but it's exact here: this poll is
+			// the sole writer of WRITE/STALLED, and the worklet only ever advances READ toward WRITE, so a
+			// zero observed on this thread can't be a stale/racy read.
 			if (this.#buffered && !this.#ring.stalled && this.#ring.length === 0) this.#ring.reset();
 			const stalled = this.#ring.stalled;
 			this.#timestamp.set(this.#ring.timestamp);

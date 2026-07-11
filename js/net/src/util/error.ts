@@ -23,22 +23,19 @@ const STREAM_FAULT_CODES = new Set<number>([
 ]);
 
 /**
- * True when an error is a ROUTINE stream teardown (a peer RESET_STREAM / STOP_SENDING for an unsubscribe,
- * publisher handover, or close) rather than a client-actionable fault. Lets callers log expected lifecycle
- * churn at debug while a genuine failure (auth, not-found, protocol, unroutable, ...) still warns.
+ * True when `err` is a stream-lifecycle event a caller can log at debug rather than warn: false for a
+ * client-actionable fault (see STREAM_FAULT_CODES) or a non-stream error.
  *
- * Reads the application error code the relay encodes (rs/moq-net `error.rs`): `WebTransportError.
- * streamErrorCode` on native transports, or the trailing number of qmux's "RESET_STREAM: <code>" /
- * "STOP_SENDING: <code>" message on the WebSocket fallback. A stream reset whose code is a fault (see
- * STREAM_FAULT_CODES), or an error that is not a stream reset at all, returns false so it is surfaced.
- * Keyed on `err.name` rather than `instanceof WebTransportError` so it is safe where that global is
- * undefined (e.g. the test runner).
+ * Reads the application code the relay encodes (rs/moq-net `error.rs`): `WebTransportError.streamErrorCode`
+ * on native transports, or the trailing number in qmux's "RESET_STREAM: <code>" / "STOP_SENDING: <code>"
+ * message on the WebSocket fallback. Keyed on `err.name` rather than `instanceof WebTransportError` so it
+ * is safe where that global is undefined (e.g. the test runner).
  */
 export function isStreamAbort(err: unknown): boolean {
 	if (!(err instanceof Error)) return false;
 
-	// Coded stream resets decide first, so a client-actionable fault code always wins over the message
-	// heuristics below. It is a stream reset: routine unless the relay signalled a fault code.
+	// Coded stream resets decide first: a client-actionable fault code always wins over the message
+	// heuristics below.
 	if (err.name === "WebTransportError") {
 		// Trust the relay's numeric app code regardless of `source`: Chrome reports a WRITE-side abort
 		// (a downstream unsubscribe seen by the publisher) as source "session", not "stream", so gating on
@@ -52,20 +49,19 @@ export function isStreamAbort(err: unknown): boolean {
 	if (match) return !STREAM_FAULT_CODES.has(Number(match[1]));
 
 	// The session itself ended, which fails every stream still open on it. qmux words this
-	// "Connection closed", optionally carrying the peer's CONNECTION_CLOSE code. Same rule as a stream
-	// reset: routine unless the peer signalled a client-actionable fault. (Native WebTransport reports
-	// the equivalent as a WebTransportError with no `streamErrorCode`, handled above.)
+	// "Connection closed", optionally carrying the peer's CONNECTION_CLOSE code. (Native WebTransport
+	// reports the equivalent as a WebTransportError with no `streamErrorCode`, handled above.)
 	const closed = /^Connection closed(?::\s*(\d+))?/.exec(err.message);
 	if (closed) {
 		const code = closed[1] === undefined ? undefined : Number(closed[1]);
 		return code === undefined || !STREAM_FAULT_CODES.has(code);
 	}
 
-	// A write/close after the stream already ended surfaces as a generic Streams-API error rather than a
-	// coded RESET_STREAM/STOP_SENDING. This is routine teardown (a peer reset racing an in-flight write),
-	// common over the WebSocket/qmux fallback. Engines word it differently: Chromium/Firefox say the stream
-	// is "closed or closing"; Safari throws InvalidStateError. Key Safari on `name` rather than the prose,
-	// so an unrelated error that merely mentions an invalid state still surfaces.
+	// A write/close after the stream already ended (a peer reset racing an in-flight write) surfaces as a
+	// generic Streams-API error rather than a coded RESET_STREAM/STOP_SENDING, common over the WebSocket/qmux
+	// fallback. Engines word it differently: Chromium/Firefox say the stream is "closed or closing"; Safari
+	// throws InvalidStateError. Key Safari on `name` rather than the prose, so an unrelated error that merely
+	// mentions an invalid state still surfaces.
 	if (err.name === "InvalidStateError") return true;
 	return /closed or closing/i.test(err.message);
 }

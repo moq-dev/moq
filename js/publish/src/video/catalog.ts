@@ -19,9 +19,6 @@ export function videoCatalog(
 	config: VideoEncoderConfig,
 	decoderConfig?: { reqCodec: string; width: number; height: number; codec: string; description?: string },
 ): Catalog.VideoConfig {
-	// Apply the captured value only while the FORMAT-determining fields (requested codec + dimensions)
-	// still match. Bitrate/framerate churn (bandwidth adaptation rebuilds #config ~10x/s) does not
-	// invalidate the parameter sets; a codec or resolution change does.
 	const dc =
 		decoderConfig &&
 		decoderConfig.reqCodec === config.codec &&

@@ -1,8 +1,5 @@
 import * as Util from "@moq/hang/util";
 
-// https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
-const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
-
 export type Partial = "full" | "partial" | "none";
 
 export type Codec = {
@@ -71,7 +68,7 @@ async function videoDecoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 	});
 
 	// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-	const unknown = isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+	const unknown = Util.Hacks.isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
 
 	return {
 		hardware: unknown ? undefined : hardware.supported === true,
@@ -84,7 +81,8 @@ export async function isSupported(): Promise<Full> {
 		// Firefox drops server-initiated bidi streams, and reading datagrams kills the session on
 		// Safari, so both are forced onto the WebSocket fallback even though they define
 		// `WebTransport`. Report "partial" to surface the degraded path in UI.
-		webtransport: typeof WebTransport !== "undefined" && !isFirefox && !Util.Hacks.isSafari ? "full" : "partial",
+		webtransport:
+			typeof WebTransport !== "undefined" && !Util.Hacks.isFirefox && !Util.Hacks.isSafari ? "full" : "partial",
 		audio: {
 			decoding: {
 				aac: await audioDecoderSupported("aac"),

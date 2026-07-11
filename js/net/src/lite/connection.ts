@@ -7,6 +7,7 @@ import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
+import { isStreamAbort } from "../util/error.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -52,9 +53,6 @@ export class Connection implements Established {
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
-
-	// True once close() has been called, so #run can treat its unwinding as expected teardown, not a fault.
-	#closing = false;
 
 	/** Estimated send bitrate from the congestion controller. */
 	readonly sendBandwidth?: Bandwidth;
@@ -123,15 +121,12 @@ export class Connection implements Established {
 	 * Closes the connection.
 	 */
 	close() {
-		this.#closing = true;
-
 		this.#publisher.close();
 		this.#subscriber.close();
 
 		try {
-			// TODO: For whatever reason, this try/catch doesn't seem to work..?
-			// Because the error that escapes a close is a rejection of `closed`, not a synchronous throw.
-			// It still guards a teardown race (closing an already-closed transport), so keep it.
+			// A failed close rejects `closed` rather than throwing; this only guards
+			// closing an already-closed transport (a teardown race).
 			this.#quic.close();
 		} catch {
 			// ignore
@@ -162,9 +157,9 @@ export class Connection implements Established {
 		try {
 			await Promise.all(tasks);
 		} catch (err) {
-			// On a deliberate close the loop's streams reject; that is expected teardown, not a fault.
-			if (this.#closing) console.debug("connection run loop stopped while closing", err);
-			else console.error("fatal error running connection", err);
+			// Routine teardown (unsubscribe, handover, peer close) rejects the same way a fault does;
+			// isStreamAbort tells them apart from the error content, same as every other run-loop catch.
+			console[isStreamAbort(err) ? "debug" : "error"]("connection run loop stopped", err);
 		} finally {
 			this.close();
 		}

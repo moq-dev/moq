@@ -44,10 +44,6 @@ scope.onmessage = async (event: MessageEvent<{ track: MediaStreamTrack }>) => {
 		// Release the transferred camera clone. The host terminates this worker on any terminal
 		// message; we deliberately do not self-close, so a terminal message can never race a
 		// self.close() that might drop it before it reaches the host.
-		try {
-			track.stop();
-		} catch {
-			// Already stopped or neutered by transfer; nothing to do.
-		}
+		track.stop();
 	}
 };
