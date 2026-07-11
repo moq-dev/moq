@@ -80,7 +80,7 @@ impl Origin {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let (path, event) = tokio::select! {
+			let moq_net::announce::Update { path, event, .. } = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {

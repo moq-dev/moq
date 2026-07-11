@@ -310,10 +310,7 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.track(&name)?
-					.subscribe(moq_net::Subscription {
-						priority: 1,
-						..Default::default()
-					})
+					.subscribe(moq_net::track::Subscription::default().with_priority(1))
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -362,10 +359,7 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.track(&name)?
-					.subscribe(moq_net::Subscription {
-						priority: 2,
-						..Default::default()
-					})
+					.subscribe(moq_net::track::Subscription::default().with_priority(2))
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -512,7 +506,7 @@ impl Consume {
 				};
 
 				// Hold the lock only to buffer the frame; release it before the callback.
-				let frame_id = State::lock().consume.raw_frame.insert(payload)?;
+				let frame_id = State::lock().consume.raw_frame.insert(payload.payload)?;
 				callback.call(Ok(frame_id));
 			}
 		}

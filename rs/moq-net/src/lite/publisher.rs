@@ -217,7 +217,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, event)) = announced.try_next() {
+				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
@@ -258,7 +258,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
-				while let Some((path, event)) = announced.try_next() {
+				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
@@ -329,7 +329,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				res = stream.reader.closed() => return res,
 				next = announced.next() => {
-						let Some((path, event)) = next else {
+						let Some(crate::announce::Update { path, event, .. }) = next else {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
 						};
@@ -537,7 +537,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		broadcast: kio::Pending<origin::Requested>,
+		broadcast: kio::Pending<origin::Requesting>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -546,7 +546,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		let (track_stats, broadcasts, absolute) = stats;
-		let subscription = crate::Subscription {
+		let subscription = crate::track::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
 			stale: subscribe.max_latency,
@@ -668,7 +668,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch(
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
-		broadcast: kio::Pending<origin::Requested>,
+		broadcast: kio::Pending<origin::Requesting>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
@@ -948,6 +948,19 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 						return Ok(());
 					};
 					let _ = track_priority_tx.send(upd.priority);
+					// Feed the full update into the model subscriber so the producer's
+					// aggregate reflects it (and a relay re-forwards it upstream).
+					let _ = track.update(crate::track::Subscription {
+						priority: upd.priority,
+						ordered: upd.ordered,
+						stale: upd.max_latency,
+						group_start: upd.start_group,
+						group_end: upd.end_group,
+						..Default::default()
+					});
+					if let Some(start_group) = upd.start_group {
+						track.start_at(start_group);
+					}
 					track.end_at(upd.end_group);
 				}
 			}
@@ -1017,7 +1030,18 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			return;
 		};
 
-		if body.len() <= self.session.max_datagram_size() && self.session.send_datagram(body).is_ok() {
+		let max = self.session.max_datagram_size();
+		if body.len() > max {
+			tracing::debug!(
+				sequence = datagram.sequence,
+				size = body.len(),
+				max,
+				"dropping datagram larger than the transport limit"
+			);
+			return;
+		}
+
+		if self.session.send_datagram(body).is_ok() {
 			self.track_stats.group();
 		}
 	}

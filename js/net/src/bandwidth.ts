@@ -1,3 +1,8 @@
+/**
+ * Bandwidth estimation: a reactive signal carrying the transport's estimated bitrate.
+ *
+ * @module
+ */
 import { Signal } from "@moq/signals";
 
 /**

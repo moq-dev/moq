@@ -207,8 +207,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => {
 					let plain = match self.decoder.as_mut() {
-						Some(decoder) => decoder.frame(&frame)?,
-						None => frame,
+						Some(decoder) => decoder.frame(&frame.payload)?,
+						None => frame.payload,
 					};
 					return Poll::Ready(Ok(Some(serde_json::from_slice(&plain)?)));
 				}
@@ -325,7 +325,7 @@ mod test {
 		};
 		let mut sizes = Vec::new();
 		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			sizes.push(frame.len());
+			sizes.push(frame.payload.len());
 		}
 		assert_eq!(sizes.len(), 8);
 		let raw = serde_json::to_vec(&json!({ "group": 7, "pts": 14_000 })).unwrap().len();

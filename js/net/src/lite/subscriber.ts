@@ -46,20 +46,6 @@ function supportsTrackStream(version: Version): boolean {
 	}
 }
 
-/**
- * Options accepted by {@link Subscriber.announced}.
- */
-export interface AnnouncedOptions {
-	/**
-	 * If true, skip announcements whose hop chain contains this connection's
-	 * own origin id. Useful for meshes that reflect announces back. Defaults
-	 * to false for backwards compatibility: existing code (notably hang.live)
-	 * relies on seeing its own publishes as the signal that a namespace
-	 * published successfully.
-	 */
-	ignoreSelf?: boolean;
-}
-
 interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
@@ -83,8 +69,8 @@ export class Subscriber {
 	// The version of the connection.
 	readonly version: Version;
 
-	// Shared with the Publisher so callers can optionally filter out their
-	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
+	// Per-connection origin id shared with the Publisher, sent with announce
+	// interest so the peer can skip announces that already traversed us.
 	readonly origin: Origin;
 
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
@@ -140,17 +126,14 @@ export class Subscriber {
 
 	/**
 	 * Subscribe to broadcast announcements under `prefix`.
-	 *
-	 * Pass `{ ignoreSelf: true }` to skip announces that have already traversed
-	 * this connection's {@link origin}.
 	 */
-	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): announce.Consumer {
+	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
-		void this.#runAnnounced(announced, prefix, options);
+		void this.#runAnnounced(announced, prefix);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Send our own session-level origin id so the peer can skip announces
 		// whose hop chain already passed through us. Matches the Rust subscriber's
@@ -164,12 +147,8 @@ export class Subscriber {
 			await msg.encode(stream.writer, this.version);
 
 			// Lite05+: the publisher reports its own origin id before any announces.
-			// It no longer stamps itself onto each hop chain, so we append it here to
-			// keep the ignoreSelf loop check seeing the full chain.
-			let responderOrigin: Origin | undefined;
 			if (hasAnnounceOk(this.version)) {
-				const ok = await AnnounceOk.decode(stream.reader, this.version);
-				responderOrigin = ok.origin;
+				await AnnounceOk.decode(stream.reader, this.version);
 			}
 
 			switch (this.version) {
@@ -199,15 +178,6 @@ export class Subscriber {
 				]);
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
-
-				// Optionally drop reflected announces so callers asking for
-				// "someone else's broadcasts" don't re-see their own publishes. In
-				// Lite05 the sender's origin arrives via AnnounceOk, not in each hop
-				// list, so fold it back in before checking.
-				const hops = responderOrigin !== undefined ? [...announce.hops, responderOrigin] : announce.hops;
-				if (options.ignoreSelf && hops.includes(this.origin)) {
-					continue;
-				}
 
 				const path = Path.join(prefix, announce.suffix);
 
@@ -307,7 +277,7 @@ export class Subscriber {
 				case Version.DRAFT_02:
 					break;
 				default:
-					waits.push(this.#runPriorityUpdates(id, broadcast, producer, msg, stream));
+					waits.push(this.#runSubscribeUpdates(id, broadcast, producer, msg, stream));
 					break;
 			}
 
@@ -515,17 +485,17 @@ export class Subscriber {
 	}
 
 	/**
-	 * Send SUBSCRIBE_UPDATE messages whenever the track's priority signal changes.
+	 * Send SUBSCRIBE_UPDATE messages whenever the track's subscription update signal changes.
 	 *
 	 * Resolves cleanly when the stream or track closes, so the caller can include
 	 * this in Promise.race without leaving a dangling pending write that would
-	 * become an unhandled rejection if the user calls updatePriority after close.
+	 * become an unhandled rejection if the user calls update() after close.
 	 *
 	 * Peeks the signal at the top of every iteration so that updates which landed
-	 * before SubscribeOk arrived (or between iterations, before .next() registered
+	 * before the subscription opened (or between iterations, before .next() registered
 	 * its listener) aren't lost.
 	 */
-	async #runPriorityUpdates(
+	async #runSubscribeUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
 		track: track.Producer,
@@ -536,10 +506,10 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const current = track.prioritySignal.peek();
-			if (current === undefined || current === lastSent) {
+			const priority = track.subscriptionSignal.peek()?.priority;
+			if (priority === undefined || priority === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.prioritySignal.next(), stopped]);
+				const next = await Promise.race([track.subscriptionSignal.next(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -547,15 +517,15 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
 			const update = new SubscribeUpdate({
-				priority: current,
+				priority,
 				ordered: msg.ordered,
 				maxLatency: msg.maxLatency,
 				startGroup: msg.startGroup,
 				endGroup: msg.endGroup,
 			});
 			await update.encode(stream.writer, this.version);
-			lastSent = current;
-			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${current}`);
+			lastSent = priority;
+			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${priority}`);
 		}
 	}
 
@@ -597,7 +567,7 @@ export class Subscriber {
 
 			// A non-zero scale means every frame is prefixed with a zigzag-delta timestamp
 			// (the lite-05 FRAME format), which we decode into a Timestamp at that scale.
-			// Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock-stamp.
+			// Scale 0 (pre-lite-05) carries no timestamp, so we stamp arrival time.
 			let prevTs = 0n;
 
 			for (;;) {

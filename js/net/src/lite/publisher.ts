@@ -230,7 +230,7 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.track, msg.priority);
+		const track = broadcast.subscribe(msg.track, { priority: msg.priority });
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -278,7 +278,7 @@ export class Publisher {
 					console.debug(
 						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
 					);
-					track.updatePriority(result.priority);
+					track.update({ priority: result.priority });
 				}
 			}
 
@@ -455,7 +455,10 @@ export class Publisher {
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
-				if (body.byteLength > maxSize) continue;
+				if (body.byteLength > maxSize) {
+					console.debug(`dropping oversize datagram: sub=${sub} size=${body.byteLength} max=${maxSize}`);
+					continue;
+				}
 
 				await writer.ready;
 				await writer.write(body);

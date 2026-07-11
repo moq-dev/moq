@@ -249,7 +249,7 @@ export class Game {
 		const active = effect.get(this.broadcast.output.active);
 		if (!active) return;
 
-		const statusTrack = active.subscribe("status", 10);
+		const statusTrack = active.subscribe("status", { priority: 10 });
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.

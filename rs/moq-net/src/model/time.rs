@@ -11,7 +11,7 @@ pub struct TimeOverflow;
 
 /// Units per second used by a track for frame timestamps.
 ///
-/// Newtype around [`NonZero<u64>`] — zero is structurally impossible, so the
+/// Newtype around [`NonZero<u64>`]. Zero is structurally impossible, so the
 /// arithmetic on [`Timestamp`] can divide by `self.scale` without ever risking
 /// a divide by zero. Use the named constants ([`Self::SECOND`], [`Self::MILLI`],
 /// [`Self::MICRO`], [`Self::NANO`]) instead of writing raw integers at call sites;
@@ -257,19 +257,6 @@ impl Timestamp {
 	/// The value re-expressed in nanoseconds.
 	pub const fn as_nanos(self) -> u128 {
 		self.as_scale(Timescale::NANO)
-	}
-
-	/// Return the larger of two timestamps.
-	///
-	/// Panics if the scales differ. Use [`Self::convert`] first if you need to compare
-	/// across scales.
-	pub const fn max(self, other: Self) -> Self {
-		assert!(self.scale.0.get() == other.scale.0.get(), "mismatched timestamp scales");
-		if self.value.into_inner() > other.value.into_inner() {
-			self
-		} else {
-			other
-		}
 	}
 
 	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^62 - 1` or
@@ -617,11 +604,11 @@ mod tests {
 	}
 
 	#[test]
-	#[should_panic(expected = "mismatched timestamp scales")]
-	fn test_max_mismatched_scale_panics() {
+	fn test_max_cross_scale() {
+		// `Ord::max` compares across scales (no panic).
 		let a = Timestamp::from_millis(1).unwrap();
 		let b = Timestamp::from_secs(1).unwrap();
-		let _ = a.max(b);
+		assert_eq!(a.max(b), b);
 	}
 
 	#[test]

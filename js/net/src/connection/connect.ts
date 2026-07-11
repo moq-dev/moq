@@ -11,50 +11,61 @@ const DEFAULT_WEBSOCKET_DELAY_MS = 500;
 
 /** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
 export interface WebSocketOptions {
-	// If true (default), enable the WebSocket fallback.
+	/** Enable the WebSocket fallback. Defaults to `true`. */
 	enabled?: boolean;
 
-	// Optional: Use a different URL than WebTransport.
-	// By default, `https` => `wss` and `http` => `ws`.
+	/** Use a different URL than WebTransport. By default, `https` maps to `wss` and `http` to `ws`. */
 	url?: URL;
 
-	// The delay in milliseconds before attempting the WebSocket fallback. (default: 500)
-	// If WebSocket won the previous race for a given URL, this will be 0.
+	/**
+	 * The delay in milliseconds before attempting the WebSocket fallback (default: 500).
+	 * If WebSocket won the previous race for a given URL, this is 0.
+	 */
 	delay?: DOMHighResTimeStamp;
 }
 
-// One entry of `serverCertificateHashes`, used to pin a self-signed server.
-// Unlike the DOM type, `value` also accepts a hex string (the format moq
-// servers report via their certificate fingerprints), decoded automatically.
-/** A server certificate hash used to pin a self-signed server. `value` accepts raw bytes or a hex string. */
+/**
+ * A server certificate hash used to pin a self-signed server, one entry of
+ * `serverCertificateHashes`. Unlike the DOM type, `value` also accepts a hex string (the
+ * format moq servers report via their certificate fingerprints), decoded automatically.
+ */
 export interface CertificateHash {
+	/** The hash algorithm. Defaults to `sha-256` (the only supported value). */
 	algorithm?: "sha-256";
+	/** The certificate hash: raw bytes or a hex string. */
 	value: BufferSource | string;
 }
 
-// WebTransport options, extended with friendlier certificate pinning.
 /** WebTransport options extended with friendlier certificate pinning (hex hashes or a raw certificate). */
 export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes"> {
-	// Pin the server to one or more certificate hashes. Each `value` may be raw
-	// bytes or a hex string; the algorithm defaults to `sha-256`.
+	/**
+	 * Pin the server to one or more certificate hashes. Each `value` may be raw
+	 * bytes or a hex string; the algorithm defaults to `sha-256`.
+	 */
 	serverCertificateHashes?: CertificateHash[];
 
-	// Pin the server by supplying its certificate directly; the SHA-256 hash is
-	// computed for you. Accepts a PEM string or raw DER bytes. Use this when you
-	// have the certificate but not its precomputed fingerprint.
+	/**
+	 * Pin the server by supplying its certificate directly; the SHA-256 hash is
+	 * computed for you. Accepts a PEM string or raw DER bytes. Use this when you
+	 * have the certificate but not its precomputed fingerprint.
+	 */
 	serverCertificate?: string | BufferSource;
 }
 
 /** Options for {@link connect}. */
 export interface ConnectProps {
-	// WebTransport options.
+	/** WebTransport options. */
 	webtransport?: WebTransportProps;
 
-	// WebSocket (fallback) options.
+	/** WebSocket (fallback) options. */
 	websocket?: WebSocketOptions;
 
-	// Use a pre-existing WebTransport session instead of connecting.
-	// When provided, skips WebTransport/WebSocket race and uses this directly.
+	/**
+	 * Use a pre-existing WebTransport session instead of connecting; skips the
+	 * WebTransport/WebSocket race. The publisher acquires the session's datagram
+	 * writer lock (`datagrams.writable.getWriter()`) for the session's lifetime,
+	 * so the caller must not hold it.
+	 */
 	transport?: WebTransport;
 }
 

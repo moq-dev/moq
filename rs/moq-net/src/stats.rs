@@ -156,23 +156,25 @@ use crate::{AsPath, Path, PathOwned};
 /// broadcast bumps `broadcasts`, the last to close bumps `broadcasts_closed`),
 /// so summed across sessions `broadcasts - broadcasts_closed` is the count of
 /// distinct sessions currently subscribed.
+// Kept crate-private: the load/store orderings are load-bearing (see the
+// module-level "Snapshot atomicity" note), so external code only ever sees
+// the derived snapshot types.
 #[derive(Default, Debug)]
-#[non_exhaustive]
-pub struct Counters {
-	pub announced: AtomicU64,
-	pub announced_closed: AtomicU64,
-	/// Cumulative broadcast-name length summed over each announce and unannounce
-	/// of this broadcast. Counts the name, not the encoded message size, so it
-	/// doesn't penalize the broadcast for hop/framing overhead. Kept separate
-	/// from `bytes`, which is media payload.
-	pub announced_bytes: AtomicU64,
-	pub subscriptions: AtomicU64,
-	pub subscriptions_closed: AtomicU64,
-	pub broadcasts: AtomicU64,
-	pub broadcasts_closed: AtomicU64,
-	pub bytes: AtomicU64,
-	pub frames: AtomicU64,
-	pub groups: AtomicU64,
+pub(crate) struct Counters {
+	announced: AtomicU64,
+	announced_closed: AtomicU64,
+	// Cumulative broadcast-name length summed over each announce and unannounce
+	// of this broadcast. Counts the name, not the encoded message size, so it
+	// doesn't penalize the broadcast for hop/framing overhead. Kept separate
+	// from `bytes`, which is media payload.
+	announced_bytes: AtomicU64,
+	subscriptions: AtomicU64,
+	subscriptions_closed: AtomicU64,
+	broadcasts: AtomicU64,
+	broadcasts_closed: AtomicU64,
+	bytes: AtomicU64,
+	frames: AtomicU64,
+	groups: AtomicU64,
 }
 
 impl Counters {
@@ -246,7 +248,7 @@ struct RawCounts {
 
 /// Traffic-class label that selects which counter set a session's bumps record
 /// in, so a single [`Stats`] can split customer-facing, cluster-peer, regional,
-/// etc. traffic. Each tracked broadcast keeps per-tier [`Counters`] on both its
+/// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
 /// The default tier ([`Tier::default`]) is unprefixed: its tracks are
@@ -1556,7 +1558,7 @@ mod tests {
 		);
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, _broadcast) = consumer.next().await.expect("expected announce");
+		let crate::announce::Update { path, .. } = consumer.next().await.expect("expected announce");
 		path.as_str().to_string()
 	}
 
@@ -1655,7 +1657,7 @@ mod tests {
 		let _t2 = bs2.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, event) = consumer.next().await.expect("expected announce");
+		let crate::announce::Update { path, event, .. } = consumer.next().await.expect("expected announce");
 		assert!(event.broadcast().is_some());
 		assert_eq!(path.as_str(), ".stats/node/sjc/1");
 	}
@@ -1670,7 +1672,7 @@ mod tests {
 		let _t = bs.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, event) = consumer.next().await.expect("expected announce");
+		let crate::announce::Update { path, event, .. } = consumer.next().await.expect("expected announce");
 		assert!(event.broadcast().is_some());
 		assert_eq!(path.as_str(), ".stats/node");
 	}
@@ -1755,7 +1757,7 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, event) = consumer.next().await.expect("expected announce");
+		let crate::announce::Update { event, .. } = consumer.next().await.expect("expected announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.track("publisher.json")
@@ -1801,7 +1803,7 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, event) = consumer.next().await.expect("announce");
+		let crate::announce::Update { event, .. } = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.track("publisher.json")
@@ -1826,7 +1828,7 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, event) = consumer.next().await.expect("announce");
+		let crate::announce::Update { event, .. } = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.track("publisher.json")
@@ -1862,7 +1864,7 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, event) = consumer.next().await.expect("announce");
+		let crate::announce::Update { event, .. } = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.track("publisher.json")
@@ -1978,7 +1980,7 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, event) = consumer.next().await.expect("announce");
+		let crate::announce::Update { event, .. } = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 
 		let track = broadcast
@@ -2042,7 +2044,7 @@ mod tests {
 
 		drive_ticks(2).await;
 
-		let (_path, event) = consumer.next().await.expect("announce");
+		let crate::announce::Update { event, .. } = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 
 		// Default-tier publisher slot SHOULD include foo/bar.
@@ -2131,12 +2133,12 @@ mod tests {
 	}
 
 	async fn read_frame(mut track: track::Subscriber) -> BTreeMap<String, Snapshot> {
-		let bytes = track.read_frame().await.expect("ok").expect("frame");
-		serde_json::from_slice(&bytes).expect("json parse")
+		let frame = track.read_frame().await.expect("ok").expect("frame");
+		serde_json::from_slice(&frame.payload).expect("json parse")
 	}
 
 	async fn read_session_frame(mut track: track::Subscriber) -> BTreeMap<String, SessionSnapshot> {
-		let bytes = track.read_frame().await.expect("ok").expect("frame");
-		serde_json::from_slice(&bytes).expect("json parse")
+		let frame = track.read_frame().await.expect("ok").expect("frame");
+		serde_json::from_slice(&frame.payload).expect("json parse")
 	}
 }

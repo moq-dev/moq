@@ -560,7 +560,7 @@ mod tests {
 			.expect("catalog read timed out")
 			.expect("catalog read")
 			.expect("a catalog frame");
-		assert!(!frame.is_empty(), "pulled broadcast should carry a catalog");
+		assert!(!frame.payload.is_empty(), "pulled broadcast should carry a catalog");
 
 		pull.abort();
 		server_task.abort();

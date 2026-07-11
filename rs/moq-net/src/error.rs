@@ -140,6 +140,7 @@ impl Error {
 			Self::Closed => 25,
 			Self::CacheFull => 26,
 			Self::FrameTooLarge => 27,
+			// 28 is reserved (was per-frame decompression, removed in draft-05).
 			Self::TimestampMismatch => 29,
 			Self::Unroutable => 30,
 			Self::Evicted => 31,

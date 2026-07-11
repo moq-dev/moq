@@ -521,6 +521,11 @@ export class Subscriber {
  * group fetch, so `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
+	// biome-ignore lint/complexity/noUselessConstructor: widens the protected base constructor to public
+	constructor(state?: never) {
+		super(state);
+	}
+
 	// Preserve the subclass when the consume cache shares this broadcast across callers.
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.shareState());

@@ -256,7 +256,7 @@ mod tests {
 		};
 		let mut fetched = track.fetch_group(0, None).await.unwrap();
 		let payload = fetched.read_frame().await.unwrap().unwrap();
-		let frame = hang::container::Frame::decode(payload).unwrap();
+		let frame = hang::container::Frame::decode(payload.payload).unwrap();
 		assert!(
 			frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 			"hardware rung output is not Annex-B"
@@ -319,7 +319,7 @@ mod tests {
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		assert!(group.sequence <= 1, "unexpected sequence {}", group.sequence);
 		let payload = group.read_frame().await.unwrap().unwrap();
-		let frame = hang::container::Frame::decode(payload).unwrap();
+		let frame = hang::container::Frame::decode(payload.payload).unwrap();
 		assert!(
 			frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 			"rung output is not Annex-B"
@@ -333,7 +333,7 @@ mod tests {
 			.await
 			.unwrap();
 		let payload = fetched.read_frame().await.unwrap().unwrap();
-		let frame = hang::container::Frame::decode(payload).unwrap();
+		let frame = hang::container::Frame::decode(payload.payload).unwrap();
 		assert!(!frame.payload.is_empty());
 		// The fetched group is complete: the source group had 5 frames, and a
 		// finished transcode carries them all through.

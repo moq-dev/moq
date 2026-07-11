@@ -1,3 +1,10 @@
+/**
+ * Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions,
+ * plus {@link Timescale} and {@link Timestamp} for presentation timing.
+ *
+ * @module
+ */
+
 /** A duration in nanoseconds, branded so it can't be mixed with other units. */
 export type Nano = number & { readonly _brand: "nano" };
 
@@ -111,7 +118,7 @@ export class Timestamp {
 		this.scale = scale;
 	}
 
-	/** Wall-clock now, in milliseconds (`performance.now()`). */
+	/** Monotonic now (`performance.now()`, milliseconds since page load), not wall-clock time. */
 	static now(): Timestamp {
 		return new Timestamp(performance.now(), Timescale.MILLI);
 	}

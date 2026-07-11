@@ -432,17 +432,18 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<OriginAnnounce> {
 		let path = self.pending.keys().next()?.clone();
-		Some(match self.pending.remove(&path).unwrap() {
-			PendingUpdate::Announce(broadcast) => (path, Announced::Active(broadcast)),
-			PendingUpdate::Unannounce => (path, Announced::Ended),
+		let event = match self.pending.remove(&path).unwrap() {
+			PendingUpdate::Announce(broadcast) => Announced::Active(broadcast),
+			PendingUpdate::Unannounce => Announced::Ended,
 			PendingUpdate::UnannounceAnnounce(broadcast) => {
 				// Deliver the unannounce now; leave the trailing announce pending so
 				// the next take returns it for the same path.
 				self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
-				(path, Announced::Ended)
+				Announced::Ended
 			}
-			PendingUpdate::Restart(broadcast) => (path, Announced::Restart(broadcast)),
-		})
+			PendingUpdate::Restart(broadcast) => Announced::Restart(broadcast),
+		};
+		Some(OriginAnnounce { path, event })
 	}
 }
 
@@ -779,10 +780,18 @@ impl Default for OriginNodes {
 }
 
 /// A path and what happened to the broadcast there, delivered by [`AnnounceConsumer`].
-pub type OriginAnnounce = (PathOwned, Announced);
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct OriginAnnounce {
+	/// The path of the broadcast, relative to the consuming cursor's root.
+	pub path: PathOwned,
+	/// What happened to the broadcast at that path.
+	pub event: Announced,
+}
 
 /// What happened to a broadcast at a path.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum Announced {
 	/// A broadcast became available.
 	Active(broadcast::Consumer),
@@ -1098,7 +1107,7 @@ struct OriginDynamicState {
 	// picks the request up via [`Dynamic::requested_broadcast`].
 	requests: HashMap<PathOwned, kio::Producer<PendingBroadcast>>,
 
-	// Requested paths in FIFO order for the handler to drain.
+	// Requesting paths in FIFO order for the handler to drain.
 	request_order: VecDeque<PathOwned>,
 
 	// Broadcasts a handler has already served, kept weakly so a repeat request for the
@@ -1323,7 +1332,7 @@ impl Drop for Request {
 /// immediately when the broadcast was already announced, or once an [`Dynamic`]
 /// handler serves the request. Resolves to an error if the request is rejected or every
 /// handler drops before serving it.
-pub struct Requested {
+pub struct Requesting {
 	inner: RequestState,
 }
 
@@ -1337,7 +1346,7 @@ enum RequestState {
 	Pending(kio::Consumer<PendingBroadcast>),
 }
 
-impl Requested {
+impl Requesting {
 	fn ready(broadcast: broadcast::Consumer) -> Self {
 		Self {
 			inner: RequestState::Ready(broadcast),
@@ -1375,7 +1384,7 @@ impl Requested {
 	}
 }
 
-impl kio::Future for Requested {
+impl kio::Future for Requesting {
 	type Output = Result<broadcast::Consumer, Error>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1383,8 +1392,6 @@ impl kio::Future for Requested {
 	}
 }
 
-/// Cheap read handle over an origin's broadcast tree.
-///
 /// Derive a read view from a handle.
 ///
 /// Lets APIs accept either a producer or a consumer (e.g.
@@ -1393,6 +1400,7 @@ impl kio::Future for Requested {
 /// pass by value (`foo(x)`) to hand off ownership, or by reference (`foo(&x)`)
 /// to keep it, without spelling out `.consume()`.
 pub trait Consume<T> {
+	/// Derive a read view (a consumer) from this handle.
 	fn consume(&self) -> T;
 }
 
@@ -1441,6 +1449,8 @@ impl Consume<track::Consumer> for track::Consumer {
 	}
 }
 
+/// Cheap read handle over an origin's broadcast tree.
+///
 /// Clones share the underlying tree state without allocating any per-cursor
 /// resources. To actually receive announce / unannounce events, call
 /// [`Self::announced`] to obtain an [`AnnounceConsumer`].
@@ -1543,7 +1553,10 @@ impl Consumer {
 
 		let mut announced = consumer.announced();
 		loop {
-			let (announced_path, event) = announced.next().await?;
+			let OriginAnnounce {
+				path: announced_path,
+				event,
+			} = announced.next().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced_path.as_path() == path {
 				if let Some(broadcast) = event.broadcast() {
@@ -1587,12 +1600,12 @@ impl Consumer {
 	/// registered while a handler is live but then loses every handler before being served also
 	/// resolves to [`Error::Unroutable`]. Unlike an announced broadcast, a dynamically served one
 	/// is never visible to [`Self::announced`].
-	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requested> {
+	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
 		// Prefer a live announcement when one is present; the dynamic queue is only a fallback.
 		if let Some(broadcast) = self.get_broadcast(&path) {
-			return kio::Pending::new(Requested::ready(broadcast));
+			return kio::Pending::new(Requesting::ready(broadcast));
 		}
 
 		// Key requests by absolute path so a scoped/rooted consumer and the handler
@@ -1600,7 +1613,7 @@ impl Consumer {
 		let absolute = self.root.join(&path).to_owned();
 
 		let Ok(mut state) = self.dynamic.write() else {
-			return kio::Pending::new(Requested::failed(Error::Dropped));
+			return kio::Pending::new(Requesting::failed(Error::Dropped));
 		};
 
 		// Reuse a still-live broadcast a handler already served for this path, so repeat
@@ -1608,7 +1621,7 @@ impl Consumer {
 		// re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
 			if !weak.is_closed() {
-				return kio::Pending::new(Requested::ready(weak.consume()));
+				return kio::Pending::new(Requesting::ready(weak.consume()));
 			}
 			state.served.remove(&absolute);
 		}
@@ -1618,7 +1631,7 @@ impl Consumer {
 			producer.consume()
 		} else {
 			if state.dynamic == 0 {
-				return kio::Pending::new(Requested::failed(Error::Unroutable));
+				return kio::Pending::new(Requesting::failed(Error::Unroutable));
 			}
 
 			let producer = kio::Producer::<PendingBroadcast>::default();
@@ -1628,7 +1641,7 @@ impl Consumer {
 			consumer
 		};
 
-		kio::Pending::new(Requested::pending(consumer))
+		kio::Pending::new(Requesting::pending(consumer))
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -1792,7 +1805,7 @@ use futures::FutureExt;
 impl AnnounceConsumer {
 	pub fn assert_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let (path, event) = self.next().now_or_never().expect("next blocked").expect("no next");
+		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
 		assert!(matches!(event, Announced::Active(_)), "should be an active announce");
 		assert_eq!(path, expected, "wrong path");
 		assert!(
@@ -1803,7 +1816,7 @@ impl AnnounceConsumer {
 
 	pub fn assert_next_restart(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let (path, event) = self.next().now_or_never().expect("next blocked").expect("no next");
+		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
 		assert!(matches!(event, Announced::Restart(_)), "should be a restart");
 		assert_eq!(path, expected, "wrong path");
 		assert!(
@@ -1814,7 +1827,7 @@ impl AnnounceConsumer {
 
 	pub fn assert_try_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let (path, event) = self.try_next().expect("no next");
+		let OriginAnnounce { path, event, .. } = self.try_next().expect("no next");
 		assert_eq!(path, expected, "wrong path");
 		assert!(
 			event.broadcast().unwrap().is_clone(broadcast),
@@ -1824,14 +1837,14 @@ impl AnnounceConsumer {
 
 	pub fn assert_next_none(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		let (path, event) = self.next().now_or_never().expect("next blocked").expect("no next");
+		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
 		assert_eq!(path, expected, "wrong path");
 		assert!(event.broadcast().is_none(), "should be unannounced");
 	}
 
 	pub fn assert_next_wait(&mut self) {
 		if let Some(res) = self.next().now_or_never() {
-			panic!("next should block: got {:?}", res.map(|(path, _)| path));
+			panic!("next should block: got {:?}", res.map(|a| a.path));
 		}
 	}
 
@@ -2555,7 +2568,7 @@ mod tests {
 		let a2 = consumer.try_next().expect("expected second announcement");
 		consumer.assert_next_wait();
 
-		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|a| a.path.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["foobar/test", "worm-node/test"]);
 	}
@@ -2785,7 +2798,7 @@ mod tests {
 		let a2 = consumer.try_next().expect("expected second announcement");
 		consumer.assert_next_wait();
 
-		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|a| a.path.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["foobar", "worm-node/data"]);
 
@@ -3105,7 +3118,7 @@ mod tests {
 			collected.len()
 		);
 		assert!(
-			collected.iter().all(|(path, _)| path == &Path::new("test")),
+			collected.iter().all(|a| a.path == Path::new("test")),
 			"unexpected path in pending updates",
 		);
 	}
@@ -3139,7 +3152,7 @@ mod tests {
 		let a2 = announced.try_next().expect("second announcement");
 		announced.assert_next_wait();
 
-		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|a| a.path.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["test1", "test2"]);
 
@@ -3149,7 +3162,7 @@ mod tests {
 		let b2 = fresh.try_next().expect("backlog: second");
 		fresh.assert_next_wait();
 
-		let mut paths: Vec<_> = [&b1, &b2].iter().map(|(p, _)| p.to_string()).collect();
+		let mut paths: Vec<_> = [&b1, &b2].iter().map(|a| a.path.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["test1", "test2"]);
 	}

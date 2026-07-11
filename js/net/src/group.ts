@@ -1,3 +1,8 @@
+/**
+ * Group role handles: an ordered stream of frames within a track, delivered over one QUIC stream.
+ *
+ * @module
+ */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import { Timestamp } from "./time.ts";
 
@@ -139,17 +144,17 @@ export class Producer {
 		}
 	}
 
-	/** Write a string as a single UTF-8 encoded frame, stamped with wall-clock now. */
+	/** Write a string as a single UTF-8 encoded frame, stamped with {@link Timestamp.now}. */
 	writeString(str: string) {
 		this.writeFrame({ data: new TextEncoder().encode(str), timestamp: Timestamp.now() });
 	}
 
-	/** Write a value as a single JSON-encoded frame, stamped with wall-clock now. */
+	/** Write a value as a single JSON-encoded frame, stamped with {@link Timestamp.now}. */
 	writeJson(json: unknown) {
 		this.writeString(JSON.stringify(json));
 	}
 
-	/** Write a boolean as a single one-byte frame, stamped with wall-clock now. */
+	/** Write a boolean as a single one-byte frame, stamped with {@link Timestamp.now}. */
 	writeBool(bool: boolean) {
 		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
@@ -178,6 +183,9 @@ let makeConsumer: (state: GroupState) => Consumer;
 /**
  * The read side of an ordered stream of frames within a track.
  *
+ * Created internally: obtain one from {@link Producer.consume} or a track subscriber's
+ * group reads.
+ *
  * @public
  */
 export class Consumer {
@@ -186,10 +194,9 @@ export class Consumer {
 
 	#state: GroupState;
 
-	constructor(sequence: number);
-	constructor(sequenceOrState: number | GroupState) {
-		this.#state = typeof sequenceOrState === "number" ? new GroupState(sequenceOrState) : sequenceOrState;
-		this.sequence = this.#state.sequence;
+	private constructor(state: GroupState) {
+		this.#state = state;
+		this.sequence = state.sequence;
 	}
 
 	/**
@@ -201,7 +208,7 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (state) => new Consumer(state as never);
+		makeConsumer = (state) => new Consumer(state);
 	}
 
 	#readBufferedFrame(): { sequence: number; frame: Frame } | undefined {
@@ -229,20 +236,22 @@ export class Consumer {
 	}
 
 	/**
-	 * Reads the next already-buffered frame's payload without blocking.
+	 * Reads the next already-buffered frame without blocking.
+	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 *
 	 * Returns `undefined` when nothing is buffered right now. That is not by itself
 	 * end-of-group: check {@link done} to tell "no frame buffered yet" from "finished".
 	 */
-	tryReadFrame(): Uint8Array | undefined {
-		return this.tryReadFrameSequence()?.data;
+	tryReadFrame(): Frame | undefined {
+		const read = this.#readBufferedFrame();
+		return read?.frame;
 	}
 
 	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
-	tryReadFrameSequence(): { sequence: number; data: Uint8Array } | undefined {
+	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		return { sequence: read.sequence, data: read.frame.data };
+		return { sequence: read.sequence, data: read.frame.data, timestamp: read.frame.timestamp };
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
@@ -254,7 +263,10 @@ export class Consumer {
 		}
 	}
 
-	/** Reads the next frame from the group. */
+	/**
+	 * Reads the next frame from the group.
+	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 */
 	async readFrame(): Promise<Frame | undefined> {
 		for (;;) {
 			if (this.#state.offset > 0) throw new CacheFull();
@@ -270,13 +282,16 @@ export class Consumer {
 		}
 	}
 
-	/** Reads the next frame's payload along with its sequence number within the group. */
-	async readFrameSequence(): Promise<{ sequence: number; data: Uint8Array } | undefined> {
+	/**
+	 * Reads the next frame along with its sequence number within the group.
+	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 */
+	async readFrameSequence(): Promise<({ sequence: number } & Frame) | undefined> {
 		for (;;) {
 			if (this.#state.offset > 0) throw new CacheFull();
 
 			const read = this.#readBufferedFrame();
-			if (read) return { sequence: read.sequence, data: read.frame.data };
+			if (read) return { sequence: read.sequence, data: read.frame.data, timestamp: read.frame.timestamp };
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;

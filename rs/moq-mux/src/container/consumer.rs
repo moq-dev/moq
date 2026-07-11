@@ -706,7 +706,7 @@ mod tests {
 		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 			use bytes::Buf;
 
-			let Some(mut data) = ready!(group.poll_read_frame(waiter)?) else {
+			let Some(mut data) = ready!(group.poll_read_frame(waiter)?).map(|f| f.payload) else {
 				return Poll::Ready(Ok(None));
 			};
 
@@ -1418,7 +1418,7 @@ mod tests {
 		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 			use bytes::Buf;
 
-			let Some(mut data) = ready!(group.poll_read_frame(waiter)?) else {
+			let Some(mut data) = ready!(group.poll_read_frame(waiter)?).map(|f| f.payload) else {
 				return Poll::Ready(Ok(None));
 			};
 			if data.as_ref() == b"FAIL" {

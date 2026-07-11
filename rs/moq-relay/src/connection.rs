@@ -94,7 +94,7 @@ impl Connection {
 		if let Some(publish) = publish {
 			request = request.with_subscriber(publish);
 		}
-		let mut session = request.ok().await?;
+		let session = request.ok().await?;
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
 

@@ -510,7 +510,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
-		let subscription = subscription.map(moq_net::Subscription::from);
+		let subscription = subscription.map(moq_net::track::Subscription::from);
 		Ok(Arc::new(MoqTrackConsumer::new(track.subscribe(subscription))))
 	}
 

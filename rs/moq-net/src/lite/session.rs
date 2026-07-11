@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, Origin, StatsHandle,
+	Error, Origin, StatsHandle, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 };
@@ -64,8 +64,8 @@ pub fn start<S: web_transport_trait::Session>(
 	// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	peer_setup: Option<Setup>,
-) -> Result<(Option<BandwidthConsumer>, Connecting), Error> {
-	let recv_bw = BandwidthProducer::new();
+) -> Result<(Option<bandwidth::Consumer>, Connecting), Error> {
+	let recv_bw = bandwidth::Producer::new();
 
 	let recv_bw_consumer = match version {
 		Version::Lite01 | Version::Lite02 => None,

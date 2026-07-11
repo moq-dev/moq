@@ -173,7 +173,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── data path ───────────────────────────────────────────────────
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+	let moq_net::announce::Update { path, event: bc, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -192,7 +192,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	// Hold the producers until after data is read; dropping them earlier
 	// would close the publishing side of the broadcast.
@@ -269,7 +269,7 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── data path ───────────────────────────────────────────────────
 	// The root auth scope is the empty path, so the broadcast announces at its
 	// own name with no prefix.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+	let moq_net::announce::Update { path, event: bc, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -287,7 +287,7 @@ async fn relay_websocket_root_path_upgrades() {
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(track);
 	drop(broadcast);
@@ -342,7 +342,7 @@ async fn two_publish_only_clients_coexist() {
 
 	let mut seen = std::collections::HashSet::new();
 	while seen.len() < 2 {
-		let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+		let moq_net::announce::Update { path, event: bc, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
@@ -474,7 +474,7 @@ async fn internal_tcp_round_trip() {
 	// ── data path ───────────────────────────────────────────────────
 	// The internal listener grants the empty root, so the broadcast announces
 	// at its own name with no path prefix.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+	let moq_net::announce::Update { path, event: bc, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -492,7 +492,7 @@ async fn internal_tcp_round_trip() {
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(track);
 	drop(broadcast);
@@ -573,7 +573,11 @@ async fn internal_unix_round_trip() {
 		.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
-	let (announced_path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+	let moq_net::announce::Update {
+		path: announced_path,
+		event: bc,
+		..
+	} = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -591,7 +595,7 @@ async fn internal_unix_round_trip() {
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(track);
 	drop(broadcast);
@@ -644,7 +648,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
-	let (path, _) = tokio::time::timeout(TIMEOUT, announcements.next())
+	let moq_net::announce::Update { path, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");

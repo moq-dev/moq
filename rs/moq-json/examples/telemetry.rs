@@ -94,7 +94,7 @@ fn wire_bytes(config: ProducerConfig, ticks: u64) -> usize {
 	let mut track = consumer;
 	while let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) {
 		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			total += frame.len();
+			total += frame.payload.len();
 		}
 	}
 	total

@@ -48,11 +48,11 @@ impl Container for Wire {
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
-		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
+		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
 
-		let loc = moq_loc::decode(data)?;
+		let loc = moq_loc::decode(frame.payload)?;
 		// `loc.timescale == Some(0)` is a malformed wire (caught by moq_loc::decode itself),
 		// so any Some(_) we see here is non-zero. Falling back to the catalog default
 		// keeps this code path infallible.

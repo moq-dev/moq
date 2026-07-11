@@ -1,3 +1,8 @@
+/**
+ * Connection helpers: connect to or accept a MoQ session and reconnect on failure.
+ *
+ * @module
+ */
 export * from "./accept.ts";
 export * from "./connect.ts";
 export * from "./established.ts";

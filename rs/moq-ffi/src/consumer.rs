@@ -6,17 +6,18 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
 
-/// Subscriber-side delivery preferences, mirroring [`moq_net::Subscription`].
+/// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
-/// (priority 0, ordered, no staleness tolerance, full group range).
+/// (priority 0, unordered, no staleness tolerance, full group range).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	#[uniffi(default = 0)]
 	pub priority: u8,
-	/// Deliver groups in sequence order.
-	#[uniffi(default = true)]
+	/// Deliver groups in sequence order. Defaults to `false` (a DVR-style feature);
+	/// the aggregate is ordered only when every subscriber asks for it.
+	#[uniffi(default = false)]
 	pub ordered: bool,
 	/// How long to wait for an older group once a newer one has arrived before
 	/// skipping it, in milliseconds. `0` skips immediately.
@@ -30,9 +31,9 @@ pub struct MoqSubscription {
 	pub group_end: Option<u64>,
 }
 
-impl From<MoqSubscription> for moq_net::Subscription {
+impl From<MoqSubscription> for moq_net::track::Subscription {
 	fn from(s: MoqSubscription) -> Self {
-		moq_net::Subscription::default()
+		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_ordered(s.ordered)
 			.with_stale(std::time::Duration::from_millis(s.stale_ms))
@@ -139,7 +140,7 @@ impl MoqBroadcastConsumer {
 		name: String,
 		subscription: Option<MoqSubscription>,
 	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		let subscription = subscription.map(moq_net::Subscription::from);
+		let subscription = subscription.map(moq_net::track::Subscription::from);
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
@@ -162,7 +163,7 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let subscription = subscription.map(moq_net::Subscription::from);
+		let subscription = subscription.map(moq_net::track::Subscription::from);
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
@@ -188,7 +189,7 @@ impl TrackInner {
 	}
 
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
-		Ok(self.track.read_frame().await?.map(|b| b.to_vec()))
+		Ok(self.track.read_frame().await?.map(|b| b.payload.to_vec()))
 	}
 }
 
@@ -258,7 +259,7 @@ struct GroupInner {
 
 impl GroupInner {
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
-		Ok(self.group.read_frame().await?.map(|b| b.to_vec()))
+		Ok(self.group.read_frame().await?.map(|b| b.payload.to_vec()))
 	}
 }
 

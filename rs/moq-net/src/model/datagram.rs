@@ -6,19 +6,24 @@
 //! produced via [`super::track::Producer::append_datagram`] / [`super::track::Producer::write_datagram`]
 //! and consumed via [`super::track::Subscriber::recv_datagram`].
 //!
+//! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose encoded
+//! body exceeds the transport's datagram size, and sessions that can't carry datagrams at all
+//! (IETF moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
+//! deliver them.
+//!
 //! Wire counterpart: [`crate::lite::Datagram`].
 
 use bytes::Bytes;
 
 use crate::Timestamp;
 
-/// Maximum datagram payload size, in bytes.
+/// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
-/// A datagram body (sequence + timestamp + payload varints, plus this payload) must fit in a single
-/// QUIC datagram without IP fragmentation, so the payload is capped conservatively below the minimum
-/// path MTU. Producers reject a larger payload with [`crate::Error::WrongSize`]; there is no group
-/// fallback, so callers keep datagram payloads small (e.g. a single audio frame).
-pub const MAX_DATAGRAM_PAYLOAD: usize = 1200;
+/// This only bounds buffering; the real limit is per hop. Each session drops a datagram whose
+/// encoded body exceeds the transport's current datagram size (roughly the path MTU minus QUIC
+/// and MoQ header overhead), so callers should keep payloads well below the minimum path MTU
+/// of 1200 bytes (e.g. a single audio frame).
+pub(crate) const MAX_DATAGRAM_PAYLOAD: usize = u16::MAX as usize;
 
 /// A single unreliable payload on a track: a sequence number, a presentation timestamp, and the bytes.
 ///

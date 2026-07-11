@@ -1,7 +1,15 @@
+/**
+ * Track role handles: a live stream of groups (and best-effort datagrams) within a broadcast.
+ *
+ * @module
+ */
 import { Signal } from "@moq/signals";
-import { type Datagram, MAX_DATAGRAM_PAYLOAD } from "./datagram.ts";
+import type { Datagram } from "./datagram.ts";
 import { CacheFull, type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import { hooks } from "./internal.ts";
 import { Timescale, type Timestamp } from "./time.ts";
+
+export type { Datagram } from "./datagram.ts";
 
 /** Default {@link Info.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
@@ -17,6 +25,13 @@ const MAX_DATAGRAM_AGE_MS = 50;
 
 /** A datagram buffered with its arrival time, so the send buffer can evict by age. */
 type BufferedDatagram = { datagram: Datagram; time: number };
+
+/**
+ * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
+ * per-hop (the negotiated transport datagram size minus a small header) and oversize
+ * datagrams are dropped there; a payload above this cap could never fit anywhere.
+ */
+const MAX_DATAGRAM_BYTES = 65535;
 
 /**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
@@ -49,12 +64,24 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		timescale: info.timescale ?? Timescale.MILLI,
 		cache: info.cache ?? DEFAULT_CACHE_MS,
 		priority: info.priority ?? 0,
-		ordered: info.ordered ?? true,
+		ordered: info.ordered ?? false,
 	};
 }
 
 /**
+ * Per-subscription options, requested when a subscription opens and adjustable later via
+ * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
+ */
+export interface Subscription {
+	/** Delivery priority relative to this session's other subscriptions. Defaults to `0`. */
+	priority?: number;
+}
+
+/**
  * A request for a track the peer wants, yielded by `Broadcast.Producer.requested`.
+ *
+ * Created internally by the broadcast when a subscription (or info lookup) needs a track
+ * served; answer it with {@link accept} or {@link reject}.
  *
  * @public
  */
@@ -66,10 +93,14 @@ export class Request {
 
 	#producer: Producer;
 
-	constructor(name: string, producer: Producer, priority: number) {
+	private constructor(name: string, producer: Producer, priority: number) {
 		this.name = name;
 		this.#producer = producer;
 		this.priority = priority;
+	}
+
+	static {
+		hooks.makeRequest = (name, producer, priority) => new Request(name, producer, priority);
 	}
 
 	/** Accept the request, committing the track's immutable {@link Info}. */
@@ -98,7 +129,7 @@ export interface FetchGroupOptions {
  */
 export interface Broadcast {
 	/** Open a live subscription to the named track. */
-	subscribe(name: string, priority: number): Subscriber;
+	subscribe(name: string, options?: Subscription): Subscriber;
 	/** Resolve the named track's immutable info. */
 	resolveTrackInfo(name: string): Promise<Info>;
 	/** Fetch a single group of the named track by sequence. */
@@ -122,8 +153,8 @@ export class Consumer {
 	}
 
 	/** Open a live subscription to the track. */
-	subscribe(options?: { priority?: number }): Subscriber {
-		return this.#broadcast.subscribe(this.name, options?.priority ?? 0);
+	subscribe(options?: Subscription): Subscriber {
+		return this.#broadcast.subscribe(this.name, options);
 	}
 
 	/** Fetch the track's immutable publisher properties without subscribing. */
@@ -144,7 +175,7 @@ class TrackState {
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
 	closed = new Signal<boolean | Error>(false);
-	priority = new Signal<number | undefined>(undefined);
+	update = new Signal<Subscription | undefined>(undefined);
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
 }
@@ -239,9 +270,9 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	/** Reactive subscriber priority; the wire layer watches this to emit SUBSCRIBE_UPDATE. `undefined` until first set via {@link Subscriber.updatePriority}. */
-	get prioritySignal(): Signal<number | undefined> {
-		return this.#state.priority;
+	/** Reactive subscription update; the wire layer watches this to emit SUBSCRIBE_UPDATE. `undefined` until first set via {@link Subscriber.update} on any subscriber. */
+	get subscriptionSignal(): Signal<Subscription | undefined> {
+		return this.#state.update;
 	}
 
 	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
@@ -271,6 +302,12 @@ export class Producer {
 		if (!closed) {
 			this.#sinks.add(sink);
 
+			// Forward subscription updates from the sink's Subscriber to the producer's own
+			// state, which the wire layer (or the serving application) watches.
+			const forward = sink.update.subscribe((update) => {
+				if (update) this.#state.update.set(update, true);
+			});
+
 			// Drop the sink once its consumer goes away, closing its mirrors so source
 			// groups stop teeing into them, so a long-lived producer doesn't leak. This
 			// covers mirrors already handed out via recvGroup (no longer in sink.groups)
@@ -278,6 +315,7 @@ export class Producer {
 			const dispose = sink.closed.subscribe((c) => {
 				if (!c) return;
 				const abort = c instanceof Error ? c : undefined;
+				forward();
 				this.#sinks.delete(sink);
 				for (const entry of this.#cache) {
 					const mirror = entry.mirrors.get(sink);
@@ -368,7 +406,7 @@ export class Producer {
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
-		const now = Date.now();
+		const now = performance.now();
 		for (const sink of this.#sinks) {
 			sink.datagrams.mutate((list) => {
 				list.push({ datagram, time: now });
@@ -383,13 +421,16 @@ export class Producer {
 	 *
 	 * A datagram is delivered best-effort over a single QUIC datagram, parallel to the track's
 	 * groups but drawing from the same sequence namespace (interleaving with {@link appendGroup}
-	 * never reuses a number). The payload must not exceed {@link MAX_DATAGRAM_PAYLOAD}; there is no
-	 * group fallback. An origin publisher uses this; a relay preserving upstream numbering uses
-	 * {@link writeDatagram}.
+	 * never reuses a number). The payload must fit the negotiated transport datagram size minus
+	 * a small header; an oversize payload is dropped at each hop (there is no group fallback), so
+	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
+	 * over IETF moq-transport or stream-only transports (the WebSocket fallback). A payload over
+	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
+	 * relay preserving upstream numbering uses {@link writeDatagram}.
 	 */
 	appendDatagram(timestamp: Timestamp, payload: Uint8Array): number {
 		if (this.#state.closed.peek()) throw new Error("track is closed");
-		if (payload.byteLength > MAX_DATAGRAM_PAYLOAD) throw new Error("datagram payload too large");
+		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
 		const sequence = this.#next ?? 0;
 		this.#next = sequence + 1;
@@ -401,12 +442,12 @@ export class Producer {
 	 * Write a datagram with an explicit sequence number.
 	 *
 	 * Preserves the supplied sequence (advancing the shared counter if needed) so a relay can
-	 * forward a datagram without renumbering it. The payload must not exceed
-	 * {@link MAX_DATAGRAM_PAYLOAD}. Most origin publishers want {@link appendDatagram} instead.
+	 * forward a datagram without renumbering it. The size limits of {@link appendDatagram}
+	 * apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
 	writeDatagram(datagram: Datagram) {
 		if (this.#state.closed.peek()) throw new Error("track is closed");
-		if (datagram.payload.byteLength > MAX_DATAGRAM_PAYLOAD) throw new Error("datagram payload too large");
+		if (datagram.payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
 		if (datagram.sequence >= (this.#next ?? 0)) {
 			this.#next = datagram.sequence + 1;
@@ -425,7 +466,7 @@ export class Producer {
 		this.#sinks.clear();
 	}
 
-	/** Append a frame as its own single-frame group; a frame with no timestamp uses wall-clock now. */
+	/** Append a frame as its own single-frame group. */
 	writeFrame(frame: Frame) {
 		const group = this.appendGroup();
 		group.writeFrame(frame);
@@ -497,9 +538,9 @@ export class Subscriber {
 		return this.#state.closed;
 	}
 
-	/** Reactive subscriber priority; the wire layer watches this to emit SUBSCRIBE_UPDATE. `undefined` until first set via {@link updatePriority}. */
-	get prioritySignal(): Signal<number | undefined> {
-		return this.#state.priority;
+	/** The last {@link update} requested on this subscriber, or `undefined` if none yet. */
+	get subscriptionSignal(): Signal<Subscription | undefined> {
+		return this.#state.update;
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. */
@@ -546,7 +587,7 @@ export class Subscriber {
 
 			// Evict datagrams older than the send-buffer window (also enforced on write), so a
 			// reader that stalled skips stale datagrams instead of replaying them.
-			const cutoff = Date.now() - MAX_DATAGRAM_AGE_MS;
+			const cutoff = performance.now() - MAX_DATAGRAM_AGE_MS;
 			while (datagrams.length > 0 && datagrams[0].time < cutoff) datagrams.shift();
 
 			if (datagrams.length > 0) {
@@ -584,13 +625,20 @@ export class Subscriber {
 		}
 	}
 
-	/** Reads the next frame across all groups, discarding older groups. */
-	async readFrame(): Promise<Uint8Array | undefined> {
-		return (await this.readFrameSequence())?.data;
+	/**
+	 * Reads the next frame across all groups, discarding older groups.
+	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 */
+	async readFrame(): Promise<Frame | undefined> {
+		const next = await this.readFrameSequence();
+		return next ? { data: next.data, timestamp: next.timestamp } : undefined;
 	}
 
-	/** Reads the next frame along with its group and frame sequence numbers. */
-	async readFrameSequence(): Promise<{ group: number; frame: number; data: Uint8Array } | undefined> {
+	/**
+	 * Reads the next frame along with its group and frame sequence numbers.
+	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 */
+	async readFrameSequence(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {
 			const groups = this.#state.groups.peek();
 
@@ -603,7 +651,14 @@ export class Subscriber {
 					throw new CacheFull();
 				}
 				const next = groups[0].tryReadFrameSequence();
-				if (next) return { group: groups[0].sequence, frame: next.sequence, data: next.data };
+				if (next) {
+					return {
+						group: groups[0].sequence,
+						frame: next.sequence,
+						data: next.data,
+						timestamp: next.timestamp,
+					};
+				}
 				groups.shift()?.close();
 			}
 
@@ -623,7 +678,8 @@ export class Subscriber {
 				throw new CacheFull();
 			}
 			const next = group.tryReadFrameSequence();
-			if (next) return { group: group.sequence, frame: next.sequence, data: next.data };
+			if (next)
+				return { group: group.sequence, frame: next.sequence, data: next.data, timestamp: next.timestamp };
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -647,7 +703,7 @@ export class Subscriber {
 	async readString(): Promise<string | undefined> {
 		const next = await this.readFrame();
 		if (!next) return undefined;
-		return new TextDecoder().decode(next);
+		return new TextDecoder().decode(next.data);
 	}
 
 	/** Reads the next frame and parses it as JSON. */
@@ -661,14 +717,16 @@ export class Subscriber {
 	async readBool(): Promise<boolean | undefined> {
 		const next = await this.readFrame();
 		if (!next) return undefined;
-		if (next.byteLength !== 1 || !(next[0] === 0 || next[0] === 1)) throw new Error("invalid bool frame");
-		return next[0] === 1;
+		const data = next.data;
+		if (data.byteLength !== 1 || !(data[0] === 0 || data[0] === 1)) throw new Error("invalid bool frame");
+		return data[0] === 1;
 	}
 
 	/**
-	 * Update this subscription's priority, triggering a SUBSCRIBE_UPDATE to the publisher.
+	 * Update this subscription's options (e.g. priority), triggering a SUBSCRIBE_UPDATE to the
+	 * publisher. Mirrors the Rust `Subscriber::update`.
 	 */
-	updatePriority(priority: number) {
-		this.#state.priority.set(priority, true);
+	update(options: Subscription) {
+		this.#state.update.set(options, true);
 	}
 }

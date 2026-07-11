@@ -29,7 +29,7 @@ impl Announced {
 		loop {
 			match self.inner.next().await {
 				// Active and Restart both carry a broadcast; skip unannounce events.
-				Some((path, event)) => {
+				Some(moq_net::announce::Update { path, event, .. }) => {
 					let Some(broadcast) = event.broadcast() else {
 						continue;
 					};
@@ -49,7 +49,7 @@ impl Announced {
 		loop {
 			match self.inner.next().await {
 				// Active and Restart both carry a broadcast; skip unannounce events.
-				Some((_path, event)) => match event.broadcast() {
+				Some(moq_net::announce::Update { event, .. }) => match event.broadcast() {
 					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
 					None => continue,
 				},
