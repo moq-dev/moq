@@ -132,14 +132,19 @@ function createTile(name: string): WatchTile {
 	});
 
 	// Active state: only toggle audio + the active styling, so switching tiles
-	// keeps the video playing.
+	// keeps the video playing. This depends on `active` alone: reading the catalog here
+	// would re-assert `muted` on every catalog frame and clobber the player's mute button.
 	effects.run((effect) => {
 		const isActive = effect.get(active) === name;
 		el.classList.toggle("border-emerald-500", isActive);
 		el.classList.toggle("border-neutral-800", !isActive);
 		watch.muted = !isActive;
-		// Show the speaker badge on the active tile, but only when it actually has
-		// an audio track to play.
+	});
+
+	// Show the speaker badge on the active tile, but only when it actually has
+	// an audio track to play.
+	effects.run((effect) => {
+		const isActive = effect.get(active) === name;
 		const hasAudio = !!effect.get(watch.broadcast.output.catalog)?.audio;
 		audioBadge.hidden = !(isActive && hasAudio);
 	});
