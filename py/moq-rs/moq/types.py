@@ -37,6 +37,9 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
+    MoqDatagram as Datagram,
+)
+from moq_ffi import (
     MoqFrame as Frame,
 )
 from moq_ffi import (
@@ -63,6 +66,7 @@ __all__ = [
     "Catalog",
     "ConnectionStats",
     "Container",
+    "Datagram",
     "Dimensions",
     "Frame",
     "FetchGroupOptions",

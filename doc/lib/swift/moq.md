@@ -147,6 +147,21 @@ for try await request in dynamic {
 
 Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber.
 
+### Raw datagrams
+
+Raw tracks can send a single best-effort payload without opening a group stream:
+
+```swift
+let sequence = try track.appendDatagram(timestampUs: 42_000, payload: Data("meter update".utf8))
+let datagram = try await consumer.recvDatagram()
+
+for try await datagram in consumer.datagrams {
+    print(datagram.sequence, datagram.timestampUs)
+}
+```
+
+Datagrams are delivered as `Datagram(sequence, timestampUs, payload)`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
 ## Cancellation
 
 All async sequences cooperate with structured concurrency. Cancelling the surrounding `Task` propagates to the underlying `cancel()` on the consumer:

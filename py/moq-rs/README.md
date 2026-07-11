@@ -134,6 +134,9 @@ client = moq.Client(
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
   - `.finish()`
+- **`TrackProducer`**. Write raw bytes without codec parsing.
+  - `.write_frame(payload)` writes a one-frame group.
+  - `.append_datagram(timestamp_us, payload) -> sequence` sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Subscribing
 
@@ -144,6 +147,7 @@ client = moq.Client(
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
+- **`TrackConsumer`**. Async iterator of groups, plus `.recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
 
 All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
 
@@ -161,6 +165,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
+- **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
 - **`Dimensions`**. `.width: int`, `.height: int`.

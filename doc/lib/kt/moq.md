@@ -145,6 +145,21 @@ Moq.connect("https://relay.example.com").use { moq ->
 
 Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber.
 
+### Raw datagrams
+
+Raw tracks can send a single best-effort payload without opening a group stream:
+
+```kotlin
+val sequence = track.appendDatagram(timestampUs = 42_000u, payload = "meter update".encodeToByteArray())
+val datagram = consumer.recvDatagram()
+
+consumer.datagrams().collect { datagram ->
+    println("${datagram.sequence}: ${datagram.timestampUs}")
+}
+```
+
+Datagrams are delivered as `Datagram(sequence, timestampUs, payload)`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
 ## Cancellation
 
 The wrapper exposes consumers as Kotlin `Flow`s. Cancelling the collector's coroutine scope calls `cancel()` on the native side via the wrapper's `onCompletion` hook, releasing resources promptly:

@@ -41,6 +41,7 @@ typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
 
 // Data types.
 typealias Catalog = uniffi.moq.MoqCatalog
+typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 typealias Video = uniffi.moq.MoqVideo
 typealias Audio = uniffi.moq.MoqAudio

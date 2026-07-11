@@ -193,6 +193,12 @@ func (t *TrackConsumer) ReadFrame(ctx context.Context) ([]byte, error) {
 	return *res, nil
 }
 
+// RecvDatagram returns the next best-effort datagram in arrival order, or
+// (nil, nil) when the track ends.
+func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
+	return runCancellable(ctx, t.inner.Cancel, t.inner.RecvDatagram)
+}
+
 // Groups ranges over groups in sequence order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return streamSeq(ctx, t.NextGroup)
@@ -202,6 +208,11 @@ func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, er
 // out-of-sequence deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return streamSeq(ctx, t.RecvGroup)
+}
+
+// Datagrams ranges over best-effort datagrams in arrival order.
+func (t *TrackConsumer) Datagrams(ctx context.Context) iter.Seq2[*Datagram, error] {
+	return streamSeq(ctx, t.RecvDatagram)
 }
 
 // Cancel stops the stream.

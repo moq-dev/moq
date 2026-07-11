@@ -48,7 +48,7 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// Dynamic accepts subscriptions to tracks that are not published yet.
+// Dynamic accepts requests for tracks that are not published yet.
 func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 	inner, err := b.inner.Dynamic()
 	if err != nil {
@@ -119,15 +119,6 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// Dynamic accepts requests for tracks that are not published yet.
-func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
-	inner, err := b.inner.Dynamic()
-	if err != nil {
-		return nil, err
-	}
-	return &BroadcastDynamic{inner: inner}, nil
-}
-
 // SetCatalogSection sets (or replaces) an untyped application catalog section by
 // name. json is any JSON document as a string; it rides alongside video/audio and
 // reaches subscribers via Catalog.Sections. name must not be a reserved media
@@ -179,6 +170,15 @@ type TrackRequest struct {
 // Name is the requested track name.
 func (r *TrackRequest) Name() (string, error) {
 	return r.inner.Name()
+}
+
+// Dynamic creates a fetch handler before accepting this requested track.
+func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
+	inner, err := r.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDynamic{inner: inner}, nil
 }
 
 // Accept accepts the request as a raw track. For media, use PublishMediaOnTrack.
@@ -289,6 +289,13 @@ func (t *TrackProducer) WriteFrame(payload []byte) error {
 	return t.inner.WriteFrame(payload)
 }
 
+// AppendDatagram sends a best-effort datagram and returns its sequence number.
+// timestampUs is the presentation timestamp in microseconds. Payloads are capped
+// at 1200 bytes. There is no stream fallback.
+func (t *TrackProducer) AppendDatagram(timestampUs uint64, payload []byte) (uint64, error) {
+	return t.inner.AppendDatagram(timestampUs, payload)
+}
+
 // Abort closes the track with an application error code.
 func (t *TrackProducer) Abort(errorCode uint16) error {
 	return t.inner.Abort(int32(errorCode))
@@ -336,58 +343,6 @@ func (g *GroupProducer) WriteFrame(payload []byte) error {
 // Finish closes the group.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
-}
-
-// BroadcastDynamic yields tracks requested by subscribers.
-type BroadcastDynamic struct {
-	inner *ffi.MoqBroadcastDynamic
-}
-
-// RequestedTrack waits for the next requested track.
-func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
-	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
-	if err != nil {
-		return nil, err
-	}
-	return &TrackRequest{inner: inner}, nil
-}
-
-// Cancel stops current and future requested-track waits.
-func (d *BroadcastDynamic) Cancel() {
-	d.inner.Cancel()
-}
-
-// TrackRequest is a subscriber-requested track that has not been accepted yet.
-type TrackRequest struct {
-	inner *ffi.MoqTrackRequest
-}
-
-// Name is the requested track name.
-func (r *TrackRequest) Name() (string, error) {
-	return r.inner.Name()
-}
-
-// Dynamic creates a fetch handler before accepting this requested track.
-func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
-	inner, err := r.inner.Dynamic()
-	if err != nil {
-		return nil, err
-	}
-	return &TrackDynamic{inner: inner}, nil
-}
-
-// Accept accepts the request as a raw track.
-func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
-	inner, err := r.inner.Accept(info)
-	if err != nil {
-		return nil, err
-	}
-	return &TrackProducer{inner: inner}, nil
-}
-
-// Abort rejects the requested track with an application error code.
-func (r *TrackRequest) Abort(errorCode int32) error {
-	return r.inner.Abort(errorCode)
 }
 
 // TrackDynamic yields uncached groups requested by fetch consumers.

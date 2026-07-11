@@ -15,6 +15,7 @@ type (
 	AudioFrame         = ffi.MoqAudioFrame
 	Catalog            = ffi.MoqCatalog
 	ConnectionStats    = ffi.MoqConnectionStats
+	Datagram           = ffi.MoqDatagram
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame
 	FetchGroupOptions  = ffi.MoqFetchGroupOptions

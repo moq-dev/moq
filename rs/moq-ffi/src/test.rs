@@ -83,6 +83,35 @@ async fn raw_track_activity() {
 }
 
 #[tokio::test]
+async fn raw_track_datagram_roundtrip() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track(
+			"events".into(),
+			Some(MoqTrackInfo {
+				priority: 0,
+				ordered: true,
+				cache_ms: None,
+				timescale: Some(1_000_000),
+			}),
+		)
+		.unwrap();
+	let consumer = track.consume(None).unwrap();
+	let payload = b"hello datagram".to_vec();
+
+	let sequence = track.append_datagram(123_456, payload.clone()).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram")
+		.unwrap()
+		.expect("expected a datagram");
+
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.timestamp_us, 123_456);
+	assert_eq!(datagram.payload, payload);
+}
+
+#[tokio::test]
 async fn dynamic_track_request() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
@@ -800,7 +829,7 @@ async fn server_client_roundtrip_auto_origin() {
 		request.ok().await.expect("handshake failed")
 	});
 
-	// No set_publish / set_consume — auto-origin path.
+	// No set_publish / set_consume. Auto-origin path.
 	let client = MoqClient::new();
 	client.set_tls_disable_verify(true);
 	client.set_bind("127.0.0.1:0".into()).unwrap();

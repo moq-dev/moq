@@ -30,9 +30,22 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         try await ffi.readFrame()
     }
 
+    /// The next best-effort datagram in arrival order. `nil` once the track ends.
+    public func recvDatagram() async throws -> Datagram? {
+        try await ffi.recvDatagram()
+    }
+
     /// Cancel all current and future reads.
     public func cancel() {
         ffi.cancel()
+    }
+
+    /// Datagrams in arrival order. Datagram delivery requires a datagram-capable
+    /// transport and wire version; there is no stream fallback.
+    public var datagrams: AsyncThrowingStream<Datagram, Swift.Error> {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.recvDatagram()
+        }
     }
 
     /// Groups in arrival order, including out-of-sequence deliveries. The default
@@ -124,6 +137,14 @@ public final class TrackProducer: Sendable {
     /// Write a single-frame group in one call.
     public func writeFrame(_ payload: Data) throws {
         try ffi.writeFrame(payload: payload)
+    }
+
+    /// Send a best-effort datagram and return its sequence number.
+    ///
+    /// `timestampUs` is the presentation timestamp in microseconds. Payloads are
+    /// capped at 1200 bytes. There is no stream fallback.
+    public func appendDatagram(timestampUs: UInt64, payload: Data) throws -> UInt64 {
+        try ffi.appendDatagram(timestampUs: timestampUs, payload: payload)
     }
 
     /// Abort the track with an application error code, failing active consumers.
