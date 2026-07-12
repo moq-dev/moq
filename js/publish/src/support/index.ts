@@ -57,20 +57,27 @@ async function audioEncoderSupported(codec: keyof typeof CODECS): Promise<boolea
 }
 
 async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec> {
-	const software = await VideoEncoder.isConfigSupported({
-		codec: CODECS[codec],
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-software",
-	});
+	const base = { codec: CODECS[codec], width: 1280, height: 720 };
+
+	const software = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-software" });
+
+	// On Apple Silicon Safari, VideoToolbox hardware-encodes only H.264 and HEVC; Safari reports the
+	// others as prefer-hardware supported even though they run on software libvpx, so key off the
+	// codec rather than the echoed (and unreliable) hint, and skip the probe it would ignore. The
+	// same H.264/HEVC-only set drives hardwareCodecOrder in ../video/codecs.ts.
+	if (Util.Hacks.isSafari) {
+		const hardwareCapable = codec === "h264" || codec === "h265";
+		const hardware = hardwareCapable
+			? await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-hardware" })
+			: undefined;
+		return {
+			hardware: hardware?.supported === true,
+			software: software.supported === true,
+		};
+	}
 
 	// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-	const hardware = await VideoEncoder.isConfigSupported({
-		codec: CODECS[codec],
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-hardware",
-	});
+	const hardware = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-hardware" });
 
 	const unknown = Util.Hacks.isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
 
@@ -81,6 +88,10 @@ async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 }
 
 export async function isSupported(): Promise<Full> {
+	// @ts-expect-error MediaStreamTrackProcessor has no TypeScript types yet. Keep the suppression on
+	// this line only so it doesn't mask type errors in the capture expression below.
+	const mainThreadCapture = typeof MediaStreamTrackProcessor !== "undefined";
+
 	return {
 		// Firefox drops server-initiated bidi streams, and reading datagrams kills the session on
 		// Safari, so both are forced onto the WebSocket fallback even though they define
@@ -95,12 +106,13 @@ export async function isSupported(): Promise<Full> {
 			},
 		},
 		video: {
+			// Chrome exposes MediaStreamTrackProcessor on the main thread; WebKit 18+ (incl. iOS
+			// Chrome/Firefox) uses it in a Worker (see video/polyfill.ts). Older/undetectable WebKit falls
+			// back to the rAF polyfill, so it's only "partial".
 			capture:
-				// We have a fallback for MediaStreamTrackProcessor, but it's pretty gross so no full points.
-				// @ts-expect-error No typescript types yet.
-				typeof MediaStreamTrackProcessor !== "undefined"
+				mainThreadCapture || Util.Hacks.safariWorkerCapture
 					? "full"
-					: typeof OffscreenCanvas !== "undefined"
+					: Util.Hacks.isSafari || typeof OffscreenCanvas !== "undefined"
 						? "partial"
 						: "none",
 			encoding:

@@ -17,6 +17,10 @@ export class Microphone {
 
 	source = new Signal<Audio.Source | undefined>(undefined);
 
+	// Bumped when the captured track ends underneath us (e.g. a Bluetooth headset disconnects),
+	// so #run re-acquires instead of encoding silence off a dead track forever.
+	#retry = new Signal(0);
+
 	signals = new Effect();
 
 	constructor(props?: MicrophoneProps) {
@@ -32,6 +36,7 @@ export class Microphone {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
+		effect.get(this.#retry);
 		const device = effect.get(this.device.requested);
 
 		const constraints = effect.get(this.constraints) ?? {};
@@ -41,7 +46,12 @@ export class Microphone {
 		};
 
 		effect.spawn(async () => {
-			const media = navigator.mediaDevices.getUserMedia({ audio: finalConstraints }).catch(() => undefined);
+			// A denied/cancelled permission prompt must not take down the effect, but stay visible:
+			// the broadcast still announces, so watchers would otherwise buffer forever with no clue why.
+			const media = navigator.mediaDevices.getUserMedia({ audio: finalConstraints }).catch((err) => {
+				console.warn("microphone capture failed:", err);
+				return undefined;
+			});
 
 			// If the effect is cancelled for any reason (ex. cancel), stop any media that we got.
 			effect.cleanup(() =>
@@ -67,6 +77,13 @@ export class Microphone {
 				// Save the device that the user selected during the dialog prompt.
 				this.device.preferred.set(settings.deviceId);
 			}
+
+			// The track can end underneath us (device unplugged, Bluetooth dropped, OS revoked).
+			// Re-acquire so capture moves to whatever device is now available.
+			effect.event(track, "ended", () => {
+				console.warn("microphone track ended; re-acquiring");
+				this.#retry.update((n) => n + 1);
+			});
 
 			effect.set(this.device.active, settings.deviceId);
 			effect.set(this.source, { track, kind: "voice" });
