@@ -509,7 +509,10 @@ impl Consume {
 		Ok(id)
 	}
 
-	fn apply_raw_subscription(track: &mut moq_net::track::Subscriber, subscription: Option<moq_net::track::Subscription>) {
+	fn apply_raw_subscription(
+		track: &mut moq_net::track::Subscriber,
+		subscription: Option<moq_net::track::Subscription>,
+	) {
 		let subscription = subscription.unwrap_or_default();
 		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
 			track.start_at(start);
@@ -607,7 +610,11 @@ impl Consume {
 		}
 	}
 
-	pub fn raw_track_update(&mut self, track: Id, subscription: Option<moq_net::track::Subscription>) -> Result<(), Error> {
+	pub fn raw_track_update(
+		&mut self,
+		track: Id,
+		subscription: Option<moq_net::track::Subscription>,
+	) -> Result<(), Error> {
 		let entry = self
 			.raw_task
 			.get_mut(track)
