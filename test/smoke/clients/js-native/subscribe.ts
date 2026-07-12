@@ -50,12 +50,16 @@ async function run(): Promise<void> {
 		// which resets the catalog stream (RESET_STREAM). The Rust API folds this
 		// wait into consume(); the JS API leaves it to the caller. The outer timeout
 		// below bounds how long we wait.
+		//
+		// `announced(path)` is scoped to `path`, so each entry's `path` is relative to it
+		// (empty for the broadcast at `path` itself). Any active entry means a matching
+		// broadcast is up, so wait for one.
 		const announced = connection.announced(path);
 		try {
 			for (;;) {
 				const entry = await announced.next();
 				if (!entry) throw new Error("connection closed before broadcast was announced");
-				if (entry.active && Moq.Path.hasPrefix(path, entry.path)) break;
+				if (entry.active) break;
 			}
 		} finally {
 			announced.close();
