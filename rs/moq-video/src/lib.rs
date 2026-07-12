@@ -18,8 +18,8 @@
 //!     front, but the camera opens only while a subscriber is watching and is
 //!     released when the last one leaves.
 //!   - [`encode::Producer`] publishes packets you encoded yourself.
-//! - [`decode`] subscribes to an H.264 or H.265 track and decodes it to raw
-//!   frames with a native backend (VideoToolbox on macOS, Media Foundation /
+//! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
+//!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
 //!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264).
 //!   [`decode::Consumer`] is the mirror of `moq-audio`'s `AudioConsumer`. An
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]

@@ -1,8 +1,8 @@
 //! Software H.264 decode backend via Cisco's openh264 (vendored, statically linked).
 //!
-//! The portable fallback when no hardware decoder is available, and the only
-//! backend on Linux/Windows for now. Accepts Annex-B access units (SPS/PPS
-//! inline ahead of each keyframe) and returns packed I420.
+//! The portable fallback when no hardware decoder is available. Accepts Annex-B
+//! H.264 access units (SPS/PPS inline ahead of each keyframe) and returns packed
+//! I420.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -21,10 +21,15 @@ pub(crate) struct Openh264 {
 }
 
 impl Openh264 {
-	/// openh264 decodes H.264 only; the backend selector never routes another
-	/// codec here, so `codec` is accepted for signature parity and ignored, as is
-	/// `config` (no hardware scaler; callers scale the CPU frames themselves).
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	/// openh264 decodes H.264 only; `config` is accepted for signature parity
+	/// (no hardware scaler; callers scale the CPU frames themselves).
+	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		if codec != Codec::H264 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"openh264 cannot decode {}",
+				codec.label()
+			)));
+		}
 		let decoder = Decoder::with_api_config(OpenH264API::from_source(), DecoderConfig::new())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decoder init: {e}")))?;
 
