@@ -119,7 +119,8 @@ export class Connection implements Established {
 		this.#subscriber.close();
 
 		try {
-			// TODO: For whatever reason, this try/catch doesn't seem to work..?
+			// A failed close rejects `closed` rather than throwing; this only guards
+			// closing an already-closed transport (a teardown race).
 			this.#quic.close();
 		} catch {
 			// ignore
@@ -289,10 +290,14 @@ export class Connection implements Established {
 				}
 			}, SEND_BW_POLL_INTERVAL);
 
-			void this.closed.then(() => {
-				clearInterval(id);
-				resolve();
-			});
+			// `closed` rejects on abnormal termination (that rejection is what drives Reload's reconnect);
+			// here we only need it as a stop signal, so swallow the rejection to avoid an unhandled rejection.
+			void this.closed
+				.catch(() => {})
+				.then(() => {
+					clearInterval(id);
+					resolve();
+				});
 		});
 	}
 
