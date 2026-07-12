@@ -163,6 +163,7 @@ class JsonConsumer:
         return json.loads(value)
 
     def cancel(self) -> None:
+        """Cancel all current and future next() calls."""
         self._inner.cancel()
 
 
@@ -185,6 +186,7 @@ class JsonStreamConsumer:
         return json.loads(value)
 
     def cancel(self) -> None:
+        """Cancel all current and future next() calls."""
         self._inner.cancel()
 
 

@@ -146,6 +146,7 @@ val config = MoqJsonConfig(deltaRatio = 8u, compression = true)
 val status = broadcast.publishJson("status", config)
 status.update("""{"state":"live"}""")
 
+val broadcastConsumer = broadcast.consume()
 val consumer = broadcastConsumer.subscribeJson("status", config)
 consumer.values().collect { value -> println(value) }
 

@@ -129,6 +129,7 @@ let config = MoqJsonConfig(deltaRatio: 8, compression: true)
 let status = try broadcast.publishJson(name: "status", config: config)
 try status.update(value: #"{"state":"live"}"#)
 
+let broadcastConsumer = try broadcast.consume()
 let consumer = try broadcastConsumer.subscribeJson(name: "status", config: config)
 for try await value in consumer.values {
     print(value)

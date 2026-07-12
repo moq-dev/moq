@@ -17,7 +17,7 @@ Pick `Snapshot` when consumers care about "what is the value now" (a catalog, a 
 ## Quick Start
 
 ```bash
-npm add @moq/json
+bun add @moq/json
 ```
 
 ### Snapshot: the latest value

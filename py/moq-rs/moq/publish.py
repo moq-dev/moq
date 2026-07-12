@@ -155,6 +155,7 @@ class JsonProducer:
         self._inner.update(json.dumps(value))
 
     def finish(self) -> None:
+        """Finish the track, closing any open group."""
         self._inner.finish()
 
 
@@ -173,6 +174,7 @@ class JsonStreamProducer:
         self._inner.append(json.dumps(value))
 
     def finish(self) -> None:
+        """Finish the track, closing the group."""
         self._inner.finish()
 
 

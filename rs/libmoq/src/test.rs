@@ -553,7 +553,7 @@ fn json_snapshot_publish_consume() {
 			json_len: 0,
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		let received = unsafe { std::slice::from_raw_parts(value.json as *const u8, value.json_len) };
+		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
 		assert_eq!(
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
 			serde_json::from_str::<serde_json::Value>(expected).unwrap()
@@ -617,7 +617,7 @@ fn json_stream_publish_consume() {
 			json_len: 0,
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		let received = unsafe { std::slice::from_raw_parts(value.json as *const u8, value.json_len) };
+		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
 		assert_eq!(
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
 			serde_json::from_str::<serde_json::Value>(expected).unwrap()
@@ -627,7 +627,9 @@ fn json_stream_publish_consume() {
 
 	assert_eq!(moq_consume_json_close(consumer), 0);
 	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
+	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_json_stream_close(producer), 0);
+	assert!(moq_publish_json_stream_close(producer) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
