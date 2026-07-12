@@ -12,6 +12,20 @@ import styles from "./styles/index.css?inline";
 // How long the chrome lingers after the pointer stops moving (while playing).
 const HIDE_MS = 2800;
 
+// Whether `el` is the element the browser has actually put fullscreen. Unlike
+// `document.fullscreenElement`, this is not retargeted to the shadow host. `matches` throws on a
+// pseudo-class the engine can't parse, so each is tried separately.
+function matchesFullscreen(el: HTMLElement): boolean {
+	for (const selector of [":fullscreen", ":-webkit-full-screen"]) {
+		try {
+			if (el.matches(selector)) return true;
+		} catch {
+			// Unsupported selector on this engine.
+		}
+	}
+	return false;
+}
+
 export default class MoqWatchUi extends HTMLElement {
 	#signals?: Effect;
 	#root: ShadowRoot;
@@ -95,6 +109,10 @@ export default class MoqWatchUi extends HTMLElement {
 			root.fullscreenElement === player ||
 			document.fullscreenElement === player ||
 			doc.webkitFullscreenElement === player ||
+			// Safari exposes neither: `document.fullscreenElement` is retargeted to the shadow host, and
+			// `ShadowRoot.fullscreenElement` is absent. `:fullscreen` still matches the real fullscreen
+			// element inside the shadow tree. `matches` throws on a pseudo-class the engine can't parse.
+			matchesFullscreen(player) ||
 			player.classList.contains("player--pseudo-fullscreen")
 		);
 	}
