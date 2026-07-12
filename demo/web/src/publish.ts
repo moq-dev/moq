@@ -287,6 +287,12 @@ ui.run((effect) => {
 	setActual("volume-actual", `${effect.get(volume).toFixed(2)}×`);
 });
 
+// Report the transport we actually negotiated: Safari and Firefox always land on WebSocket.
+ui.run((effect) => {
+	const conn = effect.get(publish.connection.established);
+	$("network-transport").textContent = conn?.transport === "websocket" ? "WebSocket" : "WebTransport";
+});
+
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).
 ui.run((effect) => {
 	const a = effect.get(publish.broadcast.audio.config);

@@ -4,6 +4,7 @@ import type { Bandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type * as Path from "../path.ts";
 import type * as Time from "../time.ts";
+import type { Transport } from "./transport.ts";
 
 /** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
 export interface Established {
@@ -12,6 +13,9 @@ export interface Established {
 
 	/** Negotiated wire protocol version. */
 	readonly version: string;
+
+	/** The wire transport this session runs over. */
+	readonly transport: Transport;
 
 	/** Estimated send bitrate from the congestion controller (if supported). */
 	readonly sendBandwidth?: Bandwidth;

@@ -3,6 +3,7 @@ import type * as announce from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
@@ -33,6 +34,9 @@ export class Connection implements Established {
 
 	// The version of the connection as a human-readable string.
 	readonly version: string;
+
+	// The wire transport this session runs over.
+	readonly transport: Transport;
 
 	// The version used for encoding/decoding.
 	#version: Version;
@@ -81,6 +85,7 @@ export class Connection implements Established {
 		this.#session = session;
 		this.version = versionName(version);
 		this.#version = version;
+		this.transport = transportOf(quic);
 
 		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
 		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";

@@ -5,7 +5,7 @@ import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 import { exchangeSetup } from "./handshake.ts";
-import { pickTransport } from "./transport.ts";
+import { pickTransport, transportOf } from "./transport.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
@@ -111,7 +111,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	if (!session) throw new Error("no transport available");
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
-	if (session instanceof Session) {
+	// Same detection the connection exposes as `Established.transport`, so the log can't disagree with it.
+	if (transportOf(session) === "websocket") {
 		console.warn(url.toString(), "connected via WebSocket");
 		websocketWon.add(url.toString());
 	} else {
