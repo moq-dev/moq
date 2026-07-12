@@ -52,7 +52,7 @@ When reviewing a PR, always include the same public API changes list described a
 
 ## Releases
 
-- **Rust**: release-plz opens release PRs and publishes to crates.io on merge to `main` (`release-rs.yml`). `moq-relay` and `moq-cli` take patch bumps even for breaking changes (no external consumers yet); `moq-cli` bumps are manual since release-plz can't see CLI surface changes.
+- **Rust**: release-plz opens release PRs and publishes to crates.io on merge to `main` (`release-rs.yml`). `moq-relay` and `moq-cli` take patch bumps even for breaking changes (no external consumers yet). `moq-cli` is the one crate bumped by hand, in a dedicated chore PR rather than a feature PR, since release-plz can't see CLI surface changes.
 - **JS**: `release-js.yml` publishes `@moq/*` packages (per-package build + `common/release.ts`).
 - **Python**: `moq-ffi` releases on `moq-ffi-v*` tags; `moq-rs` publishes on merge to `main` when its hand-bumped version isn't already on PyPI. See `py/CLAUDE.md`.
 - **Binding mirrors**: CI mirrors the `swift`/`kt`/`go` source skeletons to `moq-dev/moq-{swift,kotlin,go}` on each `moq-ffi-v*` tag.
