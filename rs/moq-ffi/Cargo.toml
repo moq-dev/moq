@@ -26,6 +26,7 @@ android-logcat = ["moq-native/android-logcat"]
 bytes = "1"
 hang = { workspace = true }
 moq-audio = { workspace = true }
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true, features = ["serde"] }

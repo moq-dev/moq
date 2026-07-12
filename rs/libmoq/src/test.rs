@@ -505,6 +505,135 @@ fn raw_track_publish_consume() {
 }
 
 #[test]
+fn json_snapshot_publish_consume() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	let track_name = b"meta";
+	let config = moq_json_config {
+		delta_ratio: 8,
+		compression: true,
+	};
+	let producer = id(unsafe {
+		moq_publish_json(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&config,
+		)
+	});
+
+	let path = b"json-snapshot";
+	assert_eq!(
+		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
+		0
+	);
+	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+
+	let value_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_json(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&config,
+			Some(channel_callback),
+			value_cb.ptr,
+		)
+	});
+
+	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
+		assert_eq!(
+			unsafe { moq_publish_json_update(producer, expected.as_ptr() as *const c_char, expected.len()) },
+			0
+		);
+		let value_id = id(value_cb.recv());
+		let mut value = moq_json_value {
+			json: std::ptr::null(),
+			json_len: 0,
+		};
+		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(value.json as *const u8, value.json_len) };
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
+			serde_json::from_str::<serde_json::Value>(expected).unwrap()
+		);
+		assert_eq!(moq_consume_json_value_close(value_id), 0);
+	}
+
+	assert_eq!(moq_consume_json_close(consumer), 0);
+	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
+	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
+	assert_eq!(moq_publish_json_close(producer), 0);
+	assert!(moq_publish_json_close(producer) < 0, "double-close should fail");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn json_stream_publish_consume() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	let track_name = b"events";
+	let config = moq_json_stream_config { compression: true };
+	let producer = id(unsafe {
+		moq_publish_json_stream(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&config,
+		)
+	});
+
+	let path = b"json-stream";
+	assert_eq!(
+		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
+		0
+	);
+	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+
+	let value_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_json_stream(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&config,
+			Some(channel_callback),
+			value_cb.ptr,
+		)
+	});
+
+	for expected in [r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#] {
+		assert_eq!(
+			unsafe { moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len()) },
+			0
+		);
+		let value_id = id(value_cb.recv());
+		let mut value = moq_json_value {
+			json: std::ptr::null(),
+			json_len: 0,
+		};
+		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(value.json as *const u8, value.json_len) };
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
+			serde_json::from_str::<serde_json::Value>(expected).unwrap()
+		);
+		assert_eq!(moq_consume_json_value_close(value_id), 0);
+	}
+
+	assert_eq!(moq_consume_json_close(consumer), 0);
+	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
+	assert_eq!(moq_publish_json_stream_close(producer), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn close_invalid_or_zero_ids() {
 	assert!(moq_origin_close(9999) < 0);
 	assert!(moq_session_close(9999) < 0);

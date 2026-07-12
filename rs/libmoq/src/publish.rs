@@ -25,6 +25,12 @@ pub struct Publish {
 
 	/// Raw group producers, created from a raw track producer.
 	groups: NonZeroSlab<moq_net::GroupProducer>,
+
+	/// JSON snapshot producers (lossy latest-value tracks).
+	json: NonZeroSlab<moq_json::snapshot::Producer<serde_json::Value>>,
+
+	/// JSON stream producers (lossless append-log tracks).
+	json_stream: NonZeroSlab<moq_json::stream::Producer<serde_json::Value>>,
 }
 
 impl Publish {
@@ -194,6 +200,61 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
 		track.finish()?;
+		Ok(())
+	}
+
+	/// Create a JSON snapshot track (lossy latest-value) on a broadcast.
+	///
+	/// Values published via [`Self::json_update`] reach subscribers as a single latest state; a
+	/// late joiner only sees the newest value. Advertise the track in the catalog with
+	/// [`Self::catalog_section`] if consumers should discover it.
+	pub fn json(&mut self, broadcast: Id, name: &str, config: moq_json::snapshot::ProducerConfig) -> Result<Id, Error> {
+		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let track = broadcast.create_track(moq_net::Track::new(name))?;
+		let producer = moq_json::snapshot::Producer::new(track, config);
+		self.json.insert(producer)
+	}
+
+	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
+	pub fn json_update(&mut self, json: Id, value: serde_json::Value) -> Result<(), Error> {
+		let producer = self.json.get_mut(json).ok_or(Error::TrackNotFound)?;
+		producer.update(&value)?;
+		Ok(())
+	}
+
+	/// Finish a JSON snapshot track. No more values can be published.
+	pub fn json_close(&mut self, json: Id) -> Result<(), Error> {
+		let mut producer = self.json.remove(json).ok_or(Error::TrackNotFound)?;
+		producer.finish()?;
+		Ok(())
+	}
+
+	/// Create a JSON stream track (lossless append-log) on a broadcast.
+	///
+	/// Every record appended via [`Self::json_stream_append`] is preserved and delivered in order.
+	pub fn json_stream(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: moq_json::stream::ProducerConfig,
+	) -> Result<Id, Error> {
+		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let track = broadcast.create_track(moq_net::Track::new(name))?;
+		let producer = moq_json::stream::Producer::new(track, config);
+		self.json_stream.insert(producer)
+	}
+
+	/// Append one record to a JSON stream track.
+	pub fn json_stream_append(&mut self, stream: Id, value: serde_json::Value) -> Result<(), Error> {
+		let producer = self.json_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
+		producer.append(&value)?;
+		Ok(())
+	}
+
+	/// Finish a JSON stream track. No more records can be appended.
+	pub fn json_stream_close(&mut self, stream: Id) -> Result<(), Error> {
+		let mut producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
+		producer.finish()?;
 		Ok(())
 	}
 

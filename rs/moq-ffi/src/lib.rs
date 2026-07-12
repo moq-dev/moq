@@ -9,6 +9,7 @@ pub mod audio;
 pub mod consumer;
 pub mod error;
 mod ffi;
+pub mod json;
 mod log;
 pub mod media;
 pub mod origin;

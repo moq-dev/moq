@@ -2,7 +2,9 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_video_config};
+use crate::{
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_json_value, moq_section, moq_video_config,
+};
 
 struct ConsumeCatalog {
 	broadcast: moq_net::BroadcastConsumer,
@@ -51,6 +53,12 @@ pub struct Consume {
 
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<bytes::Bytes>,
+
+	/// JSON consumer tasks (snapshot and stream share this slab).
+	json_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Buffered JSON values ready for consumption, pre-serialized to a string.
+	json_value: NonZeroSlab<String>,
 }
 
 impl Consume {
@@ -489,6 +497,154 @@ impl Consume {
 
 	pub fn raw_frame_close(&mut self, frame: Id) -> Result<(), Error> {
 		self.raw_frame.remove(frame).ok_or(Error::FrameNotFound)?;
+		Ok(())
+	}
+
+	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
+	///
+	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
+	/// behind collapses the backlog and only sees the newest. Values must be released with
+	/// [`Self::json_value_close`]. Pass the same compression the producer used.
+	pub fn json(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: moq_json::snapshot::ConsumerConfig,
+		on_value: OnStatus,
+	) -> Result<Id, Error> {
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let track = broadcast.subscribe_track(&moq_net::Track::new(name))?;
+		let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(track, config);
+
+		let channel = oneshot::channel();
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_value,
+		};
+		let id = self.json_task.insert(Some(entry))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_json_snapshot(on_value, consumer, channel.1).await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.json_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_json_snapshot(
+		callback: OnStatus,
+		mut consumer: moq_json::snapshot::Consumer<serde_json::Value>,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready value.
+			let value = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = consumer.next() => match next? {
+					Some(value) => value,
+					None => return Ok(()),
+				},
+			};
+
+			let json = serde_json::to_string(&value)?;
+			// Hold the lock only to buffer the value; release it before the callback.
+			let value_id = State::lock().consume.json_value.insert(json)?;
+			callback.call(Ok(value_id));
+		}
+	}
+
+	/// Subscribe to a JSON stream track (lossless append-log) by name.
+	///
+	/// `on_value` is called with a value ID for each record, in order. Values must be released
+	/// with [`Self::json_value_close`].
+	pub fn json_stream(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: moq_json::stream::ConsumerConfig,
+		on_value: OnStatus,
+	) -> Result<Id, Error> {
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let track = broadcast.subscribe_track(&moq_net::Track::new(name))?;
+		let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, config);
+
+		let channel = oneshot::channel();
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_value,
+		};
+		let id = self.json_task.insert(Some(entry))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_json_stream(on_value, consumer, channel.1).await;
+
+			let entry = State::lock().consume.json_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_json_stream(
+		callback: OnStatus,
+		mut consumer: moq_json::stream::Consumer<serde_json::Value>,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready record.
+			let value = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = consumer.next() => match next? {
+					Some(value) => value,
+					None => return Ok(()),
+				},
+			};
+
+			let json = serde_json::to_string(&value)?;
+			let value_id = State::lock().consume.json_value.insert(json)?;
+			callback.call(Ok(value_id));
+		}
+	}
+
+	/// Signal a JSON consumer task (snapshot or stream) to stop. The task still delivers one
+	/// final terminal callback and then removes itself, so `user_data` stays valid until then.
+	pub fn json_close(&mut self, task: Id) -> Result<(), Error> {
+		self.json_task
+			.get_mut(task)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::TrackNotFound)?
+			.close
+			.take()
+			.ok_or(Error::TrackNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a JSON value delivered via a consumer callback. The pointer is valid
+	/// until the value is released with [`Self::json_value_close`].
+	pub fn json_value(&self, value: Id, dst: &mut moq_json_value) -> Result<(), Error> {
+		let json = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
+
+		*dst = moq_json_value {
+			json: json.as_str().as_ptr() as *const c_char,
+			json_len: json.len(),
+		};
+
+		Ok(())
+	}
+
+	/// Release a JSON value and clean up its resources.
+	pub fn json_value_close(&mut self, value: Id) -> Result<(), Error> {
+		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 

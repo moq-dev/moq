@@ -13,6 +13,9 @@ pub enum MoqError {
 	Mux(#[from] moq_mux::Error),
 
 	#[error(transparent)]
+	JsonTrack(#[from] moq_json::Error),
+
+	#[error(transparent)]
 	Audio(#[from] moq_audio::AudioError),
 
 	#[error(transparent)]

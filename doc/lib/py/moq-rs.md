@@ -109,6 +109,32 @@ async for group in broadcast_consumer.subscribe_track("events"):
 
 `write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
 
+### JSON tracks
+
+For JSON payloads, `publish_json` / `subscribe_json` handle the framing for you. Values are ordinary Python objects (encoded with `json` internally), in one of two modes:
+
+- **Snapshot** (lossy): one value updated over time; a subscriber only sees the latest. Ideal for status documents and metadata. A late joiner catches up to the newest value in one step.
+- **Stream** (lossless): an ordered append-log where every record is preserved. Ideal for event logs and timelines.
+
+```python
+# Snapshot: each update supersedes the last.
+status = broadcast.publish_json("status", compression=True)
+status.update({"state": "live", "viewers": 42})
+status.update({"state": "live", "viewers": 43})
+
+async for value in broadcast_consumer.subscribe_json("status", compression=True):
+    print(value["viewers"])
+
+# Stream: every record is delivered in order.
+events = broadcast.publish_json_stream("events")
+events.append({"event": "started"})
+
+async for record in broadcast_consumer.subscribe_json_stream("events"):
+    print(record["event"])
+```
+
+`compression` must match on the producer and subscriber. Snapshot mode also takes `delta_ratio` (0 disables merge-patch deltas, so every change is a fresh snapshot). Advertise the track with a catalog section if subscribers should discover it.
+
 ### On-demand raw tracks
 
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:

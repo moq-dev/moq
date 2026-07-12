@@ -66,6 +66,39 @@ pub struct moq_section {
 	pub json_len: usize,
 }
 
+/// Options for a JSON snapshot track (lossy latest-value mode).
+///
+/// The same config is passed to a producer and its consumers, but the consumer reads only
+/// `compression`; `delta_ratio` is producer-only.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_json_config {
+	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
+	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
+	/// deltas before rolling. Ignored by the consumer.
+	pub delta_ratio: u32,
+
+	/// DEFLATE-compress each group. Must match on the producer and consumer.
+	pub compression: bool,
+}
+
+/// Options for a JSON stream track (lossless append-log mode).
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_json_stream_config {
+	/// DEFLATE-compress the group. Must match on the producer and consumer.
+	pub compression: bool,
+}
+
+/// A JSON value delivered by a consumer callback.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_json_value {
+	/// The JSON document as UTF-8, NOT NULL terminated.
+	pub json: *const c_char,
+	pub json_len: usize,
+}
+
 /// Information about a frame of media.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -716,6 +749,113 @@ pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
 	})
 }
 
+/// Create a JSON snapshot track (lossy latest-value) on a broadcast.
+///
+/// Values published via [moq_publish_json_update] reach subscribers as a single latest state; a
+/// late joiner only sees the newest. Advertise the track in the catalog with
+/// [moq_publish_catalog_section] if consumers should discover it.
+///
+/// Returns a non-zero handle to the JSON producer on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_json(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_json_config,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let mut producer = moq_json::snapshot::ProducerConfig::default();
+		producer.delta_ratio = config.delta_ratio;
+		producer.compression = config.compression;
+		State::lock().publish.json(broadcast, name, producer)
+	})
+}
+
+/// Publish a new value to a JSON snapshot track. `value` is a UTF-8 JSON document. A no-op if
+/// unchanged from the previous update.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_json_update(json: u32, value: *const c_char, value_len: usize) -> i32 {
+	ffi::enter(move || {
+		let json = ffi::parse_id(json)?;
+		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
+		let value = serde_json::from_slice(value)?;
+		State::lock().publish.json_update(json, value)
+	})
+}
+
+/// Finish a JSON snapshot track. No more values can be published.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_json_close(json: u32) -> i32 {
+	ffi::enter(move || {
+		let json = ffi::parse_id(json)?;
+		State::lock().publish.json_close(json)
+	})
+}
+
+/// Create a JSON stream track (lossless append-log) on a broadcast.
+///
+/// Every record appended via [moq_publish_json_stream_append] is preserved and delivered in order.
+///
+/// Returns a non-zero handle to the JSON stream producer on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_json_stream(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_json_stream_config,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let producer = moq_json::stream::ProducerConfig::default().with_compression(config.compression);
+		State::lock().publish.json_stream(broadcast, name, producer)
+	})
+}
+
+/// Append one record to a JSON stream track. `value` is a UTF-8 JSON document.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_json_stream_append(stream: u32, value: *const c_char, value_len: usize) -> i32 {
+	ffi::enter(move || {
+		let stream = ffi::parse_id(stream)?;
+		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
+		let value = serde_json::from_slice(value)?;
+		State::lock().publish.json_stream_append(stream, value)
+	})
+}
+
+/// Finish a JSON stream track. No more records can be appended.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_json_stream_close(stream: u32) -> i32 {
+	ffi::enter(move || {
+		let stream = ffi::parse_id(stream)?;
+		State::lock().publish.json_stream_close(stream)
+	})
+}
+
 /// Create a catalog consumer for a broadcast.
 ///
 /// `on_catalog` is invoked with a positive catalog ID for each catalog update
@@ -1040,5 +1180,111 @@ pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.raw_track_close(track)
+	})
+}
+
+/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
+///
+/// `on_value` is called with a positive value ID for each new latest value; a consumer that
+/// falls behind collapses the backlog and only sees the newest. It is called exactly once more
+/// with a terminal `0` (track ended / closed) or a negative error, after which `user_data` is
+/// never touched again, so release it there. Read each value with [moq_consume_json_value] and
+/// release it with [moq_consume_json_value_close]. Pass the same compression the producer used.
+///
+/// Returns a non-zero handle to the task on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_value` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_json(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_json_config,
+	on_value: Option<extern "C" fn(user_data: *mut c_void, value: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let mut consumer = moq_json::snapshot::ConsumerConfig::default();
+		consumer.compression = config.compression;
+		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
+		State::lock().consume.json(broadcast, name, consumer, on_value)
+	})
+}
+
+/// Subscribe to a JSON stream track (lossless append-log) by name.
+///
+/// `on_value` is called with a positive value ID for each record, in order, then once more with
+/// a terminal `0` or negative error where `user_data` should be released. Read each value with
+/// [moq_consume_json_value] and release it with [moq_consume_json_value_close].
+///
+/// Returns a non-zero handle to the task on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_value` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_json_stream(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_json_stream_config,
+	on_value: Option<extern "C" fn(user_data: *mut c_void, value: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let consumer = moq_json::stream::ConsumerConfig::default().with_compression(config.compression);
+		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
+		State::lock().consume.json_stream(broadcast, name, consumer, on_value)
+	})
+}
+
+/// Read a JSON value delivered via a [moq_consume_json] or [moq_consume_json_stream] callback.
+///
+/// Fills `dst.json` / `dst.json_len`; the pointer is valid until the value is released with
+/// [moq_consume_json_value_close].
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `dst` is a valid pointer to a [moq_json_value] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_json_value(value: u32, dst: *mut moq_json_value) -> i32 {
+	ffi::enter(move || {
+		let value = ffi::parse_id(value)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.json_value(value, dst)
+	})
+}
+
+/// Release a JSON value delivered via a consumer callback.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_json_value_close(value: u32) -> i32 {
+	ffi::enter(move || {
+		let value = ffi::parse_id(value)?;
+		State::lock().consume.json_value_close(value)
+	})
+}
+
+/// Stop a JSON consumer's background task (snapshot or stream).
+///
+/// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
+/// `user_data`; the `on_value` callback still fires once more with a terminal `0` (or a negative
+/// error), which is where `user_data` should be released. Values already delivered remain valid
+/// until released with [moq_consume_json_value_close].
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_json_close(task: u32) -> i32 {
+	ffi::enter(move || {
+		let task = ffi::parse_id(task)?;
+		State::lock().consume.json_close(task)
 	})
 }

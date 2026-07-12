@@ -71,6 +71,53 @@ extension MoqAudioConsumer {
     }
 }
 
+extension MoqJsonConsumer {
+    /// Stream of JSON values (as strings), yielding the latest reconstructed value. A consumer
+    /// that has fallen behind collapses the backlog. Terminates when the underlying track ends.
+    public var values: AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    while let value = try await self.next() {
+                        try Task.checkCancellation()
+                        continuation.yield(value)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.cancel()
+            }
+        }
+    }
+}
+
+extension MoqJsonStreamConsumer {
+    /// Stream of JSON records (as strings) in order. Terminates when the underlying track ends.
+    public var values: AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    while let value = try await self.next() {
+                        try Task.checkCancellation()
+                        continuation.yield(value)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.cancel()
+            }
+        }
+    }
+}
+
 extension MoqTrackConsumer {
     /// Stream of groups in sequence order, skipping forward if the reader falls behind.
     public var groups: AsyncThrowingStream<MoqGroupConsumer, Error> {

@@ -3,6 +3,7 @@ use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
 use crate::error::MoqError;
+use crate::json::{MoqJsonConfig, MoqJsonStreamConfig};
 
 use std::time::Duration;
 
@@ -69,6 +70,73 @@ async fn raw_track_activity() {
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
+}
+
+#[tokio::test]
+async fn json_snapshot_roundtrip() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonConfig {
+		delta_ratio: 8,
+		compression: true,
+	};
+	let producer = broadcast.publish_json("meta".into(), config.clone()).unwrap();
+	let consumer = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_json("meta".into(), config)
+		.unwrap();
+
+	producer.update(r#"{"a":1}"#.into()).unwrap();
+	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for json snapshot")
+		.unwrap()
+		.expect("expected a value");
+	assert_eq!(
+		serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+		serde_json::json!({ "a": 1 })
+	);
+
+	// A second update supersedes the first; a late reader collapses to the latest.
+	producer.update(r#"{"a":2}"#.into()).unwrap();
+	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for json snapshot delta")
+		.unwrap()
+		.expect("expected a value");
+	assert_eq!(
+		serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+		serde_json::json!({ "a": 2 })
+	);
+
+	producer.finish().unwrap();
+	assert!(matches!(producer.update(r#"{"a":3}"#.into()), Err(MoqError::Closed)));
+}
+
+#[tokio::test]
+async fn json_stream_roundtrip() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonStreamConfig { compression: true };
+	let producer = broadcast.publish_json_stream("events".into(), config.clone()).unwrap();
+	let consumer = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_json_stream("events".into(), config)
+		.unwrap();
+
+	for n in 0..3 {
+		producer.append(format!(r#"{{"n":{n}}}"#)).unwrap();
+		let value = tokio::time::timeout(TIMEOUT, consumer.next())
+			.await
+			.expect("timed out waiting for json stream record")
+			.unwrap()
+			.expect("expected a record");
+		assert_eq!(
+			serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+			serde_json::json!({ "n": n })
+		);
+	}
+	producer.finish().unwrap();
 }
 
 #[tokio::test]

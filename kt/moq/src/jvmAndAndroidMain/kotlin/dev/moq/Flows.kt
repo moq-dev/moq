@@ -15,6 +15,8 @@ import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
+import uniffi.moq.MoqJsonConsumer
+import uniffi.moq.MoqJsonStreamConsumer
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqTrackConsumer
 import uniffi.moq.MoqTrackProducer
@@ -50,6 +52,29 @@ fun MoqMediaConsumer.frames(): Flow<MoqFrame> = flow {
  * `MoqAudioDecoderConfig` the consumer was created with.
  */
 fun MoqAudioConsumer.frames(): Flow<MoqAudioFrame> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/**
+ * Stream of JSON values (as strings) from a snapshot track, yielding the latest reconstructed
+ * value. A consumer that has fallen behind collapses the backlog to the latest.
+ */
+fun MoqJsonConsumer.values(): Flow<String> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of JSON records (as strings) from a stream track, in order. */
+fun MoqJsonStreamConsumer.values(): Flow<String> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)

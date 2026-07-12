@@ -119,6 +119,29 @@ for try await track in dynamic.requestedTracks {
 }
 ```
 
+### JSON tracks
+
+For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved. Values cross as JSON strings; encode and decode with `JSONEncoder`/`JSONDecoder`.
+
+```swift
+// Snapshot: each update supersedes the last.
+let config = MoqJsonConfig(deltaRatio: 8, compression: true)
+let status = try broadcast.publishJson(name: "status", config: config)
+try status.update(value: #"{"state":"live"}"#)
+
+let consumer = try broadcastConsumer.subscribeJson(name: "status", config: config)
+for try await value in consumer.values {
+    print(value)
+}
+
+// Stream: every record is delivered in order.
+let streamConfig = MoqJsonStreamConfig(compression: false)
+let events = try broadcast.publishJsonStream(name: "events", config: streamConfig)
+try events.append(value: #"{"event":"started"}"#)
+```
+
+`compression` must match on the producer and subscriber. In snapshot mode, `deltaRatio` of `0` disables merge-patch deltas (every change is a fresh snapshot).
+
 ## Cancellation
 
 All async sequences cooperate with structured concurrency. Cancelling the surrounding `Task` propagates to the underlying `cancel()` call on the consumer:
