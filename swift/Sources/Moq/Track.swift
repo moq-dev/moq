@@ -35,6 +35,16 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         try await ffi.recvDatagram()
     }
 
+    /// The publisher-side properties learned during subscription.
+    public func info() async throws -> TrackInfo {
+        try await ffi.info()
+    }
+
+    /// Change this subscriber's delivery preferences.
+    public func update(subscription: Subscription) {
+        ffi.update(subscription: subscription)
+    }
+
     /// Cancel all current and future reads.
     public func cancel() {
         ffi.cancel()

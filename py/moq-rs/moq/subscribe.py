@@ -21,6 +21,7 @@ from .types import (
     FetchGroupOptions,
     Frame,
     Subscription,
+    TrackInfo,
     Video,
 )
 
@@ -143,6 +144,14 @@ class TrackConsumer:
         transports and older wire versions.
         """
         return await self._inner.recv_datagram()
+
+    async def info(self) -> TrackInfo:
+        """Return the publisher-side track properties."""
+        return await self._inner.info()
+
+    def update(self, subscription: Subscription) -> None:
+        """Change this subscriber's delivery preferences."""
+        self._inner.update(subscription)
 
     def cancel(self) -> None:
         self._inner.cancel()

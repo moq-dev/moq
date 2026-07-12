@@ -5,6 +5,7 @@ use bytes::Buf;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
+use crate::producer::MoqTrackInfo;
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::Subscription`].
 ///
@@ -252,12 +253,18 @@ impl TrackInner {
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
 	task: Task<TrackInner>,
+	control: moq_net::track::SubscriberControl,
+	info: moq_net::track::Info,
 }
 
 impl MoqTrackConsumer {
 	pub(crate) fn new(track: moq_net::track::Subscriber) -> Self {
+		let control = track.control();
+		let info = track.info().clone();
 		Self {
 			task: Task::new(TrackInner { track }),
+			control,
+			info,
 		}
 	}
 }
@@ -312,6 +319,16 @@ impl MoqTrackConsumer {
 		self.task
 			.run(|mut state| async move { state.recv_datagram().await })
 			.await
+	}
+
+	/// Return the publisher-side track properties learned during subscription.
+	pub async fn info(&self) -> Result<MoqTrackInfo, MoqError> {
+		MoqTrackInfo::try_from(&self.info)
+	}
+
+	/// Change this subscriber's delivery preferences.
+	pub fn update(&self, subscription: MoqSubscription) {
+		self.control.update(subscription.into());
 	}
 
 	pub fn cancel(&self) {

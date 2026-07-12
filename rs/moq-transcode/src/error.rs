@@ -5,7 +5,7 @@
 #[non_exhaustive]
 pub enum Error {
 	/// The source catalog has no rendition the transcoder can decode: it needs
-	/// an H.264 or H.265 rendition local to the source broadcast.
+	/// an H.264, H.265, or AV1 rendition local to the source broadcast.
 	#[error("no transcodable video rendition in the source catalog")]
 	NoSource,
 

@@ -114,13 +114,19 @@ track.write_frame(b'{"cmd": "ready"}')
 track.finish()
 
 # Subscribe
-track = await broadcast_consumer.subscribe_track("events")
+track = await broadcast_consumer.subscribe_track(
+    "events",
+    subscription=moq.Subscription(priority=10),
+)
+info = await track.info()
+track.update(moq.Subscription(priority=20, ordered=False))
 async for group in track:
     async for frame in group:
         print(frame)
 ```
 
 `write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering), and `update()` changes this subscriber's delivery preferences without resubscribing.
 
 ### Fetching raw groups
 
@@ -177,6 +183,24 @@ async for request in dynamic:
 ```
 
 Missing track subscriptions are accepted while the `BroadcastDynamic` object is alive. Each one arrives as a `TrackRequest`; call `accept()` to turn it into a `TrackProducer` (or `abort(code)` to reject the subscriber).
+
+### On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```python
+origin = moq.OriginProducer(cache_capacity_bytes=256 * 1024 * 1024)
+dynamic = origin.dynamic()
+
+async for request in dynamic:
+    if request.path == "events":
+        broadcast = moq.BroadcastProducer()
+        track = broadcast.publish_track("status")
+        request.accept(broadcast)
+        track.write_frame(b"ready")
+```
+
+The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
 ### Discovering broadcasts
 

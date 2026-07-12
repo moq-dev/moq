@@ -19,6 +19,7 @@ type (
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame
 	FetchGroupOptions  = ffi.MoqFetchGroupOptions
+	OriginOptions      = ffi.MoqOriginOptions
 	Subscription       = ffi.MoqSubscription
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo

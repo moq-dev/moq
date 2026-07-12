@@ -166,6 +166,28 @@ broadcast.Finish()
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
 
+## Raw Track Controls
+
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```go
+subscription := moq.Subscription{Priority: 10, Ordered: true}
+track, err := broadcast.SubscribeTrack("events", &subscription)
+if err != nil {
+	log.Fatal(err)
+}
+
+info, err := track.Info(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+if info.Timescale != nil {
+	fmt.Println("timescale", *info.Timescale)
+}
+
+track.Update(moq.Subscription{Priority: 20, Ordered: false})
+```
+
 ## Fetching raw groups
 
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:
@@ -228,6 +250,57 @@ for datagram, err := range consumer.Datagrams(ctx) {
 ```
 
 Datagrams are delivered as `Datagram{Sequence, TimestampUs, Payload}`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
+## On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```go
+capacity := uint64(256 * 1024 * 1024)
+origin := moq.NewOriginProducerWithOptions(moq.OriginOptions{
+	CacheCapacityBytes: &capacity,
+})
+
+dynamic := origin.Dynamic()
+defer dynamic.Cancel()
+
+for request, err := range dynamic.All(ctx) {
+	if err != nil {
+		if moq.IsShutdown(err) {
+			break
+		}
+		log.Fatal(err)
+	}
+
+	path, err := request.Path()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if path != "events" {
+		if err := request.Abort(404); err != nil {
+			log.Fatal(err)
+		}
+		continue
+	}
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		log.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("status", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := request.Accept(broadcast); err != nil {
+		log.Fatal(err)
+	}
+	if err := track.WriteFrame([]byte("ready")); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
 
 ## Local development
 

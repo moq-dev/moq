@@ -494,12 +494,52 @@ fn catalog_section_roundtrip() {
 #[test]
 fn publish_track_invalid_broadcast() {
 	let name = b"data";
-	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len()) } < 0);
+	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) } < 0);
+	let info = moq_track_info {
+		priority: 1,
+		ordered: true,
+		ordered_valid: true,
+		cache_ms: 0,
+		cache_valid: false,
+		timescale: 0,
+		timescale_valid: false,
+	};
+	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
 	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len()) } < 0);
 	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len()) } < 0);
 	assert!(moq_publish_track_close(9999) < 0);
 	assert!(moq_publish_group_close(9999) < 0);
+
+	let subscription = moq_subscription {
+		priority: 1,
+		ordered: true,
+		ordered_valid: true,
+		stale_ms: 0,
+		group_start: 0,
+		group_start_valid: false,
+		group_end: 0,
+		group_end_valid: false,
+	};
+	assert!(unsafe { moq_consume_track_update(9999, &subscription) } < 0);
+}
+
+#[test]
+fn publish_track_with_info_rejects_invalid_timescale() {
+	let broadcast = id(moq_publish_create());
+	let name = b"data";
+	let info = moq_track_info {
+		priority: 0,
+		ordered: false,
+		ordered_valid: false,
+		cache_ms: 0,
+		cache_valid: false,
+		timescale: 0,
+		timescale_valid: true,
+	};
+
+	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -509,7 +549,14 @@ fn raw_track_publish_consume() {
 
 	// A raw, non-media track: arbitrary bytes, no codec/container/catalog.
 	let track_name = b"data";
-	let track = id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len()) });
+	let track = id(unsafe {
+		moq_publish_track(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+		)
+	});
 
 	let path = b"raw-track";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
@@ -522,6 +569,7 @@ fn raw_track_publish_consume() {
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
+			std::ptr::null(),
 			Some(channel_callback),
 			frame_cb.ptr,
 		)
@@ -588,7 +636,14 @@ fn raw_track_datagram_publish_consume() {
 	let broadcast = id(moq_publish_create());
 
 	let track_name = b"events";
-	let track = id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len()) });
+	let track = id(unsafe {
+		moq_publish_track(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+		)
+	});
 
 	let path = b"raw-datagram";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
@@ -633,6 +688,96 @@ fn raw_track_datagram_publish_consume() {
 	// before the Callback (user_data) drops.
 	assert_eq!(dg_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_datagrams_close(consumer) < 0, "double-close should fail");
+	assert_eq!(moq_publish_track_close(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn raw_track_subscription_options_and_update() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	let track_name = b"data";
+	let info = moq_track_info {
+		priority: 3,
+		ordered: false,
+		ordered_valid: true,
+		cache_ms: 1_000,
+		cache_valid: true,
+		timescale: 1_000_000,
+		timescale_valid: true,
+	};
+	let track =
+		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
+
+	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
+	for payload in payloads {
+		assert_eq!(
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len()) },
+			0
+		);
+	}
+
+	let path = b"raw-track-options";
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let consume = request_broadcast(origin, path);
+
+	let frame_cb = Callback::new();
+	let subscription = moq_subscription {
+		priority: 5,
+		ordered: true,
+		ordered_valid: true,
+		stale_ms: 25,
+		group_start: 1,
+		group_start_valid: true,
+		group_end: 1,
+		group_end_valid: true,
+	};
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&subscription,
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, b"one");
+	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+
+	let update = moq_subscription {
+		group_end: 2,
+		..subscription
+	};
+	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, b"two");
+	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+
+	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_close(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);

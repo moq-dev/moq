@@ -27,8 +27,9 @@ final class SmokeTests: XCTestCase {
     }
 
     func testOriginProducerIsConstructible() {
-        let origin = OriginProducer()
+        let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
+        _ = origin.dynamic()
     }
 
     func testBroadcastProducerOpensTracks() throws {

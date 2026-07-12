@@ -7,13 +7,13 @@ pub enum Error {
 	#[error("no usable video encoder found (tried: {0})")]
 	NoEncoder(String),
 
-	/// No decoder matching the requested hardware preference could be opened
-	/// (none compiled in, or none available on this machine).
-	#[error("no usable H.264 decoder found (tried: {0})")]
+	/// No decoder matching the requested codec / hardware preference could be
+	/// opened (none compiled in, or none available on this machine).
+	#[error("no usable video decoder found (tried: {0})")]
 	NoDecoder(String),
 
-	/// A track's codec is not H.264, the only codec the native decoders support.
-	#[error("unsupported codec for native decode: {0} (only H.264 is supported)")]
+	/// A track's codec is not supported by the native decoders.
+	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),
 
 	/// The configured framerate was zero (would divide by zero / produce a

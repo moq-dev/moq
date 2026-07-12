@@ -18,3 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware, openh264 fallback). On an NVIDIA GPU the pipeline is zero-copy:
   NVDEC decodes and scales in hardware and NVENC encodes the CUDA frame in
   place; other decoders scale I420 on the CPU.
+- 8-bit 4:2:0 AV1 source renditions are eligible for transcoding when a native
+  decoder is available. On Linux with NVDEC, AV1 sources can feed existing
+  H.264/H.265 output rungs.

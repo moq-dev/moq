@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqAnnounced, MoqAnnouncedBroadcast, MoqAnnouncement, MoqOriginConsumer, MoqOriginProducer
+from moq_ffi import (
+    MoqAnnounced,
+    MoqAnnouncedBroadcast,
+    MoqAnnouncement,
+    MoqBroadcastRequest,
+    MoqOriginConsumer,
+    MoqOriginDynamic,
+    MoqOriginOptions,
+    MoqOriginProducer,
+)
 
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
@@ -75,6 +84,45 @@ class AnnouncedBroadcast:
         self._inner.cancel()
 
 
+class BroadcastRequest:
+    """A requested broadcast that has not been accepted yet."""
+
+    def __init__(self, inner: MoqBroadcastRequest) -> None:
+        self._inner = inner
+
+    @property
+    def path(self) -> str:
+        """The requested broadcast path."""
+        return self._inner.path()
+
+    def accept(self, broadcast: BroadcastProducer) -> None:
+        """Serve the request with an unannounced broadcast."""
+        self._inner.accept(broadcast._inner)
+
+    def abort(self, error_code: int) -> None:
+        """Abort the request with an application error code."""
+        self._inner.abort(error_code)
+
+
+class OriginDynamic:
+    """Async source of broadcasts requested by consumers."""
+
+    def __init__(self, inner: MoqOriginDynamic) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> BroadcastRequest:
+        return await self.requested_broadcast()
+
+    async def requested_broadcast(self) -> BroadcastRequest:
+        return BroadcastRequest(await self._inner.requested_broadcast())
+
+    def cancel(self) -> None:
+        self._inner.cancel()
+
+
 class OriginConsumer:
     """Wraps MoqOriginConsumer for discovering broadcasts."""
 
@@ -101,8 +149,8 @@ class OriginConsumer:
 class OriginProducer:
     """Wraps MoqOriginProducer for publishing broadcasts."""
 
-    def __init__(self) -> None:
-        self._inner = MoqOriginProducer()
+    def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
+        self._inner = MoqOriginProducer(MoqOriginOptions(cache_capacity_bytes=cache_capacity_bytes))
 
     @classmethod
     def _from_inner(cls, inner: MoqOriginProducer) -> OriginProducer:
@@ -113,6 +161,10 @@ class OriginProducer:
 
     def consume(self) -> OriginConsumer:
         return OriginConsumer(self._inner.consume())
+
+    def dynamic(self) -> OriginDynamic:
+        """Serve broadcasts that consumers request without an announcement."""
+        return OriginDynamic(self._inner.dynamic())
 
     def announce(self, path: str, broadcast: BroadcastProducer) -> None:
         """Advertise ``broadcast`` at ``path`` so subscribers can discover it."""

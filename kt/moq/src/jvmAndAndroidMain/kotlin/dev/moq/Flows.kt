@@ -11,6 +11,7 @@ import uniffi.moq.MoqAudioConsumer
 import uniffi.moq.MoqAudioFrame
 import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqBroadcastDynamic
+import uniffi.moq.MoqBroadcastRequest
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
 import uniffi.moq.MoqDatagram
@@ -20,6 +21,7 @@ import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqGroupRequest
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqOriginConsumer
+import uniffi.moq.MoqOriginDynamic
 import uniffi.moq.MoqTrackConsumer
 import uniffi.moq.MoqTrackDynamic
 import uniffi.moq.MoqTrackRequest
@@ -122,6 +124,16 @@ fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(requestedGroup())
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of broadcasts requested by consumers. */
+fun MoqOriginDynamic.requestedBroadcasts(): Flow<MoqBroadcastRequest> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(requestedBroadcast())
     }
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()

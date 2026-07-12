@@ -52,19 +52,22 @@ GPU-less builder and still starts on a GPU-less machine.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq-audio`'s `AudioConsumer`) subscribes to an
-H.264 or H.265 track and returns raw I420 frames. Backends are tried
+H.264, H.265, or AV1 track and returns raw I420 frames. Backends are tried
 hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | openh264 |
-| H.265 | none | VideoToolbox | Media Foundation (DXVA) | none |
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (`nvdec`) |
+| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (`nvdec`) |
+| AV1 | none | none | none | NVDEC (`nvdec`) |
 
-On macOS VideoToolbox decodes both codecs on hardware, pulling the parameter sets
-(SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
+On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
+sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
 description. On Windows the Microsoft decoder MFT runs synchronously with a
 Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
 (NVDEC / Intel / AMD). H.264 falls back to openh264 on a GPU-less host; H.265 has
 no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
-the inbox HEVC Video Extensions or a vendor one). A non-H.264/H.265 rendition
+the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
+H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
+for AV1 source to H.264/H.265 transcode rungs. A non-H.264/H.265/AV1 rendition
 yields `Error::UnsupportedCodec`.

@@ -344,6 +344,50 @@ async def test_dynamic_track_request_can_publish_media():
     media.finish()
 
 
+async def test_dynamic_broadcast_request():
+    origin = moq.OriginProducer(cache_capacity_bytes=4096)
+    dynamic = origin.dynamic()
+    consumer = origin.consume()
+
+    request_broadcast = asyncio.create_task(consumer.request_broadcast("dynamic/broadcast"))
+
+    request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
+    assert request.path == "dynamic/broadcast"
+
+    served = moq.BroadcastProducer()
+    track = served.publish_track("status")
+    request.accept(served)
+    with pytest.raises(Exception):
+        _ = request.path
+
+    broadcast = await asyncio.wait_for(request_broadcast, timeout=5.0)
+    track_consumer = await broadcast.subscribe_track("status")
+    payload = b"served dynamically"
+    track.write_frame(payload)
+
+    frame = await asyncio.wait_for(track_consumer.read_frame(), timeout=5.0)
+    assert frame == payload
+    track.finish()
+    served.finish()
+
+
+async def test_dynamic_broadcast_request_can_reject():
+    origin = moq.OriginProducer()
+    dynamic = origin.dynamic()
+    consumer = origin.consume()
+
+    request_broadcast = asyncio.create_task(consumer.request_broadcast("missing"))
+    request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
+    assert request.path == "missing"
+
+    request.abort(404)
+    with pytest.raises(Exception):
+        _ = request.path
+
+    with pytest.raises(Exception):
+        await asyncio.wait_for(request_broadcast, timeout=5.0)
+
+
 def test_raw_append_group_sequence_increments():
     """append_group hands out monotonically increasing sequence numbers."""
     broadcast = moq.BroadcastProducer()

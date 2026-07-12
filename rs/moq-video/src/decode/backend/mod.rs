@@ -1,18 +1,17 @@
-//! Pluggable H.264 / H.265 decoder backends.
+//! Pluggable video decoder backends.
 //!
 //! The mirror of [`encode::backend`](crate::encode). [`Backend`] is the seam
-//! between the access-unit prep (length-prefixed -> Annex-B conversion + keyframe
-//! gating, owned by [`Decoder`](super::Decoder)) and the codec itself. Every
-//! backend takes one **Annex-B** access unit (parameter sets inline ahead of each
-//! keyframe: SPS/PPS for H.264, VPS/SPS/PPS for H.265) and returns zero or more
-//! [`Decoded`] pictures (a raw CPU or GPU frame plus its timestamp).
+//! between the access-unit prep (keyframe gating plus any codec-specific payload
+//! conversion, owned by [`Decoder`](super::Decoder)) and the codec itself. H.264
+//! / H.265 backends take Annex-B access units with parameter sets inline ahead
+//! of each keyframe; AV1 backends take OBU temporal units directly.
 //!
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
 //! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
 //! / DXVA on Windows, NVDEC on Linux) before the openh264 software fallback,
 //! exactly like the encode side. Only backends that support the requested codec
-//! are considered: there is no software H.265 decoder, so an H.265 track has no
-//! fallback below the hardware path.
+//! are considered: there is no software H.265 or AV1 decoder, so those tracks
+//! have no fallback below the hardware path.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -38,6 +37,7 @@ mod nvdec;
 pub(crate) enum Codec {
 	H264,
 	H265,
+	Av1,
 }
 
 impl Codec {
@@ -45,6 +45,7 @@ impl Codec {
 		match self {
 			Codec::H264 => "H.264",
 			Codec::H265 => "H.265",
+			Codec::Av1 => "AV1",
 		}
 	}
 }
@@ -60,13 +61,13 @@ pub(crate) struct Decoded {
 	pub frame: Frame,
 }
 
-/// An opened decoder. Feed it Annex-B access units in decode order; get back zero
-/// or more decoded frames (zero while the decoder is still buffering, e.g. before
-/// the first keyframe's parameter sets).
+/// An opened decoder. Feed it prepared access units in decode order; get back
+/// zero or more decoded frames (zero while the decoder is still buffering, e.g.
+/// before the first keyframe's parameter sets).
 pub(crate) trait Backend: Send {
-	/// Decode one Annex-B access unit stamped with its presentation `timestamp`.
-	/// `keyframe` marks a keyframe (parameter sets are inline ahead of it). Takes an
-	/// owned [`Bytes`] so a backend can split out NAL slices without copying.
+	/// Decode one access unit stamped with its presentation `timestamp`.
+	/// `keyframe` marks a random-access frame. Takes an owned [`Bytes`] so a
+	/// backend can split codec units without copying.
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Decoded>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
@@ -95,13 +96,13 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(target_os = "windows")]
 	Candidate {
 		name: mediafoundation::NAME,
-		supports: |_| true,
+		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: mediafoundation::MediaFoundation::open,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvdec"))]
 	Candidate {
 		name: nvdec::NAME,
-		supports: |c| matches!(c, Codec::H264 | Codec::H265),
+		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Av1),
 		open: nvdec::Nvdec::open,
 	},
 ];

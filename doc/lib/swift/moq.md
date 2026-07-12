@@ -81,6 +81,16 @@ for try await announcement in announced {
 }
 ```
 
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```swift
+let track = try await announcement.broadcast.subscribeTrack(
+    name: "events",
+    subscription: Subscription(priority: 10))
+let info = try await track.info()
+track.update(subscription: Subscription(priority: 20, ordered: false))
+```
+
 ## Publish
 
 ```swift
@@ -161,6 +171,28 @@ for try await datagram in consumer.datagrams {
 ```
 
 Datagrams are delivered as `Datagram(sequence, timestampUs, payload)`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
+### On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```swift
+let origin = OriginProducer(cacheCapacityBytes: 256 * 1024 * 1024)
+let dynamic = origin.dynamic()
+
+for try await request in dynamic {
+    if try request.path == "events" {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "status")
+        try request.accept(broadcast: broadcast)
+        try track.writeFrame(Data("ready".utf8))
+    } else {
+        try request.abort(errorCode: 404)
+    }
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
 
 ## Cancellation
 
