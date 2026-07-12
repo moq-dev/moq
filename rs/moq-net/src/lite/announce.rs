@@ -1,8 +1,16 @@
+use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{Origin, OriginList, Path, coding::*};
 
 use super::{Message, Version};
+
+// lite-06 announce message types: an outer discriminator carried before the length
+// prefix, so each announcement is an independently-typed, length-delimited message
+// (mirroring SUBSCRIBE_START/END/DROP on the subscribe stream).
+const ANNOUNCE_START: u64 = 0;
+const ANNOUNCE_END: u64 = 1;
+const ANNOUNCE_RESTART: u64 = 2;
 
 /// Whether the negotiated version carries restart (REANNOUNCE) semantics. On lite-05 a restart
 /// travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on lite-06+
@@ -17,46 +25,132 @@ pub fn restart_supported(version: Version) -> bool {
 	)
 }
 
-/// ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast.
+/// An announcement on the Announce Stream, advertising or retracting a broadcast.
 ///
-/// On lite-06+ each `Active` implicitly assigns the next announce id (a per-stream
-/// ordinal starting at 0); `EndedId`/`Restart` reference that id instead of repeating
-/// the path. Older versions retract by path (`Ended`).
+/// On lite-06+ these are three independently-typed messages (`ANNOUNCE_START`,
+/// `ANNOUNCE_END`, `ANNOUNCE_RESTART`), each framed as `Type | Length | Body` like
+/// the subscribe stream's responses. Each `Active` (ANNOUNCE_START) implicitly assigns
+/// the next announce id (a per-stream ordinal starting at 0); `EndedId` (ANNOUNCE_END)
+/// and `Restart` (ANNOUNCE_RESTART) reference that id instead of repeating the path.
+/// Older versions send a single `ANNOUNCE_BROADCAST` message that retracts by path
+/// (`Ended`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
-	/// A broadcast is now available. Carries the path suffix and the hop chain.
+	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
+	/// Carries the path suffix and the hop chain, and assigns the next announce id.
 	Active { suffix: Path<'a>, hops: OriginList },
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path<'a>, hops: OriginList },
-	/// Lite06+: a broadcast is no longer available, retracted by announce id.
-	/// The id is retired; referencing it again is a protocol violation.
+	/// ANNOUNCE_END (lite-06+): a broadcast is no longer available, retracted by
+	/// announce id. The id is retired; referencing it again is a protocol violation.
 	EndedId { id: u64 },
-	/// Lite06+: atomically replace the announcement with this id (e.g. a new hop
-	/// chain after a relay failover). The id stays live.
+	/// ANNOUNCE_RESTART (lite-06+): atomically replace the announcement with this id
+	/// (e.g. a new hop chain after a relay failover). The id stays live.
 	Restart { id: u64, hops: OriginList },
 }
 
-impl Message for AnnounceBroadcast<'_> {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let status = AnnounceStatus::decode(r, version)?;
-
+impl Encode<Version> for AnnounceBroadcast<'_> {
+	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if version.has_announce_id() {
-			// Lite06+: the body depends on the status. Only `active` carries the path;
-			// `ended`/`restart` reference the announce id it implicitly assigned.
-			return Ok(match status {
-				AnnounceStatus::Active => Self::Active {
-					suffix: Path::decode(r, version)?,
-					hops: OriginList::decode(r, version)?,
-				},
-				AnnounceStatus::Ended => Self::EndedId {
-					id: u64::decode(r, version)?,
-				},
-				AnnounceStatus::Restart => Self::Restart {
-					id: u64::decode(r, version)?,
-					hops: OriginList::decode(r, version)?,
-				},
-			});
+			// Lite06+: outer type discriminator, then a size-prefixed body (like the
+			// subscribe stream). The body varies by type. Announce messages are small and
+			// infrequent, so the scratch buffer is cheap.
+			let mut body = Vec::new();
+			let typ = match self {
+				Self::Active { suffix, hops } => {
+					suffix.encode(&mut body, version)?;
+					hops.encode(&mut body, version)?;
+					ANNOUNCE_START
+				}
+				Self::EndedId { id } => {
+					id.encode(&mut body, version)?;
+					ANNOUNCE_END
+				}
+				Self::Restart { id, hops } => {
+					id.encode(&mut body, version)?;
+					hops.encode(&mut body, version)?;
+					ANNOUNCE_RESTART
+				}
+				// The pre-lite-06 path-form retraction has no place on lite-06.
+				Self::Ended { .. } => return Err(EncodeError::Version),
+			};
+			typ.encode(w, version)?;
+			(body.len() as u64).encode(w, version)?;
+			w.put_slice(&body);
+			return Ok(());
 		}
+
+		// Older versions: a single ANNOUNCE_BROADCAST message, size-prefixed, with the
+		// status carried inside the body.
+		let mut body = Vec::new();
+		match self {
+			Self::Active { suffix, hops } => {
+				AnnounceStatus::Active.encode(&mut body, version)?;
+				suffix.encode(&mut body, version)?;
+				encode_hops(&mut body, version, hops)?;
+			}
+			Self::Ended { suffix, hops } => {
+				AnnounceStatus::Ended.encode(&mut body, version)?;
+				suffix.encode(&mut body, version)?;
+				encode_hops(&mut body, version, hops)?;
+			}
+			// The id-referencing forms only exist on lite-06+.
+			Self::EndedId { .. } | Self::Restart { .. } => return Err(EncodeError::Version),
+		}
+		(body.len() as u64).encode(w, version)?;
+		w.put_slice(&body);
+		Ok(())
+	}
+}
+
+impl Decode<Version> for AnnounceBroadcast<'_> {
+	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+		if version.has_announce_id() {
+			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
+			let typ = u64::decode(buf, version)?;
+			let size = usize::decode(buf, version)?;
+			if buf.remaining() < size {
+				return Err(DecodeError::Short);
+			}
+			let mut body = buf.take(size);
+			let msg = match typ {
+				ANNOUNCE_START => Self::Active {
+					suffix: Path::decode(&mut body, version)?,
+					hops: OriginList::decode(&mut body, version)?,
+				},
+				ANNOUNCE_END => Self::EndedId {
+					id: u64::decode(&mut body, version)?,
+				},
+				ANNOUNCE_RESTART => Self::Restart {
+					id: u64::decode(&mut body, version)?,
+					hops: OriginList::decode(&mut body, version)?,
+				},
+				_ => return Err(DecodeError::InvalidMessage(typ)),
+			};
+			if body.remaining() > 0 {
+				return Err(DecodeError::Long);
+			}
+			return Ok(msg);
+		}
+
+		// Older versions: a single size-prefixed ANNOUNCE_BROADCAST with an inner status.
+		let size = usize::decode(buf, version)?;
+		if buf.remaining() < size {
+			return Err(DecodeError::Short);
+		}
+		let mut body = buf.take(size);
+		let msg = Self::decode_legacy(&mut body, version)?;
+		if body.remaining() > 0 {
+			return Err(DecodeError::Long);
+		}
+		Ok(msg)
+	}
+}
+
+impl AnnounceBroadcast<'_> {
+	/// Decode the body of a pre-lite-06 ANNOUNCE_BROADCAST (inner status + path + hops).
+	fn decode_legacy<R: Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let status = AnnounceStatus::decode(r, version)?;
 
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
@@ -85,42 +179,6 @@ impl Message for AnnounceBroadcast<'_> {
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops },
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
-	}
-
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match self {
-			Self::Active { suffix, hops } => {
-				AnnounceStatus::Active.encode(w, version)?;
-				suffix.encode(w, version)?;
-				encode_hops(w, version, hops)?;
-			}
-			Self::Ended { suffix, hops } => {
-				// Lite06+ retracts by announce id (`EndedId`), never by path.
-				if version.has_announce_id() {
-					return Err(EncodeError::Version);
-				}
-				AnnounceStatus::Ended.encode(w, version)?;
-				suffix.encode(w, version)?;
-				encode_hops(w, version, hops)?;
-			}
-			Self::EndedId { id } => {
-				if !version.has_announce_id() {
-					return Err(EncodeError::Version);
-				}
-				AnnounceStatus::Ended.encode(w, version)?;
-				id.encode(w, version)?;
-			}
-			Self::Restart { id, hops } => {
-				if !version.has_announce_id() {
-					return Err(EncodeError::Version);
-				}
-				AnnounceStatus::Restart.encode(w, version)?;
-				id.encode(w, version)?;
-				hops.encode(w, version)?;
-			}
-		}
-
-		Ok(())
 	}
 }
 
@@ -436,7 +494,7 @@ mod tests {
 		));
 	}
 
-	// An ended message on lite-06 is tiny: size prefix, status byte, id varint.
+	// An ANNOUNCE_END message on lite-06 is tiny: type byte, size prefix, id varint.
 	#[test]
 	fn ended_by_id_is_three_bytes() {
 		let mut buf = bytes::BytesMut::new();
