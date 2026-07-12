@@ -1,15 +1,25 @@
-//! Internal metrics/observability listener.
+//! Internal (ops) listener.
 //!
 //! A tiny plain-HTTP server, separate from the customer-facing [`Web`](crate::Web)
-//! server, that exposes this node's own traffic counters as Prometheus text
-//! exposition at `/metrics` (plus a `/health` liveness mirror). It's a distinct
-//! plane from both the customer `web` surface and the MoQ `.stats` broadcast:
-//! the same underlying atomics, but a different transport and audience (an ops
-//! scraper, not a customer or the dashboard/billing aggregators).
+//! server, for endpoints that should never touch the public port. It's a
+//! trusted-plane surface named for WHO may reach it, not for any single
+//! endpoint, so it's the home for operational endpoints in general.
 //!
-//! The endpoint is unauthenticated, so bind it only to a trusted plane -
+//! Today it serves:
+//! - `/metrics` - this node's own traffic counters as Prometheus text
+//!   exposition. A distinct plane from both the customer `web` surface and the
+//!   MoQ `.stats` broadcast: the same atomics, but a different transport and
+//!   audience (an ops scraper, not a customer or the dashboard/billing
+//!   aggregators).
+//! - `/health` - a liveness mirror of the public probe, for internal checks
+//!   that don't want to hit the customer port.
+//!
+//! Everything here is unauthenticated, so bind it only to a trusted plane -
 //! loopback for a co-located scraper/agent, or a private overlay address; see
-//! [`MetricsConfig::listen`]. Unset by default (opt-in).
+//! [`InternalConfig::listen`]. Unset by default (opt-in). Any future endpoint
+//! added here inherits that "unauthenticated, trusted-plane-only" contract; a
+//! mutating/control endpoint would need its own auth and doesn't belong on an
+//! unauthenticated bind as-is.
 
 use std::net;
 
@@ -23,41 +33,40 @@ use axum::{
 };
 use clap::Parser;
 
-/// Configuration for the internal metrics/health listener.
+/// Configuration for the internal (ops) listener.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct MetricsConfig {
-	/// Socket address for the internal metrics listener (plain HTTP), serving
-	/// `/metrics` and `/health`.
+pub struct InternalConfig {
+	/// Socket address for the internal listener (plain HTTP), serving the ops
+	/// endpoints (`/metrics`, `/health`).
 	///
-	/// This endpoint is unauthenticated, so bind it only to a trusted plane:
+	/// These endpoints are unauthenticated, so bind it only to a trusted plane:
 	/// loopback (e.g. `127.0.0.1:9101`) for a co-located scraper/agent, or a
 	/// private overlay address. Never the public internet. Plain HTTP is
 	/// intentional: on loopback there's nothing to encrypt, and a private
 	/// overlay (e.g. a mesh VPN) already provides transport encryption and peer
-	/// identity. Unset (the default) disables the listener, and `/metrics` is
-	/// then not served anywhere.
-	#[arg(long = "metrics-listen", env = "MOQ_METRICS_LISTEN")]
+	/// identity. Unset (the default) disables the listener entirely.
+	#[arg(long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
 	pub listen: Option<net::SocketAddr>,
 }
 
-/// The internal metrics service: a plain-HTTP server over the node's [`Stats`].
+/// The internal (ops) service: a plain-HTTP server over the node's [`Stats`].
 ///
 /// [`Stats`]: moq_net::Stats
-pub struct Metrics {
-	config: MetricsConfig,
+pub struct Internal {
+	config: InternalConfig,
 	stats: moq_net::Stats,
 }
 
-impl Metrics {
+impl Internal {
 	/// Create the service from its config and the node's stats handle.
-	pub fn new(config: MetricsConfig, stats: moq_net::Stats) -> Self {
+	pub fn new(config: InternalConfig, stats: moq_net::Stats) -> Self {
 		Self { config, stats }
 	}
 
-	/// Build the router (`/metrics` + `/health`), with the stats handle applied
-	/// as state. Exposed so embedders can mount it on their own listener.
+	/// Build the ops router (`/metrics` + `/health`), with the stats handle
+	/// applied as state. Exposed so embedders can mount it on their own listener.
 	pub fn routes(&self) -> Router {
 		Router::new()
 			.route("/metrics", get(serve_metrics))
@@ -65,7 +74,7 @@ impl Metrics {
 			.with_state(self.stats.clone())
 	}
 
-	/// Serve on [`MetricsConfig::listen`] until it shuts down.
+	/// Serve on [`InternalConfig::listen`] until it shuts down.
 	///
 	/// When no listen address is configured the future stays pending (never
 	/// resolves), so it drops cleanly into a `select!` as a disabled no-op -
@@ -77,11 +86,11 @@ impl Metrics {
 		};
 
 		let router = self.routes().into_make_service();
-		let listener = moq_native::bind::tcp(listen).context("failed to bind metrics listener")?;
+		let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
 		axum_server::from_tcp(listener)?
 			.serve(router)
 			.await
-			.context("metrics server failed")
+			.context("internal server failed")
 	}
 }
 

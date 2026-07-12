@@ -172,7 +172,7 @@ impl Web {
 	///
 	/// This is the public-facing router (customer media routes plus a liveness
 	/// probe). `/metrics` is deliberately NOT here: node traffic counters ride
-	/// the separate internal listener ([`Metrics`](crate::Metrics)) so they're
+	/// the separate internal listener ([`Internal`](crate::Internal)) so they're
 	/// never exposed on the public listener.
 	///
 	/// The returned router already has relay state applied, so embedders can
