@@ -336,6 +336,8 @@ Requires modern browser features:
 - Firefox (behind flag)
 - Safari (future support planned)
 
+On macOS the browser's default microphone constraints engage the system voice processor: auto gain control can slowly pull the capture level down, and other system audio is ducked while the mic is live. Pass `{ echoCancellation: false, autoGainControl: false, noiseSuppression: false }` via the microphone source's `constraints` to capture the raw signal instead (expect echo without headphones).
+
 ## Production Deployment
 
 For production, you'll want to:
