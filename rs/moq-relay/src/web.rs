@@ -45,11 +45,6 @@ pub struct WebConfig {
 	#[serde(default)]
 	pub https: HttpsConfig,
 
-	/// Internal operational listener for `/metrics` and `/health`.
-	#[command(flatten)]
-	#[serde(default)]
-	pub internal: InternalConfig,
-
 	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
@@ -63,29 +58,6 @@ pub struct WebConfig {
 pub struct HttpConfig {
 	/// Socket address to bind the HTTP listener to.
 	#[arg(long = "web-http-listen", id = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
-	pub listen: Option<net::SocketAddr>,
-}
-
-/// Internal operational listener configuration (plain HTTP).
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct InternalConfig {
-	/// Socket address for the internal plain-HTTP listener serving `/metrics`
-	/// and `/health`.
-	///
-	/// This endpoint is unauthenticated, so bind it only to a trusted plane:
-	/// loopback (e.g. `127.0.0.1:9100`) for a co-located scraper/agent, or a
-	/// private overlay address. Never the public internet. Plain HTTP is
-	/// intentional: on loopback there's nothing to encrypt, and a private
-	/// overlay (e.g. a mesh VPN) already provides transport encryption and peer
-	/// identity. Unset (the default) disables the listener, and `/metrics` is
-	/// then not served anywhere.
-	#[arg(
-		long = "web-internal-listen",
-		id = "web-internal-listen",
-		env = "MOQ_WEB_INTERNAL_LISTEN"
-	)]
 	pub listen: Option<net::SocketAddr>,
 }
 
@@ -199,9 +171,9 @@ impl Web {
 	/// Build the default relay web router.
 	///
 	/// This is the public-facing router (customer media routes plus a liveness
-	/// probe). `/metrics` is deliberately NOT here: it rides the separate
-	/// internal listener ([`internal_routes`](Self::internal_routes)) so node
-	/// counters are never exposed on the public listener.
+	/// probe). `/metrics` is deliberately NOT here: node traffic counters ride
+	/// the separate internal listener ([`Metrics`](crate::Metrics)) so they're
+	/// never exposed on the public listener.
 	///
 	/// The returned router already has relay state applied, so embedders can
 	/// merge in their own state-applied routers before calling [`serve`](Self::serve).
@@ -229,19 +201,6 @@ impl Web {
 		};
 
 		app.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
-			.with_state(self.state.clone())
-	}
-
-	/// Build the internal operational router served on [`InternalConfig::listen`].
-	///
-	/// Carries `/metrics` (this node's traffic counters) and a `/health` mirror.
-	/// Both are unauthenticated, which is why this router belongs on a listener
-	/// bound to a trusted plane (loopback or a private overlay), never the
-	/// public one.
-	pub fn internal_routes(&self) -> Router {
-		Router::new()
-			.route("/health", get(serve_health))
-			.route("/metrics", get(serve_metrics))
 			.with_state(self.state.clone())
 	}
 
@@ -287,22 +246,9 @@ impl Web {
 			None
 		};
 
-		// Separate plain-HTTP listener for operational endpoints (`/metrics`,
-		// `/health`), kept off the public listeners. Serves the internal router
-		// only, not the embedder-merged `app`.
-		let internal = if let Some(listen) = self.config.internal.listen {
-			let router = self.internal_routes().into_make_service();
-			let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
-			let server = axum_server::from_tcp(listener)?;
-			Some(server.serve(router))
-		} else {
-			None
-		};
-
 		tokio::select! {
 			Some(res) = async move { Some(http?.await) } => res?,
 			Some(res) = async move { Some(https?.await) } => res?,
-			Some(res) = async move { Some(internal?.await) } => res?,
 			else => {},
 		};
 
@@ -477,114 +423,6 @@ async fn serve_landing() -> Response {
 /// process, not the relay.
 async fn serve_health() -> Response {
 	(StatusCode::OK, "ok\n").into_response()
-}
-
-/// Prometheus text-exposition metrics for this node's own MoQ traffic counters
-/// (bytes/frames/groups, subscriptions, viewers, and connected sessions),
-/// summed across broadcasts and split by `tier`/`role`.
-///
-/// Unauthenticated, so it's served only on the internal listener
-/// ([`InternalConfig::listen`]), never the public one; a scraper needs no JWT.
-/// Host system metrics (CPU/memory/disk/network) are deliberately out of scope:
-/// run a dedicated node exporter for those, per the relay's separation of
-/// concerns. Returns the current cumulative snapshot; a downstream scraper
-/// derives rates and live counts (`open - closed`).
-async fn serve_metrics(State(state): State<Arc<WebState>>) -> Response {
-	let body = render_metrics(&state.cluster.stats.snapshot());
-	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
-}
-
-/// Render a [`moq_net::StatsSnapshot`] as Prometheus text exposition (v0.0.4).
-///
-/// Hand-formatted rather than pulling in a metrics registry crate: the atomics
-/// already are the registry, and a snapshot is a fixed handful of labeled
-/// counters, so a registry would only add a second source of truth to keep in
-/// sync.
-fn render_metrics(snap: &moq_net::StatsSnapshot) -> String {
-	use std::fmt::Write as _;
-
-	let traffic = snap.traffic();
-	let mut out = String::new();
-
-	// One HELP/TYPE header followed by the four (tier, role) rows for a counter
-	// selected out of `CounterTotals` by `field`.
-	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::CounterTotals) -> u64| {
-		let _ = writeln!(out, "# HELP {name} {help}");
-		let _ = writeln!(out, "# TYPE {name} counter");
-		for (tier, role, totals) in &traffic {
-			let _ = writeln!(
-				out,
-				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
-				tier.as_str(),
-				role.as_str(),
-				field(totals)
-			);
-		}
-	};
-
-	counter(
-		&mut out,
-		"moq_relay_bytes_total",
-		"Media payload bytes transferred.",
-		|c| c.bytes,
-	);
-	counter(&mut out, "moq_relay_frames_total", "Media frames transferred.", |c| {
-		c.frames
-	});
-	counter(&mut out, "moq_relay_groups_total", "Media groups transferred.", |c| {
-		c.groups
-	});
-	counter(
-		&mut out,
-		"moq_relay_subscriptions_opened_total",
-		"Track subscriptions opened.",
-		|c| c.subscriptions,
-	);
-	counter(
-		&mut out,
-		"moq_relay_subscriptions_closed_total",
-		"Track subscriptions closed; subtract from opened for live subscriptions.",
-		|c| c.subscriptions_closed,
-	);
-	counter(
-		&mut out,
-		"moq_relay_viewers_opened_total",
-		"Distinct (broadcast, session) subscriptions opened.",
-		|c| c.broadcasts,
-	);
-	counter(
-		&mut out,
-		"moq_relay_viewers_closed_total",
-		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
-		|c| c.broadcasts_closed,
-	);
-
-	// Sessions are per-tier only (no role), so they don't fit the helper above.
-	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
-	let _ = writeln!(out, "# TYPE moq_relay_sessions_opened_total counter");
-	for (tier, sessions) in &snap.sessions() {
-		let _ = writeln!(
-			out,
-			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
-			sessions.sessions
-		);
-	}
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_sessions_closed_total Connected sessions closed; subtract from opened for live sessions."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_sessions_closed_total counter");
-	for (tier, sessions) in &snap.sessions() {
-		let _ = writeln!(
-			out,
-			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
-			sessions.sessions_closed
-		);
-	}
-
-	out
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
@@ -981,44 +819,6 @@ mod tests {
 		assert!(
 			res.is_err(),
 			"empty PEM must be rejected to avoid a silently disabled verifier"
-		);
-	}
-
-	/// The `/metrics` renderer emits well-formed Prometheus exposition: a
-	/// HELP/TYPE header per metric and a labeled line carrying the live counter
-	/// value, summed across broadcasts.
-	#[tokio::test]
-	async fn metrics_render_exposition() {
-		use moq_net::{Origin, Stats, StatsConfig, Tier};
-
-		let origin = Origin::random().produce();
-		let stats = Stats::new(StatsConfig::new().with_origin(origin));
-
-		let track = stats
-			.tier(Tier::External)
-			.broadcast("demo/x")
-			.publisher()
-			.track("video");
-		track.bytes(1234);
-		let _session = stats.tier(Tier::External).session("acme");
-
-		let body = render_metrics(&stats.snapshot());
-
-		assert!(
-			body.contains("# TYPE moq_relay_bytes_total counter"),
-			"type header:\n{body}"
-		);
-		assert!(
-			body.contains("moq_relay_bytes_total{tier=\"external\",role=\"publisher\"} 1234"),
-			"external egress bytes:\n{body}"
-		);
-		assert!(
-			body.contains("moq_relay_bytes_total{tier=\"internal\",role=\"subscriber\"} 0"),
-			"idle tier still emitted:\n{body}"
-		);
-		assert!(
-			body.contains("moq_relay_sessions_opened_total{tier=\"external\"} 1"),
-			"session presence:\n{body}"
 		);
 	}
 

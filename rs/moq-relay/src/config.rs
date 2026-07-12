@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, MetricsConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -44,6 +44,11 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub stats: StatsConfig,
+
+	/// Internal metrics/health listener. Disabled unless `metrics.listen` is set.
+	#[command(flatten)]
+	#[serde(default)]
+	pub metrics: MetricsConfig,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
