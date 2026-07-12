@@ -28,6 +28,10 @@ use web_async::Lock;
 /// the latest cached group).
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The link cost applied when neither side priced the connection (lite-06+).
+/// One per link matches the legacy hop-count metric.
+const DEFAULT_LINK_COST: u64 = 1;
+
 pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin into which remote broadcasts are inserted.
@@ -42,6 +46,11 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
+	/// The cost of this session's link (lite-06+), added to the transit cost of
+	/// every announce received on it. `Some` on dialed sessions (the dialer's
+	/// connect config prices the link); `None` on accepted sessions, which use the
+	/// cost the dialer declared in its SETUP, defaulting to 1.
+	pub link_cost: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -71,6 +80,17 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	/// Locally-configured link cost; see [`SubscriberConfig::link_cost`].
+	link_cost: Option<u64>,
+}
+
+/// One announced broadcast this session inserted into the origin: the announce
+/// guard plus the shared cost cell an ANNOUNCE_UPDATE mutates in place.
+struct AnnouncedBroadcast {
+	// Held only for its Drop, which unannounces the broadcast.
+	#[allow(dead_code)]
+	publish: origin::Publish,
+	cost: crate::broadcast::Cost,
 }
 
 #[derive(Clone)]
@@ -102,6 +122,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			link_cost: config.link_cost,
 		}
 	}
 
@@ -210,6 +231,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			(None, 0)
 		};
 
+		// The cost this session adds to every received route's transit (lite-06+).
+		// Dialed sessions price the link from their own connect config; accepted
+		// sessions use the cost the dialer declared in its SETUP so both ends price
+		// the link identically. The SETUP always arrives on lite-06 (it rides the
+		// lite-05 Setup Stream), so this can't block indefinitely.
+		let link_cost = if self.version.has_route_cost() {
+			match self.link_cost {
+				Some(cost) => cost,
+				None => self.peer_setup.link_cost().await.unwrap_or(DEFAULT_LINK_COST),
+			}
+		} else {
+			DEFAULT_LINK_COST
+		};
+
 		let mut producers = HashMap::new();
 		// Per-broadcast subscriber-side stats guards. Dropping the guard records
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
@@ -239,7 +274,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					// Lite01/02 don't carry hop information; the broadcast starts with
 					// an empty chain.
-					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
+					if self.start_announce(
+						path.clone(),
+						crate::OriginList::new(),
+						crate::broadcast::Cost::default(),
+						responder_origin,
+						&mut producers,
+					)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -271,7 +312,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await? {
 			match announce {
-				lite::AnnounceBroadcast::Active { suffix, hops } => {
+				lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
 					// Count the broadcast name length (not the encoded message size) for
@@ -279,11 +320,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.stats
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
+					let cost = Self::effective_cost(cost, link_cost);
 					if lite::restart_supported(self.version) && producers.contains_key(&path) {
 						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Older versions fall through to start_announce,
 						// which rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
+						if self.restart_announce(path.clone(), hops, cost, responder_origin, &mut producers)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -291,7 +333,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, cost, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -302,6 +344,28 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 							connecting.take();
 						}
 					}
+				}
+				lite::AnnounceBroadcast::Update { suffix, cost } => {
+					let path = prefix.join(&suffix);
+					// The matching Active may have been dropped as a reflected loop;
+					// its cost updates are just as irrelevant here.
+					let Some(entry) = producers.get(&path) else {
+						tracing::debug!(broadcast = %self.log_path(&path), "cost update for unknown broadcast; ignoring");
+						continue;
+					};
+					// Flip the shared cost cell first (forwarding reads it live), then
+					// re-rank after a deterministic per-node delay: two relays whose
+					// routes prefer each other act at different times, so they don't
+					// swap into each other simultaneously (the first mover's re-announce
+					// suppresses the loser's candidate via the hop-chain reflection drop).
+					entry.cost.set(cost.base, Some(cost.transit.saturating_add(link_cost)));
+					let origin = self.origin.clone();
+					let refresh_path = path.clone();
+					let jitter = Duration::from_millis(self.self_origin.id() % 512);
+					web_async::spawn(async move {
+						web_async::time::sleep(jitter).await;
+						origin.refresh_broadcast(&refresh_path);
+					});
 				}
 				lite::AnnounceBroadcast::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -394,12 +458,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
+		// The route cost at this node (wire cost plus this link's cost), already
+		// resolved by [`Self::effective_cost`].
+		cost: crate::broadcast::Cost,
 		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, origin::Publish>,
+		producers: &mut HashMap<PathOwned, AnnouncedBroadcast>,
 	) -> Result<bool, Error> {
 		if let Some(responder) = responder_origin {
 			// If the chain is already full, drop the announce. This is the same decision
@@ -444,10 +511,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Duplicate);
 		}
 
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), ?cost, "announce");
 
 		let broadcast = broadcast::Info {
 			hops,
+			cost: cost.clone(),
 			origin: self.origin.info(),
 		}
 		.produce();
@@ -464,12 +532,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		};
 
-		producers.insert(path.clone(), publish);
+		producers.insert(path.clone(), AnnouncedBroadcast { publish, cost });
 
 		// Run the broadcast in the background until all consumers are dropped.
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
 
 		Ok(true)
+	}
+
+	/// Resolve a received wire cost into this node's effective [`broadcast::Cost`]:
+	/// the sender's transit plus this link's cost. An absent wire cost (pre-lite-06
+	/// peer) leaves the transit unset, deriving it from the final hop count, which
+	/// reproduces the legacy shortest-hop-chain ordering exactly.
+	fn effective_cost(cost: Option<lite::RouteCost>, link_cost: u64) -> crate::broadcast::Cost {
+		match cost {
+			Some(cost) => crate::broadcast::Cost::new(cost.base, Some(cost.transit.saturating_add(link_cost))),
+			None => crate::broadcast::Cost::default(),
+		}
 	}
 
 	/// Handle a RESTART (a duplicate ANNOUNCE): atomically replace the broadcast at `path`.
@@ -482,11 +561,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
+		// The route cost at this node; see [`Self::start_announce`].
+		cost: crate::broadcast::Cost,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, origin::Publish>,
+		producers: &mut HashMap<PathOwned, AnnouncedBroadcast>,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
 		let reflected = match responder_origin {
@@ -500,10 +581,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), ?cost, "restart");
 
 		let broadcast = broadcast::Info {
 			hops,
+			cost: cost.clone(),
 			origin: self.origin.info(),
 		}
 		.produce();
@@ -517,7 +599,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		};
 
-		let old = producers.insert(path.clone(), publish);
+		let old = producers.insert(path.clone(), AnnouncedBroadcast { publish, cost });
 		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
 
 		// Drop the replaced broadcast's guard last, unannouncing it now that the replacement is live.

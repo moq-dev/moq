@@ -188,7 +188,7 @@ impl Request {
 					request: Box::new(request),
 				})
 			}
-			alpn if moq_net::ALPNS.contains(&alpn) => Ok(Self::Quic {
+			alpn if moq_net::is_moq_alpn(alpn) => Ok(Self::Quic {
 				request: web_transport_iroh::QuicRequest::accept(conn),
 			}),
 			_ => Err(Error::UnsupportedAlpn(alpn)),
@@ -268,7 +268,7 @@ pub(crate) async fn connect(
 
 			web_transport_iroh::Session::connect_h3(conn, request).await?
 		}
-		alpn if moq_net::ALPNS.contains(&alpn) => {
+		alpn if moq_net::is_moq_alpn(alpn) => {
 			let conn = connecting.await?;
 			web_transport_iroh::Session::raw(conn)
 		}

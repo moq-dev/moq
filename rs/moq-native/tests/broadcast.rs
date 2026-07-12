@@ -553,6 +553,168 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("server task failed");
 }
 
+/// Lite06 route costs end-to-end: the announce carries the publisher's base
+/// cost, the receiver adds its configured link cost, a cold broadcast (no
+/// consumers) advertises its hop-derived transit, and flips (going hot, a base
+/// cost change) propagate as ANNOUNCE_UPDATEs that mutate the receiver's shared
+/// cost cell in place, without re-announcing.
+async fn lite06_route_cost(scheme: &str) {
+	// ── publisher (server) ──────────────────────────────────────────
+	let pub_origin = Origin::random().produce();
+
+	// A hot source: a live track producer means the broadcast is actively
+	// flowing, so its transit advertises as zero (marginal cost).
+	let hot = moq_net::broadcast::Info::new().with_cost_base(7).produce();
+	let mut hot_track = hot.clone().create_track("video", None).expect("create track");
+	let hot_publish = pub_origin.publish_broadcast("hot", &hot).expect("publish hot");
+
+	// A cold source: synthetic hops, no tracks. Its transit derives from the hop
+	// count (the legacy metric), carried explicitly on the lite-06 wire.
+	let mut cold_info = moq_net::broadcast::Info::new();
+	cold_info.hops = moq_net::OriginList::try_from(
+		[42u64, 43, 44]
+			.into_iter()
+			.map(|id| moq_net::Origin::new(id).unwrap())
+			.collect::<Vec<_>>(),
+	)
+	.unwrap();
+	let cold = cold_info.produce();
+	let cold_publish = pub_origin.publish_broadcast("cold", &cold).expect("publish cold");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+
+	// This link costs 3 (the dialer prices it).
+	let client = client_config.init().expect("failed to init client").with_link_cost(3);
+	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+
+	// Client-driven triggers so the test has no timing races.
+	let (flip_base_tx, flip_base_rx) = tokio::sync::oneshot::channel::<()>();
+	let (go_hot_tx, go_hot_rx) = tokio::sync::oneshot::channel::<()>();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+
+		// On the first trigger, drop the hot source's base cost 7 -> 2. The cost
+		// cell is shared, so the session's cost tick notices and sends an update.
+		flip_base_rx.await.expect("flip trigger dropped");
+		hot.info().cost.set(2, None);
+
+		// On the second trigger, the cold source goes hot: a live track producer.
+		go_hot_rx.await.expect("go-hot trigger dropped");
+		let _cold_track = cold.clone().create_track("audio", None).expect("create track");
+
+		let _keep = (&hot_track, &hot_publish, &cold_publish);
+		let _ = session.closed().await;
+		hot_track.abort(moq_net::Error::Cancel).ok();
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// Collect both announces (order is not guaranteed).
+	let mut hot_bc = None;
+	let mut cold_bc = None;
+	for _ in 0..2 {
+		let (path, event) = tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
+		let bc = event.broadcast().expect("expected announce, got unannounce");
+		match path.as_str() {
+			"hot" => hot_bc = Some(bc),
+			"cold" => cold_bc = Some(bc),
+			other => panic!("unexpected announce: {other}"),
+		}
+	}
+	let hot_bc = hot_bc.expect("hot not announced");
+	let cold_bc = cold_bc.expect("cold not announced");
+
+	// Hot source: base 7 forwarded unchanged; transit 0 (actively flowing) plus
+	// our link cost of 3.
+	assert_eq!(hot_bc.info().cost.base(), 7);
+	assert_eq!(hot_bc.info().cost.transit(), Some(3));
+
+	// Cold source: no base; transit is its hop count (3) plus our link cost (3).
+	assert_eq!(cold_bc.info().cost.base(), 0);
+	assert_eq!(cold_bc.info().cost.transit(), Some(6));
+
+	// Await one cost cell reaching the expected value: updates arrive on the
+	// publisher's cost tick (~1s) plus receiver-side jitter, in place, with no
+	// re-announce.
+	async fn wait_cost(bc: &moq_net::broadcast::Consumer, base: u64, transit: Option<u64>) {
+		tokio::time::timeout(TIMEOUT, async {
+			loop {
+				let cost = &bc.info().cost;
+				if cost.base() == base && cost.transit() == transit {
+					return;
+				}
+				tokio::time::sleep(Duration::from_millis(50)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| {
+			panic!(
+				"cost never reached base={base} transit={transit:?}; last was {:?}",
+				bc.info().cost
+			)
+		});
+	}
+
+	// The publisher drops the hot source's base cost to 2.
+	flip_base_tx.send(()).expect("server task gone");
+	wait_cost(&hot_bc, 2, Some(3)).await;
+
+	// The cold source goes hot: transit resets to zero (plus our link cost).
+	go_hot_tx.send(()).expect("server task gone");
+	wait_cost(&cold_bc, 0, Some(3)).await;
+
+	// No re-announces happened: the updates mutated the existing broadcasts.
+	assert!(announcements.try_next().is_none(), "cost updates must not re-announce");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tokio::test]
+async fn broadcast_moq_lite_06_route_cost() {
+	lite06_route_cost("moqt").await;
+}
+
+/// Lite06 inherits the whole lite-05 framing; a plain publish/subscribe
+/// round-trip must work when both sides negotiate it.
+#[tokio::test]
+async fn broadcast_moq_lite_06_wip() {
+	broadcast_test("moqt", Some("moq-lite-06-wip"), Some("moq-lite-06-wip")).await;
+}
+
+/// A lite-06 client falls back to lite-05 against a server that doesn't opt in.
+#[tokio::test]
+async fn broadcast_moq_lite_06_client_downgrades() {
+	broadcast_test("moqt", None, Some("moq-lite-05")).await;
+}
+
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
 #[tracing_test::traced_test]

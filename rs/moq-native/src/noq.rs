@@ -483,7 +483,7 @@ impl NoqRequest {
 					.map_err(Error::RecvRequest)?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_net::ALPNS.contains(&alpn) => {
+			alpn if moq_net::is_moq_alpn(alpn) => {
 				if host.is_empty() {
 					return Err(Error::MissingServerName);
 				}

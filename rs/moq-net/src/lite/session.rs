@@ -64,6 +64,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	peer_setup: Option<Setup>,
+	// The locally-configured cost of this session's link (lite-06+). `Some` on
+	// dialed sessions (the dialer's connect config prices the link); `None` on
+	// accepted ones, which price it from the dialer's SETUP instead.
+	link_cost: Option<u64>,
 ) -> Result<(Option<BandwidthConsumer>, Connecting), Error> {
 	let recv_bw = BandwidthProducer::new();
 
@@ -78,12 +82,12 @@ pub fn start<S: web_transport_trait::Session>(
 	};
 
 	// Connection-progress tracker. Only block on the initial set for versions with an
-	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05). For other
+	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05+). For other
 	// versions we drop the producer here, which closes the channel and makes
 	// `Connecting::ready` resolve immediately. An empty subscribe origin also resolves
 	// immediately because the subscriber arms with a prefix count of zero.
 	let (connecting_producer, connecting) = Connecting::new();
-	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05) {
+	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02) || version.has_announce_ok() {
 		Some(connecting_producer)
 	} else {
 		None
@@ -137,6 +141,7 @@ pub fn start<S: web_transport_trait::Session>(
 		stats,
 		version,
 		peer_setup,
+		link_cost,
 	});
 
 	web_async::spawn(async move {
