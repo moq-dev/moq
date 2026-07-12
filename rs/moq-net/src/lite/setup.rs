@@ -9,6 +9,8 @@ use super::{Message, Parameters, Version};
 const PARAM_PROBE: u64 = 0x1;
 /// Setup Parameter id for the request Path (client-only, URI-less transports).
 const PARAM_PATH: u64 = 0x2;
+/// Setup Parameter id for the client's intended [`Role`] (client-only).
+const PARAM_ROLE: u64 = 0x3;
 
 /// The probe capability an endpoint advertises in SETUP.
 ///
@@ -46,6 +48,61 @@ impl ProbeLevel {
 	}
 }
 
+/// The direction a client intends to use the session for.
+///
+/// A client advertises this in its SETUP so the server can reject a token that lacks
+/// the matching scope during the handshake, instead of accepting a connection that
+/// then silently carries no media (a subscribe-only token used to publish, or vice
+/// versa). It only ever narrows what the server grants, so it is not a security
+/// boundary: the server still enforces the token's scope regardless.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+	/// The client will publish tracks (ingest); the server must consume.
+	Publisher,
+	/// The client will subscribe to tracks (egress); the server must publish.
+	Subscriber,
+	/// The client may do either, or declined to say. The default, and the behavior of
+	/// clients that predate this parameter (they omit it, and it decodes back to this).
+	#[default]
+	Both,
+}
+
+impl Role {
+	/// Map the wire value to a role. `0` and any unrecognized future value fall back to
+	/// [`Both`](Role::Both): the draft requires a receiver that does not recognize the
+	/// value to treat it as `Both`, so a newer client can't break an older server (it
+	/// just loses the early reject and defers fully to the token's scope).
+	fn from_code(code: u64) -> Self {
+		match code {
+			1 => Role::Publisher,
+			2 => Role::Subscriber,
+			_ => Role::Both,
+		}
+	}
+
+	/// The wire value for a directional role, or `None` for [`Role::Both`], which is the
+	/// absence of the parameter and so is never encoded.
+	fn to_code(self) -> Option<u64> {
+		match self {
+			Role::Publisher => Some(1),
+			Role::Subscriber => Some(2),
+			Role::Both => None,
+		}
+	}
+
+	/// Derive the advertised role from which origins a client wired up: publish-only is
+	/// a [`Publisher`](Role::Publisher), consume-only a [`Subscriber`](Role::Subscriber),
+	/// and both (or neither) stays [`Both`](Role::Both). This keeps the advertised role
+	/// from drifting away from what the session actually does.
+	pub(crate) fn from_origins(publishes: bool, consumes: bool) -> Self {
+		match (publishes, consumes) {
+			(true, false) => Role::Publisher,
+			(false, true) => Role::Subscriber,
+			_ => Role::Both,
+		}
+	}
+}
+
 /// The SETUP message, sent once per endpoint on the unidirectional Setup Stream.
 ///
 /// lite-05+ only. The two endpoints' SETUP messages are independent: neither side
@@ -59,6 +116,9 @@ pub struct Setup {
 	/// qmux over TCP/TLS). Sent only by the client; a server never sends one and a
 	/// relay never forwards it. `None` on URI-carrying bindings.
 	pub path: Option<String>,
+	/// The client's intended [`Role`]. `Both` (the default) is sent as the absence of
+	/// the parameter, so an old client that never sets it decodes back to `Both`.
+	pub role: Role,
 }
 
 impl Message for Setup {
@@ -82,8 +142,9 @@ impl Message for Setup {
 			}
 			None => None,
 		};
+		let role = params.get_varint(PARAM_ROLE)?.map(Role::from_code).unwrap_or_default();
 
-		Ok(Self { probe, path })
+		Ok(Self { probe, path, role })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -98,6 +159,10 @@ impl Message for Setup {
 		}
 		if let Some(path) = &self.path {
 			params.set_bytes(PARAM_PATH, path.as_bytes().to_vec());
+		}
+		// Both is the wire default (absence of the parameter), so only a directional role is encoded.
+		if let Some(code) = self.role.to_code() {
+			params.set_varint(PARAM_ROLE, code);
 		}
 
 		params.encode(w, version)
@@ -165,7 +230,10 @@ mod tests {
 	#[test]
 	fn probe_levels_round_trip() {
 		for probe in [ProbeLevel::None, ProbeLevel::Report, ProbeLevel::Increase] {
-			let msg = Setup { probe, path: None };
+			let msg = Setup {
+				probe,
+				..Default::default()
+			};
 			assert_eq!(round_trip(&msg), msg);
 		}
 	}
@@ -175,8 +243,40 @@ mod tests {
 		let msg = Setup {
 			probe: ProbeLevel::Report,
 			path: Some("/room/123".to_string()),
+			role: Role::Both,
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn roles_round_trip() {
+		for role in [Role::Publisher, Role::Subscriber, Role::Both] {
+			let msg = Setup {
+				path: Some("/room/123".to_string()),
+				role,
+				..Default::default()
+			};
+			assert_eq!(round_trip(&msg), msg);
+		}
+	}
+
+	#[test]
+	fn role_both_omits_parameter() {
+		// Both is the absence of the parameter, so a SETUP is byte-identical whether the
+		// role is set to Both or left at its default. This is what lets a client that
+		// predates the parameter decode back to Both.
+		let mut with = bytes::BytesMut::new();
+		Setup {
+			role: Role::Both,
+			..Default::default()
+		}
+		.encode(&mut with, Version::Lite05)
+		.unwrap();
+
+		let mut without = bytes::BytesMut::new();
+		Setup::default().encode(&mut without, Version::Lite05).unwrap();
+
+		assert_eq!(with, without);
 	}
 
 	#[test]
@@ -195,6 +295,27 @@ mod tests {
 		let mut slice = &buf[..];
 		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
 		assert_eq!(got.probe, ProbeLevel::Increase);
+	}
+
+	#[test]
+	fn unknown_role_decodes_as_both() {
+		// A role value the receiver doesn't recognize (a future extension, or an explicit
+		// 0) decodes to Both rather than failing, so a newer client can't break an older
+		// server. The draft mandates this fallback.
+		for code in [0u64, 9, 250] {
+			let mut params = Parameters::default();
+			params.set_varint(PARAM_ROLE, code);
+			let mut body = Vec::new();
+			params.encode(&mut body, Version::Lite05).unwrap();
+
+			let mut buf = bytes::BytesMut::new();
+			body.len().encode(&mut buf, Version::Lite05).unwrap();
+			buf.extend_from_slice(&body);
+
+			let mut slice = &buf[..];
+			let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+			assert_eq!(got.role, Role::Both, "role code {code} should decode as Both");
+		}
 	}
 
 	#[test]

@@ -1136,6 +1136,21 @@ impl Request {
 		}
 	}
 
+	/// The direction the client advertised in its moq-lite-05 SETUP.
+	///
+	/// Only stream transports (`tcp`/`unix`) carry a role; every other transport (and
+	/// any client that omits it) reports [`moq_net::Role::Both`], leaving authorization
+	/// unchanged. Use it to reject a token that lacks the scope for the client's
+	/// intended direction before accepting.
+	pub fn role(&self) -> moq_net::Role {
+		match self.kind {
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Stream(ref stream) => stream.request.role(),
+			#[allow(unreachable_patterns)]
+			_ => moq_net::Role::Both,
+		}
+	}
+
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Server::root`] during the handshake.
 	///

@@ -52,20 +52,34 @@ impl Connection {
 		let subscribe = self.cluster.subscriber(&token);
 		let transport = self.request.transport();
 
+		// The client advertises which direction it intends to use (moq-lite-05 SETUP).
+		// A bidirectional connection (e.g. a cluster peer) leaves this `Both`, so the
+		// only requirement is that the token grants *something*. But a gateway that only
+		// publishes or only subscribes says so, and a token missing that direction's
+		// scope is rejected here during the handshake, instead of being accepted and
+		// then silently carrying no media (the bug that motivated the role hint).
+		let role = self.request.role();
+		let authorized = match role {
+			moq_net::Role::Publisher => publish.is_some(),
+			moq_net::Role::Subscriber => subscribe.is_some(),
+			moq_net::Role::Both => publish.is_some() || subscribe.is_some(),
+		};
+		if !authorized {
+			let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
+			anyhow::bail!("token does not grant {role:?} access to {}", token.root);
+		}
+
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(%transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(%transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(%transport, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
-			_ => {
-				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
-				anyhow::bail!("invalid session; no allowed paths");
-			}
+			_ => unreachable!("authorized above guarantees at least one origin"),
 		}
 
 		// Record this session's stats under its billing tier (chosen by the auth
