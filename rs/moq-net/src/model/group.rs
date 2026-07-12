@@ -664,9 +664,8 @@ impl Consumer {
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
 
-		Poll::Ready(Ok(self.prefetch.pop().map(|frame| {
+		Poll::Ready(Ok(self.prefetch.pop().inspect(|_frame| {
 			self.index += 1;
-			frame
 		})))
 	}
 
