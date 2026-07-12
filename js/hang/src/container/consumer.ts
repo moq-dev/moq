@@ -111,7 +111,13 @@ export class Consumer {
 	async #run() {
 		// Start fetching groups in the background
 		for (;;) {
-			const consumer = await this.#track.recvGroup();
+			// A reset/closed track (publisher handover, unsubscribe, session close) rejects recvGroup;
+			// classify it (routine teardown -> debug, real fault -> warn) instead of letting it escape
+			// uncaught to the anonymous spawn handler as a contextless "spawn error".
+			const consumer = await this.#track.recvGroup().catch((err: unknown) => {
+				console[Moq.isStreamAbort(err) ? "debug" : "warn"]("track consumer stopped", this.#track.name, err);
+				return undefined;
+			});
 			if (!consumer) break;
 
 			// To improve TTV, we always start with the first group.
