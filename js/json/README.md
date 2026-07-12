@@ -38,11 +38,11 @@ for await (const value of consumer) {
 }
 ```
 
-Pass `{ deltaRatio: x }` with a positive `x` to `Snapshot.Producer` to emit merge-patch deltas while a group's deltas stay within `x` times the size of a fresh snapshot; `deltaRatio` defaults to `8` when unset. Set it to `0` to disable deltas: every change becomes a fresh single-frame snapshot group. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
+Pass `{ deltaRatio: x }` with a positive `x` to `Snapshot.Producer` to emit merge-patch deltas. A new snapshot group rolls once the deltas *already written* to the group exceed `x` times the fresh snapshot size; the delta that crosses the budget still lands first, so a group overshoots by at most one delta. `deltaRatio` defaults to `8` when unset. Set it to `0` to disable deltas: every change becomes a fresh single-frame snapshot group. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
 
 ### Stream: every record
 
-An ordered log of self-contained records, one JSON object per frame, all riding a single group. Nothing is superseded: a consumer yields every record in order.
+An ordered log of self-contained records, one JSON value per frame, all riding a single group. Nothing is superseded: a consumer yields every record in order.
 
 ```ts
 import { Stream } from "@moq/json";
