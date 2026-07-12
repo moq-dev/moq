@@ -246,7 +246,7 @@ The component exposes everything via its `broadcast` property
 
 ## UI Overlay
 
-Import `@moq/watch/ui` for a Web Component overlay with buffering indicator, stats panel, and playback controls:
+Import `@moq/watch/ui` for a Web Component overlay with buffering indicator, unsupported-codec indicator, stats panel, and playback controls:
 
 ```html
 <script type="module">

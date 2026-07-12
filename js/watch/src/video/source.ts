@@ -9,6 +9,9 @@ import type { Sync } from "../sync";
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
 
+/** A video source error that prevents choosing a usable rendition. */
+export type SourceError = "unsupported";
+
 export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	target?: Target | Signal<Target | undefined>;
@@ -197,6 +200,10 @@ export class Source {
 	#available = new Signal<Record<string, Catalog.VideoConfig>>({});
 	readonly available: Getter<Record<string, Catalog.VideoConfig>> = this.#available;
 
+	#error = new Signal<SourceError | undefined>(undefined);
+	/** The current source error, or undefined while healthy or still probing. */
+	readonly error: Getter<SourceError | undefined> = this.#error;
+
 	// The name of the active rendition.
 	#track = new Signal<string | undefined>(undefined);
 	readonly track: Getter<string | undefined> = this.#track;
@@ -227,22 +234,37 @@ export class Source {
 
 	#runSupported(effect: Effect): void {
 		const supported = effect.get(this.supported);
-		if (!supported) return;
+		if (!supported) {
+			this.#error.set(undefined);
+			return;
+		}
 
 		const renditions = effect.get(this.catalog)?.renditions ?? {};
+		this.#error.set(undefined);
 
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, config] of Object.entries(renditions)) {
-				const isSupported = await supported(config);
+				let isSupported = false;
+				try {
+					isSupported = await supported(config);
+				} catch (err) {
+					console.warn(
+						`[Source] video rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
+						err,
+					);
+				}
 				if (isSupported) available[name] = config;
 			}
 
-			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
+			const error =
+				Object.keys(available).length === 0 && Object.keys(renditions).length > 0 ? "unsupported" : undefined;
+			if (error === "unsupported") {
 				console.warn("[Source] No supported video renditions found:", renditions);
 			}
 
+			this.#error.set(error);
 			this.#available.set(available);
 		});
 	}

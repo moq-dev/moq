@@ -6,6 +6,7 @@ import { centerPlay } from "./components/center-play";
 import { controlBar } from "./components/control-bar";
 import { offlineIndicator } from "./components/offline-indicator";
 import { settingsPanel } from "./components/settings-panel";
+import { unsupportedIndicator } from "./components/unsupported-indicator";
 import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
 
@@ -64,9 +65,14 @@ export default class MoqWatchUi extends HTMLElement {
 		// The slotted <moq-watch> (canvas/video) sits at the base of the stack.
 		player.appendChild(DOM.create("slot"));
 
-		// Center affordances: play prompt + buffering spinner + offline notice.
+		// Center affordances: play prompt + buffering spinner + offline / unsupported-codec notice.
 		const center = DOM.create("div", { className: "center" });
-		center.append(centerPlay(effect, watch), bufferingIndicator(effect, watch), offlineIndicator(effect, watch));
+		center.append(
+			centerPlay(effect, watch),
+			bufferingIndicator(effect, watch),
+			offlineIndicator(effect, watch),
+			unsupportedIndicator(effect, watch),
+		);
 
 		// Top scrim keeps the bottom bar legible and hosts ambient gradient.
 		const scrimTop = DOM.create("div", { className: "scrim scrim--top" });

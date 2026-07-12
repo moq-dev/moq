@@ -109,7 +109,7 @@ watch.video.media.subscribe((stream) => {
 
 ## UI Web Component
 
-`@moq/watch` includes a Web Component UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, quality selector, and stats panel. It is built on top of `@moq/signals` with no framework dependency.
+`@moq/watch` includes a Web Component UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, unsupported-codec indicator, quality selector, and stats panel. It is built on top of `@moq/signals` with no framework dependency.
 
 ```html
 <script type="module">
