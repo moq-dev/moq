@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.29](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.28...moq-ffi-v0.2.29) - 2026-07-12
+
+### Other
+
+- split into snapshot/stream modules and expose JSON tracks through moq-ffi/libmoq ([#2196](https://github.com/moq-dev/moq/pull/2196))
+
 ## [0.2.28](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.27...moq-ffi-v0.2.28) - 2026-07-09
 
 ### Fixed

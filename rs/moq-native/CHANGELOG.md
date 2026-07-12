@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/moq-dev/moq/compare/moq-native-v0.17.8...moq-native-v0.18.0) - 2026-07-12
+
+### Added
+
+- *(moq-native)* add quic::Client/quic::Server transport config ([#2161](https://github.com/moq-dev/moq/pull/2161))
+
 ## [0.17.8](https://github.com/moq-dev/moq/compare/moq-native-v0.17.7...moq-native-v0.17.8) - 2026-07-09
 
 ### Added

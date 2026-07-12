@@ -822,9 +822,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.66"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5d6cac793997bd970000024b2934968efe83b382de4fdcf4fcb46b6ee4ad996"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1600,9 +1600,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
+checksum = "a69dedd701da44b0536442edf09c81a64b0ab97a7a4a5e3d1971f00027cbc63d"
 dependencies = [
  "const-oid 0.10.2",
  "pem-rfc7468 1.0.0",
@@ -1742,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "dimpl"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb2b8390bf0021eae92cf96a0e3a54c531b6315c47edfe9220f5fc61bc9e1f63"
+checksum = "ba6aa42b0c64c3e5311a2afad224b32db1ee129d21c63daaaf8ea747b846cdbc"
 dependencies = [
  "aes",
  "arrayvec",
@@ -1755,7 +1755,7 @@ dependencies = [
  "nom 8.0.0",
  "once_cell",
  "pkcs8 0.10.2",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rcgen",
  "sec1",
  "signature 2.2.0",
@@ -2580,7 +2580,7 @@ dependencies = [
  "parking_lot",
  "portable-atomic",
  "quanta",
- "rand 0.9.4",
+ "rand 0.9.5",
  "smallvec",
  "spinning_top",
  "web-time",
@@ -3752,7 +3752,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3835,9 +3835,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
+checksum = "0b6180140927ee907000b0aa540091f6ea512ead4447c92b8fc35bc72788a5a6"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4024,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4049,7 +4049,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.28"
+version = "0.2.29"
 dependencies = [
  "bytes",
  "hang",
@@ -4078,7 +4078,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4115,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.17.8"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4228,7 +4228,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "bytes",
  "futures",
@@ -4248,7 +4248,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.13.3"
+version = "0.13.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4286,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4305,7 +4305,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4363,7 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "clap",
@@ -4827,7 +4827,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.6",
+ "rand 0.8.7",
  "smallvec",
  "zeroize",
 ]
@@ -5316,7 +5316,7 @@ dependencies = [
  "futures-util",
  "opentelemetry",
  "percent-encoding",
- "rand 0.9.4",
+ "rand 0.9.5",
  "thiserror 2.0.18",
 ]
 
@@ -5538,7 +5538,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.1",
  "spki 0.8.0",
 ]
 
@@ -5819,7 +5819,7 @@ checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bitflags",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rand_xorshift",
  "regex-syntax",
@@ -6014,9 +6014,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -6025,9 +6025,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -6181,9 +6181,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.4"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+checksum = "2a0e75113e14dc5acb068cd0786884f214f1312650a3d36d269f5c4f3cdee8a2"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -6193,9 +6193,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.14"
+version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+checksum = "1f388202e4b80542a0921078cc23b6333bcf1409c1e3f86404cae4766a6131db"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -6562,7 +6562,7 @@ dependencies = [
  "bytes",
  "crc",
  "log",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rustc-hash",
  "slab",
  "thiserror 2.0.18",
@@ -6868,9 +6868,9 @@ dependencies = [
 
 [[package]]
 name = "sha1"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
@@ -7169,7 +7169,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
- "der 0.8.0",
+ "der 0.8.1",
 ]
 
 [[package]]
@@ -7191,7 +7191,7 @@ dependencies = [
  "keyed_priority_queue",
  "log",
  "pbkdf2",
- "rand 0.8.6",
+ "rand 0.8.7",
  "regex",
  "sha-1",
  "streaming-stats",
@@ -7209,7 +7209,7 @@ dependencies = [
  "bytes",
  "futures",
  "log",
- "rand 0.8.6",
+ "rand 0.8.7",
  "socket2 0.5.10",
  "srt-protocol",
  "tokio",
@@ -7501,9 +7501,9 @@ dependencies = [
 
 [[package]]
 name = "thread_local"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
+checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
 ]
@@ -7604,9 +7604,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e61e67053d25a4e82c844e8424039d9745781b3fc4f32b8d55ed50f5f667ef3"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
 dependencies = [
  "tinyvec_macros",
 ]
@@ -8120,7 +8120,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rustls",
  "rustls-pki-types",
  "sha1",

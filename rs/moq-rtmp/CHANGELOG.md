@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.1.2...moq-rtmp-v0.1.3) - 2026-07-12
+
+### Other
+
+- reject unsupported RTMP FourCC plays ([#2135](https://github.com/moq-dev/moq/pull/2135))
+
 ## [0.1.2](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.1.1...moq-rtmp-v0.1.2) - 2026-07-09
 
 ### Added

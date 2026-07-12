@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/moq-dev/moq/compare/moq-rtc-v0.1.2...moq-rtc-v0.1.3) - 2026-07-12
+
+### Other
+
+- Add RTC H.265 and AV1 ingest bridges ([#2139](https://github.com/moq-dev/moq/pull/2139))
+
 ## [0.1.2](https://github.com/moq-dev/moq/compare/moq-rtc-v0.1.1...moq-rtc-v0.1.2) - 2026-07-09
 
 ### Other
