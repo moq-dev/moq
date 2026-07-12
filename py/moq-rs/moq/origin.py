@@ -150,9 +150,7 @@ class OriginProducer:
     """Wraps MoqOriginProducer for publishing broadcasts."""
 
     def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
-        self._inner = MoqOriginProducer(
-            MoqOriginOptions(cache_capacity_bytes=cache_capacity_bytes)
-        )
+        self._inner = MoqOriginProducer(MoqOriginOptions(cache_capacity_bytes=cache_capacity_bytes))
 
     @classmethod
     def _from_inner(cls, inner: MoqOriginProducer) -> OriginProducer:
