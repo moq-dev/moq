@@ -478,7 +478,7 @@ impl QuicheRequest {
 			// Recognize any moq ALPN this server actually offered (its configured versions),
 			// not the global default set, so opt-in / work-in-progress versions (e.g.
 			// moq-lite-06-wip) that are deliberately absent from `moq_net::ALPNS` still work.
-			alpn if alpns.iter().any(|a| *a == alpn) => Ok(Self::Raw {
+			alpn if alpns.contains(&alpn) => Ok(Self::Raw {
 				connection: conn,
 				request: ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap()),
 				response: web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn),
