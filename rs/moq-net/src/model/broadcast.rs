@@ -534,7 +534,7 @@ impl Consumer {
 	/// broadcast state), so callers poll this on a coarse tick rather than an edge.
 	pub fn is_active(&self) -> bool {
 		let state = self.state.read();
-		!state.requests.is_empty() || state.tracks.values().any(|weak| !weak.is_closed())
+		!state.requests.is_empty() || state.tracks.has_live()
 	}
 
 	/// Block until the broadcast is closed (every producer dropped) and return the cause.
