@@ -1,4 +1,5 @@
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
+import * as Announce from "../announced.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
@@ -54,12 +55,6 @@ export class Reload {
 	/** The currently established session, or undefined while disconnected. */
 	established = new Signal<Established | undefined>(undefined);
 
-	// All actively announced broadcast paths, updated reactively.
-	#announced = new Signal<Set<Path.Valid>>(new Set());
-
-	/** The set of broadcast paths currently announced by the server, updated reactively. */
-	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
-
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
@@ -113,7 +108,6 @@ export class Reload {
 
 		// Create a reactive root so cleanup is easier.
 		this.signals.run(this.#connect.bind(this));
-		this.signals.run(this.#runAnnounced.bind(this));
 	}
 
 	#connect(effect: Effect): void {
@@ -173,42 +167,65 @@ export class Reload {
 		});
 	}
 
-	#runAnnounced(effect: Effect): void {
-		this.#announced.set(new Set());
+	/**
+	 * Subscribe to broadcast announcements under an optional prefix, spanning reconnects.
+	 *
+	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
+	 * is retracted (an `active: false` update) whenever the connection drops and re-announced on
+	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
+	 */
+	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
+		const producer = new Announce.Producer(prefix);
+		const consumer = producer.consume();
 
-		const conn = effect.get(this.established);
-		if (!conn) return;
-
-		effect.cleanup(() => this.#announced.set(new Set()));
-
-		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
-		// skip announce subscriptions entirely for those hosts.
-		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
-			return;
-		}
-
-		const announced = conn.announced(emptyPath());
-		effect.cleanup(() => announced.close());
-
-		effect.spawn(async () => {
-			try {
-				for (;;) {
-					const entry = await Promise.race([effect.cancel, announced.next()]);
-					if (!entry) break;
-
-					this.#announced.mutate((active) => {
-						if (entry.active) {
-							active.add(entry.path);
-						} else {
-							active.delete(entry.path);
-						}
-					});
-				}
-			} catch (err) {
-				this.#announced.set(new Set());
-				throw err;
-			}
+		// Closing the consumer closes the shared state, so stop appending after that.
+		let closed = false;
+		void consumer.closed.then(() => {
+			closed = true;
 		});
+
+		const pump = new Effect();
+		pump.run((effect) => {
+			const conn = effect.get(this.established);
+			if (!conn) return;
+
+			// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so skip the
+			// subscription for those hosts (the consumer just stays empty).
+			if (conn.url.hostname.endsWith("mediaoverquic.com")) return;
+
+			const upstream = conn.announced(prefix);
+			effect.cleanup(() => upstream.close());
+
+			// Track what this connection announced so we can retract it if the connection drops.
+			const active = new Set<Path.Valid>();
+
+			effect.spawn(async () => {
+				try {
+					for (;;) {
+						const entry = await Promise.race([effect.cancel, upstream.next()]);
+						if (!entry) break;
+						if (entry.active) active.add(entry.path);
+						else active.delete(entry.path);
+						producer.append(entry);
+					}
+				} catch {
+					// A dropped connection resets the announce stream; the retractions below cover it.
+				} finally {
+					// Retract everything from the connection that just went away, so a per-broadcast
+					// watcher tears down instead of clinging to the dead route.
+					if (!closed) {
+						for (const path of active) {
+							producer.append({ path, active: false });
+						}
+					}
+				}
+			});
+		});
+
+		this.signals.cleanup(() => pump.close());
+		void consumer.closed.then(() => pump.close());
+
+		return consumer;
 	}
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
