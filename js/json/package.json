@@ -1,7 +1,7 @@
 {
 	"name": "@moq/json",
 	"type": "module",
-	"version": "0.1.2",
+	"version": "0.2.0",
 	"description": "JSON publishing over MoQ tracks: snapshot/delta (RFC 7396 merge patch) objects, or append-log NDJSON streams.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
