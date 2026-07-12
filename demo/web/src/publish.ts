@@ -18,7 +18,7 @@
 import "./highlight";
 import "@moq/publish/element"; // defines <moq-publish>
 import "@moq/publish/ui"; // defines <moq-publish-ui>
-import { type Audio, Json, Net, Signals } from "@moq/publish";
+import { type Audio, Json, Net, Signals, Source, type Video } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
 import { formatBitrate, formatFps, graph } from "./viz";
@@ -107,20 +107,50 @@ const opusDtx = new Signals.Signal(false); // discontinuous transmission (silenc
 
 const ui = new Signals.Effect();
 
+type VideoTarget = {
+	width?: number;
+	height?: number;
+	frameRate?: number;
+};
+
+const videoTarget = ui.computed((effect): VideoTarget => {
+	const res = effect.get(resolution);
+	const [rawWidth, rawHeight] = res ? res.split("x").map(Number) : [undefined, undefined];
+	return {
+		width: rawWidth && Number.isFinite(rawWidth) ? rawWidth : undefined,
+		height: rawHeight && Number.isFinite(rawHeight) ? rawHeight : undefined,
+		frameRate: effect.get(framerate),
+	};
+});
+
+function cameraConstraints(target: VideoTarget): Video.Constraints | undefined {
+	const constraints: Video.Constraints = {};
+	if (target.width !== undefined) constraints.width = { ideal: target.width, max: target.width };
+	if (target.height !== undefined) constraints.height = { ideal: target.height, max: target.height };
+	if (target.frameRate !== undefined) constraints.frameRate = { ideal: target.frameRate, max: target.frameRate };
+
+	return Object.keys(constraints).length ? constraints : undefined;
+}
+
+function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.EncoderConfig {
+	const br = effect.get(bitrateKbps);
+	const kf = effect.get(keyframeMs);
+	return {
+		codec: effect.get(codec),
+		maxPixels: target.width && target.height ? target.width * target.height : undefined,
+		maxBitrate: br != null ? br * 1000 : undefined,
+		keyframeInterval: kf != null ? Net.Time.Milli(kf) : undefined,
+		frameRate: target.frameRate,
+	};
+}
+
 // Compose the WebCodecs/MoQ video encoder config and push it onto the HD
 // rendition. Undefined fields are omitted, so the encoder auto-sizes them.
 ui.run((effect) => {
-	const res = effect.get(resolution);
-	const [w, h] = res ? res.split("x").map(Number) : [undefined, undefined];
-	const br = effect.get(bitrateKbps);
-	const kf = effect.get(keyframeMs);
-	publish.broadcast.video.hd.config.set({
-		codec: effect.get(codec),
-		maxPixels: w && h ? w * h : undefined,
-		maxBitrate: br != null ? br * 1000 : undefined,
-		keyframeInterval: kf != null ? (kf as Net.Time.Milli) : undefined,
-		frameRate: effect.get(framerate),
-	});
+	const target = effect.get(videoTarget);
+	if (!target) return;
+
+	publish.broadcast.video.hd.config.set(encoderConfig(effect, target));
 });
 
 // Request the selected resolution from the camera itself, not just cap the encoder. publish.video
@@ -129,11 +159,12 @@ ui.run((effect) => {
 // best (the green "actual" readout shows what it gave).
 ui.run((effect) => {
 	const source = effect.get(publish.video);
-	if (!source || !("constraints" in source)) return;
+	if (!(source instanceof Source.Camera)) return;
 
-	const res = effect.get(resolution);
-	const [w, h] = res ? res.split("x").map(Number) : [undefined, undefined];
-	source.constraints.set(w && h ? { width: { ideal: w }, height: { ideal: h } } : undefined);
+	const target = effect.get(videoTarget);
+	if (!target) return;
+
+	effect.set(source.constraints, cameraConstraints(target));
 });
 
 // Audio general settings (volume gain, output sample rate, channel mix).

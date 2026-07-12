@@ -17,8 +17,8 @@ export interface EncoderConfig {
 	// If not provided, the encoder will select the best codec.
 	codec?: string;
 
-	// Constrain the encoded width/height in pixels.
-	// TODO figure out how this interacts with the width/height props.
+	// Constrain the encoded width/height in pixels. If unset, source width.max and height.max
+	// constraints provide the cap when both are present.
 	maxPixels?: number;
 
 	// Cap the encoded resolution to this fraction of the source pixel count.
@@ -272,15 +272,16 @@ export class Encoder {
 	}
 
 	#runDimensions(effect: Effect): void {
-		const user = effect.get(this.config);
+		const values = effect.getAll([this.frame, this.source]);
+		if (!values) return;
+		const [frame, source] = values;
 
-		const frame = effect.get(this.frame);
-		if (!frame) return;
+		const user = effect.get(this.config);
 
 		const sourcePixels = frame.codedWidth * frame.codedHeight;
 
 		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
-		let maxPixels = user?.maxPixels ?? sourcePixels;
+		let maxPixels = user?.maxPixels ?? sourceConstraintPixels(source) ?? sourcePixels;
 		if (user?.maxScale !== undefined) {
 			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
 				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
@@ -420,4 +421,19 @@ export class Encoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+function sourceConstraintPixels(source: Source): number | undefined {
+	const constraints = source.getConstraints();
+	const width = constraintMax(constraints.width);
+	const height = constraintMax(constraints.height);
+
+	return width !== undefined && height !== undefined ? width * height : undefined;
+}
+
+function constraintMax(value: MediaTrackConstraints["width"]): number | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+
+	const max = value.max;
+	return typeof max === "number" && Number.isFinite(max) && max > 0 ? max : undefined;
 }
