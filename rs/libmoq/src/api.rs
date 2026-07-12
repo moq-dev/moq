@@ -161,9 +161,9 @@ pub struct moq_subscription {
 	pub group_end_valid: bool,
 }
 
-impl From<&moq_subscription> for moq_net::Subscription {
+impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
-		let mut out = moq_net::Subscription::default()
+		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
 			.with_stale(std::time::Duration::from_millis(subscription.stale_ms));
 		if subscription.ordered_valid {
@@ -1400,7 +1400,7 @@ pub unsafe extern "C" fn moq_consume_track(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
-		let subscription = unsafe { subscription.as_ref() }.map(moq_net::Subscription::from);
+		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.raw_track(broadcast, name, subscription, on_frame)
 	})
@@ -1418,7 +1418,7 @@ pub unsafe extern "C" fn moq_consume_track(
 pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *const moq_subscription) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		let subscription = unsafe { subscription.as_ref() }.map(moq_net::Subscription::from);
+		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
 		State::lock().consume.raw_track_update(track, subscription)
 	})
 }

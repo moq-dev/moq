@@ -73,7 +73,7 @@ export class TrackInfo {
 
 	constructor({
 		priority = 0,
-		ordered = true,
+		ordered = false,
 		cache = 0,
 		timescale = 0,
 	}: {

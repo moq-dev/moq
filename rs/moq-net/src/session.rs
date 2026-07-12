@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use web_transport_trait::Stats;
 
-use crate::{BandwidthConsumer, BandwidthProducer, Error, Version, util::MaybeSendBox};
+use crate::{Error, Version, bandwidth, util::MaybeSendBox};
 
 /// A snapshot of connection statistics for a [`Session`].
 ///
@@ -50,22 +50,42 @@ pub struct ConnectionStats {
 /// - [`crate::Server::accept`] for servers.
 #[derive(Clone)]
 pub struct Session {
-	session: Arc<dyn SessionInner>,
+	session: Arc<SessionShared>,
 	version: Version,
-	send_bandwidth: Option<BandwidthConsumer>,
-	recv_bandwidth: Option<BandwidthConsumer>,
-	closed: bool,
+	send_bandwidth: Option<bandwidth::Consumer>,
+	recv_bandwidth: Option<bandwidth::Consumer>,
+}
+
+// Close-once state shared by every clone: the transport closes when [`Session::close`]
+// is first called, or when the last clone drops, whichever comes first.
+struct SessionShared {
+	inner: Box<dyn SessionInner>,
+	closed: std::sync::atomic::AtomicBool,
+}
+
+impl SessionShared {
+	fn close(&self, code: u32, reason: &str) {
+		if !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+			self.inner.close(code, reason);
+		}
+	}
+}
+
+impl Drop for SessionShared {
+	fn drop(&mut self) {
+		self.close(Error::Cancel.to_code(), "dropped");
+	}
 }
 
 impl Session {
 	pub(super) fn new<S: web_transport_trait::Session>(
 		session: S,
 		version: Version,
-		recv_bandwidth: Option<BandwidthConsumer>,
+		recv_bandwidth: Option<bandwidth::Consumer>,
 	) -> Self {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
-			let producer = BandwidthProducer::new();
+			let producer = bandwidth::Producer::new();
 			let consumer = producer.consume();
 
 			let session = session.clone();
@@ -79,11 +99,13 @@ impl Session {
 		};
 
 		Self {
-			session: Arc::new(session),
+			session: Arc::new(SessionShared {
+				inner: Box::new(session),
+				closed: std::sync::atomic::AtomicBool::new(false),
+			}),
 			version,
 			send_bandwidth,
 			recv_bandwidth,
-			closed: false,
 		}
 	}
 
@@ -95,14 +117,14 @@ impl Session {
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
 	///
 	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
-	pub fn send_bandwidth(&self) -> Option<BandwidthConsumer> {
+	pub fn send_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.send_bandwidth.clone()
 	}
 
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
 	///
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
-	pub fn recv_bandwidth(&self) -> Option<BandwidthConsumer> {
+	pub fn recv_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.recv_bandwidth.clone()
 	}
 
@@ -111,32 +133,23 @@ impl Session {
 	/// This is a cheap, non-blocking read of the underlying transport's counters; see
 	/// [`ConnectionStats`] for which metrics each backend reports.
 	pub fn stats(&self) -> ConnectionStats {
-		let mut stats = self.session.stats();
-		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(BandwidthConsumer::peek);
+		let mut stats = self.session.inner.stats();
+		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
 		stats
 	}
 
 	/// Close the underlying transport session.
-	pub fn close(&mut self, err: Error) {
-		if self.closed {
-			return;
-		}
-		self.closed = true;
+	///
+	/// The close state is shared across clones: the first close wins, and the
+	/// transport also closes automatically when the last clone drops.
+	pub fn close(&self, err: Error) {
 		self.session.close(err.to_code(), err.to_string().as_ref());
 	}
 
 	/// Block until the transport session is closed.
 	pub async fn closed(&self) -> Result<(), Error> {
-		let err = self.session.closed().await;
+		let err = self.session.inner.closed().await;
 		Err(Error::Transport(err))
-	}
-}
-
-impl Drop for Session {
-	fn drop(&mut self) {
-		if !self.closed {
-			self.session.close(Error::Cancel.to_code(), "dropped");
-		}
 	}
 }
 
@@ -144,7 +157,7 @@ impl Drop for Session {
 ///
 /// Exits as soon as the session closes so we don't pin the underlying connection
 /// after the wrapping [`Session`] is dropped.
-async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: BandwidthProducer) {
+async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: bandwidth::Producer) {
 	tokio::select! {
 		_ = session.closed() => {}
 		_ = producer.closed() => {}
@@ -154,7 +167,7 @@ async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, produc
 
 /// Toggles between waiting for a consumer and polling stats while one exists.
 /// Returns when the producer channel errors (closed by the consumer side).
-async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, producer: &BandwidthProducer) {
+async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, producer: &bandwidth::Producer) {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	loop {

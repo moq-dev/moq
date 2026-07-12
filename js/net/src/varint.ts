@@ -1,5 +1,9 @@
-// QUIC variable-length integer encoding/decoding
-// https://www.rfc-editor.org/rfc/rfc9000#section-16
+/**
+ * QUIC variable-length integer encoding and decoding.
+ * https://www.rfc-editor.org/rfc/rfc9000#section-16
+ *
+ * @module
+ */
 
 /** Largest value that fits in a 1-byte varint (6 bits). */
 export const MAX_U6 = 2 ** 6 - 1;

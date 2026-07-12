@@ -59,10 +59,11 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
@@ -86,7 +87,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(session);
 	server_handle
@@ -329,10 +330,11 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
@@ -356,7 +358,7 @@ async fn iroh_connect() {
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(session);
 	server_handle

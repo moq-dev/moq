@@ -296,7 +296,7 @@ export class Publisher {
 					console.debug(
 						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
 					);
-					track.updatePriority(result.priority);
+					track.update({ priority: result.priority });
 				}
 			}
 
@@ -473,7 +473,10 @@ export class Publisher {
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
-				if (body.byteLength > maxSize) continue;
+				if (body.byteLength > maxSize) {
+					console.debug(`dropping oversize datagram: sub=${sub} size=${body.byteLength} max=${maxSize}`);
+					continue;
+				}
 
 				await writer.ready;
 				await writer.write(body);

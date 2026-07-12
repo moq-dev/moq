@@ -7,10 +7,13 @@ use std::{task::Poll, time::Duration};
 /// A subscriber can change its preferences after the fact with
 /// [`crate::track::Subscriber::update`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// Whether groups should be delivered in sequence order.
+	/// Whether groups should be delivered in sequence order (a DVR-style feature).
+	/// Defaults to `false`; the aggregate is ordered only when every live
+	/// subscriber asks for it.
 	pub ordered: bool,
 	/// How long to wait for a group before skipping it once a newer group has
 	/// arrived. `Duration::ZERO` skips immediately (e.g. group 8 arriving means
@@ -27,7 +30,7 @@ impl Default for Subscription {
 	fn default() -> Self {
 		Self {
 			priority: 0,
-			ordered: true,
+			ordered: false,
 			stale: Duration::ZERO,
 			group_start: None,
 			group_end: None,
@@ -66,8 +69,9 @@ impl Subscription {
 		self
 	}
 
-	// Returns Ready with the new combined subscription, unless this subscription is a subset.
-	// TODO I don't know if we need to return Pending at all? I'm kind of confused.
+	// Fold this subscription into the running aggregate: Ready with the merged
+	// result when it demands more than `combined`, Pending when it's a subset
+	// (so callers can skip a redundant broadcast of the same aggregate).
 	pub(super) fn poll_combined(&self, combined: &Option<Subscription>) -> Poll<Subscription> {
 		let Some(combined) = combined else {
 			return Poll::Ready(self.clone());
@@ -75,7 +79,8 @@ impl Subscription {
 
 		let merged = Subscription {
 			priority: self.priority.max(combined.priority),
-			ordered: self.ordered || combined.ordered,
+			// Ordered delivery is only honored when every subscriber wants it.
+			ordered: self.ordered && combined.ordered,
 			stale: self.stale.max(combined.stale),
 			group_start: min_some(self.group_start, combined.group_start),
 			group_end: max_unbounded(self.group_end, combined.group_end),
@@ -128,13 +133,13 @@ mod tests {
 	}
 
 	#[test]
-	fn combined_ordered_preserves_any_ordered_viewer() {
+	fn combined_any_unordered_viewer_disables_ordered() {
 		let unordered = Subscription::default().with_ordered(false);
 		let ordered = Subscription::default().with_ordered(true);
 
 		let combined = combine(&[unordered, ordered]).unwrap();
 
-		assert!(combined.ordered);
+		assert!(!combined.ordered);
 	}
 
 	#[test]

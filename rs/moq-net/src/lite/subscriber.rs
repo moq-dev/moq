@@ -12,10 +12,10 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
-	AsPath, BandwidthProducer, Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Subscription,
-	Timescale, Timestamp,
+	AsPath, Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Timescale, Timestamp, bandwidth,
 	coding::{Decode, Reader, Stream},
 	lite,
+	track::Subscription,
 };
 
 use super::{ConnectingProducer, Version};
@@ -34,7 +34,7 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub origin: origin::Producer,
 	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
 	/// feature (used by versions that don't carry probe streams).
-	pub recv_bandwidth: Option<BandwidthProducer>,
+	pub recv_bandwidth: Option<bandwidth::Producer>,
 	/// Stats aggregator for this session's ingress. Use [`StatsHandle::default`]
 	/// to opt out.
 	pub stats: StatsHandle,
@@ -54,7 +54,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
 	/// distinct upstream sessions feeding each broadcast.
 	broadcasts: crate::SessionBroadcasts,
-	recv_bandwidth: Option<BandwidthProducer>,
+	recv_bandwidth: Option<bandwidth::Producer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
 	// to skip broadcasts whose hop chain already passed through us, and we
@@ -438,7 +438,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	async fn run_probe_stream(&self, bandwidth: &BandwidthProducer) -> Result<(), Error> {
+	async fn run_probe_stream(&self, bandwidth: &bandwidth::Producer) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 

@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { MAX_DATAGRAM_PAYLOAD } from "./datagram.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -55,9 +54,20 @@ test("recvDatagram advances the ordered group cursor", async () => {
 	expect((await track.nextGroup())?.sequence).toBe(6);
 });
 
-test("appendDatagram rejects an oversized payload", () => {
+test("appendDatagram rejects a payload over the QUIC datagram frame ceiling", () => {
 	const producer = new TrackProducer("test");
-	expect(() => producer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1))).toThrow();
+	expect(() => producer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array(65536))).toThrow();
+});
+
+test("a subscriber update is forwarded to the producer's update signal", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	// The wire layer watches the producer's signal to emit SUBSCRIBE_UPDATE.
+	expect(producer.subscriptionSignal.peek()).toBeUndefined();
+	const next = producer.subscriptionSignal.next();
+	track.update({ priority: 7 });
+	expect((await next)?.priority).toBe(7);
 });
 
 test("nextGroup skips late arrivals", async () => {

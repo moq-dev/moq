@@ -16,8 +16,6 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
-use bytes::Bytes;
-
 use crate::{Error, IntoBytes, Result, Timestamp};
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
@@ -618,8 +616,8 @@ impl Consumer {
 		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
 	}
 
-	/// Read the next complete frame, including timestamp and payload, without blocking.
-	pub fn poll_read_frame_full(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>>> {
+	/// Read the next frame (timestamp and payload) all at once, without blocking.
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
@@ -664,30 +662,19 @@ impl Consumer {
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
 
-		Poll::Ready(Ok(self.prefetch.pop().inspect(|_frame| {
+		Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
 			self.index += 1;
 		})))
 	}
 
-	/// Read the next frame's data all at once, without blocking.
-	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		let frame = ready!(self.poll_read_frame_full(waiter))?;
-		Poll::Ready(Ok(frame.map(|frame| frame.payload)))
-	}
-
-	/// Read the next complete frame, including timestamp and payload.
-	pub async fn read_frame_full(&mut self) -> Result<Option<Frame>> {
+	/// Read the next frame (timestamp and payload) all at once.
+	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
 		// Serve from the prefetched batch without building a future or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
 			return Ok(Some(frame));
 		}
-		kio::wait(|waiter| self.poll_read_frame_full(waiter)).await
-	}
-
-	/// Read the next frame's data all at once.
-	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		Ok(self.read_frame_full().await?.map(|frame| frame.payload))
+		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Poll for the final number of frames in the group.
@@ -703,6 +690,7 @@ impl Consumer {
 
 /// Options for a one-shot [`track::Consumer::fetch_group`] of a past group.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Fetch {
 	/// Delivery priority for the fetched group's stream. Defaults to 0.
 	pub priority: u8,
@@ -719,6 +707,7 @@ impl Fetch {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use bytes::Bytes;
 	use futures::FutureExt;
 
 	#[test]
@@ -744,19 +733,19 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		let data = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(data, Bytes::from_static(b"hello"));
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	#[test]
-	fn read_frame_full_preserves_timestamp() {
+	fn read_frame_preserves_timestamp() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let timestamp = Timestamp::from_micros(20_000).unwrap();
 		producer.write_frame(timestamp, Bytes::from_static(b"hello")).unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		let frame = consumer.read_frame_full().now_or_never().unwrap().unwrap().unwrap();
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(frame.timestamp.as_micros(), 20_000);
 		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
@@ -775,8 +764,8 @@ mod test {
 		// Frame data is held in a single per-frame buffer; a whole-frame read returns
 		// the full contents in one slice.
 		let mut consumer = producer.consume();
-		let data = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(data, Bytes::from_static(b"helloworld"));
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, Bytes::from_static(b"helloworld"));
 	}
 
 	#[test]
@@ -867,7 +856,7 @@ mod test {
 
 		// A cleanly finished group keeps its cache so the consumer can still drain.
 		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame, Bytes::from_static(b"data"));
+		assert_eq!(frame.payload, Bytes::from_static(b"data"));
 	}
 
 	#[tokio::test]
@@ -965,8 +954,8 @@ mod test {
 
 		let mut consumer = producer.consume();
 		for i in 0..n {
-			let data = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(data, Bytes::from(vec![i as u8; 4]));
+			let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload, Bytes::from(vec![i as u8; 4]));
 		}
 		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
 	}
@@ -983,7 +972,7 @@ mod test {
 		let mut consumer = producer.consume();
 		// The first whole-frame read prefetches all five frames into the batch.
 		let f0 = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f0, Bytes::from(vec![0u8; 1]));
+		assert_eq!(f0.payload, Bytes::from(vec![0u8; 1]));
 
 		// next_frame must continue from the batch, not skip ahead or repeat.
 		for i in 1..5u8 {

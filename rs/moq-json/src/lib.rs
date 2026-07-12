@@ -431,7 +431,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 		while let Some(group) = &mut self.group {
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => {
-					self.apply(frame)?;
+					self.apply(frame.payload)?;
 					advanced = true;
 				}
 				// The current group is exhausted; wait for a newer one.
@@ -916,7 +916,7 @@ mod test {
 		};
 		let mut frames = Vec::new();
 		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			frames.push(frame);
+			frames.push(frame.payload);
 		}
 		assert_eq!(frames.len(), 2, "snapshot + one delta in a single group");
 
@@ -944,6 +944,6 @@ mod test {
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("expected a frame");
 		};
-		frame.len()
+		frame.payload.len()
 	}
 }

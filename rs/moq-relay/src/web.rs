@@ -498,7 +498,10 @@ async fn serve_announced(
 	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, event)) = announced.try_next() {
+	while let Some(moq_net::announce::Update {
+		path: suffix, event, ..
+	}) = announced.try_next()
+	{
 		if event.broadcast().is_some() {
 			broadcasts.push(suffix);
 		}
@@ -596,7 +599,7 @@ struct ServeGroup {
 impl ServeGroup {
 	async fn next(&mut self) -> moq_net::Result<Option<Bytes>> {
 		match tokio::time::timeout_at(self.deadline, self.group.read_frame()).await {
-			Ok(res) => res,
+			Ok(res) => Ok(res?.map(|frame| frame.payload)),
 			Err(_) => Err(moq_net::Error::Timeout),
 		}
 	}

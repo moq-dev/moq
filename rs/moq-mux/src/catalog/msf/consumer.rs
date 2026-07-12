@@ -42,7 +42,7 @@ impl Consumer {
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => {
 					self.group = None;
-					let json = std::str::from_utf8(&frame).map_err(|_| Error::InvalidUtf8)?;
+					let json = std::str::from_utf8(&frame.payload).map_err(|_| Error::InvalidUtf8)?;
 					let msf = match moq_msf::Catalog::from_str(json) {
 						Ok(msf) => msf,
 						Err(err) => {

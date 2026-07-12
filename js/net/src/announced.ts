@@ -1,3 +1,8 @@
+/**
+ * Broadcast announcement streams: which broadcast paths are available under a prefix.
+ *
+ * @module
+ */
 import { Signal } from "@moq/signals";
 import * as Path from "./path.js";
 
@@ -50,7 +55,7 @@ export class Producer {
 
 	/** A read handle for this announcement stream. */
 	consume(): Consumer {
-		return new Consumer(this.prefix, this.#state as never);
+		return makeConsumer(this.prefix, this.#state);
 	}
 
 	/** Writes an announcement to the queue. */
@@ -70,8 +75,15 @@ export class Producer {
 	}
 }
 
+// Constructs a Consumer from within this module without exposing a public constructor
+// that would leak the unexported AnnounceState. Assigned in the class's static block.
+let makeConsumer: (prefix: Path.Valid, state: AnnounceState) => Consumer;
+
 /**
  * The read side of an announcement stream.
+ *
+ * Created internally: obtain one from {@link Producer.consume} or the connection's
+ * `announced(prefix)`.
  *
  * @public
  */
@@ -84,11 +96,14 @@ export class Consumer {
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
-	constructor(prefix?: Path.Valid, state?: never);
-	constructor(prefix = Path.empty(), state?: AnnounceState) {
+	private constructor(prefix: Path.Valid, state: AnnounceState) {
 		this.prefix = prefix;
-		this.#state = state ?? new AnnounceState();
+		this.#state = state;
 		this.closed = closedPromise(this.#state);
+	}
+
+	static {
+		makeConsumer = (prefix, state) => new Consumer(prefix, state);
 	}
 
 	/** Returns the next announcement. */

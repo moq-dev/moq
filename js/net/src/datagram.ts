@@ -6,16 +6,6 @@
 import type { Timestamp } from "./time.ts";
 
 /**
- * Maximum datagram payload size, in bytes.
- *
- * A datagram body (sequence + timestamp + payload) must fit in a single QUIC datagram without IP
- * fragmentation, so the payload is capped below the minimum path MTU. Producers reject a larger
- * payload; there is no group fallback, so keep datagram payloads small (e.g. a single audio frame).
- * Mirrors the Rust `MAX_DATAGRAM_PAYLOAD`.
- */
-export const MAX_DATAGRAM_PAYLOAD = 1200;
-
-/**
  * A single unreliable payload on a track: a sequence number, a presentation timestamp, and the bytes.
  *
  * Unlike a {@link Group} (an ordered stream of frames over a QUIC stream), a datagram is one

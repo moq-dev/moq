@@ -33,7 +33,7 @@ export interface Established {
 	publish(path: Path.Valid, broadcast: broadcast.Producer): void;
 
 	/** Consume the broadcast at the given path. */
-	consume(broadcast: Path.Valid): broadcast.Consumer;
+	consume(path: Path.Valid): broadcast.Consumer;
 
 	/** Close the session. */
 	close(): void;

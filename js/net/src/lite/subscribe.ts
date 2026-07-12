@@ -18,7 +18,7 @@ export class SubscribeUpdate {
 		endGroup?: number;
 	}) {
 		this.priority = props.priority;
-		this.ordered = props.ordered ?? true;
+		this.ordered = props.ordered ?? false;
 		this.maxLatency = props.maxLatency ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
@@ -178,7 +178,7 @@ export class SubscribeOk {
 
 	constructor({
 		priority = 0,
-		ordered = true,
+		ordered = false,
 		maxLatency = 0,
 		startGroup = undefined,
 		endGroup = undefined,

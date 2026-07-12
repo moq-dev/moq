@@ -9,12 +9,12 @@
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
 export * as Announce from "./announced.ts";
-export * from "./bandwidth.ts";
+/** Bandwidth estimate signals reported by the transport. */
+export * as Bandwidth from "./bandwidth.ts";
 /** Broadcast role handles. */
 export * as Broadcast from "./broadcast.ts";
 /** Connection helpers: connect to or accept a MoQ session and reconnect on failure. */
 export * as Connection from "./connection/index.ts";
-export * from "./datagram.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. */

@@ -1,3 +1,4 @@
+pub mod bandwidth;
 pub mod broadcast;
 pub mod cache;
 pub mod frame;
@@ -10,7 +11,6 @@ pub mod track;
 #[path = "origin.rs"]
 mod origin_impl;
 
-mod bandwidth;
 mod bytes;
 mod datagram;
 mod subscription;
@@ -19,17 +19,15 @@ mod weak_cache;
 
 pub(crate) use weak_cache::{WeakCache, WeakEntry};
 
-pub use bandwidth::*;
 pub use bytes::*;
-// Datagram + MAX_DATAGRAM_PAYLOAD stay flat at the crate root (a small track-adjacent
-// wire type), not under a role module.
+// Datagram stays flat at the crate root (a small track-adjacent wire type),
+// not under a role module.
 pub use datagram::*;
-pub use subscription::*;
 pub use time::*;
 
 /// Publishing and consuming the set of broadcasts announced at an origin.
 pub mod origin {
-	pub use super::origin_impl::{Broadcast, Consumer, Dynamic, Info, Producer, Publish, Request, Requested};
+	pub use super::origin_impl::{Broadcast, Consumer, Dynamic, Info, Producer, Publish, Request, Requesting};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.

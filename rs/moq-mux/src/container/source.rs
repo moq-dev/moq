@@ -50,9 +50,9 @@ impl VideoTransform {
 enum SourceState {
 	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
 	/// reference) to resolve; the track (by name) is subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Requested>, String),
+	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
-	Subscribing(kio::Pending<moq_net::track::Subscribe>),
+	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
 	/// the `Subscribing` variant (clippy `large_enum_variant`).
 	Active(Box<Consumer<HangContainer>>),

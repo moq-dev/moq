@@ -38,7 +38,7 @@ test("a group caps its byte size, dropping from the front", () => {
 
 	// Drain the buffered frames and sum their bytes: the cache stayed under the byte cap.
 	const frames: Uint8Array[] = [];
-	for (let f = consumer.tryReadFrame(); f; f = consumer.tryReadFrame()) frames.push(f);
+	for (let f = consumer.tryReadFrame(); f; f = consumer.tryReadFrame()) frames.push(f.data);
 	const bytes = frames.reduce((sum, f) => sum + f.byteLength, 0);
 	expect(bytes).toBeLessThanOrEqual(MAX_GROUP_CACHE_BYTES);
 	expect(frames.length).toBe(MAX_GROUP_CACHE_BYTES / oneMiB);
@@ -83,8 +83,8 @@ test("tryReadFrame drains buffered frames then returns undefined", () => {
 	producer.writeString("a");
 	producer.writeString("b");
 
-	expect(dec.decode(consumer.tryReadFrame())).toBe("a");
-	expect(dec.decode(consumer.tryReadFrame())).toBe("b");
+	expect(dec.decode(consumer.tryReadFrame()?.data)).toBe("a");
+	expect(dec.decode(consumer.tryReadFrame()?.data)).toBe("b");
 	// Nothing buffered: undefined, and the group is not closed so this is not end-of-group.
 	expect(consumer.tryReadFrame()).toBeUndefined();
 });
@@ -94,8 +94,8 @@ test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 	producer.writeString("a");
 	producer.writeString("b");
 
-	expect(consumer.tryReadFrameSequence()).toEqual({ sequence: 0, data: new TextEncoder().encode("a") });
-	expect(consumer.tryReadFrameSequence()).toEqual({ sequence: 1, data: new TextEncoder().encode("b") });
+	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 0, data: new TextEncoder().encode("a") });
+	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, data: new TextEncoder().encode("b") });
 	expect(consumer.tryReadFrameSequence()).toBeUndefined();
 });
 
@@ -104,8 +104,8 @@ test("readFrameSequence reports per-frame sequence numbers", async () => {
 	producer.writeString("a");
 	producer.writeString("b");
 
-	expect(await consumer.readFrameSequence()).toEqual({ sequence: 0, data: new TextEncoder().encode("a") });
-	expect(await consumer.readFrameSequence()).toEqual({ sequence: 1, data: new TextEncoder().encode("b") });
+	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 0, data: new TextEncoder().encode("a") });
+	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 1, data: new TextEncoder().encode("b") });
 });
 
 test("done distinguishes a finished group from one that is merely empty", () => {
@@ -139,7 +139,7 @@ test("readable resolves once a frame is buffered", async () => {
 	// Writing makes it resolve.
 	producer.writeString("hi");
 	await readable; // must not hang
-	expect(dec.decode(consumer.tryReadFrame())).toBe("hi");
+	expect(dec.decode(consumer.tryReadFrame()?.data)).toBe("hi");
 });
 
 test("readable resolves once the group closes, even with nothing buffered", async () => {

@@ -1,7 +1,7 @@
-//! Bandwidth estimation, split into a [BandwidthProducer] and [BandwidthConsumer] handle.
+//! Bandwidth estimation, split into a [Producer] and [Consumer] handle.
 //!
-//! A [BandwidthProducer] is used to set the current estimated bitrate, notifying consumers.
-//! A [BandwidthConsumer] can read the current estimate and wait for changes.
+//! A [Producer] is used to set the current estimated bitrate, notifying consumers.
+//! A [Consumer] can read the current estimate and wait for changes.
 
 use std::task::Poll;
 
@@ -15,11 +15,11 @@ struct State {
 
 /// Produces bandwidth estimates, notifying consumers when the value changes.
 #[derive(Clone)]
-pub struct BandwidthProducer {
+pub struct Producer {
 	state: kio::Producer<State>,
 }
 
-impl BandwidthProducer {
+impl Producer {
 	/// Create a fresh producer with no current estimate.
 	pub fn new() -> Self {
 		Self {
@@ -37,8 +37,8 @@ impl BandwidthProducer {
 	}
 
 	/// Create a new consumer for the bandwidth estimate.
-	pub fn consume(&self) -> BandwidthConsumer {
-		BandwidthConsumer {
+	pub fn consume(&self) -> Consumer {
+		Consumer {
 			state: self.state.consume(),
 			last: None,
 		}
@@ -80,7 +80,7 @@ impl BandwidthProducer {
 	}
 }
 
-impl Default for BandwidthProducer {
+impl Default for Producer {
 	fn default() -> Self {
 		Self::new()
 	}
@@ -88,12 +88,12 @@ impl Default for BandwidthProducer {
 
 /// Consumes bandwidth estimates, allowing reads and async change notifications.
 #[derive(Clone)]
-pub struct BandwidthConsumer {
+pub struct Consumer {
 	state: kio::Consumer<State>,
 	last: Option<u64>,
 }
 
-impl BandwidthConsumer {
+impl Consumer {
 	/// Get the current bandwidth estimate synchronously.
 	pub fn peek(&self) -> Option<u64> {
 		self.state.read().bitrate

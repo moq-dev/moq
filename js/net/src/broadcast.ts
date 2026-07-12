@@ -1,5 +1,11 @@
+/**
+ * Broadcast role handles: a named collection of tracks produced by a publisher.
+ *
+ * @module
+ */
 import { Signal } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "./group.ts";
+import { hooks } from "./internal.ts";
 import * as track from "./track.ts";
 
 /** Reactive backing state shared by broadcast producers and consumers. */
@@ -41,7 +47,7 @@ function closeState(state: BroadcastState, abort?: Error) {
 function subscribe(
 	state: BroadcastState,
 	name: string,
-	options: track.SubscribeOptions = {},
+	options: track.Subscription = {},
 	register = false,
 ): track.Subscriber {
 	if (state.closed.peek()) {
@@ -66,7 +72,7 @@ function subscribe(
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(new track.Request(name, producer, options.priority ?? 0));
+		requested.push(hooks.makeRequest(name, producer, options.priority ?? 0));
 		requested.sort((a, b) => a.priority - b.priority);
 	});
 
@@ -85,7 +91,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 
 	const producer = new track.Producer(name);
 	state.requested.mutate((requested) => {
-		requested.push(new track.Request(name, producer, 0));
+		requested.push(hooks.makeRequest(name, producer, 0));
 		requested.sort((a, b) => a.priority - b.priority);
 	});
 
@@ -105,7 +111,7 @@ async function fetchGroup(
 	sequence: number,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
-	const subscriber = subscribe(state, name, { priority: options.priority ?? 0 });
+	const subscriber = subscribe(state, name, { priority: options.priority });
 	try {
 		for (;;) {
 			const group = await subscriber.recvGroup();
@@ -144,7 +150,7 @@ export class Producer implements track.Broadcast {
 
 	/** A read handle for this broadcast. */
 	consume(): Consumer {
-		return new Consumer(this.#state as never);
+		return makeConsumer(this.#state);
 	}
 
 	/** Return the next track requested by a peer. */
@@ -194,7 +200,7 @@ export class Producer implements track.Broadcast {
 	}
 
 	/** Open a live subscription to a track. Used by the publishing wire layer. */
-	subscribe(name: string, options?: track.SubscribeOptions): track.Subscriber {
+	subscribe(name: string, options?: track.Subscription): track.Subscriber {
 		return subscribe(this.#state, name, options);
 	}
 
@@ -219,8 +225,15 @@ export class Producer implements track.Broadcast {
 	}
 }
 
+// Constructs a Consumer from within this module without exposing a public constructor
+// that would leak the unexported BroadcastState. Assigned in the class's static block.
+let makeConsumer: (state: BroadcastState) => Consumer;
+
 /**
  * The read side of a broadcast.
+ *
+ * Created internally: obtain one from {@link Producer.consume} or the connection's
+ * `consume(path)`. The wire layers subclass it to resolve tracks over the network.
  *
  * @public
  */
@@ -233,11 +246,15 @@ export class Consumer implements track.Broadcast {
 	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
-	constructor(state?: never);
-	constructor(state?: BroadcastState) {
+	protected constructor(state?: never);
+	protected constructor(state?: BroadcastState) {
 		this.#state = state ?? new BroadcastState();
 		this.#state.consumers++;
 		this.closed = closedPromise(this.#state);
+	}
+
+	static {
+		makeConsumer = (state) => new Consumer(state as never);
 	}
 
 	/**
@@ -273,7 +290,7 @@ export class Consumer implements track.Broadcast {
 	}
 
 	/** Open a live subscription to a track. Used by the subscribing wire layer. Repeat subscriptions to the same track share one upstream subscription. */
-	subscribe(name: string, options?: track.SubscribeOptions): track.Subscriber {
+	subscribe(name: string, options?: track.Subscription): track.Subscriber {
 		return subscribe(this.#state, name, options, true);
 	}
 

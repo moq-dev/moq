@@ -13,10 +13,12 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result, Subscription, Timescale, Timestamp, coding};
+use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, frame, group};
 
-use super::{Datagram, MAX_DATAGRAM_PAYLOAD};
+use super::Datagram;
+
+pub use super::subscription::Subscription;
 
 use std::{
 	collections::{HashMap, HashSet, VecDeque},
@@ -159,7 +161,9 @@ struct TrackState {
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
 	datagram_offset: usize,
 
-	// TODO Do we need this?
+	// Sequences currently occupying a cache slot, used to reject a duplicate
+	// `create_group`/`write_group` with `Error::Duplicate`. Entries are removed on
+	// expiry/eviction so a pool-evicted sequence can be re-fetched into its slot.
 	duplicates: HashSet<u64>,
 
 	// We've popped the front of this VecDeque this many times, used to map sequence -> index.
@@ -279,7 +283,7 @@ impl TrackState {
 			}
 
 			let mut consumer = group.consume();
-			match consumer.poll_read_frame_full(waiter) {
+			match consumer.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
 					return Poll::Ready(Ok(Some((frame, self.offset + i, group.sequence))));
 				}
@@ -546,7 +550,7 @@ impl TrackState {
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
-	/// [`Fetch`] resolves via [`Self::poll_fetch`].
+	/// [`Fetching`] resolves via [`Self::poll_fetch`].
 	fn insert_group_request(&mut self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
@@ -704,13 +708,17 @@ impl Producer {
 	///
 	/// A datagram is delivered best-effort over a single QUIC datagram, parallel to the
 	/// track's groups but drawing from the same sequence namespace (so interleaving with
-	/// [`Self::append_group`] never reuses a number). The payload must not exceed
-	/// [`MAX_DATAGRAM_PAYLOAD`]; there is no group fallback. An origin publisher uses this;
-	/// a relay preserving upstream numbering uses [`Self::write_datagram`].
+	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
+	/// session drops (with a debug log) any datagram whose encoded body exceeds the
+	/// transport's datagram size, and sessions that can't carry datagrams at all (IETF
+	/// moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
+	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
+	/// publisher uses this; a relay preserving upstream numbering uses
+	/// [`Self::write_datagram`].
 	pub fn append_datagram<B: Into<bytes::Bytes>>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
 		let payload = payload.into();
-		if payload.len() > MAX_DATAGRAM_PAYLOAD {
-			return Err(Error::WrongSize);
+		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
+			return Err(Error::FrameTooLarge);
 		}
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
@@ -737,11 +745,11 @@ impl Producer {
 	/// Write a datagram with an explicit sequence number.
 	///
 	/// Preserves the supplied sequence (bumping the shared `max_sequence` if needed), so a
-	/// relay can forward a datagram without renumbering it. The payload must not exceed
-	/// [`MAX_DATAGRAM_PAYLOAD`]. Most origin publishers want [`Self::append_datagram`] instead.
+	/// relay can forward a datagram without renumbering it. Most origin publishers want
+	/// [`Self::append_datagram`] instead.
 	pub fn write_datagram(&mut self, mut datagram: Datagram) -> Result<()> {
-		if datagram.payload.len() > MAX_DATAGRAM_PAYLOAD {
-			return Err(Error::WrongSize);
+		if datagram.payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
+			return Err(Error::FrameTooLarge);
 		}
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
@@ -901,7 +909,7 @@ impl Producer {
 		}
 	}
 
-	/// Subscribe to this in-process track, resolving synchronously.
+	/// Subscribing to this in-process track, resolving synchronously.
 	///
 	/// The info is fixed at creation, so there's nothing to wait for (no
 	/// SUBSCRIBE_OK round trip). The subscriber's stale window is clamped to the
@@ -909,12 +917,22 @@ impl Producer {
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let mut preferences = subscription.into().unwrap_or_default();
 
-		let mut state = self.modify().expect("track producer state is never closed");
-		let info = state.info.as_ref().expect("producer always has info").clone();
+		// Info is fixed at creation and survives a close/abort, so read it without
+		// requiring a live producer state. If the track already ended, the returned
+		// subscriber surfaces the close/abort on its first read; the preferences are
+		// simply never registered (nothing aggregates them anymore).
+		let info = self
+			.state
+			.read()
+			.info
+			.as_ref()
+			.expect("producer always has info")
+			.clone();
 		preferences.stale = info.clamp_stale(preferences.stale);
 		let subscription = kio::Producer::new(preferences);
-		state.subscriptions.push(subscription.consume());
-		drop(state);
+		if let Ok(mut state) = self.state.write() {
+			state.subscriptions.push(subscription.consume());
+		}
 
 		Subscriber {
 			name: self.name.clone(),
@@ -1121,7 +1139,7 @@ impl Drop for Producer {
 ///
 /// Read-only: iterates `subscriptions` immutably and registers `waiter` on each, so it
 /// never flags the [`TrackState`] as modified. Marking it modified would drain and wake
-/// unrelated waiters on the channel (e.g. a [`Subscribe`] parked on track info),
+/// unrelated waiters on the channel (e.g. a [`Subscribing`] parked on track info),
 /// which races with [`Request::accept`] and can drop that wakeup. Callers decide
 /// readiness from the returned value, then prune closed subscribers through the `Mut`.
 fn combined_subscription(state: &TrackState, waiter: &kio::Waiter) -> Option<Subscription> {
@@ -1232,16 +1250,16 @@ impl Consumer {
 	/// Registers the subscription on the track and returns a [`kio::Pending`] that resolves to the
 	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribe> {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
 		// Register the subscription if the track is live. If it is already closed, the returned
-		// future resolves to the abort error via `Subscribe::poll_ok`.
+		// future resolves to the abort error via `Subscribing::poll_ok`.
 		if let Ok(mut state) = self.state.write() {
 			state.subscriptions.push(subscription.consume());
 		}
 
-		kio::Pending::new(Subscribe {
+		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
@@ -1255,7 +1273,7 @@ impl Consumer {
 		self.state.read().cached_group(sequence)
 	}
 
-	/// Fetch a single past group, without holding a live subscription.
+	/// Fetching a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
 	/// immediately if the group is cached, otherwise once a [`Dynamic`] serves
@@ -1265,13 +1283,13 @@ impl Consumer {
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
 	/// (past the final sequence, or no [`Dynamic`] on the track), or the track's abort error
 	/// if it's already closed.
-	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetch> {
+	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
 		let mut request_id = None;
 
 		// Queue a request only when a handler can serve it but the group isn't cached yet. A cached
 		// group, an unservable sequence (NotFound), or a closed track all resolve through
-		// `Fetch::poll` without a queue entry.
+		// `Fetching::poll` without a queue entry.
 		if let Ok(mut state) = self.state.write() {
 			if state.poll_fetch(sequence, None).is_pending() {
 				let id = state.next_fetch;
@@ -1285,15 +1303,15 @@ impl Consumer {
 			}
 		}
 
-		kio::Pending::new(Fetch {
+		kio::Pending::new(Fetching {
 			state: self.state.clone(),
 			sequence,
 			request_id,
 		})
 	}
 
-	pub fn info(&self) -> kio::Pending<InfoQuery> {
-		kio::Pending::new(InfoQuery {
+	pub fn info(&self) -> kio::Pending<Querying> {
+		kio::Pending::new(Querying {
 			state: self.state.clone(),
 		})
 	}
@@ -1301,13 +1319,13 @@ impl Consumer {
 
 /// The pollable state of a [`Consumer::subscribe`]; awaited via the
 /// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
-pub struct Subscribe {
+pub struct Subscribing {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
 }
 
-impl Subscribe {
+impl Subscribing {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
@@ -1327,16 +1345,17 @@ impl Subscribe {
 	}
 
 	/// Change the subscription preferences before (or after) it resolves.
-	pub fn update(&mut self, subscription: Subscription) {
-		if let Ok(mut state) = self.subscription.write() {
-			*state = subscription;
-		} else {
-			panic!("subscription is closed");
-		}
+	///
+	/// Returns [`Error::Closed`] if the track already ended; the update is
+	/// meaningless at that point and can usually be ignored.
+	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
+		*state = subscription;
+		Ok(())
 	}
 }
 
-impl kio::Future for Subscribe {
+impl kio::Future for Subscribing {
 	type Output = Result<Subscriber>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1346,11 +1365,11 @@ impl kio::Future for Subscribe {
 
 /// The pollable state of a [`Consumer::info`]; awaited via the
 /// [`kio::Pending`] wrapper.
-pub struct InfoQuery {
+pub struct Querying {
 	state: kio::Consumer<TrackState>,
 }
 
-impl InfoQuery {
+impl Querying {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Info>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
@@ -1359,7 +1378,7 @@ impl InfoQuery {
 	}
 }
 
-impl kio::Future for InfoQuery {
+impl kio::Future for Querying {
 	type Output = Result<Info>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1371,7 +1390,7 @@ impl kio::Future for InfoQuery {
 /// track for a [`Dynamic`] to serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GroupRequested {
-	/// The request ID matching the waiting [`Fetch`].
+	/// The request ID matching the waiting [`Fetching`].
 	id: u64,
 	/// The group sequence the consumer wants.
 	sequence: u64,
@@ -1443,13 +1462,13 @@ impl Drop for GroupRequest {
 /// Awaited via the [`kio::Pending`] wrapper; resolves to the
 /// [`group::Consumer`] once the group lands in the track's cache (already present,
 /// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
-pub struct Fetch {
+pub struct Fetching {
 	state: kio::Consumer<TrackState>,
 	sequence: u64,
 	request_id: Option<u64>,
 }
 
-impl kio::Future for Fetch {
+impl kio::Future for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1517,12 +1536,13 @@ impl SubscriberControl {
 	}
 
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
-	pub fn update(&self, subscription: Subscription) {
-		if let Ok(mut state) = self.subscription.write() {
-			*state = subscription;
-		} else {
-			panic!("subscription is closed");
-		}
+	///
+	/// Returns [`Error::Closed`] if the track already ended; the update is
+	/// meaningless at that point and can usually be ignored.
+	pub fn update(&self, subscription: Subscription) -> Result<()> {
+		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
+		*state = subscription;
+		Ok(())
 	}
 }
 
@@ -1642,10 +1662,10 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
-	/// A helper that calls [`Self::poll_next_group`] and returns its first frame,
-	/// skipping the rest of the group. Intended for single-frame groups (see
-	/// [`Producer::write_frame`]).
-	pub fn poll_read_frame_full(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+	/// A helper that calls [`Self::poll_next_group`] and returns its first frame
+	/// (timestamp and payload), skipping the rest of the group. Intended for
+	/// single-frame groups (see [`Producer::write_frame`]).
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		let lower = self.min_sequence.max(self.next_sequence);
 		let Some((frame, found_index, sequence)) =
 			ready!(self.poll(waiter, |state| { state.poll_read_frame(self.index, lower, waiter) })?)
@@ -1658,25 +1678,12 @@ impl Subscriber {
 		Poll::Ready(Ok(Some(frame)))
 	}
 
-	/// A helper that calls [`Self::poll_next_group`] and returns its first frame's
-	/// payload, skipping the rest of the group.
-	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
-		let frame = ready!(self.poll_read_frame_full(waiter))?;
-		Poll::Ready(Ok(frame.map(|frame| frame.payload)))
-	}
-
-	/// Read a single full frame from the next group in sequence order, including timestamp.
-	///
-	/// See [`Self::poll_read_frame_full`] for semantics.
-	pub async fn read_frame_full(&mut self) -> Result<Option<frame::Frame>> {
-		kio::wait(|waiter| self.poll_read_frame_full(waiter)).await
-	}
-
-	/// Read a single full frame from the next group in sequence order.
+	/// Read a single full frame (timestamp and payload) from the next group in
+	/// sequence order.
 	///
 	/// See [`Self::poll_read_frame`] for semantics.
-	pub async fn read_frame(&mut self) -> Result<Option<bytes::Bytes>> {
-		Ok(self.read_frame_full().await?.map(|frame| frame.payload))
+	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
+		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence.
@@ -1751,9 +1758,15 @@ impl Subscriber {
 		self.control().subscription()
 	}
 
-	/// Replace this subscriber's preferences, updating the producer's aggregate.
-	pub fn update(&mut self, subscription: Subscription) {
-		self.control().update(subscription);
+	///
+	/// The stale window is clamped to the track's cache, like the initial subscribe.
+	/// Returns [`Error::Closed`] if the track already ended; the update is
+	/// meaningless at that point and can usually be ignored.
+	pub fn update(&mut self, mut subscription: Subscription) -> Result<()> {
+		subscription.stale = self.info.clamp_stale(subscription.stale);
+		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
+		*state = subscription;
+		Ok(())
 	}
 
 	/// Return the latest sequence number in the track.
@@ -2055,11 +2068,11 @@ mod test {
 	#[tokio::test]
 	async fn datagram_rejects_oversized() {
 		let mut producer = track_producer("test", None);
-		let big = bytes::Bytes::from(vec![0u8; MAX_DATAGRAM_PAYLOAD + 1]);
+		let big = bytes::Bytes::from(vec![0u8; crate::model::datagram::MAX_DATAGRAM_PAYLOAD + 1]);
 		let ts = Timestamp::from_millis(0).unwrap();
 		assert!(matches!(
 			producer.append_datagram(ts, big.clone()),
-			Err(Error::WrongSize)
+			Err(Error::FrameTooLarge)
 		));
 		assert!(matches!(
 			producer.write_datagram(Datagram {
@@ -2067,7 +2080,7 @@ mod test {
 				timestamp: ts,
 				payload: big,
 			}),
-			Err(Error::WrongSize)
+			Err(Error::FrameTooLarge)
 		));
 	}
 
@@ -2289,10 +2302,14 @@ mod test {
 		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
 
 		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
-		subscriber.update(Subscription::default().with_stale(Duration::from_millis(500)));
+		subscriber
+			.update(Subscription::default().with_stale(Duration::from_millis(500)))
+			.unwrap();
 		assert_eq!(subscriber.subscription().stale, Duration::from_millis(500));
 
-		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
+		subscriber
+			.update(Subscription::default().with_stale(Duration::ZERO))
+			.unwrap();
 		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
 	}
 
@@ -2305,7 +2322,9 @@ mod test {
 		let mut recv = Box::pin(subscriber.recv_group());
 		assert!(recv.as_mut().now_or_never().is_none());
 
-		control.update(Subscription::default().with_priority(7).with_ordered(false));
+		control
+			.update(Subscription::default().with_priority(7).with_ordered(false))
+			.unwrap();
 
 		let aggregate = producer.subscription().expect("expected an active subscription");
 		assert_eq!(aggregate.priority, 7);
@@ -2773,7 +2792,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"hello");
+		assert_eq!(&frame.payload[..], b"hello");
 
 		let frame = consumer
 			.read_frame()
@@ -2781,11 +2800,11 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"world");
+		assert_eq!(&frame.payload[..], b"world");
 	}
 
 	#[tokio::test]
-	async fn read_frame_full_preserves_timestamp() {
+	async fn read_frame_preserves_timestamp() {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
@@ -2794,7 +2813,7 @@ mod test {
 			.unwrap();
 
 		let frame = consumer
-			.read_frame_full()
+			.read_frame()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
@@ -2817,7 +2836,7 @@ mod test {
 
 		// read_frame should not block on the stalled seq 3. It returns seq 5's frame.
 		let frame = consumer
-			.read_frame_full()
+			.read_frame()
 			.now_or_never()
 			.expect("should not block on stalled earlier group")
 			.expect("would have errored")
@@ -2845,7 +2864,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"one");
+		assert_eq!(&frame.payload[..], b"one");
 
 		// The second frame of group 0 is discarded; the next read jumps to group 1.
 		let frame = consumer
@@ -2854,7 +2873,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"next");
+		assert_eq!(&frame.payload[..], b"next");
 	}
 
 	#[tokio::test]
@@ -2881,7 +2900,7 @@ mod test {
 			.expect("should not block once a frame is written")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"late");
+		assert_eq!(&frame.payload[..], b"late");
 	}
 
 	#[tokio::test]
@@ -2907,7 +2926,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"keep");
+		assert_eq!(&frame.payload[..], b"keep");
 	}
 
 	#[tokio::test]
@@ -2924,7 +2943,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(&frame[..], b"only");
+		assert_eq!(&frame.payload[..], b"only");
 
 		let done = consumer
 			.read_frame()
@@ -2984,7 +3003,7 @@ mod test {
 		assert!(consumer.get_group(0).is_some());
 		let mut g = consumer.fetch_group(0, None).await.unwrap();
 		assert_eq!(g.sequence, 0);
-		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hello");
+		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hello");
 
 		// Nothing was queued for the dynamic handler to serve.
 		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
@@ -2998,7 +3017,7 @@ mod test {
 
 		// A cache miss isn't in `get_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
-		// wrapper to the inner `Fetch` (a `kio::Future`).
+		// wrapper to the inner `Fetching` (a `kio::Future`).
 		assert!(consumer.get_group(5).is_none());
 		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
 		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
@@ -3018,7 +3037,7 @@ mod test {
 
 		let mut g = pending.await.unwrap();
 		assert_eq!(g.sequence, 5);
-		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hi");
+		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hi");
 	}
 
 	#[tokio::test]
@@ -3082,7 +3101,7 @@ mod test {
 		group.finish().unwrap();
 
 		let mut group = retry.await.unwrap();
-		assert_eq!(&group.read_frame().await.unwrap().unwrap()[..], b"retry");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"retry");
 	}
 
 	#[tokio::test]
@@ -3168,7 +3187,7 @@ mod test {
 		assert!(pool.used() > 100, "pinned latest may exceed the budget");
 		let mut subscriber = producer.subscribe(None);
 		let mut group = subscriber.assert_group();
-		assert_eq!(group.read_frame().await.unwrap().unwrap().len(), 1000);
+		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
 	}
 
 	#[tokio::test]
@@ -3289,7 +3308,7 @@ mod test {
 
 		assert!(pool.used() <= 3000);
 		let mut group = consumer.get_group(1).expect("refetched latest must stay pinned");
-		assert_eq!(group.read_frame().await.unwrap().unwrap().len(), 1000);
+		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
 	}
 
 	#[tokio::test]
@@ -3324,7 +3343,7 @@ mod test {
 		group.finish().unwrap();
 
 		let mut group = pending.await.unwrap();
-		assert_eq!(&group.read_frame().await.unwrap().unwrap()[..], b"refetched");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"refetched");
 	}
 
 	#[tokio::test]

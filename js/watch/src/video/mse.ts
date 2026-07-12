@@ -127,7 +127,7 @@ export class Mse implements Backend {
 			for (;;) {
 				// TODO: Use Frame.Consumer for CMAF so we can support higher latencies.
 				// It requires extracting the timestamp from the frame payload.
-				let frame: Uint8Array | undefined;
+				let frame: Moq.Group.Frame | undefined;
 				try {
 					frame = await data.readFrame();
 				} catch (err) {
@@ -139,10 +139,10 @@ export class Mse implements Backend {
 				if (!frame) return;
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.
-				const timestamp = Container.Cmaf.decodeTimestamp(frame, init);
+				const timestamp = Container.Cmaf.decodeTimestamp(frame.data, init);
 				this.sync.received(Moq.Time.Milli.fromMicro(timestamp), "video");
 
-				await this.#appendBuffer(sourceBuffer, frame);
+				await this.#appendBuffer(sourceBuffer, frame.data);
 
 				// Seek to the start of the buffer if we're behind it (for startup).
 				if (element.buffered.length > 0 && element.currentTime < element.buffered.start(0)) {

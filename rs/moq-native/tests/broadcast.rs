@@ -76,10 +76,11 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
@@ -106,7 +107,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	// Tear down: dropping the session closes the QUIC connection.
 	drop(session);
@@ -181,10 +182,11 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
@@ -295,10 +297,11 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
@@ -416,10 +419,11 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
@@ -440,7 +444,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
-	assert_eq!(&*frame, b"new");
+	assert_eq!(&frame.payload[..], b"new");
 
 	// While the subscription is still held and active, fetch the older group. The
 	// relay doesn't have it cached (subscription started at the latest), so this
@@ -455,7 +459,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("fetch read_frame timed out")
 		.expect("fetch read_frame failed")
 		.expect("fetched group closed prematurely");
-	assert_eq!(&*frame, b"old");
+	assert_eq!(&frame.payload[..], b"old");
 
 	// The live subscription is unaffected: a freshly published group still arrives.
 	drop(session);
@@ -518,7 +522,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (_, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+	let moq_native::moq_net::announce::Update { event: bc, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
@@ -606,25 +610,25 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 		.expect("connect failed");
 
 	// The initial set: "first" was announced before the session existed.
-	let (path, event) = next_announce(&mut announcements).await;
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "first");
 	assert!(matches!(event, Event::Active(_)), "expected initial announce");
 
 	// A live announce after the initial set.
 	let second = pub_origin.create_broadcast("second").expect("create broadcast");
-	let (path, event) = next_announce(&mut announcements).await;
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(matches!(event, Event::Active(_)), "expected live announce");
 
 	// Unannounce: retracted by announce id on the wire.
 	drop(second);
-	let (path, event) = next_announce(&mut announcements).await;
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(matches!(event, Event::Ended), "expected unannounce");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	let _second = pub_origin.create_broadcast("second").expect("create broadcast");
-	let (path, event) = next_announce(&mut announcements).await;
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(matches!(event, Event::Active(_)), "expected re-announce");
 
@@ -638,13 +642,13 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 		.publish_broadcast("first", &replacement)
 		.expect("publish replacement");
 	drop(first);
-	let (path, event) = next_announce(&mut announcements).await;
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "first");
 	assert!(matches!(event, Event::Restart(_)), "expected restart");
 
 	// A sentinel proves no stray unannounce for "first" snuck in behind the restart.
 	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
-	let (path, event) = next_announce(&mut announcements).await;
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "sentinel");
 	assert!(matches!(event, Event::Active(_)), "expected sentinel announce");
 
@@ -1070,10 +1074,11 @@ async fn broadcast_websocket() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
@@ -1100,7 +1105,7 @@ async fn broadcast_websocket() {
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(session);
 	server_handle
@@ -1178,10 +1183,11 @@ async fn broadcast_websocket_fallback() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
@@ -1206,7 +1212,7 @@ async fn broadcast_websocket_fallback() {
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&*frame, b"hello");
+	assert_eq!(&frame.payload[..], b"hello");
 
 	drop(session);
 	server_handle
@@ -1421,10 +1427,11 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timeout")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timeout")
+			.expect("origin closed");
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.broadcast().expect("expected announce");
 
@@ -1441,7 +1448,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("read frame 0 timeout")
 		.expect("read frame 0 failed")
 		.expect("group closed early");
-	assert_eq!(&*frame, b"a");
+	assert_eq!(&frame.payload[..], b"a");
 
 	// Drop the only consumer to trigger the linger phase.
 	drop(g);
@@ -1474,7 +1481,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 				.expect("read frame 1 timeout")
 				.expect("read frame 1 failed")
 				.expect("group closed early on resume");
-			assert_eq!(&*frame, b"b");
+			assert_eq!(&frame.payload[..], b"b");
 			saw_group1 = true;
 			break;
 		}
@@ -1618,10 +1625,11 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.expect("client connect failed");
 
 	// The "allowed" announce stream still delivers even though "denied" was FINed.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
 	assert_eq!(path.as_str(), "allowed/test");
 	assert!(bc.broadcast().is_some(), "expected announce, got unannounce");
 
@@ -1670,10 +1678,11 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 		// The client serves "allowed/test"; the "denied" interest is FINed but must not
 		// tear down the session.
-		let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
-			.await
-			.expect("announce timed out")
-			.expect("origin closed");
+		let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+			tokio::time::timeout(TIMEOUT, announcements.next())
+				.await
+				.expect("announce timed out")
+				.expect("origin closed");
 		assert_eq!(path.as_str(), "allowed/test");
 		let bc = bc.broadcast().expect("expected announce, got unannounce");
 
@@ -1693,7 +1702,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.expect("read_frame timed out")
 			.expect("read_frame failed")
 			.expect("group closed prematurely");
-		assert_eq!(&*frame, b"hello");
+		assert_eq!(&frame.payload[..], b"hello");
 
 		// The disjoint "denied" interest must not have torn down the session.
 		assert!(

@@ -582,10 +582,10 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const current = track.prioritySignal.peek();
+			const current = track.subscriptionSignal.peek()?.priority;
 			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.prioritySignal.next(), stopped]);
+				const next = await Promise.race([track.subscriptionSignal.next(), stopped]);
 				if (next === null) return;
 				continue;
 			}

@@ -239,7 +239,7 @@ async fn subscribe(
 	let mut seen: HashSet<String> = HashSet::new();
 
 	while (seen.len() as u64) < want {
-		let Some((path, event)) = announced.next().await else {
+		let Some(moq_net::announce::Update { path, event, .. }) = announced.next().await else {
 			break;
 		};
 		let Some(broadcast) = event.broadcast() else {
@@ -290,7 +290,7 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 			// The first frame of every group is the JSON keyframe. Parse it once to
 			// learn the publisher's shape (we may be watching a peer, not ourselves).
 			if first && !learned_shape {
-				if let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame) {
+				if let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
 					tracing::debug!(
 						fps = header.fps,
 						frame_size = header.frame_size,
@@ -301,7 +301,7 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 				}
 			}
 			first = false;
-			stats.frame_recv(frame.len());
+			stats.frame_recv(frame.payload.len());
 		}
 	}
 	Ok(())
@@ -433,7 +433,7 @@ mod tests {
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
-		let header: serde_json::Value = serde_json::from_slice(&keyframe).unwrap();
+		let header: serde_json::Value = serde_json::from_slice(&keyframe.payload).unwrap();
 		assert_eq!(header["connection"], 7);
 		assert_eq!(header["broadcast"], "bench/test");
 		assert_eq!(header["group"], 0);
@@ -442,7 +442,7 @@ mod tests {
 		assert_eq!(header["group_size"], 2);
 
 		for _ in 0..2 {
-			let payload = group.read_frame().await.unwrap().expect("payload");
+			let payload = group.read_frame().await.unwrap().expect("payload").payload;
 			assert_eq!(payload.len(), 8);
 			assert!(payload.iter().all(|&b| b == 0));
 		}

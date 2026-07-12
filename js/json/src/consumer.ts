@@ -55,7 +55,7 @@ export class Consumer<T> {
 			let value: T | undefined;
 			let advanced = false;
 			for (let frame = this.#group.tryReadFrame(); frame !== undefined; frame = this.#group.tryReadFrame()) {
-				value = this.#apply(frame);
+				value = this.#apply(frame.data);
 				advanced = true;
 			}
 			if (advanced) return value;

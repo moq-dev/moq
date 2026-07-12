@@ -6,9 +6,10 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, StatsHandle, Subscription,
+	AsPath, Error, StatsHandle,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
+	track::Subscription,
 };
 
 use super::{Message, Version};
@@ -514,7 +515,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				next = announced.next() => next,
 			};
 
-			let Some((path, event)) = next else {
+			let Some(crate::announce::Update { path, event, .. }) = next else {
 				break;
 			};
 
@@ -692,7 +693,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// Send initial NAMESPACE messages for currently active namespaces
 				// Send initial NAMESPACE messages for currently active namespaces.
 				// A restart is indistinguishable from an active here (the namespace is present).
-				while let Some((path, event)) = announced.try_next() {
+				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
 					if event.broadcast().is_some() {
 						let suffix = path
 							.strip_prefix(&prefix)
@@ -710,7 +711,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						biased;
 						res = stream.reader.closed() => return res,
 					next = announced.next() => {
-						let Some((path, event)) = next else {
+						let Some(crate::announce::Update { path, event, .. }) = next else {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
 						};

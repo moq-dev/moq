@@ -36,7 +36,7 @@ struct TaskEntry {
 /// A raw track task also accepts subscription updates while it is running.
 struct RawTaskEntry {
 	close: Option<oneshot::Sender<()>>,
-	update: mpsc::UnboundedSender<Option<moq_net::Subscription>>,
+	update: mpsc::UnboundedSender<Option<moq_net::track::Subscription>>,
 	callback: OnStatus,
 }
 
@@ -335,10 +335,7 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.track(&name)?
-					.subscribe(moq_net::Subscription {
-						priority: 1,
-						..Default::default()
-					})
+					.subscribe(moq_net::track::Subscription::default().with_priority(1))
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -387,10 +384,7 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.track(&name)?
-					.subscribe(moq_net::Subscription {
-						priority: 2,
-						..Default::default()
-					})
+					.subscribe(moq_net::track::Subscription::default().with_priority(2))
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -480,7 +474,7 @@ impl Consume {
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		subscription: Option<moq_net::Subscription>,
+		subscription: Option<moq_net::track::Subscription>,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
@@ -515,20 +509,24 @@ impl Consume {
 		Ok(id)
 	}
 
-	fn apply_raw_subscription(track: &mut moq_net::track::Subscriber, subscription: Option<moq_net::Subscription>) {
+	fn apply_raw_subscription(
+		track: &mut moq_net::track::Subscriber,
+		subscription: Option<moq_net::track::Subscription>,
+	) {
 		let subscription = subscription.unwrap_or_default();
 		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
 			track.start_at(start);
 		}
 		track.end_at(subscription.group_end);
-		track.update(subscription);
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = track.update(subscription);
 	}
 
 	async fn run_raw(
 		callback: OnStatus,
 		mut track: moq_net::track::Subscriber,
 		mut close: oneshot::Receiver<()>,
-		mut updates: mpsc::UnboundedReceiver<Option<moq_net::Subscription>>,
+		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
@@ -562,7 +560,7 @@ impl Consume {
 					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
-					match group.poll_read_frame_full(waiter) {
+					match group.poll_read_frame(waiter) {
 						Poll::Ready(Ok(Some(frame))) => Poll::Ready(Ok(RawStep::Item(frame))),
 						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
 						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
@@ -594,7 +592,7 @@ impl Consume {
 	/// can poll a track/group source afterwards.
 	fn poll_raw_control(
 		close: &mut oneshot::Receiver<()>,
-		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::Subscription>>,
+		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 		track: &mut moq_net::track::Subscriber,
 		waiter: &moq_net::kio::Waiter,
 	) -> bool {
@@ -612,7 +610,11 @@ impl Consume {
 		}
 	}
 
-	pub fn raw_track_update(&mut self, track: Id, subscription: Option<moq_net::Subscription>) -> Result<(), Error> {
+	pub fn raw_track_update(
+		&mut self,
+		track: Id,
+		subscription: Option<moq_net::track::Subscription>,
+	) -> Result<(), Error> {
 		let entry = self
 			.raw_task
 			.get_mut(track)

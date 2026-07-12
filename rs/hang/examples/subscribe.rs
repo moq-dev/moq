@@ -42,7 +42,9 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 // Subscribe to a broadcast and read media frames.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
-	let (path, broadcast) = consumer.announced().next().await.context("origin closed")?;
+	let moq_net::announce::Update {
+		path, event: broadcast, ..
+	} = consumer.announced().next().await.context("origin closed")?;
 
 	let broadcast = broadcast
 		.broadcast()
@@ -78,10 +80,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 	// Subscribe to the video track.
 	let track_consumer = broadcast
 		.track(name)?
-		.subscribe(moq_net::Subscription {
-			priority: 1,
-			..Default::default()
-		})
+		.subscribe(moq_net::track::Subscription::default().with_priority(1))
 		.await?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 		.with_latency(Duration::from_millis(500));

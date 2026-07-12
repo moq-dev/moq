@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some((path, event)) = origin.next() => match event.broadcast() {
+					Some(moq_net::announce::Update { path, event, .. }) = origin.next() => match event.broadcast() {
 						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast
@@ -212,10 +212,10 @@ impl Subscriber {
 				.context("failed to get first object")?
 				.context("empty group")?;
 
-			let base = String::from_utf8_lossy(&base);
+			let base = String::from_utf8_lossy(&base.payload);
 
 			while let Some(object) = group.read_frame().await? {
-				let str = String::from_utf8_lossy(&object);
+				let str = String::from_utf8_lossy(&object.payload);
 				println!("{base}{str}");
 			}
 		}

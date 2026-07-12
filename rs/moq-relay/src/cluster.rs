@@ -627,7 +627,7 @@ impl Cluster {
 		loop {
 			tokio::select! {
 				ann = announced.next() => {
-					let Some((relative, event)) = ann else { return; };
+					let Some(moq_net::announce::Update { path: relative, event, .. }) = ann else { return; };
 					let peer = relative.as_str();
 					// Skip self and any peer we lose the tiebreaker to; that side
 					// dials us instead, so each pair forms a single session.
@@ -1202,7 +1202,8 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration broadcast must be visible on the origin.
-		let (path, event) = watcher.try_next().expect("self-registration must be published");
+		let moq_net::announce::Update { path, event, .. } =
+			watcher.try_next().expect("self-registration must be published");
 		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
 		assert!(event.broadcast().is_some());
 

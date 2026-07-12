@@ -88,9 +88,11 @@ impl Server {
 	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
 		// Regimes without a path to read defer to `ok()` without surfacing one.
 		let deferred = |handshake| Request {
-			server: self.clone(),
 			path: None,
-			handshake,
+			inner: Some(RequestInner {
+				server: self.clone(),
+				handshake,
+			}),
 		};
 
 		let (encoding, supported) = match session.protocol() {
@@ -145,13 +147,15 @@ impl Server {
 				// PROBE gating resolves without re-reading the (consumed) Setup Stream.
 				let client_setup = lite::accept_setup(&session, version).await?;
 				return Ok(Request {
-					server: self.clone(),
 					path: client_setup.path.clone(),
-					handshake: Handshake::LiteSetup {
-						session,
-						version,
-						client_setup,
-					},
+					inner: Some(RequestInner {
+						server: self.clone(),
+						handshake: Handshake::LiteSetup {
+							session,
+							version,
+							client_setup,
+						},
+					}),
 				});
 			}
 			Some(ALPN_LITE_04) => {
@@ -214,14 +218,16 @@ impl Server {
 		};
 
 		Ok(Request {
-			server: self.clone(),
 			path,
-			handshake: Handshake::Legacy {
-				session,
-				stream,
-				version,
-				request_id_max,
-			},
+			inner: Some(RequestInner {
+				server: self.clone(),
+				handshake: Handshake::Legacy {
+					session,
+					stream,
+					version,
+					request_id_max,
+				},
+			}),
 		})
 	}
 
@@ -234,13 +240,15 @@ impl Server {
 	) -> Result<Request<S>, Error> {
 		let (peer_setup, path) = ietf::accept_setup(&session, version).await?;
 		Ok(Request {
-			server: self.clone(),
 			path,
-			handshake: Handshake::IetfModern {
-				session,
-				version,
-				peer_setup,
-			},
+			inner: Some(RequestInner {
+				server: self.clone(),
+				handshake: Handshake::IetfModern {
+					session,
+					version,
+					peer_setup,
+				},
+			}),
 		})
 	}
 }
@@ -253,8 +261,14 @@ impl Server {
 /// [`close`](Self::close) to reject it. Modeled on the WebTransport `Request` in
 /// moq-native.
 pub struct Request<S: web_transport_trait::Session> {
-	server: Server,
 	path: Option<String>,
+	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
+	inner: Option<RequestInner<S>>,
+}
+
+/// The parts of a [`Request`] consumed by [`Request::ok`] / [`Request::close`].
+struct RequestInner<S: web_transport_trait::Session> {
+	server: Server,
 	handshake: Handshake<S>,
 }
 
@@ -301,27 +315,31 @@ impl<S: web_transport_trait::Session> Request<S> {
 	/// Publish to the connected client. Overrides any value from the [`Server`]
 	/// builder; typically set after inspecting [`path`](Self::path).
 	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
-		self.server.publish = Some(publish.consume());
+		self.inner_mut().server.publish = Some(publish.consume());
 		self
 	}
 
 	/// Subscribe to the connected client. Overrides any value from the [`Server`] builder.
 	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
-		self.server.subscribe = Some(subscribe);
+		self.inner_mut().server.subscribe = Some(subscribe);
 		self
 	}
 
 	/// Set the tier-scoped stats handle. Overrides any value from the [`Server`] builder.
 	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
-		self.server.stats = stats;
+		self.inner_mut().server.stats = stats;
 		self
 	}
 
-	/// Accept the session, completing the handshake.
-	pub async fn ok(self) -> Result<Session, Error> {
-		let server = self.server;
+	fn inner_mut(&mut self) -> &mut RequestInner<S> {
+		self.inner.as_mut().expect("request already responded")
+	}
 
-		let (session, mut stream, version, request_id_max) = match self.handshake {
+	/// Accept the session, completing the handshake.
+	pub async fn ok(mut self) -> Result<Session, Error> {
+		let RequestInner { server, handshake } = self.inner.take().expect("request already responded");
+
+		let (session, mut stream, version, request_id_max) = match handshake {
 			Handshake::IetfModern {
 				session,
 				version,
@@ -443,7 +461,14 @@ impl<S: web_transport_trait::Session> Request<S> {
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
-	pub fn close(self, err: Error) {
+	pub fn close(mut self, err: Error) {
+		let inner = self.inner.take().expect("request already responded");
+		inner.close(err);
+	}
+}
+
+impl<S: web_transport_trait::Session> RequestInner<S> {
+	fn close(self, err: Error) {
 		let session = match self.handshake {
 			Handshake::IetfModern { session, .. } => session,
 			Handshake::LiteBare { session, .. } => session,
@@ -451,6 +476,17 @@ impl<S: web_transport_trait::Session> Request<S> {
 			Handshake::LiteSetup { session, .. } => session,
 		};
 		session.close(err.to_code(), &err.to_string());
+	}
+}
+
+impl<S: web_transport_trait::Session> Drop for Request<S> {
+	// A dropped request would otherwise leave the client hanging until its idle
+	// timeout: it already sent SETUP and is waiting on a response. Reject loudly.
+	fn drop(&mut self) {
+		if let Some(inner) = self.inner.take() {
+			tracing::warn!("Request dropped without ok() or close(); rejecting the session");
+			inner.close(Error::Cancel);
+		}
 	}
 }
 

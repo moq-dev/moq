@@ -202,12 +202,12 @@ impl Container for Wire {
 	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
-		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
+		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
 
 		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
-		Poll::Ready(Ok(Some(decode(data, timescale)?)))
+		Poll::Ready(Ok(Some(decode(frame.payload, timescale)?)))
 	}
 }
 

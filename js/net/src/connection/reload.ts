@@ -6,34 +6,32 @@ import type { Established } from "./established.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
-	// The delay in milliseconds before reconnecting.
-	// default: 1000
+	/** The delay in milliseconds before reconnecting (default: 1000). */
 	initial: DOMHighResTimeStamp;
 
-	// The multiplier for the delay.
-	// default: 2
+	/** The multiplier for the delay (default: 2). */
 	multiplier: number;
 
-	// The maximum delay in milliseconds.
-	// default: 30000
+	/** The maximum delay in milliseconds (default: 30000). */
 	max: DOMHighResTimeStamp;
 
-	// Maximum total time in milliseconds to spend retrying before giving up.
-	// Resets after each successful connection. Set to 0 for unlimited retries.
-	// default: 300000 (5 minutes)
+	/**
+	 * Maximum total time in milliseconds to spend retrying before giving up (default:
+	 * 300000, 5 minutes). Resets after each successful connection. Set to 0 for
+	 * unlimited retries.
+	 */
 	timeout?: DOMHighResTimeStamp;
 };
 
 /** Options for {@link Reload}: connect options plus reactive URL/enabled signals and backoff tuning. */
 export type ReloadProps = ConnectProps & {
-	// Whether to reload the connection when it disconnects.
-	// default: true
+	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
 
-	// The URL of the relay server.
+	/** The URL of the relay server. */
 	url?: URL | Signal<URL | undefined>;
 
-	// The delay for the reload.
+	/** Backoff settings for the reconnect loop. */
 	delay?: ReloadDelay;
 };
 
