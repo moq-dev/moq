@@ -672,6 +672,19 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
+	/// Send a best-effort datagram, returning its per-track sequence number.
+	///
+	/// `timestamp_us` is the presentation timestamp in microseconds. The payload
+	/// must be at most 1200 bytes. Datagrams are only delivered on transports and
+	/// wire versions with a datagram channel; there is no stream fallback.
+	pub fn append_datagram(&self, timestamp_us: u64, payload: Vec<u8>) -> Result<u64, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
+		Ok(track.append_datagram(timestamp, payload)?)
+	}
+
 	/// Abort this track with an application error code.
 	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();

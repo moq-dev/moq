@@ -17,6 +17,7 @@ from .types import (
     AudioFrame,
     Catalog,
     Container,
+    Datagram,
     FetchGroupOptions,
     Frame,
     Subscription,
@@ -135,6 +136,14 @@ class TrackConsumer:
         status/command tracks). Returns `None` when the track ends.
         """
         return await self._inner.read_frame()
+
+    async def recv_datagram(self) -> Datagram | None:
+        """Receive the next best-effort datagram in arrival order.
+
+        Returns ``None`` when the track ends. Datagrams are unavailable over stream-only
+        transports and older wire versions.
+        """
+        return await self._inner.recv_datagram()
 
     async def info(self) -> TrackInfo:
         """Return the publisher-side track properties."""

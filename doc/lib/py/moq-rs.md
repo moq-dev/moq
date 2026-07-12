@@ -155,6 +155,17 @@ async for request in dynamic:
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+### Raw datagrams
+
+Raw tracks can also send best-effort datagrams:
+
+```python
+seq = track.append_datagram(timestamp_us=42_000, payload=b"meter update")
+datagram = await track_consumer.recv_datagram()
+```
+
+A datagram is a single unreliable payload, returned as `Datagram(sequence, timestamp_us, payload)`. Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
 ### On-demand raw tracks
 
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:

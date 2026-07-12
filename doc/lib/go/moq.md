@@ -226,6 +226,31 @@ _ = producer.Finish()
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+## Raw datagrams
+
+Raw tracks can send a single best-effort payload without opening a group stream:
+
+```go
+sequence, err := track.AppendDatagram(42_000, []byte("meter update"))
+if err != nil {
+    return err
+}
+
+datagram, err := consumer.RecvDatagram(ctx)
+if err != nil {
+    return err
+}
+
+for datagram, err := range consumer.Datagrams(ctx) {
+    if err != nil {
+        return err
+    }
+    fmt.Println(datagram.Sequence, datagram.TimestampUs)
+}
+```
+
+Datagrams are delivered as `Datagram{Sequence, TimestampUs, Payload}`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
 ## On-demand broadcasts
 
 Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
