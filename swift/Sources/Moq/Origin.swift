@@ -5,8 +5,8 @@ import MoqFFI
 public final class OriginProducer: Sendable {
     let ffi: MoqOriginProducer
 
-    public init() {
-        ffi = MoqOriginProducer()
+    public init(cacheCapacityBytes: UInt64? = nil) {
+        ffi = MoqOriginProducer(options: MoqOriginOptions(cacheCapacityBytes: cacheCapacityBytes))
     }
 
     init(_ ffi: MoqOriginProducer) {
@@ -18,9 +18,67 @@ public final class OriginProducer: Sendable {
         OriginConsumer(ffi.consume())
     }
 
+    /// Serve broadcasts that consumers request without an announcement.
+    public func dynamic() -> OriginDynamic {
+        OriginDynamic(ffi.dynamic())
+    }
+
     /// Announce a broadcast under the given path so subscribers can find it.
     public func announce(path: String, broadcast: BroadcastProducer) throws {
         try ffi.announce(path: path, broadcast: broadcast.ffi)
+    }
+}
+
+/// A requested broadcast that has not been accepted yet.
+public final class BroadcastRequest: Sendable {
+    let ffi: MoqBroadcastRequest
+
+    init(_ ffi: MoqBroadcastRequest) {
+        self.ffi = ffi
+    }
+
+    /// The requested broadcast path.
+    public var path: String {
+        get throws { try ffi.path() }
+    }
+
+    /// Serve the request with an unannounced broadcast.
+    public func accept(broadcast: BroadcastProducer) throws {
+        try ffi.accept(broadcast: broadcast.ffi)
+    }
+
+    /// Abort the request with an application error code.
+    public func abort(errorCode: Int32) throws {
+        try ffi.abort(errorCode: errorCode)
+    }
+}
+
+/// A stream of broadcasts requested by consumers. Iterate directly:
+/// `for try await request in dynamic { ... }`. Hold this while missing
+/// broadcasts should be served; cancelling the consuming task stops serving.
+public final class OriginDynamic: AsyncSequence, Sendable {
+    public typealias Element = BroadcastRequest
+
+    let ffi: MoqOriginDynamic
+
+    init(_ ffi: MoqOriginDynamic) {
+        self.ffi = ffi
+    }
+
+    /// The next requested broadcast. Throws `Closed` once the origin closes.
+    public func requestedBroadcast() async throws -> BroadcastRequest {
+        BroadcastRequest(try await ffi.requestedBroadcast())
+    }
+
+    /// Cancel all current and future `requestedBroadcast()` calls.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    public func makeAsyncIterator() -> AsyncThrowingStream<BroadcastRequest, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            BroadcastRequest(try await ffi.requestedBroadcast())
+        }.makeAsyncIterator()
     }
 }
 

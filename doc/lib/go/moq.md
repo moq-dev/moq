@@ -55,6 +55,83 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## TLS and stats
+
+Use certificate roots or fingerprints when a client needs to trust a private or
+self-signed endpoint without disabling verification:
+
+```go
+client, err := moq.Dial(ctx, "https://relay.example.com",
+    moq.WithTLSRoots("/etc/ssl/custom-ca.pem"),
+    moq.WithTLSSystemRoots(true),
+    moq.WithTLSFingerprints("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+stats := client.Session().Stats()
+fmt.Printf("rtt: %v\n", stats.RttUs)
+```
+
+`Stats()` returns a snapshot. Individual fields are nil when the transport does
+not report that metric yet.
+
+## Dynamic tracks
+
+`BroadcastProducer.Dynamic()` lets a publisher accept tracks that subscribers
+request before they exist:
+
+```go
+broadcast, err := moq.NewBroadcastProducer()
+if err != nil {
+    log.Fatal(err)
+}
+defer broadcast.Finish()
+
+dynamic, err := broadcast.Dynamic()
+if err != nil {
+    log.Fatal(err)
+}
+defer dynamic.Cancel()
+
+go func() {
+    request, err := dynamic.RequestedTrack(ctx)
+    if err != nil {
+        return
+    }
+    track, err := request.Accept(nil)
+    if err != nil {
+        return
+    }
+    _ = track.WriteFrame([]byte("ready"))
+}()
+```
+
+For media tracks, let the importer accept the request:
+
+```go
+request, err := dynamic.RequestedTrack(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+media, err := broadcast.PublishMediaOnTrack(request, "opus", opusInit)
+if err != nil {
+    log.Fatal(err)
+}
+_ = media.WriteFrame(opusFrame, 20_000)
+```
+
+Video catalog fields that are known before the first keyframe can be supplied
+with `WithVideoHint`:
+
+```go
+media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{
+    Coded: &moq.Dimensions{Width: 1920, Height: 1080},
+}))
+```
+
 ## Error handling
 
 A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
@@ -88,6 +165,28 @@ broadcast.Finish()
 ```
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
+
+## Raw Track Controls
+
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```go
+subscription := moq.Subscription{Priority: 10, Ordered: true}
+track, err := broadcast.SubscribeTrack("events", &subscription)
+if err != nil {
+	log.Fatal(err)
+}
+
+info, err := track.Info(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+if info.Timescale != nil {
+	fmt.Println("timescale", *info.Timescale)
+}
+
+track.Update(moq.Subscription{Priority: 20, Ordered: false})
+```
 
 ## Fetching raw groups
 
@@ -146,6 +245,56 @@ if err != nil {
 fmt.Println(string(frame.Payload), frame.TimestampUs)
 ```
 
+## On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```go
+capacity := uint64(256 * 1024 * 1024)
+origin := moq.NewOriginProducerWithOptions(moq.OriginOptions{
+	CacheCapacityBytes: &capacity,
+})
+
+dynamic := origin.Dynamic()
+defer dynamic.Cancel()
+
+for request, err := range dynamic.All(ctx) {
+	if err != nil {
+		if moq.IsShutdown(err) {
+			break
+		}
+		log.Fatal(err)
+	}
+
+	path, err := request.Path()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if path != "events" {
+		if err := request.Abort(404); err != nil {
+			log.Fatal(err)
+		}
+		continue
+	}
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		log.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("status", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := request.Accept(broadcast); err != nil {
+		log.Fatal(err)
+	}
+	if err := track.WriteFrame([]byte("ready"), 0); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:

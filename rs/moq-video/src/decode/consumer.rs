@@ -1,4 +1,4 @@
-//! Subscribe to an encoded H.264 or H.265 track and emit raw I420 frames.
+//! Subscribe to an encoded H.264, H.265, or AV1 track and emit raw I420 frames.
 
 use std::collections::VecDeque;
 
@@ -8,7 +8,7 @@ use super::Frame;
 use super::decoder::{Config, Decoder};
 use crate::Error;
 
-/// Subscribe to a moq-mux H.264 or H.265 track and emit decoded I420.
+/// Subscribe to a moq-mux video track and emit decoded I420.
 ///
 /// The codec/backend are fixed at construction; [`read`](Self::read) returns
 /// plain [`Frame`]s. The direct mirror of `moq_audio::AudioConsumer`.
@@ -23,7 +23,7 @@ pub struct Consumer {
 
 impl Consumer {
 	/// Subscribe to `name` in `broadcast`, decoding it per the catalog entry.
-	/// Errors if the rendition isn't H.264 or H.265.
+	/// Errors if the rendition's codec is not supported by a native backend.
 	pub async fn new(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,

@@ -5,6 +5,14 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
 
+/// Options used when creating an origin.
+#[derive(Clone, Default, uniffi::Record)]
+pub struct MoqOriginOptions {
+	/// Maximum cached group bytes across broadcasts under this origin. Null is unbounded.
+	#[uniffi(default = None)]
+	pub cache_capacity_bytes: Option<u64>,
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
 	inner: moq_net::origin::Producer,
@@ -20,8 +28,29 @@ pub struct MoqAnnounced {
 	task: Task<Announced>,
 }
 
+#[derive(uniffi::Object)]
+pub struct MoqOriginDynamic {
+	task: Task<OriginDynamic>,
+}
+
+#[derive(uniffi::Object)]
+pub struct MoqBroadcastRequest {
+	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
+}
+
 struct Announced {
 	inner: moq_net::announce::Consumer,
+}
+
+struct OriginDynamic {
+	inner: moq_net::origin::Dynamic,
+}
+
+impl OriginDynamic {
+	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
+		let request = self.inner.requested_broadcast().await?;
+		Ok(Arc::new(MoqBroadcastRequest::new(request)))
+	}
 }
 
 impl Announced {
@@ -83,6 +112,15 @@ impl MoqOriginProducer {
 	pub(crate) fn from_inner(inner: moq_net::origin::Producer) -> Self {
 		Self { inner }
 	}
+
+	fn from_options(options: MoqOriginOptions) -> Self {
+		let mut info = moq_net::origin::Info::new(moq_net::Origin::random());
+		if let Some(capacity) = options.cache_capacity_bytes {
+			info = info.with_pool(moq_net::cache::Pool::new(capacity));
+		}
+
+		Self { inner: info.produce() }
+	}
 }
 
 impl MoqOriginConsumer {
@@ -95,11 +133,9 @@ impl MoqOriginConsumer {
 impl MoqOriginProducer {
 	/// Create a new origin for publishing and/or consuming broadcasts.
 	#[uniffi::constructor]
-	pub fn new() -> Arc<Self> {
+	pub fn new(options: MoqOriginOptions) -> Arc<Self> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		Arc::new(Self {
-			inner: moq_net::Origin::random().produce(),
-		})
+		Arc::new(Self::from_options(options))
 	}
 
 	/// Create a consumer for this origin.
@@ -107,6 +143,19 @@ impl MoqOriginProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(MoqOriginConsumer {
 			inner: self.inner.consume(),
+		})
+	}
+
+	/// Create a dynamic handler for serving unannounced broadcasts on request.
+	///
+	/// Hold the returned object while missing broadcast requests should be accepted.
+	/// Dropping it makes future requests to unknown broadcasts fail.
+	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		Arc::new(MoqOriginDynamic {
+			task: Task::new(OriginDynamic {
+				inner: self.inner.dynamic(),
+			}),
 		})
 	}
 
@@ -165,6 +214,68 @@ impl MoqOriginConsumer {
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))
+	}
+}
+
+// ---- MoqOriginDynamic ----
+
+#[uniffi::export]
+impl MoqOriginDynamic {
+	/// Wait for the next requested broadcast that is not announced.
+	///
+	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or abort
+	/// it with an application error code. The requesting consumer stays pending until then.
+	pub async fn requested_broadcast(&self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
+		self.task
+			.run(|mut state| async move { state.requested_broadcast().await })
+			.await
+	}
+
+	/// Cancel all current and future `requested_broadcast()` calls.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
+}
+
+// ---- MoqBroadcastRequest ----
+
+impl MoqBroadcastRequest {
+	fn new(request: moq_net::origin::Request) -> Self {
+		Self {
+			inner: std::sync::Mutex::new(Some(request)),
+		}
+	}
+
+	fn take(&self) -> Result<moq_net::origin::Request, MoqError> {
+		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
+	}
+}
+
+#[uniffi::export]
+impl MoqBroadcastRequest {
+	/// The requested broadcast path.
+	pub fn path(&self) -> Result<String, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		let request = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(request.path().to_string())
+	}
+
+	/// Accept the request with an unannounced broadcast.
+	pub fn accept(&self, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let consumer = broadcast.consume_inner()?;
+		let request = self.take()?;
+		request.accept(&consumer);
+		Ok(())
+	}
+
+	/// Abort the request with an application error code.
+	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
+		let request = self.take()?;
+		request.reject(moq_net::Error::App(error_code));
+		Ok(())
 	}
 }
 

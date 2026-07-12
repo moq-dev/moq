@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `encode::Encoder::encode(frame)` entry point; `decode::Config::resize` scales
   in the decoder for free. Like NVENC, everything is dlopen'd at runtime, so a
   driverless host falls back to the next decoder.
+- AV1 hardware decode on Linux via NVDEC for 8-bit 4:2:0 sources. AV1 is
+  decode-only and emits the same CUDA NV12 frame type as H.264/H.265, so it can
+  feed existing NVENC H.264/H.265 transcode output.
 - `decode::Frame` pixels are now private: `into_i420()` returns the packed
   I420 bytes (downloading a GPU frame), replacing the public `data` field, and
   each frame's `timestamp_us` now rides the decoder (correct across reordering)

@@ -122,13 +122,63 @@ Failed calls are reported only through the return code and `moq_error()`, not lo
 Raw tracks carry arbitrary byte payloads without catalog or codec parsing. Use
 `moq_publish_track_frame` / `moq_publish_group_frame` to provide presentation
 timestamps in microseconds.
-libmoq creates raw tracks with a microsecond timescale, matching the C ABI's
-timestamp units.
+libmoq creates raw tracks with a microsecond timescale by default (used when
+`moq_track_info.timescale_valid` is false or no info is given), matching the C
+ABI's timestamp units.
 
 Subscribers receive raw frame handles from `moq_consume_track`; read each one
 with `moq_consume_track_frame`. The returned `moq_frame.timestamp_us` carries
 the timestamp, and `keyframe` is always false because raw tracks do not parse
 codec metadata.
+
+## Raw Track Options
+
+`moq_publish_track` accepts optional publisher-side track properties:
+
+```c
+struct moq_track_info info = {0};
+info.priority = 3;
+info.ordered = true;
+info.ordered_valid = true;
+info.cache_ms = 1000;
+info.cache_valid = true;
+info.timescale = 1000000;
+info.timescale_valid = true;
+
+int track = moq_publish_track(
+    broadcast,
+    name,
+    name_len,
+    &info);
+```
+
+`moq_consume_track` accepts optional subscriber delivery preferences.
+`moq_consume_track_update` changes them while the callback task is running.
+Fields ending in `_valid` decide whether the matching value overrides the default:
+
+```c
+struct moq_subscription sub = {0};
+sub.priority = 5;
+sub.ordered = true;
+sub.ordered_valid = true;
+sub.stale_ms = 25;
+sub.group_start = 10;
+sub.group_start_valid = true;
+
+int consumer = moq_consume_track(
+    broadcast,
+    name,
+    name_len,
+    &sub,
+    on_frame,
+    user_data);
+
+sub.group_end = 20;
+sub.group_end_valid = true;
+moq_consume_track_update(consumer, &sub);
+```
+
+Pass `NULL` for either options pointer to use the moq-net defaults.
 
 ## Use cases
 

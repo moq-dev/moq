@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import uniffi.moq.MoqAnnounced
 import uniffi.moq.MoqAnnouncement
 import uniffi.moq.MoqClient
+import uniffi.moq.MoqOriginOptions
 import uniffi.moq.MoqOriginProducer
 import uniffi.moq.MoqSession
 
@@ -67,7 +68,7 @@ class Moq internal constructor(
             // broadcast published on this connection is discoverable via its own
             // announcements() (loopback). Otherwise honor what the caller passed
             // and let the FFI auto-create any side left null.
-            val shared = if (publish == null && subscribe == null) MoqOriginProducer() else null
+            val shared = if (publish == null && subscribe == null) MoqOriginProducer(MoqOriginOptions()) else null
             val publishOrigin = publish ?: shared
             val subscribeOrigin = subscribe ?: shared
 

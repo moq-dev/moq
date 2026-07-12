@@ -71,6 +71,17 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
+
+```kotlin
+val track = announcement.broadcast().subscribeTrack(
+    "events",
+    Subscription(priority = 10u.toUByte()),
+)
+val info = track.info()
+track.update(Subscription(priority = 20u.toUByte(), ordered = false))
+```
+
 ## Publish
 
 ```kotlin
@@ -144,6 +155,30 @@ Moq.connect("https://relay.example.com").use { moq ->
 ```
 
 Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber. Use `writeFrame(payload, timestampUs)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `MoqFrame` values from `readFrame()` or the `frames()` Flow extension.
+
+### On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```kotlin
+import dev.moq.*
+
+val origin = OriginProducer(OriginOptions(cacheCapacityBytes = 256UL * 1024UL * 1024UL))
+val dynamic = origin.dynamic()
+
+dynamic.requestedBroadcasts().collect { request ->
+    if (request.path() == "events") {
+        val broadcast = BroadcastProducer()
+        val track = broadcast.publishTrack("status", null)
+        request.accept(broadcast)
+        track.writeFrame("ready".encodeToByteArray())
+    } else {
+        request.abort(404)
+    }
+}
+```
+
+The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
 ## Cancellation
 

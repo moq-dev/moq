@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Raw track options for the C ABI: `moq_publish_track` now accepts
+  `moq_track_info`, and `moq_consume_track` now accepts `moq_subscription`;
+  subscriptions can be updated with `moq_consume_track_update`.
 - Native video decode C API: `moq_consume_video_raw` (+ `_close`, `_frame`,
   `_frame_free`) subscribes to an H.264 track and hands back decoded I420 frames,
   the video counterpart to `moq_consume_audio_raw`. Decoding happens inside

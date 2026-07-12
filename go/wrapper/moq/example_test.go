@@ -65,6 +65,39 @@ func ExampleClient_Publish() {
 	}
 }
 
+// Connect with pinned TLS material and read a stats snapshot.
+func ExampleClient_Session_stats() {
+	ctx := context.Background()
+
+	client, err := moq.Dial(ctx, "https://relay.example.com",
+		moq.WithTLSRoots("/etc/ssl/custom-ca.pem"),
+		moq.WithTLSSystemRoots(true),
+		moq.WithTLSFingerprints("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
+
+	stats := client.Session().Stats()
+	fmt.Println("rtt:", stats.RttUs)
+}
+
+// Publish a video track with catalog hints known before the first keyframe.
+func ExampleBroadcastProducer_PublishMedia_videoHint() {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{}))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer media.Finish()
+}
+
 // Run a server with a self-signed certificate, accepting every session.
 func ExampleListen() {
 	ctx := context.Background()

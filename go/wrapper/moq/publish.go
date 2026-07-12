@@ -2,9 +2,36 @@ package moq
 
 import (
 	"context"
+	"errors"
+	"iter"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
+
+// MediaOption configures media tracks published by a BroadcastProducer.
+type MediaOption func(*mediaConfig)
+
+type mediaConfig struct {
+	video *VideoHint
+}
+
+var errNilTrackRequest = errors.New("moq: nil track request")
+
+// WithVideoHint seeds catalog fields that a video stream cannot reveal itself.
+func WithVideoHint(hint VideoHint) MediaOption {
+	return func(c *mediaConfig) {
+		h := hint
+		c.video = &h
+	}
+}
+
+func mediaInit(format string, init []byte, opts []MediaOption) ffi.MoqInit {
+	var cfg mediaConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return ffi.MoqInit{Format: format, Data: init, Video: cfg.video}
+}
 
 // BroadcastProducer publishes a collection of tracks. Build one, publish tracks
 // onto it, then publish the broadcast itself to an origin/client/server.
@@ -21,10 +48,31 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
+// Dynamic accepts subscriptions to tracks that are not published yet.
+func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
+	inner, err := b.inner.Dynamic()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastDynamic{inner: inner}, nil
+}
+
 // PublishMedia publishes a media track from an init segment, fed frame by
 // frame with explicit timestamps.
-func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProducer, error) {
-	inner, err := b.inner.PublishMedia(ffi.MoqInit{Format: format, Data: init})
+func (b *BroadcastProducer) PublishMedia(format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {
+	inner, err := b.inner.PublishMedia(mediaInit(format, init, opts))
+	if err != nil {
+		return nil, err
+	}
+	return &MediaProducer{inner: inner}, nil
+}
+
+// PublishMediaOnTrack publishes media onto a subscriber-requested track.
+func (b *BroadcastProducer) PublishMediaOnTrack(request *TrackRequest, format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {
+	if request == nil {
+		return nil, errNilTrackRequest
+	}
+	inner, err := b.inner.PublishMediaOnTrack(request.inner, mediaInit(format, init, opts))
 	if err != nil {
 		return nil, err
 	}
@@ -34,8 +82,8 @@ func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProd
 // PublishMediaStream publishes a media track fed by a raw byte stream with
 // unknown frame boundaries (e.g. Annex-B H.264). format is a stream format:
 // avc3, hev1, av01, fmp4, or mkv.
-func (b *BroadcastProducer) PublishMediaStream(format string) (*MediaStreamProducer, error) {
-	inner, err := b.inner.PublishMediaStream(ffi.MoqInit{Format: format})
+func (b *BroadcastProducer) PublishMediaStream(format string, opts ...MediaOption) (*MediaStreamProducer, error) {
+	inner, err := b.inner.PublishMediaStream(mediaInit(format, nil, opts))
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +145,54 @@ func (b *BroadcastProducer) RemoveCatalogSection(name string) error {
 // Finish closes the broadcast.
 func (b *BroadcastProducer) Finish() error {
 	return b.inner.Finish()
+}
+
+// BroadcastDynamic is a stream of subscriber-requested tracks.
+type BroadcastDynamic struct {
+	inner *ffi.MoqBroadcastDynamic
+}
+
+// RequestedTrack waits for the next subscriber-requested track.
+func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackRequest{inner: inner}, nil
+}
+
+// Requests ranges over subscriber-requested tracks until the dynamic source ends.
+func (d *BroadcastDynamic) Requests(ctx context.Context) iter.Seq2[*TrackRequest, error] {
+	return streamSeq(ctx, d.RequestedTrack)
+}
+
+// Cancel stops the dynamic request stream.
+func (d *BroadcastDynamic) Cancel() {
+	d.inner.Cancel()
+}
+
+// TrackRequest is a subscriber-requested track that has not been accepted yet.
+type TrackRequest struct {
+	inner *ffi.MoqTrackRequest
+}
+
+// Name is the requested track name.
+func (r *TrackRequest) Name() (string, error) {
+	return r.inner.Name()
+}
+
+// Accept accepts the request as a raw track. For media, use PublishMediaOnTrack.
+func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
+	inner, err := r.inner.Accept(info)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackProducer{inner: inner}, nil
+}
+
+// Abort rejects the request with an application error code.
+func (r *TrackRequest) Abort(errorCode uint16) error {
+	return r.inner.Abort(int32(errorCode))
 }
 
 // MediaProducer writes timestamped frames into a media track.
@@ -191,6 +287,11 @@ func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
 // WriteFrame writes a single-frame group with a timestamp in microseconds.
 func (t *TrackProducer) WriteFrame(payload []byte, timestampUs uint64) error {
 	return t.inner.WriteFrame(payload, timestampUs)
+}
+
+// Abort closes the track with an application error code.
+func (t *TrackProducer) Abort(errorCode uint16) error {
+	return t.inner.Abort(int32(errorCode))
 }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
