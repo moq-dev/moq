@@ -6,6 +6,7 @@ import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import type * as Time from "../time.ts";
+import { isStreamAbort } from "../util/error.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -150,7 +151,9 @@ export class Connection implements Established {
 		try {
 			await Promise.all(tasks);
 		} catch (err) {
-			console.error("fatal error running connection", err);
+			// Routine teardown (unsubscribe, handover, peer close) rejects the same way a fault does;
+			// isStreamAbort tells them apart from the error content, same as every other run-loop catch.
+			console[isStreamAbort(err) ? "debug" : "error"]("connection run loop stopped", err);
 		} finally {
 			this.close();
 		}

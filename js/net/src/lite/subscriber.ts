@@ -8,7 +8,7 @@ import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, isStreamAbort } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -326,7 +326,11 @@ export class Subscriber {
 			const e = error(err);
 			request.reject(e);
 			this.#subscribes.delete(id);
-			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`);
+			// A publisher handover/unsubscribe (or session close) resets the stream during setup; that is
+			// expected teardown, not a fault. A timeout is not a stream abort, so it still logs at warn.
+			console[isStreamAbort(e) ? "debug" : "warn"](
+				`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`,
+			);
 			// If the stream eventually opens after the timeout, abort it so we
 			// don't leak it. Cover both branches: setup may resolve late, or it
 			// may reject (e.g. encode/decode failure) after the stream is open.
@@ -365,7 +369,10 @@ export class Subscriber {
 		} catch (err) {
 			const e = error(err);
 			producer.close(e);
-			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`);
+			// A publisher handover/unsubscribe resets the stream; that is expected teardown, not a fault.
+			console[isStreamAbort(e) ? "debug" : "warn"](
+				`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`,
+			);
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
@@ -708,7 +715,8 @@ export class Subscriber {
 				reader.releaseLock();
 			}
 		} catch (err: unknown) {
-			console.warn("datagram stream error", err);
+			// Best-effort loop: a deliberate session close resets this stream on every teardown.
+			console[isStreamAbort(err) ? "debug" : "warn"]("datagram stream error", err);
 		}
 	}
 
@@ -778,7 +786,9 @@ export class Subscriber {
 				}
 			}
 		} catch (err: unknown) {
-			console.warn("probe stream error", err);
+			// Best-effort bandwidth/RTT side channel: a reset on reconnect/teardown just means no estimate
+			// right now, but a real fault (auth, protocol, unroutable) must still surface.
+			console[isStreamAbort(err) ? "debug" : "warn"]("probe stream error", err);
 		} finally {
 			this.#recvBandwidth.set(undefined);
 			this.#rtt?.set(undefined);
