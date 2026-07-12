@@ -85,6 +85,9 @@ export class Reload {
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
 
+	// True after the browser freezes or hides the page until it visibly resumes.
+	#suspended = new Signal(false);
+
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
@@ -99,6 +102,15 @@ export class Reload {
 			this.#closedReject = reject;
 		});
 
+		if (typeof window !== "undefined" && typeof document !== "undefined") {
+			this.signals.event(window, "pagehide", () => this.#suspended.set(true));
+			this.signals.event(window, "pageshow", () => this.#suspended.set(false));
+			this.signals.event(window, "unload", () => this.#suspended.set(true));
+			this.signals.event(document, "visibilitychange", () => {
+				if (!document.hidden) this.#suspended.set(false);
+			});
+		}
+
 		// Create a reactive root so cleanup is easier.
 		this.signals.run(this.#connect.bind(this));
 		this.signals.run(this.#runAnnounced.bind(this));
@@ -108,8 +120,9 @@ export class Reload {
 		// Will retry when the tick changes.
 		effect.get(this.#tick);
 
+		const suspended = effect.get(this.#suspended);
 		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
+		if (!enabled || suspended) return;
 
 		const url = effect.get(this.url);
 		if (!url) return;
