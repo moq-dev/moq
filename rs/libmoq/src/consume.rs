@@ -38,6 +38,16 @@ struct RawTaskEntry {
 	callback: OnStatus,
 }
 
+/// Outcome of polling a raw track source alongside its control channels.
+enum RawStep<T> {
+	/// A delivered value: the next group, or the next frame within a group.
+	Item(T),
+	/// The source is exhausted: the track finished, or the group was fully read.
+	End,
+	/// The consumer was closed; the task must unwind without re-polling `close`.
+	Stop,
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -516,62 +526,80 @@ impl Consume {
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
 		// producer wrote, regardless of how it was grouped.
+		//
+		// `close` is a oneshot that panics if polled after completion, so a `Stop`
+		// must unwind the whole task rather than fall through to the outer loop.
 		loop {
-			let Some(mut group) =
-				moq_net::kio::wait(|waiter| -> Poll<Result<Option<moq_net::group::Consumer>, Error>> {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if Pin::new(&mut close).poll(&mut cx).is_ready() {
-						return Poll::Ready(Ok(None));
+			let mut group =
+				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+						return Poll::Ready(Ok(RawStep::Stop));
 					}
-
-					loop {
-						match updates.poll_recv(&mut cx) {
-							Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(&mut track, subscription),
-							Poll::Ready(None) => return Poll::Ready(Ok(None)),
-							Poll::Pending => break,
-						}
-					}
-
 					match track.poll_next_group(waiter) {
-						Poll::Ready(Ok(group)) => Poll::Ready(Ok(group)),
+						Poll::Ready(Ok(Some(group))) => Poll::Ready(Ok(RawStep::Item(group))),
+						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
 						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
 						Poll::Pending => Poll::Pending,
 					}
 				})
 				.await?
-			else {
-				return Ok(());
-			};
+				{
+					RawStep::Item(group) => group,
+					// Track finished or the consumer was closed: nothing left to deliver.
+					RawStep::End | RawStep::Stop => return Ok(()),
+				};
 
 			loop {
-				let Some(payload) = moq_net::kio::wait(|waiter| -> Poll<Result<Option<bytes::Bytes>, Error>> {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if Pin::new(&mut close).poll(&mut cx).is_ready() {
-						return Poll::Ready(Ok(None));
+				let payload = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<bytes::Bytes>, Error>> {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+						return Poll::Ready(Ok(RawStep::Stop));
 					}
-
-					loop {
-						match updates.poll_recv(&mut cx) {
-							Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(&mut track, subscription),
-							Poll::Ready(None) => return Poll::Ready(Ok(None)),
-							Poll::Pending => break,
-						}
-					}
-
 					match group.poll_read_frame(waiter) {
-						Poll::Ready(Ok(payload)) => Poll::Ready(Ok(payload)),
+						Poll::Ready(Ok(Some(payload))) => Poll::Ready(Ok(RawStep::Item(payload))),
+						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
 						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
 						Poll::Pending => Poll::Pending,
 					}
 				})
 				.await?
-				else {
-					break;
+				{
+					RawStep::Item(payload) => payload,
+					// Group fully read: advance to the next group.
+					RawStep::End => break,
+					// Consumer closed mid-group: terminate without touching `close` again.
+					RawStep::Stop => return Ok(()),
 				};
 
 				// Hold the lock only to buffer the frame; release it before the callback.
 				let frame_id = State::lock().consume.raw_frame.insert(payload)?;
 				callback.call(Ok(frame_id));
+			}
+		}
+	}
+
+	/// Poll the close and update channels, applying any subscription updates inline.
+	///
+	/// Returns `true` when the task must stop: either the consumer was closed
+	/// (`close` fired) or the update channel was dropped. The caller must then
+	/// unwind rather than poll `close` again, since a completed oneshot panics if
+	/// re-polled. Borrows `track` only for the duration of the call so the caller
+	/// can poll a track/group source afterwards.
+	fn poll_raw_control(
+		close: &mut oneshot::Receiver<()>,
+		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::Subscription>>,
+		track: &mut moq_net::track::Subscriber,
+		waiter: &moq_net::kio::Waiter,
+	) -> bool {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if Pin::new(close).poll(&mut cx).is_ready() {
+			return true;
+		}
+
+		loop {
+			match updates.poll_recv(&mut cx) {
+				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
+				Poll::Ready(None) => return true,
+				Poll::Pending => return false,
 			}
 		}
 	}
