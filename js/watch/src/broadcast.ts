@@ -8,8 +8,20 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { toHang } from "./msf";
 
 // Connections already warned about missing broadcast-discovery support, so the
-// per-rendition announcement check logs at most once per connection.
+// announcement check logs at most once per connection.
 const warnedNoDiscovery = new WeakSet<Moq.Connection.Established>();
+
+// Whether to skip the announcement gate for this connection. Cloudflare's relay does not yet support
+// SUBSCRIBE_NAMESPACE, so waiting on announcements there would hang forever; subscribe immediately
+// instead, warning once per connection.
+function skipDiscovery(conn: Moq.Connection.Established): boolean {
+	if (!conn.url.hostname.endsWith("mediaoverquic.com")) return false;
+	if (!warnedNoDiscovery.has(conn)) {
+		warnedNoDiscovery.add(conn);
+		console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
+	}
+	return true;
+}
 
 // Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
 // DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
@@ -72,18 +84,19 @@ export class Broadcast {
 	};
 	readonly output = readonlys(this.#output);
 
-	// All actively announced broadcast paths from the connection. If omitted, reload skips the
-	// announcement gate and subscribes immediately.
-	readonly #announced?: Getter<Set<Moq.Path.Valid>>;
+	// The set of announced paths on the connection, for cross-broadcast (`broadcast: ../`) references
+	// so `relativeBroadcast` can gate on whether a sibling is announced. `undefined` until the stream
+	// is open. Opened lazily; the main broadcast doesn't use it (`#runBroadcast` drives off its own
+	// name-scoped stream).
+	readonly #announced = new Signal<Set<Moq.Path.Valid> | undefined>(undefined);
 
-	// Whether `name` is currently in the announced set (or skipping the check).
-	// Derived in its own effect so that flaps for unrelated broadcasts don't
-	// retrigger the broadcast/catalog subscriptions.
-	readonly #announcedNow = new Signal(false);
+	// Set true the first time a relative reference needs the announcement gate, so a broadcast with
+	// no cross-broadcast renditions never opens the (broad) connection-scoped announcement stream.
+	readonly #wantAnnounced = new Signal(false);
 
 	signals = new Effect();
 
-	constructor(props?: Inputs<BroadcastInput> & { announced?: Getter<Set<Moq.Path.Valid>> }) {
+	constructor(props?: Inputs<BroadcastInput>) {
 		this.input = {
 			connection: getter(props?.connection),
 			name: getter(props?.name ?? Path.empty()),
@@ -93,60 +106,108 @@ export class Broadcast {
 			catalog: getter(props?.catalog),
 		};
 
-		this.#announced = props?.announced;
-
-		this.signals.run(this.#runAnnouncedNow.bind(this));
+		this.signals.run(this.#runAnnounced.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
 		this.signals.run(this.#runCatalog.bind(this));
 	}
 
-	#runAnnouncedNow(effect: Effect): void {
-		const name = effect.get(this.input.name);
-		this.#announcedNow.set(this.#isPathAnnounced(effect, name));
-	}
+	// Maintain the set of announced paths used by `relativeBroadcast`, by draining a connection-scoped
+	// announcement stream. Only opened once a relative reference asks for it (see `#wantAnnounced`),
+	// and reopened per connection.
+	#runAnnounced(effect: Effect): void {
+		this.#announced.set(undefined);
 
-	// Whether `name` is currently announced on the connection (or skipping the check
-	// because reload is off, no announced set is wired in, or the relay doesn't support
-	// announcements). Used by both `#runAnnouncedNow` (for `input.name`) and
-	// `relativeBroadcast` (for cross-broadcast refs, which reruns per rendition).
-	#isPathAnnounced(effect: Effect, name: Moq.Path.Valid): boolean {
-		const reload = effect.get(this.input.reload);
-		if (!reload) return true;
+		if (!effect.get(this.#wantAnnounced)) return;
+		if (!effect.get(this.input.reload)) return;
 
-		// Without an announced set to consult, subscribe immediately.
-		if (!this.#announced) return true;
-
-		// Cloudflare's relay does not yet support announcement subscriptions,
-		// so default to subscribing immediately instead of waiting forever. This runs in a
-		// per-rendition reactive path, so warn at most once per connection instead of on
-		// every re-evaluation.
 		const conn = effect.get(this.input.connection);
-		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
-			if (!warnedNoDiscovery.has(conn)) {
-				warnedNoDiscovery.add(conn);
-				console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
-			}
-			return true;
-		}
+		if (!conn || skipDiscovery(conn)) return;
 
-		const announced = effect.get(this.#announced);
-		return announced.has(name);
+		const announced = conn.announced(Path.empty());
+		effect.cleanup(() => announced.close());
+		this.#announced.set(new Set());
+
+		effect.spawn(async () => {
+			for (;;) {
+				const entry = await Promise.race([effect.cancel, announced.next()]);
+				if (!entry) break;
+				this.#announced.mutate((active) => {
+					if (!active) return;
+					if (entry.active) active.add(entry.path);
+					else active.delete(entry.path);
+				});
+			}
+		});
 	}
 
+	// Whether `path` is currently announced, for `relativeBroadcast`'s cross-broadcast refs. Returns
+	// true (subscribe immediately) when the gate can't apply: reload is off, or the relay doesn't
+	// support discovery. Opens the announcement stream on first use.
+	#isPathAnnounced(effect: Effect, path: Moq.Path.Valid): boolean {
+		if (!effect.get(this.input.reload)) return true;
+
+		const conn = effect.get(this.input.connection);
+		if (conn && skipDiscovery(conn)) return true;
+
+		this.#wantAnnounced.set(true);
+
+		const active = effect.get(this.#announced);
+		if (!active) return false; // stream not open yet: wait rather than subscribe to a maybe-absent path
+		return active.has(path);
+	}
+
+	// Subscribe to the broadcast, re-consuming on every (re-)announce so a same-name republish (a new
+	// publisher, or a relay-failover RESTART) re-attaches to the new instance instead of clinging to
+	// the dead one. Driven off the announcement stream's updates rather than a membership flag, since
+	// a coalesced republish leaves the active set unchanged yet still emits a fresh update.
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.input.enabled);
 		if (!enabled) return;
-
-		if (!effect.get(this.#announcedNow)) return;
 
 		const conn = effect.get(this.input.connection);
 		if (!conn) return;
 
 		const name = effect.get(this.input.name);
-		const broadcast = conn.consume(name);
-		effect.cleanup(() => broadcast.close());
 
-		effect.set(this.#output.active, broadcast, undefined);
+		// No announcement gate: subscribe immediately (reload off, or the relay lacks discovery).
+		if (!effect.get(this.input.reload) || skipDiscovery(conn)) {
+			const broadcast = conn.consume(name);
+			effect.cleanup(() => broadcast.close());
+			effect.set(this.#output.active, broadcast, undefined);
+			return;
+		}
+
+		const announced = conn.announced(name);
+		effect.cleanup(() => announced.close());
+
+		let current: Moq.Broadcast.Consumer | undefined;
+		effect.cleanup(() => {
+			current?.close();
+			current = undefined;
+			this.#output.active.set(undefined);
+		});
+
+		effect.spawn(async () => {
+			for (;;) {
+				const event = await Promise.race([effect.cancel, announced.next()]);
+				if (!event) break;
+
+				// Scoped to `name`, so the exact broadcast arrives with an empty suffix; ignore children.
+				if (event.path !== Path.empty()) continue;
+
+				if (event.active) {
+					// A live subscription survives a redundant (re-)announce; only replace a dead one.
+					if (current && !current.closedSignal.peek()) continue;
+					current?.close();
+					current = conn.consume(name);
+					this.#output.active.set(current);
+				} else {
+					current?.close();
+					current = undefined;
+					this.#output.active.set(undefined);
+				}
+			}
+		});
 	}
 
 	#runCatalog(effect: Effect): void {

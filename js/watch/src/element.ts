@@ -104,7 +104,6 @@ export default class MoqWatch extends HTMLElement {
 
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
-			announced: this.connection.announced,
 			enabled: this.#enabled,
 			name: this.#name,
 			reload: this.#reload,

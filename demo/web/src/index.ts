@@ -164,17 +164,14 @@ function createTile(name: string): WatchTile {
 // Broadcast discovery
 // ---------------------------------------------------------------------------
 //
-// Subscribe to announcements under the prefix and keep a live set of active
-// broadcasts. `announced.next()` drains a queue, so we track membership
-// ourselves: active=true adds the path, active=false removes it.
+// Subscribe to announcements under the prefix and keep a live set of active broadcasts.
+// `announced.next()` drains the update stream, so we track membership ourselves: active=true adds the
+// path, active=false removes it. `Reload.announced()` spans reconnects (it retracts everything on
+// disconnect and re-announces on reconnect), so the set self-heals without any extra wiring here.
 const discovery = new Signals.Effect();
 discovery.run((effect) => {
-	const conn = effect.get(connection.established);
-	broadcasts.set([]);
-	if (!conn) return;
-
 	const prefix = prefixPath(effect.get(prefixInput));
-	const announced = conn.announced(prefix);
+	const announced = connection.announced(prefix);
 	effect.cleanup(() => announced.close());
 
 	const live = new Set<string>();
