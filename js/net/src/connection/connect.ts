@@ -5,6 +5,7 @@ import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 import { exchangeSetup } from "./handshake.ts";
+import { pickTransport } from "./transport.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
@@ -61,11 +62,6 @@ export interface ConnectProps {
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
-// Firefox's WebTransport implementation drops server-initiated bidi streams,
-// breaking publish (the relay opens a subscribe bidi back to us). Force WebSocket.
-// TODO: remove once Firefox fixes incoming bidi delivery.
-const isFirefox = typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("firefox");
-
 /**
  * Establishes a connection to a MOQ server.
  *
@@ -80,8 +76,12 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	// Create a cancel promise to kill whichever is still connecting.
 	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
 
+	// `navigator` is absent under SSR, some worker scopes, and bun tests.
+	const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
 	const webtransport =
-		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
+		pickTransport(userAgent, !!globalThis.WebTransport) === "webtransport"
+			? connectWebTransport(url, cancel, props?.webtransport)
+			: undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
