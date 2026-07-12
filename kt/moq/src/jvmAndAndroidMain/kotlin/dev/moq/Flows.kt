@@ -14,6 +14,7 @@ import uniffi.moq.MoqBroadcastDynamic
 import uniffi.moq.MoqBroadcastRequest
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
+import uniffi.moq.MoqDatagram
 import uniffi.moq.MoqException
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
@@ -107,6 +108,17 @@ fun MoqTrackConsumer.frames(): Flow<MoqFrame> = flow {
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()
 }
+
+/** Stream of best-effort datagrams in arrival order. */
+fun MoqTrackConsumer.datagrams(): Flow<MoqDatagram> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(recvDatagram() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
 
 /** Stream of tracks requested by subscribers. */
 fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {

@@ -244,6 +244,22 @@ impl TrackInner {
 	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
 		self.track.read_frame_full().await?.map(raw_frame).transpose()
 	}
+
+	async fn recv_datagram(&mut self) -> Result<Option<MoqDatagram>, MoqError> {
+		let Some(datagram) = self.track.recv_datagram().await? else {
+			return Ok(None);
+		};
+		let timestamp_us = datagram
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
+		Ok(Some(MoqDatagram {
+			sequence: datagram.sequence,
+			timestamp_us,
+			payload: datagram.payload.to_vec(),
+		}))
+	}
 }
 
 #[derive(uniffi::Object)]
@@ -306,6 +322,16 @@ impl MoqTrackConsumer {
 	/// `keyframe` is always false for raw frames because no codec metadata is parsed.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
+	}
+
+	/// Receive the next best-effort datagram in arrival order.
+	///
+	/// Returns `None` when the track ends. Datagram delivery is unavailable over
+	/// IETF moq-transport, pre-lite-05 moq-lite, and stream-only transports.
+	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
+		self.task
+			.run(|mut state| async move { state.recv_datagram().await })
+			.await
 	}
 
 	/// Return the publisher-side track properties learned during subscription.

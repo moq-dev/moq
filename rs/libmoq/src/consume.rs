@@ -2,7 +2,9 @@ use std::{ffi::c_char, future::Future, pin::Pin, task::Poll};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_string, moq_video_config};
+use crate::{
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_section, moq_string, moq_video_config,
+};
 
 struct ConsumeCatalog {
 	broadcast: moq_net::broadcast::Consumer,
@@ -70,6 +72,12 @@ pub struct Consume {
 
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
+
+	/// Raw track datagram consumer tasks (best-effort, parallel to `raw_task`).
+	datagram_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Buffered datagrams ready for consumption.
+	datagram: NonZeroSlab<moq_net::Datagram>,
 }
 
 impl Consume {
@@ -648,6 +656,95 @@ impl Consume {
 
 	pub fn raw_frame_close(&mut self, frame: Id) -> Result<(), Error> {
 		self.raw_frame.remove(frame).ok_or(Error::FrameNotFound)?;
+		Ok(())
+	}
+
+	/// Subscribe to a raw track's best-effort datagrams by name.
+	///
+	/// Parallel to [`Self::raw_track`], but delivers datagrams instead of frames.
+	/// `on_datagram` is called with a datagram ID for each datagram in arrival order;
+	/// each must be released with [`Self::datagram_close`].
+	pub fn datagram_track(&mut self, broadcast: Id, name: &str, on_datagram: OnStatus) -> Result<Id, Error> {
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let name = name.to_string();
+
+		let channel = oneshot::channel();
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_datagram,
+		};
+		let id = self.datagram_task.insert(Some(entry))?;
+
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		tokio::spawn(async move {
+			let res = async move {
+				let track = broadcast.track(&name)?.subscribe(None).await?;
+				Self::run_datagrams(on_datagram, track, channel.1).await
+			}
+			.await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.datagram_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_datagrams(
+		callback: OnStatus,
+		mut track: moq_net::track::Subscriber,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready datagram.
+			let datagram = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				datagram = track.recv_datagram() => match datagram? {
+					Some(datagram) => datagram,
+					None => return Ok(()),
+				},
+			};
+
+			// Hold the lock only to buffer the datagram; release it before the callback.
+			let id = State::lock().consume.datagram.insert(datagram)?;
+			callback.call(Ok(id));
+		}
+	}
+
+	pub fn datagram_track_close(&mut self, track: Id) -> Result<(), Error> {
+		// Signal shutdown; the task delivers a final callback and removes itself.
+		self.datagram_task
+			.get_mut(track)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::TrackNotFound)?
+			.close
+			.take()
+			.ok_or(Error::TrackNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a datagram's payload, timestamp, and sequence. The pointer is
+	/// valid until the datagram is released with [`Self::datagram_close`].
+	pub fn datagram(&self, datagram: Id, dst: &mut moq_datagram) -> Result<(), Error> {
+		let value = self.datagram.get(datagram).ok_or(Error::FrameNotFound)?;
+
+		*dst = moq_datagram {
+			payload: value.payload.as_ptr(),
+			payload_size: value.payload.len(),
+			timestamp_us: value.timestamp.as_micros() as u64,
+			sequence: value.sequence,
+		};
+
+		Ok(())
+	}
+
+	pub fn datagram_close(&mut self, datagram: Id) -> Result<(), Error> {
+		self.datagram.remove(datagram).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 

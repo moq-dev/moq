@@ -384,7 +384,7 @@ test("integration: subscribe to non-existent broadcast", async () => {
 
 	// Client tries to consume a broadcast that nobody is publishing
 	const remote = client.consume(Path.from("nonexistent"));
-	const track = remote.subscribe("video", 0);
+	const track = remote.subscribe("video", { priority: 0 });
 
 	// Reading should eventually error since the broadcast doesn't exist
 	await expect(

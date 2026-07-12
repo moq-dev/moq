@@ -18,7 +18,7 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 
 	// Two subscriptions to the same track share one upstream subscription...
 	const a = consumer.track("video").subscribe();
-	const b = consumer.subscribe("video", 0);
+	const b = consumer.subscribe("video", { priority: 0 });
 
 	const request = await pendingRequest(consumer);
 	expect(request?.name).toBe("video");
@@ -33,12 +33,12 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect(await b.readString()).toBe("hello");
 
 	// A different track still opens its own request.
-	consumer.subscribe("audio", 0);
+	consumer.subscribe("audio", { priority: 0 });
 	expect((await pendingRequest(consumer))?.name).toBe("audio");
 
 	// Once the shared track closes, a later subscribe re-opens it.
 	producer.close();
-	consumer.subscribe("video", 0);
+	consumer.subscribe("video", { priority: 0 });
 	expect((await pendingRequest(consumer))?.name).toBe("video");
 });
 
@@ -75,8 +75,8 @@ test("consumer track subscriptions fan out and close independently", async () =>
 	const consumer = new BroadcastConsumer();
 
 	// Two subscriptions to one track dedupe onto a single upstream request...
-	const a = consumer.subscribe("video", 0);
-	const b = consumer.subscribe("video", 0);
+	const a = consumer.subscribe("video", { priority: 0 });
+	const b = consumer.subscribe("video", { priority: 0 });
 
 	const request = await pendingRequest(consumer);
 	if (!request) throw new Error("expected request");

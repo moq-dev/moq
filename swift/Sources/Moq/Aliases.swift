@@ -18,6 +18,7 @@ public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 public typealias AudioFormat = MoqFFI.MoqAudioFormat
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias Container = MoqFFI.Container
+public typealias Datagram = MoqFFI.MoqDatagram
 public typealias Subscription = MoqFFI.MoqSubscription
 /// Options for fetching one complete group by sequence.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions

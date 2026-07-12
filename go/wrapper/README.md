@@ -75,6 +75,15 @@ cancelled; the few that have no native cancel (`Used`/`Unused` and
 `Server.Accept`) return `ctx.Err()` promptly but keep running in the background
 until the owning producer/server is closed. See the package doc for details.
 
+## Raw datagrams
+
+Raw tracks support best-effort datagrams alongside groups: `TrackProducer.AppendDatagram`
+sends one payload and returns its sequence number, while `TrackConsumer.RecvDatagram`
+and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
+1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
+newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not
+deliver them, and there is no stream fallback.
+
 ## Versioning
 
 `VERSION` holds the human-owned `MAJOR.MINOR` line (the wrapper API version). Bump it in a PR when the wrapper's own API changes. The patch number is derived by CI from the existing mirror tags, so every release (whether triggered by a wrapper change or by a new `moq-go-ffi`) just takes the next patch on that line.

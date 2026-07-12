@@ -68,6 +68,21 @@ pub struct moq_frame {
 	pub keyframe: bool,
 }
 
+/// A best-effort raw track datagram delivered via [moq_consume_datagrams].
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_datagram {
+	/// The payload of the datagram, or NULL/0 if the track has ended.
+	pub payload: *const u8,
+	pub payload_size: usize,
+
+	/// The presentation timestamp of the datagram in microseconds.
+	pub timestamp_us: u64,
+
+	/// Per-track sequence number, drawn from the same namespace as groups.
+	pub sequence: u64,
+}
+
 /// Publisher-side raw track properties.
 ///
 /// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
@@ -985,6 +1000,38 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 	})
 }
 
+/// Send a best-effort datagram on a raw track created by [moq_publish_track].
+///
+/// `timestamp_us` is the presentation timestamp in microseconds. The payload must be at
+/// most 1200 bytes. On success the datagram's per-track sequence number (shared with the
+/// group namespace) is written to `out_sequence` when it is non-NULL. Datagrams are
+/// delivered only on transports and wire versions with a datagram channel; there is no
+/// group fallback.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `out_sequence` must be NULL or a valid pointer to a `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track_datagram(
+	track: u32,
+	timestamp_us: u64,
+	payload: *const u8,
+	payload_size: usize,
+	out_sequence: *mut u64,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		let sequence = State::lock().publish.track_datagram(track, timestamp_us, payload)?;
+		if let Some(out) = unsafe { out_sequence.as_mut() } {
+			*out = sequence;
+		}
+		Ok(())
+	})
+}
+
 /// Finish a raw track. No more groups or frames can be written.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -1419,5 +1466,80 @@ pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.raw_track_close(track)
+	})
+}
+
+/// Subscribe to a raw track's best-effort datagrams by name.
+///
+/// The datagram counterpart to [moq_consume_track], on its own subscription. `on_datagram`
+/// is called with a positive datagram ID for each datagram in arrival order, then exactly
+/// once more with a terminal code: `0` (closed cleanly) or a negative error. After the
+/// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never
+/// touched again, so release `user_data` there. The terminal callback fires even after
+/// [moq_consume_datagrams_close]. Read each datagram with [moq_consume_datagram] and release
+/// it with [moq_consume_datagram_close]. Datagrams arrive only over datagram-capable
+/// transports and lite-05 or newer moq-lite; there is no stream fallback.
+///
+/// Returns a non-zero handle to the subscription on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_datagram` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_datagrams(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	on_datagram: Option<extern "C" fn(user_data: *mut c_void, datagram: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram) };
+		State::lock().consume.datagram_track(broadcast, name, on_datagram)
+	})
+}
+
+/// Read a datagram delivered via the [moq_consume_datagrams] callback.
+///
+/// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
+/// [moq_consume_datagram_close]), plus `dst.timestamp_us` and `dst.sequence`.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_datagram] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_datagram(datagram: u32, dst: *mut moq_datagram) -> i32 {
+	ffi::enter(move || {
+		let datagram = ffi::parse_id(datagram)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.datagram(datagram, dst)
+	})
+}
+
+/// Close a datagram and clean up its resources.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_datagram_close(datagram: u32) -> i32 {
+	ffi::enter(move || {
+		let datagram = ffi::parse_id(datagram)?;
+		State::lock().consume.datagram_close(datagram)
+	})
+}
+
+/// Stop a datagram subscription's background task.
+///
+/// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
+/// `user_data`; the [moq_consume_datagrams] `on_datagram` callback still fires once more with a
+/// terminal `0` (or a negative error), which is where `user_data` should be released. Datagrams
+/// already delivered via the callback remain valid until released with [moq_consume_datagram_close].
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_datagrams_close(task: u32) -> i32 {
+	ffi::enter(move || {
+		let task = ffi::parse_id(task)?;
+		State::lock().consume.datagram_track_close(task)
 	})
 }

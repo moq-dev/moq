@@ -151,7 +151,7 @@ function subscribeNode(effect: Signals.Effect, conn: Net.Connection.Established,
 	effect.cleanup(() => consumer.close());
 
 	const sub = <K extends keyof NodeStats>(trackName: string, key: K) => {
-		const track = consumer.subscribe(trackName, 0);
+		const track = consumer.subscribe(trackName, { priority: 0 });
 		effect.cleanup(() => track.close());
 		effect.spawn(async () => {
 			for (;;) {

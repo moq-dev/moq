@@ -90,6 +90,16 @@ export interface FetchGroupOptions {
 }
 
 /**
+ * Subscriber-side preferences for a subscription.
+ *
+ * @public
+ */
+export interface SubscribeOptions {
+	/** Delivery priority for this subscription. Higher values are served first when constrained. Defaults to `0`. */
+	priority?: number;
+}
+
+/**
  * The per-track operations a lazy {@link Consumer} delegates to the broadcast it came from.
  *
  * Implemented by `broadcast.Producer` / `broadcast.Consumer` (and the wire-layer subclasses
@@ -98,7 +108,7 @@ export interface FetchGroupOptions {
  */
 export interface Broadcast {
 	/** Open a live subscription to the named track. */
-	subscribe(name: string, priority: number): Subscriber;
+	subscribe(name: string, options?: SubscribeOptions): Subscriber;
 	/** Resolve the named track's immutable info. */
 	resolveTrackInfo(name: string): Promise<Info>;
 	/** Fetch a single group of the named track by sequence. */
@@ -122,8 +132,8 @@ export class Consumer {
 	}
 
 	/** Open a live subscription to the track. */
-	subscribe(options?: { priority?: number }): Subscriber {
-		return this.#broadcast.subscribe(this.name, options?.priority ?? 0);
+	subscribe(options?: SubscribeOptions): Subscriber {
+		return this.#broadcast.subscribe(this.name, options);
 	}
 
 	/** Fetch the track's immutable publisher properties without subscribing. */

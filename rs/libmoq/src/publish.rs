@@ -197,6 +197,17 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Send a best-effort datagram on a raw track, returning its per-track sequence.
+	///
+	/// The payload must be at most [`moq_net::MAX_DATAGRAM_PAYLOAD`] bytes. Datagrams are
+	/// delivered only on transports and wire versions with a datagram channel; there is no
+	/// group fallback.
+	pub fn track_datagram(&mut self, track: Id, timestamp_us: u64, payload: &[u8]) -> Result<u64, Error> {
+		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		Ok(track.append_datagram(timestamp, bytes::Bytes::copy_from_slice(payload))?)
+	}
+
 	/// Finish a raw track. No more groups or frames can be written.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;

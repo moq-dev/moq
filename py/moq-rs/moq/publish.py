@@ -133,6 +133,14 @@ class TrackProducer:
         """Write a single-frame group with a timestamp in microseconds."""
         self._inner.write_frame(payload, timestamp_us)
 
+    def append_datagram(self, timestamp_us: int, payload: bytes) -> int:
+        """Send a best-effort datagram and return its sequence number.
+
+        Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
+        transport and wire version; there is no stream fallback.
+        """
+        return self._inner.append_datagram(timestamp_us, payload)
+
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
 

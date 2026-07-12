@@ -636,6 +636,70 @@ fn raw_track_publish_consume() {
 }
 
 #[test]
+fn raw_track_datagram_publish_consume() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	let track_name = b"events";
+	let track = id(unsafe {
+		moq_publish_track(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+		)
+	});
+
+	let path = b"raw-datagram";
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+
+	let consume = request_broadcast(origin, path);
+
+	let dg_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_datagrams(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			Some(channel_callback),
+			dg_cb.ptr,
+		)
+	});
+
+	// Millisecond-aligned so the value survives the default (millisecond) timescale exactly.
+	let payload = b"hello datagram";
+	let mut sequence: u64 = u64::MAX;
+	assert_eq!(
+		unsafe { moq_publish_track_datagram(track, 120_000, payload.as_ptr(), payload.len(), &mut sequence) },
+		0
+	);
+
+	let dg_id = id(dg_cb.recv());
+	let mut datagram = moq_datagram {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		sequence: 0,
+	};
+	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(datagram.payload, datagram.payload_size) };
+	assert_eq!(received, payload);
+	assert_eq!(datagram.timestamp_us, 120_000);
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(moq_consume_datagram_close(dg_id), 0);
+
+	assert_eq!(moq_consume_datagrams_close(consumer), 0);
+	// The task delivers one final terminal callback after close; drain it
+	// before the Callback (user_data) drops.
+	assert_eq!(dg_cb.recv_terminal(), 0, "clean close delivers terminal 0");
+	assert!(moq_consume_datagrams_close(consumer) < 0, "double-close should fail");
+	assert_eq!(moq_publish_track_close(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn raw_track_subscription_options_and_update() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());

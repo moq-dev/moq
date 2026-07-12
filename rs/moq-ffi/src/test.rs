@@ -92,6 +92,35 @@ async fn raw_track_activity() {
 }
 
 #[tokio::test]
+async fn raw_track_datagram_roundtrip() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track(
+			"events".into(),
+			Some(MoqTrackInfo {
+				priority: 0,
+				ordered: true,
+				cache_ms: None,
+				timescale: Some(1_000_000),
+			}),
+		)
+		.unwrap();
+	let consumer = track.consume(None).unwrap();
+	let payload = b"hello datagram".to_vec();
+
+	let sequence = track.append_datagram(123_456, payload.clone()).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram")
+		.unwrap()
+		.expect("expected a datagram");
+
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.timestamp_us, 123_456);
+	assert_eq!(datagram.payload, payload);
+}
+
+#[tokio::test]
 async fn raw_track_info_reports_publisher_properties() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let info = MoqTrackInfo {
