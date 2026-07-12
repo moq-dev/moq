@@ -94,6 +94,11 @@ impl MediaFoundation {
 		let (input_subtype, label) = match codec {
 			Codec::H264 => (MFVideoFormat_H264, "H.264"),
 			Codec::H265 => (MFVideoFormat_HEVC, "H.265"),
+			Codec::Av1 => {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"Media Foundation AV1 decode is not wired"
+				)));
+			}
 		};
 		let com = ComGuard::new()?;
 		let transform = enumerate_decoder(input_subtype)?;

@@ -18,7 +18,7 @@ pub(crate) struct Resolved {
 }
 
 /// Pick the rendition to transcode from: the highest-resolution decodable
-/// (H.264/H.265) rendition local to the source broadcast.
+/// (H.264/H.265/AV1) rendition local to the source broadcast.
 pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Error> {
 	video
 		.renditions
@@ -26,7 +26,12 @@ pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Erro
 		// A rendition that itself lives in another broadcast can't be subscribed
 		// through this one; composing relative references is a follow-up.
 		.filter(|(_, config)| config.broadcast.is_none())
-		.filter(|(_, config)| matches!(config.codec, VideoCodec::H264(_) | VideoCodec::H265(_)))
+		.filter(|(_, config)| {
+			matches!(
+				config.codec,
+				VideoCodec::H264(_) | VideoCodec::H265(_) | VideoCodec::AV1(_)
+			)
+		})
 		.max_by_key(|(_, config)| (config.coded_height, config.coded_width, config.bitrate))
 		.map(|(name, config)| (name.clone(), config.clone()))
 		.ok_or(Error::NoSource)
@@ -294,5 +299,18 @@ mod tests {
 		let (name, config) = choose_source(&video).unwrap();
 		assert_eq!(name, "high");
 		assert_eq!(config.coded_height, Some(1080));
+	}
+
+	#[test]
+	fn chooses_av1_source() {
+		let mut video = Video::default();
+		let mut av1 = VideoConfig::new(hang::catalog::AV1::default());
+		av1.coded_width = Some(1920);
+		av1.coded_height = Some(1080);
+		video.insert("av1", av1).unwrap();
+
+		let (name, config) = choose_source(&video).unwrap();
+		assert_eq!(name, "av1");
+		assert!(matches!(config.codec, VideoCodec::AV1(_)));
 	}
 }

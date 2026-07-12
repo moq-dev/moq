@@ -1,11 +1,12 @@
-//! H.264 / H.265 decoder front end.
+//! Video decoder front end.
 //!
 //! Prepares each container frame for a [`Backend`](super::backend::Backend):
 //! converts out-of-band payloads (avc1 / hvc1: length-prefixed NALs with the
 //! parameter sets in the description) to Annex-B and injects those parameter sets
-//! ahead of keyframes, leaving in-band payloads (avc3 / hev1, already Annex-B
-//! inline) untouched. Gates output until the first keyframe so the backend never
-//! sees a delta frame it can't decode.
+//! ahead of keyframes, leaving in-band H.264 / H.265 payloads (avc3 / hev1,
+//! already Annex-B inline) and AV1 OBU temporal units untouched. Gates output
+//! until the first keyframe so the backend never sees a delta frame it can't
+//! decode.
 
 use std::time::Duration;
 
@@ -63,11 +64,11 @@ impl Config {
 	}
 }
 
-/// How to turn a container payload into an Annex-B access unit for the backend.
+/// How to turn a container payload into a backend access unit.
 enum Conversion {
-	/// avc3 / hev1: the payload is already Annex-B with parameter sets inline.
-	/// Pass through.
-	Annexb,
+	/// The payload is already in the backend's input framing: Annex-B for avc3 /
+	/// hev1, OBU temporal units for AV1.
+	Passthrough,
 	/// avc1 / hvc1: length-prefixed NALs with the parameter sets out-of-band (in
 	/// the avcC / hvcC description). Replace the length prefixes with start codes
 	/// and prepend `keyframe_prefix` (the parameter sets) ahead of every keyframe.
@@ -79,8 +80,8 @@ enum Conversion {
 /// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
 /// when the frames don't come from a plain track subscription, e.g. a transcoder
 /// serving individually fetched groups. Feed it the payload of each container
-/// frame in decode order; it handles avc1/hvc1 -> Annex-B conversion and gates
-/// output until the first keyframe.
+/// frame in decode order; it handles avc1/hvc1 -> Annex-B conversion, passes
+/// AV1 OBU temporal units through, and gates output until the first keyframe.
 pub struct Decoder {
 	backend: Box<dyn Backend>,
 	conversion: Conversion,
@@ -89,12 +90,12 @@ pub struct Decoder {
 
 impl Decoder {
 	/// Build a decoder for the catalog's video config. Errors if the codec is
-	/// neither H.264 nor H.265 (the codecs the native backends support).
+	/// not supported by the native backends.
 	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 		let (codec, conversion) = match &catalog.codec {
 			VideoCodec::H264(h264) => {
 				let conversion = if h264.inline {
-					Conversion::Annexb
+					Conversion::Passthrough
 				} else {
 					let avcc = catalog.description.as_ref().ok_or_else(|| {
 						Error::Codec(anyhow::anyhow!("avc1 H.264 track is missing its avcC description"))
@@ -110,7 +111,7 @@ impl Decoder {
 			}
 			VideoCodec::H265(h265) => {
 				let conversion = if h265.in_band {
-					Conversion::Annexb
+					Conversion::Passthrough
 				} else {
 					let hvcc = catalog.description.as_ref().ok_or_else(|| {
 						Error::Codec(anyhow::anyhow!("hvc1 H.265 track is missing its hvcC description"))
@@ -125,6 +126,7 @@ impl Decoder {
 				};
 				(Codec::H265, conversion)
 			}
+			VideoCodec::AV1(_) => (Codec::Av1, Conversion::Passthrough),
 			other => return Err(Error::UnsupportedCodec(other.to_string())),
 		};
 
@@ -157,9 +159,9 @@ impl Decoder {
 			self.got_keyframe = true;
 		}
 
-		let annexb = match &self.conversion {
-			// Cheap refcount bump; the backend splits NAL slices off this buffer.
-			Conversion::Annexb => payload.clone(),
+		let access_unit = match &self.conversion {
+			// Cheap refcount bump; the backend splits codec units off this buffer.
+			Conversion::Passthrough => payload.clone(),
 			Conversion::LengthPrefixed {
 				length_size,
 				keyframe_prefix,
@@ -171,7 +173,7 @@ impl Decoder {
 
 		Ok(self
 			.backend
-			.decode(annexb, timestamp, keyframe)?
+			.decode(access_unit, timestamp, keyframe)?
 			.into_iter()
 			.map(|decoded| Frame {
 				timestamp: decoded.timestamp,
@@ -273,6 +275,16 @@ mod tests {
 	fn openh264_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
 		round_trip(h264_software_encoder(), decoder, "openh264");
+	}
+
+	#[test]
+	fn av1_is_supported_by_hardware_only() {
+		let catalog = hang::catalog::VideoConfig::new(hang::catalog::AV1::default());
+		let config = decode_config(super::Kind::Software);
+		let Err(err) = super::Decoder::new(&catalog, &config) else {
+			panic!("software AV1 decode unexpectedly opened");
+		};
+		assert!(matches!(err, crate::Error::NoDecoder(_)));
 	}
 
 	#[cfg(target_os = "macos")]
