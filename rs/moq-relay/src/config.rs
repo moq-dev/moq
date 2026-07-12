@@ -446,4 +446,36 @@ uid = [1001]
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.id, Some(67890));
 	}
+
+	/// Serializes tests that touch `MOQ_INTERNAL_LISTEN`. Same rationale as
+	/// `STATS_ENV_LOCK`.
+	static INTERNAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the same clap+TOML clobber bug on `internal.listen`
+	/// (the `--internal-listen` / `MOQ_INTERNAL_LISTEN` ops listener). It's an
+	/// `Option<SocketAddr>`, so an absent CLI flag must leave the TOML value
+	/// intact; if it were ever re-typed to a bare `SocketAddr`, the `update_from`
+	/// re-parse would overwrite a TOML-configured listener with the default.
+	#[test]
+	fn cli_does_not_clobber_toml_internal_listen() {
+		let _guard = INTERNAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: INTERNAL_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_INTERNAL_LISTEN") };
+
+		let toml = "[internal]\nlisten = \"127.0.0.1:9101\"\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("internal-listen-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.internal.listen,
+			Some("127.0.0.1:9101".parse().unwrap()),
+			"TOML's internal.listen must not be clobbered by the CLI re-parse"
+		);
+	}
 }

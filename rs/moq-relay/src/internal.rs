@@ -87,10 +87,10 @@ impl Internal {
 
 		let router = self.routes().into_make_service();
 		let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
-		axum_server::from_tcp(listener)?
-			.serve(router)
-			.await
-			.context("internal server failed")
+		// No blanket "…server failed" context here: the caller (main.rs) adds
+		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
+		axum_server::from_tcp(listener)?.serve(router).await?;
+		Ok(())
 	}
 }
 
