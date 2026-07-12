@@ -223,6 +223,59 @@ impl I420 {
 		Ok(Self { width, height, data })
 	}
 
+	/// Resize to `width` x `height` (both even) with a per-plane SIMD bilinear
+	/// convolution: Y at full size, U/V at quarter size. The CPU half of
+	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+	pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
+		use std::cell::RefCell;
+
+		use fast_image_resize::images::{Image, ImageRef};
+		use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+
+		// The resizer caches its convolution state; recreating it per frame on a
+		// live path would throw that away, so keep one per thread (decode/encode
+		// loops are single-threaded).
+		thread_local! {
+			static RESIZER: RefCell<Resizer> = RefCell::new(Resizer::new());
+		}
+
+		// Bilinear convolution: proper filter support at any downscale factor,
+		// the cheapest option that doesn't alias.
+		let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear));
+
+		let plane = |resizer: &mut Resizer,
+		             src: &[u8],
+		             sw: u32,
+		             sh: u32,
+		             dst: &mut [u8],
+		             dw: u32,
+		             dh: u32|
+		 -> Result<(), Error> {
+			let src = ImageRef::new(sw, sh, src, PixelType::U8)
+				.map_err(|e| Error::Codec(anyhow::anyhow!("resize source: {e}")))?;
+			let mut dst = Image::from_slice_u8(dw, dh, dst, PixelType::U8)
+				.map_err(|e| Error::Codec(anyhow::anyhow!("resize destination: {e}")))?;
+			resizer
+				.resize(&src, &mut dst, &options)
+				.map_err(|e| Error::Codec(anyhow::anyhow!("resize: {e}")))
+		};
+
+		let luma = width as usize * height as usize;
+		let mut data = vec![0u8; Self::len(width, height)];
+		let (y_dst, chroma) = data.split_at_mut(luma);
+		let (u_dst, v_dst) = chroma.split_at_mut(luma / 4);
+
+		RESIZER.with_borrow_mut(|resizer| {
+			plane(resizer, self.y(), self.width, self.height, y_dst, width, height)?;
+			let (sw2, sh2) = (self.width / 2, self.height / 2);
+			let (dw2, dh2) = (width / 2, height / 2);
+			plane(resizer, self.u(), sw2, sh2, u_dst, dw2, dh2)?;
+			plane(resizer, self.v(), sw2, sh2, v_dst, dw2, dh2)
+		})?;
+
+		Ok(Self { width, height, data })
+	}
+
 	/// Flatten the three planes of a freshly-converted image into one tightly
 	/// packed I420 buffer (Y, then U, then V).
 	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32) -> Self {
@@ -381,12 +434,43 @@ pub(crate) mod macos {
 
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
 pub(crate) mod cuda {
-	use std::sync::Arc;
+	use std::sync::{Arc, OnceLock};
 
-	use cudarc::driver::{CudaContext, result};
+	use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
 
 	use super::I420;
 	use crate::Error;
+
+	/// The NV12 box-filter resize kernels, vendored as PTX (see nv12_resize.cu)
+	/// and JIT-compiled by the driver, so building needs no CUDA toolkit.
+	const RESIZE_PTX: &str = include_str!("frame/nv12_resize.ptx");
+
+	/// The loaded resize kernels, one per process (everything runs in the
+	/// device's primary context, so one module serves every frame).
+	struct Kernels {
+		luma: CudaFunction,
+		chroma: CudaFunction,
+	}
+
+	fn kernels(ctx: &Arc<CudaContext>) -> Result<&'static Kernels, Error> {
+		static KERNELS: OnceLock<Result<Kernels, String>> = OnceLock::new();
+		KERNELS
+			.get_or_init(|| {
+				let module = ctx
+					.load_module(cudarc::nvrtc::Ptx::from_src(RESIZE_PTX))
+					.map_err(|e| format!("load nv12_resize PTX: {e:?}"))?;
+				Ok(Kernels {
+					luma: module
+						.load_function("resize_luma")
+						.map_err(|e| format!("load resize_luma: {e:?}"))?,
+					chroma: module
+						.load_function("resize_chroma")
+						.map_err(|e| format!("load resize_chroma: {e:?}"))?,
+				})
+			})
+			.as_ref()
+			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA resize unavailable: {e}")))
+	}
 
 	/// An owned device allocation. Plain `cuMemAlloc` on purpose: NVENC's
 	/// resource registration rejects stream-ordered pool memory
@@ -492,6 +576,81 @@ pub(crate) mod cuda {
 				height: self.height,
 				data,
 			})
+		}
+
+		/// Resize to `width` x `height` (both even) with the box-filter kernel,
+		/// staying in device memory. The GPU half of
+		/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
+			let ctx = &self.buf.ctx;
+			let kernels = kernels(ctx)?;
+
+			// Destination row pitch aligned to 256 bytes: comfortable coalescing
+			// and a multiple of 4 as NVENC registration requires.
+			let pitch = width.next_multiple_of(256);
+			let dst = Self::alloc(ctx, width, height, pitch)?;
+
+			let stream = ctx.default_stream();
+			let block = (16u32, 16, 1);
+			let grid = |w: u32, h: u32| (w.div_ceil(16), h.div_ceil(16), 1);
+			let launch_err = |plane: &str, e| Error::Codec(anyhow::anyhow!("CUDA resize {plane}: {e:?}"));
+
+			// Luma plane: one thread per destination pixel.
+			//
+			// SAFETY: both buffers are live NV12 allocations of pitch * height *
+			// 3 / 2 bytes, and the kernels bound every access by the dimensions
+			// passed alongside the pointers.
+			unsafe {
+				stream
+					.launch_builder(&kernels.luma)
+					.arg(&self.buf.ptr)
+					.arg(&self.pitch)
+					.arg(&self.width)
+					.arg(&self.height)
+					.arg(&dst.buf.ptr)
+					.arg(&pitch)
+					.arg(&width)
+					.arg(&height)
+					.launch(LaunchConfig {
+						grid_dim: grid(width, height),
+						block_dim: block,
+						shared_mem_bytes: 0,
+					})
+			}
+			.map_err(|e| launch_err("luma", e))?;
+
+			// Chroma plane: one thread per destination UV pair, offset past the
+			// luma rows in both buffers.
+			let src_uv = self.buf.ptr + u64::from(self.pitch) * u64::from(self.height);
+			let dst_uv = dst.buf.ptr + u64::from(pitch) * u64::from(height);
+			let (src_pw, src_ph) = (self.width / 2, self.height / 2);
+			let (dst_pw, dst_ph) = (width / 2, height / 2);
+			// SAFETY: as above; the UV offsets stay inside the same allocations.
+			unsafe {
+				stream
+					.launch_builder(&kernels.chroma)
+					.arg(&src_uv)
+					.arg(&self.pitch)
+					.arg(&src_pw)
+					.arg(&src_ph)
+					.arg(&dst_uv)
+					.arg(&pitch)
+					.arg(&dst_pw)
+					.arg(&dst_ph)
+					.launch(LaunchConfig {
+						grid_dim: grid(dst_pw, dst_ph),
+						block_dim: block,
+						shared_mem_bytes: 0,
+					})
+			}
+			.map_err(|e| launch_err("chroma", e))?;
+
+			// The frame may head straight to NVENC (which does not order against
+			// our stream), so wait for the kernels rather than queueing.
+			stream
+				.synchronize()
+				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA resize sync: {e:?}")))?;
+			Ok(dst)
 		}
 	}
 }
@@ -669,5 +828,104 @@ pub(crate) mod d3d11 {
 		fn drop(&mut self) {
 			unsafe { self.context.Unmap(self.resource, 0) };
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::I420;
+
+	/// A gradient I420 frame with structure in every plane, so resize bugs
+	/// (plane swaps, stride mistakes) shift the averages measurably.
+	fn gradient_i420(width: u32, height: u32) -> I420 {
+		let (w, h) = (width as usize, height as usize);
+		let (cw, ch) = (w / 2, h / 2);
+		let mut data = vec![0u8; I420::len(width, height)];
+		let (y, chroma) = data.split_at_mut(w * h);
+		let (u, v) = chroma.split_at_mut(cw * ch);
+		for row in 0..h {
+			for col in 0..w {
+				y[row * w + col] = ((col * 255) / w) as u8;
+			}
+		}
+		for row in 0..ch {
+			for col in 0..cw {
+				u[row * cw + col] = ((row * 255) / ch) as u8;
+				v[row * cw + col] = (((row + col) * 255) / (ch + cw)) as u8;
+			}
+		}
+		I420 { width, height, data }
+	}
+
+	/// Mean absolute error between two equal-length planes.
+	fn mae(a: &[u8], b: &[u8]) -> u64 {
+		assert_eq!(a.len(), b.len());
+		a.iter().zip(b).map(|(x, y)| x.abs_diff(*y) as u64).sum::<u64>() / a.len() as u64
+	}
+
+	/// The CPU resize follows the source gradients at any downscale factor: a
+	/// horizontal luma ramp stays a ramp, and the chroma ramps follow too.
+	#[test]
+	fn i420_resize_follows_gradients() {
+		let src = gradient_i420(320, 240);
+		let dst = src.resize(128, 96).unwrap();
+		assert_eq!((dst.width, dst.height), (128, 96));
+
+		// Reference: the same gradients sampled at the destination geometry.
+		let expected = gradient_i420(128, 96);
+		assert!(mae(dst.y(), expected.y()) < 4, "luma ramp drifted");
+		assert!(mae(dst.u(), expected.u()) < 4, "u ramp drifted");
+		assert!(mae(dst.v(), expected.v()) < 4, "v ramp drifted");
+	}
+
+	/// GPU (box filter) and CPU (bilinear convolution) resizes agree on a
+	/// smooth gradient. Runs on real hardware; skips without the NVIDIA driver.
+	#[cfg(all(target_os = "linux", feature = "nvdec"))]
+	#[test]
+	fn cuda_resize_matches_cpu() {
+		use std::sync::Arc;
+
+		use cudarc::driver::{CudaContext, result};
+
+		use super::cuda;
+
+		// Same probe as the codec backends: no driver, no test.
+		if unsafe { libloading::Library::new("libcuda.so.1") }.is_err() {
+			return;
+		}
+		let Ok(ctx): Result<Arc<CudaContext>, _> = CudaContext::new(0) else {
+			return;
+		};
+
+		let (w, h) = (322u32, 242u32); // odd-ish sizes: exercise pitch != width
+		let src_i420 = gradient_i420(w, h);
+
+		// Upload as pitched NV12: Y rows, then interleaved UV rows.
+		let pitch = 512u32;
+		let frame = cuda::Frame::alloc(&ctx, w, h, pitch).unwrap();
+		let mut host = vec![0u8; pitch as usize * h as usize * 3 / 2];
+		for row in 0..h as usize {
+			let dst = row * pitch as usize;
+			host[dst..dst + w as usize].copy_from_slice(&src_i420.y()[row * w as usize..(row + 1) * w as usize]);
+		}
+		let (cw, ch) = (w as usize / 2, h as usize / 2);
+		for row in 0..ch {
+			let dst = (h as usize + row) * pitch as usize;
+			for col in 0..cw {
+				host[dst + 2 * col] = src_i420.u()[row * cw + col];
+				host[dst + 2 * col + 1] = src_i420.v()[row * cw + col];
+			}
+		}
+		// SAFETY: the frame's buffer is exactly host.len() bytes.
+		unsafe { result::memcpy_htod_sync(frame.device_ptr(), &host) }.unwrap();
+
+		let scaled = frame.resize(160, 120).unwrap();
+		let gpu = scaled.download_i420().unwrap();
+		let cpu = src_i420.resize(160, 120).unwrap();
+
+		assert_eq!((gpu.width, gpu.height), (160, 120));
+		assert!(mae(gpu.y(), cpu.y()) < 4, "GPU and CPU luma disagree");
+		assert!(mae(gpu.u(), cpu.u()) < 4, "GPU and CPU u disagree");
+		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 }

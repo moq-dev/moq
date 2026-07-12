@@ -47,6 +47,48 @@ pub struct Frame {
 }
 
 impl Frame {
+	/// A copy of this frame scaled to `width` x `height` (both even and
+	/// non-zero), preserving the timestamp. A GPU frame scales on the GPU (a
+	/// box filter, correct at any downscale factor) and stays there, so
+	/// resize -> [`encode`](crate::encode::Encoder::encode) never touches the
+	/// CPU; a CPU frame scales on the CPU. When one output size is enough,
+	/// prefer decoding straight to it ([`Config::resize`]), which is free on
+	/// decoders with a hardware scaler; this method is for fanning one decoded
+	/// stream out to several sizes.
+	pub fn resize(&self, width: u32, height: u32) -> Result<Frame, Error> {
+		if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"resize to {width}x{height}: dimensions must be even and non-zero"
+			)));
+		}
+
+		let inner = match &self.inner {
+			crate::frame::Frame::I420(i420) => crate::frame::Frame::I420(i420.resize(width, height)?),
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			crate::frame::Frame::Cuda(cuda) => match cuda.resize(width, height) {
+				Ok(scaled) => crate::frame::Frame::Cuda(scaled),
+				// E.g. the driver rejected the vendored PTX: degrade to a CPU
+				// resize (download once) instead of killing the stream.
+				Err(err) => {
+					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+					crate::frame::Frame::I420(cuda.download_i420()?.resize(width, height)?)
+				}
+			},
+			// Capture-only surfaces (CVPixelBuffer / D3D11) never appear in
+			// decoded frames, but stay total: download, then scale on the CPU.
+			#[allow(unreachable_patterns)]
+			other => crate::frame::Frame::I420(other.to_i420()?.into_owned().resize(width, height)?),
+		};
+
+		Ok(Frame {
+			timestamp: self.timestamp,
+			width,
+			height,
+			inner,
+		})
+	}
+
 	/// The frame as tightly-packed I420 (YUV 4:2:0, BT.601 limited range): Y
 	/// (`width * height` bytes), then U, then V (`width/2 * height/2` bytes
 	/// each), no row padding. Free for a CPU frame; downloads a GPU frame.

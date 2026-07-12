@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `decode::Frame::resize(width, height)`: a scaled copy of a decoded frame,
+  preserving the timestamp. A CUDA frame (NVDEC output) resizes on the GPU with
+  a box-filter kernel (vendored PTX, JIT-compiled by the driver; no CUDA
+  toolkit needed to build) and stays in device memory; CPU frames resize with a
+  SIMD bilinear convolution. Fans one decoded stream out to several sizes, e.g.
+  a transcode ladder sharing one decoder.
+
 - H.264 / H.265 hardware decode on Linux via NVIDIA NVDEC, behind the
   default-on `nvdec` feature. Decoded frames stay in CUDA device memory and
   feed the NVENC encoder zero-copy through the new

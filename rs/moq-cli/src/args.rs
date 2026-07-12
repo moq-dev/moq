@@ -72,6 +72,10 @@ pub enum Direction {
 	/// Route media OUT OF MoQ to one sink.
 	#[command(alias = "subscribe")]
 	Export(Export),
+	/// Re-encode `--broadcast` into a lower ladder, published next to it and
+	/// only encoded while watched (just-in-time).
+	#[cfg(feature = "transcode")]
+	Transcode(crate::transcode::Args),
 }
 
 // ------------------------------------------------------------------ import

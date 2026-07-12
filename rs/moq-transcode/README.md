@@ -9,9 +9,10 @@ combined ladder and the transcoder never proxies what it doesn't re-encode.
 
 Nothing is encoded until someone asks, Cloudflare-style just-in-time per rung:
 
-- **Subscribe** to a rung and the transcoder subscribes to the source track,
-  decoding, scaling, and re-encoding group for group until the last subscriber
-  leaves.
+- **Subscribe** to a rung and the transcoder decodes the source live, resizing
+  and re-encoding group for group until the last subscriber leaves. Every
+  active rung of a source shares one subscription and one decoder, so decode
+  cost scales with sources, not ladder depth.
 - **Fetch** a specific group and the transcoder fetches that same group from
   the source and transcodes just that group. Output groups mirror source group
   sequence numbers 1:1, so group N of every rung is the same content as source
