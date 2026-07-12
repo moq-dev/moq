@@ -17,6 +17,8 @@ nix develop --command just build        # Build all packages
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
+CI runs `just ci`, which layers a few checks on top of `just check` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
+
 ## Architecture
 
 The project contains multiple layers of protocols:
@@ -63,7 +65,7 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 
 The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi` (mirrored to external repos); see each directory's `README.md` rather than a dedicated guide.
 
-This root file holds only cross-cutting rules that apply everywhere (writing style, branch targeting, cross-package sync, public-API scrutiny, comment/doc conventions).
+This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Dependencies
 
@@ -85,6 +87,7 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 - **Public API symbols are the exception: document every exported symbol.** Each `pub` Rust item and each exported JS/TS symbol (function, class, interface, type, const, enum, plus their notable public members) gets a doc comment (`///` / `/** */`), even when it looks self-explanatory. These render on the published docs (JSR builds API docs from the `.d.ts`; docs.rs from `///`), so a missing doc is a hole a consumer hits, not a self-evident line of code. Add a module-level doc to every entrypoint too (a `/** ... @module */` block at the top of each JS entrypoint file; a `//!` block on each Rust module root). Keep these one line where possible and say what a *consumer* needs (units, ownership, lifecycle, what it wraps), not throat-clearing.
 - Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough. Skip throat-clearing like "This function is responsible for...".
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
+- Never tag code comments, doc comments, or `/doc` pages with AI attribution: source markers rot. Attribution for commits and PR prose lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Deprecation
 
@@ -95,13 +98,21 @@ Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `-
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. A runtime warning when someone *uses* the deprecated path is fine (it fires on use, it isn't documentation); a standing note that advertises the dead name is not.
 
-## AI Attribution
+## Root Cause First
 
-LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with the agent model, e.g. `(Written by GPT-5)`. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.
+- Before fixing a bug, reproduce it and explain the mechanism. A fix that adds a retry, sleep, widened timeout, defensive check, or call-site special case without a stated mechanism is a symptom patch, not a fix.
+- If the mechanism lives in a lower layer, fix it there rather than working around it in the caller. The workaround becomes load-bearing and hides the bug from the next caller.
+- "It's a flake" is a claim that needs evidence; assume an intermittent CI failure is a real race until proven otherwise.
+- State the root cause in the PR description so reviewers can check the diagnosis, not just the patch.
+- Land each bug fix with a regression test that fails without it, encoding the root cause rather than just the reported symptom.
 
 ## Refactor As You Go
 
-A function with 4+ args, or a call site passing the same 3+ values into multiple functions, is a struct waiting to happen. Make the change in the same PR rather than leaving a TODO. Same for repeated tuples returned across modules.
+A change isn't done when it works; it's done when it's the shape you'd want to maintain. Spend the extra cycles:
+
+- A function with 4+ args, or a call site passing the same 3+ values into multiple functions, is a struct waiting to happen. Same for repeated tuples returned across modules. Make the change in the same PR rather than leaving a TODO.
+- Prefer extending an existing primitive over adding a parallel one-off, and generalizing a helper over copying it. If a fix needs the same edit in N places, reshape so it's one place first, then fix.
+- When a task can be solved by patching around an awkward internal shape or by fixing the shape, fix the shape in the same PR. The Public API Scrutiny "don't preserve an awkward shape just to avoid churn" rule applies to internal code too.
 
 ## Public API Scrutiny
 
@@ -132,11 +143,6 @@ Language-specific tooling (TypeScript/`bun`/Biome, JS async patterns, Web Compon
 - **Local-first**: When work can live in a `just` recipe (invoked via `nix develop --command`) or as logic in a GitHub Actions workflow step, prefer the recipe. The same code then runs reproducibly on a developer machine and in CI, and is debuggable locally without pushing commits. Workflow YAML should mostly delegate to `just`; reach for plugins (`dorny/paths-filter`, custom actions, etc.) only when a recipe genuinely can't express the logic.
 - **CI**: Prefer building release artifacts inside Nix (`nix build .#pkg`) over relying on runner-provided toolchains and `apt`/`brew` packages. Pinning the build environment in `flake.lock` makes artifacts deterministic and decouples them from drift in GitHub Actions runner images. Reach for the runner-native toolchain only when Nix doesn't fit (e.g. Windows runners).
 
-## Testing Approach
-
-- Run `just check` to execute all tests and linting.
-- Run `just fix` to automatically fix formating and easy things.
-
 ## Cross-Package Sync
 
 Changes in one area usually need matching updates elsewhere, including docs. If you skip a row, say why in the PR description.
@@ -154,19 +160,13 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 
+For wire, `moq-ffi`, or gateway changes, also run the cross-language interop matrix: `just test smoke` (see `test/justfile`).
+
 **When a command-line tool's interface changes (a flag, argument, subcommand, or positional renamed/added/removed/reordered), update every doc that shows an example invocation, not just the tool's primary page.** Sample commands for `moq-cli`, `moq-relay`, and `moq-token` are scattered across `doc/bin/`, `doc/lib/`, `doc/setup/`, and `doc/concept/`, plus the `justfile`s under `demo/`. Grep the whole repo for the binary name and reconcile each hit against the binary's `--help`. A stale example that no longer parses is worse than no example.
 
 ## Branch Targeting
 
-Two long-lived branches. The split is about **semver breakage, not size or novelty**: `dev` is only for changes that break an existing published contract. Everything else (bug fixes, new behavior, new/additive APIs, docs, refactors) goes to `main`, however large.
-
-- **`main`**: the default. Bug fixes, new behavior, new/additive APIs, docs, and refactors that preserve the existing public/wire contract. A change that only *adds* is additive and lands here even when it is big: a new `pub` item, a new option, or a parser accepting a broader set of inputs it previously rejected. Changing what a component does with input it *already* takes (e.g. recognizing a media pattern it used to mishandle) is a fix, not a break, so it also lands here.
-- **`dev`**: reserved for changes that violate semver by breaking an existing contract. Target it only for:
-  - Wire-protocol changes (anything under `rs/moq-net`, including `moq-lite` / `moq-transport` framing or draft bumps).
-  - Breaking changes to public APIs in `rs/moq-ffi`, `rs/libmoq`, `rs/moq-net`, `rs/hang`, `js/net`, `js/hang`, or any of the language wrappers under `swift/`, `kt/`, `go/`, `py/`. This means a renamed, removed, or signature-changed `pub` item, not a newly *added* one (adding is additive, so it goes to `main`).
-  - Catalog/container format changes in `rs/hang` or `js/hang` that alter existing on-the-wire framing or fields.
-
-`dev` periodically merges into `main` (or vice versa) when the batch is ready to ship. When in doubt, target `main`; reviewers will redirect to `dev` if a change turns out to break an existing contract. CI (`pull_request:` workflows) runs on PRs against either branch, so no extra setup is needed when you switch the base.
+PRs target `main` by default, however large the change: bug fixes, new behavior, additive APIs, docs, refactors. `dev` is reserved for changes that break an existing published contract: wire-protocol changes under `rs/moq-net`, breaking (renamed/removed/signature-changed, not newly added) `pub` API changes in the core libraries or language wrappers, and catalog/container format breaks. When in doubt, target `main`. Full rules in [CONTRIBUTING.md](CONTRIBUTING.md#branch-targeting).
 
 ## Workflow
 
@@ -177,23 +177,5 @@ When making changes to the codebase:
 3. Run `just fix` to auto-format and fix linting issues
 4. Run `just check` to verify everything passes
 5. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
-6. Add tests where they're easy to write
-7. Commit and push changes
-
-## PR Reviews
-
-CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review (or CodeRabbit otherwise fails to produce one), run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill. Then act on the findings the same way you would CodeRabbit's: push the high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
-
-When reviewing a PR, always include a list of the public API changes (new/renamed/removed/signature-changed `pub` items in `rs/moq-*` and `js/*`), and call out anything that is breaking per [Branch Targeting](#branch-targeting). Distinguish genuinely public surface from `pub(crate)` / private items so the breaking-change and branch-targeting rules are applied to the right things.
-
-## PR Title and Description Maintenance
-
-When pushing additional commits to an existing PR, check whether the title and description still describe the change accurately. They often go stale during review iterations: a flag gets renamed, an API gets reshaped, an extra fix lands, etc. The PR description is what shows up in the squash-merge commit, so a stale title/body means a misleading entry in `git log` forever.
-
-Update them with `gh pr edit <num> --title "..." --body "..."` whenever the scope shifts. Specifically watch for:
-
-- Flags, file names, or public APIs renamed in later commits but still referenced by their old name in the PR body.
-- Bullet points in the "Summary" section that describe behavior the latest commits have changed or removed.
-- The test-plan checklist getting out of date as new tests are added.
-
-When you edit a PR description you authored, keep the agent model marker so reviewers still know the body wasn't human-authored.
+6. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
+7. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews

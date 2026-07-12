@@ -1,6 +1,6 @@
 # py/CLAUDE.md
 
-Scopes the `/py` uv workspace. Universal rules (writing style / no em-dashes, Branch Targeting, Cross-Package Sync, AI Attribution) live in the root `CLAUDE.md`.
+Scopes the `/py` uv workspace. Universal rules (writing style / no em-dashes, Root Cause First, Cross-Package Sync, Public API Scrutiny) live in the root `CLAUDE.md`; PR/commit/release mechanics live in the root `CONTRIBUTING.md`.
 
 ## Two packages, one wheel boundary
 

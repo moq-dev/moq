@@ -1,6 +1,6 @@
 # js/CLAUDE.md
 
-Scopes the `/js` TypeScript/JavaScript workspace. Universal rules (writing style / no em-dashes, Branch Targeting, Cross-Package Sync, AI Attribution, Public API Scrutiny, Refactor As You Go, comment/doc conventions) live in the root `CLAUDE.md` and are not repeated here.
+Scopes the `/js` TypeScript/JavaScript workspace. Universal rules (writing style / no em-dashes, Root Cause First, Cross-Package Sync, Public API Scrutiny, Refactor As You Go, comment/doc conventions) live in the root `CLAUDE.md`; PR/commit/release mechanics live in the root `CONTRIBUTING.md`. Neither is repeated here.
 
 ## Workspace layout
 

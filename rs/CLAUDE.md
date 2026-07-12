@@ -1,6 +1,6 @@
 # rs/CLAUDE.md
 
-Reference for the `/rs` Cargo workspace. Universal rules (writing style, no em dashes, Branch Targeting, Cross-Package Sync, Public API Scrutiny, Refactor As You Go, AI Attribution) live in the root `/CLAUDE.md` and are not repeated here.
+Reference for the `/rs` Cargo workspace. Universal rules (writing style, no em dashes, Root Cause First, Cross-Package Sync, Public API Scrutiny, Refactor As You Go) live in the root `/CLAUDE.md`; PR/commit/release mechanics live in `/CONTRIBUTING.md`. Neither is repeated here.
 
 Workspace members live in the root `Cargo.toml` (`[workspace]`). `rust-version = "1.85"`, edition 2024. Shared versions/paths are pinned under `[workspace.dependencies]`; new crates should add their dep there and reference it via `{ workspace = true }`.
 
@@ -78,6 +78,11 @@ match version {
 ```
 
 Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference order; newer drafts negotiate via dedicated ALPNs (`version::ALPNS`). The version-to-behavior dispatch lives in `setup.rs:73` (`SetupVersion::from_version`).
+
+## Invariants and footguns
+
+- **No cascading abort**: Broadcast/Track/Group/Frame closes stay independent so handles can be shared. Closing or aborting one layer must not tear down its parent or siblings.
+- **`moq_net::Timestamp` scales**: the inherent `max`/`checked_add`/`checked_sub` panic or error on mismatched scales (`Ord::cmp` is safe), and `ZERO` is second-scale. Don't seed a `.max()` accumulator with `ZERO`; use an `Option` instead. A panic in a spawned task can hang a `finished().await` forever, so this once cost a 60-minute CI hang.
 
 ## Rust conventions
 
