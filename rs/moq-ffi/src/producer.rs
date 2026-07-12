@@ -68,7 +68,6 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	}
 }
 
-
 // ---- UniFFI Objects ----
 
 pub(crate) struct BroadcastProducer {
