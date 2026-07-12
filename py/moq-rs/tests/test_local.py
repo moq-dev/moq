@@ -365,10 +365,12 @@ async def test_dynamic_broadcast_request():
     broadcast = await asyncio.wait_for(request_broadcast, timeout=5.0)
     track_consumer = await broadcast.subscribe_track("status")
     payload = b"served dynamically"
-    track.write_frame(payload)
+    track.write_frame(payload, 20_000)
 
     frame = await asyncio.wait_for(track_consumer.read_frame(), timeout=5.0)
-    assert frame == payload
+    assert frame is not None
+    assert frame.payload == payload
+    assert frame.timestamp_us == 20_000
     track.finish()
     served.finish()
 
