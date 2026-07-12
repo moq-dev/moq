@@ -39,14 +39,13 @@ export function datagramWriter(quic: WebTransport): WritableStreamDefaultWriter<
 	const stream = datagrams(quic);
 	if (!stream || maxDatagramSize(quic) === 0) return undefined;
 
-	const writable = typeof stream.createWritable === "function" ? stream.createWritable() : stream.writable;
-
-	if (!writable) {
-		console.warn("datagram send disabled: WebTransport datagram writable stream is unavailable");
-		return undefined;
-	}
-
 	try {
+		const writable = typeof stream.createWritable === "function" ? stream.createWritable() : stream.writable;
+		if (!writable) {
+			console.warn("datagram send disabled: WebTransport datagram writable stream is unavailable");
+			return undefined;
+		}
+
 		return writable.getWriter();
 	} catch (err: unknown) {
 		console.warn("datagram send disabled: failed to open WebTransport datagram writer", err);
