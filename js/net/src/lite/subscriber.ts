@@ -12,6 +12,7 @@ import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
@@ -684,14 +685,16 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runDatagrams(): Promise<void> {
-		if (!hasDatagrams(this.version) || this.#quic.datagrams.maxDatagramSize === 0) {
+		if (!hasDatagrams(this.version) || DatagramStream.maxDatagramSize(this.#quic) === 0) {
 			return;
 		}
 
 		// Never reject: this loop is awaited alongside the connection's other tasks, so a
 		// datagram-stream failure must not tear the whole session down (it's best-effort).
+		const reader = DatagramStream.datagramReader(this.#quic);
+		if (!reader) return;
+
 		try {
-			const reader = this.#quic.datagrams.readable.getReader();
 			try {
 				for (;;) {
 					const { value, done } = await reader.read();
@@ -708,7 +711,12 @@ export class Subscriber {
 				reader.releaseLock();
 			}
 		} catch (err: unknown) {
-			console.warn("datagram stream error", err);
+			const e = error(err);
+			if (e.message === "The session is closed.") {
+				console.debug(`datagram receive stopped: ${e.message}`);
+			} else {
+				console.warn("datagram stream error", err);
+			}
 		}
 	}
 

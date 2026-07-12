@@ -8,6 +8,7 @@ import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import * as DatagramStream from "./datagram_stream.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
@@ -94,8 +95,8 @@ export class Publisher {
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
 		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
-		if (hasDatagrams(version) && quic.datagrams.maxDatagramSize > 0) {
-			this.#datagramWriter = quic.datagrams.writable.getWriter();
+		if (hasDatagrams(version)) {
+			this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		}
 	}
 
@@ -461,7 +462,7 @@ export class Publisher {
 	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
-		const maxSize = this.#quic.datagrams.maxDatagramSize;
+		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
 
 		try {
 			for (;;) {

@@ -45,7 +45,12 @@ class MockTransport implements WebTransport {
 	// Reference to the peer so we can enqueue streams to them
 	#peer?: MockTransport;
 
-	constructor(protocol: string, datagramsEnabled = true) {
+	constructor(
+		protocol: string,
+		datagramsEnabled = true,
+		datagramWritable: DatagramWritableApi = "writable",
+		datagramReadable = true,
+	) {
 		this.protocol = protocol;
 		this.ready = Promise.resolve(undefined);
 		this.closed = new Promise((resolve) => {
@@ -71,11 +76,13 @@ class MockTransport implements WebTransport {
 			// A real datagram duplex: writes enqueue into the peer's incoming readable,
 			// so a peer pair actually exchanges datagrams (unlike a real qmux Session,
 			// whose datagram streams are inert stubs).
-			const readable = new ReadableStream<Uint8Array>({
-				start: (controller) => {
-					this.#datagramController = controller;
-				},
-			});
+			const readable = datagramReadable
+				? new ReadableStream<Uint8Array>({
+						start: (controller) => {
+							this.#datagramController = controller;
+						},
+					})
+				: undefined;
 			const writable = new WritableStream<Uint8Array>({
 				write: (chunk) => {
 					const peer = this.#peer;
@@ -90,15 +97,29 @@ class MockTransport implements WebTransport {
 					}
 				},
 			});
-			this.datagrams = {
+			const datagrams: {
+				readable?: ReadableStream<Uint8Array>;
+				writable?: WritableStream<Uint8Array>;
+				maxDatagramSize: number;
+				incomingHighWaterMark: number;
+				outgoingHighWaterMark: number;
+				incomingMaxAge: null;
+				outgoingMaxAge: null;
+				createWritable?: () => WritableStream<Uint8Array>;
+			} = {
 				readable,
-				writable,
 				incomingHighWaterMark: 0,
 				outgoingHighWaterMark: 0,
 				incomingMaxAge: null,
 				outgoingMaxAge: null,
 				maxDatagramSize: 1200,
 			};
+			if (datagramWritable === "writable") {
+				datagrams.writable = writable;
+			} else if (datagramWritable === "createWritable") {
+				datagrams.createWritable = () => writable;
+			}
+			this.datagrams = datagrams as WebTransportDatagramDuplexStream;
 		} else {
 			// Simulate a transport that doesn't carry datagrams (maxDatagramSize 0): the
 			// wire layer must fall back to not sending, with no group fallback.
@@ -212,6 +233,8 @@ class MockTransport implements WebTransport {
 	}
 }
 
+type DatagramWritableApi = "writable" | "createWritable" | "none";
+
 /** Options for {@link createMockTransportPair}. */
 export interface MockTransportOptions {
 	/**
@@ -220,13 +243,19 @@ export interface MockTransportOptions {
 	 * session), so the wire layer must fall back to not sending datagrams.
 	 */
 	datagrams?: boolean;
+
+	/** Which outgoing datagram API shape the mock exposes. */
+	datagramWritable?: DatagramWritableApi;
+
+	/** Whether the incoming datagram readable stream is exposed. */
+	datagramReadable?: boolean;
 }
 
 /**
  * Creates a pair of connected MockTransport instances.
  *
  * @param protocol - The WebTransport protocol identifier (e.g. "moqt-17", "moql", "")
- * @param options - Optional behavior toggles (e.g. disabling datagrams)
+ * @param options - Optional behavior toggles for datagram availability
  * @returns An object containing `client` and `server` transports
  */
 export function createMockTransportPair(
@@ -234,8 +263,8 @@ export function createMockTransportPair(
 	options?: MockTransportOptions,
 ): { client: WebTransport; server: WebTransport } {
 	const datagrams = options?.datagrams ?? true;
-	const client = new MockTransport(protocol, datagrams);
-	const server = new MockTransport(protocol, datagrams);
+	const client = new MockTransport(protocol, datagrams, options?.datagramWritable, options?.datagramReadable);
+	const server = new MockTransport(protocol, datagrams, options?.datagramWritable, options?.datagramReadable);
 	client.setPeer(server);
 	server.setPeer(client);
 	return { client, server };

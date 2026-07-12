@@ -227,6 +227,90 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 	server.close();
 });
 
+test("integration: lite draft-05 datagrams sent with standards-track createWritable", async () => {
+	const enc = new TextEncoder();
+	const dec = new TextDecoder();
+	const pair = createMockTransportPair(Lite.ALPN_05, { datagramWritable: "createWritable" });
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+
+	const received = track.recvDatagram();
+	let stop = false;
+	const pump = (async () => {
+		for (let i = 0; !stop; i++) {
+			producer.appendDatagram(Timestamp.fromMillis(i), enc.encode("dgram"));
+			await sleep(2);
+		}
+	})();
+
+	const got = await received;
+	stop = true;
+	await pump;
+
+	expect(got).toBeDefined();
+	expect(dec.decode(got?.payload)).toBe("dgram");
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+test("integration: lite draft-05 missing datagram writer does not close streams", async () => {
+	const enc = new TextEncoder();
+	const pair = createMockTransportPair(Lite.ALPN_05, { datagramWritable: "none" });
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+
+	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
+	producer.writeString("group");
+
+	expect(await track.readString()).toBe("group");
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
+	const enc = new TextEncoder();
+	const pair = createMockTransportPair(Lite.ALPN_05, { datagramReadable: false });
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+
+	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
+	producer.writeString("group");
+
+	expect(await track.readString()).toBe("group");
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: lite draft-05 fetches a cached group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
