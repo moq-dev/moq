@@ -113,7 +113,7 @@ type VideoTarget = {
 	frameRate?: number;
 };
 
-const videoTarget = ui.computed((effect): VideoTarget => {
+function readVideoTarget(effect: Signals.Effect): VideoTarget {
 	const res = effect.get(resolution);
 	const [rawWidth, rawHeight] = res ? res.split("x").map(Number) : [undefined, undefined];
 	return {
@@ -121,7 +121,7 @@ const videoTarget = ui.computed((effect): VideoTarget => {
 		height: rawHeight && Number.isFinite(rawHeight) ? rawHeight : undefined,
 		frameRate: effect.get(framerate),
 	};
-});
+}
 
 function cameraConstraints(target: VideoTarget): Video.Constraints | undefined {
 	const constraints: Video.Constraints = {};
@@ -147,10 +147,7 @@ function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.Encod
 // Compose the WebCodecs/MoQ video encoder config and push it onto the HD
 // rendition. Undefined fields are omitted, so the encoder auto-sizes them.
 ui.run((effect) => {
-	const target = effect.get(videoTarget);
-	if (!target) return;
-
-	publish.broadcast.video.hd.config.set(encoderConfig(effect, target));
+	publish.broadcast.video.hd.config.set(encoderConfig(effect, readVideoTarget(effect)));
 });
 
 // Request the selected resolution from the camera itself, not just cap the encoder. publish.video
@@ -161,10 +158,7 @@ ui.run((effect) => {
 	const source = effect.get(publish.video);
 	if (!(source instanceof Source.Camera)) return;
 
-	const target = effect.get(videoTarget);
-	if (!target) return;
-
-	effect.set(source.constraints, cameraConstraints(target));
+	effect.set(source.constraints, cameraConstraints(readVideoTarget(effect)));
 });
 
 // Audio general settings (volume gain, output sample rate, channel mix).
