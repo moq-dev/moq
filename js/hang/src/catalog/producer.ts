@@ -28,7 +28,7 @@ export interface Config<T extends Root = Root> {
  * with `serve`. Extend the catalog by passing a schema built via `z.extend(RootSchema, ...)` and
  * writing the extra sections in `mutate`.
  */
-export class Producer<T extends Root = Root> extends Json.Producer<T> {
+export class Producer<T extends Root = Root> extends Json.Snapshot.Producer<T> {
 	/** Create a track-less catalog producer seeded with an empty catalog. */
 	constructor(config: Config<T> = {}) {
 		super({

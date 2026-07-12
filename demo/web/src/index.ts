@@ -395,10 +395,10 @@ metaEffect.run((effect) => {
 
 	// subscribeTrack runs `consume` for the active tile's broadcast and follows it
 	// across reconnects, reusing the <moq-watch>'s own connection. The
-	// Json.Consumer reconstructs the value from the snapshot (frame 0) +
+	// Json.Snapshot.Consumer reconstructs the value from the snapshot (frame 0) +
 	// merge-patch deltas, the same encoding @moq/hang uses for the catalog itself.
 	const unsubscribe = watch.broadcast.subscribeTrack(trackName, Hang.Catalog.PRIORITY.catalog, (track, e) => {
-		const consumer = new Json.Consumer<unknown>(track);
+		const consumer = new Json.Snapshot.Consumer<unknown>(track);
 		e.spawn(async () => {
 			for (;;) {
 				const nextVal = await Promise.race([e.cancel, consumer.next()]);

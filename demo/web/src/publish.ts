@@ -300,7 +300,7 @@ ui.run((effect) => {
 // Custom meta.json track
 // ---------------------------------------------------------------------------
 //
-// A track-less Json.Producer retains the current value and fans it out to each
+// A track-less Json.Snapshot.Producer retains the current value and fans it out to each
 // subscriber, seeding late joiners. publishTrack registers it on the broadcast;
 // the component's publish loop serves it whenever a viewer requests `meta.json`.
 // We advertise the track in the catalog's `metadata` section (the hang catalog
@@ -309,7 +309,7 @@ ui.run((effect) => {
 
 const META_TRACK = "meta.json";
 
-const meta = new Json.Producer<unknown>({
+const meta = new Json.Snapshot.Producer<unknown>({
 	initial: { title: "My Broadcast", location: "earth", note: "edit me" },
 });
 

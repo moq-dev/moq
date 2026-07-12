@@ -219,7 +219,7 @@ export class Broadcast {
 	 * import * as Json from "@moq/json";
 	 * const scte35 = new Signal<{ splices: number[] } | undefined>(undefined);
 	 * broadcast.subscribeTrack("scte35.json", Catalog.PRIORITY.catalog, (track, effect) => {
-	 * 	const consumer = new Json.Consumer<{ splices: number[] }>(track);
+	 * 	const consumer = new Json.Snapshot.Consumer<{ splices: number[] }>(track);
 	 * 	effect.spawn(async () => {
 	 * 		for (;;) {
 	 * 			const next = await Promise.race([effect.cancel, consumer.next()]);

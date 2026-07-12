@@ -5,20 +5,20 @@ use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
+/// This wraps a [`moq_json::snapshot::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
 ///
 /// Generic over the application extension `E` (defaulting to `()`); yields a
 /// [`Catalog<E>`](super::Catalog).
 pub struct Consumer<E: CatalogExt = ()> {
-	inner: moq_json::Consumer<Catalog<E>>,
+	inner: moq_json::snapshot::Consumer<Catalog<E>>,
 }
 
 impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
 		Self {
-			inner: moq_json::Consumer::new(track, moq_json::ConsumerConfig::default()),
+			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::ConsumerConfig::default()),
 		}
 	}
 
@@ -26,10 +26,10 @@ impl<E: CatalogExt> Consumer<E> {
 	///
 	/// The track must be the compressed one; pair this with [`hang::Catalog::compressed_track`].
 	pub fn compressed(track: moq_net::TrackConsumer) -> Self {
-		let mut config = moq_json::ConsumerConfig::default();
+		let mut config = moq_json::snapshot::ConsumerConfig::default();
 		config.compression = true;
 		Self {
-			inner: moq_json::Consumer::new(track, config),
+			inner: moq_json::snapshot::Consumer::new(track, config),
 		}
 	}
 

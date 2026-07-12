@@ -35,7 +35,7 @@ pub struct Status {
 
 /// Manages the status track, publishing snapshots and deltas via [`moq_json`].
 pub struct StatusPublisher {
-	producer: moq_json::Producer<Status>,
+	producer: moq_json::snapshot::Producer<Status>,
 }
 
 impl StatusPublisher {
@@ -44,7 +44,7 @@ impl StatusPublisher {
 		let producer = broadcast.create_track(track)?;
 
 		Ok(Self {
-			producer: moq_json::Producer::new(producer, moq_json::ProducerConfig::default()),
+			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::ProducerConfig::default()),
 		})
 	}
 

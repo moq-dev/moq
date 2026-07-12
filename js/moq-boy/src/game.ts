@@ -229,7 +229,7 @@ export class Game {
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
-		const consumer = new Json.Consumer(statusTrack, { schema: GameStatusSchema });
+		const consumer = new Json.Snapshot.Consumer(statusTrack, { schema: GameStatusSchema });
 
 		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
 		// ends without racing effect.cancel.
@@ -280,7 +280,7 @@ export class Game {
 				if (!req) break;
 
 				if (req.track.name === "command") {
-					const producer = new Json.Producer<Record<string, unknown>>(req.track);
+					const producer = new Json.Snapshot.Producer<Record<string, unknown>>(req.track);
 					effect.cleanup(() => producer.finish());
 					effect.run(this.#runCommandTrack.bind(this, req.track, producer));
 				}
@@ -288,7 +288,11 @@ export class Game {
 		});
 	}
 
-	#runCommandTrack(track: Moq.Track, producer: Json.Producer<Record<string, unknown>>, effect: Moq.Signals.Effect) {
+	#runCommandTrack(
+		track: Moq.Track,
+		producer: Json.Snapshot.Producer<Record<string, unknown>>,
+		effect: Moq.Signals.Effect,
+	) {
 		if (effect.get(track.state.closed)) return;
 
 		const command = effect.get(this.#command);

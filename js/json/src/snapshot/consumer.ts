@@ -1,7 +1,7 @@
 import { Decoder } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import type * as z from "zod/mini";
-import { merge } from "./diff.ts";
+import { merge } from "../diff.ts";
 import type { Config } from "./producer.ts";
 
 /**

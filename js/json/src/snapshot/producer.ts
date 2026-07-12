@@ -3,7 +3,7 @@ import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type * as z from "zod/mini";
 
-import { deepEqual, diff } from "./diff.ts";
+import { deepEqual, diff } from "../diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.

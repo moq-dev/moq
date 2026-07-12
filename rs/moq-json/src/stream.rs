@@ -1,9 +1,9 @@
-//! Append-log JSON publishing over [`moq-net`](moq_net) tracks.
+//! Lossless append-log JSON publishing over [`moq-net`](moq_net) tracks.
 //!
-//! The counterpart to the crate root's snapshot/delta ("object") mode: instead of one JSON
-//! value updated over time, a stream is an ordered log of self-contained records. Every
-//! [`Producer::append`] writes one JSON object as one frame, and a [`Consumer`] yields every
-//! record in order.
+//! The counterpart to the lossy [`snapshot`](crate::snapshot) mode: instead of one JSON value
+//! updated over time, a stream is an ordered log of self-contained records that preserves
+//! everything. Every [`Producer::append`] writes one JSON object as one frame, nothing is ever
+//! superseded, and a [`Consumer`] yields every record in order.
 //!
 //! The whole log rides a **single group** that is never rolled: with
 //! [`ProducerConfig::compression`] on, that one group is one DEFLATE window, so every record

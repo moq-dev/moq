@@ -1,8 +1,8 @@
 /**
- * Append-log JSON publishing over MoQ tracks: the counterpart to the snapshot/delta ("object")
- * mode in {@link ./producer.ts}. Instead of one value updated over time, a stream is an ordered
- * log of self-contained records; every {@link Producer.append} writes one JSON object as one
- * frame, and a {@link Consumer} yields them all in order.
+ * Lossless append-log JSON publishing over MoQ tracks: the counterpart to the lossy `Snapshot`
+ * module. Instead of one value updated over time, a stream is an ordered log of self-contained
+ * records that preserves everything; every {@link Producer.append} writes one JSON object as one
+ * frame, nothing is ever superseded, and a {@link Consumer} yields every record in order.
  *
  * The whole log rides a **single group** that is never rolled: with {@link ProducerConfig.compression}
  * on, that one group is one DEFLATE window, so every record compresses against the earlier ones.

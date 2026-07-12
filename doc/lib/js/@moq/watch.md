@@ -230,7 +230,7 @@ const section = broadcast.catalog.peek()?.scte35;
 
 const scte35 = new Signals.Signal<{ splices: number[] } | undefined>(undefined);
 broadcast.subscribeTrack("scte35.json", 100, (track, effect) => {
-    const consumer = new Json.Consumer<{ splices: number[] }>(track);
+    const consumer = new Json.Snapshot.Consumer<{ splices: number[] }>(track);
     effect.spawn(async () => {
         for (;;) {
             const next = await Promise.race([effect.cancel, consumer.next()]);

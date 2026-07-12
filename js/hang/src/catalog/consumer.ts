@@ -24,7 +24,7 @@ export interface ConsumerConfig<T extends Root = Root> {
  * `z.extend(RootSchema, ...)`) to validate and type application sections; otherwise unknown
  * sections pass through untouched. Set `compression` to read the `catalog.json.z` track.
  */
-export class Consumer<T extends Root = Root> extends Json.Consumer<T> {
+export class Consumer<T extends Root = Root> extends Json.Snapshot.Consumer<T> {
 	/** Wrap `track`, validating each catalog against `config.schema` (defaults to {@link RootSchema}). */
 	constructor(track: Moq.Track, config: ConsumerConfig<T> = {}) {
 		super(track, {

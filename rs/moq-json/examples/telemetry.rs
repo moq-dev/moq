@@ -9,7 +9,7 @@
 
 use std::task::Poll;
 
-use moq_json::{ConsumerConfig, Producer, ProducerConfig};
+use moq_json::snapshot::{Consumer, ConsumerConfig, Producer, ProducerConfig};
 use serde_json::{Value, json};
 
 /// One second of telemetry for a fleet device: a big static core plus a few moving numbers.
@@ -106,7 +106,7 @@ fn verify(producer_config: ProducerConfig, ticks: u64) {
 
 	let mut consumer_config = ConsumerConfig::default();
 	consumer_config.compression = producer_config.compression;
-	let mut consumer = moq_json::Consumer::<Value>::new(consumer, consumer_config);
+	let mut consumer = Consumer::<Value>::new(consumer, consumer_config);
 	let waiter = kio::Waiter::noop();
 
 	for tick in 0..ticks {
@@ -145,7 +145,7 @@ fn verify_late_joiner(producer_config: ProducerConfig, ticks: u64) -> usize {
 
 	let mut consumer_config = ConsumerConfig::default();
 	consumer_config.compression = producer_config.compression;
-	let mut consumer = moq_json::Consumer::<Value>::new(consumer, consumer_config);
+	let mut consumer = Consumer::<Value>::new(consumer, consumer_config);
 	let waiter = kio::Waiter::noop();
 	let mut last = None;
 	let mut yielded = 0;

@@ -7,11 +7,12 @@
 [![npm version](https://img.shields.io/npm/v/@moq/json)](https://www.npmjs.com/package/@moq/json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Snapshot/delta JSON publishing over [Media over QUIC](https://moq.dev/) tracks using [RFC 7396 JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396.html).
+JSON publishing over [Media over QUIC](https://moq.dev/) tracks, in two modes:
 
-A JSON value is published over a [`@moq/net`](../net) track as a series of groups. Each group is self-contained: its first frame is a full snapshot and any following frames are JSON Merge Patch deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and applies the deltas, so a late joiner never needs older groups.
+- **`Snapshot`**: lossy. One JSON value updated over time; a consumer only gets the most recent value. Intermediate updates are collapsed and older groups are dropped.
+- **`Stream`**: lossless. An ordered append-log of self-contained records; every record is preserved and delivered in order, nothing is ever superseded.
 
-Deltas are opt-in via `maxDeltaRatio` (omit it to publish a full snapshot per group).
+Pick `Snapshot` when consumers care about "what is the value now" (a catalog, a status document) and `Stream` when they care about every record (an event log, a media timeline).
 
 ## Quick Start
 
@@ -19,18 +20,41 @@ Deltas are opt-in via `maxDeltaRatio` (omit it to publish a full snapshot per gr
 npm add @moq/json
 ```
 
-```ts
-import { Producer, Consumer } from "@moq/json";
+### Snapshot: the latest value
 
-// Publish: deltas off by default (one snapshot per group).
-const producer = new Producer(track);
+A JSON value is published over a [`@moq/net`](../net) track as a series of groups. Each group is self-contained: its first frame is a full snapshot and any following frames are [RFC 7396 JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396.html) deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and applies the deltas, so a late joiner never needs older groups. This is lossy by design: only the most recent value is delivered.
+
+```ts
+import { Snapshot } from "@moq/json";
+
+// Publish: each update supersedes the last.
+const producer = new Snapshot.Producer(track);
 producer.update({ hello: "world" });
 
-// Consume: yields the reconstructed value after each update.
-const consumer = new Consumer(track);
+// Consume: yields the latest reconstructed value, collapsing any backlog.
+const consumer = new Snapshot.Consumer(track);
 for await (const value of consumer) {
 	console.log(value);
 }
 ```
 
-Pass `{ deltaRatio: x }` with a positive `x` to `Producer` to emit merge-patch deltas while a group's deltas stay within `x` times the size of a fresh snapshot; `deltaRatio` defaults to `8` when unset. Set it to `0` to disable deltas: every change becomes a fresh single-frame snapshot group. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
+Pass `{ deltaRatio: x }` with a positive `x` to `Snapshot.Producer` to emit merge-patch deltas while a group's deltas stay within `x` times the size of a fresh snapshot; `deltaRatio` defaults to `8` when unset. Set it to `0` to disable deltas: every change becomes a fresh single-frame snapshot group. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
+
+### Stream: every record
+
+An ordered log of self-contained records, one JSON object per frame, all riding a single group. Nothing is superseded: a consumer yields every record in order.
+
+```ts
+import { Stream } from "@moq/json";
+
+const producer = new Stream.Producer(track);
+producer.append({ event: "started" });
+producer.append({ event: "stopped" });
+
+const consumer = new Stream.Consumer(track);
+for await (const record of consumer) {
+	console.log(record);
+}
+```
+
+Both modes support optional group-scoped DEFLATE compression (`{ compression: true }` on both sides), interoperable with the Rust `moq-json` crate.
