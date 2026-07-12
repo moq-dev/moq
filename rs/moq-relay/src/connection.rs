@@ -93,14 +93,25 @@ impl Connection {
 		// the connection closes below.
 		let _session_stats = stats.session(&token.root);
 
+		// Wire only the direction(s) the client will actually use. The token scope
+		// (enforced above) caps what it *may* do; the role caps what it *will* do.
+		// Pruning the unused half means moq-net feeds that side a no-op origin, so a
+		// publish-only ingest isn't announced every cluster broadcast it would ignore,
+		// and a subscribe-only egress issues no announce-interest. A `Both` client (and
+		// any transport that carries no role) keeps whatever the token grants.
+		let (publish, subscribe) = match role {
+			moq_net::Role::Publisher => (publish, None),
+			moq_net::Role::Subscriber => (None, subscribe),
+			moq_net::Role::Both => (publish, subscribe),
+		};
+
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
 		//
-		// Only set the side the token actually grants. moq-net defaults the
-		// unset side to a fresh no-op origin, which is fine for a publish-only
-		// or subscribe-only token.
+		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
+		// publish-only or subscribe-only session.
 		let mut request = self.request.with_stats(stats);
 		if let Some(subscribe) = subscribe {
 			request = request.with_publisher(&subscribe);
