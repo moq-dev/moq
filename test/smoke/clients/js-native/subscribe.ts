@@ -66,7 +66,7 @@ async function run(): Promise<void> {
 		// The .hang catalog lives on the "catalog.json" track. It's a @moq/json
 		// snapshot+delta value, reconstructed by Json.Consumer. A lazy publisher may
 		// announce video in a later update, so keep reading until one has it.
-		const track = bc.subscribe("catalog.json", Catalog.PRIORITY.catalog);
+		const track = bc.subscribe("catalog.json", { priority: Catalog.PRIORITY.catalog });
 		const catalog = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
 		let videoTrack: string | undefined;
 		while (!videoTrack) {
@@ -76,7 +76,7 @@ async function run(): Promise<void> {
 			if (renditions) videoTrack = Object.keys(renditions)[0];
 		}
 
-		const video = bc.subscribe(videoTrack, 0);
+		const video = bc.subscribe(videoTrack, { priority: 0 });
 		let total = 0;
 		for (;;) {
 			const group = await video.recvGroup();

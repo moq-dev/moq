@@ -150,7 +150,7 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.trackName, msg.subscriberPriority);
+		const track = broadcast.subscribe(msg.trackName, { priority: msg.subscriberPriority });
 
 		try {
 			// Send SUBSCRIBE_OK

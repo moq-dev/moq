@@ -38,7 +38,12 @@ function closeState(state: BroadcastState, abort?: Error) {
 // subscription instead of opening a new one, mirroring the Rust `broadcast::Consumer::track`
 // weak-dedup. The publishing side leaves it false: `state.tracks` there holds only the tracks
 // the app inserted, and a dynamic serve stays one request per peer subscription.
-function subscribe(state: BroadcastState, name: string, priority: number, register = false): track.Subscriber {
+function subscribe(
+	state: BroadcastState,
+	name: string,
+	options: track.SubscribeOptions = {},
+	register = false,
+): track.Subscriber {
 	if (state.closed.peek()) {
 		throw new Error(`broadcast is closed: ${state.closed.peek()}`);
 	}
@@ -61,7 +66,7 @@ function subscribe(state: BroadcastState, name: string, priority: number, regist
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(new track.Request(name, producer, priority));
+		requested.push(new track.Request(name, producer, options.priority ?? 0));
 		requested.sort((a, b) => a.priority - b.priority);
 	});
 
@@ -100,7 +105,7 @@ async function fetchGroup(
 	sequence: number,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
-	const subscriber = subscribe(state, name, options.priority ?? 0);
+	const subscriber = subscribe(state, name, { priority: options.priority ?? 0 });
 	try {
 		for (;;) {
 			const group = await subscriber.recvGroup();
@@ -189,8 +194,8 @@ export class Producer implements track.Broadcast {
 	}
 
 	/** Open a live subscription to a track. Used by the publishing wire layer. */
-	subscribe(name: string, priority: number): track.Subscriber {
-		return subscribe(this.#state, name, priority);
+	subscribe(name: string, options?: track.SubscribeOptions): track.Subscriber {
+		return subscribe(this.#state, name, options);
 	}
 
 	/** Resolve a track's immutable info. Used by the publishing wire layer. */
@@ -268,8 +273,8 @@ export class Consumer implements track.Broadcast {
 	}
 
 	/** Open a live subscription to a track. Used by the subscribing wire layer. Repeat subscriptions to the same track share one upstream subscription. */
-	subscribe(name: string, priority: number): track.Subscriber {
-		return subscribe(this.#state, name, priority, true);
+	subscribe(name: string, options?: track.SubscribeOptions): track.Subscriber {
+		return subscribe(this.#state, name, options, true);
 	}
 
 	/** Return the next track requested by the local consumer. Used by the subscribing wire layer. */
