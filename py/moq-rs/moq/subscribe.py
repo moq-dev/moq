@@ -75,6 +75,10 @@ class GroupConsumer:
             raise StopAsyncIteration
         return frame
 
+    async def read_frame(self) -> Frame | None:
+        """Read the next timestamped frame. Returns `None` when the group ends."""
+        return await self._inner.read_frame()
+
     def cancel(self) -> None:
         self._inner.cancel()
 
