@@ -254,11 +254,15 @@ impl Tier {
 		}
 	}
 
-	/// Lowercase label for this tier (`"external"` / `"internal"`), e.g. for a
-	/// metrics label or a track-name prefix.
+	/// Label for this tier, e.g. a metrics label. The default (external /
+	/// customer) tier is the empty string `""`; cluster-peer traffic is
+	/// `"internal"`. This mirrors the `.stats` wire convention, where the
+	/// default tier is unprefixed (`publisher.json`) and the internal tier is
+	/// `internal/`-prefixed, and leaves room for the default to become one of
+	/// several configurable tier names later.
 	pub fn as_str(self) -> &'static str {
 		match self {
-			Tier::External => "external",
+			Tier::External => "",
 			Tier::Internal => "internal",
 		}
 	}

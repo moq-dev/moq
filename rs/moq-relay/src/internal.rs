@@ -239,15 +239,15 @@ mod tests {
 			"type header:\n{body}"
 		);
 		assert!(
-			body.contains("moq_relay_bytes_total{tier=\"external\",role=\"publisher\"} 1234"),
-			"external egress bytes:\n{body}"
+			body.contains("moq_relay_bytes_total{tier=\"\",role=\"publisher\"} 1234"),
+			"default-tier egress bytes (empty tier label):\n{body}"
 		);
 		assert!(
 			body.contains("moq_relay_bytes_total{tier=\"internal\",role=\"subscriber\"} 0"),
 			"idle tier still emitted:\n{body}"
 		);
 		assert!(
-			body.contains("moq_relay_sessions_opened_total{tier=\"external\"} 1"),
+			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
 		);
 	}
