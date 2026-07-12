@@ -334,9 +334,7 @@ Requires modern browser features:
 **Experimental support:**
 
 - Firefox (behind flag)
-- Safari
-
-Safari always connects over the WebSocket fallback, because reading WebTransport datagrams terminates the session. It therefore has no congestion-controller bandwidth estimate, so the encoder does not adapt its bitrate downward. Set `maxBitrate` explicitly if you need a ceiling.
+- Safari (future support planned)
 
 ## Production Deployment
 

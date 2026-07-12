@@ -1,7 +1,9 @@
-import * as Util from "@moq/hang/util";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import { type Codec, type Full, isSupported, type Partial } from "./";
+
+// https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
+const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 
 const OBSERVED = ["show", "details"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -200,11 +202,7 @@ export default class MoqPublishSupport extends HTMLElement {
 
 		const binary = (value: boolean | undefined) => (value ? "🟢 Yes" : "🔴 No");
 		const hardware = (codec: Codec | undefined) =>
-			codec?.hardware
-				? "🟢 Hardware"
-				: codec?.software
-					? `🟡 Software${Util.Hacks.isFirefox ? "*" : ""}`
-					: "🔴 No";
+			codec?.hardware ? "🟢 Hardware" : codec?.software ? `🟡 Software${isFirefox ? "*" : ""}` : "🔴 No";
 		const partial = (value: Partial | undefined) =>
 			value === "full" ? "🟢 Full" : value === "partial" ? "🟡 Polyfill" : "🔴 None";
 
@@ -256,7 +254,7 @@ export default class MoqPublishSupport extends HTMLElement {
 		addRow("", "VP9", hardware(support.video.encoding?.vp9));
 		addRow("", "VP8", hardware(support.video.encoding?.vp8));
 
-		if (Util.Hacks.isFirefox) {
+		if (isFirefox) {
 			const noteDiv = DOM.create(
 				"div",
 				{

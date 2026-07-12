@@ -165,9 +165,7 @@ Requires modern browser features:
 **Experimental support:**
 
 - Firefox (behind flag)
-- Safari
-
-Safari always connects over the WebSocket fallback, because reading WebTransport datagrams terminates the session.
+- Safari (future support planned)
 
 ## Framework Integration
 
