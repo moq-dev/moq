@@ -477,7 +477,11 @@ impl QuinnRequest {
 					.map_err(Error::RecvRequest)?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_net::ALPNS.contains(&alpn) => {
+			// Recognize any moq ALPN this server actually offered (its configured versions),
+			// not the global default set. rustls only negotiates an ALPN the server offered, so
+			// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
+			// deliberately absent from `moq_net::ALPNS`.
+			alpn if alpns.contains(&alpn) => {
 				if host.is_empty() {
 					return Err(Error::MissingServerName);
 				}

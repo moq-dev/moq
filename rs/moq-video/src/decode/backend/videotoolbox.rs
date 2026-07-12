@@ -88,6 +88,9 @@ impl VideoToolbox {
 	/// `config` is accepted for signature parity; VideoToolbox decodes at the
 	/// stream's native size (callers scale the frames themselves).
 	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		if codec == Codec::Av1 {
+			return Err(Error::Codec(anyhow::anyhow!("VideoToolbox AV1 decode is not wired")));
+		}
 		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
 		Ok(Box::new(Self {
 			codec,
@@ -110,6 +113,7 @@ impl VideoToolbox {
 		match self.codec {
 			Codec::H264 => Some(vec![sps, pps]),
 			Codec::H265 => Some(vec![self.vps.clone()?, sps, pps]),
+			Codec::Av1 => None,
 		}
 	}
 
@@ -315,6 +319,9 @@ fn create_format_description(codec: Codec, params: &[Bytes]) -> Result<CFRetaine
 				NonNull::new(&mut format_ptr).unwrap(),
 			)
 		},
+		Codec::Av1 => {
+			return Err(Error::Codec(anyhow::anyhow!("VideoToolbox AV1 decode is not wired")));
+		}
 	};
 	NonNull::new(format_ptr as *mut CMFormatDescription)
 		.filter(|_| status == 0)
@@ -426,5 +433,6 @@ fn nal_kind(nal: &[u8], codec: Codec) -> NalKind {
 			34 => NalKind::Pps,
 			_ => NalKind::Slice,
 		},
+		Codec::Av1 => NalKind::Slice,
 	}
 }

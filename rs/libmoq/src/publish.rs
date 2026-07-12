@@ -177,9 +177,9 @@ impl Publish {
 	/// No codec, container, or catalog framing. This is the moq-net primitive
 	/// for non-media tracks. Pair it with [`Self::video_config`] / [`Self::audio_config`]
 	/// if you want to describe the track in the catalog as well.
-	pub fn track(&mut self, broadcast: Id, name: &str) -> Result<Id, Error> {
+	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
 		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.create_track(name, None)?;
+		let track = broadcast.create_track(name, info)?;
 		self.tracks.insert(track)
 	}
 
@@ -190,12 +190,22 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
-	/// Write a single-frame group to a raw track. Convenience for the common
-	/// one-frame-per-group pattern (e.g. status/command tracks).
-	pub fn track_frame(&mut self, track: Id, payload: &[u8]) -> Result<(), Error> {
+	/// Write a single-frame group to a raw track with an explicit timestamp.
+	pub fn track_frame(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.write_frame_now(bytes::Bytes::copy_from_slice(payload))?;
+		track.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
+	}
+
+	/// Send a best-effort datagram on a raw track, returning its per-track sequence.
+	///
+	/// The payload must be at most [`moq_net::MAX_DATAGRAM_PAYLOAD`] bytes. Datagrams are
+	/// delivered only on transports and wire versions with a datagram channel; there is no
+	/// group fallback.
+	pub fn track_datagram(&mut self, track: Id, timestamp_us: u64, payload: &[u8]) -> Result<u64, Error> {
+		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		Ok(track.append_datagram(timestamp, bytes::Bytes::copy_from_slice(payload))?)
 	}
 
 	/// Finish a raw track. No more groups or frames can be written.
@@ -205,10 +215,10 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Write a frame into a raw group.
-	pub fn group_frame(&mut self, group: Id, payload: &[u8]) -> Result<(), Error> {
+	/// Write a frame into a raw group with an explicit timestamp.
+	pub fn group_frame(&mut self, group: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
-		group.write_frame_now(bytes::Bytes::copy_from_slice(payload))?;
+		group.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
 	}
 

@@ -32,12 +32,14 @@ async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> Non
         try:
             while True:
                 now = datetime.now(timezone.utc).replace(microsecond=0)
+                timestamp_us = int(now.timestamp()) * 1_000_000
                 group = track.append_group()
-                group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode())
+                group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp_us)
 
                 current_minute = now.minute
                 while now.minute == current_minute:
-                    group.write_frame(now.strftime("%S").encode())
+                    timestamp_us = int(now.timestamp()) * 1_000_000
+                    group.write_frame(now.strftime("%S").encode(), timestamp_us)
                     await asyncio.sleep(1 - datetime.now(timezone.utc).microsecond / 1_000_000)
                     now = datetime.now(timezone.utc).replace(microsecond=0)
 

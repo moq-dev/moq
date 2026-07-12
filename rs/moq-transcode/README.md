@@ -19,9 +19,10 @@ Nothing is encoded until someone asks, Cloudflare-style just-in-time per rung:
 
 The codec work is [`moq-video`](../moq-video): hardware where available (NVDEC +
 NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows), openh264 as
-the H.264 software fallback. On an NVIDIA GPU the pipeline is fully GPU-resident:
-NVDEC decodes and scales in hardware and NVENC encodes the CUDA frame in place,
-with no CPU copies. Other decoders fall back to CPU scaling.
+the H.264 software fallback. H.264, H.265, and 8-bit 4:2:0 AV1 source renditions
+are eligible when a matching decoder is available. On an NVIDIA GPU the pipeline
+is fully GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
+CUDA frame in place, with no CPU copies. Other decoders fall back to CPU scaling.
 
 ## Library
 

@@ -110,17 +110,24 @@ if "transcript" in catalog.sections:
 # Publish
 broadcast = moq.BroadcastProducer()
 track = broadcast.publish_track("events")
-track.write_frame(b'{"cmd": "ready"}')
+track.write_frame(b'{"cmd": "ready"}', 0)
+track.write_frame(b'{"cmd": "tick"}', 20_000)
 track.finish()
 
 # Subscribe
-track = await broadcast_consumer.subscribe_track("events")
+track = await broadcast_consumer.subscribe_track(
+    "events",
+    subscription=moq.Subscription(priority=10),
+)
+info = await track.info()
+track.update(moq.Subscription(priority=20, ordered=False))
 async for group in track:
     async for frame in group:
-        print(frame)
+        print(frame.timestamp_us, frame.payload)
 ```
 
-`write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+`write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, including `payload`, `timestamp_us`, and `keyframe`. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering), and `update()` changes this subscriber's delivery preferences without resubscribing.
 
 ### Fetching raw groups
 
@@ -133,7 +140,7 @@ group = await broadcast_consumer.fetch_group(
     options=moq.FetchGroupOptions(priority=10),
 )
 async for frame in group:
-    print(frame)
+    print(frame.timestamp_us, frame.payload)
 ```
 
 A retained group resolves immediately. To serve a group that is not retained, keep a dynamic handler alive on its producer:
@@ -143,11 +150,22 @@ dynamic = track.dynamic()
 
 async for request in dynamic:
     group = request.accept()
-    group.write_frame(load_archived_frame(request.sequence))
+    group.write_frame(load_archived_frame(request.sequence), request.sequence * 20_000)
     group.finish()
 ```
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+### Raw datagrams
+
+Raw tracks can also send best-effort datagrams:
+
+```python
+seq = track.append_datagram(timestamp_us=42_000, payload=b"meter update")
+datagram = await track_consumer.recv_datagram()
+```
+
+A datagram is a single unreliable payload, returned as `Datagram(sequence, timestamp_us, payload)`. Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
 ### On-demand raw tracks
 
@@ -161,11 +179,29 @@ client.announce("events", broadcast)
 async for request in dynamic:
     if request.name == "alerts":
         track = request.accept()
-        track.write_frame(b"ready")
+        track.write_frame(b"ready", 0)
         track.finish()
 ```
 
 Missing track subscriptions are accepted while the `BroadcastDynamic` object is alive. Each one arrives as a `TrackRequest`; call `accept()` to turn it into a `TrackProducer` (or `abort(code)` to reject the subscriber).
+
+### On-demand broadcasts
+
+Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+
+```python
+origin = moq.OriginProducer(cache_capacity_bytes=256 * 1024 * 1024)
+dynamic = origin.dynamic()
+
+async for request in dynamic:
+    if request.path == "events":
+        broadcast = moq.BroadcastProducer()
+        track = broadcast.publish_track("status")
+        request.accept(broadcast)
+        track.write_frame(b"ready")
+```
+
+The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
 ### Discovering broadcasts
 

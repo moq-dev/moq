@@ -5,6 +5,23 @@ use bytes::Buf;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
+use crate::producer::MoqTrackInfo;
+
+fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
+	timestamp
+		.as_micros()
+		.try_into()
+		.map_err(|_| MoqError::TimeOverflow(moq_net::TimeOverflow))
+}
+
+fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
+	let timestamp_us = timestamp_us(frame.timestamp)?;
+	Ok(MoqFrame {
+		payload: frame.payload.to_vec(),
+		timestamp_us,
+		keyframe: false,
+	})
+}
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
@@ -111,11 +128,7 @@ impl Media {
 			return Ok(None);
 		};
 
-		let timestamp_us: u64 = frame
-			.timestamp
-			.as_micros()
-			.try_into()
-			.map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
+		let timestamp_us = timestamp_us(frame.timestamp)?;
 
 		let mut buf = frame.payload;
 		let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
@@ -145,7 +158,7 @@ impl MoqBroadcastConsumer {
 		}))
 	}
 
-	/// Subscribe to a track by name — same pattern as moq-boy's command/status tracks.
+	/// Subscribe to a track by name, the same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
 	/// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
@@ -227,20 +240,42 @@ impl TrackInner {
 		Ok(self.track.next_group().await?)
 	}
 
-	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
-		Ok(self.track.read_frame().await?.map(|b| b.payload.to_vec()))
+	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
+		self.track.read_frame().await?.map(raw_frame).transpose()
+	}
+
+	async fn recv_datagram(&mut self) -> Result<Option<MoqDatagram>, MoqError> {
+		let Some(datagram) = self.track.recv_datagram().await? else {
+			return Ok(None);
+		};
+		let timestamp_us = datagram
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
+		Ok(Some(MoqDatagram {
+			sequence: datagram.sequence,
+			timestamp_us,
+			payload: datagram.payload.to_vec(),
+		}))
 	}
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
 	task: Task<TrackInner>,
+	control: moq_net::track::SubscriberControl,
+	info: moq_net::track::Info,
 }
 
 impl MoqTrackConsumer {
 	pub(crate) fn new(track: moq_net::track::Subscriber) -> Self {
+		let control = track.control();
+		let info = track.info().clone();
 		Self {
 			task: Task::new(TrackInner { track }),
+			control,
+			info,
 		}
 	}
 }
@@ -279,12 +314,36 @@ impl MoqTrackConsumer {
 			.await
 	}
 
-	/// Read the first frame of the next group.
+	/// Read the first frame of the next group, including its timestamp.
 	///
 	/// Convenience for tracks using one-frame-per-group (like moq-boy's
 	/// status/command tracks). Returns `None` when the track ends.
-	pub async fn read_frame(&self) -> Result<Option<Vec<u8>>, MoqError> {
+	/// `keyframe` is always false for raw frames because no codec metadata is parsed.
+	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
+	}
+
+	/// Receive the next best-effort datagram in arrival order.
+	///
+	/// Returns `None` when the track ends. Datagram delivery is unavailable over
+	/// IETF moq-transport, pre-lite-05 moq-lite, and stream-only transports.
+	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
+		self.task
+			.run(|mut state| async move { state.recv_datagram().await })
+			.await
+	}
+
+	/// Return the publisher-side track properties learned during subscription.
+	pub async fn info(&self) -> Result<MoqTrackInfo, MoqError> {
+		MoqTrackInfo::try_from(&self.info)
+	}
+
+	/// Change this subscriber's delivery preferences.
+	///
+	/// Silently ignored if the track already ended; the update is meaningless at
+	/// that point.
+	pub fn update(&self, subscription: MoqSubscription) {
+		let _ = self.control.update(subscription.into());
 	}
 
 	pub fn cancel(&self) {
@@ -297,8 +356,8 @@ struct GroupInner {
 }
 
 impl GroupInner {
-	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
-		Ok(self.group.read_frame().await?.map(|b| b.payload.to_vec()))
+	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
+		self.group.read_frame().await?.map(raw_frame).transpose()
 	}
 }
 
@@ -324,8 +383,11 @@ impl MoqGroupConsumer {
 		self.sequence
 	}
 
-	/// Read the next frame in this group. Returns `None` when the group ends.
-	pub async fn read_frame(&self) -> Result<Option<Vec<u8>>, MoqError> {
+	/// Read the next frame in this group, including its timestamp.
+	///
+	/// Returns `None` when the group ends. `keyframe` is always false for raw frames
+	/// because no codec metadata is parsed.
+	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}
 

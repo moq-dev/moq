@@ -217,6 +217,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// guard set tracks `producers` exactly.
 		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
 
+		// Lite06+: announce ids. Each received `active` implicitly assigns the next
+		// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
+		// path. Tracked even for announces we drop locally (reflected loops), since
+		// the sender doesn't know we dropped them.
+		let mut next_announce_id: u64 = 0;
+		let mut announced_by_id: HashMap<u64, PathOwned> = HashMap::new();
+
 		// Stats keys are absolute paths (matching the publisher side) so the
 		// fanned-out level keys line up with the absolute broadcast paths a
 		// dashboard sees on the origin.
@@ -279,10 +286,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.stats
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
-					if lite::restart_supported(self.version) && producers.contains_key(&path) {
-						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
-						// atomically replace the broadcast. Older versions fall through to start_announce,
-						// which rejects the duplicate (Error::Duplicate).
+					if self.version.has_announce_id() {
+						// Every `active` assigns the next ordinal, even ones we drop locally.
+						announced_by_id.insert(next_announce_id, path.clone());
+						next_announce_id += 1;
+					}
+					if lite::restart_supported(self.version)
+						&& !self.version.has_announce_id()
+						&& producers.contains_key(&path)
+					{
+						// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
+						// atomically replace the broadcast. Lite06+ restarts by announce id, and older
+						// versions never defined restarts, so both fall through to start_announce, which
+						// rejects the duplicate (Error::Duplicate).
 						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
@@ -318,6 +334,52 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// Dropping the entry drops its origin::Publish guard, which unannounces.
 					if producers.remove(&path).is_some() {
 						stats_guards.remove(&abs);
+					}
+				}
+				lite::AnnounceBroadcast::EndedId { id } => {
+					// Resolve and retire the id; an unknown or already-retired id is a
+					// protocol violation.
+					let Some(path) = announced_by_id.remove(&id) else {
+						return Err(Error::ProtocolViolation);
+					};
+					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
+					let abs = self.origin.absolute(&path).to_owned();
+					// Count the unannounce name length whether or not a matching guard exists.
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
+
+					// The matching Active may have been silently dropped by
+					// start_announce as a reflected loop, in which case
+					// `producers` has no entry; that's expected, not an error.
+					// Dropping the entry drops its origin::Publish guard, which unannounces.
+					if producers.remove(&path).is_some() {
+						stats_guards.remove(&abs);
+					}
+				}
+				lite::AnnounceBroadcast::Restart { id, hops } => {
+					// Resolve the id; it stays live (the replacement reuses it). An unknown
+					// or retired id is a protocol violation.
+					let Some(path) = announced_by_id.get(&id).cloned() else {
+						return Err(Error::ProtocolViolation);
+					};
+					let abs = self.origin.absolute(&path).to_owned();
+					self.stats
+						.broadcast(&abs)
+						.subscriber_announced_bytes(abs.as_str().len() as u64);
+					if producers.contains_key(&path) {
+						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
+							// Continuity: keep the existing stats guard if present.
+							stats_guards
+								.entry(abs.clone())
+								.or_insert_with(|| self.stats.broadcast(&abs).subscriber());
+						} else {
+							stats_guards.remove(&abs);
+						}
+					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
+						// The original announce was dropped locally (e.g. a reflected loop);
+						// the replacement may be routable, so treat it as a fresh start.
+						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
 			}

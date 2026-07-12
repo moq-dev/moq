@@ -100,7 +100,7 @@ func (m *MediaConsumer) Cancel() {
 	m.inner.Cancel()
 }
 
-// GroupConsumer is a stream of byte payloads within a single group.
+// GroupConsumer is a stream of timestamped raw frames within a single group.
 type GroupConsumer struct {
 	inner *ffi.MoqGroupConsumer
 }
@@ -110,35 +110,14 @@ func (g *GroupConsumer) Sequence() uint64 {
 	return g.inner.Sequence()
 }
 
-// ReadFrame returns the next frame payload, or (nil, nil) when the group ends.
-func (g *GroupConsumer) ReadFrame(ctx context.Context) ([]byte, error) {
-	res, err := runCancellable(ctx, g.inner.Cancel, g.inner.ReadFrame)
-	if err != nil {
-		return nil, err
-	}
-	if res == nil {
-		return nil, nil
-	}
-	return *res, nil
+// ReadFrame returns the next timestamped frame, or (nil, nil) when the group ends.
+func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
+	return runCancellable(ctx, g.inner.Cancel, g.inner.ReadFrame)
 }
 
-// Frames ranges over frame payloads until the group ends or the loop breaks.
-func (g *GroupConsumer) Frames(ctx context.Context) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		for {
-			frame, err := g.ReadFrame(ctx)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if frame == nil {
-				return
-			}
-			if !yield(frame, nil) {
-				return
-			}
-		}
-	}
+// Frames ranges over timestamped frames until the group ends or the loop breaks.
+func (g *GroupConsumer) Frames(ctx context.Context) iter.Seq2[*Frame, error] {
+	return streamSeq(ctx, g.ReadFrame)
 }
 
 // Cancel stops the stream.
@@ -147,7 +126,7 @@ func (g *GroupConsumer) Cancel() {
 }
 
 // TrackConsumer is a stream of groups from a track. Each group is itself a
-// stream of byte payloads.
+// stream of timestamped raw frames.
 type TrackConsumer struct {
 	inner *ffi.MoqTrackConsumer
 }
@@ -180,17 +159,26 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 	return &GroupConsumer{inner: *res}, nil
 }
 
-// ReadFrame reads the first frame of the next group, or (nil, nil) when the
-// track ends. Convenient for one-frame-per-group tracks.
-func (t *TrackConsumer) ReadFrame(ctx context.Context) ([]byte, error) {
-	res, err := runCancellable(ctx, t.inner.Cancel, t.inner.ReadFrame)
-	if err != nil {
-		return nil, err
-	}
-	if res == nil {
-		return nil, nil
-	}
-	return *res, nil
+// ReadFrame reads the first timestamped frame of the next group, or (nil, nil)
+// when the track ends. Convenient for one-frame-per-group tracks.
+func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
+	return runCancellable(ctx, t.inner.Cancel, t.inner.ReadFrame)
+}
+
+// RecvDatagram returns the next best-effort datagram in arrival order, or
+// (nil, nil) when the track ends.
+func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
+	return runCancellable(ctx, t.inner.Cancel, t.inner.RecvDatagram)
+}
+
+// Info returns the publisher-side track properties learned during subscription.
+func (t *TrackConsumer) Info(ctx context.Context) (TrackInfo, error) {
+	return runCancellable(ctx, nil, t.inner.Info)
+}
+
+// Update changes this subscriber's delivery preferences.
+func (t *TrackConsumer) Update(subscription Subscription) {
+	t.inner.Update(subscription)
 }
 
 // Groups ranges over groups in sequence order.
@@ -202,6 +190,11 @@ func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, er
 // out-of-sequence deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return streamSeq(ctx, t.RecvGroup)
+}
+
+// Datagrams ranges over best-effort datagrams in arrival order.
+func (t *TrackConsumer) Datagrams(ctx context.Context) iter.Seq2[*Datagram, error] {
+	return streamSeq(ctx, t.RecvDatagram)
 }
 
 // Cancel stops the stream.

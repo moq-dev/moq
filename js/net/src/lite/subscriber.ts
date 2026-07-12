@@ -10,7 +10,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
+import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
@@ -20,7 +20,7 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
@@ -46,6 +46,20 @@ function supportsTrackStream(version: Version): boolean {
 	}
 }
 
+/**
+ * Options accepted by {@link Subscriber.announced}.
+ */
+export interface AnnouncedOptions {
+	/**
+	 * If true, skip announcements whose hop chain contains this connection's
+	 * own origin id. Useful for meshes that reflect announces back. Defaults
+	 * to false for backwards compatibility: existing code (notably hang.live)
+	 * relies on seeing its own publishes as the signal that a namespace
+	 * published successfully.
+	 */
+	ignoreSelf?: boolean;
+}
+
 interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
@@ -69,8 +83,8 @@ export class Subscriber {
 	// The version of the connection.
 	readonly version: Version;
 
-	// Per-connection origin id shared with the Publisher, sent with announce
-	// interest so the peer can skip announces that already traversed us.
+	// Shared with the Publisher so callers can optionally filter out their
+	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
 	readonly origin: Origin;
 
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
@@ -126,14 +140,17 @@ export class Subscriber {
 
 	/**
 	 * Subscribe to broadcast announcements under `prefix`.
+	 *
+	 * Pass `{ ignoreSelf: true }` to skip announces that have already traversed
+	 * this connection's {@link origin}.
 	 */
-	announced(prefix = Path.empty()): announce.Consumer {
+	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): announce.Consumer {
 		const announced = new announce.Producer(prefix);
-		void this.#runAnnounced(announced, prefix);
+		void this.#runAnnounced(announced, prefix, options);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Send our own session-level origin id so the peer can skip announces
 		// whose hop chain already passed through us. Matches the Rust subscriber's
@@ -147,8 +164,12 @@ export class Subscriber {
 			await msg.encode(stream.writer, this.version);
 
 			// Lite05+: the publisher reports its own origin id before any announces.
+			// It no longer stamps itself onto each hop chain, so we append it here to
+			// keep the ignoreSelf loop check seeing the full chain.
+			let responderOrigin: Origin | undefined;
 			if (hasAnnounceOk(this.version)) {
-				await AnnounceOk.decode(stream.reader, this.version);
+				const ok = await AnnounceOk.decode(stream.reader, this.version);
+				responderOrigin = ok.origin;
 			}
 
 			switch (this.version) {
@@ -170,19 +191,74 @@ export class Subscriber {
 					break;
 			}
 
+			// Lite06+: announce ids. Each received `active` implicitly assigns the next
+			// per-stream ordinal; `endedId`/`restart` reference it. Tracked even for
+			// announces we skip via ignoreSelf, since the sender doesn't know we skipped.
+			let nextAnnounceId = 0n;
+			const announcedById = new Map<bigint, Path.Valid>();
+
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
 				const announce = await Promise.race([
-					AnnounceBroadcast.decodeMaybe(stream.reader, this.version),
+					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
 
-				const path = Path.join(prefix, announce.suffix);
+				let suffix: Path.Valid;
+				let active: boolean;
+				// Present on active/restart; ended messages never carry hops worth checking.
+				let hops: Origin[] | undefined;
 
-				console.debug(`announced: broadcast=${path} active=${announce.active}`);
-				announced.append({ path: announce.suffix, active: announce.active });
+				switch (announce.status) {
+					case "active":
+						suffix = announce.suffix;
+						active = true;
+						hops = announce.hops;
+						if (hasAnnounceId(this.version)) {
+							announcedById.set(nextAnnounceId++, announce.suffix);
+						}
+						break;
+					case "ended":
+						suffix = announce.suffix;
+						active = false;
+						break;
+					case "endedId": {
+						// Resolve and retire the id; an unknown or retired id is a protocol violation.
+						const path = announcedById.get(announce.id);
+						if (path === undefined) throw new Error(`unknown announce id: ${announce.id}`);
+						announcedById.delete(announce.id);
+						suffix = path;
+						active = false;
+						break;
+					}
+					case "restart": {
+						// Resolve the id; it stays live (the replacement reuses it).
+						const path = announcedById.get(announce.id);
+						if (path === undefined) throw new Error(`unknown announce id: ${announce.id}`);
+						suffix = path;
+						active = true;
+						hops = announce.hops;
+						break;
+					}
+				}
+
+				// Optionally drop reflected announces so callers asking for
+				// "someone else's broadcasts" don't re-see their own publishes. In
+				// Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
+				// list, so fold it back in before checking.
+				if (hops !== undefined && options.ignoreSelf) {
+					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
+					if (full.includes(this.origin)) {
+						continue;
+					}
+				}
+
+				const path = Path.join(prefix, suffix);
+
+				console.debug(`announced: broadcast=${path} active=${active}`);
+				announced.append({ path: suffix, active });
 			}
 
 			announced.close();
@@ -277,7 +353,7 @@ export class Subscriber {
 				case Version.DRAFT_02:
 					break;
 				default:
-					waits.push(this.#runSubscribeUpdates(id, broadcast, producer, msg, stream));
+					waits.push(this.#runPriorityUpdates(id, broadcast, producer, msg, stream));
 					break;
 			}
 
@@ -485,17 +561,17 @@ export class Subscriber {
 	}
 
 	/**
-	 * Send SUBSCRIBE_UPDATE messages whenever the track's subscription update signal changes.
+	 * Send SUBSCRIBE_UPDATE messages whenever the track's priority signal changes.
 	 *
 	 * Resolves cleanly when the stream or track closes, so the caller can include
 	 * this in Promise.race without leaving a dangling pending write that would
-	 * become an unhandled rejection if the user calls update() after close.
+	 * become an unhandled rejection if the user calls updatePriority after close.
 	 *
 	 * Peeks the signal at the top of every iteration so that updates which landed
-	 * before the subscription opened (or between iterations, before .next() registered
+	 * before SubscribeOk arrived (or between iterations, before .next() registered
 	 * its listener) aren't lost.
 	 */
-	async #runSubscribeUpdates(
+	async #runPriorityUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
 		track: track.Producer,
@@ -506,8 +582,8 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const priority = track.subscriptionSignal.peek()?.priority;
-			if (priority === undefined || priority === lastSent) {
+			const current = track.subscriptionSignal.peek()?.priority;
+			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
 				const next = await Promise.race([track.subscriptionSignal.next(), stopped]);
 				if (next === null) return;
@@ -517,15 +593,15 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
 			const update = new SubscribeUpdate({
-				priority,
+				priority: current,
 				ordered: msg.ordered,
 				maxLatency: msg.maxLatency,
 				startGroup: msg.startGroup,
 				endGroup: msg.endGroup,
 			});
 			await update.encode(stream.writer, this.version);
-			lastSent = priority;
-			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${priority}`);
+			lastSent = current;
+			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${current}`);
 		}
 	}
 
@@ -567,7 +643,7 @@ export class Subscriber {
 
 			// A non-zero scale means every frame is prefixed with a zigzag-delta timestamp
 			// (the lite-05 FRAME format), which we decode into a Timestamp at that scale.
-			// Scale 0 (pre-lite-05) carries no timestamp, so we stamp arrival time.
+			// Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock-stamp.
 			let prevTs = 0n;
 
 			for (;;) {

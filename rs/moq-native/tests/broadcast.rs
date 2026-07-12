@@ -557,6 +557,108 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("server task failed");
 }
 
+/// Wait for the next announce event, failing the test on a timeout or a closed origin.
+async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_net::announce::Update {
+	tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timeout")
+		.expect("origin closed")
+}
+
+/// Lite06 announce lifecycle end-to-end: initial set, live announce, unannounce,
+/// re-announce, and restart. On lite-06 every retraction/restart references the
+/// implicit announce id rather than repeating the path (the path form doesn't even
+/// encode), so this exercises the id bookkeeping on both sides of the session.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_06_announce_lifecycle() {
+	use moq_net::announce::Event;
+
+	let pub_origin = Origin::random().produce();
+
+	// Announced before the client connects, so it rides the initial set.
+	let first = pub_origin.create_broadcast("first").expect("create broadcast");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_origin = pub_origin.clone();
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&server_origin).ok().await?;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	// The initial set: "first" was announced before the session existed.
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "first");
+	assert!(matches!(event, Event::Active(_)), "expected initial announce");
+
+	// A live announce after the initial set.
+	let second = pub_origin.create_broadcast("second").expect("create broadcast");
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "second");
+	assert!(matches!(event, Event::Active(_)), "expected live announce");
+
+	// Unannounce: retracted by announce id on the wire.
+	drop(second);
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "second");
+	assert!(matches!(event, Event::Ended), "expected unannounce");
+
+	// Re-announce the same path: a fresh announce assigning a fresh id.
+	let _second = pub_origin.create_broadcast("second").expect("create broadcast");
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "second");
+	assert!(matches!(event, Event::Active(_)), "expected re-announce");
+
+	// Restart: publish a replacement at "first" and retire the original. Whichever
+	// of the two transitions wins the origin's route tie-break, downstream sees a
+	// single atomic restart (never an unannounce).
+	let mut replacement_info = moq_net::broadcast::Info::new();
+	replacement_info.origin = pub_origin.info();
+	let replacement = replacement_info.produce();
+	let _replacement_guard = pub_origin
+		.publish_broadcast("first", &replacement)
+		.expect("publish replacement");
+	drop(first);
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "first");
+	assert!(matches!(event, Event::Restart(_)), "expected restart");
+
+	// A sentinel proves no stray unannounce for "first" snuck in behind the restart.
+	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "sentinel");
+	assert!(matches!(event, Event::Active(_)), "expected sentinel announce");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
 #[tracing_test::traced_test]
@@ -575,6 +677,12 @@ async fn broadcast_moq_lite_02() {
 #[tokio::test]
 async fn broadcast_moq_lite_03() {
 	broadcast_test("moqt", Some("moq-lite-03"), Some("moq-lite-03")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_06() {
+	broadcast_test("moqt", Some("moq-lite-06-wip"), Some("moq-lite-06-wip")).await;
 }
 
 #[tracing_test::traced_test]
@@ -1119,6 +1227,8 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
+/// Work-in-progress versions (e.g. `moq-lite-06-wip`) are excluded from the default
+/// set, so they don't count as "the newest" here until promoted.
 const NEWEST_LITE: &str = "moq-lite-05";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means

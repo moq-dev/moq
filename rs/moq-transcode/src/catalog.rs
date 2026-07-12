@@ -1,7 +1,7 @@
 //! Derivative catalog construction: pick the source rendition, size the ladder
 //! against it, and fill the output catalog with rung + passthrough entries.
 
-use hang::catalog::{H264, Video, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, H264, Video, VideoCodec, VideoConfig};
 use moq_net::PathRelativeOwned;
 
 use crate::{Error, Rung};
@@ -18,7 +18,7 @@ pub(crate) struct Resolved {
 }
 
 /// Pick the rendition to transcode from: the highest-resolution decodable
-/// (H.264/H.265) rendition local to the source broadcast.
+/// (H.264/H.265/AV1) rendition local to the source broadcast.
 pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Error> {
 	video
 		.renditions
@@ -26,10 +26,22 @@ pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Erro
 		// A rendition that itself lives in another broadcast can't be subscribed
 		// through this one; composing relative references is a follow-up.
 		.filter(|(_, config)| config.broadcast.is_none())
-		.filter(|(_, config)| matches!(config.codec, VideoCodec::H264(_) | VideoCodec::H265(_)))
+		.filter(|(_, config)| can_decode(config))
 		.max_by_key(|(_, config)| (config.coded_height, config.coded_width, config.bitrate))
 		.map(|(name, config)| (name.clone(), config.clone()))
 		.ok_or(Error::NoSource)
+}
+
+fn can_decode(config: &VideoConfig) -> bool {
+	match &config.codec {
+		VideoCodec::H264(_) | VideoCodec::H265(_) => true,
+		VideoCodec::AV1(av1) => is_supported_av1(av1),
+		_ => false,
+	}
+}
+
+fn is_supported_av1(av1: &AV1) -> bool {
+	av1.bitdepth == 8 && !av1.mono_chrome && av1.chroma_subsampling_x && av1.chroma_subsampling_y
 }
 
 /// Resolve the configured rungs against the source: derive geometry from the
@@ -294,5 +306,35 @@ mod tests {
 		let (name, config) = choose_source(&video).unwrap();
 		assert_eq!(name, "high");
 		assert_eq!(config.coded_height, Some(1080));
+	}
+
+	#[test]
+	fn chooses_av1_source() {
+		let mut video = Video::default();
+		let mut av1 = VideoConfig::new(hang::catalog::AV1::default());
+		av1.coded_width = Some(1920);
+		av1.coded_height = Some(1080);
+		video.insert("av1", av1).unwrap();
+
+		let (name, config) = choose_source(&video).unwrap();
+		assert_eq!(name, "av1");
+		assert!(matches!(config.codec, VideoCodec::AV1(_)));
+	}
+
+	#[test]
+	fn skips_unsupported_av1_source() {
+		let mut video = Video::default();
+		let mut av1 = VideoConfig::new(hang::catalog::AV1 {
+			bitdepth: 10,
+			..hang::catalog::AV1::default()
+		});
+		av1.coded_width = Some(3840);
+		av1.coded_height = Some(2160);
+		video.insert("av1", av1).unwrap();
+		video.insert("h264", source(1920, 1080, None)).unwrap();
+
+		let (name, config) = choose_source(&video).unwrap();
+		assert_eq!(name, "h264");
+		assert!(matches!(config.codec, VideoCodec::H264(_)));
 	}
 }

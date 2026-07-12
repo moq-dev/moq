@@ -15,7 +15,10 @@ typealias Request = uniffi.moq.MoqRequest
 
 // Origin (broadcast discovery / announcement).
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
+typealias OriginOptions = uniffi.moq.MoqOriginOptions
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
+typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
+typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 typealias Announced = uniffi.moq.MoqAnnounced
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announcement = uniffi.moq.MoqAnnouncement
@@ -41,6 +44,7 @@ typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
 
 // Data types.
 typealias Catalog = uniffi.moq.MoqCatalog
+typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 typealias Video = uniffi.moq.MoqVideo
 typealias Audio = uniffi.moq.MoqAudio

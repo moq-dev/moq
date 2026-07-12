@@ -78,12 +78,12 @@ pub fn start<S: web_transport_trait::Session>(
 	};
 
 	// Connection-progress tracker. Only block on the initial set for versions with an
-	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05). For other
+	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05+). For other
 	// versions we drop the producer here, which closes the channel and makes
 	// `Connecting::ready` resolve immediately. An empty subscribe origin also resolves
 	// immediately because the subscriber arms with a prefix count of zero.
 	let (connecting_producer, connecting) = Connecting::new();
-	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05) {
+	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02) || version.has_announce_ok() {
 		Some(connecting_producer)
 	} else {
 		None

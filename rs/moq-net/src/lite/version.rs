@@ -9,9 +9,14 @@ pub enum Version {
 	Lite04,
 	/// lite-05. Adds the TRACK stream (immutable per-track properties incl.
 	/// timescale), zigzag-delta timestamps in per-frame headers, and drops
-	/// SUBSCRIBE_OK/FETCH_OK. Advertised over ALPN and the preferred version in the
-	/// default version sets.
+	/// SUBSCRIBE_OK/FETCH_OK.
 	Lite05,
+	/// Work-in-progress lite-06. Adds announce ids: each `active` ANNOUNCE_BROADCAST
+	/// implicitly assigns the next ordinal, and `ended`/`restart` reference that id
+	/// instead of repeating the path. Advertised over ALPN (`moq-lite-06`, no `-wip`
+	/// suffix on the wire) and the preferred version in the default sets. The wire
+	/// format is still WIP; finalizing is a pure rename to `Lite06` with no wire change.
+	Lite06Wip,
 }
 
 impl Version {
@@ -64,6 +69,18 @@ impl Version {
 			_ => true,
 		}
 	}
+
+	/// Whether announcements carry implicit announce ids: each `active`
+	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
+	/// reference that id instead of repeating the path. Added in lite-06.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_announce_id(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
 }
 
 impl fmt::Display for Version {
@@ -74,6 +91,7 @@ impl fmt::Display for Version {
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
 			Self::Lite05 => write!(f, "moq-lite-05"),
+			Self::Lite06Wip => write!(f, "moq-lite-06-wip"),
 		}
 	}
 }
@@ -86,6 +104,7 @@ impl From<Version> for crate::Version {
 			Version::Lite03 => crate::Version::Lite(Version::Lite03),
 			Version::Lite04 => crate::Version::Lite(Version::Lite04),
 			Version::Lite05 => crate::Version::Lite(Version::Lite05),
+			Version::Lite06Wip => crate::Version::Lite(Version::Lite06Wip),
 		}
 	}
 }

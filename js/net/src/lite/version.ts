@@ -3,8 +3,11 @@ export const Version = {
 	DRAFT_02: 0xff0dad02,
 	DRAFT_03: 0xff0dad03,
 	DRAFT_04: 0xff0dad04,
-	/// lite-05, advertised as the preferred WebTransport subprotocol.
 	DRAFT_05: 0xff0dad05,
+	/// Work-in-progress lite-06, advertised as the preferred WebTransport subprotocol.
+	/// Adds announce ids: each active ANNOUNCE_BROADCAST implicitly assigns the next
+	/// ordinal, and ended/restart reference that id instead of repeating the path.
+	DRAFT_06: 0xff0dad06,
 } as const;
 
 export type Version = (typeof Version)[keyof typeof Version];
@@ -54,6 +57,23 @@ export function hasAnnounceOk(version: Version): boolean {
 	}
 }
 
+/** Whether announcements carry implicit announce ids: each `active` assigns the next
+ * per-stream ordinal, and `ended`/`restart` reference that id instead of repeating the
+ * path. Added in lite-06. */
+export function hasAnnounceId(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-06+ announce behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";
@@ -64,9 +84,13 @@ export const ALPN_03 = "moq-lite-03";
 /// The ALPN string for Draft04, which uses ALPN-based version negotiation.
 export const ALPN_04 = "moq-lite-04";
 
-/// The ALPN string for Draft05, offered first in the default WebTransport
-/// `protocols` list so lite-05 is the preferred version.
+/// The ALPN string for Draft05, which uses ALPN-based version negotiation.
 export const ALPN_05 = "moq-lite-05";
+
+/// The ALPN string for the work-in-progress Draft06. It is NOT in the default
+/// WebTransport `protocols` list, so lite-06 is never advertised or negotiated by
+/// default; a peer only reaches it when both sides explicitly offer this ALPN.
+export const ALPN_06_WIP = "moq-lite-06-wip";
 
 const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_01]: "moq-lite-01",
@@ -74,6 +98,7 @@ const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_03]: "moq-lite-03",
 	[Version.DRAFT_04]: "moq-lite-04",
 	[Version.DRAFT_05]: "moq-lite-05",
+	[Version.DRAFT_06]: "moq-lite-06-wip",
 };
 
 export function versionName(v: Version): string {

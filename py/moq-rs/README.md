@@ -134,24 +134,38 @@ client = moq.Client(
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
   - `.finish()`
+- **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
+  - `.write_frame(payload, timestamp_us)` writes a payload with a presentation timestamp in microseconds.
+  - `.append_datagram(timestamp_us, payload) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Subscribing
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `await .subscribe_catalog() → CatalogConsumer`
-  - `await .subscribe_track(name) → TrackConsumer`
-  - `await .subscribe_media(name, track, max_latency_ms=10000) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
+  - `await .subscribe_track(name, subscription=None) → TrackConsumer`
+  - `await .subscribe_media(name, track, max_latency_ms=10000, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
+- **`TrackConsumer`**. Async iterator of groups, plus `.recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
+- **`TrackConsumer`**. Async iterator of raw groups.
+  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
+  - `await .info() → TrackInfo`
+  - `.update(subscription)`. Change priority, ordering, staleness, or group range after subscribing.
+- **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
+  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
 All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
 
 ### Origin (advanced)
 
-- **`OriginProducer()`**. Manage broadcast announcements.
+- **`OriginProducer(cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
+  - `.dynamic() → OriginDynamic`
   - `.announce(path, broadcast)`
+- **`OriginDynamic`**. Async source of broadcasts requested by consumers.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.abort(code)` to fail the requester.
+  - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix) → Announced` (async iterator)
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
@@ -161,8 +175,11 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
+- **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
+- **`Subscription`**. Subscriber delivery preferences: priority, ordering, staleness, and optional group range.
+- **`TrackInfo`**. Publisher track properties: priority, ordering, cache window, and timescale.
 - **`Dimensions`**. `.width: int`, `.height: int`.
 - **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 

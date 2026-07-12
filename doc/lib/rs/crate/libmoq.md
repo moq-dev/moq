@@ -39,6 +39,11 @@ cargo install libmoq
 
 See the [`rs/libmoq/README.md`](https://github.com/moq-dev/moq/blob/main/rs/libmoq/README.md) for the C API function signatures and the [`rs/libmoq/src/test.rs`](https://github.com/moq-dev/moq/blob/main/rs/libmoq/src/test.rs) for working usage examples.
 
+Raw tracks can carry arbitrary byte payloads without catalog or codec parsing.
+Use `moq_publish_track_frame` or `moq_publish_group_frame` with microsecond
+presentation timestamps; read them back through `moq_consume_track_frame` in
+`moq_frame.timestamp_us`.
+
 ## API Reference
 
 Full API documentation: [docs.rs/libmoq](https://docs.rs/libmoq)

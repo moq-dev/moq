@@ -1,11 +1,12 @@
-//! Hardware H.264 / H.265 decode via NVIDIA NVDEC (`moq-nvenc`'s cuvid table).
+//! Hardware H.264 / H.265 / AV1 decode via NVIDIA NVDEC (`moq-nvenc`'s cuvid table).
 //!
 //! Linux only, behind the default-on `nvdec` feature. Everything is dlopen'd at
 //! runtime (cudarc loads libcuda, the cuvid table loads libnvcuvid), so the
 //! binary links on a GPU-less builder and a driverless host falls back to the
 //! next decoder (see [`backend::open`](super::open)).
 //!
-//! Decoded frames come back as NV12 in CUDA device memory ([`Frame::Cuda`]).
+//! Decoded 8-bit 4:2:0 frames come back as NV12 in CUDA device memory
+//! ([`Frame::Cuda`]).
 //! Each mapped cuvid surface is copied device-to-device into an owned buffer
 //! (surfaces come from a small fixed pool, so holding them across calls would
 //! stall the decoder), which the NVENC encode backend then registers directly:
@@ -117,6 +118,7 @@ impl Nvdec {
 		let cuda_codec = match codec {
 			Codec::H264 => cudaVideoCodec::cudaVideoCodec_H264,
 			Codec::H265 => cudaVideoCodec::cudaVideoCodec_HEVC,
+			Codec::Av1 => cudaVideoCodec::cudaVideoCodec_AV1,
 		};
 
 		// `CudaContext::new` retains the device's primary context, the same one

@@ -44,6 +44,23 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## Common APIs
+
+Client TLS can be configured with `WithTLSRoots`, `WithTLSSystemRoots`, and
+`WithTLSFingerprints`. Use fingerprints with `Server.CertFingerprints()` when
+pinning a generated self-signed certificate.
+
+`Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
+when the transport backend does not report that metric yet.
+
+`BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
+`TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishMediaOnTrack()`
+for media tracks whose timescale should be selected by the importer.
+
+`PublishMedia`, `PublishMediaOnTrack`, and `PublishMediaStream` accept
+`WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
+before the stream reveals them.
+
 ## Errors
 
 All FFI errors come back as the `moq.Error` type. The error variants are
@@ -57,6 +74,15 @@ Blocking calls take a `context.Context`. Most abort cleanly when the context is
 cancelled; the few that have no native cancel (`Used`/`Unused` and
 `Server.Accept`) return `ctx.Err()` promptly but keep running in the background
 until the owning producer/server is closed. See the package doc for details.
+
+## Raw datagrams
+
+Raw tracks support best-effort datagrams alongside groups: `TrackProducer.AppendDatagram`
+sends one payload and returns its sequence number, while `TrackConsumer.RecvDatagram`
+and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
+1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
+newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not
+deliver them, and there is no stream fallback.
 
 ## Versioning
 

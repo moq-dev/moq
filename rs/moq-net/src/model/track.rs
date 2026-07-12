@@ -298,7 +298,7 @@ impl TrackState {
 			}
 		}
 
-		// A pending group can still produce a frame even after finish() — finish only
+		// A pending group can still produce a frame even after finish(). Finish only
 		// blocks new groups at/above final_sequence, not frames on existing groups.
 		if pending_seen {
 			Poll::Pending
@@ -1519,6 +1519,33 @@ pub struct Subscriber {
 	end_sequence: Option<u64>,
 }
 
+/// A cloneable handle to a subscriber's delivery preferences.
+///
+/// This updates the same subscription as the owning [`Subscriber`] without
+/// borrowing its read cursor, so callers can change priority, ordering, or
+/// group bounds while another task is waiting for groups.
+#[derive(Clone)]
+pub struct SubscriberControl {
+	subscription: kio::Producer<Subscription>,
+}
+
+impl SubscriberControl {
+	/// This subscriber's current preferences.
+	pub fn subscription(&self) -> Subscription {
+		self.subscription.read().clone()
+	}
+
+	/// Replace this subscriber's preferences, updating the producer's aggregate.
+	///
+	/// Returns [`Error::Closed`] if the track already ended; the update is
+	/// meaningless at that point and can usually be ignored.
+	pub fn update(&self, subscription: Subscription) -> Result<()> {
+		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
+		*state = subscription;
+		Ok(())
+	}
+}
+
 impl Subscriber {
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -1526,6 +1553,13 @@ impl Subscriber {
 
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// Create a handle for updating this subscriber's delivery preferences.
+	pub fn control(&self) -> SubscriberControl {
+		SubscriberControl {
+			subscription: self.subscription.clone(),
+		}
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -1721,10 +1755,9 @@ impl Subscriber {
 
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
-		self.subscription.read().clone()
+		self.control().subscription()
 	}
 
-	/// Replace this subscriber's preferences, updating the producer's aggregate.
 	///
 	/// The stale window is clamped to the track's cache, like the initial subscribe.
 	/// Returns [`Error::Closed`] if the track already ended; the update is
@@ -2280,6 +2313,24 @@ mod test {
 		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
 	}
 
+	#[test]
+	fn subscriber_control_updates_while_read_future_is_pending() {
+		let producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let control = subscriber.control();
+
+		let mut recv = Box::pin(subscriber.recv_group());
+		assert!(recv.as_mut().now_or_never().is_none());
+
+		control
+			.update(Subscription::default().with_priority(7).with_ordered(false))
+			.unwrap();
+
+		let aggregate = producer.subscription().expect("expected an active subscription");
+		assert_eq!(aggregate.priority, 7);
+		assert!(!aggregate.ordered);
+	}
+
 	#[tokio::test]
 	async fn out_of_order_max_sequence_at_front() {
 		tokio::time::pause();
@@ -2491,11 +2542,11 @@ mod test {
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 5);
 
-		// Seq 3 arrives late — skipped because 3 <= 5.
+		// Seq 3 arrives late, skipped because 3 <= 5.
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
-		// Seq 4 arrives late — also skipped.
+		// Seq 4 arrives late and is also skipped.
 		producer.create_group(group::Info { sequence: 4 }).unwrap();
-		// Seq 7 arrives — returned.
+		// Seq 7 arrives and is returned.
 		producer.create_group(group::Info { sequence: 7 }).unwrap();
 
 		let group = consumer
@@ -2506,7 +2557,7 @@ mod test {
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 7);
 
-		// No more groups — would block.
+		// No more groups. This would block.
 		assert!(
 			consumer.next_group().now_or_never().is_none(),
 			"should block waiting for a higher sequence"
@@ -2518,7 +2569,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
+		// Seq 3 arrives first, then seq 5. Both should be returned in arrival order.
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
@@ -2753,6 +2804,25 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn read_frame_preserves_timestamp() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		producer
+			.write_frame(Timestamp::from_micros(20_000).unwrap(), b"hello".as_slice())
+			.unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(frame.timestamp.as_micros(), 20_000);
+		assert_eq!(&frame.payload[..], b"hello");
+	}
+
+	#[tokio::test]
 	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
@@ -2764,7 +2834,7 @@ mod test {
 		g5.write_frame_now(bytes::Bytes::from_static(b"later")).unwrap();
 		g5.finish().unwrap();
 
-		// read_frame should not block on the stalled seq 3 — it returns seq 5's frame.
+		// read_frame should not block on the stalled seq 3. It returns seq 5's frame.
 		let frame = consumer
 			.read_frame()
 			.now_or_never()
@@ -2816,7 +2886,7 @@ mod test {
 		let mut g0 = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		producer.finish().unwrap();
 
-		// Track is finished but group 0 has no frame yet — must block, not return None.
+		// Track is finished but group 0 has no frame yet. It must block, not return None.
 		assert!(
 			consumer.read_frame().now_or_never().is_none(),
 			"read_frame must block on a pending group even after finish()"
@@ -2841,7 +2911,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 		consumer.start_at(5);
 
-		// Seq 3 has a frame but is below min_sequence — must be skipped.
+		// Seq 3 has a frame but is below min_sequence, so it must be skipped.
 		let mut g3 = producer.create_group(group::Info { sequence: 3 }).unwrap();
 		g3.write_frame_now(bytes::Bytes::from_static(b"skip-me")).unwrap();
 		g3.finish().unwrap();

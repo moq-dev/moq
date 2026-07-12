@@ -121,6 +121,16 @@ export interface FetchGroupOptions {
 }
 
 /**
+ * Subscriber-side preferences for a subscription.
+ *
+ * @public
+ */
+export interface SubscribeOptions {
+	/** Delivery priority for this subscription. Higher values are served first when constrained. Defaults to `0`. */
+	priority?: number;
+}
+
+/**
  * The per-track operations a lazy {@link Consumer} delegates to the broadcast it came from.
  *
  * Implemented by `broadcast.Producer` / `broadcast.Consumer` (and the wire-layer subclasses

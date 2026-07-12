@@ -7,7 +7,15 @@ from moq_ffi import MoqError as Error
 
 from .client import Client, connect
 from .log import log_level
-from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
+from .origin import (
+    Announced,
+    AnnouncedBroadcast,
+    Announcement,
+    BroadcastRequest,
+    OriginConsumer,
+    OriginDynamic,
+    OriginProducer,
+)
 from .publish import (
     AudioProducer,
     BroadcastDynamic,
@@ -41,6 +49,7 @@ from .types import (
     Catalog,
     ConnectionStats,
     Container,
+    Datagram,
     Dimensions,
     FetchGroupOptions,
     Frame,
@@ -66,11 +75,13 @@ __all__ = [
     "BroadcastConsumer",
     "BroadcastDynamic",
     "BroadcastProducer",
+    "BroadcastRequest",
     "Catalog",
     "CatalogConsumer",
     "Client",
     "ConnectionStats",
     "Container",
+    "Datagram",
     "Dimensions",
     "Error",
     "Frame",
@@ -82,6 +93,7 @@ __all__ = [
     "MediaProducer",
     "MediaStreamProducer",
     "OriginConsumer",
+    "OriginDynamic",
     "OriginProducer",
     "Request",
     "Server",

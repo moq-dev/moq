@@ -6,7 +6,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
-import { AnnounceBroadcast, AnnounceInit, AnnounceOk, type AnnounceRequest } from "./announce.ts";
+import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -21,7 +21,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -140,6 +140,11 @@ export class Publisher {
 			active.add(suffix);
 		}
 
+		// Lite06+: announce ids. Every active we send implicitly assigns the next
+		// per-stream ordinal; ended references the id instead of repeating the path.
+		let nextAnnounceId = 0n;
+		const announceIds = new Map<Path.Valid, bigint>();
+
 		switch (this.version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02: {
@@ -151,8 +156,11 @@ export class Publisher {
 				if (!hasAnnounceOk(this.version)) {
 					// Draft03/04: send individual Announce messages, stamping our origin as a hop.
 					for (const suffix of active) {
-						const wire = new AnnounceBroadcast({ suffix, active: true, hops: [this.origin] });
-						await wire.encode(stream.writer, this.version);
+						await encodeAnnounceBroadcast(
+							stream.writer,
+							{ status: "active", suffix, hops: [this.origin] },
+							this.version,
+						);
 					}
 					break;
 				}
@@ -162,8 +170,10 @@ export class Publisher {
 				const ok = new AnnounceOk(this.origin, active.size);
 				await ok.encode(stream.writer, this.version);
 				for (const suffix of active) {
-					const wire = new AnnounceBroadcast({ suffix, active: true });
-					await wire.encode(stream.writer, this.version);
+					if (hasAnnounceId(this.version)) {
+						announceIds.set(suffix, nextAnnounceId++);
+					}
+					await encodeAnnounceBroadcast(stream.writer, { status: "active", suffix, hops: [] }, this.version);
 				}
 				break;
 			}
@@ -196,16 +206,24 @@ export class Publisher {
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
 				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
-				const wire = new AnnounceBroadcast({ suffix: added, active: true, hops });
-				await wire.encode(stream.writer, this.version);
+				if (hasAnnounceId(this.version)) {
+					announceIds.set(added, nextAnnounceId++);
+				}
+				await encodeAnnounceBroadcast(stream.writer, { status: "active", suffix: added, hops }, this.version);
 			}
 
-			// Announce any removed broadcasts.
-			// Ended announces don't need hops. The peer matches on path only.
+			// Announce any removed broadcasts. Lite06+ retracts by announce id;
+			// older versions repeat the path (ended announces don't need hops).
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
-				const wire = new AnnounceBroadcast({ suffix: removed, active: false });
-				await wire.encode(stream.writer, this.version);
+				if (hasAnnounceId(this.version)) {
+					const id = announceIds.get(removed);
+					announceIds.delete(removed);
+					if (id === undefined) continue; // never announced
+					await encodeAnnounceBroadcast(stream.writer, { status: "endedId", id }, this.version);
+				} else {
+					await encodeAnnounceBroadcast(stream.writer, { status: "ended", suffix: removed }, this.version);
+				}
 			}
 
 			// NOTE: This is kind of a hack that won't work with a rapid UNANNOUNCE/ANNOUNCE cycle.

@@ -64,6 +64,12 @@ The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastPr
 
 Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in sequence order; use its `groupsAsArrived` property for arrival order.
 
+Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(timestampUs:payload:)`
+returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,
+and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
+Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport,
+pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+
 ## Local development
 
 `swift/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Run via `just swift check`; skips cleanly on non-macOS hosts.

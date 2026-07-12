@@ -91,8 +91,9 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes) -> None:
-        self._inner.write_frame(payload)
+    def write_frame(self, payload: bytes, timestamp_us: int) -> None:
+        """Write a frame with a presentation timestamp in microseconds."""
+        self._inner.write_frame(payload, timestamp_us)
 
     def finish(self) -> None:
         self._inner.finish()
@@ -128,9 +129,17 @@ class TrackProducer:
         """Start a new group; write frames into it, then finish()."""
         return GroupProducer(self._inner.append_group())
 
-    def write_frame(self, payload: bytes) -> None:
-        """Convenience: write a single-frame group in one call."""
-        self._inner.write_frame(payload)
+    def write_frame(self, payload: bytes, timestamp_us: int) -> None:
+        """Write a single-frame group with a timestamp in microseconds."""
+        self._inner.write_frame(payload, timestamp_us)
+
+    def append_datagram(self, timestamp_us: int, payload: bytes) -> int:
+        """Send a best-effort datagram and return its sequence number.
+
+        Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
+        transport and wire version; there is no stream fallback.
+        """
+        return self._inner.append_datagram(timestamp_us, payload)
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.

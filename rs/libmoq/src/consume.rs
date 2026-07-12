@@ -1,8 +1,10 @@
-use std::ffi::c_char;
-use tokio::sync::oneshot;
+use std::{ffi::c_char, future::Future, pin::Pin, task::Poll};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_section, moq_string, moq_video_config};
+use crate::{
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_section, moq_string, moq_video_config,
+};
 
 struct ConsumeCatalog {
 	broadcast: moq_net::broadcast::Consumer,
@@ -31,6 +33,23 @@ struct TaskEntry {
 	callback: OnStatus,
 }
 
+/// A raw track task also accepts subscription updates while it is running.
+struct RawTaskEntry {
+	close: Option<oneshot::Sender<()>>,
+	update: mpsc::UnboundedSender<Option<moq_net::track::Subscription>>,
+	callback: OnStatus,
+}
+
+/// Outcome of polling a raw track source alongside its control channels.
+enum RawStep<T> {
+	/// A delivered value: the next group, or the next frame within a group.
+	Item(T),
+	/// The source is exhausted: the track finished, or the group was fully read.
+	End,
+	/// The consumer was closed; the task must unwind without re-polling `close`.
+	Stop,
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -49,10 +68,16 @@ pub struct Consume {
 	frame: NonZeroSlab<moq_mux::container::Frame>,
 
 	/// Raw track consumer tasks (no media/container framing).
-	raw_task: NonZeroSlab<Option<TaskEntry>>,
+	raw_task: NonZeroSlab<Option<RawTaskEntry>>,
 
 	/// Buffered raw frames ready for consumption.
-	raw_frame: NonZeroSlab<bytes::Bytes>,
+	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
+
+	/// Raw track datagram consumer tasks (best-effort, parallel to `raw_task`).
+	datagram_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Buffered datagrams ready for consumption.
+	datagram: NonZeroSlab<moq_net::Datagram>,
 }
 
 impl Consume {
@@ -413,7 +438,7 @@ impl Consume {
 
 	/// Read the payload of a frame as a single contiguous slice.
 	///
-	/// Frames are not chunked — the payload pointer is valid until the frame is closed
+	/// Frames are not chunked. The payload pointer is valid until the frame is closed
 	/// via [`Self::frame_close`].
 	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
@@ -444,14 +469,22 @@ impl Consume {
 	///
 	/// No catalog lookup or container parsing. This is the moq-net primitive for
 	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
-	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
-	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
+	/// in sequence order. Frames must be released with [`Self::raw_frame_close`].
+	pub fn raw_track(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		subscription: Option<moq_net::track::Subscription>,
+		on_frame: OnStatus,
+	) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
-		let entry = TaskEntry {
+		let (update, updates) = mpsc::unbounded_channel();
+		let entry = RawTaskEntry {
 			close: Some(channel.0),
+			update,
 			callback: on_frame,
 		};
 		let id = self.raw_task.insert(Some(entry))?;
@@ -459,8 +492,9 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = broadcast.track(&name)?.subscribe(None).await?;
-				Self::run_raw(on_frame, track, channel.1).await
+				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?;
+				Self::apply_raw_subscription(&mut track, subscription);
+				Self::run_raw(on_frame, track, channel.1, updates).await
 			}
 			.await;
 
@@ -475,41 +509,112 @@ impl Consume {
 		Ok(id)
 	}
 
+	fn apply_raw_subscription(track: &mut moq_net::track::Subscriber, subscription: Option<moq_net::track::Subscription>) {
+		let subscription = subscription.unwrap_or_default();
+		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
+			track.start_at(start);
+		}
+		track.end_at(subscription.group_end);
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = track.update(subscription);
+	}
+
 	async fn run_raw(
 		callback: OnStatus,
 		mut track: moq_net::track::Subscriber,
 		mut close: oneshot::Receiver<()>,
+		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
 		// producer wrote, regardless of how it was grouped.
+		//
+		// `close` is a oneshot that panics if polled after completion, so a `Stop`
+		// must unwind the whole task rather than fall through to the outer loop.
 		loop {
-			// `biased` so a pending close always wins over a ready group.
-			let mut group = tokio::select! {
-				biased;
-				_ = &mut close => return Ok(()),
-				group = track.next_group() => match group? {
-					Some(group) => group,
-					None => return Ok(()),
-				},
-			};
+			let mut group =
+				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+						return Poll::Ready(Ok(RawStep::Stop));
+					}
+					match track.poll_next_group(waiter) {
+						Poll::Ready(Ok(Some(group))) => Poll::Ready(Ok(RawStep::Item(group))),
+						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
+						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
+						Poll::Pending => Poll::Pending,
+					}
+				})
+				.await?
+				{
+					RawStep::Item(group) => group,
+					// Track finished or the consumer was closed: nothing left to deliver.
+					RawStep::End | RawStep::Stop => return Ok(()),
+				};
 
 			loop {
-				let payload = tokio::select! {
-					biased;
-					_ = &mut close => return Ok(()),
-					payload = group.read_frame() => match payload? {
-						Some(payload) => payload,
-						None => break,
-					},
+				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+						return Poll::Ready(Ok(RawStep::Stop));
+					}
+					match group.poll_read_frame(waiter) {
+						Poll::Ready(Ok(Some(frame))) => Poll::Ready(Ok(RawStep::Item(frame))),
+						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
+						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
+						Poll::Pending => Poll::Pending,
+					}
+				})
+				.await?
+				{
+					RawStep::Item(frame) => frame,
+					// Group fully read: advance to the next group.
+					RawStep::End => break,
+					// Consumer closed mid-group: terminate without touching `close` again.
+					RawStep::Stop => return Ok(()),
 				};
 
 				// Hold the lock only to buffer the frame; release it before the callback.
-				let frame_id = State::lock().consume.raw_frame.insert(payload.payload)?;
+				let frame_id = State::lock().consume.raw_frame.insert(frame)?;
 				callback.call(Ok(frame_id));
 			}
 		}
+	}
+
+	/// Poll the close and update channels, applying any subscription updates inline.
+	///
+	/// Returns `true` when the task must stop: either the consumer was closed
+	/// (`close` fired) or the update channel was dropped. The caller must then
+	/// unwind rather than poll `close` again, since a completed oneshot panics if
+	/// re-polled. Borrows `track` only for the duration of the call so the caller
+	/// can poll a track/group source afterwards.
+	fn poll_raw_control(
+		close: &mut oneshot::Receiver<()>,
+		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
+		track: &mut moq_net::track::Subscriber,
+		waiter: &moq_net::kio::Waiter,
+	) -> bool {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if Pin::new(close).poll(&mut cx).is_ready() {
+			return true;
+		}
+
+		loop {
+			match updates.poll_recv(&mut cx) {
+				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
+				Poll::Ready(None) => return true,
+				Poll::Pending => return false,
+			}
+		}
+	}
+
+	pub fn raw_track_update(&mut self, track: Id, subscription: Option<moq_net::track::Subscription>) -> Result<(), Error> {
+		let entry = self
+			.raw_task
+			.get_mut(track)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::TrackNotFound)?;
+		entry.update.send(subscription).map_err(|_| Error::TrackNotFound)?;
+		Ok(())
 	}
 
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
@@ -527,12 +632,17 @@ impl Consume {
 	/// Fill `dst` with a raw frame's payload. The pointer is valid until the
 	/// frame is released with [`Self::raw_frame_close`].
 	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
-		let payload = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+		let timestamp_us = frame
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))?;
 
 		*dst = moq_frame {
-			payload: payload.as_ptr(),
-			payload_size: payload.len(),
-			timestamp_us: 0,
+			payload: frame.payload.as_ptr(),
+			payload_size: frame.payload.len(),
+			timestamp_us,
 			keyframe: false,
 		};
 
@@ -544,8 +654,97 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Subscribe to a raw track's best-effort datagrams by name.
+	///
+	/// Parallel to [`Self::raw_track`], but delivers datagrams instead of frames.
+	/// `on_datagram` is called with a datagram ID for each datagram in arrival order;
+	/// each must be released with [`Self::datagram_close`].
+	pub fn datagram_track(&mut self, broadcast: Id, name: &str, on_datagram: OnStatus) -> Result<Id, Error> {
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let name = name.to_string();
+
+		let channel = oneshot::channel();
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_datagram,
+		};
+		let id = self.datagram_task.insert(Some(entry))?;
+
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		tokio::spawn(async move {
+			let res = async move {
+				let track = broadcast.track(&name)?.subscribe(None).await?;
+				Self::run_datagrams(on_datagram, track, channel.1).await
+			}
+			.await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.datagram_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_datagrams(
+		callback: OnStatus,
+		mut track: moq_net::track::Subscriber,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready datagram.
+			let datagram = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				datagram = track.recv_datagram() => match datagram? {
+					Some(datagram) => datagram,
+					None => return Ok(()),
+				},
+			};
+
+			// Hold the lock only to buffer the datagram; release it before the callback.
+			let id = State::lock().consume.datagram.insert(datagram)?;
+			callback.call(Ok(id));
+		}
+	}
+
+	pub fn datagram_track_close(&mut self, track: Id) -> Result<(), Error> {
+		// Signal shutdown; the task delivers a final callback and removes itself.
+		self.datagram_task
+			.get_mut(track)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::TrackNotFound)?
+			.close
+			.take()
+			.ok_or(Error::TrackNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a datagram's payload, timestamp, and sequence. The pointer is
+	/// valid until the datagram is released with [`Self::datagram_close`].
+	pub fn datagram(&self, datagram: Id, dst: &mut moq_datagram) -> Result<(), Error> {
+		let value = self.datagram.get(datagram).ok_or(Error::FrameNotFound)?;
+
+		*dst = moq_datagram {
+			payload: value.payload.as_ptr(),
+			payload_size: value.payload.len(),
+			timestamp_us: value.timestamp.as_micros() as u64,
+			sequence: value.sequence,
+		};
+
+		Ok(())
+	}
+
+	pub fn datagram_close(&mut self, datagram: Id) -> Result<(), Error> {
+		self.datagram.remove(datagram).ok_or(Error::FrameNotFound)?;
+		Ok(())
+	}
+
 	/// Look up a video rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// (broadcast, config, name) tuple needed to subscribe, mirroring
 	/// the index-based selection in `video_ordered`.
 	pub fn video_rendition(
 		&self,
@@ -564,7 +763,7 @@ impl Consume {
 	}
 
 	/// Look up an audio rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// (broadcast, config, name) tuple needed to subscribe, mirroring
 	/// the index-based selection in `audio_ordered`.
 	pub fn audio_rendition(
 		&self,

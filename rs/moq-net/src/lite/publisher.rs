@@ -211,6 +211,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
 
+		// Lite06+: announce ids. Every `active` we send implicitly assigns the next
+		// per-stream ordinal, and `ended`/`restart` reference the id instead of
+		// repeating the path. Keyed by suffix; only announces that actually hit the
+		// wire get an id (filtered ones were never seen by the peer).
+		let mut next_announce_id: u64 = 0;
+		let mut announce_ids: std::collections::HashMap<crate::PathOwned, u64> = std::collections::HashMap::new();
+
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
@@ -301,6 +308,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let mut buf = bytes::BytesMut::new();
 				ok.encode(&mut buf, version)?;
 				for (suffix, hops) in &initial {
+					if version.has_announce_id() {
+						announce_ids.insert(suffix.clone(), next_announce_id);
+						next_announce_id += 1;
+					}
 					lite::AnnounceBroadcast::Active {
 						suffix: suffix.as_path(),
 						hops: hops.clone(),
@@ -350,19 +361,38 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 								let prev = stats_guards.insert(absolute.clone(), bs.publisher());
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
+								if version.has_announce_id() {
+									let prev = announce_ids.insert(suffix.clone(), next_announce_id);
+									debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
+									next_announce_id += 1;
+								}
 								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 							}
 							announce::Event::Restart(active) => {
-								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
-								// `Active` for an already-announced path). Older versions never defined
-								// that, so split it into an unannounce followed by a fresh announce.
+								// On lite-06+ a restart references the announce id. On lite-05 it
+								// travels as a duplicate ANNOUNCE (a second `Active` for an
+								// already-announced path). Older versions never defined either, so
+								// split it into an unannounce followed by a fresh announce.
 								let info = active.info();
 								match Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) {
 									Some(hops) => {
 										tracing::debug!(broadcast = %absolute, "restart");
 										let bs = stats.broadcast(&absolute);
 										// Continuity: keep the existing stats guard (no close + reopen).
-										if lite::restart_supported(version) {
+										if version.has_announce_id() {
+											// One message on the wire, one name-length count.
+											bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+											if let Some(&id) = announce_ids.get(&suffix) {
+												stream.writer.encode(&lite::AnnounceBroadcast::Restart { id, hops }).await?;
+											} else {
+												// The prior announcement was filtered, so the peer never saw
+												// it: this is a fresh announce, assigning the next id.
+												stats_guards.entry(absolute.clone()).or_insert_with(|| bs.publisher());
+												announce_ids.insert(suffix.clone(), next_announce_id);
+												next_announce_id += 1;
+												stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
+											}
+										} else if lite::restart_supported(version) {
 											// One Active message on the wire, one name-length count.
 											bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
@@ -382,22 +412,42 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									None => {
 										// The replacement loops back to us; from this peer's view the broadcast is gone.
 										tracing::debug!(broadcast = %absolute, "restart replacement looped; unannouncing");
-										stats.broadcast(&absolute)
-											.publisher_announced_bytes(absolute.as_str().len() as u64);
 										stats_guards.remove(&absolute);
-										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
+										if version.has_announce_id() {
+											// Retract by id; nothing to send if the prior announcement was
+											// filtered and the peer never saw it.
+											if let Some(id) = announce_ids.remove(&suffix) {
+												stats.broadcast(&absolute)
+													.publisher_announced_bytes(absolute.as_str().len() as u64);
+												stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
+											}
+										} else {
+											stats.broadcast(&absolute)
+												.publisher_announced_bytes(absolute.as_str().len() as u64);
+											stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
+										}
 									}
 								}
 							}
 							announce::Event::Ended => {
 								tracing::debug!(broadcast = %absolute, "unannounce");
-								// Count the name length whether or not a guard is held: the Ended
-								// message is sent even for announces we filtered out above.
-								stats.broadcast(&absolute)
-									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								stats_guards.remove(&absolute);
-								// An ended announce doesn't need hops; the receiver matches on path only.
-								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
+								if version.has_announce_id() {
+									// Retract by id; nothing to send if the announce was filtered and
+									// the peer never saw it (an unknown id is a protocol violation).
+									if let Some(id) = announce_ids.remove(&suffix) {
+										stats.broadcast(&absolute)
+											.publisher_announced_bytes(absolute.as_str().len() as u64);
+										stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
+									}
+								} else {
+									// Count the name length whether or not a guard is held: the Ended
+									// message is sent even for announces we filtered out above.
+									stats.broadcast(&absolute)
+										.publisher_announced_bytes(absolute.as_str().len() as u64);
+									// An ended announce doesn't need hops; the receiver matches on path only.
+									stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
+								}
 							}
 						}
 					}

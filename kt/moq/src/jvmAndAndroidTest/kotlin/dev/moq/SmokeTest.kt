@@ -32,8 +32,9 @@ class SmokeTest {
      */
     @Test
     fun `origin alias constructs and consumes`() = runTest {
-        OriginProducer().use { origin ->
+        OriginProducer(OriginOptions()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
+            origin.dynamic().use { /* dynamic origin smoke */ }
         }
     }
 
@@ -42,7 +43,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame("cached".encodeToByteArray())
+            group.writeFrame("cached".encodeToByteArray(), timestampUs = 0u)
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(
@@ -51,7 +52,7 @@ class SmokeTest {
                 FetchGroupOptions(priority = 3u),
             )
             assertEquals(0uL, fetched.sequence())
-            assertEquals("cached", fetched.readFrame()?.decodeToString())
+            assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
         }
     }

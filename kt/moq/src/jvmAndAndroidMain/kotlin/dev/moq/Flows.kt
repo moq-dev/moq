@@ -11,14 +11,17 @@ import uniffi.moq.MoqAudioConsumer
 import uniffi.moq.MoqAudioFrame
 import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqBroadcastDynamic
+import uniffi.moq.MoqBroadcastRequest
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
+import uniffi.moq.MoqDatagram
 import uniffi.moq.MoqException
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqGroupRequest
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqOriginConsumer
+import uniffi.moq.MoqOriginDynamic
 import uniffi.moq.MoqTrackConsumer
 import uniffi.moq.MoqTrackDynamic
 import uniffi.moq.MoqTrackRequest
@@ -96,6 +99,27 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
     if (cause is CancellationException) cancel()
 }
 
+/** Stream of timestamped raw frames from one-frame-per-group tracks. */
+fun MoqTrackConsumer.frames(): Flow<MoqFrame> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(readFrame() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of best-effort datagrams in arrival order. */
+fun MoqTrackConsumer.datagrams(): Flow<MoqDatagram> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(recvDatagram() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+
 /** Stream of tracks requested by subscribers. */
 fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {
     while (true) {
@@ -116,8 +140,18 @@ fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/** Stream of raw frame payloads within a group. */
-fun MoqGroupConsumer.frames(): Flow<ByteArray> = flow {
+/** Stream of broadcasts requested by consumers. */
+fun MoqOriginDynamic.requestedBroadcasts(): Flow<MoqBroadcastRequest> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(requestedBroadcast())
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of timestamped raw frames within a group. */
+fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(readFrame() ?: break)

@@ -21,6 +21,11 @@ func (s *Session) Closed(ctx context.Context) error {
 	return runErr(ctx, s.inner.Shutdown, s.inner.Closed)
 }
 
+// Stats snapshots the current connection statistics.
+func (s *Session) Stats() ConnectionStats {
+	return s.inner.Stats()
+}
+
 // Shutdown closes the session gracefully.
 func (s *Session) Shutdown() {
 	s.inner.Shutdown()

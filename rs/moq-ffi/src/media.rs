@@ -76,6 +76,19 @@ pub struct MoqFrame {
 	pub keyframe: bool,
 }
 
+/// A best-effort raw track datagram.
+#[derive(uniffi::Record)]
+pub struct MoqDatagram {
+	/// Per-track sequence number, shared with groups.
+	#[uniffi(default = 0)]
+	pub sequence: u64,
+	/// Presentation timestamp in microseconds.
+	#[uniffi(default = 0)]
+	pub timestamp_us: u64,
+	/// Datagram payload, capped at 1200 bytes.
+	pub payload: Vec<u8>,
+}
+
 /// Caller-provided video catalog fields for [`MoqInit`].
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.

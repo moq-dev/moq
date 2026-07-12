@@ -68,6 +68,117 @@ pub struct moq_frame {
 	pub keyframe: bool,
 }
 
+/// A best-effort raw track datagram delivered via [moq_consume_datagrams].
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_datagram {
+	/// The payload of the datagram, or NULL/0 if the track has ended.
+	pub payload: *const u8,
+	pub payload_size: usize,
+
+	/// The presentation timestamp of the datagram in microseconds.
+	pub timestamp_us: u64,
+
+	/// Per-track sequence number, drawn from the same namespace as groups.
+	pub sequence: u64,
+}
+
+/// Publisher-side raw track properties.
+///
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
+/// A zero-initialized struct also uses those defaults, except `priority` where
+/// zero is the default itself.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_track_info {
+	/// Priority, used to break ties between subscriptions of equal subscriber priority.
+	pub priority: u8,
+
+	/// Whether groups are delivered in sequence order when `ordered_valid` is true.
+	pub ordered: bool,
+	/// Whether `ordered` should override the default ordered setting.
+	pub ordered_valid: bool,
+
+	/// How long the relay should cache past groups, in milliseconds.
+	pub cache_ms: u64,
+	/// Whether `cache_ms` should override the default cache setting.
+	pub cache_valid: bool,
+
+	/// Per-frame timescale in ticks per second.
+	pub timescale: u64,
+	/// Whether `timescale` should override the default millisecond timescale.
+	pub timescale_valid: bool,
+}
+
+impl TryFrom<&moq_track_info> for moq_net::track::Info {
+	type Error = Error;
+
+	fn try_from(info: &moq_track_info) -> Result<Self, Self::Error> {
+		// Raw tracks default to a microsecond timescale, matching the C ABI's
+		// timestamp_us units. An explicit timescale below overrides it.
+		let mut out = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MICRO)
+			.with_priority(info.priority);
+		if info.ordered_valid {
+			out = out.with_ordered(info.ordered);
+		}
+		if info.cache_valid {
+			out = out.with_cache(std::time::Duration::from_millis(info.cache_ms));
+		}
+		if info.timescale_valid {
+			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
+		}
+		Ok(out)
+	}
+}
+
+/// Subscriber-side raw track delivery preferences.
+///
+/// A null [moq_consume_track] or [moq_consume_track_update] `subscription`
+/// pointer uses the moq-net defaults.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_subscription {
+	/// Delivery priority. Higher values preempt lower ones under contention.
+	pub priority: u8,
+
+	/// Whether groups are delivered in sequence order when `ordered_valid` is true.
+	pub ordered: bool,
+	/// Whether `ordered` should override the default ordered setting.
+	pub ordered_valid: bool,
+
+	/// How long to wait for an older group once a newer group has arrived, in milliseconds.
+	pub stale_ms: u64,
+
+	/// First group to deliver.
+	pub group_start: u64,
+	/// Whether `group_start` is present. When false, delivery starts at the latest group.
+	pub group_start_valid: bool,
+
+	/// Last group to deliver, inclusive.
+	pub group_end: u64,
+	/// Whether `group_end` is present. When false, there is no end cap.
+	pub group_end_valid: bool,
+}
+
+impl From<&moq_subscription> for moq_net::track::Subscription {
+	fn from(subscription: &moq_subscription) -> Self {
+		let mut out = moq_net::track::Subscription::default()
+			.with_priority(subscription.priority)
+			.with_stale(std::time::Duration::from_millis(subscription.stale_ms));
+		if subscription.ordered_valid {
+			out = out.with_ordered(subscription.ordered);
+		}
+		if subscription.group_start_valid {
+			out = out.with_group_start(subscription.group_start);
+		}
+		if subscription.group_end_valid {
+			out = out.with_group_end(subscription.group_end);
+		}
+		out
+	}
+}
+
 /// A borrowed UTF-8 string slice, NOT NULL terminated.
 ///
 /// Used to hand a C caller a JSON document that lives inside libmoq's storage.
@@ -824,18 +935,29 @@ pub unsafe extern "C" fn moq_remove_catalog_section(broadcast: u32, name: *const
 /// as-is to subscribers using [moq_consume_track]. Use it for non-media tracks
 /// (control channels, JSON metadata, etc.), or pair it with
 /// [moq_publish_video_config] / [moq_publish_audio_config] to also describe the
-/// track in the catalog.
+/// track in the catalog. Pass NULL for `info` to use moq-net defaults.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must ensure that info is either NULL or a valid pointer to a [moq_track_info] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_track(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	info: *const moq_track_info,
+) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
-		State::lock().publish.track(broadcast, name)
+		// Default raw tracks to a microsecond timescale even when no info is given.
+		let info = match unsafe { info.as_ref() } {
+			Some(info) => moq_net::track::Info::try_from(info)?,
+			None => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
+		};
+		State::lock().publish.track(broadcast, name, Some(info))
 	})
 }
 
@@ -853,21 +975,60 @@ pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
 	})
 }
 
-/// Write a single-frame group to a raw track.
+/// Write a single-frame group to a raw track with a timestamp.
 ///
 /// Convenience for the common one-frame-per-group pattern. Equivalent to
 /// appending a group, writing one frame, and finishing it.
+/// The timestamp is in microseconds.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_frame(track: u32, payload: *const u8, payload_size: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_frame(
+	track: u32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp_us: u64,
+) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		State::lock().publish.track_frame(track, payload)
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		State::lock().publish.track_frame(track, timestamp, payload)
+	})
+}
+
+/// Send a best-effort datagram on a raw track created by [moq_publish_track].
+///
+/// `timestamp_us` is the presentation timestamp in microseconds. The payload must be at
+/// most 1200 bytes. On success the datagram's per-track sequence number (shared with the
+/// group namespace) is written to `out_sequence` when it is non-NULL. Datagrams are
+/// delivered only on transports and wire versions with a datagram channel; there is no
+/// group fallback.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `out_sequence` must be NULL or a valid pointer to a `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track_datagram(
+	track: u32,
+	timestamp_us: u64,
+	payload: *const u8,
+	payload_size: usize,
+	out_sequence: *mut u64,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		let sequence = State::lock().publish.track_datagram(track, timestamp_us, payload)?;
+		if let Some(out) = unsafe { out_sequence.as_mut() } {
+			*out = sequence;
+		}
+		Ok(())
 	})
 }
 
@@ -884,16 +1045,24 @@ pub extern "C" fn moq_publish_track_close(track: u32) -> i32 {
 
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
+/// The timestamp is in microseconds.
+///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_group_frame(group: u32, payload: *const u8, payload_size: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_group_frame(
+	group: u32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp_us: u64,
+) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		State::lock().publish.group_frame(group, payload)
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		State::lock().publish.group_frame(group, timestamp, payload)
 	})
 }
 
@@ -1205,39 +1374,61 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 ///
 /// This is the counterpart to [moq_publish_track]: no catalog lookup or
 /// container parsing. `on_frame` is called with a positive raw frame ID for each
-/// frame in arrival order, then exactly once more with a terminal code: `0`
+/// frame in sequence order, then exactly once more with a terminal code: `0`
 /// (closed cleanly) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_frame` is never called again and `user_data` is never touched again, so
 /// release `user_data` there. The terminal callback fires even after
 /// [moq_consume_track_close]. Read each frame with [moq_consume_track_frame] and
-/// release it with [moq_consume_track_frame_close].
+/// release it with [moq_consume_track_frame_close]. Pass NULL for `subscription`
+/// to use moq-net defaults.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_track(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
+	subscription: *const moq_subscription,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock().consume.raw_track(broadcast, name, on_frame)
+		State::lock().consume.raw_track(broadcast, name, subscription, on_frame)
+	})
+}
+
+/// Update a raw track subscription's delivery preferences.
+///
+/// Pass NULL for `subscription` to reset to moq-net defaults.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *const moq_subscription) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
+		State::lock().consume.raw_track_update(track, subscription)
 	})
 }
 
 /// Read a raw frame's payload delivered via the [moq_consume_track] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
-/// frame is released with [moq_consume_frame_close]. `dst.timestamp_us` and
-/// `dst.keyframe` are reported as 0 / false (not meaningful for raw tracks).
+/// frame is released with [moq_consume_frame_close]. `dst.timestamp_us` is the
+/// frame presentation timestamp in microseconds. `dst.keyframe` is reported as
+/// false because raw tracks do not parse codec metadata.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1275,5 +1466,80 @@ pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.raw_track_close(track)
+	})
+}
+
+/// Subscribe to a raw track's best-effort datagrams by name.
+///
+/// The datagram counterpart to [moq_consume_track], on its own subscription. `on_datagram`
+/// is called with a positive datagram ID for each datagram in arrival order, then exactly
+/// once more with a terminal code: `0` (closed cleanly) or a negative error. After the
+/// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never
+/// touched again, so release `user_data` there. The terminal callback fires even after
+/// [moq_consume_datagrams_close]. Read each datagram with [moq_consume_datagram] and release
+/// it with [moq_consume_datagram_close]. Datagrams arrive only over datagram-capable
+/// transports and lite-05 or newer moq-lite; there is no stream fallback.
+///
+/// Returns a non-zero handle to the subscription on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_datagram` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_datagrams(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	on_datagram: Option<extern "C" fn(user_data: *mut c_void, datagram: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram) };
+		State::lock().consume.datagram_track(broadcast, name, on_datagram)
+	})
+}
+
+/// Read a datagram delivered via the [moq_consume_datagrams] callback.
+///
+/// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
+/// [moq_consume_datagram_close]), plus `dst.timestamp_us` and `dst.sequence`.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_datagram] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_datagram(datagram: u32, dst: *mut moq_datagram) -> i32 {
+	ffi::enter(move || {
+		let datagram = ffi::parse_id(datagram)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.datagram(datagram, dst)
+	})
+}
+
+/// Close a datagram and clean up its resources.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_datagram_close(datagram: u32) -> i32 {
+	ffi::enter(move || {
+		let datagram = ffi::parse_id(datagram)?;
+		State::lock().consume.datagram_close(datagram)
+	})
+}
+
+/// Stop a datagram subscription's background task.
+///
+/// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
+/// `user_data`; the [moq_consume_datagrams] `on_datagram` callback still fires once more with a
+/// terminal `0` (or a negative error), which is where `user_data` should be released. Datagrams
+/// already delivered via the callback remain valid until released with [moq_consume_datagram_close].
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_datagrams_close(task: u32) -> i32 {
+	ffi::enter(move || {
+		let task = ffi::parse_id(task)?;
+		State::lock().consume.datagram_track_close(task)
 	})
 }

@@ -738,6 +738,19 @@ mod test {
 	}
 
 	#[test]
+	fn read_frame_preserves_timestamp() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let timestamp = Timestamp::from_micros(20_000).unwrap();
+		producer.write_frame(timestamp, Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.timestamp.as_micros(), 20_000);
+		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
+	}
+
+	#[test]
 	fn chunked_frame_reads_whole() {
 		let mut producer = Info { sequence: 0 }.produce();
 		{
@@ -914,7 +927,7 @@ mod test {
 		// Read one frame from c1
 		let _ = c1.next_frame().now_or_never().unwrap().unwrap().unwrap();
 
-		// Clone c1 — inherits index (past first frame)
+		// Clone c1, inheriting its index (past first frame).
 		let mut c2 = c1.clone();
 
 		producer.write_frame_now(Bytes::from_static(b"b")).unwrap();
