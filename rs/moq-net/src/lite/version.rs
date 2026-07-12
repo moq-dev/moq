@@ -91,7 +91,7 @@ impl fmt::Display for Version {
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
 			Self::Lite05 => write!(f, "moq-lite-05"),
-			Self::Lite06Wip => write!(f, "moq-lite-06"),
+			Self::Lite06Wip => write!(f, "moq-lite-06-wip"),
 		}
 	}
 }

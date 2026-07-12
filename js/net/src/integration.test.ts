@@ -96,11 +96,11 @@ test("integration: lite draft-05", async () => {
 
 test("integration: lite draft-06", async () => {
 	// Exercises announce ids: every active assigns an ordinal on the wire.
-	await runPublishSubscribeFlow(Lite.ALPN_06);
+	await runPublishSubscribeFlow(Lite.ALPN_06_WIP);
 });
 
 test("integration: lite draft-06 announce lifecycle", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_06);
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	// Announced before the client asks, so it can ride the initial set.

@@ -600,13 +600,13 @@ async fn internal_unix_round_trip() {
 	handle.abort();
 }
 
-/// Every version whose SETUP carries a request path the server reads: moq-lite-05+
+/// Every version whose SETUP carries a request path the server reads: moq-lite-05
 /// (Setup Stream) and moq-transport 14-18 (the `Path` SETUP parameter, in-band on
-/// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
+/// the bidi stream for 14-16 and the uni Setup Stream for 17-18). lite-06-wip shares
+/// lite-05's SETUP path handling but is opt-in only, so it isn't exercised here.
 fn path_versions() -> Vec<moq_net::Version> {
 	[
 		"moq-lite-05",
-		"moq-lite-06",
 		"moq-transport-14",
 		"moq-transport-15",
 		"moq-transport-16",

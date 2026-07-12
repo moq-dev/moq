@@ -87,11 +87,10 @@ export const ALPN_04 = "moq-lite-04";
 /// The ALPN string for Draft05, which uses ALPN-based version negotiation.
 export const ALPN_05 = "moq-lite-05";
 
-/// The ALPN string for Draft06, offered first in the default WebTransport
-/// `protocols` list so lite-06 is the preferred version. The wire format is still
-/// work-in-progress, but the ALPN carries no `-wip` suffix so finalizing needs no
-/// wire change.
-export const ALPN_06 = "moq-lite-06";
+/// The ALPN string for the work-in-progress Draft06. It is NOT in the default
+/// WebTransport `protocols` list, so lite-06 is never advertised or negotiated by
+/// default; a peer only reaches it when both sides explicitly offer this ALPN.
+export const ALPN_06_WIP = "moq-lite-06-wip";
 
 const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_01]: "moq-lite-01",
@@ -99,7 +98,7 @@ const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_03]: "moq-lite-03",
 	[Version.DRAFT_04]: "moq-lite-04",
 	[Version.DRAFT_05]: "moq-lite-05",
-	[Version.DRAFT_06]: "moq-lite-06",
+	[Version.DRAFT_06]: "moq-lite-06-wip",
 };
 
 export function versionName(v: Version): string {

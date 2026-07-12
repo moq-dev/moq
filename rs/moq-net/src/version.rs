@@ -17,12 +17,11 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
 /// newest moq-lite ALPN that both sides converge on.
 ///
-/// Includes `ALPN_LITE_06` so the demo and end-to-end tests negotiate lite-06
-/// by default. lite-06's wire format is still work-in-progress (the internal
-/// `Lite06Wip` variant), but the ALPN carries no `-wip` suffix so finalizing is a
-/// pure rename with no wire change; revisit this default before promoting to `main`.
+/// `ALPN_LITE_06_WIP` is deliberately absent: lite-06's wire format is still
+/// work-in-progress, so it is never advertised or negotiated by default. It is only
+/// reachable when both peers explicitly opt in (e.g. `--version moq-lite-06-wip`),
+/// which is enough to exercise it in tests without shipping it to real peers.
 pub const ALPNS: &[&str] = &[
-	ALPN_LITE_06,
 	ALPN_LITE_05,
 	ALPN_LITE_04,
 	ALPN_LITE_03,
@@ -40,7 +39,7 @@ pub(crate) const ALPN_LITE: &str = "moql";
 pub(crate) const ALPN_LITE_03: &str = "moq-lite-03";
 pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
 pub(crate) const ALPN_LITE_05: &str = "moq-lite-05";
-pub(crate) const ALPN_LITE_06: &str = "moq-lite-06";
+pub(crate) const ALPN_LITE_06_WIP: &str = "moq-lite-06-wip";
 pub(crate) const ALPN_14: &str = "moq-00";
 pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
@@ -104,7 +103,7 @@ impl Version {
 			ALPN_LITE_03 => Some(Self::Lite(lite::Version::Lite03)),
 			ALPN_LITE_04 => Some(Self::Lite(lite::Version::Lite04)),
 			ALPN_LITE_05 => Some(Self::Lite(lite::Version::Lite05)),
-			ALPN_LITE_06 => Some(Self::Lite(lite::Version::Lite06Wip)),
+			ALPN_LITE_06_WIP => Some(Self::Lite(lite::Version::Lite06Wip)),
 			ALPN_14 => Some(Self::Ietf(ietf::Version::Draft14)),
 			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -118,7 +117,7 @@ impl Version {
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
 		match self {
-			Self::Lite(lite::Version::Lite06Wip) => ALPN_LITE_06,
+			Self::Lite(lite::Version::Lite06Wip) => ALPN_LITE_06_WIP,
 			Self::Lite(lite::Version::Lite05) => ALPN_LITE_05,
 			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
 			Self::Lite(lite::Version::Lite03) => ALPN_LITE_03,
@@ -177,7 +176,7 @@ impl FromStr for Version {
 			"moq-lite-03" => Ok(Self::Lite(lite::Version::Lite03)),
 			"moq-lite-04" => Ok(Self::Lite(lite::Version::Lite04)),
 			"moq-lite-05" => Ok(Self::Lite(lite::Version::Lite05)),
-			"moq-lite-06" => Ok(Self::Lite(lite::Version::Lite06Wip)),
+			"moq-lite-06-wip" => Ok(Self::Lite(lite::Version::Lite06Wip)),
 			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
 			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
@@ -240,10 +239,14 @@ impl From<Vec<Version>> for coding::Versions {
 pub struct Versions(Vec<Version>);
 
 impl Versions {
-	/// All supported versions exposed by default.
+	/// All versions exposed by default.
+	///
+	/// `Lite06Wip` is intentionally excluded: its wire format is still work-in-progress,
+	/// so it is not advertised until a caller opts in explicitly (e.g. a pinned
+	/// `version = ["moq-lite-06-wip"]`). It is otherwise a fully-defined version, so an
+	/// opt-in set that includes it negotiates normally.
 	pub fn all() -> Self {
 		Self(vec![
-			Version::Lite(lite::Version::Lite06Wip),
 			Version::Lite(lite::Version::Lite05),
 			Version::Lite(lite::Version::Lite04),
 			Version::Lite(lite::Version::Lite03),
