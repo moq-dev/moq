@@ -469,10 +469,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
 				let broadcast = broadcast::Info {
-					hops,
-					// No wire cost on moq-transport; the default derives it from the
+					// No wire cost on moq-transport; the route derives it from the
 					// hop count, matching the legacy metric.
-					cost: Default::default(),
+					route: broadcast::Route::new(hops),
 					origin: self.origin.info(),
 				}
 				.produce();

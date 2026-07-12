@@ -33,7 +33,8 @@ impl Announced {
 					let Some(broadcast) = event.broadcast() else {
 						continue;
 					};
-					let hops = broadcast.info().hops.iter().map(|origin| origin.id()).collect();
+					// A snapshot: the route can be updated in place while announced.
+					let hops = broadcast.info().route.hops().iter().map(|origin| origin.id()).collect();
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
 						hops,

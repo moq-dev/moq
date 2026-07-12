@@ -85,12 +85,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 }
 
 /// One announced broadcast this session inserted into the origin: the announce
-/// guard plus the shared cost cell an ANNOUNCE_UPDATE mutates in place.
+/// guard plus the shared route a repeat announcement replaces in place.
 struct AnnouncedBroadcast {
 	// Held only for its Drop, which unannounces the broadcast.
 	#[allow(dead_code)]
 	publish: origin::Publish,
-	cost: crate::broadcast::Cost,
+	route: crate::broadcast::Route,
 }
 
 #[derive(Clone)]
@@ -277,7 +277,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					if self.start_announce(
 						path.clone(),
 						crate::OriginList::new(),
-						crate::broadcast::Cost::default(),
+						None,
+						link_cost,
 						responder_origin,
 						&mut producers,
 					)? {
@@ -320,12 +321,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.stats
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
-					let cost = Self::effective_cost(cost, link_cost);
-					if lite::restart_supported(self.version) && producers.contains_key(&path) {
-						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
-						// atomically replace the broadcast. Older versions fall through to start_announce,
-						// which rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, cost, responder_origin, &mut producers)? {
+					if producers.contains_key(&path) {
+						// A repeat ANNOUNCE for an already-announced path (lite-05+) replaces
+						// the route in place: same broadcast, same subscriptions, new
+						// hops/cost. Older versions never repeat an Active, so there it's a
+						// protocol violation.
+						if !lite::restart_supported(self.version) {
+							return Err(Error::Duplicate);
+						}
+						if self.update_announce(&path, hops, cost, link_cost, responder_origin, &mut producers) {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -333,7 +337,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, cost, responder_origin, &mut producers)? {
+					} else if self.start_announce(
+						path.clone(),
+						hops,
+						cost,
+						link_cost,
+						responder_origin,
+						&mut producers,
+					)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -344,28 +355,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 							connecting.take();
 						}
 					}
-				}
-				lite::AnnounceBroadcast::Update { suffix, cost } => {
-					let path = prefix.join(&suffix);
-					// The matching Active may have been dropped as a reflected loop;
-					// its cost updates are just as irrelevant here.
-					let Some(entry) = producers.get(&path) else {
-						tracing::debug!(broadcast = %self.log_path(&path), "cost update for unknown broadcast; ignoring");
-						continue;
-					};
-					// Flip the shared cost cell first (forwarding reads it live), then
-					// re-rank after a deterministic per-node delay: two relays whose
-					// routes prefer each other act at different times, so they don't
-					// swap into each other simultaneously (the first mover's re-announce
-					// suppresses the loser's candidate via the hop-chain reflection drop).
-					entry.cost.set(cost.base, Some(cost.transit.saturating_add(link_cost)));
-					let origin = self.origin.clone();
-					let refresh_path = path.clone();
-					let jitter = Duration::from_millis(self.self_origin.id() % 512);
-					web_async::spawn(async move {
-						web_async::time::sleep(jitter).await;
-						origin.refresh_broadcast(&refresh_path);
-					});
 				}
 				lite::AnnounceBroadcast::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -451,32 +440,30 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	/// Returns `Ok(true)` if the announce was accepted (and the broadcast was
-	/// published into the origin), `Ok(false)` if it was dropped as a
-	/// reflected loop.
-	fn start_announce(
-		&mut self,
-		path: PathOwned,
+	/// Normalize a received hop chain into this node's view of the route: append
+	/// the responder's origin (lite-05+, which no longer stamps itself), drop
+	/// reflections, rewrite Lite03 placeholders, and guarantee one attributable
+	/// hop. Returns `None` when the chain is unusable here (it loops through us,
+	/// or is full), in which case the announcement offers no route via this peer.
+	fn resolve_hops(
+		&self,
+		path: &PathOwned,
 		mut hops: crate::OriginList,
-		// The route cost at this node (wire cost plus this link's cost), already
-		// resolved by [`Self::effective_cost`].
-		cost: crate::broadcast::Cost,
 		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, AnnouncedBroadcast>,
-	) -> Result<bool, Error> {
+	) -> Option<crate::OriginList> {
 		if let Some(responder) = responder_origin {
 			// If the chain is already full, drop the announce. This is the same decision
 			// the Lite04 sender makes at its push site.
 			if hops.push(responder).is_err() {
 				tracing::warn!(
-					broadcast = %self.log_path(&path),
+					broadcast = %self.log_path(path),
 					"dropping announce; hop chain at MAX_HOPS (possible loop)",
 				);
-				return Ok(false);
+				return None;
 			}
 		}
 
@@ -485,15 +472,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
 		// the authoritative cluster-loop check on the receiver.
 		if hops.contains(&self.self_origin) {
-			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
-			return Ok(false);
+			tracing::debug!(broadcast = %self.log_path(path), "dropping reflected announce");
+			return None;
 		}
 
 		// Lite03 carries its hop count as UNKNOWN placeholders rather than real
 		// ids. Rewrite the first placeholder with this connection's origin so
 		// the route is attributable to the upstream session, without changing
-		// the hop count (shortest-path selection and the MAX_HOPS limit stay
-		// accurate). Lite01/02 send no placeholders; they're covered below.
+		// the hop count (route selection and the MAX_HOPS limit stay accurate).
+		// Lite01/02 send no placeholders; they're covered below.
 		if self.version_lacks_hops() {
 			hops.replace_first(crate::Origin::UNKNOWN, self.session_origin);
 		}
@@ -506,16 +493,48 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				.expect("an empty hop chain always has room for one entry");
 		}
 
+		Some(hops)
+	}
+
+	/// Resolve a received wire cost into this node's effective `(base, transit)`:
+	/// the sender's transit plus this link's cost. An absent wire cost (pre-lite-06
+	/// peer) leaves the transit unset, deriving it from the final hop count, which
+	/// reproduces the legacy shortest-hop-chain ordering exactly.
+	fn effective_cost(cost: Option<lite::RouteCost>, link_cost: u64) -> (u64, Option<u64>) {
+		match cost {
+			Some(cost) => (cost.base, Some(cost.transit.saturating_add(link_cost))),
+			None => (0, None),
+		}
+	}
+
+	/// Returns `Ok(true)` if the announce was accepted (and the broadcast was
+	/// published into the origin), `Ok(false)` if it was dropped as a
+	/// reflected loop.
+	fn start_announce(
+		&mut self,
+		path: PathOwned,
+		hops: crate::OriginList,
+		cost: Option<lite::RouteCost>,
+		link_cost: u64,
+		responder_origin: Option<crate::Origin>,
+		producers: &mut HashMap<PathOwned, AnnouncedBroadcast>,
+	) -> Result<bool, Error> {
+		let Some(hops) = self.resolve_hops(&path, hops, responder_origin) else {
+			return Ok(false);
+		};
+
 		// Make sure the peer doesn't double announce.
 		if producers.contains_key(&path) {
 			return Err(Error::Duplicate);
 		}
 
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), ?cost, "announce");
+		let route = broadcast::Route::new(hops);
+		let (base, transit) = Self::effective_cost(cost, link_cost);
+		route.set_cost(base, transit);
+		tracing::debug!(broadcast = %self.log_path(&path), ?route, "announce");
 
 		let broadcast = broadcast::Info {
-			hops,
-			cost: cost.clone(),
+			route: route.clone(),
 			origin: self.origin.info(),
 		}
 		.produce();
@@ -532,7 +551,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		};
 
-		producers.insert(path.clone(), AnnouncedBroadcast { publish, cost });
+		producers.insert(path.clone(), AnnouncedBroadcast { publish, route });
 
 		// Run the broadcast in the background until all consumers are dropped.
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
@@ -540,72 +559,51 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(true)
 	}
 
-	/// Resolve a received wire cost into this node's effective [`broadcast::Cost`]:
-	/// the sender's transit plus this link's cost. An absent wire cost (pre-lite-06
-	/// peer) leaves the transit unset, deriving it from the final hop count, which
-	/// reproduces the legacy shortest-hop-chain ordering exactly.
-	fn effective_cost(cost: Option<lite::RouteCost>, link_cost: u64) -> crate::broadcast::Cost {
-		match cost {
-			Some(cost) => crate::broadcast::Cost::new(cost.base, Some(cost.transit.saturating_add(link_cost))),
-			None => crate::broadcast::Cost::default(),
-		}
-	}
-
-	/// Handle a RESTART (a duplicate ANNOUNCE): atomically replace the broadcast at `path`.
+	/// Apply a repeat ANNOUNCE: replace the existing broadcast's route in place.
 	///
-	/// Publishing the replacement before retiring the old producer lets the origin demote the old
-	/// broadcast to a backup and emit a single restart downstream, rather than an
-	/// unannounce/announce pair with a visible gap. Returns `Ok(false)` if the replacement was a
-	/// reflected loop (the broadcast is now gone), `Ok(true)` otherwise.
-	fn restart_announce(
+	/// The broadcast and every subscription riding it are untouched: the
+	/// announcement rides this same session, so the peer the media comes from
+	/// hasn't changed, only the advertised path and cost beyond it. The origin
+	/// re-ranks the path's candidates after a deterministic per-node delay: two
+	/// relays whose routes would mutually flip toward each other act at different
+	/// times, so they don't swap simultaneously (the first mover's re-announce
+	/// suppresses the loser's candidate via the hop-chain reflection drop).
+	///
+	/// Returns `false` when the new chain is unusable here (it now loops through
+	/// us, or is full): the peer no longer offers a route for this path, so the
+	/// broadcast is retired (its guard dropped, unannouncing it).
+	fn update_announce(
 		&mut self,
-		path: PathOwned,
-		mut hops: crate::OriginList,
-		// The route cost at this node; see [`Self::start_announce`].
-		cost: crate::broadcast::Cost,
-		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
-		// rebuild the full chain since the sender no longer stamps itself. None for older
-		// versions. See `start_announce`.
+		path: &PathOwned,
+		hops: crate::OriginList,
+		cost: Option<lite::RouteCost>,
+		link_cost: u64,
 		responder_origin: Option<crate::Origin>,
 		producers: &mut HashMap<PathOwned, AnnouncedBroadcast>,
-	) -> Result<bool, Error> {
-		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
-		let reflected = match responder_origin {
-			Some(responder) => hops.push(responder).is_err() || hops.contains(&self.self_origin),
-			None => hops.contains(&self.self_origin),
-		};
-		if reflected {
-			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
+	) -> bool {
+		let Some(hops) = self.resolve_hops(path, hops, responder_origin) else {
 			// Dropping the entry drops its guard, unannouncing the broadcast.
-			producers.remove(&path);
-			return Ok(false);
-		}
-
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), ?cost, "restart");
-
-		let broadcast = broadcast::Info {
-			hops,
-			cost: cost.clone(),
-			origin: self.origin.info(),
-		}
-		.produce();
-		let dynamic = broadcast.dynamic();
-
-		// Publish the replacement first so the origin restarts atomically; the old broadcast is
-		// demoted to a backup and removed silently when we drop its guard below.
-		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
-			// Origin rejected the replacement; retire the existing broadcast.
-			producers.remove(&path);
-			return Ok(false);
+			producers.remove(path);
+			return false;
 		};
 
-		let old = producers.insert(path.clone(), AnnouncedBroadcast { publish, cost });
-		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
+		let Some(entry) = producers.get(path) else {
+			return false;
+		};
 
-		// Drop the replaced broadcast's guard last, unannouncing it now that the replacement is live.
-		drop(old);
+		let (base, transit) = Self::effective_cost(cost, link_cost);
+		entry.route.set(hops, base, transit);
+		tracing::debug!(broadcast = %self.log_path(path), route = ?entry.route, "route update");
 
-		Ok(true)
+		let origin = self.origin.clone();
+		let refresh_path = path.clone();
+		let jitter = Duration::from_millis(self.self_origin.id() % 512);
+		web_async::spawn(async move {
+			web_async::time::sleep(jitter).await;
+			origin.refresh_broadcast(&refresh_path);
+		});
+
+		true
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: broadcast::Dynamic) {

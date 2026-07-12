@@ -17,26 +17,48 @@ use crate::{
 
 use super::Version;
 
-/// How often forwarded route costs are re-evaluated (lite-06+). Doubles as the
-/// debounce for cost decreases: activity is detected by polling (a track closing
-/// doesn't wake state watchers), so a hot flip propagates within one tick.
-const COST_TICK: Duration = Duration::from_secs(1);
+/// How often forwarded routes are re-evaluated (lite-05+). In-place route
+/// updates (an upstream repeat announcement, an activity flip) mutate the shared
+/// [`crate::broadcast::Route`] cells without an origin event, so this tick polls
+/// each announced broadcast and re-announces when what we'd advertise diverges
+/// from what the peer last saw. Doubles as the debounce for cost decreases:
+/// activity is detected by polling (a track closing doesn't wake state
+/// watchers), so a hot flip propagates within one tick.
+const ROUTE_TICK: Duration = Duration::from_secs(1);
 
-/// Hold-down before a cost increase is forwarded (lite-06+). Cost increases
+/// Hold-down before a pure cost increase is forwarded (lite-06+). Cost increases
 /// (going cold, an upstream getting more expensive) are damped so viewer churn
 /// doesn't flap routes across the mesh; the increase is re-checked at each tick
-/// and only sent once it has held this long. Decreases forward promptly.
+/// and only sent once it has held this long. Decreases, and any hop-chain
+/// change, forward promptly.
 const COST_INCREASE_HOLDDOWN: Duration = Duration::from_secs(30);
 
-/// One broadcast currently announced to this peer (lite-06+): what's needed to
-/// notice its route cost changed and send an ANNOUNCE_UPDATE.
-struct CostEntry {
+/// One broadcast currently announced to this peer (lite-05+): what's needed to
+/// notice its route changed and re-announce it in place.
+struct RouteEntry {
 	broadcast: crate::broadcast::Consumer,
 	suffix: crate::PathOwned,
-	last_sent: lite::RouteCost,
-	/// When the current divergence from `last_sent` was first observed; the
-	/// hold-down for increases counts from here.
+	/// What the peer last saw, or `None` while the route is suppressed for this
+	/// peer (the chain contains its `exclude_hop` or us, or overflows). A later
+	/// route update can lift the suppression, announcing the path fresh.
+	sent: Option<SentRoute>,
+	/// When the current divergence from `sent` was first observed; the hold-down
+	/// for cost increases counts from here.
 	pending_since: Option<web_async::time::Instant>,
+}
+
+/// One announcement as the peer last saw it: the outgoing hop chain plus, on
+/// lite-06, the route cost.
+#[derive(Clone, PartialEq, Eq)]
+struct SentRoute {
+	hops: OriginList,
+	cost: Option<lite::RouteCost>,
+}
+
+/// The comparable total of an optional wire cost. Only lite-06 carries one;
+/// pre-06 versions always compare `None` vs `None` (equal).
+fn cost_total(cost: &Option<lite::RouteCost>) -> u64 {
+	cost.as_ref().map(lite::RouteCost::total).unwrap_or(0)
 }
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
@@ -233,11 +255,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
 
-		// Broadcasts announced to this peer, keyed by absolute path (lite-06+ only):
-		// the tick below re-evaluates each one's route cost and sends an
-		// ANNOUNCE_UPDATE when it diverges from what the peer last saw.
-		let mut cost_entries: std::collections::HashMap<crate::PathOwned, CostEntry> = std::collections::HashMap::new();
-		let mut cost_tick = web_async::time::interval(COST_TICK);
+		// Broadcasts currently active in the origin, keyed by absolute path
+		// (lite-05+ only): the tick below re-evaluates each one's route and
+		// re-announces it in place when what we'd advertise diverges from what the
+		// peer last saw. Suppressed routes (chain through the peer/us) are tracked
+		// too, so a route update can lift the suppression later.
+		let track_routes = lite::restart_supported(version);
+		let mut route_entries: std::collections::HashMap<crate::PathOwned, RouteEntry> =
+			std::collections::HashMap::new();
+		let mut route_tick = web_async::time::interval(ROUTE_TICK);
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -282,10 +308,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			_ if version.has_announce_ok() => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
-				// stashing suffix+hops+cost so we can both COUNT them for AnnounceOk and
+				// stashing each route so we can both COUNT them for AnnounceOk and
 				// re-send them afterward. The receiver stamps our origin onto each hop
 				// chain, so we forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, OriginList, Option<lite::RouteCost>)> = Vec::new();
+				let mut initial: Vec<(crate::PathOwned, SentRoute)> = Vec::new();
 				while let Some((path, event)) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
@@ -295,41 +321,35 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match event.broadcast() {
 						Some(broadcast) => {
-							let info = broadcast.info();
-							let hops = &info.hops;
 							// Apply the same exclude_hop and reflected-announce skips as the live
-							// loop so the count matches exactly what we send (minus the self push).
-							if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
+							// loop so the count matches exactly what we send. A suppressed route
+							// is still tracked (`sent: None`): a later route update can lift the
+							// suppression and announce it fresh.
+							let desired = Self::desired_route(&broadcast, self_origin, exclude_hop, version, &absolute);
+							route_entries.insert(
+								absolute.clone(),
+								RouteEntry {
+									broadcast: broadcast.clone(),
+									suffix: suffix.clone(),
+									sent: desired.clone(),
+									pending_since: None,
+								},
+							);
+							let Some(desired) = desired else {
 								continue;
-							}
-							if hops.contains(&self_origin) {
-								continue;
-							}
+							};
 							tracing::debug!(broadcast = %absolute, "announce");
 							let guard = stats.broadcast(&absolute).publisher();
 							stats_guards.entry(absolute.clone()).or_insert(guard);
-							let cost = version.has_route_cost().then(|| {
-								let cost = Self::wire_cost(&broadcast);
-								cost_entries.insert(
-									absolute.clone(),
-									CostEntry {
-										broadcast: broadcast.clone(),
-										suffix: suffix.clone(),
-										last_sent: cost,
-										pending_since: None,
-									},
-								);
-								cost
-							});
-							initial.retain(|(s, _, _)| s != &suffix);
-							initial.push((suffix, hops.clone(), cost));
+							initial.retain(|(s, _)| s != &suffix);
+							initial.push((suffix, desired));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
 							tracing::debug!(broadcast = %absolute, "unannounce");
 							stats_guards.remove(&absolute);
-							cost_entries.remove(&absolute);
-							initial.retain(|(s, _, _)| s != &suffix);
+							route_entries.remove(&absolute);
+							initial.retain(|(s, _)| s != &suffix);
 						}
 					}
 				}
@@ -342,11 +362,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				};
 				let mut buf = bytes::BytesMut::new();
 				ok.encode(&mut buf, version)?;
-				for (suffix, hops, cost) in &initial {
+				for (suffix, route) in &initial {
 					lite::AnnounceBroadcast::Active {
 						suffix: suffix.as_path(),
-						hops: hops.clone(),
-						cost: *cost,
+						hops: route.hops.clone(),
+						cost: route.cost,
 					}
 					.encode(&mut buf, version)?;
 				}
@@ -372,28 +392,78 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				res = stream.reader.closed() => return res,
 
-				// Re-evaluate forwarded route costs (lite-06+): activity flips and
-				// upstream cost changes don't re-announce, they mutate the shared cost
-				// cells, so this tick polls each announced broadcast and sends an
-				// ANNOUNCE_UPDATE when the advertised cost diverges. Decreases (going
-				// hot) forward at the next tick; increases hold down (see the constants).
-				_ = cost_tick.tick(), if version.has_route_cost() && !cost_entries.is_empty() => {
-					let mut due: Vec<(crate::PathOwned, lite::RouteCost)> = Vec::new();
-					for entry in cost_entries.values_mut() {
-						let desired = Self::wire_cost(&entry.broadcast);
-						if desired == entry.last_sent {
+				// Re-evaluate forwarded routes (lite-05+): route updates (an upstream
+				// repeat announcement, an activity flip) mutate the shared Route cells
+				// without an origin event, so this tick polls each announced broadcast
+				// and re-announces in place when the route we'd advertise diverges from
+				// what the peer last saw. Hop changes and cost decreases (going hot)
+				// forward at the next tick; pure cost increases hold down (see the
+				// constants). A change can also toggle suppression: a chain that now
+				// avoids (or reaches) the peer flips between announced and unannounced.
+				_ = route_tick.tick(), if track_routes && !route_entries.is_empty() => {
+					// Collect first: sending needs the writer, which the iteration must not hold.
+					let mut due: Vec<(crate::PathOwned, crate::PathOwned, Option<SentRoute>)> = Vec::new();
+					for (absolute, entry) in route_entries.iter_mut() {
+						let desired = Self::desired_route(&entry.broadcast, self_origin, exclude_hop, version, absolute);
+						let send = match (&entry.sent, &desired) {
+							// Unchanged (including still-suppressed): nothing pending.
+							(None, None) => false,
+							(Some(sent), Some(want)) if sent == want => false,
+							// Same chain, different cost: decreases forward promptly (the
+							// tick is the debounce), increases hold down.
+							(Some(sent), Some(want)) if sent.hops == want.hops => {
+								let increase = cost_total(&want.cost) > cost_total(&sent.cost);
+								let since = *entry.pending_since.get_or_insert_with(web_async::time::Instant::now);
+								!increase || since.elapsed() >= COST_INCREASE_HOLDDOWN
+							}
+							// The chain changed, or suppression toggled: the route itself is
+							// different, forward promptly.
+							_ => true,
+						};
+						if send {
+							entry.sent = desired.clone();
 							entry.pending_since = None;
-							continue;
-						}
-						let since = *entry.pending_since.get_or_insert_with(web_async::time::Instant::now);
-						if desired.total() <= entry.last_sent.total() || since.elapsed() >= COST_INCREASE_HOLDDOWN {
-							entry.last_sent = desired;
+							due.push((absolute.clone(), entry.suffix.clone(), desired));
+						} else if entry.sent == desired {
 							entry.pending_since = None;
-							due.push((entry.suffix.clone(), desired));
 						}
 					}
-					for (suffix, cost) in due {
-						stream.writer.encode(&lite::AnnounceBroadcast::Update { suffix: suffix.as_path(), cost }).await?;
+					for (absolute, suffix, desired) in due {
+						// One name-length count per message, mirroring the event arms.
+						stats
+							.broadcast(&absolute)
+							.publisher_announced_bytes(absolute.as_str().len() as u64);
+						match desired {
+							Some(route) => {
+								// A repeat Active replaces the route in place at the receiver
+								// (guaranteed by the `track_routes` gate: lite-05+).
+								stats_guards
+									.entry(absolute.clone())
+									.or_insert_with(|| stats.broadcast(&absolute).publisher());
+								tracing::debug!(broadcast = %absolute, "route update");
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Active {
+										suffix: suffix.as_path(),
+										hops: route.hops.clone(),
+										cost: route.cost,
+									})
+									.await?;
+							}
+							None => {
+								// The chain now loops through the peer (or us): from this
+								// peer's view the broadcast is gone.
+								tracing::debug!(broadcast = %absolute, "route update suppressed; unannouncing");
+								stats_guards.remove(&absolute);
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Ended {
+										suffix: suffix.as_path(),
+										hops: OriginList::new(),
+									})
+									.await?;
+							}
+						}
 					}
 				}
 
@@ -408,8 +478,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 						match event {
 							announce::Event::Active(active) => {
-								let info = active.info();
-								let Some(hops) = Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) else {
+								let desired = Self::desired_route(&active, self_origin, exclude_hop, version, &absolute);
+								if track_routes {
+									route_entries.insert(
+										absolute.clone(),
+										RouteEntry {
+											broadcast: active.clone(),
+											suffix: suffix.clone(),
+											sent: desired.clone(),
+											pending_since: None,
+										},
+									);
+								}
+								// A suppressed route is tracked above but not announced; a route
+								// update lifting the suppression announces it from the tick.
+								let Some(route) = desired else {
 									continue;
 								};
 								tracing::debug!(broadcast = %absolute, "announce");
@@ -419,48 +502,52 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 								let prev = stats_guards.insert(absolute.clone(), bs.publisher());
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								let cost = version.has_route_cost().then(|| {
-									let cost = Self::wire_cost(&active);
-									cost_entries.insert(
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Active {
+										suffix,
+										hops: route.hops.clone(),
+										cost: route.cost,
+									})
+									.await?;
+							}
+							announce::Event::Restart(active) => {
+								// The origin swapped this path's active broadcast (a different
+								// upstream won the route). On lite-05+ that travels as a repeat
+								// ANNOUNCE, which the receiver applies in place; older versions
+								// never defined one, so split it into Ended + Active.
+								let desired = Self::desired_route(&active, self_origin, exclude_hop, version, &absolute);
+								if track_routes {
+									route_entries.insert(
 										absolute.clone(),
-										CostEntry {
+										RouteEntry {
 											broadcast: active.clone(),
 											suffix: suffix.clone(),
-											last_sent: cost,
+											sent: desired.clone(),
 											pending_since: None,
 										},
 									);
-									cost
-								});
-								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost }).await?;
-							}
-							announce::Event::Restart(active) => {
-								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
-								// `Active` for an already-announced path). Older versions never defined
-								// that, so split it into an unannounce followed by a fresh announce.
-								let info = active.info();
-								match Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) {
-									Some(hops) => {
+								}
+								match desired {
+									Some(route) => {
 										tracing::debug!(broadcast = %absolute, "restart");
 										let bs = stats.broadcast(&absolute);
-										let cost = version.has_route_cost().then(|| {
-											let cost = Self::wire_cost(&active);
-											cost_entries.insert(
-												absolute.clone(),
-												CostEntry {
-													broadcast: active.clone(),
-													suffix: suffix.clone(),
-													last_sent: cost,
-													pending_since: None,
-												},
-											);
-											cost
-										});
-										// Continuity: keep the existing stats guard (no close + reopen).
+										// Continuity: keep an existing stats guard (no close + reopen);
+										// a previously-suppressed path gets one now.
+										stats_guards
+											.entry(absolute.clone())
+											.or_insert_with(|| bs.publisher());
 										if lite::restart_supported(version) {
 											// One Active message on the wire, one name-length count.
 											bs.publisher_announced_bytes(absolute.as_str().len() as u64);
-											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost }).await?;
+											stream
+												.writer
+												.encode(&lite::AnnounceBroadcast::Active {
+													suffix,
+													hops: route.hops.clone(),
+													cost: route.cost,
+												})
+												.await?;
 										} else {
 											// Ended + Active pair, so count the name twice.
 											bs.publisher_announced_bytes(2 * absolute.as_str().len() as u64);
@@ -471,7 +558,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 													hops: OriginList::new(),
 												})
 												.await?;
-											stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost }).await?;
+											stream
+												.writer
+												.encode(&lite::AnnounceBroadcast::Active {
+													suffix,
+													hops: route.hops.clone(),
+													cost: route.cost,
+												})
+												.await?;
 										}
 									}
 									None => {
@@ -480,7 +574,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 										stats.broadcast(&absolute)
 											.publisher_announced_bytes(absolute.as_str().len() as u64);
 										stats_guards.remove(&absolute);
-										cost_entries.remove(&absolute);
 										stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 									}
 								}
@@ -492,7 +585,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								stats.broadcast(&absolute)
 									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								stats_guards.remove(&absolute);
-								cost_entries.remove(&absolute);
+								route_entries.remove(&absolute);
 								// An ended announce doesn't need hops; the receiver matches on path only.
 								stream.writer.encode(&lite::AnnounceBroadcast::Ended { suffix, hops: OriginList::new() }).await?;
 							}
@@ -502,6 +595,27 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
+	/// The full route we'd announce for a broadcast right now: the outgoing hop
+	/// chain plus, on lite-06, the route cost. `None` means the route is
+	/// suppressed for this peer (see [`Self::prepare_active_hops`]).
+	fn desired_route(
+		broadcast: &crate::broadcast::Consumer,
+		self_origin: Origin,
+		exclude_hop: u64,
+		version: Version,
+		absolute: &crate::Path,
+	) -> Option<SentRoute> {
+		let hops = Self::prepare_active_hops(
+			broadcast.info().route.hops(),
+			self_origin,
+			exclude_hop,
+			version,
+			absolute,
+		)?;
+		let cost = version.has_route_cost().then(|| Self::wire_cost(broadcast));
+		Some(SentRoute { hops, cost })
+	}
+
 	/// The route cost to advertise for a broadcast right now: the publisher-set
 	/// base plus the accumulated transit, except that a broadcast actively flowing
 	/// through this relay advertises zero transit (marginal-cost routing: the
@@ -509,14 +623,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// new upstream transfer). An unset transit derives from the hop count,
 	/// matching the legacy metric.
 	fn wire_cost(broadcast: &crate::broadcast::Consumer) -> lite::RouteCost {
-		let info = broadcast.info();
+		let route = &broadcast.info().route;
 		let transit = if broadcast.is_active() {
 			0
 		} else {
-			info.cost.transit().unwrap_or(info.hops.len() as u64)
+			route.transit().unwrap_or(route.hops().len() as u64)
 		};
 		lite::RouteCost {
-			base: info.cost.base(),
+			base: route.base(),
 			transit,
 		}
 	}
@@ -526,7 +640,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Returns `None` when the announce should be skipped: the peer asked us to exclude it
 	/// (`exclude_hop`), it already passed through us (reflected loop), or the hop chain is full.
 	fn prepare_active_hops(
-		hops: &OriginList,
+		mut hops: OriginList,
 		self_origin: Origin,
 		exclude_hop: u64,
 		version: Version,
@@ -540,7 +654,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tracing::debug!(broadcast = %absolute, "skipping reflected announce");
 			return None;
 		}
-		let mut hops = hops.clone();
 		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
 		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
 		// chain is full.

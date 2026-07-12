@@ -12,12 +12,12 @@ pub enum Version {
 	/// SUBSCRIBE_OK/FETCH_OK. Advertised over ALPN and the preferred version in the
 	/// default version sets.
 	Lite05,
-	/// Work-in-progress lite-06. Adds the route cost carried on ANNOUNCE_BROADCAST
-	/// (a `base` set by the original publisher plus a `transit` accumulated per
-	/// link, replacing hop-count as the routing metric) and the ANNOUNCE_UPDATE
-	/// status that mutates a live announcement's cost in place. Not included in the
-	/// default version sets; endpoints opt in explicitly (e.g. a relay mesh) until
-	/// lite-06 ships.
+	/// Work-in-progress lite-06. Adds the route cost carried on ANNOUNCE_BROADCAST:
+	/// a `base` set by the original publisher plus a `transit` accumulated per
+	/// link, replacing hop-count as the routing metric. A repeat announcement
+	/// updates a live announcement's route (hops + cost) in place. Not included in
+	/// the default version sets; endpoints opt in explicitly (e.g. a relay mesh)
+	/// until lite-06 ships.
 	Lite06Wip,
 }
 
@@ -73,10 +73,11 @@ impl Version {
 	}
 
 	/// Whether announcements carry a route cost (ANNOUNCE_BROADCAST's `base` +
-	/// `transit` fields and the ANNOUNCE_UPDATE status). Added in lite-06 (WIP):
-	/// routing selects the lowest accumulated cost instead of the shortest hop
-	/// chain, letting relays advertise per-link costs and reset the transit cost
-	/// while actively carrying a broadcast (cache-aware routing).
+	/// `transit` fields). Added in lite-06 (WIP): routing selects the lowest
+	/// accumulated cost instead of the shortest hop chain, letting relays
+	/// advertise per-link costs and reset the transit cost while actively
+	/// carrying a broadcast (cache-aware routing). A repeat announcement updates
+	/// the route in place; nothing downstream is torn down.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_route_cost(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).

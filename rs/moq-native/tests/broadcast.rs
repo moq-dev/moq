@@ -556,28 +556,34 @@ async fn broadcast_moq_lite_05_default_timescale() {
 /// Lite06 route costs end-to-end: the announce carries the publisher's base
 /// cost, the receiver adds its configured link cost, a cold broadcast (no
 /// consumers) advertises its hop-derived transit, and flips (going hot, a base
-/// cost change) propagate as ANNOUNCE_UPDATEs that mutate the receiver's shared
-/// cost cell in place, without re-announcing.
+/// cost change) propagate as repeat announcements that replace the receiver's
+/// shared route in place, without tearing down the broadcast. A route swap at
+/// the server (a better broadcast replacing the active one) also arrives as an
+/// in-place update: the receiver's broadcast handle sees the new hops and its
+/// in-flight subscription keeps working.
 async fn lite06_route_cost(scheme: &str) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 
 	// A hot source: a live track producer means the broadcast is actively
 	// flowing, so its transit advertises as zero (marginal cost).
-	let hot = moq_net::broadcast::Info::new().with_cost_base(7).produce();
+	let hot = moq_net::broadcast::Info::new().produce();
+	hot.info().route.set_cost(7, None);
 	let mut hot_track = hot.clone().create_track("video", None).expect("create track");
 	let hot_publish = pub_origin.publish_broadcast("hot", &hot).expect("publish hot");
 
 	// A cold source: synthetic hops, no tracks. Its transit derives from the hop
 	// count (the legacy metric), carried explicitly on the lite-06 wire.
 	let mut cold_info = moq_net::broadcast::Info::new();
-	cold_info.hops = moq_net::OriginList::try_from(
-		[42u64, 43, 44]
-			.into_iter()
-			.map(|id| moq_net::Origin::new(id).unwrap())
-			.collect::<Vec<_>>(),
-	)
-	.unwrap();
+	cold_info.route = moq_net::broadcast::Route::new(
+		moq_net::OriginList::try_from(
+			[42u64, 43, 44]
+				.into_iter()
+				.map(|id| moq_net::Origin::new(id).unwrap())
+				.collect::<Vec<_>>(),
+		)
+		.unwrap(),
+	);
 	let cold = cold_info.produce();
 	let cold_publish = pub_origin.publish_broadcast("cold", &cold).expect("publish cold");
 
@@ -604,19 +610,43 @@ async fn lite06_route_cost(scheme: &str) {
 	// Client-driven triggers so the test has no timing races.
 	let (flip_base_tx, flip_base_rx) = tokio::sync::oneshot::channel::<()>();
 	let (go_hot_tx, go_hot_rx) = tokio::sync::oneshot::channel::<()>();
+	let (warm_tx, warm_rx) = tokio::sync::oneshot::channel::<()>();
+	let (swap_tx, swap_rx) = tokio::sync::oneshot::channel::<()>();
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
-		// On the first trigger, drop the hot source's base cost 7 -> 2. The cost
-		// cell is shared, so the session's cost tick notices and sends an update.
+		// On the first trigger, drop the hot source's base cost 7 -> 2. The route
+		// is shared, so the session's route tick notices and re-announces in place.
 		flip_base_rx.await.expect("flip trigger dropped");
-		hot.info().cost.set(2, None);
+		hot.info().route.set_cost(2, None);
 
 		// On the second trigger, the cold source goes hot: a live track producer.
 		go_hot_rx.await.expect("go-hot trigger dropped");
 		let _cold_track = cold.clone().create_track("audio", None).expect("create track");
+
+		// On the third trigger, write a frame so the client can prove its
+		// subscription is live end-to-end BEFORE the route swap (the group stays
+		// open across it).
+		warm_rx.await.expect("warm trigger dropped");
+		let mut group = hot_track.append_group().expect("append group");
+		group.write_frame_now(&b"before"[..]).expect("write frame");
+
+		// On the fourth trigger, a cheaper broadcast replaces "hot" at the origin
+		// (a route swap, i.e. a restart at this relay). Downstream it travels as a
+		// repeat announcement applied in place; the client's existing subscription
+		// stays fed by the ORIGINAL producer, so prove the old data plane still
+		// flows by writing a second frame after the swap.
+		swap_rx.await.expect("swap trigger dropped");
+		let mut repl_info = moq_net::broadcast::Info::new();
+		repl_info.route = moq_net::broadcast::Route::new(
+			moq_net::OriginList::try_from(vec![moq_net::Origin::new(1000).unwrap()]).unwrap(),
+		);
+		let repl = repl_info.produce();
+		let _repl_publish = pub_origin.publish_broadcast("hot", &repl).expect("publish replacement");
+		group.write_frame_now(&b"still flowing"[..]).expect("write frame");
+		group.finish().expect("finish group");
 
 		let _keep = (&hot_track, &hot_publish, &cold_publish);
 		let _ = session.closed().await;
@@ -650,21 +680,20 @@ async fn lite06_route_cost(scheme: &str) {
 
 	// Hot source: base 7 forwarded unchanged; transit 0 (actively flowing) plus
 	// our link cost of 3.
-	assert_eq!(hot_bc.info().cost.base(), 7);
-	assert_eq!(hot_bc.info().cost.transit(), Some(3));
+	assert_eq!(hot_bc.info().route.base(), 7);
+	assert_eq!(hot_bc.info().route.transit(), Some(3));
 
 	// Cold source: no base; transit is its hop count (3) plus our link cost (3).
-	assert_eq!(cold_bc.info().cost.base(), 0);
-	assert_eq!(cold_bc.info().cost.transit(), Some(6));
+	assert_eq!(cold_bc.info().route.base(), 0);
+	assert_eq!(cold_bc.info().route.transit(), Some(6));
 
-	// Await one cost cell reaching the expected value: updates arrive on the
-	// publisher's cost tick (~1s) plus receiver-side jitter, in place, with no
-	// re-announce.
+	// Await one route reaching the expected cost: updates arrive on the
+	// publisher's route tick (~1s), in place, with no origin event.
 	async fn wait_cost(bc: &moq_net::broadcast::Consumer, base: u64, transit: Option<u64>) {
 		tokio::time::timeout(TIMEOUT, async {
 			loop {
-				let cost = &bc.info().cost;
-				if cost.base() == base && cost.transit() == transit {
+				let route = &bc.info().route;
+				if route.base() == base && route.transit() == transit {
 					return;
 				}
 				tokio::time::sleep(Duration::from_millis(50)).await;
@@ -673,8 +702,8 @@ async fn lite06_route_cost(scheme: &str) {
 		.await
 		.unwrap_or_else(|_| {
 			panic!(
-				"cost never reached base={base} transit={transit:?}; last was {:?}",
-				bc.info().cost
+				"route never reached base={base} transit={transit:?}; last was {:?}",
+				bc.info().route
 			)
 		});
 	}
@@ -687,8 +716,55 @@ async fn lite06_route_cost(scheme: &str) {
 	go_hot_tx.send(()).expect("server task gone");
 	wait_cost(&cold_bc, 0, Some(3)).await;
 
-	// No re-announces happened: the updates mutated the existing broadcasts.
-	assert!(announcements.try_next().is_none(), "cost updates must not re-announce");
+	// Subscribe BEFORE the route swap so continuity is observable across it, and
+	// warm the subscription with a pre-swap frame: a SUBSCRIBE that only reached
+	// the server after the swap would (correctly) resolve the replacement instead.
+	let mut video = hot_bc
+		.track("video")
+		.expect("track")
+		.subscribe(None)
+		.await
+		.expect("subscribe");
+	warm_tx.send(()).expect("server task gone");
+	let mut group = tokio::time::timeout(TIMEOUT, video.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&*frame, b"before");
+
+	// A cheaper broadcast replaces "hot" at the server (an origin route swap).
+	// It arrives here as an in-place update on the SAME broadcast handle: the
+	// hops change under us, with no unannounce/announce and no teardown.
+	swap_tx.send(()).expect("server task gone");
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let hops = hot_bc.info().route.hops();
+			if hops.iter().next().map(|o| o.id()) == Some(1000) {
+				return;
+			}
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("route swap never arrived");
+
+	// The in-flight subscription rides the original producer, undisturbed: the
+	// frame written after the swap arrives in the same open group.
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed by the route swap");
+	assert_eq!(&*frame, b"still flowing");
+
+	// No re-announces happened: every route change was applied in place.
+	assert!(announcements.try_next().is_none(), "route updates must not re-announce");
 
 	drop(session);
 	server_handle

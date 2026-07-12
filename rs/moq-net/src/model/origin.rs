@@ -332,7 +332,7 @@ struct OriginBroadcast {
 
 /// Ordering key used to pick the active route among broadcasts at the same path.
 ///
-/// Lower wins. The cheapest route cost sorts first ([`broadcast::Cost::total`]:
+/// Lower wins. The cheapest route cost sorts first ([`broadcast::Route::cost`]:
 /// the publisher's base cost plus the accumulated per-link transit cost, which
 /// defaults to the hop count when no wire cost was carried, so pre-lite-06 routes
 /// order by shortest hop chain exactly as before); remaining ties break on a
@@ -353,13 +353,13 @@ fn route_key(name: &Path, info: &broadcast::Info) -> (u64, u64) {
 	for &byte in name.as_str().as_bytes() {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
-	for hop in &info.hops {
+	for hop in &info.route.hops() {
 		for &byte in &hop.id().to_le_bytes() {
 			hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 		}
 	}
 
-	(info.cost.total(info.hops.len()), hash)
+	(info.route.cost(), hash)
 }
 
 /// One coalesced update queued for an `AnnounceConsumer`.
@@ -976,7 +976,7 @@ impl Producer {
 		// Callers must filter reflections (a hop chain already containing our id) before publishing;
 		// relays do this on the announce path. Re-announcing one here would form a routing loop.
 		debug_assert!(
-			!broadcast.info().hops.contains(&self.info),
+			!broadcast.info().route.contains(&self.info),
 			"publish_broadcast called with a looping hop chain",
 		);
 
@@ -1000,12 +1000,12 @@ impl Producer {
 	}
 
 	/// Re-evaluate the active route for `path` after a broadcast's
-	/// [`cost`](broadcast::Info::cost) changed: if a backup route now orders below
-	/// the active one, promote it and emit a restart (the same swap a
-	/// better-ordered [`Self::publish_broadcast`] performs). Costs are read at
-	/// comparison time, so callers mutate the shared [`broadcast::Cost`] first and
-	/// then call this. Returns whether the active route changed; unknown paths and
-	/// unchanged winners are a no-op.
+	/// [`route`](broadcast::Info::route) changed: if a backup route now orders
+	/// below the active one, promote it and emit a restart (the same swap a
+	/// better-ordered [`Self::publish_broadcast`] performs). Routes are read at
+	/// comparison time, so callers mutate the shared [`broadcast::Route`] first
+	/// and then call this. Returns whether the active route changed; unknown
+	/// paths and unchanged winners are a no-op.
 	pub fn refresh_broadcast(&self, path: impl AsPath) -> bool {
 		let path = path.as_path();
 		let Some((node, rest)) = self.nodes.get(&path) else {
@@ -2124,7 +2124,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
-			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			route: broadcast::Route::new(OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap()),
 			..Default::default()
 		}
 		.produce();
@@ -2146,7 +2146,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
-			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+			route: broadcast::Route::new(OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap()),
 			..Default::default()
 		}
 		.produce();
@@ -2199,7 +2199,7 @@ mod tests {
 			)
 			.unwrap();
 			broadcast::Info {
-				hops,
+				route: broadcast::Route::new(hops),
 				..Default::default()
 			}
 			.produce()
@@ -2212,7 +2212,7 @@ mod tests {
 			let b = route(second);
 			origin.publish_broadcast_spawn("test", a.consume());
 			origin.publish_broadcast_spawn("test", b.consume());
-			let hops = origin.consume().get_broadcast("test").unwrap().info().hops.clone();
+			let hops = origin.consume().get_broadcast("test").unwrap().info().route.hops();
 			// Keep the producers alive until after we read the active route.
 			drop((a, b));
 			hops
@@ -2235,7 +2235,7 @@ mod tests {
 	async fn test_cost_beats_hops() {
 		tokio::time::pause();
 
-		fn route(ids: &[u64], cost: broadcast::Cost) -> broadcast::Producer {
+		fn route(ids: &[u64], base: u64, transit: Option<u64>) -> broadcast::Producer {
 			let hops = OriginList::try_from(
 				ids.iter()
 					.copied()
@@ -2243,9 +2243,10 @@ mod tests {
 					.collect::<Vec<_>>(),
 			)
 			.unwrap();
+			let route = broadcast::Route::new(hops);
+			route.set_cost(base, transit);
 			broadcast::Info {
-				hops,
-				cost,
+				route,
 				..Default::default()
 			}
 			.produce()
@@ -2253,24 +2254,28 @@ mod tests {
 
 		let origin = Origin::random().produce();
 		// One hop, default cost -> total 1.
-		let short = route(&[10], broadcast::Cost::default());
+		let short = route(&[10], 0, None);
 		// Two hops, but a hot upstream reset the transit to zero -> total 0.
-		let hot = route(&[20, 30], broadcast::Cost::new(0, Some(0)));
+		let hot = route(&[20, 30], 0, Some(0));
 
 		origin.publish_broadcast_spawn("test", short.consume());
 		origin.publish_broadcast_spawn("test", hot.consume());
 
 		let active = origin.consume().get_broadcast("test").unwrap();
-		assert_eq!(active.info().hops.len(), 2, "the cheaper (hot) route must win");
+		assert_eq!(active.info().route.hops().len(), 2, "the cheaper (hot) route must win");
 
 		// A publisher-set base cost penalizes a source regardless of distance.
 		let origin = Origin::random().produce();
-		let near_penalized = route(&[10], broadcast::Cost::new(10, Some(0)));
-		let far = route(&[20, 30], broadcast::Cost::new(0, Some(2)));
+		let near_penalized = route(&[10], 10, Some(0));
+		let far = route(&[20, 30], 0, Some(2));
 		origin.publish_broadcast_spawn("test", near_penalized.consume());
 		origin.publish_broadcast_spawn("test", far.consume());
 		let active = origin.consume().get_broadcast("test").unwrap();
-		assert_eq!(active.info().hops.len(), 2, "base cost must count against the route");
+		assert_eq!(
+			active.info().route.hops().len(),
+			2,
+			"base cost must count against the route"
+		);
 
 		drop((short, hot, near_penalized, far));
 	}
@@ -2285,19 +2290,23 @@ mod tests {
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
 
+		let near_route = broadcast::Route::new(OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap());
+		near_route.set_cost(0, Some(1));
 		let near = broadcast::Info {
-			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
-			cost: broadcast::Cost::new(0, Some(1)),
+			route: near_route,
 			..Default::default()
 		}
 		.produce();
+		let far_route = broadcast::Route::new(
+			OriginList::try_from(vec![Origin::new(2u64).unwrap(), Origin::new(3u64).unwrap()]).unwrap(),
+		);
+		far_route.set_cost(0, Some(2));
 		let far = broadcast::Info {
-			hops: OriginList::try_from(vec![Origin::new(2u64).unwrap(), Origin::new(3u64).unwrap()]).unwrap(),
-			cost: broadcast::Cost::new(0, Some(2)),
+			route: far_route,
 			..Default::default()
 		}
 		.produce();
-		let far_cost = far.info().cost.clone();
+		let far_cost = far.info().route.clone();
 
 		origin.publish_broadcast_spawn("test", near.consume());
 		origin.publish_broadcast_spawn("test", far.consume());
@@ -2308,19 +2317,19 @@ mod tests {
 		announced.assert_next_wait();
 
 		// The far route goes hot upstream (transit reset to 0): now cheaper.
-		far_cost.set(0, Some(0));
+		far_cost.set_cost(0, Some(0));
 		assert!(origin.refresh_broadcast("test"));
 		announced.assert_next_restart("test", &far.consume());
 
 		// It cools back down: the near route wins again.
-		far_cost.set(0, Some(2));
+		far_cost.set_cost(0, Some(2));
 		assert!(origin.refresh_broadcast("test"));
 		announced.assert_next_restart("test", &near.consume());
 
 		// At an equal cost the deterministic hash tie-break decides (same rule as
 		// publish, so every node converges); either way a second refresh with no
 		// further change is a no-op.
-		far_cost.set(0, Some(1));
+		far_cost.set_cost(0, Some(1));
 		origin.refresh_broadcast("test");
 		assert!(!origin.refresh_broadcast("test"));
 

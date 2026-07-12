@@ -7,31 +7,56 @@ use std::{
 
 use crate::Error;
 
-use super::{OriginList, WeakCache};
+use super::{Origin, OriginList, WeakCache};
 
-/// The mutable route cost of a broadcast, shared by every clone of its
-/// producer/consumer (they all hold the same [`Info`]).
+/// The route a broadcast was announced over: its hop chain plus its cost.
 ///
-/// The hop chain is immutable for a broadcast's lifetime; the cost is the one
-/// dynamic routing input, updated in place (via lite-06 ANNOUNCE_UPDATE) without
-/// re-announcing. `base` is set by the original publisher and forwarded
-/// unchanged; `transit` accumulates per-link costs along the route and is reset
-/// to zero by a relay actively carrying the broadcast (its upstream path is
-/// already paid for). A `transit` of `None` means "derive from the hop count",
-/// which keeps pre-lite-06 sessions and plain local publishes on the legacy
-/// shortest-hop-chain ordering.
+/// Shared by every clone of the broadcast's producer/consumer (they all hold the
+/// same [`Info`]) and mutable in place: a repeat announcement for an
+/// already-announced path replaces the route without replacing the broadcast, so
+/// nothing downstream is torn down. That is safe by construction: an
+/// announcement rides a session, so a route update never changes which peer the
+/// media comes from, only the advertised path and cost beyond that peer.
+/// Routing re-ranks on update ([`crate::origin::Producer::refresh_broadcast`]);
+/// in-flight subscriptions keep flowing and end only with their data source.
+///
+/// The cost is the metric routing minimizes. `base` is set by the original
+/// publisher and forwarded unchanged: a standing penalty (or, at zero, a
+/// preference) for using this source at all. `transit` accumulates per-link
+/// costs along the route and is reset to zero by a relay actively carrying the
+/// broadcast (its upstream path is already paid for). An unset `transit`
+/// derives from the hop count, which keeps pre-lite-06 sessions and plain local
+/// publishes on the legacy shortest-hop-chain ordering.
 #[derive(Clone, Default)]
-pub struct Cost(kio::Producer<CostState>);
+pub struct Route(kio::Producer<RouteState>);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct CostState {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RouteState {
+	hops: OriginList,
 	base: u64,
 	transit: Option<u64>,
 }
 
-impl Cost {
-	pub fn new(base: u64, transit: Option<u64>) -> Self {
-		Self(kio::Producer::new(CostState { base, transit }))
+impl Route {
+	/// A route with the given hop chain, no base cost, and a hop-derived transit.
+	pub fn new(hops: OriginList) -> Self {
+		Self(kio::Producer::new(RouteState {
+			hops,
+			base: 0,
+			transit: None,
+		}))
+	}
+
+	/// The chain of origins the broadcast has traversed (a snapshot). Each relay
+	/// appends its own [`crate::Origin`] when forwarding; the chain is used for
+	/// loop detection and route identity.
+	pub fn hops(&self) -> OriginList {
+		self.0.read().hops.clone()
+	}
+
+	/// True if the hop chain contains `origin` (the loop check), without cloning.
+	pub fn contains(&self, origin: &Origin) -> bool {
+		self.0.read().hops.contains(origin)
 	}
 
 	/// The publisher-set base cost, forwarded unchanged along the route.
@@ -44,26 +69,38 @@ impl Cost {
 		self.0.read().transit
 	}
 
-	/// Replace both components, waking any watcher polling for a change.
-	pub fn set(&self, base: u64, transit: Option<u64>) {
+	/// The value routing compares: `base + transit`, saturating, with an unset
+	/// transit derived from the hop count, so a broadcast that never carried a
+	/// wire cost orders exactly as it did before lite-06.
+	pub fn cost(&self) -> u64 {
+		let state = self.0.read();
+		state
+			.base
+			.saturating_add(state.transit.unwrap_or(state.hops.len() as u64))
+	}
+
+	/// Replace the whole route (a repeat announcement), waking any watcher.
+	pub fn set(&self, hops: OriginList, base: u64, transit: Option<u64>) {
 		if let Ok(mut state) = self.0.write() {
-			*state = CostState { base, transit };
+			*state = RouteState { hops, base, transit };
 		}
 	}
 
-	/// The value routing compares: `base + transit`, saturating, with an unset
-	/// transit derived from the hop count (`hops_len`), so a broadcast that never
-	/// carried a wire cost orders exactly as it did before lite-06.
-	pub fn total(&self, hops_len: usize) -> u64 {
-		let state = self.0.read();
-		state.base.saturating_add(state.transit.unwrap_or(hops_len as u64))
+	/// Update only the cost, keeping the hop chain (e.g. a publisher flipping its
+	/// base cost, or a relay applying an upstream cost update).
+	pub fn set_cost(&self, base: u64, transit: Option<u64>) {
+		if let Ok(mut state) = self.0.write() {
+			state.base = base;
+			state.transit = transit;
+		}
 	}
 }
 
-impl std::fmt::Debug for Cost {
+impl std::fmt::Debug for Route {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let state = self.0.read();
-		f.debug_struct("Cost")
+		f.debug_struct("Route")
+			.field("hops", &state.hops)
 			.field("base", &state.base)
 			.field("transit", &state.transit)
 			.finish()
@@ -73,17 +110,13 @@ impl std::fmt::Debug for Cost {
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Info {
-	/// The chain of origins the broadcast has traversed. Each relay appends its own
-	/// [`crate::Origin`] when forwarding, so the list is used for loop detection.
-	/// Immutable for the broadcast's lifetime.
-	pub hops: OriginList,
-
-	/// The route cost, the metric routing minimizes (see [`Cost`]). Shared and
-	/// mutable: an ANNOUNCE_UPDATE flips it in place without re-announcing.
-	pub cost: Cost,
+	/// The route this broadcast was announced over: hop chain + cost, the inputs
+	/// to route selection. Shared and mutable: a repeat announcement updates it
+	/// in place without replacing the broadcast (see [`Route`]).
+	pub route: Route,
 
 	/// The origin this broadcast belongs to (its identity, and the cache pool its
 	/// tracks and groups inherit). A track reaches its pool by walking up this link,
@@ -93,32 +126,14 @@ pub struct Info {
 	pub origin: super::origin::Info,
 }
 
-impl Default for Info {
-	fn default() -> Self {
-		Self {
-			hops: OriginList::new(),
-			cost: Cost::default(),
-			origin: super::origin::Info::default(),
-		}
-	}
-}
-
 impl Info {
 	/// Create a new broadcast with an empty hop chain.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Set the publisher-side base cost: a standing penalty (or, at zero, a
-	/// preference) applied to this source wherever the broadcast is routed,
-	/// independent of distance. Forwarded unchanged along the route.
-	pub fn with_cost_base(self, base: u64) -> Self {
-		self.cost.set(base, self.cost.transit());
-		self
-	}
-
 	/// Consume this [Info] to create a producer that carries its metadata
-	/// (including the hop chain).
+	/// (including the route).
 	///
 	/// Keep the returned [`Producer`] alive for as long as the broadcast should stay
 	/// available, and end it with [`Producer::close`]. See the note on [`Producer`].

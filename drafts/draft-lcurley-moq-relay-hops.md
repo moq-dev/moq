@@ -214,7 +214,7 @@ When every Link Cost is 1 and no relay applies the marginal-cost rule below, the
 The transit cost a relay advertises depends on what it is currently serving.
 A relay that is **actively forwarding** a broadcast (it holds a live subscription to it on behalf of some downstream receiver) MUST advertise a Transit Cost of **zero** for that broadcast when forwarding, because a further downstream receiver pulling through it costs nothing new upstream: the media is already in flight.
 This is a marginal-cost signal, not a total-cost one, and it is what lets a mesh converge onto shared paths — cache-aware routing — rather than each receiver independently opening its own expensive path to the origin.
-Because the signal changes as subscriptions come and go, the cost of a live advertisement can change during its lifetime; see [Cost Updates](#cost-updates).
+Because the signal changes as subscriptions come and go, the cost of a live advertisement can change during its lifetime; see [Route Updates](#route-updates).
 
 
 # ROUTE_COST Parameter {#route_cost-parameter}
@@ -250,12 +250,14 @@ When a relay forwards a namespace advertisement downstream on a session that neg
 A relay MUST NOT decrease the Base Cost, and MUST NOT decrease the Transit Cost except by the marginal-cost rule (setting it to 0 while actively forwarding).
 These bounds ensure that a relay cannot make a competing path look arbitrarily cheap.
 
-## Cost Updates
-Unlike the HOP_PATH, which is fixed for the lifetime of an advertisement, the route cost can change while the advertisement is live: the marginal-cost signal flips as the relay starts or stops actively forwarding the broadcast, and an upstream cost change propagates hop by hop.
+## Route Updates
+A live advertisement's route can change: the marginal-cost signal flips as the relay starts or stops actively forwarding the broadcast, an upstream cost change propagates hop by hop, and the path beyond the sender can be rerouted entirely (a new HOP_PATH).
 
-An endpoint MAY update the cost of a live advertisement by re-advertising the namespace with an updated ROUTE_COST; the re-advertisement replaces the prior one per the namespace-advertisement semantics of {{moqt}}.
-Because re-advertising resends the whole advertisement (and, downstream, may interrupt in-flight subscriptions that depend on it), a profile of this extension MAY instead define a lightweight cost-only update that carries just the namespace and a new ROUTE_COST, leaving the rest of the advertisement (including the HOP_PATH) untouched.
-Such an update MUST NOT change any field other than the route cost; a receiver applies it by replacing the stored cost and re-evaluating [Path Selection](#path-selection), without treating the advertisement as withdrawn and re-announced.
+An endpoint updates a live advertisement by re-advertising the namespace with the new HOP_PATH and ROUTE_COST; the re-advertisement replaces the prior one per the namespace-advertisement semantics of {{moqt}}.
+A receiver applies the update **in place**: it replaces the stored route and re-evaluates [Path Selection](#path-selection), without treating the advertisement as withdrawn and re-announced.
+Crucially, a route update MUST NOT interrupt existing subscriptions that ride the advertisement: the advertisement arrived on a session, so an update never changes which peer the media comes from — only the advertised path and cost beyond that peer.
+An in-flight subscription keeps flowing from wherever it is already fed and ends only with its data source; only new subscriptions resolve against the updated route.
+(If the updated HOP_PATH now contains the receiver's own Hop ID, the route has become a loop from its perspective and the receiver treats the update as a withdrawal instead.)
 
 An endpoint SHOULD damp cost updates so that transient subscription churn does not cause a storm of updates or route flapping:
 
@@ -274,7 +276,7 @@ This is analogous to how BGP confederations hide internal AS topology while pres
 
 Because a relay only ever appends to HOP_PATH, it cannot make a competing path appear shorter than it is; the worst a misbehaving relay can do is under-report the upstream portion of its own path to win an advisory tie-break. Since path selection is advisory, the impact is limited to a suboptimal path choice. A receiver MUST NOT make security decisions based on Hop IDs, and SHOULD corroborate path selection with locally measured signals (e.g. RTT) when it matters.
 
-The route cost has the same shape of exposure and abuse. The advertised cost can leak the coarse cost structure of a deployment; a relay that wishes to hide it MAY normalize the cost (for example, collapse the transit accumulated within its own administrative domain into a single value) before forwarding across a trust boundary. Because a relay may only increase the Base and Transit Costs — never decrease them, except by the well-defined marginal-cost rule — a misbehaving relay cannot make a competing path look arbitrarily cheap; the worst it can do is under-report its own transit (claim to be actively forwarding when it is not) to win an advisory tie-break, at most steering traffic onto a suboptimal but still loop-free path. A relay MUST bound the rate at which it acts on [Cost Updates](#cost-updates) so that a peer flapping an advertisement's cost cannot force unbounded re-evaluation or a storm of downstream updates.
+The route cost has the same shape of exposure and abuse. The advertised cost can leak the coarse cost structure of a deployment; a relay that wishes to hide it MAY normalize the cost (for example, collapse the transit accumulated within its own administrative domain into a single value) before forwarding across a trust boundary. Because a relay may only increase the Base and Transit Costs — never decrease them, except by the well-defined marginal-cost rule — a misbehaving relay cannot make a competing path look arbitrarily cheap; the worst it can do is under-report its own transit (claim to be actively forwarding when it is not) to win an advisory tie-break, at most steering traffic onto a suboptimal but still loop-free path. A relay MUST bound the rate at which it acts on [Route Updates](#route-updates) so that a peer flapping an advertisement's cost cannot force unbounded re-evaluation or a storm of downstream updates.
 
 
 # IANA Considerations

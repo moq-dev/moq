@@ -5,9 +5,9 @@ use crate::{Origin, OriginList, Path, coding::*};
 use super::{Message, Version};
 
 /// Whether the negotiated version carries restart (REANNOUNCE) semantics: a duplicate ANNOUNCE
-/// (and the draft's explicit `restart` status) for an already-announced path. Older versions never
-/// defined this, so we neither send nor interpret it there; a restart is sent as an unannounce
-/// followed by a fresh announce instead.
+/// (and the draft's explicit `restart` status) for an already-announced path, replacing the prior
+/// announcement's route in place. Older versions never defined this, so we neither send nor
+/// interpret it there; a route change is sent as an unannounce followed by a fresh announce.
 pub fn restart_supported(version: Version) -> bool {
 	// Explicitly list older versions so future versions default to supported.
 	!matches!(
@@ -54,11 +54,14 @@ impl Encode<Version> for RouteCost {
 	}
 }
 
-/// ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast,
-/// or (lite-06+) to update a live announcement's route cost in place.
+/// ANNOUNCE_BROADCAST: sent by the publisher to advertise (or retract) a broadcast.
 ///
 /// Carries the broadcast path suffix and the hop chain, plus the route cost on
-/// lite-06+. Renamed from ANNOUNCE in lite-05.
+/// lite-06+. Renamed from ANNOUNCE in lite-05. A repeat `Active` for an
+/// already-announced path replaces the prior announcement's route (hops + cost)
+/// in place; the receiver updates its stored route and re-ranks, without tearing
+/// down the broadcast or any subscription riding it (the data still comes from
+/// this same session either way).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
 	Active {
@@ -72,31 +75,12 @@ pub enum AnnounceBroadcast<'a> {
 		suffix: Path<'a>,
 		hops: OriginList,
 	},
-	/// ANNOUNCE_UPDATE (lite-06+): mutate a live announcement's route cost without
-	/// re-announcing. The hop chain is immutable for an announcement's lifetime;
-	/// cost is the only dynamic field, so a hot/cold flip travels as this small
-	/// message instead of an Ended+Active pair (which would abort in-flight
-	/// subscriptions downstream).
-	Update {
-		suffix: Path<'a>,
-		cost: RouteCost,
-	},
 }
 
 impl Message for AnnounceBroadcast<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
-
-		// ANNOUNCE_UPDATE carries no hop chain: the chain is immutable for the
-		// announcement's lifetime, only the cost changes.
-		if let AnnounceStatus::Update = status {
-			if !version.has_route_cost() {
-				return Err(DecodeError::InvalidValue);
-			}
-			let cost = RouteCost::decode(r, version)?;
-			return Ok(Self::Update { suffix, cost });
-		}
 
 		let hops = match version {
 			Version::Lite01 | Version::Lite02 => OriginList::new(),
@@ -125,12 +109,11 @@ impl Message for AnnounceBroadcast<'_> {
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// We encode a restart as a duplicate ANNOUNCE (a second `Active`), but on versions that
 			// support restart we also accept the draft's explicit `restart` status and treat it the
-			// same. For an already-announced path the subscriber turns it into a restart; for an
-			// unknown path it's a fresh announce. Older versions never defined this status, so it's
-			// an invalid value there.
+			// same. For an already-announced path the subscriber turns it into a route update; for
+			// an unknown path it's a fresh announce. Older versions never defined this status, so
+			// it's an invalid value there.
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops, cost },
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
-			AnnounceStatus::Update => unreachable!("handled above"),
 		})
 	}
 
@@ -149,14 +132,6 @@ impl Message for AnnounceBroadcast<'_> {
 				AnnounceStatus::Ended.encode(w, version)?;
 				suffix.encode(w, version)?;
 				encode_hops(w, version, hops)?;
-			}
-			Self::Update { suffix, cost } => {
-				if !version.has_route_cost() {
-					return Err(EncodeError::Version);
-				}
-				AnnounceStatus::Update.encode(w, version)?;
-				suffix.encode(w, version)?;
-				cost.encode(w, version)?;
 			}
 		}
 
@@ -214,8 +189,6 @@ enum AnnounceStatus {
 	/// The draft's explicit restart status. We never encode it (a restart goes out as a duplicate
 	/// `Active`), but we accept it on decode for forward/cross-compatibility.
 	Restart = 2,
-	/// ANNOUNCE_UPDATE (lite-06+): a route-cost update for a live announcement.
-	Update = 3,
 }
 
 impl Decode<Version> for AnnounceStatus {
@@ -413,10 +386,6 @@ mod tests {
 				suffix: suffix.to_owned(),
 				hops,
 			},
-			AnnounceBroadcast::Update { suffix, cost } => AnnounceBroadcast::Update {
-				suffix: suffix.to_owned(),
-				cost,
-			},
 		}
 	}
 
@@ -483,12 +452,6 @@ mod tests {
 			cost: Some(RouteCost { base: 10, transit: 3 }),
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite06Wip), msg);
-
-		let update = AnnounceBroadcast::Update {
-			suffix: Path::new("room/cam"),
-			cost: RouteCost { base: 0, transit: 2 },
-		};
-		assert_eq!(broadcast_round_trip(&update, Version::Lite06Wip), update);
 	}
 
 	// Encoding an Active without a cost on lite-06 is a caller bug, not a silent default.
@@ -503,36 +466,6 @@ mod tests {
 		assert!(matches!(
 			msg.encode(&mut buf, Version::Lite06Wip),
 			Err(EncodeError::Version)
-		));
-	}
-
-	// ANNOUNCE_UPDATE doesn't exist before lite-06: encode refuses, decode rejects the status.
-	#[test]
-	fn announce_update_rejected_before_lite06() {
-		let update = AnnounceBroadcast::Update {
-			suffix: Path::new("room/cam"),
-			cost: RouteCost::default(),
-		};
-		let mut buf = bytes::BytesMut::new();
-		assert!(matches!(
-			update.encode(&mut buf, Version::Lite05),
-			Err(EncodeError::Version)
-		));
-
-		// Forge an Update status byte on a lite-05 message.
-		let mut buf = bytes::BytesMut::new();
-		AnnounceBroadcast::Active {
-			suffix: Path::new("foo"),
-			hops: OriginList::new(),
-			cost: None,
-		}
-		.encode(&mut buf, Version::Lite05)
-		.unwrap();
-		buf[1] = u8::from(AnnounceStatus::Update);
-		let mut slice = buf.freeze();
-		assert!(matches!(
-			AnnounceBroadcast::decode(&mut slice, Version::Lite05),
-			Err(DecodeError::InvalidValue)
 		));
 	}
 }
