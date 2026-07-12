@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{VideoCodec, VideoConfig};
+use hang::catalog::{AV1, VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
@@ -126,7 +126,7 @@ impl Decoder {
 				};
 				(Codec::H265, conversion)
 			}
-			VideoCodec::AV1(_) => (Codec::Av1, Conversion::Passthrough),
+			VideoCodec::AV1(av1) if is_supported_av1(av1) => (Codec::Av1, Conversion::Passthrough),
 			other => return Err(Error::UnsupportedCodec(other.to_string())),
 		};
 
@@ -183,6 +183,10 @@ impl Decoder {
 			})
 			.collect())
 	}
+}
+
+fn is_supported_av1(av1: &AV1) -> bool {
+	av1.bitdepth == 8 && !av1.mono_chrome && av1.chroma_subsampling_x && av1.chroma_subsampling_y
 }
 
 #[cfg(test)]
@@ -285,6 +289,20 @@ mod tests {
 			panic!("software AV1 decode unexpectedly opened");
 		};
 		assert!(matches!(err, crate::Error::NoDecoder(_)));
+	}
+
+	#[test]
+	fn av1_rejects_unsupported_catalog_shape() {
+		let av1 = hang::catalog::AV1 {
+			bitdepth: 10,
+			..hang::catalog::AV1::default()
+		};
+		let catalog = hang::catalog::VideoConfig::new(av1);
+		let config = decode_config(super::Kind::Auto);
+		let Err(err) = super::Decoder::new(&catalog, &config) else {
+			panic!("10-bit AV1 decode unexpectedly opened");
+		};
+		assert!(matches!(err, crate::Error::UnsupportedCodec(_)));
 	}
 
 	#[cfg(target_os = "macos")]
