@@ -716,7 +716,7 @@ async fn dynamic_broadcast_request_can_reject() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "missing");
 
-	request.reject(404).unwrap();
+	request.abort(404).unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let result = tokio::time::timeout(TIMEOUT, request_broadcast)

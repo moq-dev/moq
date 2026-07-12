@@ -223,7 +223,7 @@ impl MoqOriginConsumer {
 impl MoqOriginDynamic {
 	/// Wait for the next requested broadcast that is not announced.
 	///
-	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
+	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or abort
 	/// it with an application error code. The requesting consumer stays pending until then.
 	pub async fn requested_broadcast(&self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
 		self.task
@@ -269,8 +269,8 @@ impl MoqBroadcastRequest {
 		Ok(())
 	}
 
-	/// Reject the request with an application error code.
-	pub fn reject(&self, error_code: i32) -> Result<(), MoqError> {
+	/// Abort the request with an application error code.
+	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let request = self.take()?;

@@ -99,9 +99,9 @@ class BroadcastRequest:
         """Serve the request with an unannounced broadcast."""
         self._inner.accept(broadcast._inner)
 
-    def reject(self, error_code: int) -> None:
-        """Reject the request with an application error code."""
-        self._inner.reject(error_code)
+    def abort(self, error_code: int) -> None:
+        """Abort the request with an application error code."""
+        self._inner.abort(error_code)
 
 
 class OriginDynamic:

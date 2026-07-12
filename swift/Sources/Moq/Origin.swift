@@ -47,9 +47,9 @@ public final class BroadcastRequest: Sendable {
         try ffi.accept(broadcast: broadcast.ffi)
     }
 
-    /// Reject the request with an application error code.
-    public func reject(errorCode: Int32) throws {
-        try ffi.reject(errorCode: errorCode)
+    /// Abort the request with an application error code.
+    public func abort(errorCode: Int32) throws {
+        try ffi.abort(errorCode: errorCode)
     }
 }
 

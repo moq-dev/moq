@@ -380,7 +380,7 @@ async def test_dynamic_broadcast_request_can_reject():
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "missing"
 
-    request.reject(404)
+    request.abort(404)
     with pytest.raises(Exception):
         _ = request.path
 

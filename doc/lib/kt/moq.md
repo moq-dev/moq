@@ -162,12 +162,12 @@ dynamic.requestedBroadcasts().collect { request ->
         request.accept(broadcast)
         track.writeFrame("ready".encodeToByteArray())
     } else {
-        request.reject(404)
+        request.abort(404)
     }
 }
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `reject(code)` to fail the requester.
+The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
 ## Cancellation
 

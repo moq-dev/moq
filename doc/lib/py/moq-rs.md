@@ -183,7 +183,7 @@ async for request in dynamic:
         track.write_frame(b"ready")
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `reject(code)` to fail the requester.
+The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
 ### Discovering broadcasts
 

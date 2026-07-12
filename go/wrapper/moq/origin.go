@@ -90,9 +90,9 @@ func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
 	return r.inner.Accept(broadcast.inner)
 }
 
-// Reject fails the request with an application error code.
-func (r *BroadcastRequest) Reject(errorCode int32) error {
-	return r.inner.Reject(errorCode)
+// Abort fails the request with an application error code.
+func (r *BroadcastRequest) Abort(errorCode int32) error {
+	return r.inner.Abort(errorCode)
 }
 
 // OriginConsumer discovers broadcasts announced to an origin.

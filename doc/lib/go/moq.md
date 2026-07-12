@@ -153,7 +153,7 @@ for request, err := range dynamic.All(ctx) {
 		log.Fatal(err)
 	}
 	if path != "events" {
-		if err := request.Reject(404); err != nil {
+		if err := request.Abort(404); err != nil {
 			log.Fatal(err)
 		}
 		continue
@@ -176,7 +176,7 @@ for request, err := range dynamic.All(ctx) {
 }
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Reject(code)` to fail the requester.
+The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
 
 ## Local development
 

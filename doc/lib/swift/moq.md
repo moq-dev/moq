@@ -162,12 +162,12 @@ for try await request in dynamic {
         try request.accept(broadcast: broadcast)
         try track.writeFrame(Data("ready".utf8))
     } else {
-        try request.reject(errorCode: 404)
+        try request.abort(errorCode: 404)
     }
 }
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `reject(errorCode:)` to fail the requester.
+The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
 
 ## Cancellation
 
