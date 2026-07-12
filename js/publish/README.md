@@ -69,7 +69,7 @@ The simplest way to publish a stream:
 | `url`       | string  | required | Relay server URL                |
 | `name`      | string  | required | Broadcast name                  |
 | `source`    | string  | —        | `"camera"`, `"screen"`, `"file"` |
-| `muted`     | boolean | false    | Mute audio capture              |
+| `muted`     | boolean | false    | Stop audio capture and publish silence (a mic is released, OS indicator off); track stays in the catalog |
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
 | `announce`  | string  | `"source"` | When to publish: `"always"`, `"never"`, `"source"` (once a source is selected) |

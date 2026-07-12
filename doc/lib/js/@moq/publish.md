@@ -67,7 +67,7 @@ a real bundler (the examples below).
 - `url` (required) - Relay server URL
 - `name` (required) - Broadcast name
 - `source` - Input to capture: `"camera"`, `"screen"`, or `"file"`
-- `muted` - Mute audio capture (boolean)
+- `muted` - Stop capturing audio and publish silence in its place (a microphone is released and the OS recording indicator turns off; screen or file audio is detached); the audio track stays in the catalog so viewers don't rebuild (boolean)
 - `invisible` - Disable video capture (boolean)
 - `simulcast` - Also publish a lower-resolution `video/sd` rendition (a fraction of the source resolution) alongside `video/hd` (boolean)
 - `preview` - What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))

@@ -17,9 +17,6 @@ const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
-import CaptureWorklet from "./capture-worklet.ts?worklet";
-
 // Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
 // object with the mime plus tuning knobs.
 export type Codec = Opus | Aac;
@@ -70,6 +67,11 @@ export type EncoderProps = {
 // channel count (which can differ from the requested count on some platforms, e.g. Safari/macOS).
 type Captured = { sampleRate: number; channelCount: number };
 
+// The capture format derived from the live source: the AudioContext rate, the worklet channel count,
+// and the audio kind. Persisted across a mute so the pipeline (context + worklet + catalog) survives
+// the audio source being released, publishing silence instead of dropping the audio track.
+type Format = { sampleRate: number; channelCount: number; kind: Kind };
+
 export class Encoder {
 	static readonly TRACK = "audio/data";
 	static readonly PRIORITY = Catalog.PRIORITY.audio;
@@ -90,6 +92,10 @@ export class Encoder {
 	// Observed capture format. #config (and thus #catalog) is derived from this plus the codec, so the
 	// worklet handlers only ever write here, never read-modify-write #config.
 	#captured = new Signal<Captured | undefined>(undefined);
+
+	// The capture format derived from the live source, persisted so a mute (which clears `source`)
+	// leaves it intact and #runPipeline keeps the AudioContext + worklet + catalog up. See #runFormat.
+	#format = new Signal<Format | undefined>(undefined);
 
 	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
@@ -112,13 +118,18 @@ export class Encoder {
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
 
+		this.#signals.run(this.#runFormat.bind(this));
+		this.#signals.run(this.#runPipeline.bind(this));
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
 
-	#runSource(effect: Effect): void {
+	// Derive the capture format from the live source and persist it. NOT effect.set: a mute clears
+	// `source`, and we deliberately keep the last format so #runPipeline holds the AudioContext,
+	// worklet, and catalog up while the audio source is detached. Only a real change rebuilds.
+	#runFormat(effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.source]);
 		if (!values) return;
 		const [_, rawSource] = values;
@@ -131,49 +142,73 @@ export class Encoder {
 		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
 		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
 		// encodes) duplicated mono as stereo. Prefer an explicitly requested channel count, from
-		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
-		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
+		// the prop or the track's applied getUserMedia constraint; fall back to the settings count,
+		// then 2 (the source-node default). The worklet is pinned to this fixed count so it stays
+		// stable when the source detaches on mute and only the mono silence source drives the graph.
+		const channelCount =
+			effect.get(this.channelCount) ?? requestedChannelCount(source.track) ?? settings.channelCount ?? 2;
+
+		// Signal.set's deep-equality dedupe drops a rebuilt-but-identical format, so codec knob
+		// tweaks that rerun this effect never tear down the AudioContext.
+		this.#format.set({ sampleRate, channelCount, kind: source.kind });
+	}
+
+	// Build and hold the capture pipeline (AudioContext -> GainNode -> capture worklet) from the
+	// persisted #format. It outlives a mute, so the catalog never flaps. A silent ConstantSourceNode
+	// keeps the 0-output worklet pulled while no mic is attached, so it keeps emitting silence frames.
+	#runPipeline(effect: Effect): void {
+		const enabled = effect.get(this.enabled);
+		const format = effect.get(this.#format);
+		if (!enabled || !format) return;
 
 		const context = new AudioContext({
 			latencyHint: "interactive",
-			sampleRate,
+			sampleRate: format.sampleRate,
 		});
 		effect.cleanup(() => context.close());
-
-		const root = new MediaStreamAudioSourceNode(context, {
-			mediaStream: new MediaStream([source.track]),
-		});
-		effect.cleanup(() => root.disconnect());
 
 		const gain = new GainNode(context, {
 			gain: this.volume.peek(),
 		});
-		root.connect(gain);
 		effect.cleanup(() => gain.disconnect());
+
+		// A muted broadcast detaches its audio source (see element.ts), so nothing else drives the graph.
+		// This always-running silent source keeps the 0-output worklet processing so it keeps emitting
+		// silence frames on the same clock; without it the worklet would stop and the catalog flap. Its
+		// mono zeros up-mix to the worklet's fixed channel count, so a muted broadcast is true silence.
+		const silence = new ConstantSourceNode(context, { offset: 0 });
+		silence.connect(gain);
+		silence.start();
+		effect.cleanup(() => {
+			silence.stop();
+			silence.disconnect();
+		});
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			await context.audioWorklet.addModule(CaptureWorklet);
+			// Load lazily (compiled and inlined as a blob URL via vite-plugin-worklet). A static
+			// import would pull the ?worklet module into the eager graph, which breaks non-Vite
+			// loaders like `bun test` that lack the plugin.
+			const { default: captureWorklet } = await import("./capture-worklet.ts?worklet");
+			await context.audioWorklet.addModule(captureWorklet);
 			if (context.state === "closed") return;
 
-			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
-				channelCount,
-				// "explicit" forces Web Audio to (down)mix the input to channelCount before the
-				// worklet sees it. The default "max" just follows the input, which is the unreliable
-				// path on macOS. Only force it when we actually have a requested count to honor.
-				channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
+				channelCount: format.channelCount,
+				// "explicit" pins the count so it can't drift when the source detaches on mute and only the
+				// mono silence source drives the graph; the worklet (down)mixes every input to it.
+				channelCountMode: "explicit",
 				// Stamp audio against the same wall clock as video (see video/polyfill.ts), so both
-				// tracks share an epoch and stay in sync.
+				// tracks share an epoch. Fixed once per pipeline, so the epoch survives a mute/unmute.
 				processorOptions: { zero: performance.now() * 1000 },
 			});
 
 			effect.set(this.#worklet, worklet);
 
-			// The information about channels count can be unreliable on different platforms (Apple's Safari).
-			// Try to get the first audio frame and only then record the captured format.
+			// The channel count can be unreliable across platforms (Apple's Safari). Record the captured
+			// format from the first frame the worklet emits (silence or mic, both at the fixed count).
 			effect.event(
 				worklet.port,
 				"message",
@@ -197,6 +232,23 @@ export class Encoder {
 			// Only set the gain after the worklet is registered.
 			effect.set(this.#gain, gain);
 		});
+	}
+
+	// Attach the live source track to the pipeline gain. Keyed on `source` alone: a mute clears it and
+	// this effect tears the source node down, leaving the silent keep-alive to drive the worklet.
+	// Unmuting re-attaches the source (re-acquiring the mic when there is one) and reconnects here,
+	// all on the same AudioContext (no catalog flap).
+	#runSource(effect: Effect): void {
+		const rawSource = effect.get(this.source);
+		const gain = effect.get(this.#gain);
+		if (!rawSource || !gain) return;
+
+		const track = normalizeSource(rawSource).track;
+		const root = new MediaStreamAudioSourceNode(gain.context as AudioContext, {
+			mediaStream: new MediaStream([track]),
+		});
+		root.connect(gain);
+		effect.cleanup(() => root.disconnect());
 	}
 
 	#createConfig(captured: Captured, codec: OpusConfig | AacConfig): Catalog.AudioConfig {
@@ -304,15 +356,20 @@ export class Encoder {
 					track.close(err);
 				},
 			});
-			effect.cleanup(() => encoder.close());
+			// Guard against double-close: a fatal error auto-closes the encoder, and close() on a closed
+			// encoder throws InvalidStateError, aborting the signals dispose loop and leaking the sibling effects.
+			effect.cleanup(() => {
+				if (encoder.state !== "closed") encoder.close();
+			});
 
 			let config: Catalog.AudioConfig | undefined;
 			effect.run((effect: Effect) => {
 				config = effect.get(this.#config);
 				if (!config) return;
 
-				const source = effect.get(this.source);
-				const kind: Kind = source ? normalizeSource(source).kind : "auto";
+				// Read the persisted format's kind, not `source`: a mute clears `source` but must not
+				// reconfigure the encoder (voice -> auto would drop DTX) while it publishes silence.
+				const kind: Kind = effect.get(this.#format)?.kind ?? "auto";
 				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
 
 				console.debug("encoding audio", encoderConfig);

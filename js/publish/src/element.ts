@@ -45,10 +45,18 @@ export default class MoqPublish extends HTMLElement {
 	audio = new Signal<Source.Microphone | Source.Screen | undefined>(undefined);
 	file = new Signal<Source.File | undefined>(undefined);
 
-	// The inverse of the `muted` and `invisible` signals.
+	// Whether the audio/video encoder pipelines run. #audioEnabled stays true across `muted`; see
+	// #micEnabled below for why (the encoder keeps publishing silence, the audio input is what's gated).
 	#videoEnabled: Signal<boolean>;
 	#audioEnabled: Signal<boolean>;
 	#eitherEnabled: Signal<boolean>;
+
+	// Whether the microphone should actually capture: audio enabled AND not muted. Muting stops audio
+	// capture without dropping the published track: a mic track is stopped (releasing the OS device and
+	// its recording indicator), while screen/file audio, whose track can't be stopped without killing
+	// the share, is detached in the source branches instead. The encoder pipeline stays up and publishes
+	// silence, so watchers keep their audio subtree instead of rebuilding it.
+	#micEnabled: Signal<boolean>;
 
 	// Set when `simulcast` is enabled and video is not `invisible`.
 	#sdEnabled: Signal<boolean>;
@@ -71,10 +79,12 @@ export default class MoqPublish extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		// The inverse of the `muted` and `invisible` signals.
 		// TODO make this.signals.computed to simplify the code.
 		this.#videoEnabled = new Signal(false);
-		this.#audioEnabled = new Signal(false);
+		// Always on; muting gates the audio input (see #micEnabled and the screen/file source
+		// branches), not the pipeline.
+		this.#audioEnabled = new Signal(true);
+		this.#micEnabled = new Signal(false);
 		this.#eitherEnabled = new Signal(false);
 		this.#sdEnabled = new Signal(false);
 
@@ -83,7 +93,7 @@ export default class MoqPublish extends HTMLElement {
 			const invisible = effect.get(this.state.invisible);
 			const simulcast = effect.get(this.state.simulcast);
 			this.#videoEnabled.set(!invisible);
-			this.#audioEnabled.set(!muted);
+			this.#micEnabled.set(effect.get(this.#audioEnabled) && !muted);
 			this.#eitherEnabled.set(!muted || !invisible);
 			this.#sdEnabled.set(simulcast && !invisible);
 		});
@@ -108,6 +118,9 @@ export default class MoqPublish extends HTMLElement {
 
 			audio: {
 				enabled: this.#audioEnabled,
+				// Muting stops audio capture (see #micEnabled); this fades the encoder gain to zero in step,
+				// so any in-flight samples during the teardown are silenced and unmute fades back in.
+				muted: this.state.muted,
 			},
 			video: {
 				hd: {
@@ -232,16 +245,16 @@ export default class MoqPublish extends HTMLElement {
 		if (!source) return;
 
 		if (source === "camera") {
+			// These proxies are scoped to this run so they close before the capture below, which would
+			// otherwise clear its `source` signal and let a stale proxy write over the next source.
 			const video = new Source.Camera({ enabled: this.#videoEnabled });
-			this.signals.run((effect) => {
-				const source = effect.get(video.source);
-				this.broadcast.video.source.set(source);
+			effect.run((effect) => {
+				effect.set(this.broadcast.video.source, effect.get(video.source));
 			});
 
-			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
-			this.signals.run((effect) => {
-				const source = effect.get(audio.source);
-				this.broadcast.audio.source.set(source);
+			const audio = new Source.Microphone({ enabled: this.#micEnabled });
+			effect.run((effect) => {
+				effect.set(this.broadcast.audio.source, effect.get(audio.source));
 			});
 
 			effect.set(this.video, video);
@@ -260,12 +273,15 @@ export default class MoqPublish extends HTMLElement {
 				enabled: this.#eitherEnabled,
 			});
 
-			this.signals.run((effect) => {
+			effect.run((effect) => {
 				const source = effect.get(screen.source);
 				if (!source) return;
 
+				// The shared screen track can't be stopped without killing video (and re-prompting), so
+				// mute detaches its audio from the encoder instead. The pipeline keeps publishing silence.
+				const muted = effect.get(this.state.muted);
 				effect.set(this.broadcast.video.source, source.video);
-				effect.set(this.broadcast.audio.source, source.audio);
+				effect.set(this.broadcast.audio.source, muted ? undefined : source.audio);
 			});
 
 			effect.set(this.video, screen);
@@ -293,10 +309,12 @@ export default class MoqPublish extends HTMLElement {
 
 			effect.set(this.file, fileSource);
 
-			this.signals.run((effect) => {
+			effect.run((effect) => {
 				const source = effect.get(fileSource.source);
-				this.broadcast.video.source.set(source.video);
-				this.broadcast.audio.source.set(source.audio);
+				// Mute detaches the file's audio from the encoder; the pipeline keeps publishing silence.
+				const muted = effect.get(this.state.muted);
+				effect.set(this.broadcast.video.source, source.video);
+				effect.set(this.broadcast.audio.source, muted ? undefined : source.audio);
 			});
 
 			effect.cleanup(() => {

@@ -3,7 +3,7 @@ import type MoqPublish from "../../element";
 import { icon, micOff, microphone } from "../icons";
 import { controlButton } from "./button";
 
-/** Toggles whether audio is published (publish.muted). Red when muted. */
+/** Toggles publish.muted: stops audio capture and publishes silence in its place. Red when muted. */
 export function audioToggle(parent: Effect, publish: MoqPublish): HTMLElement {
 	const button = controlButton(microphone, "Mute");
 
@@ -12,7 +12,7 @@ export function audioToggle(parent: Effect, publish: MoqPublish): HTMLElement {
 		const muted = effect.get(publish.state.muted);
 		button.disabled = !hasSource;
 		button.classList.toggle("control--off", hasSource && muted);
-		button.title = muted ? "Unmute microphone" : "Mute microphone";
+		button.title = muted ? "Unmute audio" : "Mute audio";
 		button.setAttribute("aria-label", button.title);
 		button.replaceChildren(icon(muted ? micOff : microphone));
 	});
