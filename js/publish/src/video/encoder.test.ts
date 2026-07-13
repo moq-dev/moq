@@ -1,30 +1,45 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Encoder } from "./encoder";
 import type { Source } from "./types";
 
-test("serve tracks encoder config in its child effect", async () => {
-	const OriginalVideoEncoder = globalThis.VideoEncoder;
-	const originalWarn = console.warn;
-	const warnings: unknown[][] = [];
+class FakeVideoEncoder {
+	state: CodecState = "unconfigured";
 
-	class FakeVideoEncoder {
-		state: CodecState = "unconfigured";
-
-		configure(): void {
-			this.state = "configured";
-		}
-
-		encode(): void {}
-
-		close(): void {
-			this.state = "closed";
-		}
+	configure(): void {
+		this.state = "configured";
 	}
 
-	globalThis.VideoEncoder = FakeVideoEncoder as unknown as typeof VideoEncoder;
-	console.warn = (...args: unknown[]) => warnings.push(args);
+	encode(): void {}
+
+	close(): void {
+		this.state = "closed";
+	}
+}
+
+function installFakeVideoEncoder() {
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", {
+		configurable: true,
+		value: FakeVideoEncoder,
+		writable: true,
+	});
+
+	return {
+		[Symbol.dispose]() {
+			if (original) {
+				Object.defineProperty(globalThis, "VideoEncoder", original);
+			} else {
+				Reflect.deleteProperty(globalThis, "VideoEncoder");
+			}
+		},
+	};
+}
+
+test("serve tracks encoder config in its child effect", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	using warn = spyOn(console, "warn").mockImplementation(() => {});
 
 	const frame = new Signal<VideoFrame | undefined>(undefined);
 	const source = new Signal<Source | undefined>(undefined);
@@ -36,13 +51,12 @@ test("serve tracks encoder config in its child effect", async () => {
 		encoder.serve({ close() {} } as never, effect);
 		for (let i = 0; i < 5; i++) await Promise.resolve();
 
-		expect(warnings.map(([message]) => message)).not.toContain(
+		expect(warn).not.toHaveBeenCalledWith(
 			"Effect did not subscribe to any signals; it will never rerun.",
+			expect.anything(),
 		);
 	} finally {
 		effect.close();
 		encoder.close();
-		console.warn = originalWarn;
-		globalThis.VideoEncoder = OriginalVideoEncoder;
 	}
 });
