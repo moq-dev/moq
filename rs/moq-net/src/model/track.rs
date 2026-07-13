@@ -65,7 +65,7 @@ pub struct Info {
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
 	/// The publisher's group ordering preference (newest-first when `false`), used
-	/// only to break ties. Reported in TRACK_INFO (Lite05+).
+	/// only to break ties. Reported in TRACK_INFO (Lite05+). Defaults to `false`.
 	pub ordered: bool,
 
 	/// The broadcast this track belongs to, bound when the track is created under one
@@ -91,7 +91,7 @@ impl Default for Info {
 			timescale: Timescale::default(),
 			cache: DEFAULT_CACHE,
 			priority: 0,
-			ordered: true,
+			ordered: false,
 			broadcast: default_broadcast(),
 		}
 	}
@@ -120,6 +120,7 @@ impl Info {
 	}
 
 	/// Set the publisher's group ordering preference, returning `self` for chaining.
+	/// Defaults to `false`.
 	pub fn with_ordered(mut self, ordered: bool) -> Self {
 		self.ordered = ordered;
 		self

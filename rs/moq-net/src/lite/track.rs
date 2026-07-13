@@ -128,6 +128,21 @@ mod test {
 	}
 
 	#[test]
+	fn track_info_defaults_match_cross_language_wire_bytes() {
+		let info = crate::track::Info::default();
+		let info = TrackInfo {
+			priority: info.priority,
+			ordered: info.ordered,
+			cache: info.cache,
+			timescale: info.timescale,
+		};
+		let mut buf = Vec::new();
+		info.encode(&mut buf, Version::Lite05).unwrap();
+
+		assert_eq!(buf, [0x06, 0x00, 0x00, 0x53, 0x88, 0x43, 0xe8]);
+	}
+
+	#[test]
 	fn track_info_errors_before_lite05() {
 		let mut buf = Vec::new();
 		assert!(info_sample().encode_msg(&mut buf, Version::Lite04).is_err());

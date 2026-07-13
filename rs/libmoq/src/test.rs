@@ -543,6 +543,21 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 }
 
 #[test]
+fn publish_track_info_defaults_to_unordered() {
+	let info = moq_track_info {
+		priority: 0,
+		ordered: false,
+		ordered_valid: false,
+		cache_ms: 0,
+		cache_valid: false,
+		timescale: 0,
+		timescale_valid: false,
+	};
+
+	assert!(!moq_net::track::Info::try_from(&info).unwrap().ordered);
+}
+
+#[test]
 fn raw_track_publish_consume() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());

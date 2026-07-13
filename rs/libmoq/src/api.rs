@@ -129,7 +129,7 @@ pub struct moq_track_info {
 
 	/// Whether groups are delivered in sequence order when `ordered_valid` is true.
 	pub ordered: bool,
-	/// Whether `ordered` should override the default ordered setting.
+	/// Whether `ordered` should override the default unordered setting.
 	pub ordered_valid: bool,
 
 	/// How long the relay should cache past groups, in milliseconds.
@@ -177,7 +177,7 @@ pub struct moq_subscription {
 
 	/// Whether groups are delivered in sequence order when `ordered_valid` is true.
 	pub ordered: bool,
-	/// Whether `ordered` should override the default ordered setting.
+	/// Whether `ordered` should override the default unordered setting.
 	pub ordered_valid: bool,
 
 	/// How long to wait for an older group once a newer group has arrived, in milliseconds.

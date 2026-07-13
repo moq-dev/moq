@@ -141,6 +141,15 @@ async fn raw_track_info_reports_publisher_properties() {
 }
 
 #[tokio::test]
+async fn raw_track_info_defaults_to_unordered() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	assert!(!consumer.info().await.unwrap().ordered);
+}
+
+#[tokio::test]
 async fn raw_track_update_does_not_wait_for_pending_read() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), None).unwrap();

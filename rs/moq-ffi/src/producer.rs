@@ -10,14 +10,14 @@ use crate::media::MoqInit;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, ordered, default cache, microsecond timescale).
+/// (priority 0, unordered, default cache, microsecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	#[uniffi(default = 0)]
 	pub priority: u8,
-	/// Whether groups are delivered in sequence order.
-	#[uniffi(default = true)]
+	/// Whether groups are delivered in sequence order. Defaults to false.
+	#[uniffi(default = false)]
 	pub ordered: bool,
 	/// How long the relay should cache past groups, in milliseconds. Null uses the default.
 	#[uniffi(default = None)]
