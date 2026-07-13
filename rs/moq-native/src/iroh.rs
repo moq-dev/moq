@@ -1,10 +1,7 @@
 use std::{net, path::PathBuf, str::FromStr};
 
 use url::Url;
-use web_transport_iroh::{
-	http,
-	iroh::{self, SecretKey},
-};
+use web_transport_iroh::iroh::{self, SecretKey};
 // NOTE: web-transport-iroh should re-export proto like web-transport-quinn does.
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
@@ -191,67 +188,40 @@ impl EndpointConfig {
 	}
 }
 
-pub enum Request {
-	Quic {
-		request: web_transport_iroh::QuicRequest,
-	},
-	WebTransport {
-		request: Box<web_transport_iroh::H3Request>,
-	},
-}
+/// Accept an iroh connection, negotiate WebTransport or raw QUIC, and complete the
+/// handshake. Returns the established session plus the request URL (raw QUIC carries
+/// none). iroh exposes no client-certificate identity, so the identity is always `None`.
+pub(crate) async fn accept(
+	conn: iroh::endpoint::Incoming,
+) -> Result<(
+	web_transport_iroh::Session,
+	Option<Url>,
+	Option<crate::tls::PeerIdentity>,
+)> {
+	let conn = conn.accept()?.await?;
+	let alpn = String::from_utf8(conn.alpn().to_vec())?;
+	tracing::Span::current().record("id", conn.stable_id());
+	tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
+	match alpn.as_str() {
+		web_transport_iroh::ALPN_H3 => {
+			let request = web_transport_iroh::H3Request::accept(conn)
+				.await
+				.map_err(Error::RecvRequest)?;
+			let url = Some(request.url.clone());
 
-impl Request {
-	pub async fn accept(conn: iroh::endpoint::Incoming) -> Result<Self> {
-		let conn = conn.accept()?.await?;
-		let alpn = String::from_utf8(conn.alpn().to_vec())?;
-		tracing::Span::current().record("id", conn.stable_id());
-		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
-		match alpn.as_str() {
-			web_transport_iroh::ALPN_H3 => {
-				let request = web_transport_iroh::H3Request::accept(conn)
-					.await
-					.map_err(Error::RecvRequest)?;
-				Ok(Self::WebTransport {
-					request: Box::new(request),
-				})
+			let mut response = ConnectResponse::OK;
+			if let Some(protocol) = request.protocols.first() {
+				response = response.with_protocol(protocol);
 			}
-			alpn if moq_net::ALPNS.contains(&alpn) => Ok(Self::Quic {
-				request: web_transport_iroh::QuicRequest::accept(conn),
-			}),
-			_ => Err(Error::UnsupportedAlpn(alpn)),
+			let session = request.respond(response).await.map_err(Error::Server)?;
+			Ok((session, url, None))
 		}
-	}
-
-	/// Accept the session.
-	pub async fn ok(self) -> std::result::Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
-		match self {
-			Request::Quic { request } => Ok(request.ok()),
-			Request::WebTransport { request } => {
-				let mut response = ConnectResponse::OK;
-				if let Some(protocol) = request.protocols.first() {
-					response = response.with_protocol(protocol);
-				}
-				request.respond(response).await
-			}
+		// Raw QUIC carries no request URL; the path rides the SETUP.
+		alpn if moq_net::ALPNS.contains(&alpn) => {
+			let session = web_transport_iroh::QuicRequest::accept(conn).ok();
+			Ok((session, None, None))
 		}
-	}
-
-	/// Reject the session.
-	pub async fn close(self, status: http::StatusCode) -> std::result::Result<(), web_transport_iroh::ServerError> {
-		match self {
-			Request::Quic { request } => {
-				request.close(status);
-				Ok(())
-			}
-			Request::WebTransport { request, .. } => request.reject(status).await,
-		}
-	}
-
-	pub fn url(&self) -> Option<&Url> {
-		match self {
-			Request::Quic { .. } => None,
-			Request::WebTransport { request } => Some(&request.url),
-		}
+		_ => Err(Error::UnsupportedAlpn(alpn)),
 	}
 }
 

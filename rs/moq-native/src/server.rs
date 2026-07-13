@@ -532,12 +532,10 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							// Accept the transport, then exchange the MoQ SETUP up front so
-							// path/role are known before the caller authorizes (like streams).
-							let noq = super::noq::NoqRequest::accept(_conn, alpns).await?;
-							let url = noq.url().cloned();
-							let identity = noq.peer_identity();
-							let session = noq.ok().await.map_err(crate::noq::Error::Server)?;
+							// Accept the transport (capturing url + mTLS identity) and exchange the
+							// MoQ SETUP up front, so path/role are known before the caller authorizes
+							// (like the stream bindings).
+							let (session, url, identity) = super::noq::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
@@ -548,10 +546,7 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let quinn = super::quinn::QuinnRequest::accept(_conn, alpns).await?;
-							let url = quinn.url().cloned();
-							let identity = quinn.peer_identity();
-							let session = quinn.ok().await.map_err(crate::quinn::Error::Server)?;
+							let (session, url, identity) = super::quinn::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quinn(Box::new(request)) })
 						}.boxed());
@@ -562,22 +557,18 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let quiche = super::quiche::QuicheRequest::accept(_conn, alpns).await?;
-							let url = quiche.url().cloned();
-							let session = quiche.ok().await.map_err(crate::quiche::Error::Accept)?;
+							let (session, url, identity) = super::quiche::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity: None, kind: RequestKind::Quiche(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quiche(Box::new(request)) })
 						}.boxed());
 					}
 				}
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let iroh = super::iroh::Request::accept(_conn).await?;
-						let url = iroh.url().cloned();
-						let session = iroh.ok().await.map_err(crate::iroh::Error::Server)?;
+						let (session, url, identity) = super::iroh::accept(_conn).await?;
 						let request = server.accept_request(session).await?;
-						Ok(Request { transport: Transport::Iroh, url, identity: None, kind: RequestKind::Iroh(Box::new(request)) })
+						Ok(Request { transport: Transport::Iroh, url, identity, kind: RequestKind::Iroh(Box::new(request)) })
 					}.boxed());
 				}
 				Some(_res) = ws_accept => {
