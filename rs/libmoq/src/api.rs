@@ -59,7 +59,7 @@ pub struct moq_audio_config {
 /// `compression`; `delta_ratio` is producer-only.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_json_config {
+pub struct moq_json_snapshot_config {
 	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
 	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
 	/// deltas before rolling. Ignored by the consumer.
@@ -1112,8 +1112,8 @@ pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
 
 /// Create a JSON snapshot track (lossy latest-value) on a broadcast.
 ///
-/// Values published via [moq_publish_json_update] reach subscribers as a single latest state; a
-/// late joiner only sees the newest. Advertise the track in the catalog with
+/// Values published via [moq_publish_json_snapshot_update] reach subscribers as a single latest
+/// state; a late joiner only sees the newest. Advertise the track in the catalog with
 /// [moq_publish_catalog_section] if consumers should discover it.
 ///
 /// Returns a non-zero handle to the JSON producer on success, or a negative code on failure.
@@ -1121,11 +1121,11 @@ pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
 /// # Safety
 /// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_json(
+pub unsafe extern "C" fn moq_publish_json_snapshot(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
-	config: *const moq_json_config,
+	config: *const moq_json_snapshot_config,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
@@ -1134,7 +1134,7 @@ pub unsafe extern "C" fn moq_publish_json(
 		let mut producer = moq_json::snapshot::ProducerConfig::default();
 		producer.delta_ratio = config.delta_ratio;
 		producer.compression = config.compression;
-		State::lock().publish.json(broadcast, name, producer)
+		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }
 
@@ -1146,12 +1146,12 @@ pub unsafe extern "C" fn moq_publish_json(
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_json_update(json: u32, value: *const c_char, value_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_json_snapshot_update(json: u32, value: *const c_char, value_len: usize) -> i32 {
 	ffi::enter(move || {
 		let json = ffi::parse_id(json)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		State::lock().publish.json_update(json, value)
+		State::lock().publish.json_snapshot_update(json, value)
 	})
 }
 
@@ -1159,10 +1159,10 @@ pub unsafe extern "C" fn moq_publish_json_update(json: u32, value: *const c_char
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_json_close(json: u32) -> i32 {
+pub extern "C" fn moq_publish_json_snapshot_close(json: u32) -> i32 {
 	ffi::enter(move || {
 		let json = ffi::parse_id(json)?;
-		State::lock().publish.json_close(json)
+		State::lock().publish.json_snapshot_close(json)
 	})
 }
 
@@ -1698,11 +1698,11 @@ pub extern "C" fn moq_consume_datagrams_close(task: u32) -> i32 {
 /// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_value` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_json(
+pub unsafe extern "C" fn moq_consume_json_snapshot(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
-	config: *const moq_json_config,
+	config: *const moq_json_snapshot_config,
 	on_value: Option<extern "C" fn(user_data: *mut c_void, value: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
@@ -1713,7 +1713,7 @@ pub unsafe extern "C" fn moq_consume_json(
 		let mut consumer = moq_json::snapshot::ConsumerConfig::default();
 		consumer.compression = config.compression;
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
-		State::lock().consume.json(broadcast, name, consumer, on_value)
+		State::lock().consume.json_snapshot(broadcast, name, consumer, on_value)
 	})
 }
 
@@ -1747,7 +1747,7 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 	})
 }
 
-/// Read a JSON value delivered via a [moq_consume_json] or [moq_consume_json_stream] callback.
+/// Read a JSON value delivered via a [moq_consume_json_snapshot] or [moq_consume_json_stream] callback.
 ///
 /// Fills `dst.json` / `dst.json_len`; the pointer is valid until the value is released with
 /// [moq_consume_json_value_close].

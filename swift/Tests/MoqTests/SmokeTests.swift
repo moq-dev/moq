@@ -60,6 +60,52 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(end)
     }
 
+    func testJsonSnapshotRoundTrip() async throws {
+        struct Status: Codable, Equatable {
+            let state: String
+            let viewers: Int
+        }
+
+        let broadcast = try BroadcastProducer()
+        let producer = try broadcast.publishJsonSnapshot(name: "status", of: Status.self, compression: true)
+        let consumer = try await broadcast.consume().subscribeJsonSnapshot(
+            name: "status", as: Status.self, compression: true)
+
+        try producer.update(Status(state: "live", viewers: 42))
+        let first = try await consumer.next()
+        XCTAssertEqual(first, Status(state: "live", viewers: 42))
+
+        // A second update supersedes the first; a late reader collapses to the latest.
+        try producer.update(Status(state: "live", viewers: 43))
+        let second = try await consumer.next()
+        XCTAssertEqual(second, Status(state: "live", viewers: 43))
+
+        consumer.cancel()
+        try producer.finish()
+        try broadcast.finish()
+    }
+
+    func testJsonStreamRoundTrip() async throws {
+        struct Event: Codable, Equatable {
+            let n: Int
+        }
+
+        let broadcast = try BroadcastProducer()
+        let producer = try broadcast.publishJsonStream(name: "events", of: Event.self)
+        let consumer = try await broadcast.consume().subscribeJsonStream(
+            name: "events", as: Event.self)
+
+        for n in 0..<3 {
+            try producer.append(Event(n: n))
+            let record = try await consumer.next()
+            XCTAssertEqual(record, Event(n: n))
+        }
+
+        consumer.cancel()
+        try producer.finish()
+        try broadcast.finish()
+    }
+
     func testRawTrackTimestamps() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")

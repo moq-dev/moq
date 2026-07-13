@@ -781,7 +781,7 @@ impl Consume {
 	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
 	/// behind collapses the backlog and only sees the newest. Values must be released with
 	/// [`Self::json_value_close`]. Pass the same compression the producer used.
-	pub fn json(
+	pub fn json_snapshot(
 		&mut self,
 		broadcast: Id,
 		name: &str,

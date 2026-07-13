@@ -86,7 +86,7 @@ generated header at `../../target/release/moq.h`.
 
 ## Callback lifetime
 
-Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
+Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
 - **`> 0`**: a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
 - **`0`**: closed cleanly. **Terminal.**
@@ -182,16 +182,16 @@ Pass `NULL` for either options pointer to use the moq-net defaults.
 
 ## JSON tracks
 
-For JSON payloads, libmoq frames the values for you in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest, via `moq_publish_json` / `moq_consume_json`. Stream (lossless) is an ordered append-log where every record is preserved, via `moq_publish_json_stream` / `moq_consume_json_stream`. Values are UTF-8 JSON documents.
+For JSON payloads, libmoq frames the values for you. You opt into one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest, via `moq_publish_json_snapshot` / `moq_consume_json_snapshot`. Stream (lossless) is an ordered append-log where every record is preserved, via `moq_publish_json_stream` / `moq_consume_json_stream`. Values are UTF-8 JSON documents.
 
 ```c
-struct moq_json_config config = { .delta_ratio = 8, .compression = true };
-int32_t json = moq_publish_json(broadcast, "status", strlen("status"), &config);
+struct moq_json_snapshot_config config = { .delta_ratio = 8, .compression = true };
+int32_t json = moq_publish_json_snapshot(broadcast, "status", strlen("status"), &config);
 const char *value = "{\"state\":\"live\"}";
-moq_publish_json_update(json, value, strlen(value));
+moq_publish_json_snapshot_update(json, value, strlen(value));
 
 // Subscribe: on_value fires with a value ID for each update; read it, then release it.
-int32_t task = moq_consume_json(consume, "status", strlen("status"), &config, on_value, user_data);
+int32_t task = moq_consume_json_snapshot(consume, "status", strlen("status"), &config, on_value, user_data);
 // In on_value: struct moq_json_value v; moq_consume_json_value(id, &v); ... moq_consume_json_value_close(id);
 ```
 

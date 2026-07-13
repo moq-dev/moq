@@ -19,7 +19,7 @@ import uniffi.moq.MoqException
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqGroupRequest
-import uniffi.moq.MoqJsonConsumer
+import uniffi.moq.MoqJsonSnapshotConsumer
 import uniffi.moq.MoqJsonStreamConsumer
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqOriginConsumer
@@ -85,7 +85,7 @@ fun MoqAudioConsumer.frames(): Flow<MoqAudioFrame> = flow {
  * Stream of JSON values (as strings) from a snapshot track, yielding the latest reconstructed
  * value. A consumer that has fallen behind collapses the backlog to the latest.
  */
-fun MoqJsonConsumer.values(): Flow<String> = flow {
+fun MoqJsonSnapshotConsumer.values(): Flow<String> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)

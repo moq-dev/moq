@@ -797,12 +797,12 @@ fn json_snapshot_publish_consume() {
 	let broadcast = id(moq_publish_create());
 
 	let track_name = b"meta";
-	let config = moq_json_config {
+	let config = moq_json_snapshot_config {
 		delta_ratio: 8,
 		compression: true,
 	};
 	let producer = id(unsafe {
-		moq_publish_json(
+		moq_publish_json_snapshot(
 			broadcast,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
@@ -816,7 +816,7 @@ fn json_snapshot_publish_consume() {
 
 	let value_cb = Callback::new();
 	let consumer = id(unsafe {
-		moq_consume_json(
+		moq_consume_json_snapshot(
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
@@ -828,7 +828,7 @@ fn json_snapshot_publish_consume() {
 
 	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
 		assert_eq!(
-			unsafe { moq_publish_json_update(producer, expected.as_ptr() as *const c_char, expected.len()) },
+			unsafe { moq_publish_json_snapshot_update(producer, expected.as_ptr() as *const c_char, expected.len()) },
 			0
 		);
 		let value_id = id(value_cb.recv());
@@ -848,8 +848,11 @@ fn json_snapshot_publish_consume() {
 	assert_eq!(moq_consume_json_close(consumer), 0);
 	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
-	assert_eq!(moq_publish_json_close(producer), 0);
-	assert!(moq_publish_json_close(producer) < 0, "double-close should fail");
+	assert_eq!(moq_publish_json_snapshot_close(producer), 0);
+	assert!(
+		moq_publish_json_snapshot_close(producer) < 0,
+		"double-close should fail"
+	);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);

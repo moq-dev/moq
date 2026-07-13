@@ -70,6 +70,12 @@ and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped
 Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport,
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
+JSON tracks carry your own `Codable` types with the framing handled for you. You opt into one of two
+distinct modes: `publishJsonSnapshot`/`subscribeJsonSnapshot` (lossy latest-value, a subscriber only
+sees the newest value) or `publishJsonStream`/`subscribeJsonStream` (lossless append-log, every record
+preserved in order). Values encode/decode at the boundary with `JSONEncoder`/`JSONDecoder`; the consumer
+is an `AsyncSequence` of the decoded type. Pass matching `compression` on both sides.
+
 ## Local development
 
 `swift/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Run via `just swift check`; skips cleanly on non-macOS hosts.

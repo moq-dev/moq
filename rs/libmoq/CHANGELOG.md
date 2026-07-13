@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- JSON snapshot C ABI renamed for symmetry with the stream mode, so the caller
+  opts explicitly into one of the two modes: `moq_json_config` ->
+  `moq_json_snapshot_config`, `moq_publish_json` -> `moq_publish_json_snapshot`
+  (and `_update` / `_close`), and `moq_consume_json` ->
+  `moq_consume_json_snapshot`. The shared `moq_json_value`,
+  `moq_consume_json_value{,_close}`, and `moq_consume_json_close` are unchanged.
+
 ### Added
 
 - Raw track options for the C ABI: `moq_publish_track` now accepts

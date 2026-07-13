@@ -50,6 +50,29 @@ public final class BroadcastConsumer: Sendable {
     public func subscribeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
         AudioConsumer(try await ffi.subscribeAudio(name: name, catalogAudio: catalogAudio, output: output))
     }
+
+    /// Subscribe to a JSON snapshot track (lossy latest-value), decoding each value as `Value`.
+    ///
+    /// Yields only the newest value, collapsing the backlog for a reader that has fallen behind.
+    /// `compression` must match the flag the producer used.
+    public func subscribeJsonSnapshot<Value: Decodable & Sendable>(
+        name: String,
+        as _: Value.Type,
+        compression: Bool = false
+    ) async throws -> JsonSnapshotConsumer<Value> {
+        JsonSnapshotConsumer(try await ffi.subscribeJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(deltaRatio: 0, compression: compression)))
+    }
+
+    /// Subscribe to a JSON stream track (lossless append-log), decoding each record as `Value`.
+    ///
+    /// Yields every record in order. `compression` must match the flag the producer used.
+    public func subscribeJsonStream<Value: Decodable & Sendable>(
+        name: String,
+        as _: Value.Type,
+        compression: Bool = false
+    ) async throws -> JsonStreamConsumer<Value> {
+        JsonStreamConsumer(try await ffi.subscribeJsonStream(name: name, config: MoqJsonStreamConfig(compression: compression)))
+    }
 }
 
 /// Write side of a broadcast: open tracks and publish frames. Does nothing until
@@ -94,6 +117,33 @@ public final class BroadcastProducer: Sendable {
     /// (e.g. to Opus) inside the FFI boundary per `input`/`output`.
     public func publishAudio(name: String, input: AudioEncoderInput, output: AudioEncoderOutput) throws -> AudioProducer {
         AudioProducer(try ffi.publishAudio(name: name, input: input, output: output))
+    }
+
+    /// Open a JSON snapshot track (lossy latest-value), encoding each value from `Value`.
+    ///
+    /// Each `update` supersedes the last; a late joiner only sees the newest value. `deltaRatio`
+    /// controls how aggressively merge-patch deltas replace full snapshots (`0` disables deltas).
+    /// Set `compression` to DEFLATE each group; the consumer must pass the same flag. Advertise
+    /// the track with `setCatalogSection` if consumers should discover it.
+    public func publishJsonSnapshot<Value: Encodable>(
+        name: String,
+        of _: Value.Type,
+        deltaRatio: UInt32 = 8,
+        compression: Bool = false
+    ) throws -> JsonSnapshotProducer<Value> {
+        JsonSnapshotProducer(try ffi.publishJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(deltaRatio: deltaRatio, compression: compression)))
+    }
+
+    /// Open a JSON stream track (lossless append-log), encoding each record from `Value`.
+    ///
+    /// Every appended record is preserved and delivered in order. Set `compression` to DEFLATE
+    /// the group; the consumer must pass the same flag.
+    public func publishJsonStream<Value: Encodable>(
+        name: String,
+        of _: Value.Type,
+        compression: Bool = false
+    ) throws -> JsonStreamProducer<Value> {
+        JsonStreamProducer(try ffi.publishJsonStream(name: name, config: MoqJsonStreamConfig(compression: compression)))
     }
 
     /// Set (or replace) an untyped application catalog section by name.

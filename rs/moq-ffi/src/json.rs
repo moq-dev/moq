@@ -19,7 +19,7 @@ use crate::producer::MoqBroadcastProducer;
 /// The same config is passed to both the producer and the consumer, but the consumer reads only
 /// [`compression`](Self::compression); [`delta_ratio`](Self::delta_ratio) is producer-only.
 #[derive(Clone, uniffi::Record)]
-pub struct MoqJsonConfig {
+pub struct MoqJsonSnapshotConfig {
 	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
 	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
 	/// deltas before rolling a new group. Ignored by the consumer.
@@ -29,8 +29,8 @@ pub struct MoqJsonConfig {
 	pub compression: bool,
 }
 
-impl From<MoqJsonConfig> for moq_json::snapshot::ProducerConfig {
-	fn from(config: MoqJsonConfig) -> Self {
+impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::ProducerConfig {
+	fn from(config: MoqJsonSnapshotConfig) -> Self {
 		let mut out = moq_json::snapshot::ProducerConfig::default();
 		out.delta_ratio = config.delta_ratio;
 		out.compression = config.compression;
@@ -38,8 +38,8 @@ impl From<MoqJsonConfig> for moq_json::snapshot::ProducerConfig {
 	}
 }
 
-impl From<MoqJsonConfig> for moq_json::snapshot::ConsumerConfig {
-	fn from(config: MoqJsonConfig) -> Self {
+impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::ConsumerConfig {
+	fn from(config: MoqJsonSnapshotConfig) -> Self {
 		let mut out = moq_json::snapshot::ConsumerConfig::default();
 		out.compression = config.compression;
 		out
@@ -75,13 +75,17 @@ impl MoqBroadcastProducer {
 	///
 	/// Advertise it in the catalog yourself with
 	/// [`set_catalog_section`](Self::set_catalog_section) if consumers should discover it.
-	pub fn publish_json(&self, name: String, config: MoqJsonConfig) -> Result<Arc<MoqJsonProducer>, MoqError> {
+	pub fn publish_json_snapshot(
+		&self,
+		name: String,
+		config: MoqJsonSnapshotConfig,
+	) -> Result<Arc<MoqJsonSnapshotProducer>, MoqError> {
 		let _guard = RUNTIME.enter();
 		self.with_state(|state| {
 			let mut broadcast = state.broadcast.clone();
 			let track = broadcast.create_track(name, None)?;
 			let producer = moq_json::snapshot::Producer::<Value>::new(track, config.into());
-			Ok(Arc::new(MoqJsonProducer {
+			Ok(Arc::new(MoqJsonSnapshotProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
 		})
@@ -109,11 +113,15 @@ impl MoqBroadcastProducer {
 impl MoqBroadcastConsumer {
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
-	/// Pass the same [`MoqJsonConfig::compression`] the producer used.
-	pub async fn subscribe_json(&self, name: String, config: MoqJsonConfig) -> Result<Arc<MoqJsonConsumer>, MoqError> {
+	/// Pass the same [`MoqJsonSnapshotConfig::compression`] the producer used.
+	pub async fn subscribe_json_snapshot(
+		&self,
+		name: String,
+		config: MoqJsonSnapshotConfig,
+	) -> Result<Arc<MoqJsonSnapshotConsumer>, MoqError> {
 		let track = self.inner().track(&name)?.subscribe(None).await?;
 		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
-		Ok(Arc::new(MoqJsonConsumer {
+		Ok(Arc::new(MoqJsonSnapshotConsumer {
 			task: Task::new(SnapshotConsumer { inner: consumer }),
 		}))
 	}
@@ -136,12 +144,12 @@ impl MoqBroadcastConsumer {
 
 /// Publishes a JSON value that consumers see as a single latest state.
 #[derive(uniffi::Object)]
-pub struct MoqJsonProducer {
+pub struct MoqJsonSnapshotProducer {
 	inner: std::sync::Mutex<Option<moq_json::snapshot::Producer<Value>>>,
 }
 
 #[uniffi::export]
-impl MoqJsonProducer {
+impl MoqJsonSnapshotProducer {
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
 	pub fn update(&self, value: String) -> Result<(), MoqError> {
@@ -177,12 +185,12 @@ impl SnapshotConsumer {
 
 /// Consumes a JSON snapshot track, yielding the latest reconstructed value.
 #[derive(uniffi::Object)]
-pub struct MoqJsonConsumer {
+pub struct MoqJsonSnapshotConsumer {
 	task: Task<SnapshotConsumer>,
 }
 
 #[uniffi::export]
-impl MoqJsonConsumer {
+impl MoqJsonSnapshotConsumer {
 	/// Get the next value as a JSON string. Returns `None` once the track ends.
 	///
 	/// A consumer that has fallen behind collapses the backlog and yields only the latest value.
