@@ -195,6 +195,16 @@
           nixfmt
         ];
 
+        # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
+        # the wrapper and runs :moq:jvmTest instead of silently skipping.
+        # Pinned to gradle 8.x (Kotlin 2.0.21's Gradle plugin predates Gradle
+        # 9) and JDK 17 (the wrapper's jvmTarget). Cross-platform: the kt check
+        # builds moq-ffi for the host and runs on both Linux and macOS.
+        ktDeps = with pkgs; [
+          jdk17
+          gradle_8
+        ];
+
         # Dependencies for building the OBS plugin (`just obs build`).
         # Linux-only: nixpkgs marks obs-studio broken on Darwin, so macOS
         # and Windows fetch libobs/Qt6 via the OBS buildspec instead (see
@@ -282,6 +292,7 @@
             ++ packagingDeps
             ++ lintDeps
             ++ obsDeps
+            ++ ktDeps
             ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
