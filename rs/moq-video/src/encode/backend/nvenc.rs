@@ -504,7 +504,7 @@ mod tests {
 		};
 
 		let rgba = gradient_rgba(w, h);
-		let expected = crate::frame::I420::from_rgba(&rgba, w, h).unwrap();
+		let expected = crate::frame::I420::from_rgba(&rgba, w * 4, w, h).unwrap();
 
 		let decode_config = crate::decode::Config {
 			kind: crate::decode::Kind::Software,

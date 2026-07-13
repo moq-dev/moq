@@ -35,6 +35,11 @@ nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # binary carries NEEDED libva.so.2 / libva-drm.so.2), so disable this feature for a
 # build with no libva dependency. See #1837.
 vaapi = ["dep:moq-vaapi"]
+# Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
+# Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
+# at build time (and its bindgen needs libclang), so it only belongs in builds
+# that actually capture displays. Camera capture (V4L2) needs nothing extra.
+pipewire = ["dep:pipewire", "dep:ashpd"]
 
 [dependencies]
 anyhow = "1"
@@ -58,6 +63,10 @@ tracing = "0.1"
 yuv = "0.8.14"
 
 [target.'cfg(target_os="linux")'.dependencies]
+# xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,
+# zbus over DBus). The portal owns source selection: the user picks a monitor in a
+# compositor dialog, and we get back a PipeWire fd + node id to stream from.
+ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast"] }
 # NVENC hardware encoder, behind the default-on `nvenc` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
@@ -81,6 +90,9 @@ moq-nvenc = { workspace = true, optional = true }
 # switch moq-vaapi to dlopen libva (one portable binary that falls back like the
 # NVENC backend); the latter is tracked in #1837.
 moq-vaapi = { workspace = true, optional = true }
+# PipeWire video stream for the portal's node, behind the `pipewire` feature.
+# Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
+pipewire = { version = "0.10", optional = true }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
 v4l = "0.14"

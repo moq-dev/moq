@@ -2,7 +2,8 @@
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420).
+//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), screen ->
+//!   xdg-desktop-portal + PipeWire (RGB -> CPU I420, `pipewire` feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
 //!   DXGI Desktop Duplication (BGRA -> CPU I420).
 //!
@@ -39,6 +40,10 @@ mod surface;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
+// Portal + PipeWire screen capture on Linux.
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+mod pipewire;
+
 // Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
 mod mediafoundation;
@@ -58,7 +63,8 @@ pub enum Source {
 	/// A camera / webcam.
 	#[default]
 	Camera,
-	/// A display (whole-screen capture). macOS and Windows.
+	/// A display (whole-screen capture). macOS, Windows, and Linux (behind the
+	/// `pipewire` feature; the xdg-desktop-portal picker chooses the screen).
 	Display,
 }
 
@@ -186,7 +192,17 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 			{
 				desktopduplication::open(config).await
 			}
-			#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+			#[cfg(all(target_os = "linux", feature = "pipewire"))]
+			{
+				pipewire::open(config).await
+			}
+			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
+			{
+				Err(Error::Codec(anyhow::anyhow!(
+					"screen capture requires the `pipewire` feature on Linux"
+				)))
+			}
+			#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 			{
 				Err(Error::Codec(anyhow::anyhow!(
 					"screen capture is not supported on this platform"

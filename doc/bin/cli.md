@@ -125,12 +125,15 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang import 
 
 # Pick a codec (default h264). h265 is hardware-only:
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --codec h265
+
+# Capture a display instead of a camera:
+moq --client-connect https://relay.example.com/anon --broadcast screen.hang import capture --screen --no-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders are compiled in by
-default and link the CUDA / libva system libraries. To build `capture` without
-them (software openh264 + V4L2 capture only, no CUDA/libva dependency), drop the
-default features:
+On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
+screen capture are compiled in by default and link the CUDA / libva / libpipewire
+system libraries. To build `capture` without them (software openh264 + V4L2
+camera capture only, no system library dependency), drop the default features:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
@@ -138,7 +141,12 @@ cargo build --release -p moq-cli --no-default-features \
 ```
 
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
-Linux, Media Foundation on Windows). The codec is chosen with `--codec`
+Linux, Media Foundation on Windows). `--screen` captures a display instead:
+ScreenCaptureKit on macOS, DXGI Desktop Duplication on Windows, and
+xdg-desktop-portal + PipeWire on Linux (Wayland and X11), where the desktop's
+picker dialog chooses the screen. The Linux screen backend links libpipewire and
+is behind the default-on `pipewire` feature; drop it (like the codecs above) for
+a build without the dependency. The codec is chosen with `--codec`
 (`h264` default, or `h265`). For H.264 it picks a hardware encoder
 (VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
 is present, falling back to the built-in software encoder (openh264); force either

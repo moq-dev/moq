@@ -174,7 +174,7 @@ impl Encoder {
 			)));
 		}
 
-		let frame = Frame::I420(I420::from_rgba(rgba, width, height)?);
+		let frame = Frame::I420(I420::from_rgba(rgba, width * 4, width, height)?);
 		self.encode_raw(&frame, keyframe)
 	}
 

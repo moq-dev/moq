@@ -18,7 +18,7 @@ name = "moq"
 path = "src/main.rs"
 
 [features]
-default = ["iroh", "noq", "websocket", "nvenc", "vaapi", "nvdec"]
+default = ["iroh", "noq", "websocket", "nvenc", "vaapi", "nvdec", "pipewire"]
 iroh = ["moq-native/iroh"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
@@ -42,6 +42,10 @@ transcode = ["dep:moq-transcode", "dep:moq-video"]
 nvenc = ["moq-video?/nvenc", "moq-transcode?/nvenc"]
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 nvdec = ["moq-video?/nvdec", "moq-transcode?/nvdec"]
+# Screen capture for `capture --screen` on Linux (xdg-desktop-portal + PipeWire),
+# on by default like the hardware codecs above and trimmable the same way. Only
+# bites when `capture` pulls in moq-video; links libpipewire-0.3 at build time.
+pipewire = ["moq-video?/pipewire"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

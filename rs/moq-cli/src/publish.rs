@@ -47,7 +47,8 @@ pub struct CaptureArgs {
 	#[arg(long, conflicts_with = "screen")]
 	pub camera: Option<String>,
 
-	/// Capture a display (whole screen) instead of a camera. macOS and Windows.
+	/// Capture a display (whole screen) instead of a camera. On Linux the
+	/// desktop portal opens a picker dialog to choose the screen.
 	#[arg(long)]
 	pub screen: bool,
 

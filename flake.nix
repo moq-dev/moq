@@ -124,6 +124,11 @@
             # #1837: if moq-vaapi switches to dlopen'ing libva, this stays needed
             # only to run it, and a libva-less build/host would fall back cleanly.)
             pkgs.libva
+            # moq-video's `pipewire` screen-capture feature: the pipewire crate
+            # links libpipewire-0.3 via pkg-config and generates bindings at build
+            # time (bindgenHook above provides libclang). Linux-only; macOS uses
+            # ScreenCaptureKit.
+            pkgs.pipewire
           ];
 
         # JavaScript dependencies
