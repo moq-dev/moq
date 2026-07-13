@@ -47,7 +47,7 @@ fn missing_url_fails_state_change() {
 // A connect that cannot succeed does NOT post a fatal ERROR: the sink reconnects with backoff
 // (issue #2212), so an unattended publisher survives a relay that is unreachable at startup or
 // during an outage instead of tearing down the pipeline. It keeps retrying and stays disconnected.
-// (A non-retryable failure — e.g. auth rejection — is still terminal; that path needs a live relay
+// (A non-retryable failure, e.g. auth rejection, is still terminal; that path needs a live relay
 // and is covered separately.) The `.invalid` host fails fast at DNS resolution, so the loop is
 // already several retries deep within the window below.
 #[test]
@@ -65,14 +65,22 @@ fn connect_failure_retries_without_erroring() {
 	let bus = pipeline.bus().expect("pipeline bus");
 	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Error]);
 	let connected = sink.property::<bool>("connected");
+	let status = sink.property::<gstmoq::ConnectionStatus>("status");
+	let send_bitrate = sink.property::<u64>("estimated-send-bitrate");
+	let recv_bitrate = sink.property::<u64>("estimated-recv-bitrate");
 	let _ = pipeline.set_state(gst::State::Null);
 
 	assert!(
 		msg.is_none(),
-		"a failed connect must NOT post an ERROR — the sink retries (issue #2212)"
+		"a failed connect must NOT post an ERROR: the sink retries (issue #2212)"
 	);
 	assert!(
 		!connected,
 		"a failed connect must leave connected = false while retrying"
 	);
+	// While retrying, status stays Disconnected (a transient retry, not the terminal Failed) and the
+	// bitrate estimates read 0.
+	assert_eq!(status, gstmoq::ConnectionStatus::Disconnected);
+	assert_eq!(send_bitrate, 0);
+	assert_eq!(recv_bitrate, 0);
 }

@@ -3,6 +3,9 @@ use gst::glib;
 mod sink;
 mod source;
 
+/// The `moqsink` publish connection lifecycle, exposed as its read-only `status` property.
+pub use sink::ConnectionStatus;
+
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
