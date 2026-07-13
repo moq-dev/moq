@@ -71,9 +71,9 @@ impl Publish {
 	/// see a normal end rather than [`moq_net::Error::Dropped`].
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let (broadcast, mut catalog) = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		// Close the broadcast first so the clean end reaches subscribers even if
+		// Finish the broadcast first so the clean end reaches subscribers even if
 		// finalizing the catalog fails.
-		broadcast.close();
+		broadcast.finish();
 		catalog.finish()?;
 		Ok(())
 	}

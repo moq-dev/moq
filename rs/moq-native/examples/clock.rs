@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
 			// Cleanly close the broadcast on exit so subscribers see a normal end
 			// rather than Error::Dropped.
-			broadcast.close();
+			broadcast.finish();
 			result
 		}
 		Command::Subscribe => {
