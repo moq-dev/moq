@@ -536,18 +536,4 @@ impl QuicheRequest {
 			QuicheRequest::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
-
-	/// Reject the session with a status code.
-	pub async fn reject(
-		self,
-		status: web_transport_quiche::http::StatusCode,
-	) -> std::result::Result<(), web_transport_quiche::ServerError> {
-		match self {
-			QuicheRequest::Raw { connection, .. } => {
-				let _: () = connection.close(status.as_u16().into(), status.as_str());
-				Ok(())
-			}
-			QuicheRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
-		}
-	}
 }

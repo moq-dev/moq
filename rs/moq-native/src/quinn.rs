@@ -548,20 +548,6 @@ impl QuinnRequest {
 		};
 		crate::tls::PeerIdentity::from_any(conn.peer_identity())
 	}
-
-	/// Reject the session with a status code.
-	pub async fn close(
-		self,
-		status: web_transport_quinn::http::StatusCode,
-	) -> std::result::Result<(), web_transport_quinn::ServerError> {
-		match self {
-			QuinnRequest::Raw { connection, .. } => {
-				connection.close(status.as_u16().into(), status.as_str().as_bytes());
-				Ok(())
-			}
-			QuinnRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
-		}
-	}
 }
 
 // ── ServerIdGenerator ───────────────────────────────────────────────

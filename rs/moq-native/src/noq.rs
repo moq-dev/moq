@@ -548,20 +548,6 @@ impl NoqRequest {
 		};
 		crate::tls::PeerIdentity::from_any(conn.peer_identity())
 	}
-
-	/// Reject the session with a status code.
-	pub async fn close(
-		self,
-		status: web_transport_noq::http::StatusCode,
-	) -> std::result::Result<(), web_transport_noq::ServerError> {
-		match self {
-			NoqRequest::Raw { connection, .. } => {
-				connection.close(status.as_u16().into(), status.as_str().as_bytes());
-				Ok(())
-			}
-			NoqRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
-		}
-	}
 }
 
 // ── ServerIdGenerator ───────────────────────────────────────────────

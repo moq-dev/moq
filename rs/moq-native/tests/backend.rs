@@ -46,6 +46,10 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
+		// The client wired only a subscriber, so its advertised role reaches the server
+		// over every transport, now that the SETUP is read before the caller authorizes
+		// rather than deferred to `ok()`.
+		assert_eq!(request.role(), moq_native::moq_net::Role::Subscriber);
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
@@ -319,6 +323,10 @@ async fn iroh_connect() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
+		// The client wired only a subscriber, so its advertised role reaches the server
+		// over every transport, now that the SETUP is read before the caller authorizes
+		// rather than deferred to `ok()`.
+		assert_eq!(request.role(), moq_native::moq_net::Role::Subscriber);
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
