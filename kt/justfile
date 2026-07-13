@@ -9,11 +9,19 @@ set working-directory := '.'
 default:
     just check
 
-# Build moq-ffi for the host, regenerate uniffi bindings, run :moq:jvmTest.
+# Build moq-ffi for the host, regenerate uniffi bindings, compile the
+# wrapper, and run :moq:jvmTest. Needs cargo + a JDK + gradle (all in the
 
-# Skips cleanly if cargo, java, or gradle is missing.
+# `nix develop` shell); errors out if any is missing so drift can't slip by.
 check:
     bash scripts/check.sh
+
+# Regenerate the checked-in uniffi bindings + host native lib without
+# compiling or testing. For environments that intentionally lack gradle;
+
+# `check` runs this first. Needs cargo.
+generate:
+    bash scripts/generate.sh
 
 # Assemble the KMP module from per-target moq-ffi binaries + bindings.
 # Used by .github/workflows/release-kt.yml; see kt/README.md for the

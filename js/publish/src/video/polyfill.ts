@@ -31,15 +31,8 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	// TODO Firefox supports this in a background worker.
 	console.warn("Using MediaStreamTrackProcessor polyfill; performance might suffer.");
 
-	const settings = track.getSettings();
-	if (!settings) {
-		throw new Error("track has no settings");
-	}
-
 	let video: HTMLVideoElement;
-	let last: Time.Milli;
-
-	const frameRate = settings.frameRate ?? 30;
+	let handle: number | undefined;
 
 	return new ReadableStream<VideoFrame>({
 		async start() {
@@ -51,20 +44,25 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 					video.onloadedmetadata = r;
 				}),
 			]);
-
-			last = Time.Milli.now();
 		},
 		async pull(controller) {
-			while (true) {
-				const now = Time.Milli.now();
-				if (Time.Milli.sub(now, last) < ((1000 / frameRate) as Time.Milli)) {
-					await new Promise((r) => requestAnimationFrame(r));
-					continue;
-				}
-
-				last = now;
-				controller.enqueue(new VideoFrame(video, { timestamp: Time.Micro.fromMilli(last) }));
-			}
+			// requestVideoFrameCallback fires once per frame the camera actually delivers, so we
+			// sample its true cadence instead of racing a wall clock. The old timer settled at
+			// 20fps for a 30fps camera because Safari/Firefox clamp performance.now() to whole
+			// milliseconds, so a 33ms tick always read as "too early" for a 33.333ms period.
+			await new Promise<void>((resolve) => {
+				handle = video.requestVideoFrameCallback((now, metadata) => {
+					// captureTime is the frame's capture instant; both it and now are on the
+					// performance.now() timebase, so audio and video stay on one epoch.
+					const timestamp = (metadata.captureTime ?? now) as Time.Milli;
+					controller.enqueue(new VideoFrame(video, { timestamp: Time.Micro.fromMilli(timestamp) }));
+					resolve();
+				});
+			});
+		},
+		cancel() {
+			if (handle !== undefined) video.cancelVideoFrameCallback(handle);
+			if (video) video.srcObject = null;
 		},
 	});
 }

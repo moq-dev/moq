@@ -14,7 +14,7 @@ name = "moq-rs"
 # isn't already there (no tag needed; the registry is the gate).
 # Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
 # bundled the bindings.
-version = "0.3.1"
+version = "0.3.2"
 description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API. Import as `moq`."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -30,9 +30,10 @@ classifiers = [
 ]
 # Compatible-release pin: floats to the latest 0.2.x moq-ffi patch without a
 # wrapper re-release. A moq-ffi minor bump (0.3) is the only thing that forces
-# bumping this constraint. Floor is 0.2.24, the first release exposing
-# MoqAnnouncement.hops() that Announcement.hops depends on.
-dependencies = ["moq-ffi ~= 0.2.24"]
+# bumping this constraint. Floor is 0.2.29, the first release exposing the JSON
+# track types (MoqJsonProducer/MoqJsonStreamProducer/...) that the publish_json
+# and subscribe_json wrappers import.
+dependencies = ["moq-ffi ~= 0.2.29"]
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"

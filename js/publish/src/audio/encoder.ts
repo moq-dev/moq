@@ -152,7 +152,7 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			await context.audioWorklet.addModule(CaptureWorklet);
+			await Promise.race([context.audioWorklet.addModule(CaptureWorklet), effect.cancel]);
 			if (context.state === "closed") return;
 
 			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
