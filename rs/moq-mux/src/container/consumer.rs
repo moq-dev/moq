@@ -1406,7 +1406,7 @@ mod tests {
 
 		fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 			for frame in frames {
-				group.write_frame_now(frame.payload.clone())?;
+				group.write_frame(moq_net::Timestamp::ZERO, frame.payload.clone())?;
 			}
 			Ok(())
 		}
@@ -1445,8 +1445,12 @@ mod tests {
 
 		// A decodable frame first (so startup selects the group), then a malformed one.
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		group.write_frame_now(Bytes::from(0u64.to_le_bytes().to_vec())).unwrap();
-		group.write_frame_now(Bytes::from_static(b"FAIL")).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, Bytes::from(0u64.to_le_bytes().to_vec()))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"FAIL"))
+			.unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
 

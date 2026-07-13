@@ -743,11 +743,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// `create_frame` is the allocation chokepoint and rejects an oversized
 			// `size` before allocating, so no pre-check is needed. No wire timestamp
-			// (pre-lite-05) means wall-clock at receive.
-			let mut frame = match timestamp {
-				Some(ts) => group.create_frame(frame::Info { size, timestamp: ts })?,
-				None => group.create_frame_now(size)?,
-			};
+			// (pre-lite-05) means local receive time.
+			let timestamp = timestamp.unwrap_or_else(Timestamp::now);
+			let mut frame = group.create_frame(frame::Info { size, timestamp })?;
 			track_stats.frame();
 
 			if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
@@ -908,7 +906,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match self.track_info().await {
 				Ok(info) => {
 					// Lite05 carries per-frame timestamps on the wire at this scale; `Some`
-					// tells `run_group` to decode them (vs. wall-clock-stamping locally).
+					// tells `run_group` to decode them instead of stamping local receive time.
 					let timescale = Some(info.timescale);
 					(Some(Track::Active(request.accept(info))), timescale)
 				}

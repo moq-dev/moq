@@ -255,7 +255,7 @@ impl Inner {
 		self.group
 			.as_mut()
 			.expect("delta_allowed guarantees an open group")
-			.write_frame_now(slice)?;
+			.write_frame(moq_net::Timestamp::now(), slice)?;
 		self.delta_bytes += len;
 		self.group_frames += 1;
 
@@ -302,7 +302,7 @@ impl Inner {
 			(Bytes::from(snapshot), None)
 		};
 		self.snapshot_len = slice.len() as u64;
-		group.write_frame_now(slice)?;
+		group.write_frame(moq_net::Timestamp::now(), slice)?;
 		self.delta_bytes = 0;
 		self.group_frames = 1;
 		self.encoder = encoder;
@@ -749,7 +749,10 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		group
-			.write_frame_now(Bytes::from(serde_json::to_vec(&json!({ "a": 1 })).unwrap()))
+			.write_frame(
+				moq_net::Timestamp::ZERO,
+				Bytes::from(serde_json::to_vec(&json!({ "a": 1 })).unwrap()),
+			)
 			.unwrap();
 		group.finish().unwrap();
 

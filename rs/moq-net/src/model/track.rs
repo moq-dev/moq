@@ -53,7 +53,7 @@ pub struct Info {
 	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
 	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
-	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to wall-clock milliseconds.
+	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
 	pub timescale: Timescale,
 	/// How long the publisher keeps old groups available before evicting them
 	/// (the newest group is always retained). A subscriber's
@@ -770,20 +770,11 @@ impl Producer {
 
 	/// Create a group with a single frame, at the given presentation timestamp.
 	///
-	/// The timestamp is converted into the track's timescale. Use
-	/// [`Self::write_frame_now`] to stamp wall-clock time instead.
+	/// The timestamp is converted into the track's timescale. For data without
+	/// a presentation time, pass [`Timestamp::now`] explicitly.
 	pub fn write_frame<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
 		let mut group = self.append_group()?;
 		group.write_frame(timestamp, frame)?;
-		group.finish()?;
-		Ok(())
-	}
-
-	/// Like [`Self::write_frame`] but stamps the frame with wall-clock now
-	/// ([`Timestamp::now`]).
-	pub fn write_frame_now<B: crate::IntoBytes>(&mut self, frame: B) -> Result<()> {
-		let mut group = self.append_group()?;
-		group.write_frame_now(frame)?;
 		group.finish()?;
 		Ok(())
 	}
@@ -2783,8 +2774,8 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		producer.write_frame_now(b"hello".as_slice()).unwrap();
-		producer.write_frame_now(b"world".as_slice()).unwrap();
+		producer.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
+		producer.write_frame(Timestamp::ZERO, b"world".as_slice()).unwrap();
 
 		let frame = consumer
 			.read_frame()
@@ -2831,7 +2822,8 @@ mod test {
 		let _stalled = producer.create_group(group::Info { sequence: 3 }).unwrap();
 		// Seq 5: fully-written group with a frame.
 		let mut g5 = producer.create_group(group::Info { sequence: 5 }).unwrap();
-		g5.write_frame_now(bytes::Bytes::from_static(b"later")).unwrap();
+		g5.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"later"))
+			.unwrap();
 		g5.finish().unwrap();
 
 		// read_frame should not block on the stalled seq 3. It returns seq 5's frame.
@@ -2851,12 +2843,14 @@ mod test {
 
 		// Group 0 has two frames; only the first is returned.
 		let mut g0 = producer.create_group(group::Info { sequence: 0 }).unwrap();
-		g0.write_frame_now(bytes::Bytes::from_static(b"one")).unwrap();
-		g0.write_frame_now(bytes::Bytes::from_static(b"two")).unwrap();
+		g0.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"one"))
+			.unwrap();
+		g0.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"two"))
+			.unwrap();
 		g0.finish().unwrap();
 
 		// Group 1 is a normal single-frame group.
-		producer.write_frame_now(b"next".as_slice()).unwrap();
+		producer.write_frame(Timestamp::ZERO, b"next".as_slice()).unwrap();
 
 		let frame = consumer
 			.read_frame()
@@ -2893,7 +2887,8 @@ mod test {
 		);
 
 		// A late frame on the pending group is still delivered.
-		g0.write_frame_now(bytes::Bytes::from_static(b"late")).unwrap();
+		g0.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"late"))
+			.unwrap();
 		let frame = consumer
 			.read_frame()
 			.now_or_never()
@@ -2913,11 +2908,13 @@ mod test {
 
 		// Seq 3 has a frame but is below min_sequence, so it must be skipped.
 		let mut g3 = producer.create_group(group::Info { sequence: 3 }).unwrap();
-		g3.write_frame_now(bytes::Bytes::from_static(b"skip-me")).unwrap();
+		g3.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"skip-me"))
+			.unwrap();
 		g3.finish().unwrap();
 
 		let mut g5 = producer.create_group(group::Info { sequence: 5 }).unwrap();
-		g5.write_frame_now(bytes::Bytes::from_static(b"keep")).unwrap();
+		g5.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"keep"))
+			.unwrap();
 		g5.finish().unwrap();
 
 		let frame = consumer
@@ -2934,7 +2931,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		producer.write_frame_now(b"only".as_slice()).unwrap();
+		producer.write_frame(Timestamp::ZERO, b"only".as_slice()).unwrap();
 		producer.finish().unwrap();
 
 		let frame = consumer
@@ -2993,7 +2990,9 @@ mod test {
 
 		// Produce a cached group.
 		let mut group = producer.append_group().unwrap(); // seq 0
-		group.write_frame_now(bytes::Bytes::from_static(b"hello")).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"hello"))
+			.unwrap();
 		group.finish().unwrap();
 
 		// A cached group resolves immediately and never queues a request. `get_group`
@@ -3032,7 +3031,9 @@ mod test {
 
 		// Serve it by accepting the request; the fetch then resolves.
 		let mut group = req.accept(None).unwrap();
-		group.write_frame_now(bytes::Bytes::from_static(b"hi")).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"hi"))
+			.unwrap();
 		group.finish().unwrap();
 
 		let mut g = pending.await.unwrap();
@@ -3097,7 +3098,9 @@ mod test {
 			.expect("should not block")
 			.unwrap();
 		let mut group = req.accept(None).unwrap();
-		group.write_frame_now(bytes::Bytes::from_static(b"retry")).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"retry"))
+			.unwrap();
 		group.finish().unwrap();
 
 		let mut group = retry.await.unwrap();
@@ -3143,7 +3146,9 @@ mod test {
 
 	fn finished_group(producer: &mut Producer, size: usize) -> u64 {
 		let mut group = producer.append_group().unwrap();
-		group.write_frame_now(bytes::Bytes::from(vec![0u8; size])).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; size]))
+			.unwrap();
 		group.finish().unwrap();
 		group.sequence
 	}
@@ -3265,7 +3270,9 @@ mod test {
 
 		// A late frame on the old group still counts against the budget, and can
 		// evict that very group once it blows past capacity.
-		group0.write_frame_now(bytes::Bytes::from(vec![0u8; 4000])).unwrap();
+		group0
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 4000]))
+			.unwrap();
 		assert!(pool.used() <= 3000, "growth on an old group triggers eviction");
 		assert!(matches!(group0.abort(Error::Cancel), Err(Error::Evicted)));
 	}
@@ -3279,7 +3286,9 @@ mod test {
 
 		// Seq 0 stays open: the straggler used to apply memory pressure later.
 		let mut straggler = producer.append_group().unwrap();
-		straggler.write_frame_now(bytes::Bytes::from(vec![0u8; 1000])).unwrap();
+		straggler
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 1000]))
+			.unwrap();
 		tokio::time::advance(Duration::from_millis(10)).await;
 
 		// The publisher aborts its own latest group; the slot stays at max_sequence.
@@ -3297,14 +3306,18 @@ mod test {
 			.expect("should not block")
 			.unwrap();
 		let mut group = req.accept(None).unwrap();
-		group.write_frame_now(bytes::Bytes::from(vec![0u8; 1000])).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 1000]))
+			.unwrap();
 		group.finish().unwrap();
 		pending.await.unwrap();
 		tokio::time::advance(Duration::from_millis(10)).await;
 
 		// Blow the budget with the straggler; the refetched latest is pinned, so
 		// the straggler itself is the only eligible victim.
-		straggler.write_frame_now(bytes::Bytes::from(vec![0u8; 4000])).unwrap();
+		straggler
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 4000]))
+			.unwrap();
 
 		assert!(pool.used() <= 3000);
 		let mut group = consumer.get_group(1).expect("refetched latest must stay pinned");
@@ -3339,7 +3352,9 @@ mod test {
 
 		// Accept replaces the evicted slot in place (not Error::Duplicate).
 		let mut group = req.accept(None).unwrap();
-		group.write_frame_now(bytes::Bytes::from_static(b"refetched")).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"refetched"))
+			.unwrap();
 		group.finish().unwrap();
 
 		let mut group = pending.await.unwrap();

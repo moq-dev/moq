@@ -846,7 +846,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 
 			// Per-object extension headers may carry the frame's presentation timestamp
-			// (Timestamp/Timescale Object Properties). Absent it, we wall-clock-stamp.
+			// (Timestamp/Timescale Object Properties). Absent it, stamp the local receive time.
 			let timestamp = if group.flags.has_extensions {
 				let size: usize = stream.decode().await?;
 				let mut ext = stream.read_exact(size).await?;
@@ -859,10 +859,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					let frame = match timestamp {
-						Some(ts) => producer.create_frame(frame::Info { size: 0, timestamp: ts })?,
-						None => producer.create_frame_now(0)?,
-					};
+					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
 					track_stats.frame();
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
@@ -871,12 +869,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				// `create_frame*` is the allocation chokepoint and rejects an oversized
+				// `create_frame` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
-				let mut frame = match timestamp {
-					Some(ts) => producer.create_frame(frame::Info { size, timestamp: ts })?,
-					None => producer.create_frame_now(size)?,
-				};
+				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {

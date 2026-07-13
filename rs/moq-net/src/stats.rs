@@ -1258,7 +1258,7 @@ fn flush_track<T: Serialize>(track: &mut track::Producer, frame: &T, last: &mut 
 	if &json == last {
 		return;
 	}
-	if let Err(err) = track.write_frame_now(json.clone()) {
+	if let Err(err) = track.write_frame(crate::Timestamp::now(), json.clone()) {
 		tracing::debug!(?err, name, "stats: failed to write frame");
 		return;
 	}

@@ -283,7 +283,8 @@ impl Timestamp {
 		}
 	}
 
-	/// Current time, expressed in the default timescale ([`Timescale::MILLI`]).
+	/// Current point on the local monotonic clock, expressed in the default timescale
+	/// ([`Timescale::MILLI`]).
 	///
 	/// This is the one-way bridge from a local clock to a track timestamp: there is
 	/// deliberately no inverse (a [`Timestamp`] is relative and jittered, never a clock).

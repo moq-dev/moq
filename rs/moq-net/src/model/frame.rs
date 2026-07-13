@@ -27,9 +27,7 @@ pub struct Info {
 	///
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// Use [`group::Producer::create_frame_now`] /
-	/// [`group::Producer::write_frame_now`] to stamp wall-clock time instead of
-	/// supplying one explicitly.
+	/// For data without a presentation time, pass [`Timestamp::now`] explicitly.
 	pub timestamp: Timestamp,
 }
 

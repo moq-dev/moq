@@ -141,7 +141,10 @@ impl Inner {
 			Some(encoder) => encoder.frame(&payload),
 			None => payload,
 		};
-		self.group.as_mut().expect("a group is open").write_frame_now(slice)?;
+		self.group
+			.as_mut()
+			.expect("a group is open")
+			.write_frame(moq_net::Timestamp::now(), slice)?;
 		Ok(())
 	}
 

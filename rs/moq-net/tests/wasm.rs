@@ -21,24 +21,18 @@
 #![cfg(target_arch = "wasm32")]
 
 use bytes::Bytes;
-use moq_net::{Broadcast, Time, Track};
+use moq_net::{Broadcast, Timestamp, Track};
 use wasm_bindgen_test::*;
 
-/// The producer timestamp clock works on wasm: `Time::now()` (which flows through
-/// the web_async clock) returns a sane, non-decreasing wall-clock time.
+/// The producer timestamp clock works on wasm: `Timestamp::now()` (which flows
+/// through the web_async clock) returns a non-decreasing local time.
 /// On the old code this panicked (`std::time` has no clock on wasm32).
 #[wasm_bindgen_test]
 fn timescale_now_is_sane_and_monotonic() {
-	let a = Time::now();
-	let b = Time::now();
+	let a = Timestamp::now();
+	let b = Timestamp::now();
 
-	// A real post-2020 wall-clock time in ms (2020-01-01 = 1_577_836_800_000).
-	// Proves the web_async wall clock actually resolved.
-	assert!(
-		a.as_millis() > 1_577_836_800_000,
-		"timestamp before 2020. wall clock not working: {}",
-		a.as_millis()
-	);
+	assert!(!a.is_zero(), "timestamp clock did not advance from its local anchor");
 	// Monotonic non-decreasing.
 	assert!(b >= a, "time went backwards: {} < {}", b.as_millis(), a.as_millis());
 }
@@ -54,9 +48,15 @@ async fn produce_consume_frame_roundtrip() {
 	let mut sub = consumer.subscribe_track(&Track::new("stream")).unwrap();
 
 	// Producer side: write a frame (creates a group, timestamped via the wasm clock).
-	track.write_frame(Bytes::from_static(b"hello-wasm")).unwrap();
+	track
+		.write_frame(Timestamp::now(), Bytes::from_static(b"hello-wasm"))
+		.unwrap();
 
 	// Consumer side: read it back.
 	let frame = sub.read_frame().await.unwrap();
-	assert_eq!(frame.as_deref(), Some(&b"hello-wasm"[..]), "frame did not round-trip");
+	assert_eq!(
+		frame.as_ref().map(|frame| frame.payload.as_ref()),
+		Some(&b"hello-wasm"[..]),
+		"frame did not round-trip"
+	);
 }

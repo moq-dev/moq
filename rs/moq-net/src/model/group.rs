@@ -262,8 +262,8 @@ impl Producer {
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
 	/// But an upfront size is required.
 	///
-	/// `timestamp` is converted into the parent track's timescale. Use
-	/// [Self::write_frame_now] to stamp wall-clock time instead of supplying one.
+	/// `timestamp` is converted into the parent track's timescale. For data without
+	/// a presentation time, pass [`Timestamp::now`] explicitly.
 	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
 		let timestamp = timestamp
 			.convert(self.track.timescale)
@@ -289,13 +289,6 @@ impl Producer {
 		drop(state);
 		self.track.broadcast.origin.pool.evict();
 		Ok(())
-	}
-
-	/// Like [Self::write_frame] but stamps the frame with wall-clock now
-	/// ([`Timestamp::now`]). For data with no real presentation time of its own
-	/// (catalogs, JSON state) or sources whose protocol can't carry one.
-	pub fn write_frame_now<B: IntoBytes>(&mut self, data: B) -> Result<()> {
-		self.write_frame(Timestamp::now(), data)
 	}
 
 	/// Create a frame with an upfront size and presentation timestamp, streamed in
@@ -339,15 +332,6 @@ impl Producer {
 			timestamp,
 		};
 		Ok(frame::Producer::new(self, buf, info))
-	}
-
-	/// Like [Self::create_frame] but stamps the frame with wall-clock now
-	/// ([`Timestamp::now`]).
-	pub fn create_frame_now(&mut self, size: u64) -> Result<frame::Producer<'_>> {
-		self.create_frame(frame::Info {
-			size,
-			timestamp: Timestamp::now(),
-		})
 	}
 
 	/// Wake consumers parked on the group channel (called after a partial write).
@@ -713,8 +697,12 @@ mod test {
 	#[test]
 	fn basic_frame_reading() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame_now(Bytes::from_static(b"frame0")).unwrap();
-		producer.write_frame_now(Bytes::from_static(b"frame1")).unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"frame0"))
+			.unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"frame1"))
+			.unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -729,7 +717,9 @@ mod test {
 	#[test]
 	fn read_frame_all_at_once() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame_now(Bytes::from_static(b"hello")).unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
+			.unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -754,7 +744,12 @@ mod test {
 	fn chunked_frame_reads_whole() {
 		let mut producer = Info { sequence: 0 }.produce();
 		{
-			let mut frame = producer.create_frame_now(10).unwrap();
+			let mut frame = producer
+				.create_frame(frame::Info {
+					size: 10,
+					timestamp: Timestamp::ZERO,
+				})
+				.unwrap();
 			frame.write(Bytes::from_static(b"hello")).unwrap();
 			frame.write(Bytes::from_static(b"world")).unwrap();
 			frame.finish().unwrap();
@@ -773,7 +768,12 @@ mod test {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 
-		let mut frame = producer.create_frame_now(6).unwrap();
+		let mut frame = producer
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
 		frame.write(Bytes::from_static(b"foo")).unwrap();
 
 		// A consumer can stream the in-flight tail before it's finished.
@@ -814,7 +814,9 @@ mod test {
 	#[test]
 	fn abort_clears_cached_frames() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.unwrap();
 
 		// A stale consumer that never reads must not pin the cached frames.
 		let _consumer = producer.consume();
@@ -831,7 +833,9 @@ mod test {
 	fn drop_unfinished_clears_cached_frames() {
 		let producer = Info { sequence: 0 }.produce();
 		let mut writer = producer.clone();
-		writer.write_frame_now(Bytes::from_static(b"data")).unwrap();
+		writer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.unwrap();
 
 		// A stale consumer keeps the channel (and thus the cache) alive.
 		let mut consumer = producer.consume();
@@ -848,7 +852,9 @@ mod test {
 	#[test]
 	fn drop_finished_keeps_cached_frames() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -867,7 +873,9 @@ mod test {
 		// Consumer blocks because no frames yet.
 		assert!(consumer.next_frame().now_or_never().is_none());
 
-		producer.write_frame_now(Bytes::from_static(b"data")).unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.unwrap();
 		producer.finish().unwrap();
 
 		let frame = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -880,8 +888,8 @@ mod test {
 
 		// Write frames that total more than MAX_GROUP_CACHE.
 		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
-		producer.write_frame_now(big.clone()).unwrap();
-		producer.write_frame_now(big).unwrap();
+		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
+		producer.write_frame(Timestamp::ZERO, big).unwrap();
 
 		// The first frame should have been evicted (tombstoned via offset).
 		let state = producer.state.read();
@@ -895,8 +903,8 @@ mod test {
 		let mut producer = Info { sequence: 0 }.produce();
 
 		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
-		producer.write_frame_now(big.clone()).unwrap();
-		producer.write_frame_now(big).unwrap();
+		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
+		producer.write_frame(Timestamp::ZERO, big).unwrap();
 
 		let mut consumer = producer.consume();
 		// First frame was evicted, next_frame should return CacheFull.
@@ -909,7 +917,7 @@ mod test {
 		let mut producer = Info { sequence: 0 }.produce();
 		// Many small frames stay cached: there is no frame-count cap, only a byte budget.
 		for _ in 0..100_000 {
-			producer.write_frame_now(Bytes::from_static(b"x")).unwrap();
+			producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
 		}
 		producer.finish().unwrap();
 
@@ -921,7 +929,7 @@ mod test {
 	#[test]
 	fn clone_consumer_independent() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 
 		let mut c1 = producer.consume();
 		// Read one frame from c1
@@ -930,7 +938,7 @@ mod test {
 		// Clone c1, inheriting its index (past first frame).
 		let mut c2 = c1.clone();
 
-		producer.write_frame_now(Bytes::from_static(b"b")).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
 		producer.finish().unwrap();
 
 		// c2 should get the second frame (inherited index)
@@ -948,7 +956,9 @@ mod test {
 		let n = Prefetch::CAP * 3 + 5;
 		let mut producer = Info { sequence: 0 }.produce();
 		for i in 0..n {
-			producer.write_frame_now(Bytes::from(vec![i as u8; 4])).unwrap();
+			producer
+				.write_frame(Timestamp::ZERO, Bytes::from(vec![i as u8; 4]))
+				.unwrap();
 		}
 		producer.finish().unwrap();
 
@@ -965,7 +975,7 @@ mod test {
 	fn interleave_read_and_next_frame() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for i in 0..5u8 {
-			producer.write_frame_now(Bytes::from(vec![i; 1])).unwrap();
+			producer.write_frame(Timestamp::ZERO, Bytes::from(vec![i; 1])).unwrap();
 		}
 		producer.finish().unwrap();
 
@@ -988,8 +998,8 @@ mod test {
 	#[test]
 	fn read_frame_past_cleared_frames_does_not_panic() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame_now(Bytes::from_static(b"a")).unwrap();
-		producer.write_frame_now(Bytes::from_static(b"b")).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
 
 		let mut consumer = producer.consume();
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -1009,7 +1019,7 @@ mod test {
 	fn drop_with_partial_batch() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for _ in 0..Prefetch::CAP {
-			producer.write_frame_now(Bytes::from_static(b"x")).unwrap();
+			producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
 		}
 		producer.finish().unwrap();
 
@@ -1038,25 +1048,33 @@ mod test {
 		assert_eq!(writer.timestamp.value(), 1000);
 	}
 
-	/// `create_frame_now` stamps wall-clock now, at the group's scale.
+	/// An explicit current timestamp is converted to the group's scale.
 	#[tokio::test]
-	async fn create_frame_now_stamps_wall_clock() {
+	async fn create_frame_converts_current_timestamp() {
 		use crate::Timescale;
 
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let writer = producer.create_frame_now(3).unwrap();
+		let writer = producer
+			.create_frame(frame::Info {
+				size: 3,
+				timestamp: Timestamp::now(),
+			})
+			.unwrap();
 		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
-		assert!(!writer.timestamp.is_zero(), "wall clock should be non-zero");
+		assert!(!writer.timestamp.is_zero(), "local clock should be non-zero");
 	}
 
 	/// The per-frame size cap (the group byte budget) is enforced before allocating.
 	#[test]
 	fn create_frame_rejects_oversized() {
 		let mut producer = Info { sequence: 0 }.produce();
-		let result = producer.create_frame_now(MAX_GROUP_CACHE + 1);
+		let result = producer.create_frame(frame::Info {
+			size: MAX_GROUP_CACHE + 1,
+			timestamp: Timestamp::ZERO,
+		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
 }
