@@ -129,22 +129,6 @@ impl ObjectImpl for MoqSink {
 					.blurb("Disable TLS verification")
 					.default_value(false)
 					.build(),
-				// Read-only, served from the live session's status.
-				glib::ParamSpecBoolean::builder("connected")
-					.nick("Connected")
-					.blurb("Whether the session is currently connected")
-					.read_only()
-					.build(),
-				glib::ParamSpecString::builder("moq-version")
-					.nick("Negotiated version")
-					.blurb("The negotiated MoQ protocol version, null when disconnected")
-					.read_only()
-					.build(),
-				glib::ParamSpecUInt64::builder("estimated-send-bitrate")
-					.nick("Estimated send bitrate")
-					.blurb("Estimated send bitrate in bits per second (congestion controller), 0 when unavailable")
-					.read_only()
-					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -161,26 +145,12 @@ impl ObjectImpl for MoqSink {
 	}
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+		let settings = self.settings.lock().unwrap();
 		match pspec.name() {
-			"connected" | "moq-version" | "estimated-send-bitrate" => {
-				let state = self.state.lock().unwrap();
-				let status = state.as_ref().map(|s| s.session.status());
-				match pspec.name() {
-					"connected" => status.is_some_and(|s| s.connected()).to_value(),
-					"moq-version" => status.and_then(|s| s.version()).to_value(),
-					"estimated-send-bitrate" => status.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
-					_ => unreachable!(),
-				}
-			}
-			name => {
-				let settings = self.settings.lock().unwrap();
-				match name {
-					"url" => settings.url.to_value(),
-					"broadcast" => settings.broadcast.to_value(),
-					"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-					_ => unreachable!(),
-				}
-			}
+			"url" => settings.url.to_value(),
+			"broadcast" => settings.broadcast.to_value(),
+			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+			_ => unreachable!(),
 		}
 	}
 

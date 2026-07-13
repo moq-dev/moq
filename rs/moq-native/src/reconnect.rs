@@ -71,25 +71,6 @@ pub enum Status {
 	Disconnected,
 }
 
-/// A snapshot of the live session's observable state, reported by [`Reconnect::changed`].
-///
-/// The reconnect loop owns the session, so a caller that needs the session's stats (a publisher
-/// element surfacing them as properties, say) reads them from here rather than holding the session
-/// itself. All fields reflect the *current* session and reset when it disconnects.
-///
-/// `#[non_exhaustive]`: read the fields you need; a future observable field won't be a breaking
-/// change. Construct via [`Default`] when a placeholder is needed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Snapshot {
-	/// Current connection status, or `None` before the first connect.
-	pub status: Option<Status>,
-	/// The negotiated MoQ version of the live session, or `None` when disconnected.
-	pub version: Option<String>,
-	/// The congestion controller's send estimate in bits/sec, `0` when disconnected or unavailable.
-	pub send_bitrate: u64,
-}
-
 /// Shared reconnect state, observed by consumers through a [`kio`] channel.
 ///
 /// The channel closing (all producers dropped) is the terminal signal; `error`
@@ -98,23 +79,8 @@ pub struct Snapshot {
 struct State {
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
-	/// The negotiated MoQ version of the live session, or `None` when disconnected.
-	version: Option<String>,
-	/// The live session's congestion-controller send estimate (bits/sec); `0` when disconnected
-	/// or the backend has no estimate.
-	send_bitrate: u64,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Error>,
-}
-
-impl State {
-	fn snapshot(&self) -> Snapshot {
-		Snapshot {
-			status: self.status,
-			version: self.version.clone(),
-			send_bitrate: self.send_bitrate,
-		}
-	}
 }
 
 /// Handle to a background reconnect loop.
@@ -127,8 +93,6 @@ pub struct Reconnect {
 	state: kio::Consumer<State>,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	last_reported: Option<Status>,
-	/// The last snapshot returned by [`changed`](Self::changed), for change detection.
-	last_snapshot: Option<Snapshot>,
 }
 
 impl Reconnect {
@@ -148,7 +112,6 @@ impl Reconnect {
 			abort: task.abort_handle(),
 			state,
 			last_reported: None,
-			last_snapshot: None,
 		}
 	}
 
@@ -174,18 +137,12 @@ impl Reconnect {
 					tracing::info!(%url, "connected");
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Connected);
-						state.version = Some(session.version().to_string());
-						state.send_bitrate = 0;
 					}
 
 					let connected = tokio::time::Instant::now();
-					// Wait for the session to close, forwarding its send-bandwidth estimate into the
-					// shared state meanwhile so a consumer tracks the live stats across the connection.
-					let closed = run_session(state, &session).await;
+					let closed = session.closed().await;
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Disconnected);
-						state.version = None;
-						state.send_bitrate = 0;
 					}
 
 					if connected.elapsed() >= backoff.initial {
@@ -266,86 +223,6 @@ impl Reconnect {
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
-
-	/// Poll for the next change to the live session's observable [`Snapshot`] since this handle last
-	/// reported one.
-	///
-	/// `Ready(Ok(snapshot))` on any change (connect/disconnect, version, or send-bitrate),
-	/// `Ready(Err)` once the loop has stopped, `Pending` otherwise.
-	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Snapshot>> {
-		let last = self.last_snapshot.clone();
-		let snapshot = match ready!(self.state.poll(waiter, |state| {
-			let snapshot = state.snapshot();
-			if Some(&snapshot) != last.as_ref() {
-				Poll::Ready(snapshot)
-			} else {
-				Poll::Pending
-			}
-		})) {
-			Ok(snapshot) => snapshot,
-			Err(state) => return Poll::Ready(Err(terminal(&state))),
-		};
-
-		self.last_snapshot = Some(snapshot.clone());
-		Poll::Ready(Ok(snapshot))
-	}
-
-	/// Wait until the live session's observable [`Snapshot`] changes from what this handle last
-	/// reported — a connect/disconnect, a version change, or a send-bitrate update — and return the
-	/// current snapshot. `Err` once the loop has stopped.
-	///
-	/// This is the stats-carrying counterpart to [`status`](Self::status): the reconnect loop owns
-	/// the session, so a caller that needs the live session's version/send-bitrate reads them here
-	/// instead of holding the session across reconnects.
-	pub async fn changed(&mut self) -> crate::Result<Snapshot> {
-		kio::wait(|waiter| self.poll_changed(waiter)).await
-	}
-
-	/// The negotiated MoQ version of the live session, or `None` when disconnected.
-	pub fn version(&self) -> Option<String> {
-		self.state.read().version.clone()
-	}
-
-	/// The live session's congestion-controller send estimate in bits/sec, `0` when disconnected or
-	/// unavailable.
-	pub fn send_bitrate(&self) -> u64 {
-		self.state.read().send_bitrate
-	}
-}
-
-/// Wait for `session` to close, forwarding its congestion-controller send estimate into `state`
-/// meanwhile so a [`Reconnect`] consumer tracks the live send-bitrate. Returns the session's close
-/// result (the reconnect loop uses it to distinguish a healthy drop from an immediate sever).
-async fn run_session(state: &kio::Producer<State>, session: &moq_net::Session) -> Result<(), moq_net::Error> {
-	// `None` when the QUIC backend has no bandwidth estimate; then that select arm parks forever.
-	let mut send_bandwidth = session.send_bandwidth();
-	let closed = session.closed();
-	tokio::pin!(closed);
-
-	loop {
-		tokio::select! {
-			result = &mut closed => return result,
-			bitrate = async {
-				match send_bandwidth.as_mut() {
-					Some(bw) => bw.changed().await,
-					None => std::future::pending::<Option<u64>>().await,
-				}
-			} => match bitrate {
-				Some(rate) => {
-					if let Ok(mut state) = state.write() {
-						state.send_bitrate = rate;
-					}
-				}
-				None => {
-					// Estimate gone: report 0 (the documented "unavailable" value) and stop polling.
-					if let Ok(mut state) = state.write() {
-						state.send_bitrate = 0;
-					}
-					send_bandwidth = None;
-				}
-			},
-		}
-	}
 }
 
 impl Drop for Reconnect {
@@ -373,36 +250,5 @@ mod tests {
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(30));
 		assert_eq!(backoff.timeout, Duration::from_secs(300));
-	}
-
-	#[test]
-	fn snapshot_reflects_state_and_detects_change() {
-		// The observable surface `changed()`/`poll_changed()` forward is `State::snapshot()`, and the
-		// change filter is snapshot inequality — so every observable field must round-trip and a
-		// send-bitrate update alone must read as a distinct snapshot.
-		let mut state = State::default();
-		assert_eq!(state.snapshot(), Snapshot::default());
-
-		state.status = Some(Status::Connected);
-		state.version = Some("moq-lite-04".to_string());
-		state.send_bitrate = 2_000_000;
-		let connected = state.snapshot();
-		assert_eq!(connected.status, Some(Status::Connected));
-		assert_eq!(connected.version.as_deref(), Some("moq-lite-04"));
-		assert_eq!(connected.send_bitrate, 2_000_000);
-
-		// A send-bitrate change alone is a new snapshot (so a live estimate update wakes poll_changed).
-		state.send_bitrate = 2_100_000;
-		assert_ne!(state.snapshot(), connected);
-
-		// Disconnect clears version + bitrate but keeps the (distinct) Disconnected status.
-		state.status = Some(Status::Disconnected);
-		state.version = None;
-		state.send_bitrate = 0;
-		let disconnected = state.snapshot();
-		assert_eq!(disconnected.status, Some(Status::Disconnected));
-		assert_eq!(disconnected.version, None);
-		assert_eq!(disconnected.send_bitrate, 0);
-		assert_ne!(disconnected, connected);
 	}
 }

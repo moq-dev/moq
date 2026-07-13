@@ -64,15 +64,10 @@ fn connect_failure_retries_without_erroring() {
 	let _ = pipeline.set_state(gst::State::Playing);
 	let bus = pipeline.bus().expect("pipeline bus");
 	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Error]);
-	let connected = sink.property::<bool>("connected");
 	let _ = pipeline.set_state(gst::State::Null);
 
 	assert!(
 		msg.is_none(),
 		"a failed connect must NOT post an ERROR — the sink retries (issue #2212)"
-	);
-	assert!(
-		!connected,
-		"a failed connect must leave connected = false while retrying"
 	);
 }
