@@ -127,11 +127,9 @@ pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	pub priority: u8,
 
-	/// Whether groups are prioritized in sequence order when `ordered_valid` is true.
+	/// Whether groups are prioritized in sequence order.
 	/// Groups may always arrive out-of-order (or not at all) over the network.
 	pub ordered: bool,
-	/// Whether `ordered` should override the default unordered setting.
-	pub ordered_valid: bool,
 
 	/// How long the relay should cache past groups, in milliseconds.
 	pub cache_ms: u64,
@@ -152,10 +150,8 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		// timestamp_us units. An explicit timescale below overrides it.
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority);
-		if info.ordered_valid {
-			out = out.with_ordered(info.ordered);
-		}
+			.with_priority(info.priority)
+			.with_ordered(info.ordered);
 		if info.cache_valid {
 			out = out.with_cache(std::time::Duration::from_millis(info.cache_ms));
 		}
@@ -176,11 +172,9 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Whether groups are prioritized in sequence order when `ordered_valid` is true.
+	/// Whether groups are prioritized in sequence order.
 	/// Groups may always arrive out-of-order (or not at all) over the network.
 	pub ordered: bool,
-	/// Whether `ordered` should override the default unordered setting.
-	pub ordered_valid: bool,
 
 	/// How long to wait for an older group once a newer group has arrived, in milliseconds.
 	pub stale_ms: u64,
@@ -200,10 +194,8 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
+			.with_ordered(subscription.ordered)
 			.with_stale(std::time::Duration::from_millis(subscription.stale_ms));
-		if subscription.ordered_valid {
-			out = out.with_ordered(subscription.ordered);
-		}
 		if subscription.group_start_valid {
 			out = out.with_group_start(subscription.group_start);
 		}

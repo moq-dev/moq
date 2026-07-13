@@ -142,7 +142,6 @@ network.
 struct moq_track_info info = {0};
 info.priority = 3;
 info.ordered = true;
-info.ordered_valid = true;
 info.cache_ms = 1000;
 info.cache_valid = true;
 info.timescale = 1000000;
@@ -157,13 +156,12 @@ int track = moq_publish_track(
 
 `moq_consume_track` accepts optional subscriber delivery preferences.
 `moq_consume_track_update` changes them while the callback task is running.
-Fields ending in `_valid` decide whether the matching value overrides the default:
+Fields ending in `_valid` decide whether the matching optional value is present:
 
 ```c
 struct moq_subscription sub = {0};
 sub.priority = 5;
 sub.ordered = true;
-sub.ordered_valid = true;
 sub.stale_ms = 25;
 sub.group_start = 10;
 sub.group_start_valid = true;

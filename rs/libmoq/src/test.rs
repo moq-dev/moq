@@ -498,7 +498,6 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		ordered: true,
-		ordered_valid: true,
 		cache_ms: 0,
 		cache_valid: false,
 		timescale: 0,
@@ -514,7 +513,6 @@ fn publish_track_invalid_broadcast() {
 	let subscription = moq_subscription {
 		priority: 1,
 		ordered: true,
-		ordered_valid: true,
 		stale_ms: 0,
 		group_start: 0,
 		group_start_valid: false,
@@ -531,7 +529,6 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		ordered: false,
-		ordered_valid: false,
 		cache_ms: 0,
 		cache_valid: false,
 		timescale: 0,
@@ -543,11 +540,10 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 }
 
 #[test]
-fn publish_track_info_defaults_to_unordered() {
-	let info = moq_track_info {
+fn raw_track_options_preserve_ordering_priority() {
+	let mut info = moq_track_info {
 		priority: 0,
 		ordered: false,
-		ordered_valid: false,
 		cache_ms: 0,
 		cache_valid: false,
 		timescale: 0,
@@ -555,6 +551,22 @@ fn publish_track_info_defaults_to_unordered() {
 	};
 
 	assert!(!moq_net::track::Info::try_from(&info).unwrap().ordered);
+	info.ordered = true;
+	assert!(moq_net::track::Info::try_from(&info).unwrap().ordered);
+
+	let mut subscription = moq_subscription {
+		priority: 0,
+		ordered: false,
+		stale_ms: 0,
+		group_start: 0,
+		group_start_valid: false,
+		group_end: 0,
+		group_end_valid: false,
+	};
+
+	assert!(!moq_net::track::Subscription::from(&subscription).ordered);
+	subscription.ordered = true;
+	assert!(moq_net::track::Subscription::from(&subscription).ordered);
 }
 
 #[test]
@@ -723,7 +735,6 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		ordered: false,
-		ordered_valid: true,
 		cache_ms: 1_000,
 		cache_valid: true,
 		timescale: 1_000_000,
@@ -748,7 +759,6 @@ fn raw_track_subscription_options_and_update() {
 	let subscription = moq_subscription {
 		priority: 5,
 		ordered: true,
-		ordered_valid: true,
 		stale_ms: 25,
 		group_start: 1,
 		group_start_valid: true,
