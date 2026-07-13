@@ -186,7 +186,7 @@ dynamic.requestedBroadcasts().collect { request ->
         val broadcast = BroadcastProducer()
         val track = broadcast.publishTrack("status", null)
         request.accept(broadcast)
-        track.writeFrame("ready".encodeToByteArray())
+        track.writeFrame("ready".encodeToByteArray(), timestampUs = 0u)
     } else {
         request.abort(404)
     }

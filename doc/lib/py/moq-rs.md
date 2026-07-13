@@ -224,7 +224,7 @@ async for request in dynamic:
         broadcast = moq.BroadcastProducer()
         track = broadcast.publish_track("status")
         request.accept(broadcast)
-        track.write_frame(b"ready")
+        track.write_frame(b"ready", 0)
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.

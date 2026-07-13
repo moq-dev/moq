@@ -92,15 +92,15 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer trackConsumer.Cancel()
 
 	payload := []byte("served dynamically")
-	if err := track.WriteFrame(payload); err != nil {
+	if err := track.WriteFrame(payload, 0); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := trackConsumer.ReadFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(frame) != string(payload) {
-		t.Fatalf("frame = %q, want %q", frame, payload)
+	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs != 0 {
+		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 
 	if err := track.Finish(); err != nil {
@@ -406,7 +406,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte("hello dynamic track")
-	if err := track.WriteFrame(payload); err != nil {
+	if err := track.WriteFrame(payload, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -426,8 +426,8 @@ func TestDynamicTrackRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(frame) != string(payload) {
-		t.Fatalf("frame = %q, want %q", frame, payload)
+	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs != 0 {
+		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)

@@ -105,7 +105,7 @@ go func() {
     if err != nil {
         return
     }
-    _ = track.WriteFrame([]byte("ready"))
+    _ = track.WriteFrame([]byte("ready"), 0)
 }()
 ```
 
