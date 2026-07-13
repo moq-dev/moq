@@ -164,11 +164,11 @@ impl ObjectImpl for MoqSink {
 		match pspec.name() {
 			"connected" | "moq-version" | "estimated-send-bitrate" => {
 				let state = self.state.lock().unwrap();
-				let status = state.as_ref().map(|s| s.session.status());
+				let session = state.as_ref().map(|s| &s.session);
 				match pspec.name() {
-					"connected" => status.is_some_and(|s| s.connected()).to_value(),
-					"moq-version" => status.and_then(|s| s.version()).to_value(),
-					"estimated-send-bitrate" => status.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
+					"connected" => session.is_some_and(|s| s.status().connected()).to_value(),
+					"moq-version" => session.and_then(|s| s.status().version()).to_value(),
+					"estimated-send-bitrate" => session.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
 					_ => unreachable!(),
 				}
 			}
