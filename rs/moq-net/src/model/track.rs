@@ -1783,6 +1783,11 @@ pub struct Request {
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
 	_dynamic: Dynamic,
+
+	// Set when this request resumes an existing track after a route change (see
+	// `Keeper::resume_request`): the sequence the upstream subscription should
+	// start from so already-cached groups aren't delivered twice.
+	resume: Option<u64>,
 }
 
 impl Request {
@@ -1799,12 +1804,24 @@ impl Request {
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
+			resume: None,
 		}
 	}
 
 	/// The requested track name.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The group sequence a resumed subscription should start from, or `None` for a
+	/// fresh request.
+	///
+	/// Set when this request re-serves a track that outlived its previous route,
+	/// after a route change or session loss: groups below this floor are already
+	/// cached, so the server should open its upstream subscription at the floor
+	/// instead of the live edge to bridge the gap without duplicate delivery.
+	pub fn resume(&self) -> Option<u64> {
+		self.resume
 	}
 
 	pub fn consume(&self) -> Consumer {
@@ -1831,10 +1848,27 @@ impl Request {
 	///
 	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
 	/// mismatch, or the broadcast's abort error if it closed while pending.
+	///
+	/// A resumed request (see [`Self::resume`]) keeps the track's existing [`Info`]:
+	/// the properties were fixed by the original publisher and changing them
+	/// mid-track (a different timescale, say) would corrupt every consumer. A
+	/// mismatched `info` from the new route is logged and ignored.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		let mut info = info.into().unwrap_or_default();
 		info.broadcast = self.broadcast.clone();
-		self.state.write().ok().unwrap().info = Some(info);
+		if let Ok(mut state) = self.state.write() {
+			match &state.info {
+				Some(existing) => {
+					if existing.timescale != info.timescale || existing.ordered != info.ordered {
+						tracing::warn!(
+							track = %self.name,
+							"resumed track properties differ across routes; keeping the original"
+						);
+					}
+				}
+				None => state.info = Some(info),
+			}
+		}
 		Producer {
 			name: self.name,
 			broadcast: self.broadcast,
@@ -1868,7 +1902,6 @@ impl Request {
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let prev = &self.prev_subscription;
 		let mut combined = None;
-		// The request owns the only producer, so the channel can't be closed here.
 		let mut state = match ready!(self.state.poll(waiter, |state| {
 			let next = combined_subscription(state, waiter);
 			if &next == prev {
@@ -1879,7 +1912,10 @@ impl Request {
 			}
 		})) {
 			Ok(state) => state,
-			Err(_) => unreachable!("a Request holds the only producer"),
+			// A resumed request shares its state with a `Keeper` (and possibly the
+			// previous route's leftover handles), so the track can close underneath
+			// it. Report "no subscribers"; the server sees the closure elsewhere.
+			Err(_) => return Poll::Ready(None),
 		};
 		// The aggregate changed: prune any closed subscribers now that we hold the lock.
 		state.subscriptions.retain(|sub| !sub.is_closed());
@@ -1892,6 +1928,92 @@ impl Request {
 		TrackWeak {
 			name: self.name.clone(),
 			state: self.state.weak(),
+		}
+	}
+
+	/// A strong handle over this request's track state that survives the serving
+	/// route, so the track can be re-served after a route change. See [`Keeper`].
+	pub(crate) fn keeper(&self) -> Keeper {
+		Keeper {
+			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
+			_dynamic: Dynamic::new(self.name.clone(), self.state.clone()),
+			state: self.state.clone(),
+		}
+	}
+}
+
+/// Keeps a route-served track's state alive across route changes.
+///
+/// The origin holds one per track it dispatched to a route. It pins the track's
+/// channel open (so consumer handles stall instead of erroring while no route is
+/// serving) and keeps the track fetch-capable, and it can mint a resume [`Request`]
+/// for the next route to continue the same track, deduplicating on group sequence.
+pub(crate) struct Keeper {
+	name: Arc<str>,
+	broadcast: Arc<broadcast::Info>,
+	state: kio::Producer<TrackState>,
+	// Keeps the track fetch-capable while no route serves it, so a cache-miss
+	// fetch waits for the next route instead of failing fast with NotFound.
+	_dynamic: Dynamic,
+}
+
+impl Keeper {
+	/// Whether the track is still in flight: neither finished nor aborted.
+	pub(crate) fn is_live(&self) -> bool {
+		let state = self.state.read();
+		state.abort.is_none() && state.final_sequence.is_none()
+	}
+
+	/// Whether re-serving this track is still useful: it hasn't ended (finished or
+	/// aborted) and at least one consumer handle is alive.
+	pub(crate) fn resumable(&self) -> bool {
+		// No consumers left: nobody would observe the resumed data.
+		self.is_live() && self.state.poll_unused(&kio::Waiter::noop()).is_pending()
+	}
+
+	/// The sequence a resumed subscription should start from: one past the newest
+	/// cached group, or the newest itself when it aborted mid-transfer (the fresh
+	/// route re-delivers it whole into the tombstoned slot).
+	fn resume_floor(&self) -> Option<u64> {
+		let state = self.state.read();
+		let max = state.max_sequence?;
+		match state.cached_group(max) {
+			Some(_) => max.checked_add(1),
+			None => Some(max),
+		}
+	}
+
+	/// Mint a [`Request`] that re-serves this track over a new route.
+	///
+	/// The request shares the existing track state: waiting subscribers, cached
+	/// groups, and queued fetches all carry over, and its [`Request::resume`] floor
+	/// tells the new route where to pick up.
+	pub(crate) fn resume_request(&self) -> Request {
+		Request {
+			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
+			state: self.state.clone(),
+			prev_subscription: None,
+			_dynamic: Dynamic::new(self.name.clone(), self.state.clone()),
+			resume: self.resume_floor(),
+		}
+	}
+
+	/// Abort the track, releasing every consumer with `err`. Used when no route can
+	/// serve it anymore (the broadcast closed, or resuming kept failing). No-op on
+	/// a track that already ended, so a clean finish is never clobbered.
+	pub(crate) fn abort(&self, err: Error) {
+		if let Ok(mut state) = self.state.write() {
+			if state.abort.is_some() || state.final_sequence.is_some() {
+				return;
+			}
+			state.abort = Some(err);
+			state.groups.clear();
+			state.datagrams.clear();
+			state.duplicates.clear();
+			state.latest_entry = None;
+			state.close();
 		}
 	}
 }

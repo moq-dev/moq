@@ -57,7 +57,7 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
 			match self.inner.next().await {
-				// Active and Restart both carry a broadcast; skip unannounce events.
+				// Only Active carries a broadcast; skip unannounce events.
 				Some(moq_net::announce::Update { path, event, .. }) => {
 					let Some(broadcast) = event.broadcast() else {
 						continue;
@@ -77,7 +77,7 @@ impl Announced {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
 			match self.inner.next().await {
-				// Active and Restart both carry a broadcast; skip unannounce events.
+				// Only Active carries a broadcast; skip unannounce events.
 				Some(moq_net::announce::Update { event, .. }) => match event.broadcast() {
 					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
 					None => continue,

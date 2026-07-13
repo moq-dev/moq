@@ -525,11 +525,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				announce::Event::Active(_) => {
 					self.announce_namespace(suffix, &mut namespace_streams).await?;
 				}
-				announce::Event::Restart(_) => {
-					// moq-transport has no RESTART; fall back to done + re-announce.
-					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
-					self.announce_namespace(suffix, &mut namespace_streams).await?;
-				}
 				announce::Event::Ended => {
 					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
 				}
@@ -721,15 +716,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 						match event {
 							announce::Event::Active(_) => {
-								tracing::debug!(broadcast = %absolute, "namespace");
-								stream.writer.encode(&ietf::Namespace::ID).await?;
-								stream.writer.encode(&ietf::Namespace { suffix }).await?;
-							}
-							announce::Event::Restart(_) => {
-								// moq-transport has no RESTART; fall back to namespace_done + namespace.
-								tracing::debug!(broadcast = %absolute, "namespace_done");
-								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-								stream.writer.encode(&ietf::NamespaceDone { suffix: suffix.clone() }).await?;
 								tracing::debug!(broadcast = %absolute, "namespace");
 								stream.writer.encode(&ietf::Namespace::ID).await?;
 								stream.writer.encode(&ietf::Namespace { suffix }).await?;

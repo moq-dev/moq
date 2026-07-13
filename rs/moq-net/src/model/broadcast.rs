@@ -213,6 +213,23 @@ impl Producer {
 		Dynamic::new(self.info.clone(), self.state.clone())
 	}
 
+	/// Queue a resume [`track::Request`] for the next [`Dynamic`] handler.
+	///
+	/// Used by the origin to re-dispatch a route-served track after its route died:
+	/// the request shares the existing track state, so the handler that picks it up
+	/// continues the same track. A request already queued under the name is kept
+	/// (the re-dispatch coalesces onto it).
+	pub(crate) fn enqueue_request(&self, request: track::Request) -> Result<(), Error> {
+		let mut state = BroadcastState::modify(&self.state)?;
+		let name = request.weak().name().clone();
+		if state.requests.contains_key(&name) {
+			return Ok(());
+		}
+		state.requests.insert(name.clone(), request);
+		state.request_order.push_back(name);
+		Ok(())
+	}
+
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
