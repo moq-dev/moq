@@ -6,6 +6,7 @@ mod pad;
 mod session;
 mod timeline;
 
+/// The `moqsink` publish connection lifecycle, exposed as its read-only `status` property.
 pub use session::ConnectionStatus;
 
 glib::wrapper! {

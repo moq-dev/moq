@@ -138,11 +138,10 @@ impl Session {
 		let status = Arc::new(Status::default());
 		let errored = Arc::new(AtomicBool::new(false));
 
-		// Publish through a background reconnect loop (connect, wait for close, reconnect with
-		// backoff) rather than a one-shot connect that died on the first transport drop. `timeout = 0`
-		// retries transport/connection failures indefinitely so an unattended publisher outlives
-		// relay/QUIC outages; non-retryable errors (e.g. auth) stay terminal. During an outage the pad
-		// threads keep writing (bounded by moq-net's per-group eviction) and the relay catches up
+		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
+		// `timeout = 0` retries transport/connection failures indefinitely so an unattended publisher
+		// outlives relay/QUIC outages; non-retryable errors (e.g. auth) stay terminal. During an outage
+		// the pad threads keep writing (bounded by moq-net's per-group eviction) and the relay catches up
 		// from a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
 		let mut config = moq_native::ClientConfig::default();
 		config.tls.disable_verify = Some(settings.tls_disable_verify);
@@ -209,9 +208,9 @@ impl Drop for Session {
 /// only to `notify` the bitrate properties (the getters read the estimates directly). Each source is
 /// notified on its own change: a status edge notifies `status`/`connected`/`moq-version` together, a
 /// bitrate change notifies just that bitrate. The loop stops only on a terminal error (a non-retryable
-/// auth failure, or a bounded backoff's give-up), which the `Err` arm posts as a bus error, matching
-/// the old one-shot path. [`Session`]'s `Drop` aborts this task, which drops the `Reconnect` handle and
-/// quietly tears the loop down.
+/// auth failure, or a bounded backoff's give-up), which the `Err` arm posts as a bus error.
+/// [`Session`]'s `Drop` aborts this task, which drops the `Reconnect` handle and quietly tears the loop
+/// down.
 async fn forward(
 	mut reconnect: moq_native::Reconnect,
 	origin: moq_net::OriginProducer,
