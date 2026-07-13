@@ -583,7 +583,7 @@ mod test {
 
 		// Create a new track and insert it into the broadcast (resolves immediately).
 		let track1 = producer.assert_create_track("track1", None);
-		let track1c = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
+		let mut track1c = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 
 		// A track nobody publishes stays pending until accepted.
 		let track2_fut = subscribe_pending!(consumer, "track2");
@@ -648,7 +648,7 @@ mod test {
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
 		let mut producer1 = broadcast.assert_request().accept(None);
-		let track1 = track1_fut.await.unwrap();
+		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
 		producer1.append_group().unwrap();

@@ -479,12 +479,6 @@ impl<F: Container> Consumer<F> {
 	pub fn set_latency(&mut self, latency: std::time::Duration) {
 		self.latency = latency;
 	}
-
-	/// Wait until the track is closed.
-	pub async fn closed(&self) -> Result<(), F::Error> {
-		self.track.closed().await?;
-		Ok(())
-	}
 }
 
 /// Internal reader for a group of frames.
@@ -1246,31 +1240,6 @@ mod tests {
 		.await;
 
 		assert!(result.is_ok(), "Consumer should not hang after track error");
-	}
-
-	#[tokio::test]
-	async fn closed_resolves_when_track_ends() {
-		tokio::time::pause();
-		let mut track = track_producer(
-			"test",
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		);
-		let consumer_track = track.subscribe(None);
-		let consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
-
-		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.closed())
-				.await
-				.is_err()
-		);
-
-		track.finish().unwrap();
-		drop(track);
-
-		tokio::time::timeout(Duration::from_millis(200), consumer.closed())
-			.await
-			.expect("timeout expired waiting for closed()")
-			.expect("consumer.closed() returned an error");
 	}
 
 	// ---- Gap Recovery ----

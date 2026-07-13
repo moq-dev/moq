@@ -435,18 +435,6 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	fn poll_closed(&self) -> Poll<Result<u64>> {
-		// A future boundary isn't "closed" until the trailing groups arrive, so gate on
-		// the live edge reaching it. Use `poll_finished` to observe the boundary early.
-		if let Some(fin) = self.completed() {
-			Poll::Ready(Ok(fin))
-		} else if let Some(err) = &self.abort {
-			Poll::Ready(Err(err.clone()))
-		} else {
-			Poll::Pending
-		}
-	}
-
 	/// Evict groups older than `max_age`, never evicting the max_sequence group.
 	///
 	/// Groups are in arrival order, so we can stop early when we hit a non-expired,
@@ -524,18 +512,14 @@ impl TrackState {
 		Ok(())
 	}
 
-	/// The exclusive final sequence once the track has reached its end: the boundary is
-	/// set and the live edge has caught up to it, so no further group can arrive. A
-	/// future boundary (declared via [`Producer::finish_at`] ahead of the live edge)
-	/// stays `None` until the remaining groups are produced.
-	fn completed(&self) -> Option<u64> {
-		self.final_sequence
-			.filter(|&fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
-	}
-
-	/// Whether [`Self::completed`] has a value.
+	/// Whether the track has reached its end: the final boundary is set and the live
+	/// edge has caught up to it, so no further group can arrive. A future boundary
+	/// (declared via [`Producer::finish_at`] ahead of the live edge) stays incomplete
+	/// until the remaining groups are produced. Drives the end-of-stream signal from
+	/// the read methods (`recv_group` / `next_group` / `read_frame` return `None`).
 	fn is_complete(&self) -> bool {
-		self.completed().is_some()
+		self.final_sequence
+			.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
@@ -1737,21 +1721,6 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
 
-	/// Poll for track closure, without blocking.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		self.poll(waiter, |state| state.poll_closed())
-	}
-
-	/// Block until the track is closed, returning the exclusive final sequence (also the
-	/// total group count) on a clean finish, or the cause on an abort.
-	///
-	/// Resolves once the live edge reaches the final sequence, so a track finished ahead
-	/// of its live edge (via [`Producer::finish_at`]) stays open until the trailing
-	/// groups arrive. Use [`Self::finished`] to observe the declared boundary earlier.
-	pub async fn closed(&self) -> Result<u64> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
 	/// Whether `other` was cloned from this subscriber (shares the same underlying state).
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
@@ -1763,11 +1732,12 @@ impl Subscriber {
 	}
 
 	/// Block until the track declares its end, returning the exclusive final sequence
-	/// (also the total group count).
+	/// (also the total group count), or the cause on an abort.
 	///
 	/// Resolves as soon as the boundary is known, which may be ahead of the live edge
-	/// when the producer finished via [`Producer::finish_at`]. Use [`Self::closed`] to
-	/// wait until every group up to the boundary has actually arrived.
+	/// when the producer finished via [`Producer::finish_at`]. This reports the declared
+	/// end, not that every group has arrived: drive [`Self::recv_group`] /
+	/// [`Self::next_group`] until they yield `None` to observe the track fully drained.
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
@@ -1958,18 +1928,18 @@ impl Subscriber {
 		);
 	}
 
-	pub fn assert_not_closed(&self) {
-		assert!(self.closed().now_or_never().is_none(), "should not be closed");
+	pub fn assert_not_closed(&mut self) {
+		assert!(self.finished().now_or_never().is_none(), "should not be closed");
 	}
 
-	pub fn assert_closed(&self) {
-		assert!(self.closed().now_or_never().is_some(), "should be closed");
+	pub fn assert_closed(&mut self) {
+		assert!(self.finished().now_or_never().is_some(), "should be closed");
 	}
 
 	// TODO assert specific errors after implementing PartialEq
-	pub fn assert_error(&self) {
+	pub fn assert_error(&mut self) {
 		assert!(
-			self.closed().now_or_never().expect("should not block").is_err(),
+			self.finished().now_or_never().expect("should not block").is_err(),
 			"should be error"
 		);
 	}
