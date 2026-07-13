@@ -1,5 +1,4 @@
-// https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
-const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
+import * as Util from "@moq/hang/util";
 
 export type Partial = "full" | "partial" | "none";
 
@@ -58,22 +57,26 @@ async function audioEncoderSupported(codec: keyof typeof CODECS): Promise<boolea
 }
 
 async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec> {
-	const software = await VideoEncoder.isConfigSupported({
-		codec: CODECS[codec],
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-software",
-	});
+	const base = { codec: CODECS[codec], width: 1280, height: 720 };
+
+	const software = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-software" });
+
+	// Safari answers "prefer-hardware" for every codec, but VideoToolbox only hardware-encodes H.264
+	// and HEVC. Key off the codec instead of the echoed hint, which would otherwise claim hardware VP9
+	// and AV1. The same pair drives hardwareCodecs() in ../video/codecs.ts.
+	if (Util.Hacks.isSafari) {
+		if (codec !== "h264" && codec !== "h265") {
+			return { hardware: false, software: software.supported === true };
+		}
+
+		const hardware = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-hardware" });
+		return { hardware: hardware.supported === true, software: software.supported === true };
+	}
 
 	// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-	const hardware = await VideoEncoder.isConfigSupported({
-		codec: CODECS[codec],
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-hardware",
-	});
+	const hardware = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-hardware" });
 
-	const unknown = isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+	const unknown = Util.Hacks.isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
 
 	return {
 		hardware: unknown ? undefined : hardware.supported === true,
@@ -85,7 +88,7 @@ export async function isSupported(): Promise<Full> {
 	return {
 		// Firefox's WebTransport drops server-initiated bidi streams, so we force the
 		// WebSocket fallback. Report "partial" to surface the degraded path in UI.
-		webtransport: typeof WebTransport !== "undefined" ? (isFirefox ? "partial" : "full") : "partial",
+		webtransport: typeof WebTransport !== "undefined" ? (Util.Hacks.isFirefox ? "partial" : "full") : "partial",
 		audio: {
 			capture: typeof AudioWorkletNode !== "undefined",
 			encoding: {
