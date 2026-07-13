@@ -44,10 +44,14 @@ fn missing_url_fails_state_change() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// A connect that cannot succeed surfaces as an ERROR on the bus (not a silent log) and leaves the
-// element disconnected. The `.invalid` host fails fast at DNS resolution in this test environment.
+// A connect that cannot succeed does NOT post a fatal ERROR: the sink reconnects with backoff
+// (issue #2212), so an unattended publisher survives a relay that is unreachable at startup or
+// during an outage instead of tearing down the pipeline. It keeps retrying and stays disconnected.
+// (A non-retryable failure — e.g. auth rejection — is still terminal; that path needs a live relay
+// and is covered separately.) The `.invalid` host fails fast at DNS resolution, so the loop is
+// already several retries deep within the window below.
 #[test]
-fn connect_failure_posts_error_to_bus() {
+fn connect_failure_retries_without_erroring() {
 	init();
 	let pipeline = gst::Pipeline::new();
 	let sink = gst::ElementFactory::make("moqsink")
@@ -59,10 +63,16 @@ fn connect_failure_posts_error_to_bus() {
 
 	let _ = pipeline.set_state(gst::State::Playing);
 	let bus = pipeline.bus().expect("pipeline bus");
-	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
+	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Error]);
 	let connected = sink.property::<bool>("connected");
 	let _ = pipeline.set_state(gst::State::Null);
 
-	assert!(msg.is_some(), "a failed connect must post an ERROR to the bus");
-	assert!(!connected, "a failed connect must leave connected = false");
+	assert!(
+		msg.is_none(),
+		"a failed connect must NOT post an ERROR — the sink retries (issue #2212)"
+	);
+	assert!(
+		!connected,
+		"a failed connect must leave connected = false while retrying"
+	);
 }
