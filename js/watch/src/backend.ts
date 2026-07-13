@@ -17,11 +17,11 @@ type VideoBackendOutput = {
 // Unifies the video outputs across the MSE and WebCodecs backends.
 class VideoBackend implements Video.Backend {
 	source: Video.Source;
-	readonly output: Readonlys<VideoBackendOutput>;
+	readonly out: Readonlys<VideoBackendOutput>;
 
 	constructor(source: Video.Source, output: VideoBackendOutput) {
 		this.source = source;
-		this.output = readonlys(output);
+		this.out = readonlys(output);
 	}
 }
 
@@ -34,11 +34,11 @@ type AudioBackendOutput = {
 // Unifies the audio outputs across the MSE and WebCodecs backends.
 class AudioBackend implements Audio.Backend {
 	source: Audio.Source;
-	readonly output: Readonlys<AudioBackendOutput>;
+	readonly out: Readonlys<AudioBackendOutput>;
 
 	constructor(source: Audio.Source, output: AudioBackendOutput) {
 		this.source = source;
-		this.output = readonlys(output);
+		this.out = readonlys(output);
 	}
 }
 
@@ -70,10 +70,10 @@ type MultiBackendInput = {
 ///
 /// This is primarily what backs the <moq-watch> web component, but it's useful as a standalone for other use cases.
 export class MultiBackend {
-	readonly input: Readonlys<MultiBackendInput>;
+	readonly in: Readonlys<MultiBackendInput>;
 
 	// Read-only signals computed by Sync: the jitter buffer (ms) and whether buffered playback is active.
-	readonly output: { readonly jitter: Getter<Moq.Time.Milli>; readonly buffered: Getter<boolean> };
+	readonly out: { readonly jitter: Getter<Moq.Time.Milli>; readonly buffered: Getter<boolean> };
 
 	#videoSource: Video.Source;
 	#audioSource: Audio.Source;
@@ -110,7 +110,7 @@ export class MultiBackend {
 	signals = new Effect();
 
 	constructor(props?: Inputs<MultiBackendInput>) {
-		this.input = {
+		this.in = {
 			element: getter(props?.element),
 			broadcast: getter(props?.broadcast),
 			connection: getter(props?.connection),
@@ -123,34 +123,34 @@ export class MultiBackend {
 		};
 
 		this.#videoSource = new Video.Source({
-			broadcast: this.input.broadcast,
-			target: this.input.target,
+			broadcast: this.in.broadcast,
+			target: this.in.target,
 			supported: this.#videoSupported,
 		});
 		this.#audioSource = new Audio.Source({
-			broadcast: this.input.broadcast,
+			broadcast: this.in.broadcast,
 			supported: this.#audioSupported,
 		});
 
 		// Sources produce the per-rendition jitter that Sync reads, so they're created
 		// before Sync to avoid a construction cycle.
 		this.sync = new Sync({
-			latency: this.input.latency,
-			connection: this.input.connection,
-			video: this.#videoSource.output.jitter,
-			audio: this.#audioSource.output.jitter,
+			latency: this.in.latency,
+			connection: this.in.connection,
+			video: this.#videoSource.out.jitter,
+			audio: this.#audioSource.out.jitter,
 		});
 
 		this.video = new VideoBackend(this.#videoSource, this.#videoOutput);
 		this.audio = new AudioBackend(this.#audioSource, this.#audioOutput);
 
-		this.output = { jitter: this.sync.output.jitter, buffered: this.sync.output.buffered };
+		this.out = { jitter: this.sync.out.jitter, buffered: this.sync.out.buffered };
 
 		this.signals.run(this.#runElement.bind(this));
 	}
 
 	#runElement(effect: Effect): void {
-		const element = effect.get(this.input.element);
+		const element = effect.get(this.in.element);
 		if (!element) return;
 
 		if (element instanceof HTMLCanvasElement) {
@@ -170,14 +170,14 @@ export class MultiBackend {
 		this.#audioDecoder = audioDecoder;
 
 		const audioEmitter = new Audio.Emitter(audioDecoder, {
-			volume: this.input.volume,
-			muted: this.input.muted,
-			paused: this.input.paused,
+			volume: this.in.volume,
+			muted: this.in.muted,
+			paused: this.in.paused,
 		});
 
 		const videoRenderer = new Video.Renderer(videoDecoder, {
 			canvas: element,
-			visible: this.input.visible,
+			visible: this.in.visible,
 		});
 
 		effect.cleanup(() => {
@@ -189,19 +189,19 @@ export class MultiBackend {
 		});
 
 		// Audio download follows the emitter's enable policy (paused/muted).
-		effect.proxy(this.#audioEnabled, audioEmitter.output.enabled);
+		effect.proxy(this.#audioEnabled, audioEmitter.out.enabled);
 
 		// Video downloads while playing and on-screen. When paused, keep downloading only
 		// until a frame is on the canvas, then stop: a cold paused start still shows a poster
 		// instead of black, without streaming while paused. Read the rendered frame only in
 		// the paused branch so playback doesn't re-run this every painted frame.
 		effect.run((inner) => {
-			const visible = inner.get(videoRenderer.output.visible);
-			if (!inner.get(this.input.paused)) {
+			const visible = inner.get(videoRenderer.out.visible);
+			if (!inner.get(this.in.paused)) {
 				this.#videoEnabled.set(visible);
 				return;
 			}
-			const frame = inner.get(videoRenderer.output.frame);
+			const frame = inner.get(videoRenderer.out.frame);
 			this.#videoEnabled.set(visible && !frame);
 		});
 		effect.cleanup(() => {
@@ -210,14 +210,14 @@ export class MultiBackend {
 		});
 
 		// Proxy the read only signals to the backend.
-		effect.proxy(this.#videoOutput.stats, videoDecoder.output.stats);
-		effect.proxy(this.#videoOutput.buffered, videoDecoder.output.buffered);
-		effect.proxy(this.#videoOutput.stalled, videoDecoder.output.stalled);
-		effect.proxy(this.#videoOutput.timestamp, videoDecoder.output.timestamp);
+		effect.proxy(this.#videoOutput.stats, videoDecoder.out.stats);
+		effect.proxy(this.#videoOutput.buffered, videoDecoder.out.buffered);
+		effect.proxy(this.#videoOutput.stalled, videoDecoder.out.stalled);
+		effect.proxy(this.#videoOutput.timestamp, videoDecoder.out.timestamp);
 
-		effect.proxy(this.#audioOutput.stats, audioDecoder.output.stats);
-		effect.proxy(this.#audioOutput.buffered, audioDecoder.output.buffered);
-		effect.proxy(this.#audioOutput.context, audioDecoder.output.context);
+		effect.proxy(this.#audioOutput.stats, audioDecoder.out.stats);
+		effect.proxy(this.#audioOutput.buffered, audioDecoder.out.buffered);
+		effect.proxy(this.#audioOutput.context, audioDecoder.out.context);
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
@@ -226,14 +226,14 @@ export class MultiBackend {
 		effect.set(this.#audioSupported, Audio.Mse.supported, undefined);
 
 		const muxer = new Muxer(this.sync, {
-			paused: this.input.paused,
+			paused: this.in.paused,
 			element,
 		});
 
 		const video = new Video.Mse(muxer, this.sync, this.#videoSource);
 		const audio = new Audio.Mse(muxer, this.sync, this.#audioSource, {
-			volume: this.input.volume,
-			muted: this.input.muted,
+			volume: this.in.volume,
+			muted: this.in.muted,
 		});
 
 		effect.cleanup(() => {
@@ -243,14 +243,14 @@ export class MultiBackend {
 		});
 
 		// Proxy the read only signals to the backend.
-		effect.proxy(this.#videoOutput.stats, video.output.stats);
-		effect.proxy(this.#videoOutput.buffered, video.output.buffered);
-		effect.proxy(this.#videoOutput.stalled, video.output.stalled);
-		effect.proxy(this.#videoOutput.timestamp, video.output.timestamp);
+		effect.proxy(this.#videoOutput.stats, video.out.stats);
+		effect.proxy(this.#videoOutput.buffered, video.out.buffered);
+		effect.proxy(this.#videoOutput.stalled, video.out.stalled);
+		effect.proxy(this.#videoOutput.timestamp, video.out.timestamp);
 
-		effect.proxy(this.#audioOutput.stats, audio.output.stats);
-		effect.proxy(this.#audioOutput.buffered, audio.output.buffered);
-		effect.proxy(this.#audioOutput.context, audio.output.context);
+		effect.proxy(this.#audioOutput.stats, audio.out.stats);
+		effect.proxy(this.#audioOutput.buffered, audio.out.buffered);
+		effect.proxy(this.#audioOutput.context, audio.out.context);
 	}
 
 	// Re-anchor playback at an utterance boundary in buffered mode: reset the sync reference

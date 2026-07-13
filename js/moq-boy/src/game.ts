@@ -138,8 +138,8 @@ export class Game {
 		this.sync = new Watch.Sync({
 			latency: this.latency,
 			connection: connection.established,
-			video: this.videoSource.output.jitter,
-			audio: this.audioSource.output.jitter,
+			video: this.videoSource.out.jitter,
+			audio: this.audioSource.out.jitter,
 		});
 		this.#signals.cleanup(() => this.sync.close());
 
@@ -174,7 +174,7 @@ export class Game {
 		// Resume AudioContext on first user interaction (browser autoplay policy).
 		for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
 			this.#signals.event(document, event, () => {
-				const ctx = this.audioDecoder.output.context.peek();
+				const ctx = this.audioDecoder.out.context.peek();
 				if (ctx?.state === "suspended") ctx.resume();
 			});
 		}
@@ -204,11 +204,11 @@ export class Game {
 	/** Collect media timestamps at each pipeline stage for latency measurement. */
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
-		const received = this.sync.output.timestamp.peek();
+		const received = this.sync.out.timestamp.peek();
 		if (received != null) entries.push({ label: "received", ts: received });
-		const decoded = this.videoDecoder.output.timestamp.peek();
+		const decoded = this.videoDecoder.out.timestamp.peek();
 		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
-		const rendered = this.videoRenderer.output.timestamp.peek();
+		const rendered = this.videoRenderer.out.timestamp.peek();
 		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
 		return entries;
 	}
@@ -235,7 +235,7 @@ export class Game {
 
 	#runVideoEnabled(videoEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
 		const exp = effect.get(this.expanded);
-		const visible = effect.get(this.videoRenderer.output.visible);
+		const visible = effect.get(this.videoRenderer.out.visible);
 		// On the grid or when expanded, but never download an off-screen tile.
 		videoEnabled.set((exp === undefined || exp === this.sessionId) && visible);
 	}
@@ -246,7 +246,7 @@ export class Game {
 	}
 
 	#runStatus(effect: Moq.Signals.Effect) {
-		const active = effect.get(this.broadcast.output.active);
+		const active = effect.get(this.broadcast.out.active);
 		if (!active) return;
 
 		const statusTrack = active.subscribe("status", { priority: 10 });

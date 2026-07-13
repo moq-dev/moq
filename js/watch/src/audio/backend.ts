@@ -7,7 +7,7 @@ export interface Backend {
 	// The source of the audio.
 	source: Source;
 
-	readonly output: {
+	readonly out: {
 		// The stats of the audio.
 		readonly stats: Getter<Stats | undefined>;
 

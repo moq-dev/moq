@@ -13,7 +13,7 @@
  *
  * The per-stream metadata rides on a separate `meta.json` track within the active
  * broadcast (advertised in the catalog's `metadata` list); we subscribe to it off
- * the tile's `broadcast.output.active` consumer and decode it with @moq/json.
+ * the tile's `broadcast.out.active` consumer and decode it with @moq/json.
  */
 
 import "./highlight";
@@ -145,7 +145,7 @@ function createTile(name: string): WatchTile {
 	// an audio track to play.
 	effects.run((effect) => {
 		const isActive = effect.get(active) === name;
-		const hasAudio = !!effect.get(watch.broadcast.output.catalog)?.audio;
+		const hasAudio = !!effect.get(watch.broadcast.out.catalog)?.audio;
 		audioBadge.hidden = !(isActive && hasAudio);
 	});
 
@@ -285,7 +285,7 @@ ui.run((effect) => {
 // Broadcast pill: Online when the active broadcast is live, else Loading/Offline.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const stream = watch ? effect.get(watch.broadcast.output.status) : "offline"; // offline | loading | live
+	const stream = watch ? effect.get(watch.broadcast.out.status) : "offline"; // offline | loading | live
 	if (stream === "live") setPill("bcast-status", "bcast-text", "Online", "ok");
 	else if (watch && stream === "loading") setPill("bcast-status", "bcast-text", "Loading", "wait");
 	else setPill("bcast-status", "bcast-text", "Offline", "bad");
@@ -295,7 +295,7 @@ ui.run((effect) => {
 // the video track config from the catalog plus live decode stats.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const catalog = watch ? effect.get(watch.broadcast.output.catalog) : undefined;
+	const catalog = watch ? effect.get(watch.broadcast.out.catalog) : undefined;
 	const video = catalog?.video;
 	const section = $("video-section");
 	if (!watch || !video) {
@@ -304,8 +304,8 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
-	const stalled = effect.get(watch.backend.video.output.stalled);
-	const live = effect.get(watch.broadcast.output.status) === "live";
+	const stalled = effect.get(watch.backend.video.out.stalled);
+	const live = effect.get(watch.broadcast.out.status) === "live";
 	const r = Object.values(video.renditions)[0];
 
 	const resolution =
@@ -328,7 +328,7 @@ ui.run((effect) => {
 // Audio section: only shown when the active catalog has an audio section.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const catalog = watch ? effect.get(watch.broadcast.output.catalog) : undefined;
+	const catalog = watch ? effect.get(watch.broadcast.out.catalog) : undefined;
 	const audio = catalog?.audio;
 	const section = $("audio-section");
 	if (!watch || !audio) {
@@ -361,8 +361,8 @@ ui.run((effect) => {
 	const conn = effect.get(connection.established);
 	$("network-transport").textContent = conn ? (conn.transport === "websocket" ? "WebSocket" : "WebTransport") : "";
 
-	const video = effect.get(watch.backend.video.output.stats);
-	const audio = effect.get(watch.backend.audio.output.stats);
+	const video = effect.get(watch.backend.video.out.stats);
+	const audio = effect.get(watch.backend.audio.out.stats);
 	const bytes = (video?.bytesReceived ?? 0) + (audio?.bytesReceived ?? 0);
 	renderRows($("network-info"), [["bytes received", bytes > 0 ? formatBytes(bytes) : undefined]]);
 });
@@ -370,7 +370,7 @@ ui.run((effect) => {
 // Raw catalog (collapsible) - only rendered once the active catalog arrives.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const catalog = watch ? effect.get(watch.broadcast.output.catalog) : undefined;
+	const catalog = watch ? effect.get(watch.broadcast.out.catalog) : undefined;
 	const section = $("catalog-raw-section");
 	if (!catalog) {
 		section.hidden = true;
@@ -386,7 +386,7 @@ ui.run((effect) => {
 //
 // The publish demo serves its metadata as a separate `meta.json` track, advertised
 // in the catalog's `metadata` list. We read the active broadcast off
-// `broadcast.output.active`, subscribe to that track, and decode the JSON value,
+// `broadcast.out.active`, subscribe to that track, and decode the JSON value,
 // re-subscribing whenever the broadcast (or the advertised track) changes.
 // Memoize the advertised track name so the subscription below only re-runs when it
 // (or the active broadcast) changes, not on every catalog frame (e.g. a live
@@ -394,13 +394,13 @@ ui.run((effect) => {
 const metaTrackName = ui.computed((effect) => {
 	const watch = effect.get(activeWatch);
 	if (!watch) return undefined;
-	const catalog = effect.get(watch.broadcast.output.catalog) as { metadata?: string[] } | undefined;
+	const catalog = effect.get(watch.broadcast.out.catalog) as { metadata?: string[] } | undefined;
 	return catalog?.metadata?.[0];
 });
 
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const broadcast = watch ? effect.get(watch.broadcast.output.active) : undefined;
+	const broadcast = watch ? effect.get(watch.broadcast.out.active) : undefined;
 	const trackName = effect.get(metaTrackName);
 	if (!broadcast || !trackName) {
 		metaSignal.set(undefined);
@@ -431,7 +431,7 @@ ui.run((effect) => {
 ui.run((effect) => {
 	const meta = effect.get(metaSignal);
 	const watch = effect.get(activeWatch);
-	const live = watch ? effect.get(watch.broadcast.output.status) === "live" : false;
+	const live = watch ? effect.get(watch.broadcast.out.status) === "live" : false;
 	const section = $("metadata-section");
 	const pre = $("metadata");
 	if (live && meta !== undefined) {
@@ -479,8 +479,8 @@ viz.interval(() => {
 		return;
 	}
 
-	const v = watch.backend.video.output.stats.peek();
-	const a = watch.backend.audio.output.stats.peek();
+	const v = watch.backend.video.out.stats.peek();
+	const a = watch.backend.audio.out.stats.peek();
 	const videoBytes = v?.bytesReceived ?? 0;
 	const totalBytes = videoBytes + (a?.bytesReceived ?? 0);
 	const frames = v?.frameCount ?? 0;
@@ -510,7 +510,7 @@ viz.interval(() => {
 // one element and runs its own animation loop until its child effect closes.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const live = watch ? effect.get(watch.broadcast.output.status) === "live" : false;
+	const live = watch ? effect.get(watch.broadcast.out.status) === "live" : false;
 	const section = $("buffer-section");
 	const host = $("buffer-viz");
 	host.replaceChildren();

@@ -55,8 +55,8 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.run((effect) => {
 		const mode = latencyBounds(effect.get(watch.controls.latency)).min;
-		const jitter = effect.get(watch.backend.output.jitter);
-		const total = effect.get(watch.backend.sync.output.buffer);
+		const jitter = effect.get(watch.backend.out.jitter);
+		const total = effect.get(watch.backend.sync.out.buffer);
 		jitterVal.textContent = `${formatMillis(jitter)}${mode === "real-time" ? " (auto)" : ""}`;
 		bufferVal.textContent = formatMillis(total);
 	});

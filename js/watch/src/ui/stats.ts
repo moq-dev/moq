@@ -75,7 +75,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
 	track(parent, videoCard, {
-		catalog: watch.backend.video.source.output.catalog,
+		catalog: watch.backend.video.source.out.catalog,
 		flag: watch.controls.paused,
 		label: "paused",
 	});
@@ -87,7 +87,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aChannels = line(audioCard.grid, "Channels");
 	const aBitrate = line(audioCard.grid, "Bitrate");
 	track(parent, audioCard, {
-		catalog: watch.backend.audio.source.output.catalog,
+		catalog: watch.backend.audio.source.out.catalog,
 		flag: watch.controls.muted,
 		label: "muted",
 	});
@@ -108,9 +108,9 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		const now = performance.now();
 
 		// Video. Resolution comes from the active rendition (catalog.display is optional).
-		const vConf = watch.backend.video.source.output.config.peek();
-		const vCat = watch.backend.video.source.output.catalog.peek();
-		const vStats = watch.backend.video.output.stats.peek();
+		const vConf = watch.backend.video.source.out.config.peek();
+		const vCat = watch.backend.video.source.out.catalog.peek();
+		const vStats = watch.backend.video.out.stats.peek();
 		const w = vConf?.codedWidth ?? vCat?.display?.width;
 		const h = vConf?.codedHeight ?? vCat?.display?.height;
 		vRes.textContent = w && h ? `${w}×${h}` : "—";
@@ -128,8 +128,8 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		if (vStats) vPrev = { frames: vStats.frameCount, bytes: vStats.bytesReceived, when: now };
 
 		// Audio.
-		const aConf = watch.backend.audio.source.output.config.peek();
-		const aStats = watch.backend.audio.output.stats.peek();
+		const aConf = watch.backend.audio.source.out.config.peek();
+		const aStats = watch.backend.audio.out.stats.peek();
 		aCodec.textContent = aConf?.codec ?? "—";
 		aRate2.textContent = aConf?.sampleRate ? formatHz(aConf.sampleRate) : "—";
 		aChannels.textContent = aConf?.numberOfChannels ? `${aConf.numberOfChannels}` : "—";

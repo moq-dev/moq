@@ -81,7 +81,7 @@ try {
 				const w = document.querySelector("moq-watch") as unknown as {
 					backend?: { video?: { output?: { stats?: { peek(): { frameCount?: number } | undefined } } } };
 				} | null;
-				return w?.backend?.video?.output?.stats?.peek()?.frameCount ?? 0;
+				return w?.backend?.video?.out?.stats?.peek()?.frameCount ?? 0;
 			});
 			if (frames > 0) break;
 			// The watch element gives up if it subscribes to the catalog before the

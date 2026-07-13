@@ -42,11 +42,11 @@ type DecoderOutput = {
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
 export class Decoder implements Backend {
-	readonly input: Readonlys<DecoderInput>;
+	readonly in: Readonlys<DecoderInput>;
 	source: Source;
 	sync: Sync;
 
-	readonly #output: DecoderOutput = {
+	readonly #out: DecoderOutput = {
 		frame: new Signal<VideoFrame | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
@@ -54,7 +54,7 @@ export class Decoder implements Backend {
 		stats: new Signal<Stats | undefined>(undefined),
 		buffered: new Signal<BufferedRanges>([]),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
@@ -62,15 +62,15 @@ export class Decoder implements Backend {
 	#signals = new Effect();
 
 	#clearCurrentFrame(): void {
-		this.#output.frame.update((prev) => {
+		this.#out.frame.update((prev) => {
 			prev?.close();
 			return undefined;
 		});
-		this.#output.timestamp.set(undefined);
+		this.#out.timestamp.set(undefined);
 	}
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
-		this.input = {
+		this.in = {
 			enabled: getter(props?.enabled ?? false),
 		};
 
@@ -85,10 +85,10 @@ export class Decoder implements Backend {
 
 	#runPending(effect: Effect): void {
 		const values = effect.getAll([
-			this.input.enabled,
-			this.source.input.broadcast,
-			this.source.output.track,
-			this.source.output.config,
+			this.in.enabled,
+			this.source.in.broadcast,
+			this.source.out.track,
+			this.source.out.config,
 		]);
 		if (!values) {
 			// Close the active track when disabled (e.g. paused or not visible).
@@ -105,7 +105,7 @@ export class Decoder implements Backend {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
 			this.#clearCurrentFrame();
-			this.#output.buffered.set([]);
+			this.#out.buffered.set([]);
 			return;
 		}
 
@@ -115,7 +115,7 @@ export class Decoder implements Backend {
 			broadcast: active,
 			track,
 			config,
-			stats: this.#output.stats,
+			stats: this.#out.stats,
 		});
 
 		effect.cleanup(() => pending?.close());
@@ -147,7 +147,7 @@ export class Decoder implements Backend {
 		const active = effect.get(this.#active);
 		if (!active) {
 			// Clear stale data when disabled (e.g. paused or not visible).
-			this.#output.buffered.set([]);
+			this.#out.buffered.set([]);
 			return;
 		}
 
@@ -157,51 +157,51 @@ export class Decoder implements Backend {
 		// proxy() would share the same reference, allowing the source to close our frame.
 		effect.run((inner) => {
 			const frame = inner.get(active.frame);
-			this.#output.frame.update((prev) => {
+			this.#out.frame.update((prev) => {
 				prev?.close();
 				return frame?.clone();
 			});
 		});
-		effect.proxy(this.#output.timestamp, active.timestamp);
-		effect.proxy(this.#output.buffered, active.buffered);
+		effect.proxy(this.#out.timestamp, active.timestamp);
+		effect.proxy(this.#out.buffered, active.buffered);
 	}
 
 	#runDisplay(effect: Effect): void {
-		const catalog = effect.get(this.source.output.catalog);
+		const catalog = effect.get(this.source.out.catalog);
 		if (!catalog) return;
 
 		const display = catalog.display;
 		if (display) {
-			effect.set(this.#output.display, {
+			effect.set(this.#out.display, {
 				width: display.width,
 				height: display.height,
 			});
 			return;
 		}
 
-		const frame = effect.get(this.#output.frame);
+		const frame = effect.get(this.#out.frame);
 		if (!frame) return;
 
-		effect.set(this.#output.display, {
+		effect.set(this.#out.display, {
 			width: frame.displayWidth,
 			height: frame.displayHeight,
 		});
 	}
 
 	#runBuffering(effect: Effect): void {
-		const enabled = effect.get(this.input.enabled);
+		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
-		const frame = effect.get(this.#output.frame);
+		const frame = effect.get(this.#out.frame);
 		if (!frame) {
-			this.#output.stalled.set(true);
+			this.#out.stalled.set(true);
 			return;
 		}
 
-		this.#output.stalled.set(false);
+		this.#out.stalled.set(false);
 
 		effect.timer(() => {
-			this.#output.stalled.set(true);
+			this.#out.stalled.set(true);
 		}, BUFFERING);
 	}
 
@@ -329,7 +329,7 @@ class DecoderTrack {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.sync.output.buffer,
+			latency: this.sync.out.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -412,7 +412,7 @@ class DecoderTrack {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.sync.output.buffer,
+			latency: this.sync.out.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 

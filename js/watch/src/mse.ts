@@ -16,18 +16,18 @@ type MuxerOutput = {
  * Uses Media Source Extensions to handle complete moof+mdat fragments.
  */
 export class Muxer {
-	readonly input: Readonlys<MuxerInput>;
+	readonly in: Readonlys<MuxerInput>;
 	sync: Sync;
 
-	readonly #output: MuxerOutput = {
+	readonly #out: MuxerOutput = {
 		mediaSource: new Signal<MediaSource | undefined>(undefined),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
 
 	constructor(sync: Sync, props?: Inputs<MuxerInput>) {
-		this.input = {
+		this.in = {
 			element: getter(props?.element),
 			paused: getter(props?.paused ?? false),
 		};
@@ -41,7 +41,7 @@ export class Muxer {
 	}
 
 	#runMediaSource(effect: Effect): void {
-		const element = effect.get(this.input.element);
+		const element = effect.get(this.in.element);
 		if (!element) return;
 
 		const mediaSource = new MediaSource();
@@ -53,7 +53,7 @@ export class Muxer {
 			mediaSource,
 			"sourceopen",
 			() => {
-				effect.set(this.#output.mediaSource, mediaSource);
+				effect.set(this.#out.mediaSource, mediaSource);
 			},
 			{ once: true },
 		);
@@ -64,16 +64,16 @@ export class Muxer {
 	}
 
 	#runSkip(effect: Effect): void {
-		const element = effect.get(this.input.element);
+		const element = effect.get(this.in.element);
 		if (!element) return;
 
 		// Don't skip when paused, otherwise we'll keep jerking forward.
-		const paused = effect.get(this.input.paused);
+		const paused = effect.get(this.in.paused);
 		if (paused) return;
 
 		// Use the computed latency (catalog jitter + user jitter)
 		// Convert to seconds since DOM APIs use seconds
-		const latency = Time.Milli.toSecond(effect.get(this.sync.output.buffer));
+		const latency = Time.Milli.toSecond(effect.get(this.sync.out.buffer));
 
 		effect.interval(() => {
 			// Skip over gaps based on the effective latency.
@@ -93,10 +93,10 @@ export class Muxer {
 	}
 
 	#runTrim(effect: Effect): void {
-		const element = effect.get(this.input.element);
+		const element = effect.get(this.in.element);
 		if (!element) return;
 
-		const media = effect.get(this.output.mediaSource);
+		const media = effect.get(this.out.mediaSource);
 		if (!media) return;
 
 		// Periodically clean up old buffered data.
@@ -114,10 +114,10 @@ export class Muxer {
 	}
 
 	#runPaused(effect: Effect): void {
-		const element = effect.get(this.input.element);
+		const element = effect.get(this.in.element);
 		if (!element) return;
 
-		const paused = effect.get(this.input.paused);
+		const paused = effect.get(this.in.paused);
 		if (paused && !element.paused) {
 			element.pause();
 		} else if (!paused && element.paused) {
@@ -129,17 +129,17 @@ export class Muxer {
 
 	// Seek to the target position based on the reference and latency.
 	#runSync(effect: Effect): void {
-		const element = effect.get(this.input.element);
+		const element = effect.get(this.in.element);
 		if (!element) return;
 
 		// Don't seek when paused, otherwise we'll keep jerking around.
-		const paused = effect.get(this.input.paused);
+		const paused = effect.get(this.in.paused);
 		if (paused) return;
 
-		const reference = effect.get(this.sync.output.reference);
+		const reference = effect.get(this.sync.out.reference);
 		if (reference === undefined) return;
 
-		const latency = effect.get(this.sync.output.buffer);
+		const latency = effect.get(this.sync.out.buffer);
 
 		// Compute the target currentTime based on reference and latency.
 		// reference = performance.now() - frameTimestamp (in ms) when we received the earliest frame

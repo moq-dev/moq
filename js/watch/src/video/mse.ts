@@ -26,13 +26,13 @@ export class Mse implements Backend {
 	sync: Sync;
 	source: Source;
 
-	readonly #output: MseOutput = {
+	readonly #out: MseOutput = {
 		stats: new Signal<Stats | undefined>(undefined),
 		buffered: new Signal<BufferedRanges>([]),
 		stalled: new Signal<boolean>(false),
 		timestamp: new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	signals = new Effect();
 
@@ -47,19 +47,19 @@ export class Mse implements Backend {
 	}
 
 	#runMedia(effect: Effect): void {
-		const element = effect.get(this.muxer.input.element);
+		const element = effect.get(this.muxer.in.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.muxer.output.mediaSource);
+		const mediaSource = effect.get(this.muxer.out.mediaSource);
 		if (!mediaSource) return;
 
-		const broadcast = effect.get(this.source.input.broadcast);
+		const broadcast = effect.get(this.source.in.broadcast);
 		if (!broadcast) return;
 
-		const track = effect.get(this.source.output.track);
+		const track = effect.get(this.source.out.track);
 		if (!track) return;
 
-		const config = effect.get(this.source.output.config);
+		const config = effect.get(this.source.out.config);
 		if (!config) return;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
@@ -80,7 +80,7 @@ export class Mse implements Backend {
 		});
 
 		effect.event(sourceBuffer, "updateend", () => {
-			this.#output.buffered.set(timeRangesToArray(sourceBuffer.buffered));
+			this.#out.buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
 		if (config.container.kind === "cmaf") {
@@ -167,7 +167,7 @@ export class Mse implements Backend {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(data, {
 			format,
-			latency: this.sync.output.buffer,
+			latency: this.sync.out.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -232,11 +232,11 @@ export class Mse implements Backend {
 	}
 
 	#runStalled(effect: Effect): void {
-		const element = effect.get(this.muxer.input.element);
+		const element = effect.get(this.muxer.in.element);
 		if (!element) return;
 
 		const update = () => {
-			this.#output.stalled.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
+			this.#out.stalled.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
 		};
 
 		// Set initial state
@@ -249,7 +249,7 @@ export class Mse implements Backend {
 	}
 
 	#runTimestamp(effect: Effect): void {
-		const element = effect.get(this.muxer.input.element);
+		const element = effect.get(this.muxer.in.element);
 		if (!element) return;
 
 		// Use requestVideoFrameCallback if available (frame-accurate)
@@ -259,7 +259,7 @@ export class Mse implements Backend {
 			let handle: number;
 			const onFrame = () => {
 				const timestamp = Moq.Time.Milli.fromSecond(video.currentTime as Moq.Time.Second);
-				this.#output.timestamp.set(timestamp);
+				this.#out.timestamp.set(timestamp);
 				handle = video.requestVideoFrameCallback(onFrame);
 			};
 			handle = video.requestVideoFrameCallback(onFrame);
@@ -269,7 +269,7 @@ export class Mse implements Backend {
 			// Fallback to timeupdate event
 			effect.event(element, "timeupdate", () => {
 				const timestamp = Moq.Time.Milli.fromSecond(element.currentTime as Moq.Time.Second);
-				this.#output.timestamp.set(timestamp);
+				this.#out.timestamp.set(timestamp);
 			});
 		}
 	}

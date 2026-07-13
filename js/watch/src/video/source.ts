@@ -210,9 +210,9 @@ function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
  * for video playback. It is used by both MSE and Decoder backends.
  */
 export class Source {
-	readonly input: Readonlys<SourceInput>;
+	readonly in: Readonlys<SourceInput>;
 
-	readonly #output: SourceOutput = {
+	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
 		error: new Signal<SourceError | undefined>(undefined),
@@ -220,12 +220,12 @@ export class Source {
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		jitter: new Signal<Moq.Time.Milli | undefined>(undefined),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SourceInput>) {
-		this.input = {
+		this.in = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
 			supported: getter(props?.supported),
@@ -237,24 +237,24 @@ export class Source {
 	}
 
 	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.input.broadcast);
+		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
-		const catalog = effect.get(broadcast.output.catalog)?.video;
+		const catalog = effect.get(broadcast.out.catalog)?.video;
 		if (!catalog) return;
 
-		effect.set(this.#output.catalog, catalog);
+		effect.set(this.#out.catalog, catalog);
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.input.supported);
+		const supported = effect.get(this.in.supported);
 		if (!supported) {
-			this.#output.error.set(undefined);
+			this.#out.error.set(undefined);
 			return;
 		}
 
-		const renditions = effect.get(this.#output.catalog)?.renditions ?? {};
-		this.#output.error.set(undefined);
+		const renditions = effect.get(this.#out.catalog)?.renditions ?? {};
+		this.#out.error.set(undefined);
 
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
@@ -278,31 +278,31 @@ export class Source {
 				console.warn("[Source] No supported video renditions found:", renditions);
 			}
 
-			this.#output.error.set(error);
-			this.#output.available.set(available);
+			this.#out.error.set(error);
+			this.#out.available.set(available);
 		});
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = effect.get(this.#output.available);
+		const available = effect.get(this.#out.available);
 		if (Object.keys(available).length === 0) return;
 
-		const target = effect.get(this.input.target);
+		const target = effect.get(this.in.target);
 
 		// Manual selection by name — skip all ABR logic.
 		if (target?.name && target.name in available) {
 			const config = available[target.name];
-			effect.set(this.#output.track, target.name);
-			effect.set(this.#output.config, config);
-			effect.set(this.#output.jitter, config.jitter !== undefined ? Time.Milli(config.jitter) : undefined);
+			effect.set(this.#out.track, target.name);
+			effect.set(this.#out.config, config);
+			effect.set(this.#out.jitter, config.jitter !== undefined ? Time.Milli(config.jitter) : undefined);
 			return;
 		}
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
 		let effectiveTarget = target;
 		if (!target?.bitrate) {
-			const broadcast = effect.get(this.input.broadcast);
-			const connection = broadcast ? effect.get(broadcast.input.connection) : undefined;
+			const broadcast = effect.get(this.in.broadcast);
+			const connection = broadcast ? effect.get(broadcast.in.connection) : undefined;
 			const recvBw = connection?.recvBandwidth;
 			if (recvBw) {
 				const estimate = effect.get(recvBw);
@@ -319,12 +319,12 @@ export class Source {
 
 		const config = available[selected];
 
-		effect.set(this.#output.track, selected);
-		effect.set(this.#output.config, config);
+		effect.set(this.#out.track, selected);
+		effect.set(this.#out.config, config);
 
 		// Use catalog jitter if available, otherwise estimate from framerate.
 		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		effect.set(this.#output.jitter, jitter !== undefined ? Time.Milli(jitter) : undefined);
+		effect.set(this.#out.jitter, jitter !== undefined ? Time.Milli(jitter) : undefined);
 	}
 
 	/**

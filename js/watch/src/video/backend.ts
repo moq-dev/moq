@@ -8,7 +8,7 @@ export interface Backend {
 	// The source of the video.
 	source: Source;
 
-	readonly output: {
+	readonly out: {
 		// The stats of the video.
 		readonly stats: Getter<Stats | undefined>;
 

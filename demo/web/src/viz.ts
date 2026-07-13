@@ -290,12 +290,12 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 					: 0;
 		if (delta === 0) return;
 		e.preventDefault();
-		setLatency((watch.backend.output.jitter.peek() as unknown as number) + delta);
+		setLatency((watch.backend.out.jitter.peek() as unknown as number) + delta);
 	});
 
 	// Position the target line from the live jitter (actual measured buffer in ms).
 	parent.run((effect) => {
-		const jitter = effect.get(watch.backend.output.jitter) as unknown as number;
+		const jitter = effect.get(watch.backend.out.jitter) as unknown as number;
 		const pct = Math.max(0, Math.min(1, jitter / BUFFER_MAX)) * 100;
 		target.style.left = `${pct}%`;
 		targetLabel.textContent = `${Math.round(jitter)}ms`;
@@ -305,9 +305,9 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 	// Repaint the bars every animation frame; cleaned up when the effect closes.
 	const draw = () => {
 		const timestamp = watch.backend.sync.now() as number | undefined;
-		const stalled = watch.backend.video.output.stalled.peek();
-		drawRanges(video.canvas, watch.backend.video.output.buffered.peek(), timestamp, stalled);
-		drawRanges(audio.canvas, watch.backend.audio.output.buffered.peek(), timestamp, false);
+		const stalled = watch.backend.video.out.stalled.peek();
+		drawRanges(video.canvas, watch.backend.video.out.buffered.peek(), timestamp, stalled);
+		drawRanges(audio.canvas, watch.backend.audio.out.buffered.peek(), timestamp, false);
 		parent.animate(draw);
 	};
 	parent.animate(draw);

@@ -7,7 +7,7 @@ export default function StatsPanel() {
 	const ctx = useGameUI();
 	const game = ctx.game;
 
-	const jitter = createAccessor(game.sync.output.jitter);
+	const jitter = createAccessor(game.sync.out.jitter);
 
 	const onJitterInput = (e: Event) => {
 		const el = e.currentTarget as HTMLInputElement;

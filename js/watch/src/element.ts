@@ -221,7 +221,7 @@ export default class MoqWatch extends HTMLElement {
 			if (min === "real-time") {
 				this.setAttribute("latency", "real-time");
 			} else {
-				const jitter = Math.floor(effect.get(this.backend.output.jitter));
+				const jitter = Math.floor(effect.get(this.backend.out.jitter));
 				this.setAttribute("latency", jitter.toString());
 			}
 		});
@@ -405,7 +405,7 @@ export default class MoqWatch extends HTMLElement {
 
 	/** The jitter buffer in milliseconds. */
 	get jitter(): Time.Milli {
-		return this.backend.output.jitter.peek();
+		return this.backend.out.jitter.peek();
 	}
 
 	/** Re-anchor playback and flush the audio buffer at an utterance boundary (buffered mode). */
@@ -426,7 +426,7 @@ export default class MoqWatch extends HTMLElement {
 	 * for `"hang"` and `"msf"` this is overwritten by the fetch loop.
 	 */
 	get catalog(): Catalog.Root | undefined {
-		return this.broadcast.output.catalog.peek();
+		return this.broadcast.out.catalog.peek();
 	}
 
 	set catalog(value: Catalog.Root | undefined) {

@@ -27,14 +27,14 @@ export class Mse implements Backend {
 	sync: Sync;
 	source: Source;
 
-	readonly input: Readonlys<MseInput>;
+	readonly in: Readonlys<MseInput>;
 
-	readonly #output: MseOutput = {
+	readonly #out: MseOutput = {
 		stats: new Signal<Stats | undefined>(undefined),
 		buffered: new Signal<BufferedRanges>([]),
 		context: new Signal<AudioContext | undefined>(undefined),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
 
@@ -43,7 +43,7 @@ export class Mse implements Backend {
 		this.sync = sync;
 		this.source = source;
 
-		this.input = {
+		this.in = {
 			volume: getter(props?.volume ?? 0.5),
 			muted: getter(props?.muted ?? false),
 		};
@@ -53,19 +53,19 @@ export class Mse implements Backend {
 	}
 
 	#runMedia(effect: Effect): void {
-		const element = effect.get(this.muxer.input.element);
+		const element = effect.get(this.muxer.in.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.muxer.output.mediaSource);
+		const mediaSource = effect.get(this.muxer.out.mediaSource);
 		if (!mediaSource) return;
 
-		const broadcast = effect.get(this.source.input.broadcast);
+		const broadcast = effect.get(this.source.in.broadcast);
 		if (!broadcast) return;
 
-		const track = effect.get(this.source.output.track);
+		const track = effect.get(this.source.out.track);
 		if (!track) return;
 
-		const config = effect.get(this.source.output.config);
+		const config = effect.get(this.source.out.config);
 		if (!config) return;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
@@ -86,7 +86,7 @@ export class Mse implements Backend {
 		});
 
 		effect.event(sourceBuffer, "updateend", () => {
-			this.#output.buffered.set(timeRangesToArray(sourceBuffer.buffered));
+			this.#out.buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
@@ -163,7 +163,7 @@ export class Mse implements Backend {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.sync.output.buffer,
+			latency: this.sync.out.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -229,11 +229,11 @@ export class Mse implements Backend {
 	}
 
 	#runVolume(effect: Effect): void {
-		const element = effect.get(this.muxer.input.element);
+		const element = effect.get(this.muxer.in.element);
 		if (!element) return;
 
-		const volume = effect.get(this.input.volume);
-		const muted = effect.get(this.input.muted);
+		const volume = effect.get(this.in.volume);
+		const muted = effect.get(this.in.muted);
 
 		if (muted && !element.muted) {
 			element.muted = true;
