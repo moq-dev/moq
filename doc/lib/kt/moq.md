@@ -204,16 +204,16 @@ For JSON payloads, publish and subscribe with the framing handled for you, in on
 ```kotlin
 import dev.moq.*
 import uniffi.moq.MoqBroadcastProducer
-import uniffi.moq.MoqJsonConfig
+import uniffi.moq.MoqJsonSnapshotConfig
 import uniffi.moq.MoqJsonStreamConfig
 
 // Snapshot: each update supersedes the last.
-val config = MoqJsonConfig(deltaRatio = 8u, compression = true)
-val status = broadcast.publishJson("status", config)
+val config = MoqJsonSnapshotConfig(deltaRatio = 8u, compression = true)
+val status = broadcast.publishJsonSnapshot("status", config)
 status.update("""{"state":"live"}""")
 
 val broadcastConsumer = broadcast.consume()
-val consumer = broadcastConsumer.subscribeJson("status", config)
+val consumer = broadcastConsumer.subscribeJsonSnapshot("status", config)
 consumer.values().collect { value -> println(value) }
 
 // Stream: every record is delivered in order.

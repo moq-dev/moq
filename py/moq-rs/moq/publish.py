@@ -12,8 +12,8 @@ from moq_ffi import (
     MoqGroupProducer,
     MoqGroupRequest,
     MoqInit,
-    MoqJsonConfig,
-    MoqJsonProducer,
+    MoqJsonSnapshotConfig,
+    MoqJsonSnapshotProducer,
     MoqJsonStreamConfig,
     MoqJsonStreamProducer,
     MoqMediaProducer,
@@ -240,15 +240,15 @@ class TrackDynamic:
         self._inner.cancel()
 
 
-class JsonProducer:
+class JsonSnapshotProducer:
     """Publish a JSON value that consumers see as a single latest state (lossy).
 
-    Built via :meth:`BroadcastProducer.publish_json`. Each :meth:`update` supersedes the
+    Built via :meth:`BroadcastProducer.publish_json_snapshot`. Each :meth:`update` supersedes the
     last; a late joiner only sees the newest value. Values are any JSON-serializable Python
     object, encoded as snapshots and merge-patch deltas automatically.
     """
 
-    def __init__(self, inner: MoqJsonProducer) -> None:
+    def __init__(self, inner: MoqJsonSnapshotProducer) -> None:
         self._inner = inner
 
     def update(self, value: Any) -> None:
@@ -378,7 +378,9 @@ class BroadcastProducer:
         properties (priority, cache, timescale); omit for defaults."""
         return TrackProducer(self._inner.publish_track(name, info))
 
-    def publish_json(self, name: str, *, delta_ratio: int = 8, compression: bool = False) -> JsonProducer:
+    def publish_json_snapshot(
+        self, name: str, *, delta_ratio: int = 8, compression: bool = False
+    ) -> JsonSnapshotProducer:
         """Publish a JSON snapshot track (lossy latest-value).
 
         Each update supersedes the last; a late joiner only sees the newest value.
@@ -387,8 +389,8 @@ class BroadcastProducer:
         the consumer must pass the same flag. Advertise the track with
         :meth:`set_catalog_section` if consumers should discover it.
         """
-        config = MoqJsonConfig(delta_ratio=delta_ratio, compression=compression)
-        return JsonProducer(self._inner.publish_json(name, config))
+        config = MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
+        return JsonSnapshotProducer(self._inner.publish_json_snapshot(name, config))
 
     def publish_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamProducer:
         """Publish a JSON stream track (lossless append-log).

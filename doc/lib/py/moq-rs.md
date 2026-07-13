@@ -170,18 +170,18 @@ A datagram is a single unreliable payload, returned as `Datagram(sequence, times
 
 ### JSON tracks
 
-For JSON payloads, `publish_json` / `subscribe_json` handle the framing for you. Values are ordinary Python objects (encoded with `json` internally), in one of two modes:
+For JSON payloads, `publish_json_snapshot` / `subscribe_json_snapshot` (and the `_stream` pair) handle the framing for you. Values are ordinary Python objects (encoded with `json` internally). You opt into one of two modes:
 
 - **Snapshot** (lossy): one value updated over time; a subscriber only sees the latest. Ideal for status documents and metadata. A late joiner catches up to the newest value in one step.
 - **Stream** (lossless): an ordered append-log where every record is preserved. Ideal for event logs and timelines.
 
 ```python
 # Snapshot: each update supersedes the last.
-status = broadcast.publish_json("status", compression=True)
+status = broadcast.publish_json_snapshot("status", compression=True)
 status.update({"state": "live", "viewers": 42})
 status.update({"state": "live", "viewers": 43})
 
-async for value in broadcast_consumer.subscribe_json("status", compression=True):
+async for value in broadcast_consumer.subscribe_json_snapshot("status", compression=True):
     print(value["viewers"])
 
 # Stream: every record is delivered in order.

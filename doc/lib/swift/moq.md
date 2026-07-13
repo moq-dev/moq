@@ -174,6 +174,38 @@ for try await datagram in consumer.datagrams {
 
 Datagrams are delivered as `Datagram(sequence, timestampUs, payload)`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
+### JSON tracks
+
+For JSON payloads, publish and subscribe with the framing handled for you. Values are your own `Codable` types, encoded and decoded at the boundary with `JSONEncoder` / `JSONDecoder`. You opt into one of two distinct modes, one method per mode:
+
+- **Snapshot** (lossy): one value updated over time; a subscriber only sees the latest. Ideal for status documents and metadata. A late joiner catches up to the newest value in one step.
+- **Stream** (lossless): an ordered append-log where every record is preserved. Ideal for event logs and timelines.
+
+```swift
+struct Status: Codable { var state: String; var viewers: Int }
+
+// Snapshot: each update supersedes the last.
+let status = try broadcast.publishJsonSnapshot(name: "status", of: Status.self, compression: true)
+try status.update(Status(state: "live", viewers: 42))
+try status.update(Status(state: "live", viewers: 43))
+
+let consumer = try broadcast.consume()
+for try await value in try await consumer.subscribeJsonSnapshot(name: "status", as: Status.self, compression: true) {
+    print(value.viewers)
+}
+
+// Stream: every record is delivered in order.
+struct Event: Codable { var event: String }
+let events = try broadcast.publishJsonStream(name: "events", of: Event.self)
+try events.append(Event(event: "started"))
+
+for try await record in try await consumer.subscribeJsonStream(name: "events", as: Event.self) {
+    print(record.event)
+}
+```
+
+`compression` must match on the producer and subscriber. Snapshot mode also takes `deltaRatio` (`0` disables merge-patch deltas, so every change is a fresh snapshot). Advertise the track with a catalog section (`setCatalogSection`) if subscribers should discover it.
+
 ### On-demand broadcasts
 
 Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:

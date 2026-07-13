@@ -5,7 +5,7 @@ use super::session::MoqClient;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
-use crate::json::{MoqJsonConfig, MoqJsonStreamConfig};
+use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::MoqInit;
 
 use std::time::Duration;
@@ -184,15 +184,15 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 #[tokio::test]
 async fn json_snapshot_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let config = MoqJsonConfig {
+	let config = MoqJsonSnapshotConfig {
 		delta_ratio: 8,
 		compression: true,
 	};
-	let producer = broadcast.publish_json("meta".into(), config.clone()).unwrap();
+	let producer = broadcast.publish_json_snapshot("meta".into(), config.clone()).unwrap();
 	let consumer = broadcast
 		.consume()
 		.unwrap()
-		.subscribe_json("meta".into(), config)
+		.subscribe_json_snapshot("meta".into(), config)
 		.await
 		.unwrap();
 
