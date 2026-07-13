@@ -11,7 +11,9 @@
 //!   demand. A fresh portal session would re-prompt the picker every time, so the
 //!   portal's restore token is kept in a process-wide slot and replayed on the
 //!   next [`open`], which restores the same grant without a dialog (on
-//!   compositors that support persistence).
+//!   compositors that support persistence). The token is forgotten when the
+//!   compositor ends the stream (the user hit "stop sharing"), so a revoked
+//!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
 //!   the encoder. A loop timer re-emits the last frame whenever a frame interval
 //!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
@@ -39,6 +41,11 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// The compositor sends the negotiated format right after the stream connects;
 /// if nothing arrives the session is broken (or the grant was revoked mid-setup).
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// ScreenCast compositors deliver the current content as a first frame right
+/// after negotiation; none arriving means the session is broken, so fail `open`
+/// rather than hand the encoder a stream that will never produce (same
+/// first-frame wait as the macOS ScreenCaptureKit backend).
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The portal restore token from the last grant, replayed on the next [`open`]
 /// so a demand-driven reopen skips the picker dialog. Process-wide because the
@@ -55,7 +62,7 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
 	}
 
-	let (node_id, fd) = portal_negotiate().await?;
+	let (node_id, fd, session) = portal_negotiate().await?;
 
 	let chan = FrameChannel::new();
 	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
@@ -86,9 +93,13 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 
 	// Own the thread from here on, so cancelling this `await` still stops and
 	// joins it instead of detaching a loop that holds the portal session open.
+	// `Drop` quits and joins the loop first, then its `session` field closes the
+	// portal session, so the compositor's sharing indicator turns off and the
+	// token-clearing `Unconnected` path can't fire on our own teardown.
 	let guard = LoopGuard {
 		quit: quit_tx,
 		handle: Some(handle),
+		_session: session,
 	};
 
 	let geo = match tokio::time::timeout(FORMAT_TIMEOUT, geo_rx).await {
@@ -101,6 +112,15 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 		Err(_) => {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"no video format from the compositor within {FORMAT_TIMEOUT:?}"
+			)));
+		}
+	};
+
+	let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
+		Ok(Some(frame)) => frame,
+		Ok(None) | Err(_) => {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"no frames from the compositor within {FIRST_FRAME_TIMEOUT:?}"
 			)));
 		}
 	};
@@ -118,15 +138,15 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 		geo.height,
 		geo.framerate,
 		geo.device,
-		None,
+		Some(first),
 		Box::new(guard),
 	))
 }
 
 /// Ask the ScreenCast portal for a monitor: create a session, (re)select the
-/// source, and start it, returning the PipeWire node to stream plus the fd of
-/// the portal's PipeWire remote.
-async fn portal_negotiate() -> Result<(u32, OwnedFd), Error> {
+/// source, and start it, returning the PipeWire node to stream, the fd of the
+/// portal's PipeWire remote, and a guard that closes the session on drop.
+async fn portal_negotiate() -> Result<(u32, OwnedFd, SessionGuard), Error> {
 	let proxy = Screencast::new().await.map_err(|e| err("screencast portal", e))?;
 	let session = proxy
 		.create_session(Default::default())
@@ -167,14 +187,40 @@ async fn portal_negotiate() -> Result<(u32, OwnedFd), Error> {
 		.open_pipe_wire_remote(&session, Default::default())
 		.await
 		.map_err(|e| err("portal pipewire remote", e))?;
-	Ok((node_id, fd))
+	Ok((node_id, fd, SessionGuard::new(session)))
 }
 
-/// Stops the PipeWire loop and joins its thread on drop, ending the portal
-/// session and closing the frame channel.
+/// Closes the portal session when dropped, so the compositor's "screen is being
+/// shared" indicator turns off and sessions don't pile up across demand-driven
+/// reopens. The close call is async and `Drop` is not, so a task spawned here
+/// waits for the guard to drop. Closing does not invalidate the restore token.
+struct SessionGuard {
+	_close: tokio::sync::oneshot::Sender<()>,
+}
+
+impl SessionGuard {
+	fn new(session: ashpd::desktop::Session<Screencast>) -> Self {
+		let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+		tokio::spawn(async move {
+			// Resolves with `Err` once the guard (the sender) drops.
+			let _ = rx.await;
+			if let Err(e) = session.close().await {
+				tracing::debug!(error = %e, "failed to close portal session");
+			}
+		});
+		Self { _close: tx }
+	}
+}
+
+/// Stops the PipeWire loop and joins its thread on drop, then (via the
+/// `session` field, which drops after `drop` runs) closes the portal session
+/// and thereby the frame channel's upstream.
 struct LoopGuard {
 	quit: pw::channel::Sender<()>,
 	handle: Option<JoinHandle<()>>,
+	/// Held so the portal session outlives the loop; dropping it closes the
+	/// session only after the loop thread has been joined above.
+	_session: SessionGuard,
 }
 
 impl Drop for LoopGuard {
@@ -240,6 +286,13 @@ fn run_loop(
 					pw::stream::StreamState::Error(_) | pw::stream::StreamState::Unconnected
 				);
 				if done {
+					// The compositor ended the stream while our loop was live (the
+					// user hit "stop sharing", or the output went away). Forget the
+					// restore token so the demand-driven reopen asks again instead
+					// of silently resuming a grant the user just revoked. Our own
+					// teardown quits the loop before anything disconnects, so it
+					// never reaches this path.
+					*RESTORE_TOKEN.lock().unwrap() = None;
 					tracing::debug!(state = ?new, "screen capture stream ended");
 					if let Some(mainloop) = mainloop.upgrade() {
 						mainloop.quit();
@@ -318,6 +371,11 @@ fn run_loop(
 				let offset = data.chunk().offset() as usize;
 				let size = data.chunk().size() as usize;
 				let stride = data.chunk().stride();
+				// Compositors mark skipped frames as empty or corrupted; drop those
+				// rather than treating them as a fatal conversion failure below.
+				if size == 0 || data.chunk().flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
+					return;
+				}
 				// Without dmabuf modifiers in our format offer the compositor uses
 				// shared memory, which MAP_BUFFERS mmaps for us; `None` here means
 				// it forced something we can't read, so give up cleanly.
@@ -331,7 +389,13 @@ fn run_loop(
 				let Some(bytes) = bytes.get(offset..offset + size) else {
 					return;
 				};
-				let stride = if stride > 0 { stride as u32 } else { width * 4 };
+				// Fall back to the unclamped source width: for an odd-width source
+				// the real row is one pixel wider than the clamped `width`.
+				let stride = if stride > 0 {
+					stride as u32
+				} else {
+					state.format.size().width * 4
+				};
 
 				match convert(state.format.format(), bytes, stride, width, height) {
 					Ok(i420) => {
