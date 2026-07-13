@@ -118,14 +118,12 @@ impl Session {
 		let status = Arc::new(Status::default());
 		let errored = Arc::new(AtomicBool::new(false));
 
-		// Hand the publish origin to a background reconnect loop: connect, wait for the session to
-		// close, then reconnect with exponential backoff. This replaces the previous one-shot connect
-		// that posted a fatal bus error on the first transport death — a relay restart or QUIC idle
-		// timeout left the publish permanently dead until the pipeline was rebuilt. `timeout = 0` means
-		// never give up, so an unattended publisher outlives arbitrary relay/transport outages; the
-		// pad threads keep writing across an outage (bounded by moq-net's per-group eviction) and the
-		// relay catches up from a group boundary on reconnect. A bounded retry policy is available via
-		// `ClientConfig::backoff` if a terminal error is preferred.
+		// Publish through a background reconnect loop (connect, wait for close, reconnect with
+		// backoff) rather than a one-shot connect that died on the first transport drop. `timeout = 0`
+		// retries transport/connection failures indefinitely so an unattended publisher outlives
+		// relay/QUIC outages; non-retryable errors (e.g. auth) stay terminal. During an outage the pad
+		// threads keep writing — bounded by moq-net's per-group eviction — and the relay catches up
+		// from a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
 		let mut config = moq_native::ClientConfig::default();
 		config.tls.disable_verify = Some(settings.tls_disable_verify);
 		config.backoff.timeout = std::time::Duration::ZERO;
@@ -156,12 +154,12 @@ impl Session {
 
 /// Mirror the reconnect loop's observable state into the element's [`Status`] until the loop stops.
 ///
-/// The reconnect loop owns the session, so this task doesn't touch the transport — it forwards each
-/// [`moq_native::Snapshot`] (connected/version/send-bitrate) into the status the property getters
-/// read, and notifies `connected` on the connect/disconnect edges. With `backoff.timeout = 0` the
-/// loop never gives up, so the `Err` arm is a safety net (a bounded backoff would post the bus error
-/// there on final give-up, as the one-shot path did). [`Session::stop`] aborts this task, which drops
-/// the `Reconnect` handle and quietly tears the loop down.
+/// The reconnect loop owns the session, so this task forwards each [`moq_native::Snapshot`]
+/// (connected/version/send-bitrate) into the status the property getters read, and notifies
+/// `connected` on the connect/disconnect edges. The loop stops only on a terminal error — a
+/// non-retryable auth failure, or (with a bounded backoff) a give-up — which the `Err` arm posts as
+/// a bus error, matching the old one-shot path. [`Session::stop`] aborts this task, which drops the
+/// `Reconnect` handle and quietly tears the loop down.
 async fn forward(
 	mut reconnect: moq_native::Reconnect,
 	origin: moq_net::OriginProducer,
@@ -169,8 +167,9 @@ async fn forward(
 	errored: Arc<AtomicBool>,
 	element: glib::WeakRef<Element>,
 ) {
-	// `origin` is held for the task's lifetime so the published broadcast stays alive across every
-	// reconnect; the loop re-consumes it (a fresh publish leg) for each connection.
+	// Hold the origin producer for the task's lifetime so the published broadcast stays alive: the
+	// reconnecting client owns the consumer (taken once, via `origin.consume()` at start) and
+	// re-publishes it on each connect.
 	let _origin = origin;
 
 	let mut was_connected = false;
@@ -192,9 +191,9 @@ async fn forward(
 				}
 			}
 			Err(err) => {
-				// The reconnect loop permanently gave up (only reachable with a bounded backoff).
-				// Reset the observable surface, flag `errored` so the pad threads stop feeding a dead
-				// session, and post a fatal element error — matching the old one-shot failure path.
+				// The reconnect loop stopped on a terminal error (a non-retryable auth failure, or a
+				// bounded backoff's give-up). Reset the observable surface, flag `errored` so the pad
+				// threads stop feeding a dead session, and post a fatal element error.
 				status.reset();
 				if was_connected {
 					notify_connected(&element);

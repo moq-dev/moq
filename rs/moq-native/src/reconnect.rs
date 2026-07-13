@@ -76,7 +76,11 @@ pub enum Status {
 /// The reconnect loop owns the session, so a caller that needs the session's stats (a publisher
 /// element surfacing them as properties, say) reads them from here rather than holding the session
 /// itself. All fields reflect the *current* session and reset when it disconnects.
+///
+/// `#[non_exhaustive]`: read the fields you need; a future observable field won't be a breaking
+/// change. Construct via [`Default`] when a placeholder is needed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Snapshot {
 	/// Current connection status, or `None` before the first connect.
 	pub status: Option<Status>,
