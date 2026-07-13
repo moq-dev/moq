@@ -282,7 +282,7 @@ class BroadcastConsumer:
     async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:
         """Subscribe to a track and receive arbitrary byte payloads.
 
-        ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
+        ``subscription`` tunes delivery priority, group ordering priority, and group range; omit for defaults.
         """
         return TrackConsumer(await self._inner.subscribe_track(name, subscription))
 
@@ -329,7 +329,7 @@ class BroadcastConsumer:
         bitstream, or a :class:`Container` directly. Pass a bare container for the
         dynamic flow, where you subscribe before the catalog exists.
         ``max_latency_ms`` bounds buffering before a stalled GoP is skipped.
-        ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
+        ``subscription`` tunes delivery priority, group ordering priority, and group range; omit for defaults.
         """
         container = track if isinstance(track, Container) else track.container
         return MediaConsumer(await self._inner.subscribe_media(name, container, max_latency_ms, subscription))

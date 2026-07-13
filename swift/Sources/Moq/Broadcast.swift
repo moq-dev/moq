@@ -15,8 +15,8 @@ public final class BroadcastConsumer: Sendable {
     }
 
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
-    /// or container parsing. `subscription` tunes delivery (priority, ordering,
-    /// group range); omit for defaults.
+    /// or container parsing. `subscription` tunes delivery priority, group ordering priority,
+    /// and group range; omit for defaults.
     public func subscribeTrack(name: String, subscription: Subscription? = nil) async throws -> TrackConsumer {
         TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
@@ -33,7 +33,7 @@ public final class BroadcastConsumer: Sendable {
 
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog; `maxLatencyMs` bounds buffering before skipping a GoP.
-    /// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
+    /// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
     public func subscribeMedia(
         name: String,
         container: Container,

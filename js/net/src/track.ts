@@ -54,7 +54,10 @@ export interface Info {
 	cache: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
 	priority: number;
-	/** Group ordering preference (newest-first when `false`). Defaults to `false`. */
+	/**
+	 * Whether groups are prioritized in sequence order. Groups may always arrive
+	 * out-of-order (or not at all) over the network. Defaults to `false` (newest-first).
+	 */
 	ordered: boolean;
 }
 

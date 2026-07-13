@@ -82,6 +82,8 @@ val info = track.info()
 track.update(Subscription(priority = 20u.toUByte(), ordered = false))
 ```
 
+`ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
+
 ## Publish
 
 ```kotlin

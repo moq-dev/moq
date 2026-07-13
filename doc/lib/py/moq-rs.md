@@ -127,7 +127,8 @@ async for group in track:
 ```
 
 `write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, including `payload`, `timestamp_us`, and `keyframe`. Use `append_group()` for multi-frame groups (e.g., a video GOP).
-`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering), and `update()` changes this subscriber's delivery preferences without resubscribing.
+`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering priority), and `update()` changes this subscriber's delivery preferences without resubscribing.
+`ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
 ### Fetching raw groups
 

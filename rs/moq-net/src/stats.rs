@@ -333,10 +333,10 @@ impl Role {
 }
 
 /// Summed traffic counters for one `(tier, role)` slice, aggregated across
-/// every broadcast this node is currently tracking. The host-level rollup of
-/// the internal per-broadcast counters: that detail is collapsed away (it lives on the
-/// published `.stats` broadcast, not here). Every counter is cumulative, so a
-/// rate is `delta / delta_t` and a live count is `open - closed`.
+/// every broadcast this node is currently tracking. This host-level rollup
+/// collapses the internal per-broadcast detail (it lives on the published
+/// `.stats` broadcast, not here). Every counter is cumulative, so a rate is
+/// `delta / delta_t` and a live count is `open - closed`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CounterTotals {

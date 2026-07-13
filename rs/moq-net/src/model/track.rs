@@ -64,8 +64,9 @@ pub struct Info {
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
-	/// The publisher's group ordering preference (newest-first when `false`), used
-	/// only to break ties. Reported in TRACK_INFO (Lite05+). Defaults to `false`.
+	/// Whether groups are prioritized in sequence order. Groups may always arrive
+	/// out-of-order (or not at all) over the network. Used only to break ties,
+	/// reported in TRACK_INFO (Lite05+), and defaults to `false` (newest-first).
 	pub ordered: bool,
 
 	/// The broadcast this track belongs to, bound when the track is created under one
@@ -119,8 +120,9 @@ impl Info {
 		self
 	}
 
-	/// Set the publisher's group ordering preference, returning `self` for chaining.
-	/// Defaults to `false`.
+	/// Set whether groups are prioritized in sequence order, returning `self` for
+	/// chaining. Groups may always arrive out-of-order (or not at all) over the
+	/// network. Defaults to `false`.
 	pub fn with_ordered(mut self, ordered: bool) -> Self {
 		self.ordered = ordered;
 		self
@@ -1514,8 +1516,8 @@ pub struct Subscriber {
 /// A cloneable handle to a subscriber's delivery preferences.
 ///
 /// This updates the same subscription as the owning [`Subscriber`] without
-/// borrowing its read cursor, so callers can change priority, ordering, or
-/// group bounds while another task is waiting for groups.
+/// borrowing its read cursor, so callers can change delivery priority, group
+/// ordering priority, or group bounds while another task is waiting for groups.
 #[derive(Clone)]
 pub struct SubscriberControl {
 	subscription: kio::Producer<Subscription>,

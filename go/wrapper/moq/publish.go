@@ -302,7 +302,7 @@ func (t *TrackProducer) Abort(errorCode uint16) error {
 }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
-// (priority, ordering, group range); pass nil for defaults.
+// (delivery priority, group ordering priority, group range); pass nil for defaults.
 func (t *TrackProducer) Consume(subscription *Subscription) (*TrackConsumer, error) {
 	inner, err := t.inner.Consume(subscription)
 	if err != nil {

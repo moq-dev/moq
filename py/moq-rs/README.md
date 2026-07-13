@@ -151,7 +151,7 @@ client = moq.Client(
 - **`TrackConsumer`**. Async iterator of raw groups.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
   - `await .info() → TrackInfo`
-  - `.update(subscription)`. Change priority, ordering, staleness, or group range after subscribing.
+  - `.update(subscription)`. Change delivery priority, group ordering priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
@@ -178,10 +178,12 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
-- **`Subscription`**. Subscriber delivery preferences: priority, ordering, staleness, and optional group range.
-- **`TrackInfo`**. Publisher track properties: priority, ordering, cache window, and timescale.
+- **`Subscription`**. Subscriber delivery preferences: priority, ordering priority, staleness, and optional group range.
+- **`TrackInfo`**. Publisher track properties: priority, ordering priority, cache window, and timescale.
 - **`Dimensions`**. `.width: int`, `.height: int`.
 - **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
+
+For both `Subscription` and `TrackInfo`, `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
 ### Logging and errors
 

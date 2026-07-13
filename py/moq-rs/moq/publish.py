@@ -149,7 +149,7 @@ class TrackProducer:
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
 
-        ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
+        ``subscription`` tunes delivery priority, group ordering priority, and group range; omit for defaults.
         """
         from .subscribe import TrackConsumer
 
@@ -181,7 +181,7 @@ class TrackRequest:
     def accept(self, info: TrackInfo | None = None) -> TrackProducer:
         """Accept the request as a raw track.
 
-        ``info`` fixes the track's timescale, priority, ordering, and cache; omit for defaults.
+        ``info`` fixes the track's timescale, priority, ordering priority, and cache; omit for defaults.
         """
         return TrackProducer(self._inner.accept(info))
 

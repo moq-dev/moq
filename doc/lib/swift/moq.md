@@ -91,6 +91,8 @@ let info = try await track.info()
 track.update(subscription: Subscription(priority: 20, ordered: false))
 ```
 
+`ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
+
 ## Publish
 
 ```swift

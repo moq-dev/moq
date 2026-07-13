@@ -32,8 +32,9 @@ pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	#[uniffi(default = 0)]
 	pub priority: u8,
-	/// Deliver groups in sequence order. Defaults to `false` (a DVR-style feature);
-	/// the aggregate is ordered only when every subscriber asks for it.
+	/// Whether groups are prioritized in sequence order. Groups may always arrive
+	/// out-of-order (or not at all) over the network. Defaults to `false`; the
+	/// aggregate is ordered only when every subscriber asks for it.
 	#[uniffi(default = false)]
 	pub ordered: bool,
 	/// How long to wait for an older group once a newer one has arrived before
@@ -161,7 +162,7 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name, the same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
-	/// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
+	/// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
 	pub async fn subscribe_track(
 		&self,
 		name: String,
@@ -193,7 +194,7 @@ impl MoqBroadcastConsumer {
 	///
 	/// `container` is the track container from the catalog.
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	/// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
+	/// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
 	pub async fn subscribe_media(
 		&self,
 		name: String,

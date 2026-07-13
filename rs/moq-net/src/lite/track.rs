@@ -49,7 +49,8 @@ impl Message for Track<'_> {
 pub struct TrackInfo {
 	/// The publisher's tie-break priority for this track.
 	pub priority: u8,
-	/// The publisher's group ordering preference (newest-first when `false`).
+	/// Whether groups are prioritized in sequence order. Groups may always arrive
+	/// out-of-order (or not at all) over the network.
 	pub ordered: bool,
 	/// Publisher Max Latency: an upper bound on how long the publisher caches a
 	/// non-latest group past the arrival of a newer one. Encoded as milliseconds.

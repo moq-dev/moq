@@ -11,9 +11,9 @@ use std::{task::Poll, time::Duration};
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// Whether groups should be delivered in sequence order (a DVR-style feature).
-	/// Defaults to `false`; the aggregate is ordered only when every live
-	/// subscriber asks for it.
+	/// Whether groups are prioritized in sequence order. Groups may always arrive
+	/// out-of-order (or not at all) over the network. Defaults to `false`; the
+	/// aggregate is ordered only when every live subscriber asks for it.
 	pub ordered: bool,
 	/// How long to wait for a group before skipping it once a newer group has
 	/// arrived. `Duration::ZERO` skips immediately (e.g. group 8 arriving means
@@ -45,7 +45,8 @@ impl Subscription {
 		self
 	}
 
-	/// Set whether groups are delivered in sequence order, returning `self` for chaining.
+	/// Set whether groups are prioritized in sequence order, returning `self` for
+	/// chaining. Groups may always arrive out-of-order (or not at all) over the network.
 	pub fn with_ordered(mut self, ordered: bool) -> Self {
 		self.ordered = ordered;
 		self
@@ -79,7 +80,7 @@ impl Subscription {
 
 		let merged = Subscription {
 			priority: self.priority.max(combined.priority),
-			// Ordered delivery is only honored when every subscriber wants it.
+			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			ordered: self.ordered && combined.ordered,
 			stale: self.stale.max(combined.stale),
 			group_start: min_some(self.group_start, combined.group_start),

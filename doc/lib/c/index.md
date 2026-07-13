@@ -134,6 +134,9 @@ codec metadata.
 ## Raw Track Options
 
 `moq_publish_track` accepts optional publisher-side track properties:
+`ordered` controls prioritization only. When true, groups are prioritized in
+sequence order. Groups may always arrive out-of-order (or not at all) over the
+network.
 
 ```c
 struct moq_track_info info = {0};

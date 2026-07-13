@@ -127,7 +127,8 @@ pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	pub priority: u8,
 
-	/// Whether groups are delivered in sequence order when `ordered_valid` is true.
+	/// Whether groups are prioritized in sequence order when `ordered_valid` is true.
+	/// Groups may always arrive out-of-order (or not at all) over the network.
 	pub ordered: bool,
 	/// Whether `ordered` should override the default unordered setting.
 	pub ordered_valid: bool,
@@ -175,7 +176,8 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Whether groups are delivered in sequence order when `ordered_valid` is true.
+	/// Whether groups are prioritized in sequence order when `ordered_valid` is true.
+	/// Groups may always arrive out-of-order (or not at all) over the network.
 	pub ordered: bool,
 	/// Whether `ordered` should override the default unordered setting.
 	pub ordered_valid: bool,

@@ -188,6 +188,8 @@ if info.Timescale != nil {
 track.Update(moq.Subscription{Priority: 20, Ordered: false})
 ```
 
+`Ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
+
 ## Fetching raw groups
 
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:
@@ -320,6 +322,7 @@ for request, err := range dynamic.All(ctx) {
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
+
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:

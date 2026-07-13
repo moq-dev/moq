@@ -57,7 +57,12 @@ export class Track {
  * FETCH for the track.
  */
 export class TrackInfo {
+	/** The publisher's tie-break priority for this track. */
 	priority: number;
+	/**
+	 * Whether groups are prioritized in sequence order. Groups may always arrive
+	 * out-of-order (or not at all) over the network.
+	 */
 	ordered: boolean;
 	/**
 	 * Publisher Max Latency: an upper bound (milliseconds) on how long the publisher
