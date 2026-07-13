@@ -50,6 +50,10 @@ export class Encoder {
 	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
 
+	#bytesEncoded = new Signal(0);
+	/** Total bytes encoded while serving. Monotonic; diff it over an interval for an upload bitrate. */
+	readonly bytesEncoded: Getter<number> = this.#bytesEncoded;
+
 	#signals = new Effect();
 
 	// The user provided config.
@@ -105,6 +109,8 @@ export class Encoder {
 					if (frame.type === "key") {
 						lastKeyframe = frame.timestamp as Time.Micro;
 					}
+
+					this.#bytesEncoded.update((total) => total + frame.byteLength);
 
 					producer.encode(frame, frame.timestamp as Time.Micro, frame.type === "key");
 				},
