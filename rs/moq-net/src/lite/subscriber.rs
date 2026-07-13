@@ -866,6 +866,8 @@ enum Event {
 	Idle,
 	/// An in-flight fetch finished.
 	FetchDone,
+	/// The upstream subscribe stream carried a START/END/DROP response.
+	SubResponse(lite::SubscribeResponse),
 	/// The upstream subscribe stream closed: `Ok` is a clean FIN, `Err` a transport error.
 	SubClosed(Result<(), Error>),
 	/// The whole broadcast went away.
@@ -971,12 +973,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						Sub::None => std::future::pending().await,
 					}
 				}, if sub.is_active() => match res {
-					// START/END/DROP resolve the range; we don't drive delivery off them
-					// (the producer already orders groups), so log and keep reading.
-					Ok(Some(msg)) => {
-						tracing::debug!(track = %self.name, ?msg, "subscribe response");
-						continue;
-					}
+					Ok(Some(msg)) => Event::SubResponse(msg),
 					Ok(None) => Event::SubClosed(Ok(())),
 					Err(err) => Event::SubClosed(Err(err)),
 				},
@@ -1022,6 +1019,20 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					}
 				}
 				Event::FetchDone => {}
+				Event::SubResponse(msg) => {
+					// SUBSCRIBE_END declares the track's exclusive final sequence, which may
+					// arrive while trailing groups are still in flight. Record it on the
+					// producer so consumers learn the boundary early; the later stream FIN
+					// then finds the track already finished. START/DROP just resolve the range
+					// (the producer already orders groups), so log and keep reading.
+					if let lite::SubscribeResponse::End(end) = &msg
+						&& let Some(Track::Active(producer)) = track.as_mut()
+					{
+						let _ = producer.finish_at(end.group);
+					} else {
+						tracing::debug!(track = %self.name, ?msg, "subscribe response");
+					}
+				}
 				Event::SubClosed(Ok(())) => {
 					tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe complete");
 					// Upstream FIN'd the live subscription. Finish the producer (no more

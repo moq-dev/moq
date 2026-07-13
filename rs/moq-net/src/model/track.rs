@@ -222,7 +222,7 @@ impl TrackState {
 		}
 
 		// TODO once we have drop notifications, check if index == final_sequence.
-		if self.final_sequence.is_some() {
+		if self.is_complete() {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -243,7 +243,7 @@ impl TrackState {
 		}
 
 		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
-		if self.final_sequence.is_some() {
+		if self.is_complete() {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -302,7 +302,7 @@ impl TrackState {
 		// blocks new groups at/above final_sequence, not frames on existing groups.
 		if pending_seen {
 			Poll::Pending
-		} else if self.final_sequence.is_some() {
+		} else if self.is_complete() {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -436,7 +436,9 @@ impl TrackState {
 	}
 
 	fn poll_closed(&self) -> Poll<Result<()>> {
-		if self.final_sequence.is_some() {
+		// A future boundary isn't "closed" until the trailing groups arrive, so gate on
+		// the live edge reaching it. Use `poll_finished` to observe the boundary early.
+		if self.is_complete() {
 			Poll::Ready(Ok(()))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -505,6 +507,30 @@ impl TrackState {
 			entry.set_pinned(true);
 			self.latest_entry = Some(entry);
 		}
+	}
+
+	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
+	/// would orphan already-produced groups.
+	fn set_final(&mut self, final_sequence: u64) -> Result<()> {
+		if self.final_sequence.is_some() {
+			return Err(Error::Closed);
+		}
+		if let Some(max) = self.max_sequence
+			&& final_sequence <= max
+		{
+			return Err(Error::ProtocolViolation);
+		}
+		self.final_sequence = Some(final_sequence);
+		Ok(())
+	}
+
+	/// Whether the track has reached its end: the final boundary is set and the live
+	/// edge has caught up to it, so no further group can arrive. A future boundary
+	/// (declared via [`Producer::finish_at`] ahead of the live edge) stays incomplete
+	/// until the remaining groups are produced.
+	fn is_complete(&self) -> bool {
+		self.final_sequence
+			.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
@@ -795,30 +821,27 @@ impl Producer {
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = self.modify()?;
-		if state.final_sequence.is_some() {
-			return Err(Error::Closed);
-		}
-		state.final_sequence = Some(match state.max_sequence {
+		let final_sequence = match state.max_sequence {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
-		});
-		Ok(())
+		};
+		state.set_final(final_sequence)
 	}
 
-	/// Mark the track as finished at an exact final sequence.
+	/// Declare the track's exclusive final sequence, possibly ahead of the live edge.
 	///
-	/// The caller must pass the current max_sequence exactly.
-	/// Freezes the final boundary at one past the current max_sequence.
-	/// No new groups at or above that sequence can be created.
-	/// NOTE: Old groups with lower sequence numbers can still arrive.
-	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
-		let mut state = self.modify()?;
-		let max = state.max_sequence.ok_or(Error::Closed)?;
-		if state.final_sequence.is_some() || sequence != max {
-			return Err(Error::Closed);
-		}
-		state.final_sequence = Some(max.checked_add(1).ok_or(coding::BoundsExceeded)?);
-		Ok(())
+	/// `final_sequence` is the first sequence that will never be produced, so a track
+	/// whose last group is 89 finishes at `90`. Passing a boundary beyond the current
+	/// max_sequence records a known ending before the remaining groups arrive (e.g.
+	/// learning a track ends at group 89 while only 87 has been received). The boundary
+	/// must be strictly greater than the highest produced group, otherwise it would
+	/// orphan groups that already exist ([`Error::ProtocolViolation`]).
+	///
+	/// Groups below `final_sequence` may still be created afterwards; groups at or above
+	/// it are rejected. Consumers only see end-of-stream once the live edge reaches the
+	/// boundary. Use [`Self::finish`] to finish exactly at the live edge.
+	pub fn finish_at(&mut self, final_sequence: u64) -> Result<()> {
+		self.modify()?.set_final(final_sequence)
 	}
 
 	/// Abort the track with the given error.
@@ -1716,7 +1739,10 @@ impl Subscriber {
 
 	/// Block until the track is closed.
 	///
-	/// Returns Ok() is the track was cleanly finished.
+	/// Returns Ok() if the track was cleanly finished. Resolves once the live edge
+	/// reaches the final sequence, so a track finished ahead of its live edge (via
+	/// [`Producer::finish_at`]) stays open until the trailing groups arrive. Use
+	/// [`Self::finished`] to observe the declared boundary earlier.
 	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
@@ -1726,12 +1752,17 @@ impl Subscriber {
 		self.state.same_channel(&other.state)
 	}
 
-	/// Poll for the total number of groups in the track.
+	/// Poll for the track's declared final sequence, without blocking.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		self.poll(waiter, |state| state.poll_finished())
 	}
 
-	/// Block until the track is finished, returning the total number of groups.
+	/// Block until the track declares its end, returning the exclusive final sequence
+	/// (also the total group count).
+	///
+	/// Resolves as soon as the boundary is known, which may be ahead of the live edge
+	/// when the producer finished via [`Producer::finish_at`]. Use [`Self::closed`] to
+	/// wait until every group up to the boundary has actually arrived.
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
@@ -2492,29 +2523,67 @@ mod test {
 	}
 
 	#[test]
-	fn insert_finish_validates_sequence_and_freezes_to_max() {
+	fn finish_at_rejects_a_boundary_at_or_below_the_live_edge() {
 		let mut producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
+		// The boundary is exclusive, so it must be strictly above the highest produced
+		// group. 5 or below would orphan groups that already exist.
 		assert!(producer.finish_at(4).is_err());
-		assert!(producer.finish_at(10).is_err());
-		assert!(producer.finish_at(5).is_ok());
+		assert!(producer.finish_at(5).is_err());
+		assert!(producer.finish_at(6).is_ok());
 
 		{
 			let state = producer.state.read();
 			assert_eq!(state.final_sequence, Some(6));
 		}
 
-		assert!(producer.finish_at(5).is_err());
+		// Re-finishing is rejected, and no group at or above the boundary can be created.
+		assert!(producer.finish_at(6).is_err());
 		assert!(producer.create_group(group::Info { sequence: 4 }).is_ok());
-		assert!(producer.create_group(group::Info { sequence: 5 }).is_err());
+		assert!(producer.create_group(group::Info { sequence: 6 }).is_err());
+	}
+
+	#[tokio::test]
+	async fn finish_at_declares_a_future_boundary() {
+		let mut producer = track_producer("test", None);
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+
+		// Learn the track ends at group 6 (exclusive 7) while the live edge is still 5.
+		producer.finish_at(7).unwrap();
+
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(consumer.assert_group().sequence, 5);
+
+		// The boundary is known immediately, but the track isn't done: group 6 is still
+		// outstanding, so the consumer parks rather than seeing end-of-stream.
+		let boundary = consumer
+			.finished()
+			.now_or_never()
+			.expect("boundary is known immediately")
+			.expect("would have errored");
+		assert_eq!(boundary, 7);
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"should wait for the outstanding group"
+		);
+
+		// The trailing group arrives (below the boundary), then the track completes.
+		producer.create_group(group::Info { sequence: 6 }).unwrap();
+		assert_eq!(consumer.assert_group().sequence, 6);
+		let done = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored");
+		assert!(done.is_none(), "track completes once the boundary is reached");
 	}
 
 	#[tokio::test]
 	async fn recv_group_finishes_without_waiting_for_gaps() {
 		let mut producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
-		producer.finish_at(1).unwrap();
+		producer.finish().unwrap();
 
 		let mut consumer = producer.subscribe(None);
 		assert_eq!(consumer.assert_group().sequence, 1);
@@ -2957,7 +3026,7 @@ mod test {
 	async fn get_group_finishes_without_waiting_for_gaps() {
 		let mut producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
-		producer.finish_at(1).unwrap();
+		producer.finish().unwrap();
 
 		let consumer = producer.subscribe(None);
 		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
