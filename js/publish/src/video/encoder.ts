@@ -115,8 +115,8 @@ export class Encoder {
 
 			effect.cleanup(() => encoder.close());
 
-			effect.run(() => {
-				const config = effect.get(this.#config);
+			effect.run((childEffect) => {
+				const config = childEffect.get(this.#config);
 				if (!config) return;
 
 				encoder.configure(config);

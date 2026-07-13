@@ -122,7 +122,7 @@ export class Decoder {
 
 		effect.spawn(async () => {
 			// Register the AudioWorklet processor
-			await context.audioWorklet.addModule(RenderWorklet);
+			await Promise.race([context.audioWorklet.addModule(RenderWorklet), effect.cancel]);
 
 			// Ensure the context is running before creating the worklet
 			if (context.state === "closed") return;

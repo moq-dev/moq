@@ -85,6 +85,10 @@ export class Reload {
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
 
+	// Use the serialized URL as the reactive connection key. URL objects use identity
+	// equality, but replacing one with an equivalent instance should not reconnect.
+	#url: Getter<string | undefined>;
+
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
@@ -99,6 +103,8 @@ export class Reload {
 			this.#closedReject = reject;
 		});
 
+		this.#url = this.signals.computed((effect) => effect.get(this.url)?.href);
+
 		// Create a reactive root so cleanup is easier.
 		this.signals.run(this.#connect.bind(this));
 		this.signals.run(this.#runAnnounced.bind(this));
@@ -111,8 +117,9 @@ export class Reload {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const url = effect.get(this.url);
-		if (!url) return;
+		const href = effect.get(this.#url);
+		if (!href) return;
+		const url = new URL(href);
 
 		effect.set(this.status, "connecting", "disconnected");
 

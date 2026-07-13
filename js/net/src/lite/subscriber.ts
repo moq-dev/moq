@@ -55,6 +55,9 @@ export class Subscriber {
 	// RTT producer (Lite04+ only).
 	#rtt?: Signal<Time.Milli | undefined>;
 
+	// Distinguishes failures from streams torn down by Subscriber.close().
+	#closed = new AbortController();
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -361,7 +364,9 @@ export class Subscriber {
 				}
 			}
 		} catch (err: unknown) {
-			console.warn("probe stream error", err);
+			if (!this.#closed.signal.aborted) {
+				console.warn("probe stream error", err);
+			}
 		} finally {
 			this.#recvBandwidth.set(undefined);
 			this.#rtt?.set(undefined);
@@ -369,6 +374,8 @@ export class Subscriber {
 	}
 
 	close() {
+		this.#closed.abort();
+
 		for (const track of this.#subscribes.values()) {
 			track.close();
 		}

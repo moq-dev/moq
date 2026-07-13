@@ -99,7 +99,8 @@ export async function isSupported(): Promise<Full> {
 				// @ts-expect-error No typescript types yet.
 				typeof MediaStreamTrackProcessor !== "undefined"
 					? "full"
-					: typeof OffscreenCanvas !== "undefined"
+					: // The fallback drives a <video> element via requestVideoFrameCallback.
+						"requestVideoFrameCallback" in HTMLVideoElement.prototype
 						? "partial"
 						: "none",
 			encoding:
