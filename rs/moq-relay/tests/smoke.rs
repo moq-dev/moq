@@ -834,3 +834,64 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 
 	handle.abort();
 }
+
+/// The mirror of [`spawn_subscribe_only_relay`]: public access grants **publish only**,
+/// so a no-JWT client gets the root for publishing but no subscribe scope.
+async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
+	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+	let port = probe.local_addr().expect("local addr").port();
+	drop(probe);
+
+	let mut config = moq_native::ServerConfig::default();
+	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+
+	// Publish-only public access: the root is granted for publishing, never subscribing.
+	#[allow(deprecated)]
+	let public_publish = PublicConfig::Simple(vec![String::new()]);
+	let mut auth_config = AuthConfig::default();
+	auth_config.public_publish = Some(public_publish);
+
+	let handle = spawn_stream_relay(config, auth_config).await;
+
+	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	loop {
+		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+			break;
+		}
+		if std::time::Instant::now() >= deadline {
+			panic!("publish-only listener never became ready on port {port}");
+		}
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
+
+	(port, handle)
+}
+
+/// The mirror of the publisher-reject test, covering the other branch of the role gate:
+/// a subscriber (`Role::Subscriber`, from `with_subscriber`) whose token grants only
+/// publish scope is rejected during the handshake instead of left silently empty.
+#[tokio::test]
+async fn publish_only_public_rejects_subscriber_role() {
+	let (port, handle) = spawn_publish_only_relay().await;
+	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
+
+	let sub_origin = Origin::random().produce();
+
+	// Like the publisher case, `connect()` may resolve optimistically; either it fails
+	// outright, or the session the relay hands back closes shortly after.
+	match tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url)).await {
+		Ok(Ok(session)) => {
+			let closed = tokio::time::timeout(TIMEOUT, session.closed())
+				.await
+				.expect("subscriber session should be closed by the relay, not left open");
+			assert!(
+				closed.is_err(),
+				"relay should close a subscriber whose token lacks subscribe scope"
+			);
+		}
+		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
+		Err(_) => panic!("subscriber connect neither resolved nor was rejected within the timeout"),
+	}
+
+	handle.abort();
+}

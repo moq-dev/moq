@@ -1117,6 +1117,7 @@ The `Message Length` describes the payload size on the wire.
 - Added a SETUP message and Setup Stream (0x1).
 - Added a SETUP `Probe` parameter.
 - Added a SETUP `Path` parameter to convey the request path on bindings that have no request URI (native QUIC and Qmux-over-TCP/TLS).
+- Added a SETUP `Role` parameter so a client can advertise its intended direction (Publisher/Subscriber/Both) and be rejected during SETUP when its authorization lacks that direction.
 - Added Track Stream (0x6) and TRACK_INFO.
 - Removed FETCH_OK.
 - Trimmed SUBSCRIBE_OK to a single resolved start group.
