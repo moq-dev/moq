@@ -215,10 +215,10 @@ try {
 		await new Promise(() => {}); // stream until the orchestrator kills us
 	} else {
 		const start = Date.now();
-		const deadline = start + timeoutMs;
+		const startupDeadline = start + timeoutMs;
 		let reloaded = false;
 		let playing: PlayerState | undefined;
-		while (Date.now() < deadline) {
+		while (Date.now() < startupDeadline) {
 			throwPageErrors(errors);
 			const state = await readPlayerState(page);
 			if (state.videoTimestamp !== undefined && state.painted && state.controlLabel === "Pause") {
@@ -238,9 +238,10 @@ try {
 			throw new Error(`timed out waiting for rendered video: ${JSON.stringify(state)}`);
 		}
 
+		const interactionDeadline = Date.now() + timeoutMs;
 		if (expectAudio) {
 			playing = await waitForState(page, errors, {
-				deadline,
+				deadline: interactionDeadline,
 				description: "browser audio",
 				predicate: (state) => state.hasAudio && state.audioBytes > 0 && state.audioContext === "running",
 			});
@@ -251,17 +252,17 @@ try {
 		await page.dispatchEvent(SELECTORS.ui, "pointermove");
 		await page.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).click();
 		await waitForState(page, errors, {
-			deadline,
+			deadline: interactionDeadline,
 			description: "paused player UI",
 			predicate: (state) =>
 				state.paused && state.pausedAttribute && state.controlLabel === "Play" && state.centerPlayVisible,
 		});
-		const paused = await waitForStablePause(page, errors, deadline);
+		const paused = await waitForStablePause(page, errors, interactionDeadline);
 		if (!paused.painted) throw new Error(`pause cleared the preview frame: ${JSON.stringify(paused)}`);
 
 		await page.locator(SELECTORS.ui).locator(SELECTORS.centerPlay).click();
 		const resumed = await waitForState(page, errors, {
-			deadline,
+			deadline: interactionDeadline,
 			description: "resumed playback",
 			predicate: (state) =>
 				!state.paused &&
