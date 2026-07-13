@@ -42,7 +42,7 @@ Cancelling the surrounding coroutine scope propagates through to the native cons
 
 ## Local development
 
-`just kt check` (`kt/scripts/check.sh`) builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the JNA-resource layout, and runs `gradle :moq:jvmTest`. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell; run it from there. A missing toolchain is an error, not a skip, so Kotlin wrapper drift can't slip past a green check.
+`just kt check` (`kt/scripts/check.sh`) builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the JNA resource layout, and runs `gradle :moq:jvmTest`. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell; run it from there. A missing toolchain is an error, not a skip, so Kotlin wrapper drift can't slip past a green check.
 
 `just kt generate` (`kt/scripts/generate.sh`) runs only the generation half (build `moq-ffi` + regenerate the checked-in bindings, no compile or test). Use it in environments that intentionally lack Gradle; it needs only `cargo`.
 

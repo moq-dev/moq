@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Generation-only step for the Kotlin wrapper: build moq-ffi for the host
-# target, drop the cdylib into the JNA-resource layout of the :moq KMP module,
+# target, drop the cdylib into the JNA resource layout of the :moq KMP module,
 # and regenerate the uniffi bindings. No Gradle, no JDK required.
 #
 # Intended for environments that intentionally lack Gradle (e.g. regenerating
@@ -15,6 +15,10 @@ WORKSPACE_DIR="$(cd "$KT_DIR/.." && pwd)"
 
 if ! command -v cargo >/dev/null 2>&1; then
     echo "kt generate: cargo not on PATH; install the Rust toolchain (or use 'nix develop')" >&2
+    exit 1
+fi
+if ! command -v rustc >/dev/null 2>&1; then
+    echo "kt generate: rustc not on PATH; install the Rust toolchain (or use 'nix develop')" >&2
     exit 1
 fi
 
