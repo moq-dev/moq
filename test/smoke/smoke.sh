@@ -9,9 +9,9 @@
 # other. There's no apt/brew/npm/PyPI here, just cargo/bun/uv/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
-# broadcast and confirms every subscriber sees data flowing (a non-empty frame
-# before the timeout). We check that bytes move end-to-end across
-# implementations, not that H.264 decodes.
+# broadcast and confirms every subscriber sees data flowing before the timeout.
+# The browser also verifies rendered WebCodecs output, player pause/resume, and
+# audio when paired with the browser publisher.
 set -euo pipefail
 
 SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -218,6 +218,9 @@ prepare_js() {
         if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium) >"$TMP/js-chromium.log" 2>&1; then
             mark_broken js "playwright chromium install failed"
             sed 's/^/        /' "$TMP/js-chromium.log" >&2 || true
+        elif ! (cd "$CLIENTS/js" && bun run check) >"$TMP/js-check.log" 2>&1; then
+            mark_broken js "type check failed"
+            sed 's/^/        /' "$TMP/js-check.log" >&2 || true
         elif ! (cd "$CLIENTS/js" && bunx vite build) >"$TMP/js-vite.log" 2>&1; then
             mark_broken js "vite build failed"
             sed 's/^/        /' "$TMP/js-vite.log" >&2 || true
@@ -383,7 +386,7 @@ run_native() {
 }
 
 run_subscriber() {
-    local lang="$1" broadcast="$2"
+    local lang="$1" broadcast="$2" publisher="${3:-}"
     case "$lang" in
         rust)
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
@@ -417,9 +420,16 @@ run_subscriber() {
             [[ "${n:-0}" -ge 1 ]]
             ;;
         js)
-            # Headless Chromium decodes via WebCodecs; exits 0 once a frame lands.
-            (cd "$CLIENTS/js" && bun driver.ts subscribe \
-                --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
+            # Headless Chromium decodes and renders via WebCodecs, then drives
+            # the real player's pause/resume controls. Browser publishers also
+            # provide fake microphone input, so validate audio in that cell.
+            if [[ "$publisher" == "js" ]]; then
+                (cd "$CLIENTS/js" && bun driver.ts subscribe \
+                    --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT" --expect-audio)
+            else
+                (cd "$CLIENTS/js" && bun driver.ts subscribe \
+                    --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
+            fi
             ;;
         js-native-bun)
             # Native @moq/net via moq's WebTransport polyfill, under bun.
@@ -450,7 +460,7 @@ run_round() {
             overall=1
             continue
         fi
-        (run_subscriber "$sub" "$broadcast") >"$TMP/$pub-$sub.log" 2>&1 &
+        (run_subscriber "$sub" "$broadcast" "$pub") >"$TMP/$pub-$sub.log" 2>&1 &
         pids+=("$!")
         names+=("$sub")
     done

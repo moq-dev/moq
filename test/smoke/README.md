@@ -11,9 +11,11 @@ regressions before anything is published. No apt/brew/npm/PyPI, and no
 distribution-mechanism matrix.
 
 It stands up a `moq-relay`, then for each publisher language publishes an H.264
-broadcast and confirms every subscriber sees data flowing (a non-empty frame
-before the timeout). We check that bytes move end-to-end across implementations,
-not that H.264 decodes.
+broadcast and confirms every subscriber sees data flowing before the timeout.
+Most subscribers check for a non-empty frame. The browser additionally verifies
+WebCodecs output painted to a canvas and drives the player's pause/resume controls.
+The browser publisher also sends fake microphone audio, which the browser
+subscriber checks end-to-end.
 
 ## Clients
 
@@ -21,7 +23,7 @@ not that H.264 decodes.
 |---|---|---|---|
 | Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `just py build` (maturin editable into `.venv`) | publish + subscribe |
-| Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish + subscribe |
+| Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | audio/video publish + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
 | C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |

@@ -2,6 +2,9 @@
 	"name": "@moq/smoke-browser",
 	"private": true,
 	"type": "module",
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
 	"dependencies": {
 		"@moq/publish": "workspace:*",
 		"@moq/watch": "workspace:*"

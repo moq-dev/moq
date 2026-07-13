@@ -1,0 +1,7 @@
+{
+	"extends": "../../../../js/tsconfig.json",
+	"compilerOptions": {
+		"types": ["bun", "vite/client"]
+	},
+	"include": ["driver.ts", "src", "vite.config.ts", "../../../../js/common/worklet.d.ts"]
+}
