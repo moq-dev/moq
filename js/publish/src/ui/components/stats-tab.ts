@@ -23,7 +23,7 @@ function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: 
 }
 
 /** Show an active/idle pill: an encoder only runs (and uses bandwidth) while a viewer is subscribed. */
-function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean>) {
+function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean | undefined>) {
 	parent.run((effect) => {
 		const on = effect.get(active);
 		status.style.display = "";
@@ -56,8 +56,12 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
 
-	// active = a viewer is subscribed and we're actually encoding/sending.
-	trackActive(parent, videoCard.status, publish.broadcast.video.hd.active);
+	// active = a viewer is subscribed and we're actually encoding/sending. Either rendition counts,
+	// and the bitrate graph below sums both.
+	const videoActive = parent.computed(
+		(effect) => effect.get(publish.broadcast.video.hd.active) || effect.get(publish.broadcast.video.sd.active),
+	);
+	trackActive(parent, videoCard.status, videoActive);
 
 	const audioCard = card("audio", "Audio", audioIcon);
 	const aCodec = line(audioCard.grid, "Codec");
@@ -101,25 +105,34 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		nName.textContent = name?.toString() || "—";
 	});
 
-	// Live graphs: frame rate from captured frames, bitrate from the upload estimate.
+	// Live graphs: frame rate from captured frames, bitrate measured from the bytes we encoded.
+	// The congestion controller's send estimate would be simpler, but Safari's WebTransport has no
+	// getStats(), so it has no estimate at all and the graph stayed empty there.
 	let frames = 0;
 	parent.subscribe(publish.broadcast.video.frame, () => {
 		frames++;
 	});
+
+	const encoded = () =>
+		publish.broadcast.video.hd.bytesEncoded.peek() + publish.broadcast.video.sd.bytesEncoded.peek();
+
 	let prevFrames = 0;
+	let prevBytes = encoded();
 	let prevWhen = performance.now();
 
 	parent.interval(() => {
 		const now = performance.now();
 		const elapsed = now - prevWhen;
-		const delta = frames - prevFrames;
-		const fps = elapsed > 0 && delta > 0 ? delta / (elapsed / 1000) : undefined;
-		prevFrames = frames;
 		prevWhen = now;
-		vFpsGraph.push(fps);
 
-		const upload = publish.connection.established.peek()?.sendBandwidth?.peek();
-		vBitrateGraph.push(upload && upload > 0 ? upload : undefined);
+		const frameDelta = frames - prevFrames;
+		prevFrames = frames;
+		vFpsGraph.push(elapsed > 0 && frameDelta > 0 ? frameDelta / (elapsed / 1000) : undefined);
+
+		const bytes = encoded();
+		const byteDelta = bytes - prevBytes;
+		prevBytes = bytes;
+		vBitrateGraph.push(elapsed > 0 && byteDelta > 0 ? (byteDelta * 8) / (elapsed / 1000) : undefined);
 	}, POLL_MS);
 
 	return container;
