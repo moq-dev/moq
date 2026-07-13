@@ -54,13 +54,13 @@ impl Connection {
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(%transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(%transport, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(transport, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(%transport, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
 			_ => {
 				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
@@ -96,7 +96,7 @@ impl Connection {
 		}
 		let session = request.ok().await?;
 
-		tracing::info!(version = %session.version(), transport, "negotiated");
+		tracing::info!(version = %session.version(), %transport, "negotiated");
 
 		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
 		// connect time, so hold the session open no longer than the credential is
@@ -155,7 +155,7 @@ impl Connection {
 			// URL-less stream transports: path + `?jwt=` ride the SETUP.
 			None => AuthParams::from_path(self.request.path().unwrap_or("")),
 		};
-		params.transport = Some(transport.to_string());
+		params.transport = Some(transport);
 
 		Ok(self.auth.verify(&params).await?)
 	}

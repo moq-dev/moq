@@ -789,7 +789,7 @@ fn spawn_tcp_loop(
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
-				Some(Ok(session)) => spawn_stream_request(session, "tcp", versions.clone(), tx.clone()),
+				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, versions.clone(), tx.clone()),
 				Some(Err(err)) => tracing::warn!(%err, "tcp listener accept failed"),
 				None => break,
 			}
@@ -815,7 +815,7 @@ fn spawn_unix_loop(
 						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
 						continue;
 					}
-					spawn_stream_request(session, "unix", versions.clone(), tx.clone());
+					spawn_stream_request(session, Transport::Unix, versions.clone(), tx.clone());
 				}
 				Some(Err(err)) => tracing::warn!(%err, "unix listener accept failed"),
 				None => break,
@@ -829,7 +829,7 @@ fn spawn_unix_loop(
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 fn spawn_stream_request(
 	session: qmux::Session,
-	transport: &'static str,
+	transport: Transport,
 	versions: moq_net::Versions,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
@@ -853,7 +853,7 @@ fn spawn_stream_request(
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 pub(crate) struct StreamRequest {
 	request: moq_net::Request<qmux::Session>,
-	transport: &'static str,
+	transport: Transport,
 }
 
 /// An incoming connection that can be accepted or rejected.
@@ -870,6 +870,41 @@ pub(crate) enum RequestKind {
 	WebSocket(Box<qmux::Session>),
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	Stream(Box<StreamRequest>),
+}
+
+/// The network transport carrying an incoming MoQ session.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Transport {
+	/// QUIC, either directly or through WebTransport over HTTP/3.
+	Quic,
+	/// An Iroh QUIC connection.
+	Iroh,
+	/// A WebSocket connection using qmux framing.
+	WebSocket,
+	/// A plaintext TCP connection using qmux framing.
+	Tcp,
+	/// A Unix domain socket using qmux framing.
+	Unix,
+}
+
+impl Transport {
+	/// Returns the stable lowercase name used in logs and external metadata.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::Quic => "quic",
+			Self::Iroh => "iroh",
+			Self::WebSocket => "websocket",
+			Self::Tcp => "tcp",
+			Self::Unix => "unix",
+		}
+	}
+}
+
+impl std::fmt::Display for Transport {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
+	}
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
@@ -1040,19 +1075,19 @@ impl Request {
 		}
 	}
 
-	/// Returns the transport type as a string (e.g. "quic", "tcp", "unix").
-	pub fn transport(&self) -> &'static str {
+	/// Returns the network transport carrying this session.
+	pub fn transport(&self) -> Transport {
 		match self.kind {
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(_) => "quic",
+			RequestKind::Noq(_) => Transport::Quic,
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(_) => "quic",
+			RequestKind::Quinn(_) => Transport::Quic,
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => "quic",
+			RequestKind::Quiche(_) => Transport::Quic,
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => "iroh",
+			RequestKind::Iroh(_) => Transport::Iroh,
 			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => "websocket",
+			RequestKind::WebSocket(_) => Transport::WebSocket,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			RequestKind::Stream(ref stream) => stream.transport,
 		}
@@ -1170,6 +1205,15 @@ impl std::str::FromStr for ServerId {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn transport_names_are_stable() {
+		assert_eq!(Transport::Quic.as_str(), "quic");
+		assert_eq!(Transport::Iroh.as_str(), "iroh");
+		assert_eq!(Transport::WebSocket.as_str(), "websocket");
+		assert_eq!(Transport::Tcp.as_str(), "tcp");
+		assert_eq!(Transport::Unix.as_str(), "unix");
+	}
 
 	#[test]
 	fn test_tls_string_or_array() {

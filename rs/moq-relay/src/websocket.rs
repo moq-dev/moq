@@ -45,14 +45,11 @@ pub(crate) async fn serve_ws(
 	let params = AuthParams {
 		path,
 		jwt: query.jwt,
-		transport: Some("websocket".to_string()),
+		transport: Some(moq_native::Transport::WebSocket),
 	};
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		state
-			.auth
-			.verify_mtls(&params.path, params.transport.as_deref())
-			.await?
+		state.auth.verify_mtls(&params.path, params.transport).await?
 	} else {
 		state.auth.verify(&params).await?
 	};
