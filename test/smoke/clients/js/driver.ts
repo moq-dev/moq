@@ -64,6 +64,17 @@ type WaitForStateProps = {
 	predicate: (state: PlayerState) => boolean;
 };
 
+// Keep the UI contract in one place so player markup changes fail clearly.
+const SELECTORS = {
+	watch: "moq-watch",
+	ui: "moq-watch-ui",
+	control: "button.control[aria-label]",
+	pauseControl: 'button.control[aria-label="Pause"]',
+	centerPlay: "button.center-play",
+} as const;
+const POLL_INTERVAL_MS = 100;
+const PAUSE_STABILITY_MS = 750;
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function throwPageErrors(errors: BrowserErrors): void {
@@ -75,7 +86,7 @@ function throwPageErrors(errors: BrowserErrors): void {
 }
 
 async function readPlayerState(page: Page): Promise<PlayerState> {
-	return page.evaluate(() => {
+	return page.evaluate((selectors) => {
 		type Signal<T> = { peek(): T };
 		type Watch = HTMLElement & {
 			backend: {
@@ -92,7 +103,7 @@ async function readPlayerState(page: Page): Promise<PlayerState> {
 			broadcast: { catalog: Signal<{ audio?: unknown } | undefined> };
 		};
 
-		const watch = document.querySelector("moq-watch") as Watch | null;
+		const watch = document.querySelector(selectors.watch) as Watch | null;
 		const canvas = watch?.querySelector("canvas");
 		let painted = false;
 		if (canvas && canvas.width > 0 && canvas.height > 0) {
@@ -110,9 +121,9 @@ async function readPlayerState(page: Page): Promise<PlayerState> {
 			}
 		}
 
-		const ui = document.querySelector("moq-watch-ui");
-		const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>("button.control[aria-label]");
-		const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>("button.center-play");
+		const ui = document.querySelector(selectors.ui);
+		const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.control);
+		const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
 
 		return {
 			videoFrames: watch?.backend.video.stats.peek()?.frameCount ?? 0,
@@ -126,7 +137,7 @@ async function readPlayerState(page: Page): Promise<PlayerState> {
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,
 			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
 		};
-	});
+	}, SELECTORS);
 }
 
 async function waitForState(page: Page, errors: BrowserErrors, props: WaitForStateProps): Promise<PlayerState> {
@@ -134,7 +145,7 @@ async function waitForState(page: Page, errors: BrowserErrors, props: WaitForSta
 	while (Date.now() < props.deadline) {
 		throwPageErrors(errors);
 		if (props.predicate(last)) return last;
-		await sleep(100);
+		await sleep(POLL_INTERVAL_MS);
 		last = await readPlayerState(page);
 	}
 	throwPageErrors(errors);
@@ -146,14 +157,14 @@ async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: n
 	let stableSince = Date.now();
 	while (Date.now() < deadline) {
 		throwPageErrors(errors);
-		await sleep(100);
+		await sleep(POLL_INTERVAL_MS);
 		const current = await readPlayerState(page);
 		const stable =
 			current.videoFrames === previous.videoFrames &&
 			current.videoTimestamp === previous.videoTimestamp &&
 			(!expectAudio || current.audioBytes === previous.audioBytes);
 		if (!stable) stableSince = Date.now();
-		if (stable && Date.now() - stableSince >= 750) return current;
+		if (stable && Date.now() - stableSince >= PAUSE_STABILITY_MS) return current;
 		previous = current;
 	}
 	throwPageErrors(errors);
@@ -220,7 +231,7 @@ try {
 				reloaded = true;
 				await page.reload({ waitUntil: "load" });
 			}
-			await sleep(100);
+			await sleep(POLL_INTERVAL_MS);
 		}
 		if (!playing) {
 			const state = await readPlayerState(page);
@@ -237,8 +248,8 @@ try {
 
 		// The chrome auto-hides while playing. Pointer activity reveals the real
 		// control, then the click must flow through the public player API.
-		await page.dispatchEvent("moq-watch-ui", "pointermove");
-		await page.locator("moq-watch-ui").locator('button.control[aria-label="Pause"]').click();
+		await page.dispatchEvent(SELECTORS.ui, "pointermove");
+		await page.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).click();
 		await waitForState(page, errors, {
 			deadline,
 			description: "paused player UI",
@@ -248,7 +259,7 @@ try {
 		const paused = await waitForStablePause(page, errors, deadline);
 		if (!paused.painted) throw new Error(`pause cleared the preview frame: ${JSON.stringify(paused)}`);
 
-		await page.locator("moq-watch-ui").locator("button.center-play").click();
+		await page.locator(SELECTORS.ui).locator(SELECTORS.centerPlay).click();
 		const resumed = await waitForState(page, errors, {
 			deadline,
 			description: "resumed playback",
