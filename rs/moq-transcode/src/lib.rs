@@ -312,7 +312,7 @@ mod tests {
 		for (name, subscriber) in &mut subscribers {
 			let mut group = subscriber.next_group().await.unwrap().unwrap();
 			let payload = group.read_frame().await.unwrap().unwrap();
-			let frame = hang::container::Frame::decode(payload).unwrap();
+			let frame = hang::container::Frame::decode(payload.payload).unwrap();
 			assert!(
 				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 				"{name} output is not Annex-B"
@@ -366,7 +366,7 @@ mod tests {
 		for (name, subscriber) in &mut subscribers {
 			let mut group = subscriber.next_group().await.unwrap().unwrap();
 			let payload = group.read_frame().await.unwrap().unwrap();
-			let frame = hang::container::Frame::decode(payload).unwrap();
+			let frame = hang::container::Frame::decode(payload.payload).unwrap();
 			assert!(
 				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 				"{name} output is not Annex-B"
