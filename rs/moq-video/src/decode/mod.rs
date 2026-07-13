@@ -109,12 +109,12 @@ impl Frame {
 #[cfg(test)]
 mod tests {
 	/// Callers (libmoq, moq-transcode) hold these across `.await`s in spawned
-	/// tasks and share frames via `Arc` (the transcode fanout), so they must
-	/// stay `Send` (and `Frame` also `Sync`) even when a platform's frame wraps
+	/// tasks and share frames via `Arc` (the transcode fanout), so both must
+	/// stay `Send` and `Frame` also `Sync` even when a platform's frame wraps
 	/// a GPU handle. Compile-time check; fails per-platform if a variant
 	/// regresses.
 	#[test]
-	fn frame_and_consumer_are_send() {
+	fn frame_and_consumer_are_thread_safe() {
 		fn assert_send<T: Send>() {}
 		fn assert_sync<T: Sync>() {}
 		assert_send::<super::Frame>();

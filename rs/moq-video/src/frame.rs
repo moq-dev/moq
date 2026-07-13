@@ -356,12 +356,14 @@ pub(crate) mod macos {
 	}
 
 	// SAFETY: CVPixelBuffer is a reference-counted CoreFoundation wrapper around
-	// an IOSurface. Retain/release are thread-safe and the pixel data is only
-	// touched under CVPixelBufferLockBaseAddress (read-only here, and the lock
-	// itself is thread-safe), so the handle can move between threads and be
-	// shared by reference (capture delegate -> encode loop, decode task ->
-	// transcode fanout via Arc). objc2 leaves CoreVideo types !Send/!Sync out
-	// of conservatism.
+	// an IOSurface. Retain/release are thread-safe, every &self access is a
+	// plain field read or a read-only CVPixelBufferLockBaseAddress, and no code
+	// path write-locks a shared surface, so the handle can move between threads
+	// (capture delegate -> encode loop) and be shared by reference. objc2
+	// leaves CoreVideo types !Send/!Sync out of conservatism. Sync exists for
+	// the enum-level bound: moq-transcode shares Arc<decode::Frame>, which
+	// needs every variant Sync even though macOS decoded frames are always
+	// downloaded to I420 before they reach that fanout.
 	unsafe impl Send for Surface {}
 	unsafe impl Sync for Surface {}
 
