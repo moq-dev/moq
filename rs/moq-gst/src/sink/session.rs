@@ -118,7 +118,21 @@ impl Session {
 		let status = Arc::new(Status::default());
 		let errored = Arc::new(AtomicBool::new(false));
 
-		let join = RUNTIME.spawn(run(settings, origin, status.clone(), errored.clone(), element));
+		// Hand the publish origin to a background reconnect loop: connect, wait for the session to
+		// close, then reconnect with exponential backoff. This replaces the previous one-shot connect
+		// that posted a fatal bus error on the first transport death — a relay restart or QUIC idle
+		// timeout left the publish permanently dead until the pipeline was rebuilt. `timeout = 0` means
+		// never give up, so an unattended publisher outlives arbitrary relay/transport outages; the
+		// pad threads keep writing across an outage (bounded by moq-net's per-group eviction) and the
+		// relay catches up from a group boundary on reconnect. A bounded retry policy is available via
+		// `ClientConfig::backoff` if a terminal error is preferred.
+		let mut config = moq_native::ClientConfig::default();
+		config.tls.disable_verify = Some(settings.tls_disable_verify);
+		config.backoff.timeout = std::time::Duration::ZERO;
+		let client = config.init()?.with_publish(origin.consume());
+		let reconnect = client.reconnect(settings.url.clone());
+
+		let join = RUNTIME.spawn(forward(reconnect, origin, status.clone(), errored.clone(), element));
 
 		Ok((Self { join, status, errored }, broadcast, catalog))
 	}
@@ -140,71 +154,57 @@ impl Session {
 	}
 }
 
-/// Connect, then idle on the transport until it closes or dies. A remote death is surfaced as an
-/// element error on the bus; [`Session::stop`] aborts this task instead, which is quiet.
-async fn run(
-	settings: ResolvedSettings,
+/// Mirror the reconnect loop's observable state into the element's [`Status`] until the loop stops.
+///
+/// The reconnect loop owns the session, so this task doesn't touch the transport — it forwards each
+/// [`moq_native::Snapshot`] (connected/version/send-bitrate) into the status the property getters
+/// read, and notifies `connected` on the connect/disconnect edges. With `backoff.timeout = 0` the
+/// loop never gives up, so the `Err` arm is a safety net (a bounded backoff would post the bus error
+/// there on final give-up, as the one-shot path did). [`Session::stop`] aborts this task, which drops
+/// the `Reconnect` handle and quietly tears the loop down.
+async fn forward(
+	mut reconnect: moq_native::Reconnect,
 	origin: moq_net::OriginProducer,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,
 	element: glib::WeakRef<Element>,
 ) {
-	// `origin` is held for the task's lifetime so the published broadcast stays alive across the session.
-	let result = connect_and_run(&settings, &origin, &status, &element).await;
+	// `origin` is held for the task's lifetime so the published broadcast stays alive across every
+	// reconnect; the loop re-consumes it (a fresh publish leg) for each connection.
+	let _origin = origin;
 
-	// Reset the observable surface on exit. The Status arc is private to this session, so this never
-	// touches a newer session's status even if a new one started before this task unwound.
-	status.reset();
-	notify_connected(&element);
-
-	if let Err(err) = result {
-		errored.store(true, Ordering::Relaxed);
-		if let Some(obj) = element.upgrade() {
-			gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
-		}
-	}
-}
-
-async fn connect_and_run(
-	settings: &ResolvedSettings,
-	origin: &moq_net::OriginProducer,
-	status: &Status,
-	element: &glib::WeakRef<Element>,
-) -> Result<()> {
-	let mut config = moq_native::ClientConfig::default();
-	config.tls.disable_verify = Some(settings.tls_disable_verify);
-	let client = config.init()?.with_publish(origin.consume());
-
-	// A stop() during connect aborts this task, cancelling the connect future cleanly.
-	let session = client.connect(settings.url.clone()).await?;
-	status.set_connected(true);
-	status.set_version(Some(session.version().to_string()));
-	notify_connected(element);
-	gst::info!(CAT, "session connected to {}", settings.url);
-
-	// Congestion-controller send estimate; None when unavailable, then this arm parks forever.
-	let mut send_bandwidth = session.send_bandwidth();
-	// Resolves to Err when the transport dies; pinned so the select polls it each iteration.
-	let closed = session.closed();
-	tokio::pin!(closed);
-
+	let mut was_connected = false;
 	loop {
-		tokio::select! {
-			// Remote death: propagate the Err so the wrapper posts an element error to the bus.
-			result = &mut closed => return Ok(result?),
-			bitrate = async {
-				match send_bandwidth.as_mut() {
-					Some(bw) => bw.changed().await,
-					None => std::future::pending::<Option<u64>>().await,
+		match reconnect.changed().await {
+			Ok(snapshot) => {
+				let connected = snapshot.status == Some(moq_native::Status::Connected);
+				status.set_connected(connected);
+				status.set_version(snapshot.version);
+				status.set_send_bitrate(snapshot.send_bitrate);
+				if connected != was_connected {
+					if connected {
+						gst::info!(CAT, "session connected");
+					} else {
+						gst::warning!(CAT, "session disconnected, reconnecting");
+					}
+					notify_connected(&element);
+					was_connected = connected;
 				}
-			} => match bitrate {
-				Some(rate) => status.set_send_bitrate(rate),
-				None => {
-					// Estimate gone: report 0 (the documented "unavailable" value) and stop polling.
-					status.set_send_bitrate(0);
-					send_bandwidth = None;
+			}
+			Err(err) => {
+				// The reconnect loop permanently gave up (only reachable with a bounded backoff).
+				// Reset the observable surface, flag `errored` so the pad threads stop feeding a dead
+				// session, and post a fatal element error — matching the old one-shot failure path.
+				status.reset();
+				if was_connected {
+					notify_connected(&element);
 				}
-			},
+				errored.store(true, Ordering::Relaxed);
+				if let Some(obj) = element.upgrade() {
+					gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
+				}
+				return;
+			}
 		}
 	}
 }
