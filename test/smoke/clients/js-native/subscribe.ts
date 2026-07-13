@@ -68,10 +68,10 @@ async function run(): Promise<void> {
 		const bc = connection.consume(path);
 
 		// The .hang catalog lives on the "catalog.json" track. It's a @moq/json
-		// snapshot+delta value, reconstructed by Json.Consumer. A lazy publisher may
+		// snapshot+delta value, reconstructed by Json.Snapshot.Consumer. A lazy publisher may
 		// announce video in a later update, so keep reading until one has it.
 		const track = bc.subscribe("catalog.json", { priority: Catalog.PRIORITY.catalog });
-		const catalog = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
+		const catalog = new Json.Snapshot.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
 		let videoTrack: string | undefined;
 		while (!videoTrack) {
 			const root = await catalog.next();

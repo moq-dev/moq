@@ -79,7 +79,7 @@ try {
 		while (Date.now() < deadline) {
 			frames = await page.evaluate(() => {
 				const w = document.querySelector("moq-watch") as unknown as {
-					backend?: { video?: { output?: { stats?: { peek(): { frameCount?: number } | undefined } } } };
+					backend?: { video?: { out?: { stats?: { peek(): { frameCount?: number } | undefined } } } };
 				} | null;
 				return w?.backend?.video?.out?.stats?.peek()?.frameCount ?? 0;
 			});
