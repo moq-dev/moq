@@ -482,7 +482,8 @@ impl<F: Container> Consumer<F> {
 
 	/// Wait until the track is closed.
 	pub async fn closed(&self) -> Result<(), F::Error> {
-		Ok(self.track.closed().await?)
+		self.track.closed().await?;
+		Ok(())
 	}
 }
 

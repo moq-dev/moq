@@ -435,11 +435,11 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	fn poll_closed(&self) -> Poll<Result<()>> {
+	fn poll_closed(&self) -> Poll<Result<u64>> {
 		// A future boundary isn't "closed" until the trailing groups arrive, so gate on
 		// the live edge reaching it. Use `poll_finished` to observe the boundary early.
-		if self.is_complete() {
-			Poll::Ready(Ok(()))
+		if let Some(fin) = self.completed() {
+			Poll::Ready(Ok(fin))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
 		} else {
@@ -524,13 +524,18 @@ impl TrackState {
 		Ok(())
 	}
 
-	/// Whether the track has reached its end: the final boundary is set and the live
-	/// edge has caught up to it, so no further group can arrive. A future boundary
-	/// (declared via [`Producer::finish_at`] ahead of the live edge) stays incomplete
-	/// until the remaining groups are produced.
-	fn is_complete(&self) -> bool {
+	/// The exclusive final sequence once the track has reached its end: the boundary is
+	/// set and the live edge has caught up to it, so no further group can arrive. A
+	/// future boundary (declared via [`Producer::finish_at`] ahead of the live edge)
+	/// stays `None` until the remaining groups are produced.
+	fn completed(&self) -> Option<u64> {
 		self.final_sequence
-			.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
+			.filter(|&fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
+	}
+
+	/// Whether [`Self::completed`] has a value.
+	fn is_complete(&self) -> bool {
+		self.completed().is_some()
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
@@ -1733,17 +1738,17 @@ impl Subscriber {
 	}
 
 	/// Poll for track closure, without blocking.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		self.poll(waiter, |state| state.poll_closed())
 	}
 
-	/// Block until the track is closed.
+	/// Block until the track is closed, returning the exclusive final sequence (also the
+	/// total group count) on a clean finish, or the cause on an abort.
 	///
-	/// Returns Ok() if the track was cleanly finished. Resolves once the live edge
-	/// reaches the final sequence, so a track finished ahead of its live edge (via
-	/// [`Producer::finish_at`]) stays open until the trailing groups arrive. Use
-	/// [`Self::finished`] to observe the declared boundary earlier.
-	pub async fn closed(&self) -> Result<()> {
+	/// Resolves once the live edge reaches the final sequence, so a track finished ahead
+	/// of its live edge (via [`Producer::finish_at`]) stays open until the trailing
+	/// groups arrive. Use [`Self::finished`] to observe the declared boundary earlier.
+	pub async fn closed(&self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
