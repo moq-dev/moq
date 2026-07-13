@@ -17,7 +17,7 @@ trait Importer: Send {
 	fn decode(&mut self, frame: &[u8], pts: Option<Timestamp>) -> Result<()>;
 	fn finish(&mut self) -> Result<()>;
 	/// Close the current group without finishing the track
-	/// (see codec `Import::finish_group`).
+	/// (see `Track::finish_group`).
 	fn finish_group(&mut self) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
@@ -29,7 +29,7 @@ trait StreamImporter: Send {
 	fn decode(&mut self, data: &[u8]) -> Result<()>;
 	fn finish(&mut self) -> Result<()>;
 	/// Close the current group without finishing the track
-	/// (see codec `Import::finish_group`).
+	/// (see `Track::finish_group`).
 	fn finish_group(&mut self) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
@@ -48,7 +48,7 @@ trait FrameSink: Send {
 	fn decode(&mut self, frames: Vec<Frame>) -> Result<()>;
 	fn finish(&mut self) -> Result<()>;
 	/// Close the current group without finishing the track
-	/// (see codec `Import::finish_group`).
+	/// (see `Track::finish_group`).
 	fn finish_group(&mut self) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
@@ -386,10 +386,17 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// Close the current group cleanly and leave the track (and its catalog
-	/// rendition) OPEN, so publishing resumes into a fresh group on the next
-	/// keyframe. Unlike [`finish`](Self::finish), the track is not ended — useful
-	/// to pause a track (e.g. when it loses its last subscriber) while leaving a
-	/// COMPLETE final group rather than a truncated one.
+	/// rendition) OPEN — unlike [`finish`](Self::finish), which ends the track.
+	/// Publishing resumes into a fresh group on the next keyframe.
+	///
+	/// Typical use: pause a track that has lost its last subscriber while leaving
+	/// a COMPLETE final group rather than a truncated one.
+	///
+	/// Invariants: call it while a group is open; the next group then begins on
+	/// the following keyframe (mirroring the container producer's `finish_group`,
+	/// whose next write must be a keyframe). Composes with [`finish`](Self::finish)
+	/// and [`seek`](Self::seek). This is the canonical description — the codec
+	/// `Import`s and `TrackStream` reference it.
 	pub fn finish_group(&mut self) -> Result<()> {
 		self.inner.finish_group()
 	}

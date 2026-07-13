@@ -67,9 +67,8 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Close the current group cleanly WITHOUT finishing the track, so the track
-	/// stays open and the next keyframe opens a fresh group. Delegates to the
-	/// container producer's `finish_group`.
+	/// Close the current group without finishing the track; publishing resumes on
+	/// the next keyframe. See `import::Track::finish_group` for the full contract.
 	pub fn finish_group(&mut self) -> crate::Result<()> {
 		self.track.finish_group()?;
 		Ok(())

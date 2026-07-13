@@ -156,11 +156,10 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Close the current group cleanly WITHOUT finishing the track, so the track
-	/// stays open and the next keyframe opens a fresh group. Delegates to the
-	/// container producer's `finish_group`.
-	/// `allow(dead_code)`: the legacy importer isn't boxed into the `Importer`/`FrameSink`
-	/// dispatch set, so nothing calls this today — kept for parity with the other codecs.
+	/// Close the current group without finishing the track; publishing resumes on
+	/// the next keyframe. See `import::Track::finish_group` for the full contract.
+	// Kept for codec-`Import` surface parity; the legacy importer isn't in the
+	// object-safe dispatch set, so it isn't wired in.
 	#[allow(dead_code)]
 	pub fn finish_group(&mut self) -> crate::Result<()> {
 		self.track.finish_group()?;
