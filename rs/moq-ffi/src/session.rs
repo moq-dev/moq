@@ -69,6 +69,31 @@ mod tests {
 		let state = client.task.lock().expect("client state should be available");
 		assert_eq!(state.config.tls.system_roots, Some(false));
 	}
+
+	#[test]
+	fn sets_tls_client_cert_and_key() {
+		let client = MoqClient::new();
+
+		client.set_tls_cert(Some("client.pem".into()));
+		client.set_tls_key(Some("client.key".into()));
+		{
+			let state = client.task.lock().expect("client state should be available");
+			assert_eq!(
+				state.config.tls.cert.as_deref(),
+				Some(std::path::Path::new("client.pem"))
+			);
+			assert_eq!(
+				state.config.tls.key.as_deref(),
+				Some(std::path::Path::new("client.key"))
+			);
+		}
+
+		client.set_tls_cert(None);
+		client.set_tls_key(None);
+		let state = client.task.lock().expect("client state should be available");
+		assert_eq!(state.config.tls.cert, None);
+		assert_eq!(state.config.tls.key, None);
+	}
 }
 
 #[derive(uniffi::Object)]
@@ -128,6 +153,27 @@ impl MoqClient {
 	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.fingerprint = fingerprints;
+		}
+	}
+
+	/// Present this client certificate when the server requests one (mTLS).
+	///
+	/// Pass the path to a PEM file containing the certificate chain; only certificates
+	/// are extracted. Must be paired with `set_tls_key`: connecting with only one of the
+	/// pair configured fails. `None` clears it, connecting without a client certificate.
+	pub fn set_tls_cert(&self, path: Option<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.cert = path.map(Into::into);
+		}
+	}
+
+	/// Use the private key at this path for mTLS.
+	///
+	/// Pass the path to a PEM file containing the private key; only the key is
+	/// extracted. Must be paired with `set_tls_cert`. `None` clears it.
+	pub fn set_tls_key(&self, path: Option<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.key = path.map(Into::into);
 		}
 	}
 
