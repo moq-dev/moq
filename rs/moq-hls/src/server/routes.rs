@@ -31,11 +31,16 @@ pub fn router(server: Server) -> Router {
 }
 
 async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> Response {
-	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
+	let Some(handle) = server.handle(&broadcast).await else {
 		return not_found();
 	};
-	broadcaster.wait_ready(READY_TIMEOUT).await;
-	m3u8(broadcaster.master_playlist())
+	handle.wait_ready(READY_TIMEOUT).await;
+	// Don't serve an empty master (a 200 with no variants): if no rendition showed up
+	// within the timeout, the broadcast isn't playable yet, so 404.
+	if handle.renditions().is_empty() {
+		return not_found();
+	}
+	m3u8(handle.master_playlist())
 }
 
 async fn media(
@@ -122,9 +127,9 @@ async fn part(
 
 /// Resolve a rendition's store, waiting for the catalog to populate.
 async fn store(server: &Server, broadcast: &str, rendition: &str) -> Option<std::sync::Arc<SegmentStore>> {
-	let broadcaster = server.broadcaster(broadcast).await?;
-	broadcaster.wait_ready(READY_TIMEOUT).await;
-	broadcaster.rendition(rendition).map(|r| r.store.clone())
+	let handle = server.handle(broadcast).await?;
+	handle.wait_ready(READY_TIMEOUT).await;
+	handle.rendition(rendition).map(|r| r.store.clone())
 }
 
 /// Block until the store holds `(msn, part)`, the window passed it, or the track
