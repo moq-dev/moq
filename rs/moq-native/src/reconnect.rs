@@ -1,4 +1,5 @@
-use std::task::{Poll, ready};
+use std::future::Future;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use moq_net::kio;
@@ -297,48 +298,41 @@ impl Reconnect {
 /// producers meanwhile so [`Reconnect`] consumers track the live estimates across the connection.
 /// Returns the session's close result (the loop uses it to distinguish a healthy drop from an
 /// immediate sever).
+///
+/// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, and the
+/// transport's close future (the one non-kio source) is polled through the waiter's own waker.
 async fn run_session(
 	send_bw: &BandwidthProducer,
 	recv_bw: &BandwidthProducer,
 	session: &moq_net::Session,
 ) -> Result<(), moq_net::Error> {
-	// `None` when the backend/version has no estimate; then that select arm parks forever.
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();
-
-	// Seed the current estimates so a consumer reads them without waiting for the first change.
-	let _ = send_bw.set(send.as_ref().and_then(|bw| bw.peek()));
-	let _ = recv_bw.set(recv.as_ref().and_then(|bw| bw.peek()));
-
 	let closed = session.closed();
 	tokio::pin!(closed);
 
+	kio::wait(|waiter| {
+		poll_forward(&mut send, send_bw, waiter);
+		poll_forward(&mut recv, recv_bw, waiter);
+		closed.as_mut().poll(&mut Context::from_waker(waiter.waker()))
+	})
+	.await
+}
+
+/// Mirror `bw`'s live estimate into `out` for as long as it changes, dropping the source handle once
+/// the backend stops reporting (`None`) so we don't keep polling a dead arm. A `poll_*` step: on
+/// return, `waiter` is registered for the next change (unless the source is gone). Seeding is implicit
+/// (the first call forwards the current value if there is one).
+fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, waiter: &kio::Waiter) {
 	loop {
-		tokio::select! {
-			result = &mut closed => return result,
-			rate = async {
-				match send.as_mut() {
-					Some(bw) => bw.changed().await,
-					None => std::future::pending::<Option<u64>>().await,
-				}
-			} => {
-				let _ = send_bw.set(rate);
-				// Estimate gone (or the session's producer dropped): stop polling this arm.
-				if rate.is_none() {
-					send = None;
-				}
-			}
-			rate = async {
-				match recv.as_mut() {
-					Some(bw) => bw.changed().await,
-					None => std::future::pending::<Option<u64>>().await,
-				}
-			} => {
-				let _ = recv_bw.set(rate);
-				if rate.is_none() {
-					recv = None;
-				}
-			}
+		let Some(consumer) = bw.as_mut() else { return };
+		let Poll::Ready(rate) = consumer.poll_changed(waiter) else {
+			return;
+		};
+		let _ = out.set(rate);
+		if rate.is_none() {
+			*bw = None;
+			return;
 		}
 	}
 }
@@ -368,5 +362,35 @@ mod tests {
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(30));
 		assert_eq!(backoff.timeout, Duration::from_secs(300));
+	}
+
+	#[test]
+	fn poll_forward_mirrors_then_drops_on_none() {
+		let src = BandwidthProducer::new();
+		let out = BandwidthProducer::new();
+		let out_rx = out.consume();
+		let waiter = kio::Waiter::noop();
+
+		// No estimate yet: nothing forwarded, source retained.
+		let mut bw = Some(src.consume());
+		poll_forward(&mut bw, &out, &waiter);
+		assert_eq!(out_rx.peek(), None);
+		assert!(bw.is_some());
+
+		// A value is mirrored through.
+		src.set(Some(3_000)).unwrap();
+		poll_forward(&mut bw, &out, &waiter);
+		assert_eq!(out_rx.peek(), Some(3_000));
+
+		// Going None mirrors the None and drops the source, so we stop polling a dead arm.
+		src.set(None).unwrap();
+		poll_forward(&mut bw, &out, &waiter);
+		assert_eq!(out_rx.peek(), None);
+		assert!(bw.is_none());
+
+		// Source gone: a later value on the (now-defunct) session's producer is ignored.
+		src.set(Some(9_000)).unwrap();
+		poll_forward(&mut bw, &out, &waiter);
+		assert_eq!(out_rx.peek(), None);
 	}
 }
