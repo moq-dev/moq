@@ -77,19 +77,28 @@ struct Shared {
 }
 
 /// A driver-private per-rendition unit: the shared metadata/store plus the exporter
-/// that fills it, and whether that exporter has finished.
+/// that fills it. `export` is `None` once the rendition has finished -- dropping it
+/// then RELEASES the source subscription immediately, instead of holding a live (but
+/// no-longer-polled) track open until the whole `Broadcaster` drops. That matters on
+/// the error path: moq-mux's exporter returns an error *before* it would internally
+/// drop the track, so a rendition that errors while its publisher is still live would
+/// otherwise pin that subscription for the rest of the recording (a scoped #2255).
 struct Driver {
 	info: Arc<Rendition>,
-	export: RenditionExport,
-	done: bool,
+	export: Option<RenditionExport>,
 }
 
 impl Driver {
-	/// Finalize the store (waking blocked readers with an ENDLIST) and mark done.
+	/// True once this rendition's exporter has finished (its subscription released).
+	fn done(&self) -> bool {
+		self.export.is_none()
+	}
+
+	/// Finalize the store (waking blocked readers with an ENDLIST) and drop the
+	/// exporter, releasing its source track subscription.
 	fn finish(&mut self) {
-		if !self.done {
+		if self.export.take().is_some() {
 			self.info.store.finish();
-			self.done = true;
 		}
 	}
 }
@@ -220,11 +229,16 @@ impl Broadcaster {
 			}
 
 			for driver in self.renditions.values_mut() {
-				if driver.done {
+				// A finished rendition (`export` is `None`) is skipped; while draining, the
+				// exporter stays `Some` until an arm below finishes it and breaks.
+				if driver.export.is_none() {
 					continue;
 				}
 				loop {
-					match driver.export.poll_next_fragment(waiter) {
+					// Poll into an owned outcome so the `driver.export` borrow is released
+					// before the arms touch `driver` (e.g. `finish`, which drops the exporter).
+					let outcome = driver.export.as_mut().unwrap().poll_next_fragment(waiter);
+					match outcome {
 						Poll::Ready(Ok(Some(fragment))) => driver.info.store.push(fragment),
 						Poll::Ready(Ok(None)) => {
 							driver.finish();
@@ -242,7 +256,7 @@ impl Broadcaster {
 		}
 
 		// Done once the catalog has ended and every rendition has finished.
-		if self.catalog_done && self.renditions.values().all(|d| d.done) {
+		if self.catalog_done && self.renditions.values().all(Driver::done) {
 			return Poll::Ready(());
 		}
 
@@ -304,8 +318,7 @@ impl Broadcaster {
 			name.clone(),
 			Driver {
 				info: info.clone(),
-				export,
-				done: false,
+				export: Some(export),
 			},
 		);
 		self.shared.renditions.write().unwrap().insert(name, info);
