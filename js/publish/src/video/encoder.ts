@@ -12,6 +12,18 @@ export interface EncoderProps {
 	container?: Catalog.Container;
 }
 
+/** Cumulative encoder output totals, measured from the chunks the encoder produces. */
+export interface Stats {
+	/** Total frames encoded while serving. Monotonic; diff over an interval for a frame rate. */
+	frames: number;
+
+	/** Total bytes encoded while serving. Monotonic; diff over an interval for an upload bitrate. */
+	bytes: number;
+
+	/** Total keyframes encoded while serving. Divide frames by this for the average GOP length. */
+	keyframes: number;
+}
+
 // TODO support signals?
 export interface EncoderConfig {
 	// If not provided, the encoder will select the best codec.
@@ -50,9 +62,9 @@ export class Encoder {
 	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
 
-	#bytesEncoded = new Signal(0);
-	/** Total bytes encoded while serving. Monotonic; diff it over an interval for an upload bitrate. */
-	readonly bytesEncoded: Getter<number> = this.#bytesEncoded;
+	#stats = new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 });
+	/** Cumulative encoder output totals (frames, bytes, keyframes) measured while serving. */
+	readonly stats: Getter<Stats> = this.#stats;
 
 	#signals = new Effect();
 
@@ -106,13 +118,18 @@ export class Encoder {
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
-					if (frame.type === "key") {
+					const key = frame.type === "key";
+					if (key) {
 						lastKeyframe = frame.timestamp as Time.Micro;
 					}
 
-					this.#bytesEncoded.update((total) => total + frame.byteLength);
+					this.#stats.update((stats) => ({
+						frames: stats.frames + 1,
+						bytes: stats.bytes + frame.byteLength,
+						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
+					}));
 
-					producer.encode(frame, frame.timestamp as Time.Micro, frame.type === "key");
+					producer.encode(frame, frame.timestamp as Time.Micro, key);
 				},
 				error: (err: Error) => {
 					producer.close(err);

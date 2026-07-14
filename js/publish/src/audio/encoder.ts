@@ -50,6 +50,15 @@ export type OpusConfig = {
 	usedtx?: boolean; // discontinuous transmission (silence suppression)
 };
 
+/** Cumulative encoder output totals, measured from the chunks the encoder produces. */
+export interface Stats {
+	/** Total frames encoded while serving. Monotonic; diff over an interval for a frame rate. */
+	frames: number;
+
+	/** Total bytes encoded while serving. Monotonic; diff over an interval for an upload bitrate. */
+	bytes: number;
+}
+
 // The initial values for our signals.
 export type EncoderProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -100,6 +109,10 @@ export class Encoder {
 	readonly root: Getter<AudioNode | undefined> = this.#gain;
 
 	active = new Signal<boolean>(false);
+
+	#stats = new Signal<Stats>({ frames: 0, bytes: 0 });
+	/** Cumulative encoder output totals (frames, bytes) measured while serving. */
+	readonly stats: Getter<Stats> = this.#stats;
 
 	#signals = new Effect();
 
@@ -291,6 +304,11 @@ export class Encoder {
 					if (frame.type !== "key") {
 						throw new Error("only key frames are supported");
 					}
+
+					this.#stats.update((stats) => ({
+						frames: stats.frames + 1,
+						bytes: stats.bytes + frame.byteLength,
+					}));
 
 					// Each audio frame is its own group so the relay can forward it without
 					// waiting for a group boundary. Loss is handled by the codec's PLC.

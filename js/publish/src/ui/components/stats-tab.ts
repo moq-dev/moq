@@ -113,8 +113,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		frames++;
 	});
 
-	const encoded = () =>
-		publish.broadcast.video.hd.bytesEncoded.peek() + publish.broadcast.video.sd.bytesEncoded.peek();
+	const encoded = () => publish.broadcast.video.stats.peek().bytes;
 
 	let prevFrames = 0;
 	let prevBytes = encoded();

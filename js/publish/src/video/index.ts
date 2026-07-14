@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import { Encoder, type EncoderConfig, type EncoderProps } from "./encoder";
+import { Encoder, type EncoderConfig, type EncoderProps, type Stats } from "./encoder";
 import { TrackProcessor } from "./polyfill";
 import type { Source } from "./types";
 
@@ -32,6 +32,12 @@ export class Root {
 	hd: Encoder;
 	sd: Encoder;
 
+	#stats = new Signal<Stats & { hd?: Stats; sd?: Stats }>(aggregate([]));
+	// Combined encoder stats, since simulcast splits video across two encoders (hd + sd). The top-level
+	// totals sum every enabled rendition; hd/sd break them out. A rendition is present only while it's
+	// enabled, so a consumer reads one getter (and its totals) instead of knowing about the split.
+	readonly stats: Getter<Stats & { hd?: Stats; sd?: Stats }> = this.#stats;
+
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
 	catalog = new Signal<Catalog.Video | undefined>(undefined);
@@ -54,6 +60,14 @@ export class Root {
 
 		this.signals.run(this.#runCatalog.bind(this));
 		this.signals.run(this.#runFrame.bind(this));
+		this.signals.run(this.#runStats.bind(this));
+	}
+
+	#runStats(effect: Effect) {
+		const hd = effect.get(this.hd.enabled) ? effect.get(this.hd.stats) : undefined;
+		const sd = effect.get(this.sd.enabled) ? effect.get(this.sd.stats) : undefined;
+		const total = aggregate([hd, sd].filter((s): s is Stats => s !== undefined));
+		this.#stats.set({ ...total, hd, sd });
 	}
 
 	#runFrame(effect: Effect) {
@@ -124,4 +138,15 @@ export class Root {
 			return undefined;
 		});
 	}
+}
+
+// Sum per-encoder Stats into a combined total (across simulcast renditions).
+function aggregate(stats: Iterable<Stats>): Stats {
+	const total: Stats = { frames: 0, bytes: 0, keyframes: 0 };
+	for (const s of stats) {
+		total.frames += s.frames;
+		total.bytes += s.bytes;
+		total.keyframes += s.keyframes;
+	}
+	return total;
 }
