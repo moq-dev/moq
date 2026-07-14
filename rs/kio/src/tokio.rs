@@ -3,9 +3,8 @@
 //! Behind the `tokio` feature. Wraps a [`tokio::time::Sleep`] so a `poll_*` function can
 //! drive it against a [`Waiter`], keeping the rest of kio runtime-free.
 
-use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::Poll;
 
 use crate::Waiter;
 
@@ -26,8 +25,7 @@ impl Sleep {
 
 	/// Poll the sleep, registering `waiter` so the poll re-fires once it elapses.
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
-		let mut cx = Context::from_waker(waiter.waker());
-		self.inner.as_mut().poll(&mut cx)
+		waiter.poll_future(self.inner.as_mut())
 	}
 
 	/// Wait until the sleep elapses.

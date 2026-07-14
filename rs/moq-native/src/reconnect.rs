@@ -1,5 +1,4 @@
-use std::future::Future;
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use moq_net::kio;
@@ -314,7 +313,7 @@ async fn run_session(
 	kio::wait(|waiter| {
 		poll_forward(&mut send, send_bw, waiter);
 		poll_forward(&mut recv, recv_bw, waiter);
-		closed.as_mut().poll(&mut Context::from_waker(waiter.waker()))
+		waiter.poll_future(closed.as_mut())
 	})
 	.await
 }

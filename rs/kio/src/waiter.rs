@@ -43,12 +43,20 @@ impl Waiter {
 		list.register(self);
 	}
 
-	/// The underlying task [`Waker`], for driving a foreign future inside a `poll_*`
-	/// function. Build a [`Context`] from it and poll the future so that future
-	/// re-wakes this poll when it's ready, without kio itself taking a runtime
-	/// dependency.
+	/// The underlying task [`Waker`], for hand-rolling foreign-future integration. Prefer
+	/// [`poll_future`](Self::poll_future), which wraps the usual [`Context`] dance.
 	pub fn waker(&self) -> &Waker {
 		&self.waker
+	}
+
+	/// Poll a foreign [`std::future::Future`] against this waiter, so it re-wakes the enclosing
+	/// `poll_*` step when it's ready.
+	///
+	/// The bridge for the occasional non-kio source (a transport close, a timer) inside a poll
+	/// function otherwise driven by kio channels, so the whole thing stays a single `poll_*`. Pin the
+	/// future once, then poll it each step.
+	pub fn poll_future<F: Future>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
+		future.poll(&mut Context::from_waker(self.waker()))
 	}
 }
 
@@ -162,5 +170,23 @@ where
 		// list so the inner poll function's register call can recycle it.
 		this.waiter = Some(Waiter::new(cx.waker().clone()));
 		(this.poll)(this.waiter.as_ref().unwrap())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn poll_future_bridges_a_std_future() {
+		let waiter = Waiter::noop();
+
+		// A ready future resolves through the waiter.
+		let fut = std::pin::pin!(std::future::ready(7u8));
+		assert_eq!(waiter.poll_future(fut), Poll::Ready(7));
+
+		// A never-ready future stays pending.
+		let fut = std::pin::pin!(std::future::pending::<u8>());
+		assert_eq!(waiter.poll_future(fut), Poll::Pending);
 	}
 }
