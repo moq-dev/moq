@@ -160,6 +160,42 @@ impl<C: Container> Producer<C> {
 		self.finish_group_at(None)
 	}
 
+	/// Close the current group, recording that its content ends at `end`.
+	///
+	/// Use this instead of [`finish_group`](Self::finish_group) when a gap may follow
+	/// (a publisher pausing, or any timeline discontinuity): it pins the last frame's
+	/// presentation end at `end` so a consumer bounds it there instead of stretching
+	/// it across the gap to the next group's first frame.
+	///
+	/// How `end` reaches the wire depends on the container: CMAF backfills it as the
+	/// last sample's duration, while Legacy/LOC (which carry no per-frame duration)
+	/// get a zero-length "tail" frame at `end`. That encoding stays inside this crate;
+	/// callers only ever express the end timestamp. The next [`write`](Self::write)
+	/// must be a keyframe.
+	pub fn end_group(&mut self, end: Timestamp) -> Result<(), C::Error> {
+		self.flush(Some(end))?;
+
+		// Legacy/LOC can't express the end as a duration, so mark it with a tail frame
+		// (empty payload) as the group's last frame. CMAF already got `end` backfilled
+		// onto its last sample by the flush above.
+		if !self.container.carries_duration()
+			&& let Some(group) = self.group.as_mut()
+		{
+			let tail = Frame {
+				timestamp: end,
+				payload: bytes::Bytes::new(),
+				keyframe: false,
+				duration: None,
+			};
+			self.container.write(group, &[tail])?;
+		}
+
+		if let Some(mut group) = self.group.take() {
+			group.finish()?;
+		}
+		Ok(())
+	}
+
 	/// Like [`finish_group`](Self::finish_group), but uses `next` (the timestamp of the
 	/// keyframe that rolled the group over) as the duration boundary for the group's
 	/// last frame. See [`flush`](Self::flush).
@@ -404,5 +440,36 @@ mod tests {
 		assert_eq!(group0[0].duration, Some(Timestamp::from_micros(33_000).unwrap()));
 		// The last sample's duration is backfilled from the next keyframe: 66ms - 33ms.
 		assert_eq!(group0[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
+	}
+
+	/// `end_group(end)` on a duration-less container (Legacy) marks the group end with
+	/// a tail frame, so a Consumer bounds the last frame at `end` instead of stretching
+	/// it across a gap to the next group ~2h later. The tail is never surfaced as media.
+	#[tokio::test]
+	async fn end_group_bounds_last_frame_across_gap() {
+		use crate::container::Consumer;
+
+		let track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.end_group(Timestamp::from_micros(16_000).unwrap()).unwrap();
+		producer.write(frame(7_200_000_000, true)).unwrap(); // resume ~2h later
+		producer.finish().unwrap();
+
+		// Latency above the gap so the slow-group skip never fires; isolate the tail.
+		let mut consumer =
+			Consumer::new(consumer_track, Container::Legacy).with_latency(std::time::Duration::from_secs(10_800));
+		let mut frames = Vec::new();
+		while let Ok(Some(f)) = consumer.read().await {
+			frames.push(f);
+		}
+
+		assert_eq!(frames.len(), 2, "the tail is not surfaced as a media frame");
+		assert_eq!(frames[0].timestamp, Timestamp::from_micros(0).unwrap());
+		// Bounded by end_group's tail (16ms), NOT the 2h jump to the next group.
+		assert_eq!(frames[0].duration, Some(Timestamp::from_micros(16_000).unwrap()));
+		assert_eq!(frames[1].timestamp, Timestamp::from_micros(7_200_000_000).unwrap());
 	}
 }

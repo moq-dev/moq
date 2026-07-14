@@ -60,6 +60,17 @@ impl Producer {
 		self.import.finish()?;
 		Ok(())
 	}
+
+	/// Close the current group, marking its content as ending at `end`.
+	///
+	/// Call before a gap (e.g. pausing capture) so a consumer bounds the last frame
+	/// at `end` rather than stretching it across the gap to the next group. The next
+	/// [`publish`](Self::publish) must carry a keyframe -- the caller is responsible
+	/// for forcing the encoder to emit one.
+	pub fn end_group(&mut self, end: Timestamp) -> Result<(), Error> {
+		self.import.end_group(end)?;
+		Ok(())
+	}
 }
 
 /// Source-agnostic encode knobs for [`publish_capture`], where the geometry

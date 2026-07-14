@@ -110,6 +110,16 @@ pub trait Container {
 	{
 		async { kio::wait(|waiter| self.poll_read(group, waiter)).await }
 	}
+
+	/// Whether this container carries a per-frame duration on the wire.
+	///
+	/// When false (Legacy, LOC), a group's last frame has no intrinsic end, so
+	/// [`Producer::end_group`] writes a zero-length tail frame to mark it. When true
+	/// (CMAF), the boundary is backfilled onto the last sample instead, and no tail
+	/// is written. Defaults to false; the duration-carrying containers override it.
+	fn carries_duration(&self) -> bool {
+		false
+	}
 }
 
 /// The outcome of one [`Container::poll_read`].

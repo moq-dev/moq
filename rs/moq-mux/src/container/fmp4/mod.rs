@@ -191,6 +191,12 @@ impl Container for Wire {
 		encode(group, frames, timescale, track_id)
 	}
 
+	// CMAF carries a per-sample duration in the trun, so a group's end is expressed
+	// as the last sample's duration -- no tail frame needed.
+	fn carries_duration(&self) -> bool {
+		true
+	}
+
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,

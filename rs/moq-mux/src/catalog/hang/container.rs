@@ -49,4 +49,11 @@ impl ContainerTrait for Container {
 			Self::Loc => loc::Wire.poll_read(group, waiter),
 		}
 	}
+
+	fn carries_duration(&self) -> bool {
+		match self {
+			Self::Legacy | Self::Loc => false,
+			Self::Cmaf(cmaf) => cmaf.carries_duration(),
+		}
+	}
 }

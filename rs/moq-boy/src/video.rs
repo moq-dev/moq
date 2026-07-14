@@ -27,9 +27,15 @@ pub struct VideoEncoder {
 	_thread: std::thread::JoinHandle<()>,
 }
 
-struct EncoderMsg {
-	rgba: Bytes,
-	ts: hang::container::Timestamp,
+enum EncoderMsg {
+	/// Encode and publish one RGBA framebuffer at `ts`.
+	Frame {
+		rgba: Bytes,
+		ts: hang::container::Timestamp,
+	},
+	/// Close the current group, marking its content as ending at `end` (the video
+	/// track went idle). Ordered after the last `Frame` so the group closes cleanly.
+	EndGroup { end: hang::container::Timestamp },
 }
 
 impl VideoEncoder {
@@ -59,15 +65,27 @@ impl VideoEncoder {
 	/// Send a frame to the encoder. Non-blocking: drops the frame if the
 	/// channel is full (capacity=4) to keep latency low.
 	pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
-		if self.tx.try_send(EncoderMsg { rgba, ts }).is_err() {
+		if self.tx.try_send(EncoderMsg::Frame { rgba, ts }).is_err() {
 			tracing::warn!("video frame dropped: encoder backpressure");
 		}
 	}
 
-	/// Force the next encoded frame to be a keyframe (I-frame).
-	/// Used on resume after pause so new viewers can start decoding.
-	pub fn force_keyframe(&self) {
+	/// Close the current video group, marking its content as ending at `end`, and
+	/// force the next frame to be a keyframe.
+	///
+	/// Call when the video track goes idle (pause). A consumer then bounds the last
+	/// frame at `end` instead of stretching it across the idle gap to the resumed
+	/// group, and the resumed group still opens on a decodable keyframe. This replaces
+	/// a separate force-keyframe-on-resume: closing a group already requires the next
+	/// frame to be a keyframe, so the two are one operation.
+	pub fn end_group(&self, end: hang::container::Timestamp) {
+		// Arm the keyframe before the close so the resumed group opens on an IDR.
 		self.force_keyframe.store(true, Ordering::Release);
+		// Blocking, not try_send: end-of-group is rare and must not be dropped, or the
+		// last pre-pause frame would stretch across the gap -- the bug this prevents.
+		if self.tx.blocking_send(EncoderMsg::EndGroup { end }).is_err() {
+			tracing::warn!("video end_group dropped: encoder gone");
+		}
 	}
 
 	/// Latest per-frame encode duration.
@@ -85,6 +103,19 @@ fn encoder_thread(
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
 	while let Some(msg) = rx.blocking_recv() {
+		let (rgba, ts) = match msg {
+			EncoderMsg::Frame { rgba, ts } => (rgba, ts),
+			EncoderMsg::EndGroup { end } => {
+				// Close the current group at the pre-pause end so the last frame isn't
+				// stretched across the idle gap. No encoder work: it's just a boundary.
+				if let Err(e) = producer.end_group(end) {
+					tracing::error!(error = %e, "video end_group failed; stopping encoder");
+					return;
+				}
+				continue;
+			}
+		};
+
 		let enc = match encoder.as_mut() {
 			Some(enc) => enc,
 			None => {
@@ -104,9 +135,9 @@ fn encoder_thread(
 
 		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match enc.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
+		match enc.encode_rgba(&rgba, WIDTH, HEIGHT, keyframe) {
 			Ok(packets) => {
-				if let Err(e) = producer.publish(packets, msg.ts) {
+				if let Err(e) = producer.publish(packets, ts) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
 					tracing::error!(error = %e, "video publish failed; stopping encoder");

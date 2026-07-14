@@ -132,6 +132,16 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Close the current group, marking its content as ending at `end`.
+	///
+	/// Use before a gap (a publisher pausing) so a consumer bounds the last frame at
+	/// `end` instead of stretching it to the next group. The next published frame must
+	/// be a keyframe. See [`Producer::end_group`](crate::container::Producer::end_group).
+	pub fn end_group(&mut self, end: crate::container::Timestamp) -> Result<()> {
+		self.track.end_group(end)?;
+		Ok(())
+	}
+
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.

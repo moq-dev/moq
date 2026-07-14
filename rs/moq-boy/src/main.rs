@@ -17,7 +17,10 @@
 //!   audio_active ─┘
 //!                    either true → resumed (condvar notified)
 //!
-//!   On resume → force video keyframe, re-anchor audio epoch
+//!   On pause  → close the video group at its last frame's end (bounds that frame
+//!               instead of stretching it across the idle gap, and arms the keyframe
+//!               the resumed group must open on)
+//!   On resume → re-anchor audio epoch
 //! ```
 //!
 //! Emulator state is preserved across pauses: a new viewer joining after a
@@ -278,6 +281,21 @@ async fn run(config: &Config) -> Result<()> {
 	}
 }
 
+/// Close the open video group (if any) at its last frame's presentation end -- one
+/// frame past the last published timestamp -- so that frame isn't stretched across an
+/// idle gap to the resumed group. Clears `last`; a no-op when no group is open.
+fn close_video_group(
+	encoder: &video::VideoEncoder,
+	last: &mut Option<hang::container::Timestamp>,
+	frame_duration: Duration,
+) {
+	if let Some(ts) = last.take() {
+		let end = hang::container::Timestamp::from_micros(ts.as_micros() as u64 + frame_duration.as_micros() as u64)
+			.unwrap_or(ts);
+		encoder.end_group(end);
+	}
+}
+
 /// The main emulator loop, running on a blocking thread.
 ///
 /// Ticks the Game Boy at ~59.73fps (the real hardware rate), captures
@@ -311,18 +329,25 @@ fn run_emulator(
 	let mut viewer_latency: HashMap<String, Vec<status::LatencyEntry>> = HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
+	// Timestamp of the last published video frame, i.e. the open video group's end so
+	// far. `Some` means a group is open; taken when we close it.
+	let mut last_video_ts = Some(ts);
 
 	loop {
 		// Block when no viewers are watching. See state diagram in module docs.
 		if session.paused.load(Ordering::Acquire) {
+			// Close the video group before idling so its last frame is bounded at its
+			// own end, not stretched across the pause to the resumed group. This also
+			// arms the resume keyframe (a closed group must reopen on one), which is
+			// why there's no separate force-keyframe-on-resume anymore.
+			close_video_group(&session.video_encoder, &mut last_video_ts, frame_duration);
+
 			session.wait_for_resume();
 
 			// Don't try to catch up after a pause.
 			next_frame = Instant::now();
 			// Reset tick timer so pause duration isn't counted.
 			game_stats.reset_tick();
-			// Force a keyframe so new viewers can start decoding.
-			session.video_encoder.force_keyframe();
 			// Re-anchor audio timestamps so the pause gap appears in PTS.
 			audio_encoder.reset_epoch();
 		}
@@ -409,6 +434,11 @@ fn run_emulator(
 			let ts =
 				hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
 			session.video_encoder.try_frame(rgba, ts);
+			last_video_ts = Some(ts);
+		} else {
+			// Video went idle without the whole emulator pausing (e.g. an audio-only
+			// viewer): close its group so the last frame isn't stretched to the resume.
+			close_video_group(&session.video_encoder, &mut last_video_ts, frame_duration);
 		}
 
 		// Encode and publish audio.
