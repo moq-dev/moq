@@ -51,12 +51,8 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
 
-	// active = a viewer is subscribed and we're actually encoding/sending. Either rendition counts,
-	// and the bitrate graph below sums both.
-	const videoActive = parent.computed(
-		(effect) => effect.get(publish.hd.out.active) || effect.get(publish.sd.out.active),
-	);
-	trackActive(parent, videoCard.status, videoActive);
+	// active = a viewer is subscribed and we're actually encoding/sending.
+	trackActive(parent, videoCard.status, publish.video.out.active);
 
 	const audioCard = card("audio", "Audio", audioIcon);
 	const aCodec = line(audioCard.grid, "Codec");
@@ -75,7 +71,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	// Resolution/codec from the live capture (display) + catalog; card hides when not capturing video.
 	parent.run((effect) => {
 		const display = effect.get(publish.capture.out.display);
-		const cfg = effect.get(publish.hd.out.catalog);
+		const cfg = effect.get(publish.video.out.catalog);
 		videoCard.el.style.display = display ? "" : "none";
 		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
 		vCodec.textContent = cfg?.codec ?? "—";
@@ -108,8 +104,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		frames++;
 	});
 
-	// Simulcast splits video across hd + sd encoders; sum both for the upload bitrate.
-	const encoded = () => publish.hd.out.stats.peek().bytes + publish.sd.out.stats.peek().bytes;
+	const encoded = () => publish.video.out.stats.peek().bytes;
 
 	let prevFrames = 0;
 	let prevBytes = encoded();

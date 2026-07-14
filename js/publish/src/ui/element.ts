@@ -92,7 +92,7 @@ export default class MoqPublishUi extends HTMLElement {
 		// last live preview's aspect ratio (defaults to 16:9) instead of snapping.
 		let lastAspect = 16 / 9;
 		effect.run((e) => {
-			const src = e.get(publish.videoSource);
+			const src = e.get(publish.capture.in.source);
 			if (src) {
 				player.classList.remove("player--empty");
 				player.style.aspectRatio = "";

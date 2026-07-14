@@ -6,7 +6,7 @@ import * as Preview from "./preview";
 import * as Source from "./source";
 import * as Video from "./video";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "simulcast", "preview", "announce"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
@@ -30,7 +30,6 @@ export default class MoqPublish extends HTMLElement {
 		source: new Signal<SourceType | File | undefined>(undefined),
 		muted: new Signal(false),
 		invisible: new Signal(false),
-		simulcast: new Signal(false),
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
 		// When to announce/publish the broadcast: always, never, or only once a source is selected.
@@ -41,17 +40,26 @@ export default class MoqPublish extends HTMLElement {
 	capture: Video.Capture;
 	broadcast: Broadcast;
 
-	// The per-rendition encoders. "hd"/"sd" naming survives only here, in the batteries-included element.
-	hd: Video.Encoder;
-	sd: Video.Encoder;
+	// The single video and audio encoders. For multiple renditions (e.g. simulcast), drop the element
+	// and register your own encoders on a Broadcast via the JS API.
+	video: Video.Encoder;
 	audio: Audio.Encoder;
 
-	// The video encoder tuning knobs, applied to the `hd` rendition.
+	// The video encoder tuning knobs.
 	videoConfig = new Signal<Video.Config | undefined>(undefined);
 
-	// The captured media tracks, written by #runSource and read by the capture/encoders/preview/UI.
-	videoSource = new Signal<Video.Source | undefined>(undefined);
-	audioSource = new Signal<Audio.Source | undefined>(undefined);
+	// The selected input sources: the Camera/Screen, Microphone/Screen, and File holders driving capture.
+	// Read by the UI (device pickers) and written by #runSource.
+	sources = {
+		video: new Signal<Source.Camera | Source.Screen | undefined>(undefined),
+		audio: new Signal<Source.Microphone | Source.Screen | undefined>(undefined),
+		file: new Signal<Source.File | undefined>(undefined),
+	};
+
+	// The captured media tracks, written by #runSource. Fed to `capture` (video) and the `audio` encoder,
+	// so consumers read them back via `capture.in.source` and `audio.source` rather than here.
+	#videoSource = new Signal<Video.Source | undefined>(undefined);
+	#audioSource = new Signal<Audio.Source | undefined>(undefined);
 
 	// The broadcast name, wired into the broadcast's `name` input.
 	#name = new Signal<Moq.Path.Valid>(Moq.Path.empty());
@@ -59,23 +67,16 @@ export default class MoqPublish extends HTMLElement {
 	// Whether to flip the video horizontally on playback. No attribute yet.
 	#flip = new Signal(false);
 
-	// The estimated send bandwidth (bits/sec), shared by both video encoders.
+	// The estimated send bandwidth (bits/sec), the encoder's bitrate cap.
 	#bandwidth = new Signal<number | undefined>(undefined);
 
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
-	video = new Signal<Source.Camera | Source.Screen | undefined>(undefined);
-	audioInput = new Signal<Source.Microphone | Source.Screen | undefined>(undefined);
-	file = new Signal<Source.File | undefined>(undefined);
-
 	// The inverse of the `muted` and `invisible` signals.
 	#videoEnabled: Signal<boolean>;
 	#audioEnabled: Signal<boolean>;
 	#eitherEnabled: Signal<boolean>;
-
-	// Set when `simulcast` is enabled and video is not `invisible`.
-	#sdEnabled: Signal<boolean>;
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -100,16 +101,13 @@ export default class MoqPublish extends HTMLElement {
 		this.#videoEnabled = new Signal(false);
 		this.#audioEnabled = new Signal(false);
 		this.#eitherEnabled = new Signal(false);
-		this.#sdEnabled = new Signal(false);
 
 		this.signals.run((effect) => {
 			const muted = effect.get(this.state.muted);
 			const invisible = effect.get(this.state.invisible);
-			const simulcast = effect.get(this.state.simulcast);
 			this.#videoEnabled.set(!invisible);
 			this.#audioEnabled.set(!muted);
 			this.#eitherEnabled.set(!muted || !invisible);
-			this.#sdEnabled.set(simulcast && !invisible);
 		});
 
 		this.signals.run((effect) => {
@@ -119,19 +117,19 @@ export default class MoqPublish extends HTMLElement {
 			// video track exists -- not merely a source *type* selected. Otherwise we'd
 			// announce an empty broadcast while the getUserMedia/getDisplayMedia
 			// permission prompt is still pending (or after the user denies it).
-			const hasMedia = effect.get(this.videoSource) !== undefined || effect.get(this.audioSource) !== undefined;
+			const hasMedia = effect.get(this.#videoSource) !== undefined || effect.get(this.#audioSource) !== undefined;
 			const announcing = announce === "always" || (announce === "source" && hasMedia);
 			this.#publishEnabled.set(enabled && announcing);
 		});
 
-		// Track the connection's send bandwidth estimate, shared by both encoders as their bitrate cap.
+		// Track the connection's send bandwidth estimate, the encoder's bitrate cap.
 		this.signals.run((effect) => {
 			const conn = effect.get(this.connection.established);
 			const bandwidth = conn?.sendBandwidth;
 			this.#bandwidth.set(bandwidth ? effect.get(bandwidth) : undefined);
 		});
 
-		this.capture = new Video.Capture({ source: this.videoSource });
+		this.capture = new Video.Capture({ source: this.#videoSource });
 		this.signals.cleanup(() => this.capture.close());
 
 		this.broadcast = new Broadcast({
@@ -143,30 +141,19 @@ export default class MoqPublish extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		this.hd = new Video.Encoder("video/hd", {
+		this.video = new Video.Encoder("video/data", {
 			broadcast: this.broadcast,
 			capture: this.capture,
 			enabled: this.#videoEnabled,
 			config: this.videoConfig,
 			bandwidth: this.#bandwidth,
 		});
-		this.signals.cleanup(() => this.hd.close());
-
-		// Default the sd rendition to ~3/16 of the source pixel count (e.g. ~480p from a 1080p source),
-		// scaling relative to the source so simulcast stays generic instead of baking in a fixed baseline.
-		this.sd = new Video.Encoder("video/sd", {
-			broadcast: this.broadcast,
-			capture: this.capture,
-			enabled: this.#sdEnabled,
-			config: { maxScale: 0.1875 },
-			bandwidth: this.#bandwidth,
-		});
-		this.signals.cleanup(() => this.sd.close());
+		this.signals.cleanup(() => this.video.close());
 
 		this.audio = new Audio.Encoder("audio/data", {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
-			source: this.audioSource,
+			source: this.#audioSource,
 		});
 		this.signals.cleanup(() => this.audio.close());
 
@@ -190,7 +177,7 @@ export default class MoqPublish extends HTMLElement {
 					frame: this.capture.out.frame,
 					display: this.capture.out.display,
 					flip: this.#flip,
-					encoder: this.hd,
+					encoder: this.video,
 					mode: this.state.preview,
 					enabled: this.#videoEnabled,
 				});
@@ -204,7 +191,7 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
-			const source = effect.get(this.videoSource);
+			const source = effect.get(this.#videoSource);
 			if (!source) {
 				preview.style.display = "none";
 				return;
@@ -264,8 +251,6 @@ export default class MoqPublish extends HTMLElement {
 			this.state.muted.set(newValue !== null);
 		} else if (name === "invisible") {
 			this.state.invisible.set(newValue !== null);
-		} else if (name === "simulcast") {
-			this.state.simulcast.set(newValue !== null);
 		} else if (name === "preview") {
 			if (newValue === "encoded" || newValue === "source" || newValue === "none") {
 				this.state.preview.set(newValue);
@@ -288,17 +273,17 @@ export default class MoqPublish extends HTMLElement {
 			const video = new Source.Camera({ enabled: this.#videoEnabled });
 			this.signals.run((effect) => {
 				const source = effect.get(video.source);
-				this.videoSource.set(source);
+				this.#videoSource.set(source);
 			});
 
 			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
 			this.signals.run((effect) => {
 				const source = effect.get(audio.source);
-				this.audioSource.set(source);
+				this.#audioSource.set(source);
 			});
 
-			effect.set(this.video, video);
-			effect.set(this.audioInput, audio);
+			effect.set(this.sources.video, video);
+			effect.set(this.sources.audio, audio);
 
 			effect.cleanup(() => {
 				video.close();
@@ -317,12 +302,12 @@ export default class MoqPublish extends HTMLElement {
 				const source = effect.get(screen.source);
 				if (!source) return;
 
-				effect.set(this.videoSource, source.video);
-				effect.set(this.audioSource, source.audio);
+				effect.set(this.#videoSource, source.video);
+				effect.set(this.#audioSource, source.audio);
 			});
 
-			effect.set(this.video, screen);
-			effect.set(this.audioInput, screen);
+			effect.set(this.sources.video, screen);
+			effect.set(this.sources.audio, screen);
 
 			effect.cleanup(() => {
 				screen.close();
@@ -344,12 +329,12 @@ export default class MoqPublish extends HTMLElement {
 				fileSource.prompt();
 			}
 
-			effect.set(this.file, fileSource);
+			effect.set(this.sources.file, fileSource);
 
 			this.signals.run((effect) => {
 				const source = effect.get(fileSource.source);
-				this.videoSource.set(source.video);
-				this.audioSource.set(source.audio);
+				this.#videoSource.set(source.video);
+				this.#audioSource.set(source.audio);
 			});
 
 			effect.cleanup(() => {
@@ -401,18 +386,6 @@ export default class MoqPublish extends HTMLElement {
 
 	set invisible(value: boolean) {
 		this.state.invisible.set(value);
-	}
-
-	/**
-	 * When enabled, publish an additional lower-resolution `video/sd` rendition alongside `video/hd`.
-	 * Mirrors the `simulcast` attribute and has no effect while `invisible` is set.
-	 */
-	get simulcast(): boolean {
-		return this.state.simulcast.peek();
-	}
-
-	set simulcast(value: boolean) {
-		this.state.simulcast.set(value);
 	}
 
 	get preview(): Preview.Mode {

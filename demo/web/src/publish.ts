@@ -36,8 +36,8 @@ const $ = <T extends HTMLElement>(id: string): T => {
 };
 
 // The component builds its encoders in the constructor, so they're ready as soon as
-// the element upgrades. `publish.hd`/`publish.sd` are the video encoders and
-// `publish.audio` the audio encoder whose signals we drive below.
+// the element upgrades. `publish.video`/`publish.audio` are the encoders whose signals
+// we drive below.
 const publish = $<MoqPublish>("publish");
 publish.url = RELAY_URL;
 
@@ -150,12 +150,12 @@ ui.run((effect) => {
 	publish.videoConfig.set(encoderConfig(effect, readVideoTarget(effect)));
 });
 
-// Request the selected resolution from the camera itself, not just cap the encoder. publish.video
-// holds the active Camera source (undefined for screen/file); its constraints re-acquire the track
-// on change. getUserMedia uses `ideal`, so a camera that can't reach the target falls back to its
-// best (the green "actual" readout shows what it gave).
+// Request the selected resolution from the camera itself, not just cap the encoder.
+// publish.sources.video holds the active Camera source (undefined for screen/file); its constraints
+// re-acquire the track on change. getUserMedia uses `ideal`, so a camera that can't reach the target
+// falls back to its best (the green "actual" readout shows what it gave).
 ui.run((effect) => {
-	const source = effect.get(publish.video);
+	const source = effect.get(publish.sources.video);
 	if (!(source instanceof Source.Camera)) return;
 
 	effect.set(source.constraints, cameraConstraints(readVideoTarget(effect)));
@@ -169,9 +169,9 @@ ui.run((effect) => {
 });
 
 // Mic processing constraints go to the capture itself (getUserMedia re-acquires the track on
-// change). publish.audioInput holds the active Microphone source (undefined for screen/file).
+// change). publish.sources.audio holds the active Microphone source (undefined for screen/file).
 ui.run((effect) => {
-	const source = effect.get(publish.audioInput);
+	const source = effect.get(publish.sources.audio);
 	if (!source || !("constraints" in source)) return;
 
 	const constraints = {
@@ -341,7 +341,7 @@ const setActual = (id: string, value: string | undefined) => {
 
 // Video: the resolved encoder config (codec / resolution / fps / bitrate).
 ui.run((effect) => {
-	const v = effect.get(publish.hd.out.resolved);
+	const v = effect.get(publish.video.out.resolved);
 	setActual("codec-actual", v?.codec);
 	setActual("resolution-actual", v?.width && v?.height ? `${v.width}×${v.height}` : undefined);
 	setActual("framerate-actual", v?.framerate ? formatFps(v.framerate) : undefined);
