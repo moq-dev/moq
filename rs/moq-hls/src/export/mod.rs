@@ -12,7 +12,7 @@ mod rendition;
 pub mod store;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
@@ -24,6 +24,19 @@ pub use rendition::{Kind, Rendition};
 
 /// How long to wait before retrying the initial catalog subscription.
 const CATALOG_RETRY: Duration = Duration::from_millis(250);
+
+/// Aborts a spawned task when dropped, tying the task's lifetime to the value that
+/// owns this guard. Used to stop the catalog watcher + rendition pumps the moment a
+/// [`Broadcaster`] is dropped, so its source subscriptions are released instead of
+/// lingering until the broadcast itself closes (which a subscription-driven
+/// publisher would never do while we hold it open -- a self-sustaining leak).
+pub(super) struct AbortOnDrop(pub(super) tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
 
 /// Export tuning shared across renditions.
 #[derive(Clone, Debug)]
@@ -62,6 +75,11 @@ pub struct Broadcaster {
 	/// reading; renditions discovered later inherit the current value (they
 	/// `subscribe()` to this sender).
 	paused: watch::Sender<bool>,
+	/// Aborts the [`watch_catalog`] task when this `Broadcaster` is dropped. The task
+	/// holds only a `Weak<Self>`, so dropping the last external `Arc` runs this `Drop`
+	/// (and, transitively, every rendition's [`AbortOnDrop`]), releasing the catalog
+	/// and per-track subscriptions instead of leaking them until the broadcast closes.
+	_catalog: AbortOnDrop,
 }
 
 impl Broadcaster {
@@ -69,14 +87,21 @@ impl Broadcaster {
 	pub fn new(broadcast: moq_net::BroadcastConsumer, config: Config) -> Arc<Self> {
 		let (ready, _) = watch::channel(0);
 		let (paused, _) = watch::channel(false);
-		let broadcaster = Arc::new(Self {
-			broadcast: broadcast.clone(),
-			renditions: Mutex::new(BTreeMap::new()),
-			ready,
-			paused,
-		});
-		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
-		broadcaster
+		// `new_cyclic` hands the catalog watcher a `Weak<Self>` so it can't keep the
+		// `Broadcaster` alive; the `AbortOnDrop` we store then stops that (possibly
+		// parked) task the instant the last external `Arc` drops. Without both halves the
+		// task's `Arc` (old code) pinned the `Broadcaster` -- and thus every source
+		// subscription -- until the broadcast closed on its own.
+		Arc::new_cyclic(|weak: &Weak<Self>| {
+			let catalog = tokio::spawn(watch_catalog(broadcast.clone(), config, weak.clone()));
+			Self {
+				broadcast,
+				renditions: Mutex::new(BTreeMap::new()),
+				ready,
+				paused,
+				_catalog: AbortOnDrop(catalog.abort_handle()),
+			}
+		})
 	}
 
 	/// Pause or resume pulling media from the broadcast.
@@ -181,7 +206,7 @@ impl Broadcaster {
 	}
 }
 
-async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
+async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Weak<Broadcaster>) {
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang) {
 			Ok(consumer) => break consumer,
@@ -197,12 +222,57 @@ async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, br
 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => broadcaster.sync(&broadcast, &config, &catalog),
+			// Upgrade per catalog rather than holding an `Arc`: if the owner has dropped
+			// the `Broadcaster`, stop (our `AbortOnDrop` will also have aborted us, but a
+			// clean exit is fine if that race hasn't run yet).
+			Ok(Some(catalog)) => match broadcaster.upgrade() {
+				Some(broadcaster) => broadcaster.sync(&broadcast, &config, &catalog),
+				None => break,
+			},
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
 				break;
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Dropping a `Broadcaster` must release its source subscription, not pin it until
+	/// the broadcast closes on its own. Regression for the VOD recorder leaving demo
+	/// publishers "subscribed" (and, being subscription-driven, emulating + encoding)
+	/// for hours after a recording was deleted: the catalog watcher held an
+	/// `Arc<Broadcaster>` and the rendition pumps only exited on broadcast close, so
+	/// nothing dropped when the recorder task ended.
+	#[tokio::test]
+	async fn dropping_broadcaster_releases_subscription() {
+		let mut producer = moq_net::Broadcast::new().produce();
+		let catalog = producer
+			.create_track(moq_net::Track {
+				name: "catalog.json".to_string(),
+				priority: 0,
+			})
+			.unwrap();
+
+		let broadcaster = Broadcaster::new(producer.consume(), Config::default());
+
+		// The catalog watcher subscribes to `catalog.json`; wait until it actually has.
+		tokio::time::timeout(Duration::from_secs(5), catalog.used())
+			.await
+			.expect("export should subscribe to the catalog track")
+			.unwrap();
+
+		// Dropping the export must release that subscription so the producer sees no
+		// consumers. Before the fix this timed out: the watcher's `Arc` kept the
+		// `Broadcaster` (and its subscription) alive until the broadcast closed.
+		drop(broadcaster);
+		tokio::time::timeout(Duration::from_secs(5), catalog.unused())
+			.await
+			.expect("dropping the Broadcaster must release the catalog subscription")
+			.unwrap();
 	}
 }

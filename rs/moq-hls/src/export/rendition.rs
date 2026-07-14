@@ -8,8 +8,8 @@ use moq_mux::container::fmp4::Export;
 use moq_mux::select;
 use tokio::sync::watch;
 
-use super::Config;
 use super::store::SegmentStore;
+use super::{AbortOnDrop, Config};
 use crate::Result;
 
 /// Fallback advertised bitrates when the catalog doesn't carry one.
@@ -42,6 +42,10 @@ pub struct Rendition {
 	pub codec: String,
 	/// The segment/part store fed by this rendition's exporter task.
 	pub store: Arc<SegmentStore>,
+	/// Aborts this rendition's exporter pump when the `Rendition` is dropped (i.e. when
+	/// the owning `Broadcaster` drops its renditions map), releasing the source track
+	/// subscription instead of leaving the pump reading a track nobody records.
+	_pump: AbortOnDrop,
 }
 
 impl Rendition {
@@ -54,7 +58,7 @@ impl Rendition {
 		paused: watch::Receiver<bool>,
 	) -> Self {
 		let store = Arc::new(SegmentStore::new(Kind::Video, cfg));
-		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
+		let pump = spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Video,
@@ -63,6 +67,7 @@ impl Rendition {
 			height: config.coded_height,
 			codec: config.codec.to_string(),
 			store,
+			_pump: pump,
 		}
 	}
 
@@ -75,7 +80,7 @@ impl Rendition {
 		paused: watch::Receiver<bool>,
 	) -> Self {
 		let store = Arc::new(SegmentStore::new(Kind::Audio, cfg));
-		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
+		let pump = spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -84,6 +89,7 @@ impl Rendition {
 			height: None,
 			codec: config.codec.to_string(),
 			store,
+			_pump: pump,
 		}
 	}
 }
@@ -95,14 +101,15 @@ fn spawn_pump(
 	store: Arc<SegmentStore>,
 	cfg: Config,
 	paused: watch::Receiver<bool>,
-) {
-	tokio::spawn(async move {
+) -> AbortOnDrop {
+	let handle = tokio::spawn(async move {
 		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
 		store.finish();
 	});
+	AbortOnDrop(handle.abort_handle())
 }
 
 async fn run_pump(
