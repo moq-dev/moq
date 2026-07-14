@@ -55,7 +55,7 @@ impl Waiter {
 	/// The bridge for the occasional non-kio source (a transport close, a timer) inside a poll
 	/// function otherwise driven by kio channels, so the whole thing stays a single `poll_*`. Pin the
 	/// future once, then poll it each step.
-	pub fn poll_future<F: Future>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
+	pub fn poll_future<F: Future + ?Sized>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
 		future.poll(&mut Context::from_waker(self.waker()))
 	}
 }
@@ -188,5 +188,9 @@ mod tests {
 		// A never-ready future stays pending.
 		let fut = std::pin::pin!(std::future::pending::<u8>());
 		assert_eq!(waiter.poll_future(fut), Poll::Pending);
+
+		// A type-erased future works too (the `?Sized` bound).
+		let mut boxed: Pin<Box<dyn Future<Output = u8>>> = Box::pin(std::future::ready(9u8));
+		assert_eq!(waiter.poll_future(boxed.as_mut()), Poll::Ready(9));
 	}
 }
