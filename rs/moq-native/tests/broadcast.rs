@@ -733,7 +733,7 @@ async fn broadcast_route_migration() {
 		group.finish().expect("finish group");
 	}
 	let publish_b = origin_b
-		.publish_broadcast("test", &broadcast_b.consume())
+		.publish_broadcast("test", broadcast_b.consume())
 		.expect("publish broadcast");
 
 	let mut server_a = {

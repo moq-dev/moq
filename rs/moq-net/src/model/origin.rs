@@ -983,12 +983,10 @@ impl Producer {
 
 		// First route: create the front, publish its broadcast, and hand its
 		// lifecycle to a janitor task.
-		let producer = broadcast::Info {
+		let producer = broadcast::Producer::new_spliced(broadcast::Info {
 			hops: hops.clone(),
 			origin: self.info(),
-		}
-		.produce();
-		let dynamic = producer.dynamic();
+		});
 		let state = kio::Producer::new(FrontState {
 			path: full.clone(),
 			next_route: 1,
@@ -997,7 +995,7 @@ impl Producer {
 				hops: hops.clone(),
 			}],
 			active: Some(0),
-			serving: HashMap::new(),
+			served: HashMap::new(),
 			closed: false,
 		});
 
@@ -1014,7 +1012,6 @@ impl Producer {
 			}
 			leaf_guard.front = Some(Front {
 				broadcast: producer.clone(),
-				_dynamic: dynamic,
 				state: state.clone(),
 			});
 		}
@@ -1033,7 +1030,6 @@ impl Producer {
 		Ok(Route {
 			id: 0,
 			state,
-			dynamic: producer.dynamic(),
 			broadcast: producer,
 		})
 	}
@@ -1041,27 +1037,50 @@ impl Producer {
 	/// Join the live front at `leaf` as an additional route, or `None` if the leaf
 	/// has no front (or it already closed).
 	fn join_front(leaf: &Lock<OriginNode>, hops: &OriginList) -> Option<Route> {
-		let leaf_guard = leaf.lock();
-		let front = leaf_guard.front.as_ref()?;
-		let mut s = front.state.write().ok()?;
-		if s.closed {
-			return None;
-		}
-		let id = s.next_route;
-		s.next_route += 1;
-		s.routes.push(FrontRoute { id, hops: hops.clone() });
-		// The new route takes over dispatch if it's now the best; tracks already
-		// being served stay where they are (sticky until their route detaches).
-		let best = s.best_route();
-		s.active = best;
-		drop(s);
+		let (route, handover) = {
+			let leaf_guard = leaf.lock();
+			let front = leaf_guard.front.as_ref()?;
+			let mut s = front.state.write().ok()?;
+			if s.closed {
+				return None;
+			}
+			let id = s.next_route;
+			s.next_route += 1;
+			s.routes.push(FrontRoute { id, hops: hops.clone() });
 
-		Some(Route {
-			id,
-			state: front.state.clone(),
-			dynamic: front.broadcast.dynamic(),
-			broadcast: front.broadcast.clone(),
-		})
+			// If the new route wins dispatch (a strictly better hop chain), hand the
+			// live tracks over: each is re-queued, the new route splices in at a
+			// group boundary, and the old sessions wind down as their demand caps.
+			let prev = s.active;
+			let best = s.best_route();
+			s.active = best;
+			let mut handover = Vec::new();
+			if s.active != prev && s.active == Some(id) {
+				for (name, entry) in s.served.iter_mut() {
+					if entry.route != Some(id) {
+						entry.route = None;
+						handover.push(name.clone());
+					}
+				}
+			}
+			drop(s);
+
+			(
+				Route {
+					id,
+					state: front.state.clone(),
+					broadcast: front.broadcast.clone(),
+				},
+				handover,
+			)
+		};
+
+		// Outside the leaf and route-table locks: queue the handovers.
+		for name in &handover {
+			route.broadcast.requeue_spliced(name);
+		}
+
+		Some(route)
 	}
 
 	/// Returns a new Producer restricted to publishing under one of `prefixes`.
@@ -1214,16 +1233,13 @@ const ROUTE_LINGER: Duration = Duration::from_secs(5);
 /// the retry loop against an upstream that keeps resetting one subscription.
 const MAX_TRACK_RETRIES: u32 = 3;
 
-/// A route-fed broadcast at one path: the node-owned producer every route writes
-/// into, plus the route table. The producer (and thus every track and cached
-/// group) survives route churn; consumers never observe a route change.
+/// A route-fed broadcast at one path: the node-owned broadcast whose tracks are
+/// spliced across the attached routes' per-session tracks, plus the route table.
+/// The broadcast (and every logical track and cached group in it) survives route
+/// churn; consumers never observe a route change.
 struct Front {
-	/// The shared broadcast all routes feed. Node-owned so it outlives any route.
+	/// The shared, spliced broadcast. Node-owned so it outlives any route.
 	broadcast: broadcast::Producer,
-	/// Keeps the broadcast's request queue alive across route churn: with this
-	/// handle held, a consumer's track request queues (waiting for the next route)
-	/// instead of failing fast, even while zero routes are attached.
-	_dynamic: broadcast::Dynamic,
 	/// The route table, shared with every [`Route`] handle and the janitor.
 	state: kio::Producer<FrontState>,
 }
@@ -1236,15 +1252,14 @@ struct FrontRoute {
 	hops: OriginList,
 }
 
-/// A track dispatched to a route, tracked so it can be re-dispatched when the
-/// route dies.
-struct FrontServing {
+/// Bookkeeping for a track assigned to a route, so it can be re-assigned when the
+/// route detaches or the serve fails.
+struct ServedTrack {
 	/// The route currently serving the track, or `None` while it is queued for
-	/// re-dispatch (waiting for a route to pop it).
+	/// (re-)assignment.
 	route: Option<u64>,
-	/// Pins the track state alive across the handoff and mints resume requests.
-	keeper: track::Keeper,
-	/// Consecutive serve failures; at [`MAX_TRACK_RETRIES`] the track aborts.
+	/// Serve attempts that failed before a session track was spliced in; at
+	/// [`MAX_TRACK_RETRIES`] the logical track aborts instead of retrying.
 	fails: u32,
 }
 
@@ -1255,10 +1270,10 @@ struct FrontState {
 	path: PathOwned,
 	next_route: u64,
 	routes: Vec<FrontRoute>,
-	/// The route that pops new track requests. Backups park until promoted.
+	/// The route that pops new track assignments. Backups park until promoted.
 	active: Option<u64>,
 	/// Route-served tracks by name.
-	serving: HashMap<Arc<str>, FrontServing>,
+	served: HashMap<Arc<str>, ServedTrack>,
 	/// Terminal: no more routes may attach and every poller stops. Set by the
 	/// janitor when the linger window expires, or synchronously by a graceful
 	/// detach (a deliberate unannounce) that empties the route table.
@@ -1276,9 +1291,9 @@ impl FrontState {
 	}
 }
 
-/// Detach `id` from the route table, promoting the next-best route and queueing a
-/// resume request for every track the route was serving. Idempotent. Shared by
-/// [`Route`] and [`RouteGuard`] drops.
+/// Detach `id` from the route table, promoting the next-best route and re-queueing
+/// every track the route was serving for the replacement to splice into.
+/// Idempotent. Shared by [`Route`] and [`RouteGuard`] drops.
 ///
 /// `graceful` marks a deliberate unannounce (the peer retracted the path) rather
 /// than a dying session: if it empties the route table, the broadcast closes
@@ -1286,10 +1301,10 @@ impl FrontState {
 /// guarantees a following re-announce creates a *new* broadcast rather than
 /// splicing new content into this one.
 fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Producer, id: u64, graceful: bool) {
-	// Collect the re-dispatch work under the route-table lock, then enqueue outside
-	// it so the broadcast lock is never nested inside it.
-	let mut resume = Vec::new();
-	let mut aborted = Vec::new();
+	// Collect the re-queue work under the route-table lock, then apply it outside
+	// so the broadcast lock is never nested inside it.
+	let mut requeue = Vec::new();
+	let mut close = false;
 	{
 		let Ok(mut s) = state.write() else { return };
 		let Some(pos) = s.routes.iter().position(|r| r.id == id) else {
@@ -1304,41 +1319,36 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 			// Deliberate end: close now. The janitor observes `closed` and finishes
 			// the teardown (unannounce).
 			s.closed = true;
-			aborted = std::mem::take(&mut s.serving).into_values().collect();
+			close = true;
 		} else {
-			// Anything this route was serving needs a new home. Tracks that ended
-			// (or lost every consumer) are dropped instead of re-dispatched.
-			s.serving.retain(|_, entry| {
-				if entry.route != Some(id) {
-					return true;
+			// Anything this route was serving needs a new home.
+			for (name, entry) in s.served.iter_mut() {
+				if entry.route == Some(id) {
+					entry.route = None;
+					requeue.push(name.clone());
 				}
-				if !entry.keeper.resumable() {
-					return false;
-				}
-				entry.route = None;
-				resume.push(entry.keeper.resume_request());
-				true
-			});
+			}
 		}
 	}
-	for entry in aborted {
-		entry.keeper.abort(Error::Dropped);
+	if close {
+		broadcast.abort_spliced(Error::Dropped);
 	}
-	for request in resume {
+	for name in requeue {
 		// Queued for whichever route pops it next; if none ever attaches, the
 		// janitor eventually closes the front and aborts the track.
-		let _ = broadcast.enqueue_request(request);
+		broadcast.requeue_spliced(&name);
 	}
 }
 
 /// The serving side of one route feeding a route-fed broadcast.
 ///
 /// Returned by [`Producer::attach_route`]. The session (or any feeder) drains
-/// [`Self::requested_track`] and serves each [`track::Request`] by writing groups
-/// into the shared track producer. Only the best attached route (shortest hop
-/// chain) is dispatched requests; the others park as hot standbys.
+/// [`Self::assigned`] and serves each [`Assignment`] with a track of its own,
+/// which the origin splices into the logical track at a group boundary. Only the
+/// best attached route (shortest hop chain) is dispatched assignments; the others
+/// park as hot standbys.
 ///
-/// Dropping the route detaches it: every track it was serving is re-dispatched to
+/// Dropping the route detaches it: every track it was serving is re-assigned to
 /// the next-best route, resuming at the first missing group sequence, and
 /// consumers never observe the swap. When the last route detaches the broadcast
 /// lingers briefly (serving from cache) before being unannounced, so a
@@ -1347,19 +1357,18 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 pub struct Route {
 	id: u64,
 	state: kio::Producer<FrontState>,
-	// The front's shared broadcast, used to enqueue resume requests on detach.
+	// The front's shared broadcast: the assignment queue, and metadata for
+	// session-local tracks.
 	broadcast: broadcast::Producer,
-	// The front's request queue; only polled while this route is active.
-	dynamic: broadcast::Dynamic,
 }
 
 impl Route {
-	/// Poll for the next track request dispatched to this route.
+	/// Poll for the next track assigned to this route.
 	///
 	/// Parks while another route is active. Returns [`Error::Dropped`] once the
 	/// route is detached or the broadcast is gone, at which point the feeder should
 	/// stop serving.
-	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
+	pub fn poll_assigned(&mut self, waiter: &kio::Waiter) -> Poll<Result<Assignment, Error>> {
 		// Gate on being the active route (or a terminal state).
 		let id = self.id;
 		match self.state.poll(waiter, |s| {
@@ -1378,53 +1387,41 @@ impl Route {
 			Poll::Pending => return Poll::Pending,
 		}
 
-		let request = match ready!(self.dynamic.poll_requested_track(waiter)) {
-			Ok(request) => request,
+		let (name, resume) = match ready!(self.broadcast.poll_spliced_assigned(waiter)) {
+			Ok(assigned) => assigned,
 			Err(err) => return Poll::Ready(Err(err)),
 		};
 
-		// Attribute the track to this route and pin its state (via the keeper) so it
-		// survives us. Preserve the fail count across re-dispatches so a track that
-		// keeps failing eventually aborts instead of retrying forever.
+		// Attribute the track to this route, preserving the fail count so a track
+		// that keeps failing eventually aborts instead of retrying forever.
 		if let Ok(mut s) = self.state.write() {
-			let name = request.weak().name().clone();
-			let fails = s.serving.get(&name).map(|e| e.fails).unwrap_or(0);
-			s.serving.insert(
-				name,
-				FrontServing {
-					route: Some(self.id),
-					keeper: request.keeper(),
-					fails,
-				},
-			);
-			// Opportunistic reap: drop keepers for tracks that already ended.
-			s.serving.retain(|_, e| e.keeper.is_live());
+			let entry = s
+				.served
+				.entry(name.clone())
+				.or_insert(ServedTrack { route: None, fails: 0 });
+			entry.route = Some(self.id);
 		}
 
-		Poll::Ready(Ok(request))
-	}
-
-	/// Block until a track request is dispatched to this route. See
-	/// [`Self::poll_requested_track`].
-	pub async fn requested_track(&mut self) -> Result<track::Request, Error> {
-		kio::wait(|waiter| self.poll_requested_track(waiter)).await
-	}
-
-	/// A cheap, cloneable handle for per-track bookkeeping (re-dispatching a failed
-	/// track, observing closure) without the detach-on-drop semantics.
-	pub fn handle(&self) -> RouteHandle {
-		RouteHandle {
-			id: self.id,
+		Poll::Ready(Ok(Assignment {
+			name,
+			resume,
 			state: self.state.clone(),
 			broadcast: self.broadcast.clone(),
-		}
+			route: self.id,
+			served: false,
+			done: false,
+		}))
+	}
+
+	/// Block until a track is assigned to this route. See [`Self::poll_assigned`].
+	pub async fn assigned(&mut self) -> Result<Assignment, Error> {
+		kio::wait(|waiter| self.poll_assigned(waiter)).await
 	}
 
 	/// A guard whose drop detaches this route, for callers that own the route's
 	/// lifecycle (e.g. an announce loop) while another task drives
-	/// [`Self::requested_track`]. Detaching is idempotent: whichever of the guard
-	/// and the [`Route`] drops first wins, and the poller then observes
-	/// [`Error::Dropped`].
+	/// [`Self::assigned`]. Detaching is idempotent: whichever of the guard and the
+	/// [`Route`] drops first wins, and the poller then observes [`Error::Dropped`].
 	pub fn guard(&self) -> RouteGuard {
 		RouteGuard {
 			id: self.id,
@@ -1470,79 +1467,97 @@ impl Drop for RouteGuard {
 	}
 }
 
-/// A cheap, cloneable companion to a [`Route`] for per-track tasks.
+/// One track assigned to a route for serving.
 ///
-/// Lets the task that serves one track hand the track back for re-dispatch when
-/// its upstream fails, and observe the broadcast closing, without holding the
-/// route itself (whose drop would detach it).
-#[derive(Clone)]
-pub struct RouteHandle {
-	id: u64,
+/// Yielded by [`Route::assigned`]. The feeder learns the track's properties (e.g.
+/// via a wire TRACK_INFO), creates a track of its own with [`Self::serve`], and
+/// writes groups into it; the origin splices that track into the logical track at
+/// the right group boundary, so downstream consumers resume seamlessly.
+///
+/// Dropping the assignment without [`Self::complete`] (or [`Self::retire`]) hands
+/// the track back: it is re-queued for the next route (or a bounded retry), and
+/// its consumers stall rather than error while nobody serves it.
+#[must_use = "the track is re-assigned (or aborted) when dropped without complete/retire"]
+pub struct Assignment {
+	name: Arc<str>,
+	resume: super::resume::Producer,
 	state: kio::Producer<FrontState>,
 	broadcast: broadcast::Producer,
+	route: u64,
+	served: bool,
+	done: bool,
 }
 
-impl RouteHandle {
-	/// Hand a track back after a serve failure so another (or the same) route can
-	/// resume it.
+impl Assignment {
+	/// The assigned track's name.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// Start serving: create this route's own track and splice it into the logical
+	/// track, resuming at the first group the previous route never delivered.
 	///
-	/// The track's consumers keep their handles and stall until it is re-served; it
-	/// aborts with `err` instead once it has failed a bounded number of times or
-	/// nothing can serve it anymore. No-op if the track was already re-dispatched
-	/// elsewhere or has ended.
-	pub fn redispatch_track(&self, name: &str, err: Error) {
-		enum Action {
-			Resume(track::Request),
-			Abort(track::Keeper),
+	/// The returned producer is exclusively this route's; write groups with their
+	/// publisher-assigned sequences and the splice delivers exactly the missing
+	/// range downstream. Subscriber demand (sliced to this segment's bounds)
+	/// arrives through the producer's aggregate as usual.
+	pub fn serve(&mut self, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
+		let producer = track::Producer::new(self.broadcast.info_arc(), self.name.clone(), info.into());
+		self.resume.takeover(producer.consume())?;
+		self.served = true;
+		Ok(producer)
+	}
+
+	/// The logical track finished for good (the upstream ended it, not a boundary
+	/// cap): no more groups will ever exist, and subscribers see a clean end once
+	/// the final segment drains.
+	pub fn complete(mut self) {
+		self.done = true;
+		let _ = self.resume.finish();
+	}
+
+	/// Stop serving cleanly without ending the logical track (this route's slice
+	/// completed at a boundary cap). No re-assignment happens; another route is
+	/// already serving the rest.
+	pub fn retire(mut self) {
+		self.done = true;
+	}
+}
+
+impl Drop for Assignment {
+	fn drop(&mut self) {
+		if self.done {
+			return;
 		}
 
-		let action = {
+		// Hand the track back. Pre-serve failures (the route couldn't even resolve
+		// the track) count toward the retry cap; post-serve hand-backs (a session
+		// dying mid-serve) don't, since failover is normal operation.
+		let abort = {
 			let Ok(mut s) = self.state.write() else { return };
 			if s.closed {
 				return;
 			}
-			let Some(entry) = s.serving.get_mut(name) else { return };
-			if entry.route != Some(self.id) {
+			let Some(entry) = s.served.get_mut(&self.name) else {
+				return;
+			};
+			if entry.route != Some(self.route) {
 				// Someone else already took the track over.
 				return;
 			}
-			if !entry.keeper.resumable() {
-				s.serving.remove(name);
-				return;
+			entry.route = None;
+			if !self.served {
+				entry.fails += 1;
 			}
-			entry.fails += 1;
-			if entry.fails > MAX_TRACK_RETRIES {
-				let entry = s.serving.remove(name).expect("entry just observed");
-				Action::Abort(entry.keeper)
-			} else {
-				entry.route = None;
-				Action::Resume(entry.keeper.resume_request())
-			}
+			entry.fails > MAX_TRACK_RETRIES
 		};
 
-		match action {
-			Action::Resume(request) => {
-				let _ = self.broadcast.enqueue_request(request);
-			}
-			Action::Abort(keeper) => keeper.abort(err),
+		if abort {
+			// Nobody can serve it: release the waiting subscribers.
+			let _ = self.resume.abort(Error::Unroutable);
+		} else {
+			self.broadcast.requeue_spliced(&self.name);
 		}
-	}
-
-	/// Poll for the broadcast being closed (the linger window expired with no
-	/// routes attached, or the origin went away).
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		match self
-			.state
-			.poll(waiter, |s| if s.closed { Poll::Ready(()) } else { Poll::Pending })
-		{
-			Poll::Ready(_) => Poll::Ready(()),
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
-	/// Block until the broadcast is closed. See [`Self::poll_closed`].
-	pub async fn closed(&self) {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 }
 
@@ -1555,7 +1570,7 @@ async fn run_front_janitor(
 	state: kio::Producer<FrontState>,
 	broadcast: broadcast::Producer,
 ) {
-	let serving = loop {
+	loop {
 		// Wait until the last route detaches, or a graceful detach already closed
 		// the front. We hold a producer, so the channel can't close underneath us;
 		// treat it as terminal anyway.
@@ -1574,8 +1589,8 @@ async fn run_front_janitor(
 		})
 		.await;
 		if already_closed {
-			// A graceful detach took the serving map and aborted its tracks.
-			break HashMap::new();
+			// A graceful detach already aborted the logical tracks.
+			break;
 		}
 
 		// Linger: consumers keep their handles (serving from cache) while a
@@ -1605,23 +1620,21 @@ async fn run_front_janitor(
 		match state.write() {
 			Ok(mut s) => {
 				if s.closed {
-					break HashMap::new();
+					break;
 				}
 				if !s.routes.is_empty() {
 					continue;
 				}
 				s.closed = true;
-				break std::mem::take(&mut s.serving);
+				break;
 			}
-			Err(_) => break HashMap::new(),
+			Err(_) => break,
 		}
-	};
-
-	// Close: no route came back. Release the per-track keepers (aborting tracks
-	// that never finished) and unannounce.
-	for entry in serving.into_values() {
-		entry.keeper.abort(Error::Dropped);
 	}
+
+	// Close: no route came back. Abort the logical tracks (releasing their
+	// subscribers) and unannounce.
+	broadcast.abort_spliced(Error::Dropped);
 
 	// Deliberate close; suppresses the dropped-without-close warning.
 	broadcast.close();
@@ -2619,51 +2632,54 @@ mod tests {
 		let mut route_b = origin.attach_route("test", hops_b).unwrap();
 		announced.assert_next_wait();
 
-		// Subscribing dispatches the track request to the best route (A).
+		// Subscribing dispatches the track to the best route (A).
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
 		assert!(
-			route_b.requested_track().now_or_never().is_none(),
-			"standby route should not be dispatched requests"
+			route_b.assigned().now_or_never().is_none(),
+			"standby route should not be assigned tracks"
 		);
-		let request = route_a
-			.requested_track()
+		let mut assignment = route_a
+			.assigned()
 			.now_or_never()
-			.expect("request should be dispatched")
+			.expect("track should be assigned")
 			.unwrap();
-		assert_eq!(request.name(), "video");
-		assert_eq!(request.resume(), None, "fresh request has no resume floor");
+		assert_eq!(assignment.name(), "video");
 
-		let mut producer = request.accept(None);
+		// Serving splices this route's own track in; the subscriber resolves.
+		let mut producer = assignment.serve(None).unwrap();
 		let mut sub = subscribing.await.unwrap();
+		// Demand registers as the subscriber polls; a fresh segment carries no
+		// boundary, so the demand is the subscriber's own.
+		sub.assert_no_group();
+		assert_eq!(producer.subscription().unwrap().group_start, None);
 
 		producer.append_group().unwrap();
 		producer.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 0);
 		assert_eq!(sub.assert_group().sequence, 1);
 
-		// Route A dies (session loss): the track is re-dispatched to route B with a
-		// resume floor, and nothing is announced.
+		// Route A dies (session loss): the track is re-assigned to route B and
+		// nothing is announced.
 		drop(route_a);
-		drop(producer);
+		drop(assignment);
+		producer.abort(Error::Dropped).unwrap();
 		announced.assert_next_wait();
 
-		let request = route_b
-			.requested_track()
+		let mut assignment = route_b
+			.assigned()
 			.now_or_never()
-			.expect("resume request should be dispatched to the standby")
+			.expect("track should be re-assigned to the standby")
 			.unwrap();
-		assert_eq!(request.name(), "video");
-		assert_eq!(request.resume(), Some(2), "resume floor is one past the cached groups");
+		assert_eq!(assignment.name(), "video");
 
-		// The resumed producer feeds the same track state: a duplicate group is
-		// rejected, and the same subscriber keeps reading past the swap.
-		let mut producer = request.accept(None);
-		assert!(matches!(
-			producer.create_group(group::Info { sequence: 1 }),
-			Err(Error::Duplicate)
-		));
+		// The new segment resumes one past the spliced groups: its demand starts at
+		// the boundary, and groups the old route already delivered are filtered.
+		let mut producer = assignment.serve(None).unwrap();
+		sub.assert_no_group();
+		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
-		assert_eq!(sub.assert_group().sequence, 2);
+		assert_eq!(sub.assert_group().sequence, 2, "groups below the boundary are filtered");
 		sub.assert_not_closed();
 	}
 
@@ -2681,8 +2697,8 @@ mod tests {
 		announced.assert_next("test", &broadcast);
 
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let request = route_a.requested_track().await.unwrap();
-		let mut producer = request.accept(None);
+		let mut assignment = route_a.assigned().await.unwrap();
+		let mut producer = assignment.serve(None).unwrap();
 		let mut sub = subscribing.await.unwrap();
 		producer.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 0);
@@ -2690,7 +2706,8 @@ mod tests {
 		// The only route dies. The broadcast stays announced (linger) and the
 		// subscriber stalls rather than erroring.
 		drop(route_a);
-		drop(producer);
+		drop(assignment);
+		producer.abort(Error::Dropped).unwrap();
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 		announced.assert_next_wait();
 		sub.assert_no_group();
@@ -2698,15 +2715,66 @@ mod tests {
 
 		// A reconnecting session re-attaches within the window and resumes.
 		let mut route_b = origin.attach_route("test", hops).unwrap();
-		let request = route_b.requested_track().await.unwrap();
-		assert_eq!(request.resume(), Some(1));
-		let mut producer = request.accept(None);
+		let mut assignment = route_b.assigned().await.unwrap();
+		let mut producer = assignment.serve(None).unwrap();
+		sub.assert_no_group();
+		assert_eq!(producer.subscription().unwrap().group_start, Some(1));
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 
 		// Well past the linger window: the re-attached route keeps it alive.
 		tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 		announced.assert_next_wait();
+		sub.assert_not_closed();
+	}
+
+	/// A better route attaching mid-subscription takes the track over at an explicit
+	/// group boundary: the old route's demand is capped, the new route starts at the
+	/// boundary, and the subscriber reads a seamless sequence.
+	#[tokio::test]
+	async fn test_route_handover() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops_long = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+
+		let mut route_a = origin.attach_route("test", hops_long).unwrap();
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		announced.assert_next("test", &broadcast);
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut assignment_a = route_a.assigned().await.unwrap();
+		let mut producer_a = assignment_a.serve(None).unwrap();
+		let mut sub = subscribing.await.unwrap();
+		producer_a.append_group().unwrap();
+		producer_a.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+		assert_eq!(sub.assert_group().sequence, 1);
+
+		// A strictly shorter route attaches: the live track is handed over with no
+		// announce churn.
+		let mut route_b = origin.attach_route("test", hops_short).unwrap();
+		announced.assert_next_wait();
+
+		let mut assignment_b = route_b.assigned().await.unwrap();
+		assert_eq!(assignment_b.name(), "video");
+		let mut producer_b = assignment_b.serve(None).unwrap();
+
+		// The old route's demand is capped at the boundary; the new route's starts
+		// there. Both propagate as the subscriber polls.
+		sub.assert_no_group();
+		assert_eq!(producer_a.subscription().unwrap().group_end, Some(1));
+		assert_eq!(producer_b.subscription().unwrap().group_start, Some(2));
+
+		// The old route racing past its cap is filtered; the new route serves on.
+		producer_a.create_group(group::Info { sequence: 2 }).unwrap();
+		producer_b.create_group(group::Info { sequence: 2 }).unwrap();
+		producer_b.create_group(group::Info { sequence: 3 }).unwrap();
+		assert_eq!(sub.assert_group().sequence, 2);
+		assert_eq!(sub.assert_group().sequence, 3);
+		sub.assert_no_group();
 		sub.assert_not_closed();
 	}
 
@@ -2754,11 +2822,12 @@ mod tests {
 		announced.assert_next("test", &broadcast);
 
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let request = route.requested_track().await.unwrap();
-		let producer = request.accept(None);
-		let sub = subscribing.await.unwrap();
+		let mut assignment = route.assigned().await.unwrap();
+		let producer = assignment.serve(None).unwrap();
+		let mut sub = subscribing.await.unwrap();
 
 		drop(route);
+		drop(assignment);
 		drop(producer);
 
 		// The linger window expires with no route: unannounce, and the track aborts.

@@ -73,9 +73,25 @@ struct BroadcastState {
 	// If this is 0, requests must be empty.
 	dynamic: usize,
 
+	// Route-fed mode (a relay/origin "front"): tracks are spliced logical tracks
+	// joined across per-session tracks. `None` for an ordinary broadcast.
+	spliced: Option<SplicedState>,
+
 	// Set by an explicit `Producer::close()` so `Drop` can tell a deliberate
 	// shutdown apart from a producer that was dropped by accident.
 	closed: bool,
+}
+
+/// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
+/// single session, plus the queue of tracks awaiting a serving route.
+#[derive(Default)]
+struct SplicedState {
+	// Logical tracks by name, owned strongly: they live as long as the broadcast
+	// (the origin's front), not as long as any consumer.
+	tracks: HashMap<Arc<str>, super::resume::Producer>,
+
+	// Names awaiting assignment to a route, in request order.
+	pending: VecDeque<Arc<str>>,
 }
 
 impl BroadcastState {
@@ -139,8 +155,27 @@ impl Producer {
 		}
 	}
 
+	/// Create a route-fed (spliced) broadcast: consumer track lookups mint logical
+	/// tracks that are spliced across per-session tracks, queued for a route to
+	/// serve. Used by the origin for broadcasts reached over the network.
+	pub(crate) fn new_spliced(info: Info) -> Self {
+		Self {
+			info: Arc::new(info),
+			state: kio::Producer::new(BroadcastState {
+				spliced: Some(SplicedState::default()),
+				..Default::default()
+			}),
+		}
+	}
+
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// The shared metadata handle, threaded into session-local tracks so their
+	/// groups reach this broadcast's cache pool.
+	pub(crate) fn info_arc(&self) -> Arc<Info> {
+		self.info.clone()
 	}
 
 	/// Remove a track from the lookup.
@@ -213,21 +248,52 @@ impl Producer {
 		Dynamic::new(self.info.clone(), self.state.clone())
 	}
 
-	/// Queue a resume [`track::Request`] for the next [`Dynamic`] handler.
-	///
-	/// Used by the origin to re-dispatch a route-served track after its route died:
-	/// the request shares the existing track state, so the handler that picks it up
-	/// continues the same track. A request already queued under the name is kept
-	/// (the re-dispatch coalesces onto it).
-	pub(crate) fn enqueue_request(&self, request: track::Request) -> Result<(), Error> {
-		let mut state = BroadcastState::modify(&self.state)?;
-		let name = request.weak().name().clone();
-		if state.requests.contains_key(&name) {
-			return Ok(());
+	/// Poll for the next spliced track awaiting a serving route, returning its name
+	/// and logical producer. Route-fed broadcasts only.
+	pub(crate) fn poll_spliced_assigned(
+		&self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(Arc<str>, super::resume::Producer), Error>> {
+		let mut state = match ready!(self.state.poll(waiter, |state| {
+			match &state.spliced {
+				Some(spliced) if !spliced.pending.is_empty() => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		})) {
+			Ok(state) => state,
+			Err(_) => return Poll::Ready(Err(Error::Dropped)),
+		};
+
+		let spliced = state.spliced.as_mut().expect("predicate guaranteed spliced");
+		let name = spliced.pending.pop_front().expect("predicate guaranteed a request");
+		let producer = spliced.tracks.get(&name).expect("pending name without a track").clone();
+		Poll::Ready(Ok((name, producer)))
+	}
+
+	/// Re-queue a spliced track for a (new) serving route, e.g. after its previous
+	/// route died. Coalesces with an already-queued entry; a no-op if the track no
+	/// longer exists.
+	pub(crate) fn requeue_spliced(&self, name: &Arc<str>) {
+		if let Ok(mut state) = self.state.write()
+			&& let Some(spliced) = state.spliced.as_mut()
+			&& spliced.tracks.contains_key(name)
+			&& !spliced.pending.contains(name)
+		{
+			spliced.pending.push_back(name.clone());
 		}
-		state.requests.insert(name.clone(), request);
-		state.request_order.push_back(name);
-		Ok(())
+	}
+
+	/// Abort every spliced track, releasing their subscribers with `err`. Called
+	/// when the broadcast closes for good.
+	pub(crate) fn abort_spliced(&self, err: Error) {
+		if let Ok(mut state) = self.state.write()
+			&& let Some(spliced) = state.spliced.as_mut()
+		{
+			spliced.pending.clear();
+			for producer in spliced.tracks.values_mut() {
+				let _ = producer.abort(err.clone());
+			}
+		}
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -439,6 +505,20 @@ impl Consumer {
 			Err(_) => return Err(Error::Dropped),
 		};
 
+		// A route-fed broadcast mints spliced logical tracks: they outlive any
+		// session, and a route is asked (via the pending queue) to start serving.
+		if let Some(spliced) = state.spliced.as_mut() {
+			if let Some(producer) = spliced.tracks.get(name) {
+				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+			}
+			let name: Arc<str> = name.into();
+			let producer = super::resume::Producer::new();
+			let consumer = producer.consume();
+			spliced.tracks.insert(name.clone(), producer);
+			spliced.pending.push_back(name.clone());
+			return Ok(track::Consumer::spliced(name, consumer));
+		}
+
 		// Reuse a live producer if one is already publishing the track. `get` drops a
 		// closed entry and returns `None`, so we fall through to a fresh request.
 		if let Some(weak) = state.tracks.get(name) {
@@ -600,7 +680,7 @@ mod test {
 
 		// Create a new track and insert it into the broadcast (resolves immediately).
 		let track1 = producer.assert_create_track("track1", None);
-		let track1c = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
+		let mut track1c = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 
 		// A track nobody publishes stays pending until accepted.
 		let track2_fut = subscribe_pending!(consumer, "track2");
@@ -665,7 +745,7 @@ mod test {
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
 		let mut producer1 = broadcast.assert_request().accept(None);
-		let track1 = track1_fut.await.unwrap();
+		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
 		producer1.append_group().unwrap();

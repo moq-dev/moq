@@ -481,7 +481,7 @@ impl<F: Container> Consumer<F> {
 	}
 
 	/// Wait until the track is closed.
-	pub async fn closed(&self) -> Result<(), F::Error> {
+	pub async fn closed(&mut self) -> Result<(), F::Error> {
 		Ok(self.track.closed().await?)
 	}
 }
@@ -1255,7 +1255,7 @@ mod tests {
 			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
 		);
 		let consumer_track = track.subscribe(None);
-		let consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		assert!(
 			tokio::time::timeout(Duration::from_millis(50), consumer.closed())
