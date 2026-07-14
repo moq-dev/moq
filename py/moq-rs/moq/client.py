@@ -21,6 +21,10 @@ class Client:
 
         origin = OriginProducer()
         client = Client("https://relay.example.com", publish=origin, subscribe=origin)
+
+    For a relay that requires mTLS, pass a paired client certificate and key:
+
+        client = Client("https://relay.example.com", tls_cert="client.pem", tls_key="client.key")
     """
 
     def __init__(
@@ -30,6 +34,8 @@ class Client:
         tls_verify: bool = True,
         tls_roots: list[str] | None = None,
         tls_fingerprints: list[str] | None = None,
+        tls_cert: str | None = None,
+        tls_key: str | None = None,
         bind: str | None = None,
         publish: OriginProducer | None = None,
         subscribe: OriginProducer | None = None,
@@ -38,6 +44,8 @@ class Client:
         self._tls_verify = tls_verify
         self._tls_roots = tls_roots
         self._tls_fingerprints = tls_fingerprints
+        self._tls_cert = tls_cert
+        self._tls_key = tls_key
         self._bind = bind
 
         # If neither origin is provided, create a shared internal one.
@@ -63,6 +71,10 @@ class Client:
             self._inner.set_tls_roots(self._tls_roots)
         if self._tls_fingerprints:
             self._inner.set_tls_fingerprints(self._tls_fingerprints)
+        if self._tls_cert is not None:
+            self._inner.set_tls_cert(self._tls_cert)
+        if self._tls_key is not None:
+            self._inner.set_tls_key(self._tls_key)
         if self._bind is not None:
             self._inner.set_bind(self._bind)
 
