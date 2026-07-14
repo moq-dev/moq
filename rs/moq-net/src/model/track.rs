@@ -1309,6 +1309,11 @@ impl Consumer {
 			state: self.state.clone(),
 		})
 	}
+
+	/// Return the latest group sequence in the track, or `None` before any group.
+	pub fn latest(&self) -> Option<u64> {
+		self.state.read().max_sequence
+	}
 }
 
 /// The pollable state of a [`Consumer::subscribe`]; awaited via the

@@ -13,6 +13,7 @@ mod origin_impl;
 
 mod bytes;
 mod datagram;
+pub mod resume;
 mod subscription;
 mod time;
 mod weak_cache;
