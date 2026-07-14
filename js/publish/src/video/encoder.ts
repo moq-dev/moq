@@ -372,7 +372,11 @@ export class Encoder {
 
 		// Try hardware encoding first.
 		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-		if (!Util.Hacks.isFirefox) {
+		// Safari accepts every codec under `prefer-hardware` and echoes the hint straight back, but
+		// VideoToolbox only hardware-encodes H.264 and HEVC. Skip the hardware pass and let it fall
+		// through to the software pass, which is H.264 first, since Safari routes that through
+		// VideoToolbox anyway regardless of the hint.
+		if (!Util.Hacks.isFirefox && !Util.Hacks.isSafari) {
 			for (const codec of HARDWARE_CODECS) {
 				if (!codec.startsWith(required)) continue;
 
