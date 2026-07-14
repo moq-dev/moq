@@ -1,5 +1,5 @@
 import { Time } from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, Signal } from "@moq/signals";
 import type * as Video from "./video";
 
 // What the canvas preview renders.
@@ -9,9 +9,17 @@ import type * as Video from "./video";
 //   artifacts a viewer would receive. This costs a full extra encode + decode pass.
 export type Mode = "none" | "source" | "encoded";
 
+/** Inputs for the canvas preview: the frame source plus the encoder to mirror in `encoded` mode. */
 export type RendererProps = {
 	canvas: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
-	video: Video.Root;
+	// The captured frame to draw (owned by the capture pipeline; never closed here).
+	frame: Getter<VideoFrame | undefined>;
+	// The display size, for sizing the canvas before the first frame.
+	display: Getter<{ width: number; height: number } | undefined>;
+	// Whether to mirror the video horizontally.
+	flip: Getter<boolean>;
+	// The encoder to re-encode through in `encoded` mode. Falls back to the raw frame when unset.
+	encoder?: Video.Encoder | Signal<Video.Encoder | undefined>;
 	mode?: Mode | Signal<Mode>;
 	enabled?: boolean | Signal<boolean>;
 };
@@ -22,7 +30,13 @@ export class Renderer {
 	mode: Signal<Mode>;
 	enabled: Signal<boolean>;
 
-	#video: Video.Root;
+	#source: Getter<VideoFrame | undefined>;
+	#display: Getter<{ width: number; height: number } | undefined>;
+	#flip: Getter<boolean>;
+	#encoder: Getter<Video.Encoder | undefined>;
+
+	// Whether we've already warned about `encoded` mode without an encoder, so it fires at most once.
+	#warnedNoEncoder = false;
 
 	// The frame to draw. Just a pointer to a frame owned elsewhere (the capture pipeline or the
 	// transcoder), so we never close it ourselves.
@@ -35,7 +49,10 @@ export class Renderer {
 		this.canvas = Signal.from(props.canvas);
 		this.mode = Signal.from(props.mode ?? "source");
 		this.enabled = Signal.from(props.enabled ?? true);
-		this.#video = props.video;
+		this.#source = getter(props.frame);
+		this.#display = getter(props.display);
+		this.#flip = getter(props.flip);
+		this.#encoder = getter(props.encoder);
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -55,17 +72,26 @@ export class Renderer {
 		}
 
 		if (mode === "encoded") {
-			const transcode = new Transcode({
-				source: this.#video.frame,
-				config: this.#video.hd.resolved,
-				settings: this.#video.hd.config,
-			});
-			effect.cleanup(() => transcode.close());
-			effect.proxy(this.#frame, transcode.frame);
-			return;
+			const encoder = effect.get(this.#encoder);
+			if (encoder) {
+				const transcode = new Transcode({
+					source: this.#source,
+					config: encoder.out.resolved,
+					settings: encoder.in.config,
+				});
+				effect.cleanup(() => transcode.close());
+				effect.proxy(this.#frame, transcode.frame);
+				return;
+			}
+
+			// No encoder to mirror: fall back to the raw frame rather than rendering nothing.
+			if (!this.#warnedNoEncoder) {
+				this.#warnedNoEncoder = true;
+				console.warn('moq-publish: preview="encoded" requires an encoder; showing the raw source.');
+			}
 		}
 
-		effect.proxy(this.#frame, this.#video.frame);
+		effect.proxy(this.#frame, this.#source);
 	}
 
 	#runRender(effect: Effect): void {
@@ -73,8 +99,8 @@ export class Renderer {
 		if (!ctx) return;
 
 		const frame = effect.get(this.#frame);
-		const display = effect.get(this.#video.display);
-		const flip = effect.get(this.#video.flip);
+		const display = effect.get(this.#display);
+		const flip = effect.get(this.#flip);
 
 		// Size the canvas to the frame we're drawing so `encoded` mode shows the true transmitted
 		// resolution (which can be smaller than the capture). Fall back to the capture dimensions
@@ -111,7 +137,7 @@ type TranscodeProps = {
 	source: Getter<VideoFrame | undefined>;
 	config: Getter<VideoEncoderConfig | undefined>;
 	// The rendition's encoder settings, read for keyframe cadence so the preview's GOP matches the wire.
-	settings?: Getter<Video.EncoderConfig | undefined>;
+	settings?: Getter<Video.Config | undefined>;
 };
 
 // Encodes the captured frames with the live rendition settings and decodes the result, so the
@@ -122,7 +148,7 @@ export class Transcode {
 
 	#source: Getter<VideoFrame | undefined>;
 	#config: Getter<VideoEncoderConfig | undefined>;
-	#settings?: Getter<Video.EncoderConfig | undefined>;
+	#settings?: Getter<Video.Config | undefined>;
 	#signals = new Effect();
 
 	constructor(props: TranscodeProps) {

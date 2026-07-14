@@ -5,6 +5,7 @@ export * as Signals from "@moq/signals";
 export * as Audio from "./audio";
 export * from "./broadcast";
 export * as Preview from "./preview";
+export * from "./rendition";
 export * as Source from "./source";
 export * as Video from "./video";
 

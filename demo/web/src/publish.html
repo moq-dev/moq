@@ -270,8 +270,8 @@
 			are all editable live:
 		</p>
 		<pre><code class="language-typescript">const publish = document.getElementById("publish");
-publish.broadcast.video.hd.config.set({ maxBitrate: 2_000_000, frameRate: 30 });
-publish.broadcast.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pre>
+publish.videoConfig.set({ maxBitrate: 2_000_000, frameRate: 30 });
+publish.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pre>
 		<p>
 			Each setting defaults to "auto" (the field is omitted, so the encoder picks); the negotiated value
 			appears to the right once you go live. Codec support is probed with

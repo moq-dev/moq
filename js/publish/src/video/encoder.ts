@@ -3,17 +3,14 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import type { Broadcast } from "../broadcast";
+import type { Capture } from "./capture";
 import type { Source } from "./types";
 
-export interface EncoderProps {
-	enabled?: boolean | Signal<boolean>;
-	config?: EncoderConfig | Signal<EncoderConfig | undefined>;
-	container?: Catalog.Container;
-}
-
 // TODO support signals?
-export interface EncoderConfig {
+/** Encoder tuning knobs. All optional; the encoder auto-sizes anything left unset. */
+export interface Config {
 	// If not provided, the encoder will select the best codec.
 	codec?: string;
 
@@ -42,62 +39,111 @@ export interface EncoderConfig {
 	frameRate?: number;
 }
 
+// Signals the encoder reads.
+type EncoderInput = {
+	// Whether to publish (and encode) this rendition. When false the rendition drops out of the
+	// catalog and stops encoding, but stays registered so a subscriber still gets an idle track.
+	enabled: Getter<boolean>;
+
+	// The broadcast to register the rendition on. Undefined resolves the config for a local preview
+	// but has nowhere to publish.
+	broadcast: Getter<Broadcast | undefined>;
+
+	// The capture pipeline supplying frames and the source track.
+	capture: Getter<Capture | undefined>;
+
+	// User tuning knobs.
+	config: Getter<Config | undefined>;
+
+	// Estimated send bandwidth cap in bits/sec. Caps the bitrate (with a safety margin) only when no
+	// explicit maxBitrate is set.
+	bandwidth: Getter<number | undefined>;
+};
+
+type EncoderOutput = {
+	// The catalog config published for this rendition, or undefined while disabled.
+	catalog: Signal<Catalog.VideoConfig | undefined>;
+	// The resolved WebCodecs config (codec, bitrate, dimensions), available even with no subscriber.
+	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
+	resolved: Signal<VideoEncoderConfig | undefined>;
+	// True when a subscriber is attached and we're encoding.
+	active: Signal<boolean>;
+};
+
+/**
+ * A single video rendition encoder.
+ *
+ * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.video(name)`), resolves
+ * the best codec/bitrate/dimensions for the capture, and encodes frames only while a subscriber is
+ * attached (the demand gate). Rename by constructing a new encoder; the name is not a signal.
+ */
 export class Encoder {
-	enabled: Signal<boolean>;
-	source: Signal<Source | undefined>;
-	frame: Getter<VideoFrame | undefined>;
+	/** The full track name of this rendition, e.g. `"video/hd"`. */
+	readonly name: string;
 
-	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
-	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
+	readonly in: Readonlys<EncoderInput>;
 
-	#signals = new Effect();
-
-	// The user provided config.
-	config: Signal<EncoderConfig | undefined>;
+	readonly #out: EncoderOutput = {
+		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
+		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),
+		active: new Signal<boolean>(false),
+	};
+	readonly out = readonlys(this.#out);
 
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
-	// The video encoder config.
-	#config = new Signal<VideoEncoderConfig | undefined>(undefined);
+	#signals = new Effect();
 
-	// The resolved encoder config (codec, bitrate, dimensions), available even with no subscriber.
-	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
-	readonly resolved: Getter<VideoEncoderConfig | undefined> = this.#config;
-
-	// True when the encoder is actively serving a track.
-	active = new Signal<boolean>(false);
-
-	// Connection signal for reading send bandwidth.
-	connection: Getter<Moq.Connection.Established | undefined>;
-
-	constructor(
-		frame: Getter<VideoFrame | undefined>,
-		source: Signal<Source | undefined>,
-		connection: Getter<Moq.Connection.Established | undefined>,
-		props?: EncoderProps,
-	) {
-		this.frame = frame;
-		this.source = source;
-		this.connection = connection;
-		this.enabled = Signal.from(props?.enabled ?? false);
-		this.config = Signal.from(props?.config);
+	constructor(name: string, props?: Inputs<EncoderInput>) {
+		this.name = name;
+		this.in = {
+			enabled: getter(props?.enabled ?? false),
+			broadcast: getter(props?.broadcast),
+			capture: getter(props?.capture),
+			config: getter(props?.config),
+			bandwidth: getter(props?.bandwidth),
+		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
-		this.#signals.run(this.#runConfig.bind(this));
+		this.#signals.run(this.#runResolved.bind(this));
 		this.#signals.run(this.#runDimensions.bind(this));
+		this.#signals.run(this.#runRegister.bind(this));
 	}
 
-	serve(track: Moq.Track.Producer, effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
+	// Register the rendition on the broadcast and drive its catalog + encode loop. Re-registers cleanly
+	// when the broadcast swaps.
+	#runRegister(effect: Effect): void {
+		const broadcast = effect.get(this.in.broadcast);
+		if (!broadcast) return;
+
+		const rendition = broadcast.video(this.name);
+		effect.cleanup(() => rendition.close());
+
+		// Publish the resolved catalog config; undefined (while disabled) drops it from the catalog.
+		effect.proxy(rendition.config, this.out.catalog);
+
+		// Encode only while enabled and a subscriber is attached (the demand gate).
+		effect.run((effect) => {
+			const enabled = effect.get(this.in.enabled);
+			const track = effect.get(rendition.track);
+			effect.set(this.#out.active, enabled && !!track, false);
+			if (!enabled || !track) return;
+
+			this.#encode(track, effect);
+		});
+	}
+
+	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
+	#encode(track: Moq.Track.Producer, effect: Effect): void {
+		const capture = effect.get(this.in.capture);
+		if (!capture) return;
 
 		const producer = new Container.Legacy.Producer(track);
 		effect.cleanup(() => producer.close());
 
 		let lastKeyframe: Time.Micro | undefined;
 		let lastEncoded: Time.Micro | undefined;
-
-		effect.set(this.active, true, false);
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
@@ -116,20 +162,20 @@ export class Encoder {
 			effect.cleanup(() => encoder.close());
 
 			effect.run(() => {
-				const config = effect.get(this.#config);
+				const config = effect.get(this.out.resolved);
 				if (!config) return;
 
 				encoder.configure(config);
 			});
 
 			effect.run((effect) => {
-				const frame = effect.get(this.frame);
+				const frame = effect.get(capture.out.frame);
 				if (!frame) return;
 
 				if (encoder.state !== "configured") return;
 
 				// This doesn't need to be reactive.
-				const config = this.config.peek();
+				const config = this.in.config.peek();
 
 				// Pace to the target frame rate by dropping frames that arrive too soon.
 				// Allow half an interval of slack so jittery capture timestamps don't drop a frame we meant to keep.
@@ -154,11 +200,14 @@ export class Encoder {
 		});
 	}
 
-	// Returns the catalog for the configured settings.
+	// Returns the catalog for the configured settings, or undefined while disabled / unresolved.
 	#runCatalog(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#config]);
-		if (!values) return;
-		const [_, config] = values;
+		const enabled = effect.get(this.in.enabled);
+		const config = effect.get(this.out.resolved);
+		if (!enabled || !config) {
+			effect.set(this.#out.catalog, undefined);
+			return;
+		}
 
 		const catalog: Catalog.VideoConfig = {
 			codec: config.codec,
@@ -172,20 +221,27 @@ export class Encoder {
 			jitter: config.framerate ? Catalog.u53(Math.ceil(1000 / config.framerate)) : undefined,
 		};
 
-		effect.set(this.#catalog, catalog);
+		effect.set(this.#out.catalog, catalog);
 	}
 
-	#runConfig(effect: Effect): void {
+	#runResolved(effect: Effect): void {
 		// NOTE: dimensions already factors in user provided maxPixels.
 		// It's a separate effect in order to deduplicate.
-		const values = effect.getAll([this.enabled, this.source, this.#dimensions]);
-		if (!values) return;
-		const [_, source, dimensions] = values;
+		if (!effect.get(this.in.enabled)) return;
+
+		const capture = effect.get(this.in.capture);
+		if (!capture) return;
+
+		const source = effect.get(capture.in.source);
+		if (!source) return;
+
+		const dimensions = effect.get(this.#dimensions);
+		if (!dimensions) return;
 
 		const settings = source.getSettings();
 
 		// Get the user provided config.
-		const user = effect.get(this.config) ?? {};
+		const user = effect.get(this.in.config) ?? {};
 
 		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
 		const framerate = user.frameRate ?? settings.frameRate ?? 30;
@@ -242,15 +298,11 @@ export class Encoder {
 
 			// If no explicit maxBitrate, cap to the estimated send bandwidth (with 90% safety margin).
 			if (!user.maxBitrate) {
-				const conn = effect.get(this.connection);
-				const sendBw = conn?.sendBandwidth;
-				if (sendBw) {
-					const estimate = effect.get(sendBw);
-					if (estimate != null) {
-						// Reserve ~10% for audio and protocol overhead.
-						const cap = Math.round(estimate * 0.9);
-						bitrate = Math.min(bitrate, cap);
-					}
+				const estimate = effect.get(this.in.bandwidth);
+				if (estimate != null) {
+					// Reserve ~10% for audio and protocol overhead.
+					const cap = Math.round(estimate * 0.9);
+					bitrate = Math.min(bitrate, cap);
 				}
 			}
 
@@ -267,16 +319,21 @@ export class Encoder {
 				hardwareAcceleration,
 			};
 
-			effect.set(this.#config, config);
+			effect.set(this.#out.resolved, config);
 		});
 	}
 
 	#runDimensions(effect: Effect): void {
-		const values = effect.getAll([this.frame, this.source]);
-		if (!values) return;
-		const [frame, source] = values;
+		const capture = effect.get(this.in.capture);
+		if (!capture) return;
 
-		const user = effect.get(this.config);
+		const frame = effect.get(capture.out.frame);
+		if (!frame) return;
+
+		const source = effect.get(capture.in.source);
+		if (!source) return;
+
+		const user = effect.get(this.in.config);
 
 		const sourcePixels = frame.codedWidth * frame.codedHeight;
 
@@ -307,7 +364,7 @@ export class Encoder {
 		  }
 		| undefined
 	> {
-		const config = effect.get(this.config);
+		const config = effect.get(this.in.config);
 		const required = config?.codec ?? "";
 
 		const dimensions = effect.get(this.#dimensions);

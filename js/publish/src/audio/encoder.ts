@@ -4,6 +4,7 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import type { Broadcast } from "../broadcast";
 import type * as Capture from "./capture";
 import { type Kind, normalizeSource, type Source } from "./types";
 
@@ -52,6 +53,9 @@ export type OpusConfig = {
 
 // The initial values for our signals.
 export type EncoderProps = {
+	// The broadcast to register the rendition on. Undefined resolves the config but has nowhere to publish.
+	broadcast?: Broadcast | Signal<Broadcast | undefined>;
+
 	enabled?: boolean | Signal<boolean>;
 	source?: Source | Signal<Source | undefined>;
 
@@ -71,8 +75,11 @@ export type EncoderProps = {
 type Captured = { sampleRate: number; channelCount: number };
 
 export class Encoder {
-	static readonly TRACK = "audio/data";
-	static readonly PRIORITY = Catalog.PRIORITY.audio;
+	/** The full track name of this rendition, e.g. `"audio/data"`. */
+	readonly name: string;
+
+	// The broadcast to register on. Swapping it re-registers the rendition.
+	broadcast: Signal<Broadcast | undefined>;
 
 	enabled: Signal<boolean>;
 
@@ -84,10 +91,7 @@ export class Encoder {
 
 	source: Signal<Source | undefined>;
 
-	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
-
-	// Observed capture format. #config (and thus #catalog) is derived from this plus the codec, so the
+	// Observed capture format. #config is derived from this plus the codec, so the
 	// worklet handlers only ever write here, never read-modify-write #config.
 	#captured = new Signal<Captured | undefined>(undefined);
 
@@ -103,7 +107,9 @@ export class Encoder {
 
 	#signals = new Effect();
 
-	constructor(props?: EncoderProps) {
+	constructor(name: string, props?: EncoderProps) {
+		this.name = name;
+		this.broadcast = Signal.from(props?.broadcast);
 		this.source = Signal.from(props?.source);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.muted = Signal.from(props?.muted ?? false);
@@ -115,7 +121,30 @@ export class Encoder {
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
-		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runRegister.bind(this));
+	}
+
+	// Register the rendition on the broadcast, publish its config, and encode only while a subscriber
+	// is attached (the demand gate). Re-registers cleanly when the broadcast swaps.
+	#runRegister(effect: Effect): void {
+		const broadcast = effect.get(this.broadcast);
+		if (!broadcast) return;
+
+		const rendition = broadcast.audio(this.name);
+		effect.cleanup(() => rendition.close());
+
+		// Publish the resolved config; undefined (no capture) drops it from the catalog.
+		effect.proxy(rendition.config, this.config);
+
+		effect.run((effect) => {
+			const enabled = effect.get(this.enabled);
+			const worklet = effect.get(this.#worklet);
+			const track = effect.get(rendition.track);
+			effect.set(this.active, enabled && !!worklet && !!track, false);
+			if (!enabled || !worklet || !track) return;
+
+			this.#encode(track, worklet, effect);
+		});
 	}
 
 	#runSource(effect: Effect): void {
@@ -273,15 +302,9 @@ export class Encoder {
 		}
 	}
 
-	serve(track: Moq.Track.Producer, effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#worklet]);
-		if (!values) return;
-		const [_, worklet] = values;
-
-		effect.set(this.active, true, false);
-
-		effect.cleanup(() => track.close());
-
+	// Encode captured audio frames into the track producer. The broadcast owns the track's lifetime, so
+	// this only aborts it on a fatal encoder error, never on teardown.
+	#encode(track: Moq.Track.Producer, worklet: AudioWorkletNode, effect: Effect): void {
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
@@ -353,20 +376,6 @@ export class Encoder {
 			});
 			worklet.port.start();
 		});
-	}
-
-	#runCatalog(effect: Effect): void {
-		const config = effect.get(this.#config);
-		if (!config) {
-			effect.set(this.#catalog, undefined);
-			return;
-		}
-
-		const catalog: Catalog.Audio = {
-			renditions: { [Encoder.TRACK]: config },
-		};
-
-		effect.set(this.#catalog, catalog);
 	}
 
 	close() {

@@ -1,33 +1,48 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
-import * as Audio from "./audio";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
-import * as Video from "./video";
+import { type Kind, Rendition } from "./rendition";
 
-export type BroadcastProps = {
-	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
-	enabled?: boolean | Signal<boolean>;
-	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
-	audio?: Audio.EncoderProps;
-	video?: Video.Props;
+// Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
+// whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
+type BroadcastInput = {
+	connection: Getter<Moq.Connection.Established | undefined>;
+
+	// Whether to publish the broadcast. Defaults to false so nothing is announced until ready.
+	enabled: Getter<boolean>;
+
+	// The broadcast name.
+	name: Getter<Moq.Path.Valid>;
+
+	// Catalog video-section display size, shared by all video renditions. Usually wired from a
+	// Video.Capture's `display` output. Omitted from the catalog when undefined.
+	display: Getter<{ width: number; height: number } | undefined>;
+
+	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
+	flip: Getter<boolean>;
 };
 
+/**
+ * A published broadcast: the network broadcast plus a catalog producer, minting per-rendition track
+ * handles on demand.
+ *
+ * Register renditions with {@link video} / {@link audio}; each returns a {@link Rendition} whose
+ * producer (usually an encoder) fills the catalog config and encodes into the demand-gated track.
+ * The broadcast owns only its own network/catalog wiring, so {@link close} does not close the
+ * renditions' producers.
+ */
 export class Broadcast {
+	/** The catalog track name served to subscribers. */
 	static readonly CATALOG_TRACK = Catalog.TRACK;
 	/** The DEFLATE-compressed catalog track, served alongside {@link CATALOG_TRACK} with identical content. */
 	static readonly CATALOG_TRACK_COMPRESSED = Catalog.TRACK_COMPRESSED;
 
-	connection: Signal<Moq.Connection.Established | undefined>;
-	enabled: Signal<boolean>;
-	name: Signal<Moq.Path.Valid>;
-
-	audio: Audio.Encoder;
-	video: Video.Root;
+	readonly in: Readonlys<BroadcastInput>;
 
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
-	// sections (e.g. `scte35`) by locking it too.
+	// `video`/`audio` sections are folded from the registered renditions; an application adds its own
+	// root sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
 	// The underlying network broadcast, (re)created on each (re)connection and `undefined` while
@@ -36,41 +51,119 @@ export class Broadcast {
 	// Reacquire it via an effect, since reconnecting swaps in a fresh producer.
 	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
+	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
+	// key add/remove; the Rendition values compare by identity, which is stable.
+	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
+
+	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
+	// The request loop sets these on accept; teardown and unregister clear them.
+	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
+
 	signals = new Effect();
 
-	constructor(props?: BroadcastProps) {
-		this.connection = Signal.from(props?.connection);
-		this.enabled = Signal.from(props?.enabled ?? false);
-		this.name = Signal.from(props?.name ?? Moq.Path.empty());
-
-		this.audio = new Audio.Encoder(props?.audio);
-		this.video = new Video.Root({ ...props?.video, connection: this.connection });
+	constructor(props?: Inputs<BroadcastInput>) {
+		this.in = {
+			connection: getter(props?.connection),
+			enabled: getter(props?.enabled ?? false),
+			name: getter(props?.name ?? Moq.Path.empty()),
+			display: getter(props?.display),
+			flip: getter(props?.flip ?? false),
+		};
 
 		this.signals.run(this.#runCatalog.bind(this));
 		this.signals.run(this.#run.bind(this));
 	}
 
-	// Keep the base catalog sections in sync with the encoders, leaving extension sections alone.
+	/** Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken. */
+	video(name: string): Rendition<Catalog.VideoConfig> {
+		return this.#register<Catalog.VideoConfig>(name, "video");
+	}
+
+	/** Register an audio rendition under a full track name (e.g. `"audio/data"`). Throws if the name is taken. */
+	audio(name: string): Rendition<Catalog.AudioConfig> {
+		return this.#register<Catalog.AudioConfig>(name, "audio");
+	}
+
+	#register<C>(name: string, kind: Kind): Rendition<C> {
+		if (this.#renditions.peek()[name]) {
+			throw new Error(`rendition already registered: ${name}`);
+		}
+
+		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
+		this.#tracks.set(name, track);
+
+		const rendition = new Rendition<C>(name, kind, track, () => this.#unregister(name));
+		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
+
+		return rendition;
+	}
+
+	#unregister(name: string): void {
+		const track = this.#tracks.get(name);
+		if (track) {
+			track.peek()?.close();
+			track.set(undefined);
+			this.#tracks.delete(name);
+		}
+
+		this.#renditions.update((renditions) => {
+			if (!(name in renditions)) return renditions;
+			const next = { ...renditions };
+			delete next[name];
+			return next;
+		});
+	}
+
+	// Keep the base catalog sections in sync with the registered renditions, leaving extension sections
+	// alone. A section with zero defined configs is deleted.
 	#runCatalog(effect: Effect) {
-		const enabled = effect.get(this.enabled);
-		const video = enabled ? effect.get(this.video.catalog) : undefined;
-		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
+		const enabled = effect.get(this.in.enabled);
+		const renditions = effect.get(this.#renditions);
+
+		const video: Record<string, Catalog.VideoConfig> = {};
+		const audio: Record<string, Catalog.AudioConfig> = {};
+
+		for (const rendition of Object.values(renditions)) {
+			const config = enabled ? effect.get(rendition.config) : undefined;
+			if (config === undefined) continue;
+
+			if (rendition.kind === "video") {
+				video[rendition.name] = config as Catalog.VideoConfig;
+			} else {
+				audio[rendition.name] = config as Catalog.AudioConfig;
+			}
+		}
+
+		const display = effect.get(this.in.display);
+		const flip = effect.get(this.in.flip);
 
 		this.catalog.mutate((catalog) => {
-			if (video !== undefined) catalog.video = video;
-			else delete catalog.video;
+			if (Object.keys(video).length > 0) {
+				const section: Catalog.Video = { renditions: video };
+				// display is optional in the schema, so it gates only itself, not the whole section.
+				if (display) {
+					section.display = { width: Catalog.u53(display.width), height: Catalog.u53(display.height) };
+				}
+				if (flip) section.flip = true;
+				catalog.video = section;
+			} else {
+				delete catalog.video;
+			}
 
-			if (audio !== undefined) catalog.audio = audio;
-			else delete catalog.audio;
+			if (Object.keys(audio).length > 0) {
+				catalog.audio = { renditions: audio };
+			} else {
+				delete catalog.audio;
+			}
 		});
 	}
 
 	#run(effect: Effect) {
-		const values = effect.getAll([this.enabled, this.connection]);
+		const values = effect.getAll([this.in.enabled, this.in.connection]);
 		if (!values) return;
 		const [_enabled, connection] = values;
 
-		const name = effect.get(this.name);
+		const name = effect.get(this.in.name);
 		if (Catalog.detectFormat(name) === undefined) {
 			console.warn(
 				`You should append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit.`,
@@ -79,6 +172,15 @@ export class Broadcast {
 
 		const broadcast = new Moq.Broadcast.Producer();
 		effect.cleanup(() => broadcast.close());
+
+		// Close every active rendition track when the broadcast tears down (reconnect/offline), so an
+		// encoder stops encoding into a dead producer. The Rendition handles themselves stay registered.
+		effect.cleanup(() => {
+			for (const track of this.#tracks.values()) {
+				track.peek()?.close();
+				track.set(undefined);
+			}
+		});
 
 		// Publish it before serving so an application reacting to `net` can insert its own tracks.
 		this.net.set(broadcast);
@@ -96,44 +198,39 @@ export class Broadcast {
 			const request = await broadcast.requested();
 			if (!request) break;
 
-			// dev's reshape hands back a TrackRequest: switch on its name, reject unknown
-			// tracks, and accept the rest into a producer to serve.
-			let serve: ((track: Moq.Track.Producer, effect: Effect) => void) | undefined;
-			switch (request.name) {
-				case Broadcast.CATALOG_TRACK:
-					serve = (track, effect) => this.catalog.serve(track, effect);
-					break;
-				case Broadcast.CATALOG_TRACK_COMPRESSED:
-					// Same catalog, DEFLATE-compressed; consumers opt in by subscribing to this track.
-					serve = (track, effect) => this.catalog.serve(track, effect, { compression: true });
-					break;
-				case Audio.Encoder.TRACK:
-					serve = (track, effect) => this.audio.serve(track, effect);
-					break;
-				case Video.Root.TRACK_HD:
-					serve = (track, effect) => this.video.hd.serve(track, effect);
-					break;
-				case Video.Root.TRACK_SD:
-					serve = (track, effect) => this.video.sd.serve(track, effect);
-					break;
-				default:
-					console.error("received subscription for unknown track", request.name);
-					request.reject(new Error(`Unknown track: ${request.name}`));
-					continue;
+			if (request.name === Broadcast.CATALOG_TRACK || request.name === Broadcast.CATALOG_TRACK_COMPRESSED) {
+				const compression = request.name === Broadcast.CATALOG_TRACK_COMPRESSED;
+				const track = request.accept();
+				effect.cleanup(() => track.close());
+				effect.run((effect) => {
+					if (effect.get(track.closedSignal)) return;
+					this.catalog.serve(track, effect, { compression });
+				});
+				continue;
+			}
+
+			const signal = this.#tracks.get(request.name);
+			if (!signal) {
+				console.error("received subscription for unknown track", request.name);
+				request.reject(new Error(`Unknown track: ${request.name}`));
+				continue;
 			}
 
 			const track = request.accept();
-			effect.cleanup(() => track.close());
+
+			// A second subscription for the same name supersedes the first: close the old producer.
+			signal.peek()?.close();
+			signal.set(track);
+
+			// Clear the signal when this track closes on its own, unless it's already been replaced.
 			effect.run((effect) => {
-				if (effect.get(track.closedSignal)) return;
-				serve(track, effect);
+				if (!effect.get(track.closedSignal)) return;
+				if (signal.peek() === track) signal.set(undefined);
 			});
 		}
 	}
 
 	close() {
 		this.signals.close();
-		this.audio.close();
-		this.video.close();
 	}
 }

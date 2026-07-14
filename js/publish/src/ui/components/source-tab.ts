@@ -99,7 +99,7 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		if (effect.get(publish.state.source) !== "camera") return;
 
 		const video = effect.get(publish.video);
-		const audio = effect.get(publish.audio);
+		const audio = effect.get(publish.audioInput);
 		const fields: HTMLElement[] = [];
 		if (video && "device" in video) fields.push(deviceField(effect, "Camera", camera, video.device as DeviceLike));
 		if (audio && "device" in audio)
