@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Track } from "@moq/net";
+import { type Connection, Path, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
+
+// The broadcast only opens its network producer once it has a connection, so tests that drive the
+// request loop hand it a stub whose publish() is a no-op; the internal producer is exposed via `net`.
+const stubConnection = () => ({ publish() {} }) as unknown as Connection.Established;
 
 // Effects and signal writes coalesce onto microtasks, so a chain of registration -> config -> catalog
 // needs a few flushes to settle.
@@ -99,6 +103,47 @@ test("rendition.close() unregisters the name and drops it from the catalog", asy
 
 	// The name is free to register again.
 	expect(() => broadcast.video("video/hd")).not.toThrow();
+
+	broadcast.close();
+});
+
+test("serving a subscription sets the rendition track and clears it when the track closes", async () => {
+	const broadcast = new Broadcast({ enabled: true, connection: stubConnection(), name: Path.from("test.hang") });
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+
+	const rendition = broadcast.video("video");
+	const subscriber = net.subscribe("video");
+	await settle();
+
+	// The request loop accepted the subscription and handed the producer to the rendition.
+	const track = rendition.track.peek();
+	expect(track).toBeDefined();
+
+	// Closing the producer (encoder error / teardown) clears the signal via track.closed, without a
+	// lingering per-subscription effect watching it.
+	track?.close();
+	await settle();
+	expect(rendition.track.peek()).toBeUndefined();
+
+	subscriber.close();
+	broadcast.close();
+});
+
+test("serves the catalog through the broadcast request loop", async () => {
+	const broadcast = new Broadcast({ enabled: true, connection: stubConnection(), name: Path.from("test.hang") });
+	broadcast.video("video").config.set(videoConfig);
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+
+	// Subscribing to the catalog track drives the request loop's per-subscription serving scope.
+	const subscriber = net.subscribe(Broadcast.CATALOG_TRACK);
+	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>(subscriber).next();
+	expect(catalog?.video?.renditions.video?.codec).toBe("avc1.640028");
 
 	broadcast.close();
 });

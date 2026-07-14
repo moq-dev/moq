@@ -194,6 +194,14 @@ export class Broadcast {
 	}
 
 	async #runBroadcast(broadcast: Moq.Broadcast.Producer, effect: Effect) {
+		// Each catalog subscription serves from its own scope so serving state doesn't pile up on the
+		// long-lived #run effect as subscribers come and go. Close whatever is still open on teardown.
+		const scopes = new Set<Effect>();
+		effect.cleanup(() => {
+			for (const scope of scopes) scope.close();
+			scopes.clear();
+		});
+
 		for (;;) {
 			const request = await broadcast.requested();
 			if (!request) break;
@@ -201,10 +209,18 @@ export class Broadcast {
 			if (request.name === Broadcast.CATALOG_TRACK || request.name === Broadcast.CATALOG_TRACK_COMPRESSED) {
 				const compression = request.name === Broadcast.CATALOG_TRACK_COMPRESSED;
 				const track = request.accept();
-				effect.cleanup(() => track.close());
-				effect.run((effect) => {
-					if (effect.get(track.closedSignal)) return;
+
+				const scope = new Effect();
+				scopes.add(scope);
+				scope.run((effect) => {
+					effect.cleanup(() => track.close());
 					this.catalog.serve(track, effect, { compression });
+				});
+
+				// Release the scope when the subscriber goes away, rather than leaking it until reconnect.
+				void track.closed.then(() => {
+					scopes.delete(scope);
+					scope.close();
 				});
 				continue;
 			}
@@ -223,8 +239,7 @@ export class Broadcast {
 			signal.set(track);
 
 			// Clear the signal when this track closes on its own, unless it's already been replaced.
-			effect.run((effect) => {
-				if (!effect.get(track.closedSignal)) return;
+			void track.closed.then(() => {
 				if (signal.peek() === track) signal.set(undefined);
 			});
 		}
