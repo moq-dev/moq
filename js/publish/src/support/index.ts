@@ -57,26 +57,26 @@ async function audioEncoderSupported(codec: keyof typeof CODECS): Promise<boolea
 }
 
 async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec> {
-	const base = { codec: CODECS[codec], width: 1280, height: 720 };
-
-	const software = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-software" });
-
-	// Safari answers "prefer-hardware" for every codec, but VideoToolbox only hardware-encodes H.264
-	// and HEVC. Key off the codec instead of the echoed hint, which would otherwise claim hardware VP9
-	// and AV1. The same pair drives hardwareCodecs() in ../video/codecs.ts.
-	if (Util.Hacks.isSafari) {
-		if (codec !== "h264" && codec !== "h265") {
-			return { hardware: false, software: software.supported === true };
-		}
-
-		const hardware = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-hardware" });
-		return { hardware: hardware.supported === true, software: software.supported === true };
-	}
+	const software = await VideoEncoder.isConfigSupported({
+		codec: CODECS[codec],
+		width: 1280,
+		height: 720,
+		hardwareAcceleration: "prefer-software",
+	});
 
 	// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-	const hardware = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: "prefer-hardware" });
+	const hardware = await VideoEncoder.isConfigSupported({
+		codec: CODECS[codec],
+		width: 1280,
+		height: 720,
+		hardwareAcceleration: "prefer-hardware",
+	});
 
-	const unknown = Util.Hacks.isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+	// Safari always echoes "prefer-hardware" back, so the hint tells us nothing. Treat it like
+	// Firefox and report hardware support as unknown rather than advertising hardware VP9/AV1 it
+	// doesn't have.
+	const unknown =
+		Util.Hacks.isFirefox || Util.Hacks.isSafari || hardware.config?.hardwareAcceleration !== "prefer-hardware";
 
 	return {
 		hardware: unknown ? undefined : hardware.supported === true,
