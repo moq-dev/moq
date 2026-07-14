@@ -139,7 +139,7 @@ export default class MoqPublish extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		this.video = new Video.Encoder("video/data", {
+		this.video = new Video.Encoder("video", {
 			broadcast: this.broadcast,
 			capture: this.capture,
 			enabled: this.#videoEnabled,
@@ -147,7 +147,7 @@ export default class MoqPublish extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.video.close());
 
-		this.audio = new Audio.Encoder("audio/data", {
+		this.audio = new Audio.Encoder("audio", {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
 			source: this.#audioSource,
