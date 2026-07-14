@@ -165,21 +165,48 @@ impl<F: Container> Consumer<F> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
-		// On startup, we want to poll every pending group and advance self.current to the first with a frame.
+		// On startup, apply the latency window before returning the first frame. A late
+		// subscriber can receive an old cached group alongside the live edge; committing
+		// to that group first would leak the entire pre-subscription timestamp gap into
+		// downstream muxers.
 		if self.startup {
-			// NOTE: We loop in ascending order, so earlier groups will win the race.
-			for (i, group) in self.pending.iter_mut().enumerate() {
-				// We call poll_min_timestamp to try to buffer at least one frame per group.
-				// This returns Ready(Ok) if there is a buffered frame.
-				if !matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))) {
-					continue;
-				}
+			let newest = if finished || self.latency.is_zero() {
+				None
+			} else {
+				self.pending
+					.iter_mut()
+					.rev()
+					.find_map(|group| match group.poll_max_timestamp(waiter, &self.format) {
+						Poll::Ready(Ok(timestamp)) => Some(std::time::Duration::from(timestamp)),
+						_ => None,
+					})
+			};
 
+			let mut selected = None;
+			for (i, group) in self.pending.iter_mut().enumerate() {
+				let Poll::Ready(Ok(timestamp)) = group.poll_min_timestamp(waiter, &self.format) else {
+					continue;
+				};
+
+				// A finished track is an archive, so read it from the beginning. Zero latency
+				// keeps its eager first-frame behavior; the normal loop applies aggressive
+				// skipping once that frame establishes the playback cursor.
+				selected = Some(i);
+				if finished
+					|| self.latency.is_zero()
+					|| newest.is_some_and(|newest| {
+						newest.saturating_sub(std::time::Duration::from(timestamp)) < self.latency
+					}) {
+					break;
+				}
+			}
+
+			if let Some(i) = selected {
+				let group = &self.pending[i];
 				// Start reading from this group and skip any previous groups.
 				self.current = group.sequence;
 				self.startup = false;
 				self.pending.drain(0..i);
-				break;
 			}
 		}
 
@@ -1588,21 +1615,22 @@ mod tests {
 	// ---- Startup Behavior ----
 
 	#[tokio::test]
-	async fn startup_selects_earliest_group() {
+	async fn startup_skips_pre_subscription_history() {
 		tokio::time::pause();
 		let mut track = track_producer("test");
 		let consumer_track = track.consume();
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
+		const TWO_HOURS: u64 = 2 * 60 * 60 * 1_000_000;
 
 		write_group(&mut track, 3, &[ts(0)]);
-		write_group(&mut track, 5, &[ts(150_000)]);
+		write_group(&mut track, 5, &[ts(TWO_HOURS - 20_000_000)]);
 
 		let mut group7 = track.create_group(moq_net::Group { sequence: 7 }).unwrap();
 		Container::Legacy
 			.write(
 				&mut group7,
 				&[Frame {
-					timestamp: ts(300_000),
+					timestamp: ts(TWO_HOURS),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -1616,7 +1644,7 @@ mod tests {
 				.write(
 					&mut group7,
 					&[Frame {
-						timestamp: ts(400_000),
+						timestamp: ts(TWO_HOURS + 1_000_000),
 						payload: Bytes::from_static(&[0xBE, 0xEF]),
 						keyframe: false,
 						duration: None,
@@ -1627,7 +1655,7 @@ mod tests {
 			track.finish().unwrap();
 		});
 
-		let _frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
 				frames.push(frame);
@@ -1637,6 +1665,10 @@ mod tests {
 		.await
 		.expect("should not hang");
 
+		assert_eq!(
+			frames.iter().map(|frame| frame.timestamp).collect::<Vec<_>>(),
+			vec![ts(TWO_HOURS), ts(TWO_HOURS + 1_000_000)]
+		);
 		finisher.await.unwrap();
 	}
 
