@@ -77,7 +77,7 @@ export class Renderer {
 				const transcode = new Transcode({
 					source: this.#source,
 					config: encoder.out.resolved,
-					settings: encoder.in.config,
+					settings: encoder.config,
 				});
 				effect.cleanup(() => transcode.close());
 				effect.proxy(this.#frame, transcode.frame);

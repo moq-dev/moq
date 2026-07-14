@@ -147,7 +147,7 @@ function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.Confi
 // Compose the WebCodecs/MoQ video encoder config and push it onto the HD
 // rendition. Undefined fields are omitted, so the encoder auto-sizes them.
 ui.run((effect) => {
-	publish.videoConfig.set(encoderConfig(effect, readVideoTarget(effect)));
+	publish.video.config.set(encoderConfig(effect, readVideoTarget(effect)));
 });
 
 // Request the selected resolution from the camera itself, not just cap the encoder.

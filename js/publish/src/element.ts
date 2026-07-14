@@ -41,12 +41,10 @@ export default class MoqPublish extends HTMLElement {
 	broadcast: Broadcast;
 
 	// The single video and audio encoders. For multiple renditions (e.g. simulcast), drop the element
-	// and register your own encoders on a Broadcast via the JS API.
+	// and register your own encoders on a Broadcast via the JS API. Tune them via `video.config` and
+	// the `audio` encoder's signals.
 	video: Video.Encoder;
 	audio: Audio.Encoder;
-
-	// The video encoder tuning knobs.
-	videoConfig = new Signal<Video.Config | undefined>(undefined);
 
 	// The selected input sources: the Camera/Screen, Microphone/Screen, and File holders driving capture.
 	// Read by the UI (device pickers) and written by #runSource.
@@ -145,7 +143,6 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			capture: this.capture,
 			enabled: this.#videoEnabled,
-			config: this.videoConfig,
 			bandwidth: this.#bandwidth,
 		});
 		this.signals.cleanup(() => this.video.close());

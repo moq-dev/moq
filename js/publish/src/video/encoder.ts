@@ -64,12 +64,15 @@ type EncoderInput = {
 	// The capture pipeline supplying frames and the source track.
 	capture: Getter<Capture | undefined>;
 
-	// User tuning knobs.
-	config: Getter<Config | undefined>;
-
 	// Estimated send bandwidth cap in bits/sec. Caps the bitrate (with a safety margin) only when no
 	// explicit maxBitrate is set.
 	bandwidth: Getter<number | undefined>;
+};
+
+/** Constructor options: the wired inputs plus the live-editable {@link Config} tuning knobs. */
+export type EncoderProps = Inputs<EncoderInput> & {
+	// User tuning knobs. Seed a value or wire a Signal; also live-editable via `encoder.config`.
+	config?: Config | Signal<Config | undefined>;
 };
 
 type EncoderOutput = {
@@ -97,6 +100,9 @@ export class Encoder {
 
 	readonly in: Readonlys<EncoderInput>;
 
+	/** The live-editable encoder tuning knobs (codec, dimensions, bitrate, frame rate). */
+	config: Signal<Config | undefined>;
+
 	readonly #out: EncoderOutput = {
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),
@@ -110,15 +116,15 @@ export class Encoder {
 
 	#signals = new Effect();
 
-	constructor(name: string, props?: Inputs<EncoderInput>) {
+	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
 			broadcast: getter(props?.broadcast),
 			capture: getter(props?.capture),
-			config: getter(props?.config),
 			bandwidth: getter(props?.bandwidth),
 		};
+		this.config = Signal.from(props?.config);
 
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runResolved.bind(this));
@@ -197,7 +203,7 @@ export class Encoder {
 				if (encoder.state !== "configured") return;
 
 				// This doesn't need to be reactive.
-				const config = this.in.config.peek();
+				const config = this.config.peek();
 
 				// Pace to the target frame rate by dropping frames that arrive too soon.
 				// Allow half an interval of slack so jittery capture timestamps don't drop a frame we meant to keep.
@@ -263,7 +269,7 @@ export class Encoder {
 		const settings = source.getSettings();
 
 		// Get the user provided config.
-		const user = effect.get(this.in.config) ?? {};
+		const user = effect.get(this.config) ?? {};
 
 		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
 		const framerate = user.frameRate ?? settings.frameRate ?? 30;
@@ -355,7 +361,7 @@ export class Encoder {
 		const source = effect.get(capture.in.source);
 		if (!source) return;
 
-		const user = effect.get(this.in.config);
+		const user = effect.get(this.config);
 
 		const sourcePixels = frame.codedWidth * frame.codedHeight;
 
@@ -386,7 +392,7 @@ export class Encoder {
 		  }
 		| undefined
 	> {
-		const config = effect.get(this.in.config);
+		const config = effect.get(this.config);
 		const required = config?.codec ?? "";
 
 		const dimensions = effect.get(this.#dimensions);
