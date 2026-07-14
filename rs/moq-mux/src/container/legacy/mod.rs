@@ -38,6 +38,12 @@ impl Container for Wire {
 		let mut hang_frame = hang::container::Frame::decode(data)?;
 		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
 
+		// An empty payload is a tail frame: a timestamp marking the end of the
+		// preceding frame, carrying no media. See the hang draft's Container section.
+		if payload.is_empty() {
+			return Poll::Ready(Ok(Read::Tail(hang_frame.timestamp)));
+		}
+
 		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp: hang_frame.timestamp,
 			payload,

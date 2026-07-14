@@ -53,6 +53,12 @@ impl Container for Wire {
 		let scale = loc.timescale.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::from_scale(loc.timestamp, scale).map_err(hang::Error::from)?;
 
+		// An empty payload is a tail frame: a timestamp marking the end of the
+		// preceding frame, carrying no media. See the hang draft's Container section.
+		if loc.payload.is_empty() {
+			return Poll::Ready(Ok(Read::Tail(timestamp)));
+		}
+
 		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp,
 			payload: loc.payload,

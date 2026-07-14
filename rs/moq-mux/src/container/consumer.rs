@@ -44,7 +44,7 @@ pub struct Consumer<F: Container> {
 	current: u64,
 
 	// Groups that we are monitoring, sorted by sequence ascending.
-	pending: VecDeque<GroupBuffer>,
+	pending: VecDeque<GroupBuffer<F>>,
 
 	// When true, we haven't returned a frame yet and need to select the first group.
 	// We wait until we have at least one frame before finalizing `current`
@@ -479,7 +479,7 @@ impl<F: Container> Consumer<F> {
 ///
 /// Handles two-phase frame reading (get FrameConsumer, then read all data),
 /// timestamp parsing, and min/max timestamp tracking for latency decisions.
-struct GroupBuffer {
+struct GroupBuffer<F: Container> {
 	group: moq_net::GroupConsumer,
 
 	// The current frame index within the group.
@@ -498,9 +498,23 @@ struct GroupBuffer {
 	// Equals the max timestamp when the container carries no per-frame duration.
 	// Stored as a wall-clock duration so cross-scale comparisons are cheap.
 	max_end: Option<std::time::Duration>,
+
+	// The group's tail: the timestamp of a trailing empty-payload frame that marks
+	// the presentation end of the last media frame (see the hang draft's Container
+	// section). `None` until a tail is read, or for publishers that omit it.
+	tail: Option<Timestamp>,
+
+	// Set once the group's stream has ended (Read::Done), so poll_read can report
+	// the group finished without re-polling a spent stream.
+	finished: bool,
+
+	// An error hit while reading ahead (to bound a trailing frame), deferred until
+	// the frames already buffered before it have been emitted. Keeps a decode error
+	// from jumping ahead of the valid frames that preceded it on the wire.
+	pending_error: Option<F::Error>,
 }
 
-impl GroupBuffer {
+impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::GroupConsumer) -> Self {
 		Self {
 			group,
@@ -509,25 +523,67 @@ impl GroupBuffer {
 			max_timestamp: None,
 			min_timestamp: None,
 			max_end: None,
+			tail: None,
+			finished: false,
+			pending_error: None,
 		}
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
-		if let Some(frame) = self.buffered.pop_front() {
-			return Poll::Ready(Ok(Some(frame)));
+	fn poll_read(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
+		// Opportunistically read ahead so a trailing frame can be bounded by the
+		// group's tail before we emit it. This is non-blocking: if the successor
+		// (another frame, the tail, or the end) isn't buffered yet, we stop and
+		// emit what we have rather than stall the live edge waiting for it.
+		while self.buffered.len() < 2 && self.tail.is_none() && !self.finished && self.pending_error.is_none() {
+			match self.buffer_once(waiter, format) {
+				Poll::Ready(Ok(true)) => continue,
+				Poll::Ready(Ok(false)) => self.finished = true,
+				// Defer a read-ahead error behind the frames already buffered before
+				// it: emit those first, then surface the error once the buffer drains.
+				// With nothing buffered there's nothing to protect, so propagate now.
+				Poll::Ready(Err(e)) => {
+					if self.buffered.is_empty() {
+						return Poll::Ready(Err(e));
+					}
+					self.pending_error = Some(e);
+				}
+				Poll::Pending => break,
+			}
 		}
 
-		match ready!(self.buffer_one(waiter, format)?) {
-			true => Poll::Ready(Ok(Some(self.buffered.pop_front().unwrap()))),
-			false => Poll::Ready(Ok(None)),
+		let Some(mut frame) = self.buffered.pop_front() else {
+			// Nothing buffered. A deferred read-ahead error surfaces now; else report
+			// the group finished only once we've seen its end (a tail or Read::Done);
+			// otherwise a buffer_once above returned Pending and registered the waker.
+			if let Some(e) = self.pending_error.take() {
+				return Poll::Ready(Err(e));
+			}
+			if self.finished || self.tail.is_some() {
+				return Poll::Ready(Ok(None));
+			}
+			return Poll::Pending;
+		};
+
+		// The last media frame of the group ends at the tail. Legacy/LOC carry no
+		// per-frame duration, so without a tail we leave it None and a downstream
+		// muxer infers it from the next group -- which is wrong across a pause/resume
+		// gap, the very ambiguity the tail removes.
+		if frame.duration.is_none()
+			&& self.buffered.is_empty()
+			&& let Some(tail) = self.tail
+			&& let Ok(duration) = tail.checked_sub(frame.timestamp)
+		{
+			frame.duration = Some(duration);
 		}
+
+		Poll::Ready(Ok(Some(frame)))
 	}
 
 	// Add one (or one fragment's worth) more frames to the buffer if possible.
 	//
 	// Returns false if the group is finished.
-	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_once(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		match ready!(format.poll_read(&mut self.group, waiter)?) {
 			Read::Done => return Poll::Ready(Ok(false)),
 			Read::Frame(frame) => self.ingest(frame),
@@ -535,6 +591,14 @@ impl GroupBuffer {
 				for frame in frames {
 					self.ingest(frame);
 				}
+			}
+			// A tail carries no media; record its timestamp as the group's
+			// presentation end so the trailing frame's duration and the group's
+			// max_end reflect where content actually stops.
+			Read::Tail(timestamp) => {
+				self.tail = Some(self.tail.map_or(timestamp, |existing| existing.max(timestamp)));
+				let end = std::time::Duration::from(timestamp);
+				self.max_end = Some(self.max_end.map_or(end, |existing| existing.max(end)));
 			}
 		}
 
@@ -571,7 +635,7 @@ impl GroupBuffer {
 		self.buffered.push_back(frame);
 	}
 
-	fn buffer_one<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_one(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		loop {
 			if !self.buffered.is_empty() {
 				return Poll::Ready(Ok(true));
@@ -583,17 +647,13 @@ impl GroupBuffer {
 		}
 	}
 
-	fn buffer_all<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
+	fn buffer_all(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
 		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
 
 	/// Poll for the maximum timestamp in this group.
-	fn poll_max_timestamp<F: Container>(
-		&mut self,
-		waiter: &kio::Waiter,
-		format: &F,
-	) -> Poll<Result<Timestamp, F::Error>> {
+	fn poll_max_timestamp(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Timestamp, F::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
 		let _ = self.buffer_all(waiter, format)?;
 
@@ -608,11 +668,7 @@ impl GroupBuffer {
 		Poll::Pending
 	}
 
-	fn poll_min_timestamp<F: Container>(
-		&mut self,
-		waiter: &kio::Waiter,
-		format: &F,
-	) -> Poll<Result<Timestamp, F::Error>> {
+	fn poll_min_timestamp(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Timestamp, F::Error>> {
 		let _ = self.buffer_one(waiter, format)?;
 
 		if let Some(min) = self.min_timestamp {
@@ -636,7 +692,7 @@ impl GroupBuffer {
 	}
 }
 
-impl std::ops::Deref for GroupBuffer {
+impl<F: Container> std::ops::Deref for GroupBuffer<F> {
 	type Target = moq_net::GroupConsumer;
 
 	fn deref(&self) -> &Self::Target {
@@ -1078,6 +1134,79 @@ mod tests {
 			consumer.rewind.discontinuity, 1,
 			"the backwards group triggered a reset"
 		);
+	}
+
+	// ---- Tail frames ----
+
+	/// Write a group of media frames, then a tail frame (empty payload) at `tail`
+	/// marking the group's presentation end, then finish the group.
+	fn write_group_with_tail(
+		track: &mut moq_net::TrackProducer,
+		sequence: u64,
+		timestamps: &[Timestamp],
+		tail: Timestamp,
+	) {
+		let mut group = track.create_group(moq_net::Group { sequence }).unwrap();
+		for &timestamp in timestamps {
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy.write(&mut group, &[frame]).unwrap();
+		}
+		let tail_frame = Frame {
+			timestamp: tail,
+			payload: Bytes::new(),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy.write(&mut group, &[tail_frame]).unwrap();
+		group.finish().unwrap();
+	}
+
+	/// A tail frame carries no media (it is not emitted) but bounds the trailing
+	/// media frame's duration to the tail timestamp. Interior frames are untouched.
+	#[tokio::test]
+	async fn tail_bounds_trailing_frame_and_is_not_emitted() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		write_group_with_tail(&mut track, 0, &[ts(0), ts(33_000)], ts(50_000));
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 2, "the tail is not emitted as a media frame");
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(33_000));
+		// Trailing frame ends at the tail (50ms - 33ms); interior frame is untouched.
+		assert_eq!(frames[1].duration, Some(ts(17_000)));
+		assert_eq!(frames[0].duration, None);
+	}
+
+	/// The point of the tail: it gives the last frame of a group an explicit end,
+	/// so a downstream muxer never infers its duration from the *next* group. Here
+	/// group 0 ends at its tail (16ms) and group 1 resumes ~2h later (a paused
+	/// publisher whose wall clock kept advancing). Without the tail, group 0's frame
+	/// would have no duration and a muxer would stretch it across the 2h gap.
+	#[tokio::test]
+	async fn tail_bounds_trailing_frame_across_a_resume_gap() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		// Latency above the gap so the slow-group skip never fires; isolate the tail.
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10_800));
+
+		write_group_with_tail(&mut track, 0, &[ts(0)], ts(16_000));
+		write_group(&mut track, 1, &[ts(7_200_000_000)]); // resume ~2h later
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames[0].timestamp, ts(0));
+		// Bounded by the tail (16ms), NOT the 2h jump to group 1.
+		assert_eq!(frames[0].duration, Some(ts(16_000)));
+		assert_eq!(frames[1].timestamp, ts(7_200_000_000));
 	}
 
 	// ---- Group Ordering ----
