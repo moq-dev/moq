@@ -69,6 +69,25 @@ mod tests {
 		let state = client.task.lock().expect("client state should be available");
 		assert_eq!(state.config.tls.system_roots, Some(false));
 	}
+
+	#[test]
+	fn sets_tls_client_cert_and_key() {
+		let client = MoqClient::new();
+
+		client.set_tls_cert(Some("cert.pem".into()));
+		client.set_tls_key(Some("key.pem".into()));
+		{
+			let state = client.task.lock().expect("client state should be available");
+			assert_eq!(state.config.tls.cert.as_deref(), Some(std::path::Path::new("cert.pem")));
+			assert_eq!(state.config.tls.key.as_deref(), Some(std::path::Path::new("key.pem")));
+		}
+
+		client.set_tls_cert(None);
+		client.set_tls_key(None);
+		let state = client.task.lock().expect("client state should be available");
+		assert_eq!(state.config.tls.cert, None);
+		assert_eq!(state.config.tls.key, None);
+	}
 }
 
 #[derive(uniffi::Object)]
@@ -128,6 +147,28 @@ impl MoqClient {
 	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.fingerprint = fingerprints;
+		}
+	}
+
+	/// Present this PEM certificate chain when the relay requires mTLS.
+	///
+	/// Only certificates are read from the file; any private keys are ignored. Must be
+	/// paired with `set_tls_key`, otherwise `connect` fails with an incomplete-auth error.
+	/// Pass `None` to clear a previously set path.
+	pub fn set_tls_cert(&self, path: Option<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.cert = path.map(Into::into);
+		}
+	}
+
+	/// Present this PEM private key when the relay requires mTLS.
+	///
+	/// Only the private key is read from the file; any certificates are ignored. Must be
+	/// paired with `set_tls_cert`, otherwise `connect` fails with an incomplete-auth error.
+	/// Pass `None` to clear a previously set path.
+	pub fn set_tls_key(&self, path: Option<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.key = path.map(Into::into);
 		}
 	}
 
