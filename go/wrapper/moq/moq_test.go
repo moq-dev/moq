@@ -3,6 +3,7 @@ package moq_test
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -355,6 +356,110 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	if string(frame.Payload) != "group" || frame.TimestampUs != 23_456 {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
+	}
+}
+
+func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("sparse", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := track.CreateGroup(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.Sequence() != 2 {
+		t.Fatalf("sequence = %d, want 2", group.Sequence())
+	}
+	if err := group.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := track.FinishAt(5); err != nil {
+		t.Fatal(err)
+	}
+	group, err = track.CreateGroup(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := group.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := track.CreateGroup(5); err == nil {
+		t.Fatal("expected group at final sequence to fail")
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJSONTracks(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotOptions := moq.JSONSnapshotOptions{DeltaRatio: 8, Compression: true}
+	snapshot, err := broadcast.PublishJSONSnapshot("status", snapshotOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotConsumer, err := consumer.SubscribeJSONSnapshot("status", snapshotOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshotConsumer.Cancel()
+	if err := snapshot.Update(map[string]any{"viewers": 42}); err != nil {
+		t.Fatal(err)
+	}
+	value, err := snapshotConsumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(*value, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["viewers"] != float64(42) {
+		t.Fatalf("snapshot = %s", *value)
+	}
+
+	streamOptions := moq.JSONStreamOptions{Compression: true}
+	stream, err := broadcast.PublishJSONStream("events", streamOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamConsumer, err := consumer.SubscribeJSONStream("events", streamOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streamConsumer.Cancel()
+	if err := stream.Append(map[string]any{"n": 1}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := streamConsumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(*record) != `{"n":1}` {
+		t.Fatalf("record = %s", *record)
+	}
+
+	if err := snapshot.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Finish(); err != nil {
+		t.Fatal(err)
 	}
 }
 

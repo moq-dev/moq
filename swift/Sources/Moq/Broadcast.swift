@@ -96,15 +96,35 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Open a media track. `format` controls how `initData` and frame payloads
-    /// are interpreted (e.g. `"opus"`, `"avc3"`).
-    public func publishMedia(format: String, initData: Data) throws -> MediaProducer {
-        MediaProducer(try ffi.publishMedia(init: MoqInit(format: format, data: initData, video: nil)))
+    /// are interpreted (e.g. `"opus"`, `"avc3"`). `video` seeds catalog fields
+    /// that the stream cannot reveal before its first keyframe.
+    public func publishMedia(
+        format: String,
+        initData: Data = Data(),
+        video: VideoHint? = nil
+    ) throws -> MediaProducer {
+        MediaProducer(try ffi.publishMedia(init: MoqInit(format: format, data: initData, video: video)))
+    }
+
+    /// Publish a single media track requested through `BroadcastDynamic`.
+    public func publishMedia(
+        on request: TrackRequest,
+        format: String,
+        initData: Data = Data(),
+        video: VideoHint? = nil
+    ) throws -> MediaProducer {
+        MediaProducer(
+            try ffi.publishMediaOnTrack(
+                request: request.ffi,
+                init: MoqInit(format: format, data: initData, video: video)
+            )
+        )
     }
 
     /// Open a media track fed by a raw byte stream with inferred frame boundaries
     /// (e.g. piped Annex-B H.264). Only self-describing formats are supported.
-    public func publishMediaStream(format: String) throws -> MediaStreamProducer {
-        MediaStreamProducer(try ffi.publishMediaStream(init: MoqInit(format: format, data: Data(), video: nil)))
+    public func publishMediaStream(format: String, video: VideoHint? = nil) throws -> MediaStreamProducer {
+        MediaStreamProducer(try ffi.publishMediaStream(init: MoqInit(format: format, data: Data(), video: video)))
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.

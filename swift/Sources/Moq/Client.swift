@@ -19,12 +19,27 @@ public final class Client: Sendable {
         ffi.setTlsRoots(paths: paths)
     }
 
+    /// Configure whether platform roots are trusted in addition to custom roots.
+    public func setTlsSystemRoots(_ enabled: Bool) {
+        ffi.setTlsSystemRoots(systemRoots: enabled)
+    }
+
     /// Pin the peer certificate to these hex SHA-256 fingerprints, the native
     /// equivalent of `serverCertificateHashes`. Accepts the values a server
     /// reports via `Server.certFingerprints`, so a self-signed certificate can be
     /// trusted without disabling verification.
     public func setTlsFingerprints(_ fingerprints: [String]) {
         ffi.setTlsFingerprints(fingerprints: fingerprints)
+    }
+
+    /// Present a PEM certificate chain when the relay requires mTLS.
+    public func setTlsCert(_ path: String?) {
+        ffi.setTlsCert(path: path)
+    }
+
+    /// Present a PEM private key when the relay requires mTLS.
+    public func setTlsKey(_ path: String?) {
+        ffi.setTlsKey(path: path)
     }
 
     /// Set the local UDP socket bind address (defaults to `[::]:0`). Throws if

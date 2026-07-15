@@ -1002,6 +1002,17 @@ pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
 	})
 }
 
+/// Create a raw group with an explicit sequence number.
+///
+/// Returns a non-zero group handle on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_group_at(track: u32, sequence: u64) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_group_at(track, sequence)
+	})
+}
+
 /// Write a single-frame group to a raw track with a timestamp.
 ///
 /// Convenience for the common one-frame-per-group pattern. Equivalent to
@@ -1070,6 +1081,28 @@ pub extern "C" fn moq_publish_track_close(track: u32) -> i32 {
 	})
 }
 
+/// Declare a raw track's exclusive final group sequence.
+///
+/// Groups below `final_sequence` may still be created. Groups at or above it
+/// are rejected. The track remains open for groups below the boundary. Call
+/// [moq_publish_track_close] after producing the remaining groups.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_finish_at(track: u32, final_sequence: u64) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_finish_at(track, final_sequence)
+	})
+}
+
+/// Abort a raw track with an application error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_abort(track, error_code)
+	})
+}
+
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
 /// The timestamp is in microseconds.
@@ -1101,6 +1134,15 @@ pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		State::lock().publish.group_finish(group)
+	})
+}
+
+/// Abort a raw group with an application error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_group_abort(group: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		State::lock().publish.group_abort(group, error_code)
 	})
 }
 

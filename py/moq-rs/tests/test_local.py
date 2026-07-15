@@ -484,6 +484,21 @@ def test_raw_track_write_after_finish_fails():
     with pytest.raises(Exception):
         track.write_frame(b"late", 0)
 
+
+def test_raw_sparse_groups_and_known_end():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("sparse")
+
+    group = track.create_group(2)
+    assert group.sequence == 2
+    group.finish()
+
+    track.finish_at(5)
+    track.create_group(4).finish()
+    with pytest.raises(Exception):
+        track.create_group(5)
+    track.finish()
+
     with pytest.raises(Exception):
         track.append_group()
 

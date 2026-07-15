@@ -26,6 +26,16 @@ func (s *Session) Stats() ConnectionStats {
 	return s.inner.Stats()
 }
 
+// Publisher returns the origin used to advertise local broadcasts to the remote.
+func (s *Session) Publisher() *OriginProducer {
+	return &OriginProducer{inner: s.inner.Publisher()}
+}
+
+// Consumer returns the origin used to receive broadcasts from the remote.
+func (s *Session) Consumer() *OriginConsumer {
+	return &OriginConsumer{inner: s.inner.Consumer()}
+}
+
 // Shutdown closes the session gracefully.
 func (s *Session) Shutdown() {
 	s.inner.Shutdown()

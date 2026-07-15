@@ -47,7 +47,8 @@ for ann, err := range announced.All(ctx) {
 ## Common APIs
 
 Client TLS can be configured with `WithTLSRoots`, `WithTLSSystemRoots`, and
-`WithTLSFingerprints`. Use fingerprints with `Server.CertFingerprints()` when
+`WithTLSFingerprints`. Use `WithClientTLSCert` and `WithClientTLSKey` for mTLS.
+Use fingerprints with `Server.CertFingerprints()` when
 pinning a generated self-signed certificate.
 
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
@@ -60,6 +61,11 @@ for media tracks whose timescale should be selected by the importer.
 `PublishMedia`, `PublishMediaOnTrack`, and `PublishMediaStream` accept
 `WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
 before the stream reveals them.
+
+JSON tracks are available in two modes. `PublishJSONSnapshot` / `SubscribeJSONSnapshot`
+carry lossy latest state, while `PublishJSONStream` / `SubscribeJSONStream` carry every
+record in order. Producers accept any `encoding/json` value; consumers return
+`json.RawMessage` so callers choose their own decoded type.
 
 ## Errors
 

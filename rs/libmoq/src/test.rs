@@ -727,6 +727,37 @@ fn raw_track_datagram_publish_consume() {
 }
 
 #[test]
+fn raw_track_sparse_groups_and_known_end() {
+	let broadcast = id(moq_publish_create());
+	let name = b"sparse";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	let group = id(moq_publish_track_group_at(track, 2));
+	assert_eq!(moq_publish_group_close(group), 0);
+	assert_eq!(moq_publish_track_finish_at(track, 5), 0);
+	let group = id(moq_publish_track_group_at(track, 4));
+	assert_eq!(moq_publish_group_close(group), 0);
+	assert!(moq_publish_track_group_at(track, 5) < 0);
+	assert_eq!(moq_publish_track_close(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
+fn raw_track_and_group_abort_consume_their_handles() {
+	let broadcast = id(moq_publish_create());
+	let name = b"aborted";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let group = id(moq_publish_track_group(track));
+	assert_eq!(moq_publish_group_abort(group, 409), 0);
+	assert!(moq_publish_group_close(group) < 0);
+	assert_eq!(moq_publish_track_abort(track, 410), 0);
+	assert!(moq_publish_track_close(track) < 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
 fn raw_track_subscription_options_and_update() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
