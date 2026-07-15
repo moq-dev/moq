@@ -15,7 +15,7 @@ QUIC and WebTransport connection helpers for native Rust applications. Provides 
 `moq-native` bridges the gap between the transport-agnostic `moq-net` crate and actual QUIC/WebTransport networking. It handles:
 
 - TLS certificate loading and configuration
-- QUIC connection setup via a pluggable backend, defaulting to [noq](https://crates.io/crates/noq) (enable the `quinn` feature for [quinn](https://crates.io/crates/quinn) instead)
+- QUIC connection setup via a pluggable backend, defaulting to [quinn](https://crates.io/crates/quinn) (the `noq` feature provides [noq](https://crates.io/crates/noq) as an alternative)
 - WebTransport session management
 - Development certificate generation for local testing
 

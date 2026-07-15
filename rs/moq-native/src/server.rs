@@ -224,22 +224,7 @@ pub struct Server {
 
 impl Server {
 	pub fn new(config: ServerConfig) -> crate::Result<Self> {
-		let backend = config.backend.clone().unwrap_or({
-			#[cfg(feature = "noq")]
-			{
-				QuicBackend::Noq
-			}
-			#[cfg(all(feature = "quinn", not(feature = "noq")))]
-			{
-				QuicBackend::Quinn
-			}
-			#[cfg(all(feature = "quiche", not(feature = "noq"), not(feature = "quinn")))]
-			{
-				QuicBackend::Quiche
-			}
-			#[cfg(all(not(feature = "quiche"), not(feature = "noq"), not(feature = "quinn")))]
-			panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
-		});
+		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
 
 		let versions = config.versions();
 
