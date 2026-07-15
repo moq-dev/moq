@@ -19,37 +19,26 @@ use web_async::Lock;
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
-struct TrackAliases {
-	active: HashMap<u64, RequestId>,
-	waiters: kio::WaiterList,
+type TrackAliases = kio::Producer<HashMap<u64, RequestId>>;
+
+fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) -> Result<(), Error> {
+	let mut aliases = aliases.write().map_err(|_| Error::Dropped)?;
+	match aliases.entry(alias) {
+		Entry::Occupied(entry) if *entry.get() == request_id => Ok(()),
+		Entry::Occupied(_) => Err(Error::Duplicate),
+		Entry::Vacant(entry) => {
+			entry.insert(request_id);
+			Ok(())
+		}
+	}
 }
 
-impl TrackAliases {
-	fn poll_get(&mut self, alias: u64, waiter: &kio::Waiter) -> Poll<RequestId> {
-		if let Some(request_id) = self.active.get(&alias) {
-			return Poll::Ready(*request_id);
-		}
-
-		waiter.register(&mut self.waiters);
-		Poll::Pending
-	}
-
-	fn insert(&mut self, alias: u64, request_id: RequestId) -> Result<kio::WaiterList, Error> {
-		match self.active.entry(alias) {
-			Entry::Occupied(entry) if *entry.get() == request_id => Ok(kio::WaiterList::new()),
-			Entry::Occupied(_) => Err(Error::Duplicate),
-			Entry::Vacant(entry) => {
-				entry.insert(request_id);
-				Ok(self.waiters.take())
-			}
-		}
-	}
-
-	fn remove(&mut self, alias: u64, request_id: RequestId) {
-		if self.active.get(&alias) == Some(&request_id) {
-			self.active.remove(&alias);
-		}
+fn remove_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) {
+	let Ok(mut aliases) = aliases.write() else {
+		return;
+	};
+	if aliases.get(&alias) == Some(&request_id) {
+		aliases.remove(&alias);
 	}
 }
 
@@ -107,15 +96,22 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 }
 
-async fn resolve_track_alias(state: &Lock<State>, alias: u64) -> Result<RequestId, Error> {
-	let resolved = kio::wait(|waiter| state.lock().aliases.poll_get(alias, waiter));
+async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
+	let resolved = kio::wait(move |waiter| {
+		aliases
+			.poll(waiter, |aliases| match aliases.get(&alias) {
+				Some(request_id) => Poll::Ready(*request_id),
+				None => Poll::Pending,
+			})
+			.map(|result| result.map_err(|_| Error::Dropped))
+	});
 	let timeout = web_async::time::sleep(TRACK_ALIAS_TIMEOUT);
 
 	tokio::pin!(resolved);
 	tokio::pin!(timeout);
 
 	tokio::select! {
-		request_id = &mut resolved => Ok(request_id),
+		request_id = &mut resolved => request_id,
 		_ = &mut timeout => Err(Error::NotFound),
 	}
 }
@@ -146,18 +142,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn register_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
-		let mut waiters = {
-			let mut state = self.state.lock();
-			if !state.subscribes.contains_key(&request_id) {
-				return Err(Error::NotFound);
-			}
+		let mut state = self.state.lock();
+		if !state.subscribes.contains_key(&request_id) {
+			return Err(Error::NotFound);
+		}
 
-			let waiters = state.aliases.insert(alias, request_id)?;
-			state.subscribes.get_mut(&request_id).unwrap().alias = Some(alias);
-			waiters
-		};
-
-		waiters.wake();
+		insert_track_alias(&state.aliases, alias, request_id)?;
+		state.subscribes.get_mut(&request_id).unwrap().alias = Some(alias);
 		Ok(())
 	}
 
@@ -165,7 +156,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 		let track = state.subscribes.remove(&request_id)?;
 		if let Some(alias) = track.alias {
-			state.aliases.remove(alias, request_id);
+			remove_track_alias(&state.aliases, alias, request_id);
 		}
 		Some(track)
 	}
@@ -372,7 +363,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		if let Some(mut track) = state.subscribes.remove(&request_id) {
 			let _ = track.producer.finish();
 			if let Some(alias) = track.alias {
-				state.aliases.remove(alias, request_id);
+				remove_track_alias(&state.aliases, alias, request_id);
 			}
 		}
 		if let Some(path) = state.publishes.remove(&request_id) {
@@ -655,16 +646,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Entry::Occupied(_) => return Err(Error::Duplicate),
 		};
 
-		let mut waiters = match state.aliases.insert(msg.track_alias, request_id) {
-			Ok(waiters) => waiters,
-			Err(err) => {
-				state.subscribes.remove(&request_id);
-				return Err(err);
-			}
-		};
+		if let Err(err) = insert_track_alias(&state.aliases, msg.track_alias, request_id) {
+			state.subscribes.remove(&request_id);
+			return Err(err);
+		}
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
 		drop(state);
-		waiters.wake();
 
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 		broadcast.insert_track(track.consume())?;
@@ -860,11 +847,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
-		let request_id = resolve_track_alias(&self.state, group.track_alias)
-			.await
-			.inspect_err(|_| {
-				tracing::warn!(track_alias = %group.track_alias, "unknown track alias");
-			})?;
+		let aliases = self.state.lock().aliases.consume();
+		let request_id = resolve_track_alias(aliases, group.track_alias).await.inspect_err(|_| {
+			tracing::warn!(track_alias = %group.track_alias, "unknown track alias");
+		})?;
 
 		let (mut producer, track, track_stats) = {
 			let mut state = self.state.lock();
@@ -979,30 +965,32 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn track_alias_waits_for_control_message() {
-		let state = Lock::new(State::default());
-		let pending = resolve_track_alias(&state, 7);
+		let aliases = TrackAliases::default();
+		let pending = resolve_track_alias(aliases.consume(), 7);
 		tokio::pin!(pending);
 
 		assert!(poll!(&mut pending).is_pending());
 
-		let mut waiters = state.lock().aliases.insert(7, RequestId(11)).unwrap();
-		waiters.wake();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 
 		assert_eq!(pending.await.unwrap(), RequestId(11));
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn unknown_track_alias_times_out() {
-		let state = Lock::new(State::default());
-		assert!(matches!(resolve_track_alias(&state, 7).await, Err(Error::NotFound)));
+		let aliases = TrackAliases::default();
+		assert!(matches!(
+			resolve_track_alias(aliases.consume(), 7).await,
+			Err(Error::NotFound)
+		));
 	}
 
 	#[test]
 	fn removing_old_track_does_not_remove_reused_alias() {
-		let mut aliases = TrackAliases::default();
-		aliases.insert(7, RequestId(11)).unwrap();
-		aliases.remove(7, RequestId(13));
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+		remove_track_alias(&aliases, 7, RequestId(13));
 
-		assert_eq!(aliases.active.get(&7), Some(&RequestId(11)));
+		assert_eq!(aliases.read().get(&7), Some(&RequestId(11)));
 	}
 }
