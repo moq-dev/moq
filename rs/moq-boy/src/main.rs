@@ -433,8 +433,12 @@ fn run_emulator(
 			let rgba = Bytes::from(emu.framebuffer());
 			let ts =
 				hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
-			session.video_encoder.try_frame(rgba, ts);
-			last_video_ts = Some(ts);
+			// Only advance the group's end past frames the encoder actually accepted;
+			// a frame dropped for backpressure was never published, so cutting at its
+			// timestamp would stretch the previous frame past the real media.
+			if session.video_encoder.try_frame(rgba, ts) {
+				last_video_ts = Some(ts);
+			}
 		} else {
 			// Video went idle without the whole emulator pausing (e.g. an audio-only
 			// viewer): close its group so the last frame isn't stretched to the resume.

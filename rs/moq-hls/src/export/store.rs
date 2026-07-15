@@ -461,4 +461,25 @@ mod tests {
 		assert!(!snapshot.segments[0].discontinuity);
 		assert!(snapshot.segments[1].discontinuity, "the post-gap segment is tagged");
 	}
+
+	/// The discontinuity flag must force a new segment even when the roll policy
+	/// otherwise wouldn't: a non-independent (mid-GOP) video fragment normally
+	/// appends to the current segment, but a discontinuous one still opens its own.
+	/// Guards the `||` in `push` against regressing to `&&`.
+	#[test]
+	fn discontinuous_fragment_forces_segment_even_mid_gop() {
+		let cfg = config(Duration::from_secs(10));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.push(fragment(1.0)); // segment 0 (independent)
+		let mid_gop = Fragment {
+			independent: false,
+			..fragment_discontinuous(1.0)
+		};
+		store.push(mid_gop); // not a GOP boundary, but the discontinuity forces a new segment
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.segments.len(), 2, "discontinuity opens a segment even mid-GOP");
+		assert!(snapshot.segments[1].discontinuity);
+	}
 }

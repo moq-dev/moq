@@ -62,12 +62,15 @@ impl VideoEncoder {
 		}
 	}
 
-	/// Send a frame to the encoder. Non-blocking: drops the frame if the
-	/// channel is full (capacity=4) to keep latency low.
-	pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
+	/// Send a frame to the encoder. Non-blocking: drops the frame if the channel is
+	/// full (capacity=4) to keep latency low. Returns whether the frame was accepted,
+	/// so the caller only advances the group's end past frames actually published.
+	pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) -> bool {
 		if self.tx.try_send(EncoderMsg::Frame { rgba, ts }).is_err() {
 			tracing::warn!("video frame dropped: encoder backpressure");
+			return false;
 		}
+		true
 	}
 
 	/// Close the current video group, marking its content as ending at `end`, and

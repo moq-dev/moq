@@ -333,7 +333,11 @@ async fn forward_gap_yields_short_fragment_then_discontinuity() {
 
 	assert_eq!(media.len(), 2, "one media fragment per group");
 	// Group 0 is bounded by its tail (~16ms), NOT stretched across the 2h gap.
-	assert!(media[0].duration < 1.0, "pre-gap fragment is short, got {}s", media[0].duration);
+	assert!(
+		media[0].duration < 1.0,
+		"pre-gap fragment is short, got {}s",
+		media[0].duration
+	);
 	assert!(!media[0].discontinuity, "pre-gap fragment is continuous");
 	// Group 1 opens a new continuity region after the forward jump.
 	assert!(media[1].discontinuity, "post-gap fragment is flagged discontinuous");

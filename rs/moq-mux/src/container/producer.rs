@@ -167,11 +167,13 @@ impl<C: Container> Producer<C> {
 	/// presentation end at `end` so a consumer bounds it there instead of stretching
 	/// it across the gap to the next group's first frame.
 	///
-	/// How `end` reaches the wire depends on the container: CMAF backfills it as the
-	/// last sample's duration, while Legacy/LOC (which carry no per-frame duration)
-	/// get a zero-length "tail" frame at `end`. That encoding stays inside this crate;
-	/// callers only ever express the end timestamp. The next [`write`](Self::write)
-	/// must be a keyframe.
+	/// How `end` is recorded depends on the container. Legacy/LOC carry no per-frame
+	/// duration, so `cut` writes a zero-length "tail" frame at `end`. Duration-carrying
+	/// containers (CMAF) instead bound every sample by its own per-sample duration, so
+	/// each frame is self-terminating and `cut` just flushes and closes -- `end` only
+	/// backfills a still-buffered trailing sample that arrived without a duration. The
+	/// empty-frame encoding stays inside this crate; callers only ever express the end
+	/// timestamp. The next [`write`](Self::write) must be a keyframe.
 	pub fn cut(&mut self, end: Timestamp) -> Result<(), C::Error> {
 		self.flush(Some(end))?;
 
@@ -471,5 +473,58 @@ mod tests {
 		// Bounded by cut's tail (16ms), NOT the 2h jump to the next group.
 		assert_eq!(frames[0].duration, Some(Timestamp::from_micros(16_000).unwrap()));
 		assert_eq!(frames[1].timestamp, Timestamp::from_micros(7_200_000_000).unwrap());
+	}
+
+	/// Write-recording container that reports per-frame durations, like CMAF.
+	#[derive(Clone, Default)]
+	struct DurationRecording(std::rc::Rc<std::cell::RefCell<Vec<Vec<Frame>>>>);
+
+	impl super::Container for DurationRecording {
+		type Error = crate::Error;
+
+		fn has_duration(&self) -> bool {
+			true
+		}
+
+		fn write(&self, _group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+			self.0.borrow_mut().push(frames.to_vec());
+			Ok(())
+		}
+
+		fn poll_read(
+			&self,
+			_group: &mut moq_net::GroupConsumer,
+			_waiter: &kio::Waiter,
+		) -> std::task::Poll<Result<crate::container::Read, Self::Error>> {
+			unreachable!("DurationRecording is write-only")
+		}
+	}
+
+	/// For a duration-carrying container, `cut` backfills the trailing sample's
+	/// duration from `end` and writes NO tail frame (the per-sample duration already
+	/// terminates each sample). The `has_duration()` gate keeps an empty tail out of a
+	/// CMAF fragment.
+	#[tokio::test]
+	async fn cut_backfills_duration_and_writes_no_tail_for_cmaf() {
+		let track = track_producer("test");
+		let recording = DurationRecording::default();
+		let mut producer = Producer::new(track, recording.clone()).with_latency(std::time::Duration::from_secs(10));
+
+		producer.write(frame(0, true)).unwrap(); // buffered (latency)
+		producer.write(frame(33_000, false)).unwrap(); // buffered
+		producer.cut(Timestamp::from_micros(50_000).unwrap()).unwrap(); // flush with end = 50ms
+		producer.finish().unwrap();
+
+		let writes = recording.0.borrow();
+		let samples: Vec<&Frame> = writes.iter().flatten().collect();
+		assert!(
+			samples.iter().all(|f| !f.payload.is_empty()),
+			"a duration-carrying container gets no tail frame"
+		);
+		// The trailing sample's duration is backfilled from `end`: 50ms - 33ms.
+		assert_eq!(
+			samples.last().unwrap().duration,
+			Some(Timestamp::from_micros(17_000).unwrap())
+		);
 	}
 }
