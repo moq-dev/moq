@@ -118,8 +118,8 @@ where
 	if let Some(publish) = publish {
 		server = server.with_subscriber(publish);
 	}
-	let session = server.accept(ws).await?;
-	session.closed().await.map_err(Into::into)
+	let connection = server.accept(ws).await?;
+	connection.await.map_err(Into::into)
 }
 
 /// QMux wire-format versions that can ride under a `{prefix}.{alpn}` pair.

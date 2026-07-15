@@ -71,7 +71,11 @@ impl Session {
 		let origin = moq_net::Origin::random().produce();
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
-		let inner = client.connect(transport).await.map_err(js_err)?;
+		let connection = client.connect(transport).await.map_err(js_err)?;
+		let inner = connection.session().clone();
+		web_async::spawn(async move {
+			let _ = connection.await;
+		});
 		Ok(Session { inner, consumer })
 	}
 

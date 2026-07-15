@@ -42,14 +42,13 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Async
-//! This library is async-first, using [tokio] for async I/O and task management.
-//! Any plain `async` method should be awaited from inside an active tokio runtime.
-//! Otherwise you risk a panic.
+//! This library is async-first. [`Client::connect`] and [`Server::accept`] return a
+//! [`Connection`] future whose protocol work is
+//! polled by the caller, so task coordination does not require a Tokio runtime.
 //!
-//! This requirement is being phased out as more methods grow `poll_xxx` counterparts
-//! built on [`kio`], so you can drive them from custom executors without a tokio
-//! runtime. You can also call them synchronously, since [`kio`] is built on the
-//! standard [`std::task::Waker`] API and any [`std::task::Waker`] is a valid driver.
+//! More methods are gaining `poll_xxx` counterparts built on [`kio`], so you can
+//! drive them from custom executors or synchronously. [`kio`] is built on the
+//! standard [`std::task::Waker`] API, and any [`std::task::Waker`] is a valid driver.
 
 mod client;
 mod coding;

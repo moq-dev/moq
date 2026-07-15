@@ -74,10 +74,16 @@ let transport = web_transport::ClientBuilder::new()
 // Hand the transport to moq-net and run the MoQ handshake.
 let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
-let session = moq_net::Client::new()
+let connection = moq_net::Client::new()
     .with_subscriber(origin)
     .connect(transport)
     .await?;
+let session = connection.session().clone();
+
+// The connection is the protocol driver and must be polled for its lifetime.
+wasm_bindgen_futures::spawn_local(async move {
+    let _ = connection.await;
+});
 
 // Read announcements off `consumer` exactly as on native...
 ```
