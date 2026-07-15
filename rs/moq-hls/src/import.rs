@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
 use moq_mux::select;
 use reqwest::Client;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -632,12 +634,25 @@ impl Import {
 		let url = &resource.url;
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
-			let bytes = tokio::fs::read(&path).await.map_err(Error::from)?;
-			self.slice_full_response(resource, Bytes::from(bytes))
+			let Some(range) = resource.range else {
+				return tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from);
+			};
+
+			let mut file = tokio::fs::File::open(&path).await.map_err(Error::from)?;
+			file.seek(SeekFrom::Start(range.start)).await.map_err(Error::from)?;
+			let mut bytes = Vec::new();
+			file.take(range.length)
+				.read_to_end(&mut bytes)
+				.await
+				.map_err(Error::from)?;
+			self.validate_range_length(resource, Bytes::from(bytes))
 		} else {
 			let response = self.request(resource).send().await.map_err(Error::from)?;
 			let response = response.error_for_status().map_err(Error::from)?;
 			let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+			if partial {
+				self.validate_content_range(resource, response.headers())?;
+			}
 			let bytes = response.bytes().await.map_err(Error::from)?;
 			if resource.range.is_some() && !partial {
 				self.slice_full_response(resource, bytes)
@@ -690,6 +705,31 @@ impl Import {
 			});
 		}
 		Ok(bytes)
+	}
+
+	fn validate_content_range(&self, resource: &Resource, headers: &reqwest::header::HeaderMap) -> Result<()> {
+		let Some(range) = resource.range else {
+			return Ok(());
+		};
+		let end = range.start + range.length - 1;
+		let actual = headers
+			.get(reqwest::header::CONTENT_RANGE)
+			.and_then(|value| value.to_str().ok())
+			.unwrap_or("<missing>");
+		let bounds = actual
+			.split_once(' ')
+			.filter(|(unit, _)| unit.eq_ignore_ascii_case("bytes"))
+			.and_then(|(_, value)| value.split_once('/'))
+			.and_then(|(bounds, _)| bounds.split_once('-'))
+			.and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)));
+		if bounds != Some((range.start, end)) {
+			return Err(Error::ByteRangeResponseMismatch {
+				url: resource.url.clone(),
+				start: range.start,
+				end,
+			});
+		}
+		Ok(())
 	}
 
 	fn new_importer(&self, select: &select::Broadcast) -> Fmp4 {
@@ -889,6 +929,8 @@ mod tests {
 	use super::*;
 	use std::path::Path;
 	use std::sync::atomic::{AtomicUsize, Ordering};
+	use tokio::io::AsyncWriteExt as _;
+	use tokio::net::TcpListener;
 
 	static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -934,6 +976,57 @@ mod tests {
 			.map(|window| data[window[0]..window[1]].to_vec())
 			.collect();
 		(init, fragments)
+	}
+
+	async fn serve_response(
+		status: &str,
+		headers: &[(&str, &str)],
+		body: &[u8],
+	) -> (Url, tokio::task::JoinHandle<Vec<u8>>) {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let mut response = format!(
+			"HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+			body.len()
+		);
+		for (name, value) in headers {
+			response.push_str(&format!("{name}: {value}\r\n"));
+		}
+		response.push_str("\r\n");
+		let mut response = response.into_bytes();
+		response.extend_from_slice(body);
+
+		let server = tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut chunk = [0; 1024];
+				let read = stream.read(&mut chunk).await.unwrap();
+				if read == 0 {
+					break;
+				}
+				request.extend_from_slice(&chunk[..read]);
+				if request.windows(4).any(|window| window == b"\r\n\r\n") {
+					break;
+				}
+			}
+			stream.write_all(&response).await.unwrap();
+			request
+		});
+		(Url::parse(&format!("http://{address}/media.mp4")).unwrap(), server)
+	}
+
+	fn http_import(url: &Url) -> Import {
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		Import::new(broadcast, catalog, Config::new(url.to_string())).unwrap()
+	}
+
+	fn ranged_resource(url: Url) -> Resource {
+		Resource {
+			url,
+			range: Some(ResolvedRange { start: 2, length: 3 }),
+		}
 	}
 
 	#[test]
@@ -1078,6 +1171,62 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=2-4");
+	}
+
+	#[tokio::test]
+	async fn ranged_http_resource_accepts_matching_partial_response() {
+		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cde").await;
+		let import = http_import(&url);
+
+		let bytes = import.fetch_resource(&ranged_resource(url)).await.unwrap();
+		let request = String::from_utf8(server.await.unwrap()).unwrap();
+
+		assert_eq!(bytes, b"cde".as_slice());
+		assert!(
+			request
+				.lines()
+				.any(|line| line.eq_ignore_ascii_case("range: bytes=2-4"))
+		);
+	}
+
+	#[tokio::test]
+	async fn ranged_http_resource_slices_full_response() {
+		let (url, server) = serve_response("200 OK", &[], b"abcdef").await;
+		let import = http_import(&url);
+
+		let bytes = import.fetch_resource(&ranged_resource(url)).await.unwrap();
+		server.await.unwrap();
+
+		assert_eq!(bytes, b"cde".as_slice());
+	}
+
+	#[tokio::test]
+	async fn ranged_http_resource_rejects_wrong_response_length() {
+		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cd").await;
+		let import = http_import(&url);
+
+		let err = import.fetch_resource(&ranged_resource(url)).await.unwrap_err();
+		server.await.unwrap();
+
+		assert!(matches!(
+			err,
+			Error::ByteRangeLengthMismatch {
+				expected: 3,
+				actual: 2,
+				..
+			}
+		));
+	}
+
+	#[tokio::test]
+	async fn ranged_http_resource_rejects_mismatched_content_range() {
+		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 3-5/6")], b"def").await;
+		let import = http_import(&url);
+
+		let err = import.fetch_resource(&ranged_resource(url)).await.unwrap_err();
+		server.await.unwrap();
+
+		assert!(matches!(err, Error::ByteRangeResponseMismatch { start: 2, end: 4, .. }));
 	}
 
 	#[tokio::test]

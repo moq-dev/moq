@@ -82,7 +82,10 @@ fn dropping_import_retires_catalog_renditions() {
 
 	{
 		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
-		let _ = fmp4.decode(data);
+		let mut cursor = std::io::Cursor::new(data);
+		mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+		mp4_atom::Moov::decode(&mut cursor).unwrap();
+		fmp4.decode(&data[..cursor.position() as usize]).unwrap();
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.video.renditions.len(), 1);
 		assert_eq!(snapshot.audio.renditions.len(), 1);

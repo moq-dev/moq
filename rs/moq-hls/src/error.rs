@@ -69,6 +69,17 @@ pub enum Error {
 		actual: usize,
 	},
 
+	/// A partial HTTP response identified a different byte range than requested.
+	#[error("byte range for {url} returned a mismatched Content-Range, expected bytes {start}-{end}")]
+	ByteRangeResponseMismatch {
+		/// The ranged resource.
+		url: url::Url,
+		/// The first requested byte.
+		start: u64,
+		/// The last requested byte, inclusive.
+		end: u64,
+	},
+
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
 	#[error("HLS {kind} sequence {value} is too large to encode")]
 	SequenceOverflow {
