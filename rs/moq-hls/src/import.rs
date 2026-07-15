@@ -115,7 +115,6 @@ struct TrackState {
 	next_sequence: Option<u64>,
 	next_discontinuity: Option<u64>,
 	map: Option<MapState>,
-	map_range: RangeCursor,
 	media_range: RangeCursor,
 }
 
@@ -151,10 +150,14 @@ impl TrackState {
 			next_sequence: None,
 			next_discontinuity: None,
 			map: None,
-			map_range: RangeCursor::default(),
 			media_range: RangeCursor::default(),
 		}
 	}
+}
+
+fn resolve_map(url: Url, range: Option<&ByteRange>) -> Result<Resource> {
+	// EXT-X-MAP ranges require explicit offsets; they do not chain like media ranges.
+	RangeCursor::default().resolve(url, range)
 }
 
 impl RangeCursor {
@@ -392,13 +395,8 @@ impl Import {
 		}
 
 		let body = self.fetch_bytes(self.base_url.clone()).await?;
-		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
-			// The permissive master parser also accepts media playlists as an empty
-			// master. Only take this branch when it actually contains variants.
-			if master.variants.is_empty() {
-				self.video.push(TrackState::new(self.base_url.clone(), select_muxed()));
-				return Ok(());
-			}
+		if m3u8_rs::is_master_playlist(&body) {
+			let master = m3u8_rs::parse_master_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
 			let variants = select_variants(&master);
 			if variants.is_empty() {
 				return Err(Error::NoVariants);
@@ -552,15 +550,13 @@ impl Import {
 		}
 
 		let url = resolve_uri(&track.playlist, &map.uri)?;
-		let mut range = track.map_range.clone();
-		let resource = range.resolve(url, map.byte_range.as_ref())?;
+		let resource = resolve_map(url, map.byte_range.as_ref())?;
 		if track.map.as_ref().is_some_and(|current| current.resource == resource) {
 			track.map = Some(MapState {
 				sequence,
 				tag: map.clone(),
 				resource,
 			});
-			track.map_range = range;
 			return Ok(());
 		}
 
@@ -580,7 +576,6 @@ impl Import {
 			tag: map.clone(),
 			resource,
 		});
-		track.map_range = range;
 		track.next_discontinuity = None;
 		info!(?kind, "loaded HLS init segment generation");
 		Ok(())
@@ -675,7 +670,7 @@ impl Import {
 			.and_then(|(start, end)| bytes.get(start..end).map(|_| (start, end)))
 		{
 			Some((start, end)) => Ok(bytes.slice(start..end)),
-			None => Err(Error::ShortByteRange {
+			None => Err(Error::ByteRangeLengthMismatch {
 				url: resource.url.clone(),
 				expected: range.length,
 				actual: bytes.len().saturating_sub(start.unwrap_or(bytes.len())),
@@ -688,7 +683,7 @@ impl Import {
 			return Ok(bytes);
 		};
 		if u64::try_from(bytes.len()).ok() != Some(range.length) {
-			return Err(Error::ShortByteRange {
+			return Err(Error::ByteRangeLengthMismatch {
 				url: resource.url.clone(),
 				expected: range.length,
 				actual: bytes.len(),
@@ -984,6 +979,24 @@ mod tests {
 		hls
 	}
 
+	#[tokio::test]
+	async fn variantless_master_is_not_treated_as_media() {
+		let dir = temp_dir();
+		let path = dir.join("master.m3u8");
+		std::fs::write(
+			&path,
+			"#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"audio.m3u8\"\n",
+		)
+		.unwrap();
+
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let cfg = Config::new(path.to_string_lossy().into_owned());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+
+		assert!(matches!(import.ensure_tracks().await, Err(Error::NoVariants)));
+	}
+
 	#[test]
 	fn byte_ranges_advance_implicit_offsets_for_the_same_resource() {
 		let url = Url::parse("https://example.com/media.mp4").unwrap();
@@ -1032,6 +1045,20 @@ mod tests {
 				}),
 			)
 			.unwrap_err();
+
+		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
+	}
+
+	#[test]
+	fn map_byte_range_requires_an_explicit_offset() {
+		let err = resolve_map(
+			Url::parse("https://example.com/init.mp4").unwrap(),
+			Some(&ByteRange {
+				length: 20,
+				offset: None,
+			}),
+		)
+		.unwrap_err();
 
 		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
 	}

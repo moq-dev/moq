@@ -24,8 +24,8 @@ pub enum Error {
 	#[error("invalid file URL")]
 	InvalidFileUrl,
 
-	/// The fetched media playlist could not be parsed.
-	#[error("failed to parse media playlist: {0}")]
+	/// The fetched HLS playlist could not be parsed.
+	#[error("failed to parse HLS playlist: {0}")]
 	ParsePlaylist(String),
 
 	/// The master playlist contained no variant this gateway can import.
@@ -58,9 +58,9 @@ pub enum Error {
 		length: u64,
 	},
 
-	/// A ranged resource response did not contain the complete requested range.
+	/// A ranged resource response had a different length than requested.
 	#[error("byte range for {url} returned {actual} bytes, expected {expected}")]
-	ShortByteRange {
+	ByteRangeLengthMismatch {
 		/// The ranged resource.
 		url: url::Url,
 		/// The requested byte count.
