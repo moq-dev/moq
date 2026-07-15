@@ -38,6 +38,17 @@ test("Format decodes timestamp at default microseconds timescale", () => {
 	expect(decoded.keyframe).toBe(false);
 });
 
+test("Format skips a marker instead of decoding an empty chunk", () => {
+	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(12_345));
+	const frame = buildFrame(props, new Uint8Array());
+
+	const fmt = new Format();
+
+	// An empty payload is a marker: no media, so no frames -- and no throw. A
+	// publisher emitting these must not break an older decoder.
+	expect(fmt.decode(frame)).toEqual([]);
+});
+
 test("Format honors per-frame timescale property", () => {
 	// timestamp = 96000 at per-frame timescale 48000 -> 2 seconds = 2_000_000 micros
 	const props = concat(
@@ -46,7 +57,8 @@ test("Format honors per-frame timescale property", () => {
 		Varint.encode(PROP_TIMESCALE - PROP_TIMESTAMP), // delta to 0x08
 		Varint.encode(48_000),
 	);
-	const frame = buildFrame(props, new Uint8Array());
+	// A non-empty payload: an empty one is a marker, which decodes to no frames.
+	const frame = buildFrame(props, new Uint8Array([0xde, 0xad]));
 
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);

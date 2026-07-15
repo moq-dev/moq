@@ -47,6 +47,15 @@ impl Container for Wire {
 		};
 
 		let loc = moq_loc::decode(data)?;
+
+		// An empty payload is a marker, not a sample: it says content stops at this
+		// timestamp, so there's nothing to decode. Skip it and read on rather than
+		// handing an empty access unit to a decoder. Yielding no frames (instead of
+		// erroring) is what lets a publisher start emitting these without breaking us.
+		if loc.payload.is_empty() {
+			return Poll::Ready(Ok(Read::Fragment(Vec::new())));
+		}
+
 		// `loc.timescale == Some(0)` is a malformed wire (caught by moq_loc::decode itself),
 		// so any Some(_) we see here is non-zero. Falling back to the catalog default
 		// keeps this code path infallible.

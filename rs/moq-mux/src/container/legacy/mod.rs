@@ -36,8 +36,16 @@ impl Container for Wire {
 		};
 
 		let mut hang_frame = hang::container::Frame::decode(data)?;
-		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
 
+		// An empty payload is a marker, not a sample: it says content stops at this
+		// timestamp, so there's nothing to decode. Skip it and read on rather than
+		// handing an empty access unit to a decoder. Yielding no frames (instead of
+		// erroring) is what lets a publisher start emitting these without breaking us.
+		if !hang_frame.payload.has_remaining() {
+			return Poll::Ready(Ok(Read::Fragment(Vec::new())));
+		}
+
+		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
 		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp: hang_frame.timestamp,
 			payload,

@@ -1080,6 +1080,82 @@ mod tests {
 		);
 	}
 
+	// ---- Empty payloads ----
+
+	/// Write one frame with an empty payload: a marker saying content stops at
+	/// `timestamp`, carrying no media.
+	fn write_marker(group: &mut moq_net::GroupProducer, timestamp: Timestamp) {
+		let frame = Frame {
+			timestamp,
+			payload: Bytes::new(),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy.write(group, &[frame]).unwrap();
+	}
+
+	/// An empty payload carries no media, so it's skipped rather than surfaced as a
+	/// frame or raised as an error. A marker can sit anywhere -- mid-group (a gap) or
+	/// last (a group's end) -- and a publisher emitting them must not break us.
+	#[tokio::test]
+	async fn empty_payload_is_skipped() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		let mut group = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
+		let media = |timestamp| Frame {
+			timestamp,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy.write(&mut group, &[media(ts(0))]).unwrap();
+		write_marker(&mut group, ts(16_000)); // mid-group gap marker
+		Container::Legacy.write(&mut group, &[media(ts(33_000))]).unwrap();
+		write_marker(&mut group, ts(50_000)); // the group's end
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 2, "markers are not surfaced as media");
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(33_000));
+	}
+
+	/// Reading a marker consumes its frame, so a run of them makes progress and the
+	/// consumer reaches the next group instead of spinning. `read_all` times out per
+	/// read, so a stall or an infinite loop fails this rather than hanging forever.
+	#[tokio::test]
+	async fn consecutive_markers_do_not_stall() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		let mut group = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
+		Container::Legacy
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		for i in 1..5u64 {
+			write_marker(&mut group, ts(i * 1_000));
+		}
+		group.finish().unwrap();
+		write_group(&mut track, 1, &[ts(100_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![0, 100_000], "markers skipped, next group reached");
+	}
+
 	// ---- Group Ordering ----
 
 	#[tokio::test]
