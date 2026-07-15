@@ -27,7 +27,7 @@ use moq_net::{OriginConsumer, OriginProducer};
 use srt_tokio::access::{
 	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
 };
-use srt_tokio::options::StreamId;
+use srt_tokio::options::{SocketOptions, StreamId};
 use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
 
 use crate::Result;
@@ -39,6 +39,14 @@ pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(500);
 /// SRT payload size for egress: 7 MPEG-TS packets (7 x 188), the de-facto
 /// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
 const SRT_PAYLOAD: usize = 7 * 188;
+
+/// Match libsrt's 8192-payload send-buffer default by using srt-tokio's already
+/// compliant receive-buffer size. srt-tokio defaults its sender to only 32
+/// payloads, so one large keyframe can evict an unsent packet and wedge its send
+/// queue behind the missing sequence number.
+pub(crate) fn configure_buffers(options: &mut SocketOptions) {
+	options.sender.buffer_size = options.receiver.buffer_size;
+}
 
 /// An SRT server that yields each incoming connection's pending request as a
 /// [`Request`].
@@ -63,7 +71,11 @@ impl Server {
 	/// threshold for [`Subscribe`] requests.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
-		let (listener, incoming) = SrtListener::builder().latency(latency).bind(addr).await?;
+		let (listener, incoming) = SrtListener::builder()
+			.latency(latency)
+			.set(configure_buffers)
+			.bind(addr)
+			.await?;
 		Ok(Self {
 			_listener: listener,
 			incoming,
@@ -451,6 +463,60 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use bytes::Bytes;
+	use srt_tokio::options::PacketCount;
+	use std::net::SocketAddr;
+	use std::time::Duration;
+
+	#[test]
+	fn send_buffer_holds_at_least_one_standard_srt_window() {
+		let mut options = SocketOptions::default();
+		configure_buffers(&mut options);
+
+		assert!(
+			options.sender.buffer_size / options.sender.max_payload_size >= PacketCount(8192),
+			"the send buffer must hold libsrt's standard 8192-payload window"
+		);
+	}
+
+	#[tokio::test]
+	async fn accepted_socket_sends_a_burst_larger_than_srt_tokio_default() {
+		let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let addr: SocketAddr = probe.local_addr().unwrap();
+		drop(probe);
+
+		let mut server = Server::bind(addr, None).await.unwrap();
+		let caller = tokio::spawn(async move {
+			SrtSocket::builder()
+				.call(addr, Some("#!::r=buffer-test,m=request"))
+				.await
+				.unwrap()
+		});
+
+		let request = server.accept().await.expect("an SRT request");
+		let Request::Subscribe(subscribe) = request else {
+			panic!("m=request must create a subscribe request");
+		};
+		let mut sender = subscribe.0.request.accept(None).await.unwrap();
+		let mut receiver = caller.await.unwrap();
+
+		const MESSAGES: usize = 1024;
+		for sequence in 0..MESSAGES {
+			sender
+				.send((Instant::now(), Bytes::copy_from_slice(&sequence.to_be_bytes())))
+				.await
+				.unwrap();
+		}
+
+		for sequence in 0..MESSAGES {
+			let (_, payload) = tokio::time::timeout(Duration::from_secs(3), receiver.next())
+				.await
+				.expect("SRT sender stalled after its small default buffer overflowed")
+				.expect("SRT sender closed before the burst finished")
+				.unwrap();
+			assert_eq!(payload.as_ref(), sequence.to_be_bytes());
+		}
+	}
 
 	#[test]
 	fn pace_re_anchors_to_live_edge() {

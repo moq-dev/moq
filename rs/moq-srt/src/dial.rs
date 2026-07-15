@@ -24,7 +24,7 @@ use moq_net::{OriginConsumer, OriginProducer};
 use srt_tokio::SrtSocket;
 
 use crate::Result;
-use crate::server::{DEFAULT_LATENCY, serve_publish, serve_subscribe};
+use crate::server::{DEFAULT_LATENCY, configure_buffers, serve_publish, serve_subscribe};
 
 /// Dial `addr` and push a MoQ broadcast out to the remote: connect as an SRT caller
 /// requesting the remote receive on `resource` (`m=publish`), re-mux `path` from
@@ -79,6 +79,7 @@ async fn call(addr: SocketAddr, resource: &str, mode: Mode, latency: impl Into<O
 	let stream_id = format!("#!::r={resource},m={}", mode.as_str());
 	let socket = SrtSocket::builder()
 		.latency(latency)
+		.set(configure_buffers)
 		.call(addr, Some(&stream_id))
 		.await?;
 	tracing::info!(%addr, %resource, mode = mode.as_str(), "SRT caller connected");
