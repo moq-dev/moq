@@ -27,7 +27,7 @@ use moq_net::{OriginConsumer, OriginProducer};
 use srt_tokio::access::{
 	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
 };
-use srt_tokio::options::{SocketOptions, StreamId};
+use srt_tokio::options::{PacketCount, SocketOptions, StreamId};
 use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
 
 use crate::Result;
@@ -40,12 +40,14 @@ pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(500);
 /// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
 const SRT_PAYLOAD: usize = 7 * 188;
 
-/// Match libsrt's 8192-payload send-buffer default by using srt-tokio's already
-/// compliant receive-buffer size. srt-tokio defaults its sender to only 32
-/// payloads, so one large keyframe can evict an unsent packet and wedge its send
-/// queue behind the missing sequence number.
+/// Match libsrt's standard send-buffer window.
+const SRT_BUFFER_PACKETS: PacketCount = PacketCount(8192);
+
+/// srt-tokio defaults its sender to only 32 packets, so one large keyframe can
+/// evict an unsent packet and wedge its send queue behind the missing sequence
+/// number.
 pub(crate) fn configure_buffers(options: &mut SocketOptions) {
-	options.sender.buffer_size = options.receiver.buffer_size;
+	options.sender.buffer_size = SRT_BUFFER_PACKETS * options.session.max_segment_size;
 }
 
 /// An SRT server that yields each incoming connection's pending request as a
@@ -464,18 +466,17 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 mod tests {
 	use super::*;
 	use bytes::Bytes;
-	use srt_tokio::options::PacketCount;
 	use std::net::SocketAddr;
 	use std::time::Duration;
 
 	#[test]
-	fn send_buffer_holds_at_least_one_standard_srt_window() {
+	fn send_buffer_uses_standard_srt_window() {
 		let mut options = SocketOptions::default();
 		configure_buffers(&mut options);
 
-		assert!(
-			options.sender.buffer_size / options.sender.max_payload_size >= PacketCount(8192),
-			"the send buffer must hold libsrt's standard 8192-payload window"
+		assert_eq!(
+			options.sender.buffer_size,
+			SRT_BUFFER_PACKETS * options.session.max_segment_size
 		);
 	}
 
