@@ -98,7 +98,7 @@ export class Connection implements Established {
 
 		this.#closed = true;
 
-		this.#session.close?.();
+		this.#session.close();
 
 		try {
 			this.#quic.close();

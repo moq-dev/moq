@@ -13,7 +13,7 @@ export interface Session {
 	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(): Promise<bigint | undefined>;
-	close?(): void;
+	close(): void;
 	readonly version: IetfVersion;
 }
 
@@ -43,6 +43,11 @@ export class NativeSession implements Session {
 		const id = this.#requestId;
 		this.#requestId += 2n;
 		return id;
+	}
+
+	/** Closes the underlying WebTransport session. */
+	close() {
+		this.#quic.close();
 	}
 }
 
