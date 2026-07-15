@@ -385,18 +385,18 @@ impl<E: CatalogExt> Track<E> {
 		self.inner.finish()
 	}
 
-	/// Cut the current group, leaving the track (and its catalog rendition) OPEN —
+	/// Cut the current group, leaving the track (and its catalog rendition) OPEN. That's
 	/// unlike [`finish`](Self::finish), which ends the track. Publishing resumes into a
 	/// fresh group on the next keyframe.
 	///
 	/// `end` is where this group's content stops, i.e. the presentation end of its last
-	/// frame — NOT the timestamp of whatever resumes later. It bounds that last frame,
+	/// frame, NOT the timestamp of whatever resumes later. It bounds that last frame,
 	/// which otherwise has no end of its own: a consumer would have to wait for the
 	/// *next* group's first frame to infer one, and that group may be late, reordered,
 	/// or never arrive at all. So a group cut at a known `end` is self-describing.
 	///
-	/// `None` is for callers with no boundary to give — audio, where every frame is a
-	/// keyframe and the duration is deterministic, so the next packet bounds this one
+	/// `None` is for callers with no boundary to give, i.e. audio, where every frame is
+	/// a keyframe and the duration is deterministic, so the next packet bounds this one
 	/// anyway.
 	///
 	/// Typical use: pause a track that has lost its last subscriber while leaving a
@@ -405,10 +405,10 @@ impl<E: CatalogExt> Track<E> {
 	/// Invariants: call it while a group is open; the next group then begins on the
 	/// following keyframe (mirroring the container producer's `cut`, whose next write
 	/// must be a keyframe). A keyframe arriving through `decode` cuts the previous
-	/// group on its own, using its own timestamp — so call this only when you know the
+	/// group on its own, using its own timestamp, so call this only when you know the
 	/// content ends somewhere that keyframe won't tell us. Composes with
 	/// [`finish`](Self::finish) and [`seek`](Self::seek). This is the canonical
-	/// description — the codec `Import`s and `TrackStream` reference it.
+	/// description that the codec `Import`s and `TrackStream` reference.
 	pub fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 		self.inner.cut(end)
 	}
@@ -690,7 +690,7 @@ mod tests {
 		assert!(!snapshot.video.renditions.contains_key("0.avc3"));
 	}
 
-	/// `Track::cut` closes the current group cleanly and leaves the track OPEN — the next
+	/// `Track::cut` closes the current group cleanly and leaves the track OPEN. The next
 	/// decoded frame opens a fresh group and `finish` still works. Uses opus (every audio frame is a
 	/// keyframe, so each `decode` after a close opens a group).
 	#[tokio::test(start_paused = true)]
@@ -712,7 +712,7 @@ mod tests {
 			.unwrap();
 		import.finish().unwrap();
 
-		// Two complete groups reached the consumer — no truncated/never-finished group.
+		// Two complete groups reached the consumer, no truncated/never-finished group.
 		let mut groups = 0usize;
 		let mut consumer = consumer;
 		while let Some(_group) = consumer.recv_group().await.unwrap() {
