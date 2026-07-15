@@ -93,7 +93,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.14",
+      "version": "0.2.15",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -176,7 +176,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "dependencies": {
         "@moq/qmux": "^0.1.3",
         "@moq/signals": "workspace:*",
@@ -196,7 +196,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -260,7 +260,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",

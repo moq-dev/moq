@@ -39,7 +39,7 @@ function installFakeVideoEncoder() {
 
 test("serve tracks encoder config in its child effect", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	using warn = spyOn(console, "warn").mockImplementation(() => {});
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 	const frame = new Signal<VideoFrame | undefined>(undefined);
 	const source = new Signal<Source | undefined>(undefined);
@@ -58,5 +58,6 @@ test("serve tracks encoder config in its child effect", async () => {
 	} finally {
 		effect.close();
 		encoder.close();
+		warn.mockRestore();
 	}
 });

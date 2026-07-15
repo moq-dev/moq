@@ -14,7 +14,7 @@ name = "moq-rs"
 # isn't already there (no tag needed; the registry is the gate).
 # Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
 # bundled the bindings.
-version = "0.3.2"
+version = "0.3.3"
 description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API. Import as `moq`."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
