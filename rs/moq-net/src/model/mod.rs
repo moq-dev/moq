@@ -13,7 +13,7 @@ mod origin_impl;
 
 mod bytes;
 mod datagram;
-pub mod resume;
+pub(crate) mod resume;
 mod subscription;
 mod time;
 mod weak_cache;
@@ -29,7 +29,8 @@ pub use time::*;
 /// Publishing and consuming the set of broadcasts announced at an origin.
 pub mod origin {
 	pub use super::origin_impl::{
-		Assignment, Broadcast, Consumer, Dynamic, Info, Producer, Publish, Request, Requesting, Route, RouteGuard,
+		Assignment, Assignments, Broadcast, Consumer, Dynamic, Info, Producer, Publish, Request, Requesting, Route,
+		Serving,
 	};
 }
 

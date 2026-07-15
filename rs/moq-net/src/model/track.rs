@@ -1225,8 +1225,8 @@ impl Demand {
 /// to multiple times, and clones are cheap.
 ///
 /// A track reached through a route-fed broadcast is *spliced*: it is backed by one
-/// or more per-session tracks joined at group boundaries (see [`super::resume`]),
-/// and this handle reads across them transparently.
+/// or more per-session tracks joined at group boundaries, and this handle reads
+/// across them transparently.
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,

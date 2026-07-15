@@ -213,21 +213,11 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Whether any segment has been spliced in yet.
-	pub fn is_empty(&self) -> bool {
-		self.state.read().segments.is_empty()
-	}
-
 	/// Create a read handle for the logical track.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			state: self.state.consume(),
 		}
-	}
-
-	/// Block until there are no consumers or subscribers left.
-	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await.map_err(|_| Error::Dropped)
 	}
 }
 
@@ -244,6 +234,7 @@ impl Consumer {
 	/// intersected with its segment bounds, so each serving session sees plain
 	/// demand for its own range. Demand registers as the subscriber is polled.
 	/// Pass `None` for [`Subscription::default`].
+	#[cfg(test)]
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let prefs = kio::Producer::new(subscription.into().unwrap_or_default());
 		self.subscribe_shared(prefs)
@@ -300,6 +291,7 @@ impl Consumer {
 	}
 
 	/// Return the track's [`track::Info`], resolved from the first segment.
+	#[cfg(test)]
 	pub async fn info(&self) -> Result<track::Info> {
 		kio::wait(|waiter| self.poll_info(waiter)).await
 	}
@@ -330,11 +322,6 @@ impl Consumer {
 	/// The latest group sequence across the segments, clamped to their bounds.
 	pub fn latest(&self) -> Option<u64> {
 		self.state.read().latest()
-	}
-
-	/// Whether this handle reads the same logical track as `other`.
-	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
 	}
 }
 
@@ -627,6 +614,7 @@ impl Subscriber {
 	}
 
 	/// Receive the next group in arrival order across the segments.
+	#[cfg(test)]
 	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
@@ -644,11 +632,6 @@ impl Subscriber {
 				res => return Poll::Ready(Ok(res)),
 			}
 		}
-	}
-
-	/// Return the next group with a higher sequence than any previously returned.
-	pub async fn next_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
 	/// Poll for a single full frame from the next group in sequence order,
@@ -676,6 +659,7 @@ impl Subscriber {
 	}
 
 	/// Read a single full frame from the next group in sequence order.
+	#[cfg(test)]
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
@@ -703,11 +687,6 @@ impl Subscriber {
 			return Poll::Ready(Ok(None));
 		}
 		Poll::Pending
-	}
-
-	/// Receive the next datagram from the newest segment.
-	pub async fn recv_datagram(&mut self) -> Result<Option<Datagram>> {
-		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence, waiting for live arrival on the
@@ -750,6 +729,7 @@ impl Subscriber {
 	}
 
 	/// Wait until the group with the given sequence becomes available.
+	#[cfg(test)]
 	pub async fn get_group(&mut self, sequence: u64) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
@@ -761,6 +741,7 @@ impl Subscriber {
 	}
 
 	/// Block until the logical track ends.
+	#[cfg(test)]
 	pub async fn closed(&mut self) -> Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
@@ -807,6 +788,7 @@ impl Subscriber {
 	}
 
 	/// Block until the logical track is finished, returning the final group count.
+	#[cfg(test)]
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
@@ -829,11 +811,6 @@ impl Subscriber {
 				sub.end_at(min_some(seg.end, self.end_sequence));
 			}
 		}
-	}
-
-	/// This subscriber's current preferences.
-	pub fn subscription(&self) -> Subscription {
-		self.prefs.read().clone()
 	}
 
 	/// The shared preferences channel, so `track::SubscriberControl` can wrap it.

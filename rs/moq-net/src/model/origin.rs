@@ -1031,6 +1031,7 @@ impl Producer {
 			id: 0,
 			state,
 			broadcast: producer,
+			graceful: false,
 		})
 	}
 
@@ -1070,6 +1071,7 @@ impl Producer {
 					id,
 					state: front.state.clone(),
 					broadcast: front.broadcast.clone(),
+					graceful: false,
 				},
 				handover,
 			)
@@ -1293,7 +1295,7 @@ impl FrontState {
 
 /// Detach `id` from the route table, promoting the next-best route and re-queueing
 /// every track the route was serving for the replacement to splice into.
-/// Idempotent. Shared by [`Route`] and [`RouteGuard`] drops.
+/// Idempotent. Runs on [`Route`] drop.
 ///
 /// `graceful` marks a deliberate unannounce (the peer retracted the path) rather
 /// than a dying session: if it empties the route table, the broadcast closes
@@ -1340,19 +1342,19 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 	}
 }
 
-/// The serving side of one route feeding a route-fed broadcast.
+/// One route feeding a route-fed broadcast.
 ///
-/// Returned by [`Producer::attach_route`]. The session (or any feeder) drains
-/// [`Self::assigned`] and serves each [`Assignment`] with a track of its own,
-/// which the origin splices into the logical track at a group boundary. Only the
-/// best attached route (shortest hop chain) is dispatched assignments; the others
-/// park as hot standbys.
+/// Returned by [`Producer::attach_route`]; the route's tracks are served by
+/// draining [`Self::assignments`], usually from a dedicated task. Only the best
+/// attached route (shortest hop chain) is dispatched assignments; the others park
+/// as hot standbys.
 ///
 /// Dropping the route detaches it: every track it was serving is re-assigned to
 /// the next-best route, resuming at the first missing group sequence, and
 /// consumers never observe the swap. When the last route detaches the broadcast
 /// lingers briefly (serving from cache) before being unannounced, so a
-/// reconnecting session can re-attach transparently.
+/// reconnecting session can re-attach transparently; a deliberate
+/// [`Self::unannounce`] skips the linger.
 #[must_use = "the route detaches (and the broadcast may unannounce) when dropped"]
 pub struct Route {
 	id: u64,
@@ -1360,15 +1362,58 @@ pub struct Route {
 	// The front's shared broadcast: the assignment queue, and metadata for
 	// session-local tracks.
 	broadcast: broadcast::Producer,
+	graceful: bool,
 }
 
 impl Route {
-	/// Poll for the next track assigned to this route.
+	/// The queue of tracks dispatched to this route for serving.
+	///
+	/// The queue outlives the route handle (detaching is observed as
+	/// [`Error::Dropped`] on the next pull), so the announce loop can keep the
+	/// [`Route`] while a serving task drains the queue.
+	pub fn assignments(&self) -> Assignments {
+		Assignments {
+			id: self.id,
+			state: self.state.clone(),
+			broadcast: self.broadcast.clone(),
+		}
+	}
+
+	/// Detach because the peer deliberately retracted the path.
+	///
+	/// Unlike a plain drop (a dying session), a deliberate unannounce that empties
+	/// the route table closes the broadcast immediately: there is nothing to wait
+	/// for, so the unannounce propagates downstream without the reconnect linger,
+	/// and a later re-announce is a fresh broadcast.
+	pub fn unannounce(mut self) {
+		self.graceful = true;
+	}
+
+	/// Detach the route. Equivalent to dropping it, but spells out the intent.
+	pub fn detach(self) {}
+}
+
+impl Drop for Route {
+	fn drop(&mut self) {
+		detach_route(&self.state, &self.broadcast, self.id, self.graceful);
+	}
+}
+
+/// The queue of tracks dispatched to one [`Route`] for serving. Obtained from
+/// [`Route::assignments`].
+pub struct Assignments {
+	id: u64,
+	state: kio::Producer<FrontState>,
+	broadcast: broadcast::Producer,
+}
+
+impl Assignments {
+	/// Poll for the next track assigned to the route.
 	///
 	/// Parks while another route is active. Returns [`Error::Dropped`] once the
 	/// route is detached or the broadcast is gone, at which point the feeder should
 	/// stop serving.
-	pub fn poll_assigned(&mut self, waiter: &kio::Waiter) -> Poll<Result<Assignment, Error>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Assignment, Error>> {
 		// Gate on being the active route (or a terminal state).
 		let id = self.id;
 		match self.state.poll(waiter, |s| {
@@ -1413,71 +1458,23 @@ impl Route {
 		}))
 	}
 
-	/// Block until a track is assigned to this route. See [`Self::poll_assigned`].
-	pub async fn assigned(&mut self) -> Result<Assignment, Error> {
-		kio::wait(|waiter| self.poll_assigned(waiter)).await
-	}
-
-	/// A guard whose drop detaches this route, for callers that own the route's
-	/// lifecycle (e.g. an announce loop) while another task drives
-	/// [`Self::assigned`]. Detaching is idempotent: whichever of the guard and the
-	/// [`Route`] drops first wins, and the poller then observes [`Error::Dropped`].
-	pub fn guard(&self) -> RouteGuard {
-		RouteGuard {
-			id: self.id,
-			state: self.state.clone(),
-			broadcast: self.broadcast.clone(),
-			graceful: false,
-		}
-	}
-
-	/// Detach the route. Equivalent to dropping it, but spells out the intent.
-	pub fn detach(self) {}
-}
-
-impl Drop for Route {
-	fn drop(&mut self) {
-		detach_route(&self.state, &self.broadcast, self.id, false);
-	}
-}
-
-/// Detaches its route when dropped. Obtained from [`Route::guard`].
-#[must_use = "the route detaches as soon as this guard is dropped"]
-pub struct RouteGuard {
-	id: u64,
-	state: kio::Producer<FrontState>,
-	broadcast: broadcast::Producer,
-	graceful: bool,
-}
-
-impl RouteGuard {
-	/// Detach because the peer deliberately unannounced the path.
-	///
-	/// Unlike a plain drop (a dying session), a graceful detach that empties the
-	/// route table closes the broadcast immediately: there is nothing to wait for,
-	/// so the unannounce propagates without the reconnect linger.
-	pub fn unannounce(mut self) {
-		self.graceful = true;
-	}
-}
-
-impl Drop for RouteGuard {
-	fn drop(&mut self) {
-		detach_route(&self.state, &self.broadcast, self.id, self.graceful);
+	/// Block until a track is assigned to the route. See [`Self::poll_next`].
+	pub async fn next(&mut self) -> Result<Assignment, Error> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
 /// One track assigned to a route for serving.
 ///
-/// Yielded by [`Route::assigned`]. The feeder learns the track's properties (e.g.
-/// via a wire TRACK_INFO), creates a track of its own with [`Self::serve`], and
-/// writes groups into it; the origin splices that track into the logical track at
-/// the right group boundary, so downstream consumers resume seamlessly.
+/// Yielded by [`Assignments::next`]. The feeder learns the track's properties
+/// (e.g. via a wire TRACK_INFO) and starts serving with [`Self::serve`]; the
+/// origin splices the served track into the logical track at the right group
+/// boundary, so downstream consumers resume seamlessly.
 ///
-/// Dropping the assignment without [`Self::complete`] (or [`Self::retire`]) hands
-/// the track back: it is re-queued for the next route (or a bounded retry), and
-/// its consumers stall rather than error while nobody serves it.
-#[must_use = "the track is re-assigned (or aborted) when dropped without complete/retire"]
+/// Dropping the assignment hands the track back: it is re-queued for the next
+/// route (with a bounded retry), and its consumers stall rather than error while
+/// nobody serves it.
+#[must_use = "the track is re-assigned (or aborted) when dropped unserved"]
 pub struct Assignment {
 	name: Arc<str>,
 	resume: super::resume::Producer,
@@ -1497,30 +1494,66 @@ impl Assignment {
 	/// Start serving: create this route's own track and splice it into the logical
 	/// track, resuming at the first group the previous route never delivered.
 	///
-	/// The returned producer is exclusively this route's; write groups with their
-	/// publisher-assigned sequences and the splice delivers exactly the missing
-	/// range downstream. Subscriber demand (sliced to this segment's bounds)
-	/// arrives through the producer's aggregate as usual.
-	pub fn serve(&mut self, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
+	/// The returned [`Serving`] derefs to this route's own [`track::Producer`]:
+	/// write groups with their publisher-assigned sequences and the splice delivers
+	/// exactly the missing range downstream. Subscriber demand (sliced to this
+	/// segment's bounds) arrives through the producer's aggregate as usual. On
+	/// error the track is handed back, as if the assignment was dropped.
+	pub fn serve(mut self, info: impl Into<Option<track::Info>>) -> Result<Serving, Error> {
 		let producer = track::Producer::new(self.broadcast.info_arc(), self.name.clone(), info.into());
 		self.resume.takeover(producer.consume())?;
 		self.served = true;
-		Ok(producer)
+		Ok(Serving {
+			assignment: self,
+			producer,
+		})
 	}
+}
 
+/// An [`Assignment`] being served: the route's own [`track::Producer`] (via
+/// `Deref`) plus the assignment's lifecycle.
+///
+/// End it with [`Self::complete`] (the logical track is finished for good) or
+/// [`Self::retire`] (this route's slice ended at a boundary cap). Dropping it
+/// instead hands the track back for re-assignment, stalling its consumers until
+/// another route serves it; [`track::Producer::abort`] first to mark this
+/// segment's groups dead.
+#[must_use = "the track is re-assigned when dropped without complete/retire"]
+pub struct Serving {
+	assignment: Assignment,
+	producer: track::Producer,
+}
+
+impl Serving {
 	/// The logical track finished for good (the upstream ended it, not a boundary
 	/// cap): no more groups will ever exist, and subscribers see a clean end once
-	/// the final segment drains.
+	/// this final segment drains.
 	pub fn complete(mut self) {
-		self.done = true;
-		let _ = self.resume.finish();
+		let _ = self.producer.finish();
+		let _ = self.assignment.resume.finish();
+		self.assignment.done = true;
 	}
 
 	/// Stop serving cleanly without ending the logical track (this route's slice
 	/// completed at a boundary cap). No re-assignment happens; another route is
 	/// already serving the rest.
 	pub fn retire(mut self) {
-		self.done = true;
+		let _ = self.producer.finish();
+		self.assignment.done = true;
+	}
+}
+
+impl std::ops::Deref for Serving {
+	type Target = track::Producer;
+
+	fn deref(&self) -> &Self::Target {
+		&self.producer
+	}
+}
+
+impl std::ops::DerefMut for Serving {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.producer
 	}
 }
 
@@ -2624,22 +2657,24 @@ mod tests {
 		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 
 		// The first route announces the broadcast.
-		let mut route_a = origin.attach_route("test", hops_a).unwrap();
+		let route_a = origin.attach_route("test", hops_a).unwrap();
+		let mut assignments_a = route_a.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
 
 		// A second (longer) route joins silently as a standby.
-		let mut route_b = origin.attach_route("test", hops_b).unwrap();
+		let route_b = origin.attach_route("test", hops_b).unwrap();
+		let mut assignments_b = route_b.assignments();
 		announced.assert_next_wait();
 
 		// Subscribing dispatches the track to the best route (A).
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
 		assert!(
-			route_b.assigned().now_or_never().is_none(),
+			assignments_b.next().now_or_never().is_none(),
 			"standby route should not be assigned tracks"
 		);
-		let mut assignment = route_a
-			.assigned()
+		let assignment = assignments_a
+			.next()
 			.now_or_never()
 			.expect("track should be assigned")
 			.unwrap();
@@ -2661,12 +2696,12 @@ mod tests {
 		// Route A dies (session loss): the track is re-assigned to route B and
 		// nothing is announced.
 		drop(route_a);
-		drop(assignment);
 		producer.abort(Error::Dropped).unwrap();
+		drop(producer);
 		announced.assert_next_wait();
 
-		let mut assignment = route_b
-			.assigned()
+		let assignment = assignments_b
+			.next()
 			.now_or_never()
 			.expect("track should be re-assigned to the standby")
 			.unwrap();
@@ -2692,12 +2727,13 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let mut route_a = origin.attach_route("test", hops.clone()).unwrap();
+		let route_a = origin.attach_route("test", hops.clone()).unwrap();
+		let mut assignments_a = route_a.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
 
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let mut assignment = route_a.assigned().await.unwrap();
+		let assignment = assignments_a.next().await.unwrap();
 		let mut producer = assignment.serve(None).unwrap();
 		let mut sub = subscribing.await.unwrap();
 		producer.append_group().unwrap();
@@ -2706,16 +2742,17 @@ mod tests {
 		// The only route dies. The broadcast stays announced (linger) and the
 		// subscriber stalls rather than erroring.
 		drop(route_a);
-		drop(assignment);
 		producer.abort(Error::Dropped).unwrap();
+		drop(producer);
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 		announced.assert_next_wait();
 		sub.assert_no_group();
 		sub.assert_not_closed();
 
 		// A reconnecting session re-attaches within the window and resumes.
-		let mut route_b = origin.attach_route("test", hops).unwrap();
-		let mut assignment = route_b.assigned().await.unwrap();
+		let route_b = origin.attach_route("test", hops).unwrap();
+		let mut assignments_b = route_b.assignments();
+		let assignment = assignments_b.next().await.unwrap();
 		let mut producer = assignment.serve(None).unwrap();
 		sub.assert_no_group();
 		assert_eq!(producer.subscription().unwrap().group_start, Some(1));
@@ -2740,12 +2777,13 @@ mod tests {
 		let hops_long = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
 
-		let mut route_a = origin.attach_route("test", hops_long).unwrap();
+		let route_a = origin.attach_route("test", hops_long).unwrap();
+		let mut assignments_a = route_a.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
 
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let mut assignment_a = route_a.assigned().await.unwrap();
+		let assignment_a = assignments_a.next().await.unwrap();
 		let mut producer_a = assignment_a.serve(None).unwrap();
 		let mut sub = subscribing.await.unwrap();
 		producer_a.append_group().unwrap();
@@ -2755,10 +2793,11 @@ mod tests {
 
 		// A strictly shorter route attaches: the live track is handed over with no
 		// announce churn.
-		let mut route_b = origin.attach_route("test", hops_short).unwrap();
+		let route_b = origin.attach_route("test", hops_short).unwrap();
+		let mut assignments_b = route_b.assignments();
 		announced.assert_next_wait();
 
-		let mut assignment_b = route_b.assigned().await.unwrap();
+		let assignment_b = assignments_b.next().await.unwrap();
 		assert_eq!(assignment_b.name(), "video");
 		let mut producer_b = assignment_b.serve(None).unwrap();
 
@@ -2793,7 +2832,7 @@ mod tests {
 
 		// The peer deliberately unannounced: no reconnect window, the broadcast is
 		// gone as soon as the janitor observes the close (no time advance needed).
-		route.guard().unannounce();
+		route.unannounce();
 		// Let the janitor finish the teardown; no linger-sized advance needed.
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		announced.assert_next_none("test");
@@ -2817,17 +2856,17 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let mut route = origin.attach_route("test", hops).unwrap();
+		let route = origin.attach_route("test", hops).unwrap();
+		let mut assignments = route.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
 
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let mut assignment = route.assigned().await.unwrap();
+		let assignment = assignments.next().await.unwrap();
 		let producer = assignment.serve(None).unwrap();
 		let mut sub = subscribing.await.unwrap();
 
 		drop(route);
-		drop(assignment);
 		drop(producer);
 
 		// The linger window expires with no route: unannounce, and the track aborts.

@@ -203,11 +203,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			(None, 0)
 		};
 
-		let mut producers = HashMap::new();
+		let mut routes = HashMap::new();
 		// Per-broadcast subscriber-side stats guards. Dropping the guard records
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
 		// actually accepted the announcement (it may drop reflected loops), so the
-		// guard set tracks `producers` exactly.
+		// guard set tracks `routes` exactly.
 		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
 
 		// Lite06+: announce ids. Each received `active` implicitly assigns the next
@@ -239,7 +239,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					// Lite01/02 don't carry hop information; the broadcast starts with
 					// an empty chain.
-					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
+					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut routes)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -286,13 +286,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					}
 					if lite::restart_supported(self.version)
 						&& !self.version.has_announce_id()
-						&& producers.contains_key(&path)
+						&& routes.contains_key(&path)
 					{
 						// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Lite06+ restarts by announce id, and older
 						// versions never defined restarts, so both fall through to start_announce, which
 						// rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
+						if self.restart_announce(path.clone(), hops, responder_origin, &mut routes)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -300,7 +300,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, responder_origin, &mut routes)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -323,11 +323,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
-					// `producers` has no entry; that's expected, not an error.
+					// `routes` has no entry; that's expected, not an error.
 					// A deliberate unannounce detaches gracefully: if this was the
 					// broadcast's last route it closes now, without the reconnect linger.
-					if let Some(guard) = producers.remove(&path) {
-						guard.unannounce();
+					if let Some(route) = routes.remove(&path) {
+						route.unannounce();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -346,11 +346,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
-					// `producers` has no entry; that's expected, not an error.
+					// `routes` has no entry; that's expected, not an error.
 					// A deliberate unannounce detaches gracefully: if this was the
 					// broadcast's last route it closes now, without the reconnect linger.
-					if let Some(guard) = producers.remove(&path) {
-						guard.unannounce();
+					if let Some(route) = routes.remove(&path) {
+						route.unannounce();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -364,8 +364,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.stats
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
-					if producers.contains_key(&path) {
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
+					if routes.contains_key(&path) {
+						if self.restart_announce(path.clone(), hops, responder_origin, &mut routes)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -373,7 +373,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, responder_origin, &mut routes)? {
 						// The original announce was dropped locally (e.g. a reflected loop);
 						// the replacement may be routable, so treat it as a fresh start.
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
@@ -458,7 +458,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, origin::RouteGuard>,
+		routes: &mut HashMap<PathOwned, origin::Route>,
 	) -> Result<bool, Error> {
 		if let Some(responder) = responder_origin {
 			// If the chain is already full, drop the announce. This is the same decision
@@ -499,7 +499,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Make sure the peer doesn't double announce.
-		if producers.contains_key(&path) {
+		if routes.contains_key(&path) {
 			return Err(Error::Duplicate);
 		}
 
@@ -514,10 +514,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		};
 
-		producers.insert(path.clone(), route.guard());
-
-		// Serve track requests dispatched to this route in the background.
-		web_async::spawn(self.clone().run_route(path, route));
+		// Serve track requests dispatched to this route in the background; the
+		// announce loop keeps the `Route` so an unannounce can detach it.
+		web_async::spawn(self.clone().run_route(path.clone(), route.assignments()));
+		routes.insert(path, route);
 
 		Ok(true)
 	}
@@ -538,7 +538,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, origin::RouteGuard>,
+		routes: &mut HashMap<PathOwned, origin::Route>,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): the replacement can't be used here. Retire the route.
 		let reflected = match responder_origin {
@@ -548,8 +548,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		if reflected {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
 			// The peer retracted the route deliberately; detach gracefully.
-			if let Some(guard) = producers.remove(&path) {
-				guard.unannounce();
+			if let Some(route) = routes.remove(&path) {
+				route.unannounce();
 			}
 			return Ok(false);
 		}
@@ -557,17 +557,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
 		// Attach the replacement first so the broadcast never goes route-less; the old
-		// route's tracks then re-dispatch straight onto the replacement when its guard drops.
+		// route's tracks then re-dispatch straight onto the replacement when it drops.
 		let Ok(route) = self.origin.attach_route(path.clone(), hops) else {
 			// Origin rejected the replacement; retire the existing route.
-			if let Some(guard) = producers.remove(&path) {
-				guard.unannounce();
+			if let Some(route) = routes.remove(&path) {
+				route.unannounce();
 			}
 			return Ok(false);
 		};
 
-		let old = producers.insert(path.clone(), route.guard());
-		web_async::spawn(self.clone().run_route(path.clone(), route));
+		web_async::spawn(self.clone().run_route(path.clone(), route.assignments()));
+		let old = routes.insert(path, route);
 
 		// Detach the replaced route last, handing its in-flight tracks over.
 		drop(old);
@@ -575,12 +575,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(true)
 	}
 
-	async fn run_route(self, path: PathOwned, mut route: origin::Route) {
+	async fn run_route(self, path: PathOwned, mut assignments: origin::Assignments) {
 		// Serve tracks assigned to this route until it is detached (the peer
 		// unannounced, or the broadcast closed) or the session dies.
 		loop {
 			let assignment = tokio::select! {
-				assigned = route.assigned() => match assigned {
+				assigned = assignments.next() => match assigned {
 					Ok(assignment) => assignment,
 					Err(err) => {
 						tracing::debug!(%err, "route closed");
@@ -841,7 +841,7 @@ struct TrackServe<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> TrackServe<S> {
-	async fn run(self, mut assignment: origin::Assignment) {
+	async fn run(self, assignment: origin::Assignment) {
 		// SUBSCRIBE_UPDATE (and thus pause/resume) only exists on Lite03+.
 		let supports_update = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
 		let supports_fetch = self.subscriber.version.has_track_stream();
@@ -874,17 +874,17 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// Splice this session's own track into the logical track. Demand from the
 		// logical subscribers arrives through the producer's aggregate, sliced to
 		// this segment's bounds (including the resume floor after a route change).
-		let mut producer = match assignment.serve(info) {
-			Ok(producer) => producer,
+		let mut serving = match assignment.serve(info) {
+			Ok(serving) => serving,
+			// The failed serve already handed the track back.
 			Err(err) => {
 				tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "assignment rejected");
-				drop(assignment);
 				return;
 			}
 		};
 
 		// Serve on-demand fetches of uncached groups from this session.
-		let dynamic = producer.dynamic();
+		let dynamic = serving.dynamic();
 
 		let mut sub = Sub::None;
 		let mut fetches: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
@@ -898,7 +898,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				biased;
 
 				// (1) Track demand: a fetch or a subscription change. One `kio::wait`
-				// so the borrows of `dynamic` and `producer` are held together.
+				// so the borrows of `dynamic` and `serving` are held together.
 				event = kio::wait(|waiter| {
 					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
 					match dynamic.poll_requested_group(waiter) {
@@ -907,7 +907,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						Poll::Ready(Err(_)) => return Poll::Ready(Event::SessionClosed),
 						Poll::Pending => {}
 					}
-					match producer.poll_subscription_changed(waiter) {
+					match serving.poll_subscription_changed(waiter) {
 						Poll::Ready(Ok(pref)) => return Poll::Ready(Event::Subscription(pref)),
 						Poll::Ready(Err(_)) => return Poll::Ready(Event::SessionClosed),
 						Poll::Pending => {}
@@ -953,7 +953,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						capped = subscription.group_end.is_some();
 					}
 					if let Err(err) = self
-						.handle_subscription(&mut producer, &mut sub, pref, supports_update, timescale)
+						.handle_subscription(&mut serving, &mut sub, pref, supports_update, timescale)
 						.await
 					{
 						// Opening or updating the upstream failed (usually the session
@@ -987,18 +987,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			Teardown::Finished => {
 				// A capped subscription completing just retires this segment (another
 				// route serves the rest); an uncapped one means the track truly ended.
-				let _ = producer.finish();
 				if capped {
-					assignment.retire();
+					serving.retire();
 				} else {
-					assignment.complete();
+					serving.complete();
 				}
 			}
 			Teardown::GiveBack(err) => {
 				// Mark this segment dead (subscribers stall and splice to the next
-				// route) and hand the track back for re-assignment.
-				let _ = producer.abort(err);
-				drop(assignment);
+				// route); dropping the serving hands the track back for re-assignment.
+				let _ = serving.abort(err);
 			}
 		}
 	}
