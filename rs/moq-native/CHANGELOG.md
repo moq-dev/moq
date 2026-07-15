@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1](https://github.com/moq-dev/moq/compare/moq-native-v0.18.0...moq-native-v0.18.1) - 2026-07-15
+
+### Fixed
+
+- *(moq-gst)* reconnect the moqsink publisher instead of dying on transport death ([#2240](https://github.com/moq-dev/moq/pull/2240))
+
 ## [0.18.0](https://github.com/moq-dev/moq/compare/moq-native-v0.17.8...moq-native-v0.18.0) - 2026-07-12
 
 ### Added

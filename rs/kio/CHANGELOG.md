@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/moq-dev/moq/compare/kio-v0.4.3...kio-v0.4.4) - 2026-07-15
+
+### Fixed
+
+- *(moq-gst)* reconnect the moqsink publisher instead of dying on transport death ([#2240](https://github.com/moq-dev/moq/pull/2240))
+
 ## [0.4.3](https://github.com/moq-dev/moq/compare/kio-v0.4.2...kio-v0.4.3) - 2026-07-05
 
 ### Other

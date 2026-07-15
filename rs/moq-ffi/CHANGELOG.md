@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.30](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.29...moq-ffi-v0.2.30) - 2026-07-15
+
+### Added
+
+- *(moq-ffi)* expose client mTLS certificate configuration ([#2256](https://github.com/moq-dev/moq/pull/2256))
+
 ## [0.2.29](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.28...moq-ffi-v0.2.29) - 2026-07-12
 
 ### Other
