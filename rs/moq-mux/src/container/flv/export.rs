@@ -342,7 +342,7 @@ impl Export {
 				continue;
 			}
 			let flavor = video_flavor(config)?;
-			ensure_legacy(&config.container, "video", name)?;
+			ensure_raw(&config.container, "video", name)?;
 			// AV1's av1C is optional in the catalog; synthesize one from the codec
 			// struct so the enhanced SequenceStart tag always has a config record.
 			let fallback_description = match (&config.codec, config.description.as_ref()) {
@@ -376,7 +376,7 @@ impl Export {
 				continue;
 			}
 			let flavor = audio_flavor(config)?;
-			ensure_legacy(&config.container, "audio", name)?;
+			ensure_raw(&config.container, "audio", name)?;
 			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;
 			self.audio.push(FlvTrack {
@@ -639,7 +639,7 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -
 	Ok(())
 }
 
-fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
+fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
 	// FLV carries raw codec payloads, so the frames have to be raw codec bitstreams.
 	if !container.is_raw() {
 		anyhow::bail!(

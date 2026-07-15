@@ -328,7 +328,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			ensure_legacy(&config.container, "video", name)?;
+			ensure_raw(&config.container, "video", name)?;
 			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
@@ -347,7 +347,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			ensure_legacy(&config.container, "audio", name)?;
+			ensure_raw(&config.container, "audio", name)?;
 			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
@@ -512,7 +512,7 @@ impl<S: Stream> Export<S> {
 	}
 }
 
-fn ensure_legacy(container: &Container, kind: &str, name: &str) -> Result<()> {
+fn ensure_raw(container: &Container, kind: &str, name: &str) -> Result<()> {
 	// MKV emits raw codec payloads, so it only accepts a container whose frames are raw
 	// codec bitstreams (Legacy varint, LOC properties).
 	if container.is_raw() {
