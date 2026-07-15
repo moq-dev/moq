@@ -38,6 +38,10 @@ impl Container for Wire {
 		let mut hang_frame = hang::container::Frame::decode(data)?;
 		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
 
+		if payload.is_empty() {
+			return Poll::Ready(Ok(Read::Tail(hang_frame.timestamp)));
+		}
+
 		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp: hang_frame.timestamp,
 			payload,

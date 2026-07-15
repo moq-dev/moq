@@ -127,15 +127,20 @@ pub enum Read {
 	/// One moq frame decoded into several media frames, e.g. every sample in a
 	/// CMAF moof+mdat fragment.
 	Fragment(Vec<Frame>),
+	/// A timestamp-only tail that marks the presentation end of the preceding frame.
+	///
+	/// A tail carries no media, so it is excluded from [`frames`](Read::frames).
+	/// The [`Consumer`] uses its timestamp to bound the preceding frame's duration.
+	Tail(Timestamp),
 }
 
 impl Read {
 	/// The decoded frames as a slice, so callers can iterate without matching the
-	/// variant: empty for [`Done`](Read::Done), one element for [`Frame`](Read::Frame),
-	/// or the whole batch for [`Fragment`](Read::Fragment).
+	/// variant: empty for [`Done`](Read::Done) and [`Tail`](Read::Tail), one element
+	/// for [`Frame`](Read::Frame), or the whole batch for [`Fragment`](Read::Fragment).
 	pub fn frames(&self) -> &[Frame] {
 		match self {
-			Read::Done => &[],
+			Read::Done | Read::Tail(_) => &[],
 			Read::Frame(frame) => std::slice::from_ref(frame),
 			Read::Fragment(frames) => frames,
 		}

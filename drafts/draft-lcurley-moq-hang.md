@@ -216,6 +216,25 @@ The remainder of the payload is codec specific; see the WebCodecs specification 
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 
+## Tail Frame
+A frame with a timestamp but an *empty* payload is a **tail frame**.
+It carries no media; its timestamp marks the presentation *end* of the preceding frame.
+
+Legacy and LOC frames carry no per-frame duration, so a decoder normally learns where the last frame of a group ends only from the first frame of the *next* group.
+That is wrong across a discontinuity: if a publisher pauses and resumes with a later timestamp (see {{draft-lcurley-moq-timestamp}}), the gap is real elapsed time, not the duration of the last frame.
+A tail frame closes the group explicitly, so the gap between one group's tail and the next group's first frame is an unambiguous discontinuity rather than a multi-hour final frame.
+
+A tail frame MUST be the last frame of its group.
+A publisher SHOULD write a tail frame as the last frame of every video group, with a timestamp equal to the presentation end of the group's last media frame (its timestamp plus its intended duration).
+The timestamp MUST be greater than or equal to the group's last media frame's timestamp.
+A tail frame is NOT required for audio, whose frame duration is deterministic (samples / sample-rate).
+
+A decoder MUST skip tail frames: they produce no output sample.
+A decoder that computes frame durations SHOULD bound the last media frame's duration by the tail frame's timestamp, and SHOULD treat a gap between the tail and the next group's first frame as a discontinuity.
+
+Tail frames are OPTIONAL for backward compatibility: a publisher MAY omit them, and a decoder that predates this section will treat the empty payload as an empty (no-op) access unit.
+Because a coded video frame is never empty, an empty payload is an unambiguous signal.
+
 
 # Security Considerations
 TODO Security

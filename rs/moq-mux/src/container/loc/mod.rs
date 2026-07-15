@@ -53,6 +53,10 @@ impl Container for Wire {
 		let scale = loc.timescale.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::from_scale(loc.timestamp, scale).map_err(hang::Error::from)?;
 
+		if loc.payload.is_empty() {
+			return Poll::Ready(Ok(Read::Tail(timestamp)));
+		}
+
 		Poll::Ready(Ok(Read::Frame(Frame {
 			timestamp,
 			payload: loc.payload,

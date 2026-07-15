@@ -44,7 +44,7 @@ pub struct Consumer<F: Container> {
 	current: u64,
 
 	// Groups that we are monitoring, sorted by sequence ascending.
-	pending: VecDeque<GroupBuffer>,
+	pending: VecDeque<GroupBuffer<F>>,
 
 	// When true, we haven't returned a frame yet and need to select the first group.
 	// We wait until we have at least one frame before finalizing `current`
@@ -479,7 +479,7 @@ impl<F: Container> Consumer<F> {
 ///
 /// Handles two-phase frame reading (get FrameConsumer, then read all data),
 /// timestamp parsing, and min/max timestamp tracking for latency decisions.
-struct GroupBuffer {
+struct GroupBuffer<F: Container> {
 	group: moq_net::GroupConsumer,
 
 	// The current frame index within the group.
@@ -498,9 +498,18 @@ struct GroupBuffer {
 	// Equals the max timestamp when the container carries no per-frame duration.
 	// Stored as a wall-clock duration so cross-scale comparisons are cheap.
 	max_end: Option<std::time::Duration>,
+
+	// The timestamp-only tail marking the presentation end of the last media frame.
+	tail: Option<Timestamp>,
+
+	// Whether the group stream has ended.
+	finished: bool,
+
+	// A read-ahead error deferred until earlier buffered frames have been emitted.
+	pending_error: Option<F::Error>,
 }
 
-impl GroupBuffer {
+impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::GroupConsumer) -> Self {
 		Self {
 			group,
@@ -509,25 +518,55 @@ impl GroupBuffer {
 			max_timestamp: None,
 			min_timestamp: None,
 			max_end: None,
+			tail: None,
+			finished: false,
+			pending_error: None,
 		}
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
-		if let Some(frame) = self.buffered.pop_front() {
-			return Poll::Ready(Ok(Some(frame)));
+	fn poll_read(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
+		// Read ahead when possible so a tail can bound the preceding frame before
+		// it is emitted. Stop on Pending to avoid adding latency at the live edge.
+		while self.buffered.len() < 2 && self.tail.is_none() && !self.finished && self.pending_error.is_none() {
+			match self.buffer_once(waiter, format) {
+				Poll::Ready(Ok(true)) => continue,
+				Poll::Ready(Ok(false)) => self.finished = true,
+				Poll::Ready(Err(err)) => {
+					if self.buffered.is_empty() {
+						return Poll::Ready(Err(err));
+					}
+					self.pending_error = Some(err);
+				}
+				Poll::Pending => break,
+			}
 		}
 
-		match ready!(self.buffer_one(waiter, format)?) {
-			true => Poll::Ready(Ok(Some(self.buffered.pop_front().unwrap()))),
-			false => Poll::Ready(Ok(None)),
+		let Some(mut frame) = self.buffered.pop_front() else {
+			if let Some(err) = self.pending_error.take() {
+				return Poll::Ready(Err(err));
+			}
+			if self.finished || self.tail.is_some() {
+				return Poll::Ready(Ok(None));
+			}
+			return Poll::Pending;
+		};
+
+		if frame.duration.is_none()
+			&& self.buffered.is_empty()
+			&& let Some(tail) = self.tail
+			&& let Ok(duration) = tail.checked_sub(frame.timestamp)
+		{
+			frame.duration = Some(duration);
 		}
+
+		Poll::Ready(Ok(Some(frame)))
 	}
 
 	// Add one (or one fragment's worth) more frames to the buffer if possible.
 	//
 	// Returns false if the group is finished.
-	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_once(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		match ready!(format.poll_read(&mut self.group, waiter)?) {
 			Read::Done => return Poll::Ready(Ok(false)),
 			Read::Frame(frame) => self.ingest(frame),
@@ -535,6 +574,11 @@ impl GroupBuffer {
 				for frame in frames {
 					self.ingest(frame);
 				}
+			}
+			Read::Tail(timestamp) => {
+				self.tail = Some(self.tail.map_or(timestamp, |existing| existing.max(timestamp)));
+				let end = std::time::Duration::from(timestamp);
+				self.max_end = Some(self.max_end.map_or(end, |existing| existing.max(end)));
 			}
 		}
 
@@ -571,7 +615,7 @@ impl GroupBuffer {
 		self.buffered.push_back(frame);
 	}
 
-	fn buffer_one<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_one(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		loop {
 			if !self.buffered.is_empty() {
 				return Poll::Ready(Ok(true));
@@ -583,17 +627,13 @@ impl GroupBuffer {
 		}
 	}
 
-	fn buffer_all<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
+	fn buffer_all(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
 		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
 
 	/// Poll for the maximum timestamp in this group.
-	fn poll_max_timestamp<F: Container>(
-		&mut self,
-		waiter: &kio::Waiter,
-		format: &F,
-	) -> Poll<Result<Timestamp, F::Error>> {
+	fn poll_max_timestamp(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Timestamp, F::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
 		let _ = self.buffer_all(waiter, format)?;
 
@@ -608,11 +648,7 @@ impl GroupBuffer {
 		Poll::Pending
 	}
 
-	fn poll_min_timestamp<F: Container>(
-		&mut self,
-		waiter: &kio::Waiter,
-		format: &F,
-	) -> Poll<Result<Timestamp, F::Error>> {
+	fn poll_min_timestamp(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Timestamp, F::Error>> {
 		let _ = self.buffer_one(waiter, format)?;
 
 		if let Some(min) = self.min_timestamp {
@@ -636,7 +672,7 @@ impl GroupBuffer {
 	}
 }
 
-impl std::ops::Deref for GroupBuffer {
+impl<F: Container> std::ops::Deref for GroupBuffer<F> {
 	type Target = moq_net::GroupConsumer;
 
 	fn deref(&self) -> &Self::Target {
@@ -1078,6 +1114,70 @@ mod tests {
 			consumer.rewind.discontinuity, 1,
 			"the backwards group triggered a reset"
 		);
+	}
+
+	// ---- Tail frames ----
+
+	/// Write a group of media frames followed by a timestamp-only tail.
+	fn write_group_with_tail(
+		track: &mut moq_net::TrackProducer,
+		sequence: u64,
+		timestamps: &[Timestamp],
+		tail: Timestamp,
+	) {
+		let mut group = track.create_group(moq_net::Group { sequence }).unwrap();
+		for &timestamp in timestamps {
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy.write(&mut group, &[frame]).unwrap();
+		}
+		let tail = Frame {
+			timestamp: tail,
+			payload: Bytes::new(),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy.write(&mut group, &[tail]).unwrap();
+		group.finish().unwrap();
+	}
+
+	/// A tail is skipped as media and supplies the trailing frame's duration.
+	#[tokio::test]
+	async fn tail_bounds_trailing_frame_and_is_not_emitted() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		write_group_with_tail(&mut track, 0, &[ts(0), ts(33_000)], ts(50_000));
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[0].duration, None);
+		assert_eq!(frames[1].timestamp, ts(33_000));
+		assert_eq!(frames[1].duration, Some(ts(17_000)));
+	}
+
+	/// A tail prevents a resumed timestamp from stretching the preceding frame across a gap.
+	#[tokio::test]
+	async fn tail_bounds_trailing_frame_across_resume_gap() {
+		let mut track = track_producer("test");
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10_800));
+
+		write_group_with_tail(&mut track, 0, &[ts(0)], ts(16_000));
+		write_group(&mut track, 1, &[ts(7_200_000_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[0].duration, Some(ts(16_000)));
+		assert_eq!(frames[1].timestamp, ts(7_200_000_000));
 	}
 
 	// ---- Group Ordering ----
