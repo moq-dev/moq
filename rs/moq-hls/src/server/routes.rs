@@ -35,12 +35,13 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> 
 		return not_found();
 	};
 	handle.wait_ready(READY_TIMEOUT).await;
+	let snapshot = handle.snapshot();
 	// Don't serve an empty master (a 200 with no variants): if no rendition showed up
 	// within the timeout, the broadcast isn't playable yet, so 404.
-	if handle.renditions().is_empty() {
+	if snapshot.is_empty() {
 		return not_found();
 	}
-	m3u8(handle.master_playlist())
+	m3u8(snapshot.master_playlist())
 }
 
 async fn media(

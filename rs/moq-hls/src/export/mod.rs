@@ -21,15 +21,15 @@ mod rendition;
 pub mod store;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
+use hang::catalog::{AudioConfig, VideoConfig};
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::catalog::{CatalogFormat, Consumer, Select, Stream};
 use moq_mux::container::fmp4::Export;
 use moq_mux::select;
-use tokio::sync::watch;
 
 pub use playlist::render_media;
 pub use rendition::{Kind, Rendition};
@@ -66,14 +66,108 @@ impl Default for Config {
 	}
 }
 
-/// Shared read side, handed out via [`Handle`]. Written only by the driver's
-/// [`sync`](Broadcaster::sync); read by playlist renderers and segment handlers.
-struct Shared {
-	/// name -> rendition metadata + store. Grows as the catalog advertises tracks.
-	renditions: RwLock<BTreeMap<String, Arc<Rendition>>>,
-	/// Rendition count, bumped on every catalog sync so a handler can wait for the
-	/// catalog to populate before rendering a playlist.
-	ready: watch::Sender<usize>,
+/// Monotonically increasing rendition-set generation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Generation(u64);
+
+impl Generation {
+	/// Return the numeric generation, starting at zero before the first change.
+	pub fn get(self) -> u64 {
+		self.0
+	}
+
+	fn next(self) -> Self {
+		Self(self.0.checked_add(1).expect("rendition generation overflow"))
+	}
+}
+
+#[derive(Default)]
+struct State {
+	generation: Generation,
+	renditions: BTreeMap<String, Arc<Rendition>>,
+}
+
+impl State {
+	fn snapshot(&self) -> Snapshot {
+		Snapshot {
+			generation: self.generation,
+			renditions: self.renditions.clone(),
+		}
+	}
+}
+
+/// An atomic view of one rendition-set generation.
+#[derive(Clone)]
+pub struct Snapshot {
+	generation: Generation,
+	renditions: BTreeMap<String, Arc<Rendition>>,
+}
+
+impl Snapshot {
+	/// The generation represented by this snapshot.
+	pub fn generation(&self) -> Generation {
+		self.generation
+	}
+
+	/// Look up a rendition by name in this generation.
+	pub fn rendition(&self, name: &str) -> Option<Arc<Rendition>> {
+		self.renditions.get(name).cloned()
+	}
+
+	/// Whether this generation contains no renditions.
+	pub fn is_empty(&self) -> bool {
+		self.renditions.is_empty()
+	}
+
+	/// Every rendition in this generation, in name order.
+	pub fn renditions(&self) -> Vec<Arc<Rendition>> {
+		self.renditions.values().cloned().collect()
+	}
+
+	/// Render the multivariant playlist for exactly this generation.
+	pub fn master_playlist(&self) -> String {
+		let mut video = Vec::new();
+		let mut audio = Vec::new();
+		for rendition in self.renditions.values() {
+			match rendition.kind {
+				Kind::Video => video.push(master::VideoVariant {
+					name: rendition.name.clone(),
+					bandwidth: rendition.bandwidth,
+					width: rendition.width,
+					height: rendition.height,
+					codec: rendition.codec.clone(),
+				}),
+				Kind::Audio => audio.push(master::AudioVariant {
+					name: rendition.name.clone(),
+					bandwidth: rendition.bandwidth,
+					codec: rendition.codec.clone(),
+				}),
+			}
+		}
+		master::render_master(&video, &audio)
+	}
+}
+
+#[derive(Clone, PartialEq)]
+enum MediaConfig {
+	Video(VideoConfig),
+	Audio(AudioConfig),
+}
+
+impl MediaConfig {
+	fn kind(&self) -> Kind {
+		match self {
+			Self::Video(_) => Kind::Video,
+			Self::Audio(_) => Kind::Audio,
+		}
+	}
+
+	fn rendition(&self, name: String, config: &Config) -> Rendition {
+		match self {
+			Self::Video(media) => Rendition::video(name, media, config),
+			Self::Audio(media) => Rendition::audio(name, media, config),
+		}
+	}
 }
 
 /// A driver-private per-rendition unit: the shared metadata/store plus the exporter
@@ -84,6 +178,7 @@ struct Shared {
 /// drop the track, so a rendition that errors while its publisher is still live would
 /// otherwise pin that subscription for the rest of the recording (a scoped #2255).
 struct Driver {
+	config: MediaConfig,
 	info: Arc<Rendition>,
 	export: Option<RenditionExport>,
 }
@@ -115,7 +210,7 @@ pub struct Broadcaster {
 	/// The discovery catalog has ended (broadcast closed) or errored.
 	catalog_done: bool,
 	renditions: BTreeMap<String, Driver>,
-	shared: Arc<Shared>,
+	state: kio::Producer<State>,
 	/// While true, the exporters aren't polled: nothing is read, so the relay stops
 	/// sending and the media produced during the pause is dropped from the recording.
 	paused: bool,
@@ -134,17 +229,13 @@ impl Broadcaster {
 	/// failure here is a real publish-ordering bug, not a transient.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, config: Config) -> Result<Self> {
 		let catalog = Consumer::<()>::new(&broadcast, CatalogFormat::Hang)?;
-		let (ready, _) = watch::channel(0);
 		Ok(Self {
 			broadcast,
 			config,
 			catalog,
 			catalog_done: false,
 			renditions: BTreeMap::new(),
-			shared: Arc::new(Shared {
-				renditions: RwLock::new(BTreeMap::new()),
-				ready,
-			}),
+			state: kio::Producer::new(State::default()),
 			paused: false,
 			paused_observed: false,
 		})
@@ -154,7 +245,7 @@ impl Broadcaster {
 	/// subscription and can't keep the export alive past this `Broadcaster`.
 	pub fn handle(&self) -> Handle {
 		Handle {
-			shared: self.shared.clone(),
+			state: self.state.consume(),
 		}
 	}
 
@@ -279,31 +370,57 @@ impl Broadcaster {
 		}
 	}
 
-	/// Add renditions newly present in `catalog`. Renditions are add-only: one that
-	/// disappears from the catalog keeps its store (rare for a live broadcast, and
-	/// dropping it would break a player mid-stream). Removal-on-drop is now possible
-	/// (drop the `Driver` = release its subscription) but left as a follow-up.
+	/// Reconcile the active rendition drivers with one complete catalog snapshot.
+	/// Removed or reconfigured drivers are finished before their replacements become
+	/// visible, then the whole new rendition set is published as one generation.
 	fn sync(&mut self, catalog: &Catalog) {
+		let mut desired = BTreeMap::new();
 		for (name, video) in &catalog.video.renditions {
-			if self.renditions.contains_key(name) {
-				continue;
-			}
-			let info = Arc::new(Rendition::video(name.clone(), video, &self.config));
-			self.insert_rendition(name.clone(), info, Kind::Video);
+			desired.insert(name.clone(), MediaConfig::Video(video.clone()));
 		}
 		for (name, audio) in &catalog.audio.renditions {
-			if self.renditions.contains_key(name) {
+			// Video wins a same-name collision, matching the previous discovery order.
+			desired
+				.entry(name.clone())
+				.or_insert_with(|| MediaConfig::Audio(audio.clone()));
+		}
+
+		let stale: Vec<_> = self
+			.renditions
+			.iter()
+			.filter(|(name, driver)| desired.get(*name) != Some(&driver.config))
+			.map(|(name, _)| name.clone())
+			.collect();
+		let mut changed = !stale.is_empty();
+		for name in stale {
+			let mut driver = self.renditions.remove(&name).expect("stale rendition exists");
+			driver.finish();
+		}
+
+		for (name, media) in desired {
+			if self.renditions.contains_key(&name) {
 				continue;
 			}
-			let info = Arc::new(Rendition::audio(name.clone(), audio, &self.config));
-			self.insert_rendition(name.clone(), info, Kind::Audio);
+			changed |= self.insert_rendition(name, media);
 		}
-		let _ = self.shared.ready.send(self.renditions.len());
+
+		if changed {
+			let Ok(mut state) = self.state.write() else {
+				unreachable!("broadcaster owns rendition state");
+			};
+			state.generation = state.generation.next();
+			state.renditions = self
+				.renditions
+				.iter()
+				.map(|(name, driver)| (name.clone(), driver.info.clone()))
+				.collect();
+		}
 	}
 
 	/// Register a discovered rendition: build its exporter, add it to the driver map,
-	/// and publish its metadata/store to the shared read side.
-	fn insert_rendition(&mut self, name: String, info: Arc<Rendition>, kind: Kind) {
+	/// returning whether it became active.
+	fn insert_rendition(&mut self, name: String, media: MediaConfig) -> bool {
+		let kind = media.kind();
 		let export = match build_export(&self.broadcast, &name, kind, &self.config) {
 			Ok(export) => export,
 			Err(err) => {
@@ -311,17 +428,19 @@ impl Broadcaster {
 				// catalog again can't legitimately fail; if it somehow does, skip the
 				// rendition (it just won't be served) rather than abort discovery.
 				tracing::warn!(%name, ?kind, %err, "failed to build rendition exporter; skipping");
-				return;
+				return false;
 			}
 		};
+		let info = Arc::new(media.rendition(name.clone(), &self.config));
 		self.renditions.insert(
-			name.clone(),
+			name,
 			Driver {
-				info: info.clone(),
+				config: media,
+				info,
 				export: Some(export),
 			},
 		);
-		self.shared.renditions.write().unwrap().insert(name, info);
+		true
 	}
 }
 
@@ -352,65 +471,196 @@ fn build_export(
 /// this handle's reads see the final state.
 #[derive(Clone)]
 pub struct Handle {
-	shared: Arc<Shared>,
+	state: kio::Consumer<State>,
 }
 
 impl Handle {
+	/// Capture the current rendition set and generation atomically.
+	pub fn snapshot(&self) -> Snapshot {
+		self.state.read().snapshot()
+	}
+
 	/// Look up a rendition by name.
 	pub fn rendition(&self, name: &str) -> Option<Arc<Rendition>> {
-		self.shared.renditions.read().unwrap().get(name).cloned()
+		self.state.read().renditions.get(name).cloned()
 	}
 
 	/// Every discovered rendition, in name order. Lets a caller enumerate the
 	/// rendition set directly instead of re-parsing the master playlist.
 	pub fn renditions(&self) -> Vec<Arc<Rendition>> {
-		self.shared.renditions.read().unwrap().values().cloned().collect()
+		self.state.read().renditions.values().cloned().collect()
 	}
 
 	/// Wait until at least one rendition has been discovered, or `timeout` elapses.
 	pub async fn wait_ready(&self, timeout: Duration) {
-		let mut rx = self.shared.ready.subscribe();
-		if *rx.borrow() > 0 {
-			return;
-		}
-		let _ = tokio::time::timeout(timeout, async {
-			while rx.changed().await.is_ok() {
-				if *rx.borrow() > 0 {
-					break;
+		let ready = kio::wait(|waiter| {
+			match self.state.poll(waiter, |state| {
+				if state.renditions.is_empty() {
+					Poll::Pending
+				} else {
+					Poll::Ready(())
 				}
+			}) {
+				Poll::Ready(_) => Poll::Ready(()),
+				Poll::Pending => Poll::Pending,
 			}
-		})
-		.await;
+		});
+		let _ = tokio::time::timeout(timeout, ready).await;
+	}
+
+	/// Subscribe to atomic rendition-set snapshots.
+	///
+	/// The first [`Changes::changed`] call returns immediately with the current
+	/// snapshot. Later calls wait for a different generation.
+	pub fn subscribe(&self) -> Changes {
+		Changes {
+			state: self.state.clone(),
+			observed: None,
+		}
 	}
 
 	/// Render the multivariant (master) playlist from the current renditions.
 	pub fn master_playlist(&self) -> String {
-		let renditions = self.shared.renditions.read().unwrap();
-		let mut video = Vec::new();
-		let mut audio = Vec::new();
-		for rendition in renditions.values() {
-			match rendition.kind {
-				Kind::Video => video.push(master::VideoVariant {
-					name: rendition.name.clone(),
-					bandwidth: rendition.bandwidth,
-					width: rendition.width,
-					height: rendition.height,
-					codec: rendition.codec.clone(),
-				}),
-				Kind::Audio => audio.push(master::AudioVariant {
-					name: rendition.name.clone(),
-					bandwidth: rendition.bandwidth,
-					codec: rendition.codec.clone(),
-				}),
+		self.snapshot().master_playlist()
+	}
+}
+
+/// A rendition-set change subscription.
+pub struct Changes {
+	state: kio::Consumer<State>,
+	observed: Option<Generation>,
+}
+
+impl Changes {
+	/// Wait for and return the next atomic rendition-set snapshot.
+	///
+	/// Returns `None` after the owning [`Broadcaster`] is dropped and the final
+	/// generation has already been observed.
+	pub async fn changed(&mut self) -> Option<Snapshot> {
+		let observed = self.observed;
+		let snapshot = kio::wait(|waiter| {
+			match self.state.poll(waiter, |state| {
+				if Some(state.generation) == observed {
+					Poll::Pending
+				} else {
+					Poll::Ready(state.snapshot())
+				}
+			}) {
+				Poll::Ready(Ok(snapshot)) => Poll::Ready(Some(snapshot)),
+				Poll::Ready(Err(_)) => Poll::Ready(None),
+				Poll::Pending => Poll::Pending,
 			}
-		}
-		master::render_master(&video, &audio)
+		})
+		.await?;
+		self.observed = Some(snapshot.generation());
+		Some(snapshot)
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn video(level: u8) -> VideoConfig {
+		let mut video = VideoConfig::new(hang::catalog::H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level,
+			inline: true,
+		});
+		video.coded_width = Some(1280);
+		video.coded_height = Some(720);
+		video.bitrate = Some(2_000_000);
+		video
+	}
+
+	fn test_broadcaster() -> (moq_net::BroadcastProducer, moq_net::TrackProducer, Broadcaster) {
+		let mut producer = moq_net::Broadcast::new().produce();
+		let catalog = producer.create_track(moq_net::Track::new("catalog.json")).unwrap();
+		let broadcaster = Broadcaster::new(producer.consume(), Config::default()).unwrap();
+		(producer, catalog, broadcaster)
+	}
+
+	#[tokio::test]
+	async fn removes_absent_rendition() {
+		use moq_mux::catalog::Producer as CatalogProducer;
+
+		let mut producer = moq_net::Broadcast::new().produce();
+		let mut catalog = CatalogProducer::new(&mut producer).unwrap();
+		let video_track = producer.create_track(moq_net::Track::new("video")).unwrap();
+		let mut broadcaster = Broadcaster::new(producer.consume(), Config::default()).unwrap();
+		let handle = broadcaster.handle();
+		let mut changes = handle.subscribe();
+		assert_eq!(changes.changed().await.unwrap().generation().get(), 0);
+		let driver = tokio::spawn(async move { broadcaster.run().await });
+
+		catalog.lock().video.renditions.insert("video".to_string(), video(0x1f));
+		let first = tokio::time::timeout(Duration::from_secs(5), changes.changed())
+			.await
+			.expect("catalog addition should publish a generation")
+			.unwrap();
+		assert_eq!(first.generation().get(), 1);
+		let removed = first.rendition("video").unwrap();
+		tokio::time::timeout(Duration::from_secs(5), video_track.used())
+			.await
+			.expect("exporter should subscribe to the added track")
+			.unwrap();
+
+		catalog.lock().video.renditions.clear();
+		let empty = tokio::time::timeout(Duration::from_secs(5), changes.changed())
+			.await
+			.expect("catalog removal should publish a generation")
+			.unwrap();
+		assert_eq!(empty.generation().get(), 2);
+		assert!(empty.renditions().is_empty());
+		assert!(removed.store.version().finished);
+		assert!(handle.rendition("video").is_none());
+		tokio::time::timeout(Duration::from_secs(5), video_track.unused())
+			.await
+			.expect("removing a rendition should release its media subscription")
+			.unwrap();
+		driver.abort();
+	}
+
+	#[test]
+	fn replaces_same_name_when_media_config_changes() {
+		let (_producer, _catalog_track, mut broadcaster) = test_broadcaster();
+		let handle = broadcaster.handle();
+		let mut catalog = Catalog::default();
+		catalog.video.renditions.insert("video".to_string(), video(0x1f));
+		broadcaster.sync(&catalog);
+		let first = handle.rendition("video").unwrap();
+
+		catalog.video.renditions.insert("video".to_string(), video(0x28));
+		broadcaster.sync(&catalog);
+		let replacement = handle.rendition("video").unwrap();
+
+		assert!(!Arc::ptr_eq(&first, &replacement));
+		assert_ne!(first.codec, replacement.codec);
+		assert!(first.store.version().finished);
+		assert_eq!(handle.snapshot().generation().get(), 2);
+	}
+
+	#[test]
+	fn readds_rendition_with_a_fresh_store() {
+		let (_producer, _catalog_track, mut broadcaster) = test_broadcaster();
+		let handle = broadcaster.handle();
+		let mut catalog = Catalog::default();
+		catalog.video.renditions.insert("video".to_string(), video(0x1f));
+		broadcaster.sync(&catalog);
+		let first = handle.rendition("video").unwrap();
+
+		catalog.video.renditions.clear();
+		broadcaster.sync(&catalog);
+		catalog.video.renditions.insert("video".to_string(), video(0x1f));
+		broadcaster.sync(&catalog);
+		let readded = handle.rendition("video").unwrap();
+
+		assert!(!Arc::ptr_eq(&first, &readded));
+		assert!(first.store.version().finished);
+		assert!(!readded.store.version().finished);
+		assert_eq!(handle.snapshot().generation().get(), 3);
+	}
 
 	/// Dropping a `Broadcaster` must release its source subscription, not pin it until
 	/// the broadcast closes on its own. Regression for the VOD recorder leaving demo
