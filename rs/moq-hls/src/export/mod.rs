@@ -76,28 +76,71 @@ struct Shared {
 	ready: watch::Sender<usize>,
 }
 
-/// A driver-private per-rendition unit: the shared metadata/store plus the exporter
-/// that fills it. `export` is `None` once the rendition has finished -- dropping it
-/// then RELEASES the source subscription immediately, instead of holding a live (but
-/// no-longer-polled) track open until the whole `Broadcaster` drops. That matters on
-/// the error path: moq-mux's exporter returns an error *before* it would internally
-/// drop the track, so a rendition that errors while its publisher is still live would
-/// otherwise pin that subscription for the rest of the recording (a scoped #2255).
+/// The lifecycle of one rendition's media subscription.
+enum DriverState {
+	/// Pulling fragments from an active source subscription.
+	Active(Box<RenditionExport>),
+	/// Paused with no source subscription. Resume rebuilds at the live edge.
+	Paused,
+	/// Permanently ended with its store finalized.
+	Finished,
+}
+
+/// A driver-private per-rendition unit: the shared metadata/store plus the state
+/// of the exporter that fills it.
 struct Driver {
 	info: Arc<Rendition>,
-	export: Option<RenditionExport>,
+	state: DriverState,
 }
 
 impl Driver {
 	/// True once this rendition's exporter has finished (its subscription released).
 	fn done(&self) -> bool {
-		self.export.is_none()
+		matches!(self.state, DriverState::Finished)
+	}
+
+	/// The active exporter, if this rendition is currently pulling media.
+	fn active(&mut self) -> Option<&mut RenditionExport> {
+		match &mut self.state {
+			DriverState::Active(export) => Some(export),
+			DriverState::Paused | DriverState::Finished => None,
+		}
+	}
+
+	/// Drop the active exporter without finalizing the store, synchronously
+	/// acknowledging that the media subscription has been released.
+	fn pause(&mut self) {
+		if matches!(self.state, DriverState::Active(_)) {
+			self.state = DriverState::Paused;
+		}
+	}
+
+	/// Rebuild a paused exporter at the live edge and mark the recording seam.
+	fn resume(&mut self, broadcast: &moq_net::BroadcastConsumer, config: &Config) {
+		if !matches!(self.state, DriverState::Paused) {
+			return;
+		}
+
+		let export = match build_export(broadcast, &self.info.name, self.info.kind, config, true) {
+			Ok(export) => export,
+			Err(err) => {
+				tracing::warn!(name = %self.info.name, kind = ?self.info.kind, %err, "failed to resume hls rendition exporter");
+				self.finish();
+				return;
+			}
+		};
+
+		if self.info.store.has_media() {
+			self.info.store.mark_discontinuity();
+		}
+		self.state = DriverState::Active(Box::new(export));
 	}
 
 	/// Finalize the store (waking blocked readers with an ENDLIST) and drop the
 	/// exporter, releasing its source track subscription.
 	fn finish(&mut self) {
-		if self.export.take().is_some() {
+		if !matches!(self.state, DriverState::Finished) {
+			self.state = DriverState::Finished;
 			self.info.store.finish();
 		}
 	}
@@ -116,13 +159,8 @@ pub struct Broadcaster {
 	catalog_done: bool,
 	renditions: BTreeMap<String, Driver>,
 	shared: Arc<Shared>,
-	/// While true, the exporters aren't polled: nothing is read, so the relay stops
-	/// sending and the media produced during the pause is dropped from the recording.
+	/// While true, rendition drivers hold no exporters or media subscriptions.
 	paused: bool,
-	/// Set once a poll actually skips media because we're paused, so the next
-	/// unpaused poll tags a `#EXT-X-DISCONTINUITY` at the seam. A pause toggled on
-	/// and back off between polls (no media skipped) leaves this false -> no seam.
-	paused_observed: bool,
 }
 
 impl Broadcaster {
@@ -146,7 +184,6 @@ impl Broadcaster {
 				ready,
 			}),
 			paused: false,
-			paused_observed: false,
 		})
 	}
 
@@ -160,24 +197,46 @@ impl Broadcaster {
 
 	/// Pause or resume pulling media from the broadcast.
 	///
-	/// While paused the exporters aren't polled, so the relay stops sending and the
-	/// live media produced during the pause is dropped from the recording (not
-	/// buffered, and the publisher isn't kept ingesting). Resuming continues the SAME
-	/// playlists from the next group still in the relay cache (the evicted span is
-	/// skipped, then it reads forward -- it does NOT jump to live), marking the first
-	/// post-resume segment `#EXT-X-DISCONTINUITY`. CMAF sequence numbers and the init
-	/// segment persist, so it's one continuous recording with a gap, not a restart.
+	/// Entering pause synchronously drops every rendition exporter, releasing its media
+	/// subscription before this method returns. The discovery catalog stays subscribed
+	/// so newly advertised renditions are known, but no media is pulled.
+	///
+	/// Resuming creates fresh exporters at each track's latest available group. The
+	/// playlists and their sequence numbers persist, and the first post-resume segment
+	/// is tagged `#EXT-X-DISCONTINUITY` when the rendition already contained media.
 	///
 	/// Takes `&mut self`: the owner applies pause between polls (e.g. in a
 	/// `select!` alongside [`poll`](Self::poll)), so there's no shared pause flag and
 	/// no separate forwarding task. Idempotent.
 	pub fn set_paused(&mut self, paused: bool) {
+		if self.paused == paused {
+			return;
+		}
+
 		self.paused = paused;
+		if paused {
+			for driver in self.renditions.values_mut() {
+				driver.pause();
+			}
+		} else {
+			for driver in self.renditions.values_mut() {
+				driver.resume(&self.broadcast, &self.config);
+			}
+		}
 	}
 
 	/// Whether the export is currently paused.
 	pub fn is_paused(&self) -> bool {
 		self.paused
+	}
+
+	/// Stop the export and establish a synchronous no-more-writes barrier.
+	///
+	/// This consumes the broadcaster, releases every source subscription, and
+	/// finalizes retained stores before returning. Dropping a broadcaster performs
+	/// the same cleanup, while this method makes the barrier explicit to callers.
+	pub fn shutdown(mut self) {
+		self.finish_all();
 	}
 
 	/// Advance the catalog and every rendition's exporter one pass.
@@ -212,32 +271,18 @@ impl Broadcaster {
 		}
 
 		if self.paused {
-			// Not reading media, so nothing wakes us from the exporters. We must still
-			// notice the broadcast closing, or a paused recording would hang forever.
-			self.paused_observed = true;
+			// No media subscriptions remain, so only the catalog or broadcast can wake us.
+			// We must still notice the broadcast closing, or a paused recording would
+			// hang forever.
 			if self.broadcast.poll_closed(waiter).is_ready() {
 				self.finish_all();
 			}
 		} else {
-			// First unpaused poll after actually skipping media: the dropped span is a
-			// real gap, so tag the seam on every rendition.
-			if self.paused_observed {
-				for driver in self.renditions.values() {
-					driver.info.store.mark_discontinuity();
-				}
-				self.paused_observed = false;
-			}
-
 			for driver in self.renditions.values_mut() {
-				// A finished rendition (`export` is `None`) is skipped; while draining, the
-				// exporter stays `Some` until an arm below finishes it and breaks.
-				if driver.export.is_none() {
-					continue;
-				}
-				loop {
-					// Poll into an owned outcome so the `driver.export` borrow is released
+				while let Some(export) = driver.active() {
+					// Poll into an owned outcome so the active-state borrow is released
 					// before the arms touch `driver` (e.g. `finish`, which drops the exporter).
-					let outcome = driver.export.as_mut().unwrap().poll_next_fragment(waiter);
+					let outcome = export.poll_next_fragment(waiter);
 					match outcome {
 						Poll::Ready(Ok(Some(fragment))) => driver.info.store.push(fragment),
 						Poll::Ready(Ok(None)) => {
@@ -304,21 +349,26 @@ impl Broadcaster {
 	/// Register a discovered rendition: build its exporter, add it to the driver map,
 	/// and publish its metadata/store to the shared read side.
 	fn insert_rendition(&mut self, name: String, info: Arc<Rendition>, kind: Kind) {
-		let export = match build_export(&self.broadcast, &name, kind, &self.config) {
-			Ok(export) => export,
-			Err(err) => {
-				// The catalog we're mid-read on lists this track, so subscribing its
-				// catalog again can't legitimately fail; if it somehow does, skip the
-				// rendition (it just won't be served) rather than abort discovery.
-				tracing::warn!(%name, ?kind, %err, "failed to build rendition exporter; skipping");
-				return;
-			}
+		let state = if self.paused {
+			DriverState::Paused
+		} else {
+			let export = match build_export(&self.broadcast, &name, kind, &self.config, false) {
+				Ok(export) => export,
+				Err(err) => {
+					// The catalog we're mid-read on lists this track, so subscribing its
+					// catalog again can't legitimately fail; if it somehow does, skip the
+					// rendition (it just won't be served) rather than abort discovery.
+					tracing::warn!(%name, ?kind, %err, "failed to build rendition exporter; skipping");
+					return;
+				}
+			};
+			DriverState::Active(Box::new(export))
 		};
 		self.renditions.insert(
 			name.clone(),
 			Driver {
 				info: info.clone(),
-				export: Some(export),
+				state,
 			},
 		);
 		self.shared.renditions.write().unwrap().insert(name, info);
@@ -333,6 +383,7 @@ fn build_export(
 	name: &str,
 	kind: Kind,
 	cfg: &Config,
+	start_at_live: bool,
 ) -> Result<RenditionExport> {
 	let consumer = Consumer::<()>::new(broadcast, CatalogFormat::Hang)?;
 	let selection = match kind {
@@ -340,9 +391,20 @@ fn build_export(
 		Kind::Audio => select::Broadcast::default().audio(select::Audio::default().name(name)),
 	};
 	let filtered = consumer.select(selection);
-	Ok(Export::new(broadcast.clone(), filtered)
+	let export = Export::new(broadcast.clone(), filtered)
 		.with_fragment_duration(cfg.part_target)
-		.with_latency(cfg.latency))
+		.with_latency(cfg.latency);
+	Ok(if start_at_live {
+		export.with_start_at_live()
+	} else {
+		export
+	})
+}
+
+impl Drop for Broadcaster {
+	fn drop(&mut self) {
+		self.finish_all();
+	}
 }
 
 /// A cheap, cloneable read handle to a [`Broadcaster`]'s renditions.
@@ -410,14 +472,50 @@ impl Handle {
 
 #[cfg(test)]
 mod tests {
+	use bytes::Bytes;
+	use hang::catalog::{Container, VideoCodec, VideoConfig};
+	use moq_mux::catalog::Producer as CatalogProducer;
+	use moq_mux::catalog::hang::Container as WireContainer;
+	use moq_mux::container::{Frame, Producer as MediaProducer, Timestamp};
+
 	use super::*;
+
+	type VideoProducer = MediaProducer<WireContainer>;
+
+	/// Build one live VP8 rendition with an HLS broadcaster over the same broadcast.
+	fn video_fixture() -> (moq_net::BroadcastProducer, CatalogProducer, VideoProducer, Broadcaster) {
+		let mut producer = moq_net::Broadcast::new().produce();
+		let mut catalog = CatalogProducer::new(&mut producer).unwrap();
+		let track = producer.create_track(moq_net::Track::new("video")).unwrap();
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.container = Container::Legacy;
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		catalog.lock().video.renditions.insert("video".to_string(), config);
+		let video = MediaProducer::new(track, WireContainer::Legacy);
+		let broadcaster = Broadcaster::new(producer.consume(), Config::default()).unwrap();
+		(producer, catalog, video, broadcaster)
+	}
+
+	fn frame(seconds: u64) -> Frame {
+		Frame {
+			timestamp: Timestamp::from_micros(seconds * 1_000_000).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a]),
+			keyframe: true,
+		}
+	}
+
+	fn drive(broadcaster: &mut Broadcaster) {
+		let _ = broadcaster.poll(&kio::Waiter::noop());
+	}
 
 	/// Dropping a `Broadcaster` must release its source subscription, not pin it until
 	/// the broadcast closes on its own. Regression for the VOD recorder leaving demo
 	/// publishers "subscribed" (and, being subscription-driven, emulating + encoding)
 	/// for hours after a recording was deleted (moq#2255): with the poll model, drop
 	/// tears down the catalog consumer + exporters structurally, no guards needed.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn dropping_broadcaster_releases_subscription() {
 		let mut producer = moq_net::Broadcast::new().produce();
 		let catalog = producer
@@ -449,10 +547,8 @@ mod tests {
 	/// The real #2255 scenario: a rendition's MEDIA subscription (not just the
 	/// catalog) must be released when the driver is dropped. A live media track held
 	/// open is what kept the demo's subscription-driven publishers emulating.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn dropping_broadcaster_releases_media_subscription() {
-		use moq_mux::catalog::Producer as CatalogProducer;
-
 		let mut producer = moq_net::Broadcast::new().produce();
 		let mut catalog = CatalogProducer::new(&mut producer).unwrap();
 		let video = producer.create_track(moq_net::Track::new("video")).unwrap();
@@ -486,9 +582,92 @@ mod tests {
 			.unwrap();
 	}
 
+	/// Pausing a fragment stalled in an open group drops the exporter immediately,
+	/// releasing the media subscription without waiting for another frame or group.
+	#[tokio::test(start_paused = true)]
+	async fn pause_releases_stalled_media_subscription() {
+		let (_producer, _catalog, mut video, mut broadcaster) = video_fixture();
+		video.write(frame(0)).unwrap();
+
+		// The exporter consumes the only frame but cannot flush a media fragment until
+		// another keyframe or end-of-group supplies its boundary.
+		drive(&mut broadcaster);
+		video.used().await.unwrap();
+
+		broadcaster.set_paused(true);
+		assert!(broadcaster.is_paused());
+		tokio::time::timeout(Duration::from_secs(1), video.unused())
+			.await
+			.expect("pause should release a stalled media subscription")
+			.unwrap();
+
+		let rendition = broadcaster.handle().rendition("video").unwrap();
+		assert!(
+			!rendition.store.snapshot().finished,
+			"pause must keep the playlist resumable"
+		);
+	}
+
+	/// Resuming after cache eviction rebuilds at the latest retained group instead of
+	/// replaying the cache, while preserving the playlist and marking its seam.
+	#[tokio::test(start_paused = true)]
+	async fn resume_after_cache_eviction_starts_at_live_edge() {
+		let (_producer, _catalog, mut video, mut broadcaster) = video_fixture();
+		let handle = broadcaster.handle();
+
+		video.write(frame(0)).unwrap();
+		video.write(frame(1)).unwrap();
+		drive(&mut broadcaster);
+		let rendition = handle.rendition("video").unwrap();
+		assert_eq!(rendition.store.snapshot().segments.len(), 1, "initial segment");
+
+		broadcaster.set_paused(true);
+		video.unused().await.unwrap();
+
+		// Age the pre-pause groups out, then leave two fresh groups cached. A consumer
+		// starting at the cache head would record group 2; a live-edge consumer starts
+		// at group 3 and waits for group 4 to close it.
+		tokio::time::advance(Duration::from_secs(6)).await;
+		video.write(frame(2)).unwrap();
+		video.write(frame(3)).unwrap();
+
+		broadcaster.set_paused(false);
+		drive(&mut broadcaster);
+		assert_eq!(
+			rendition.store.snapshot().segments.len(),
+			1,
+			"cached group was not replayed"
+		);
+
+		video.write(frame(4)).unwrap();
+		drive(&mut broadcaster);
+		let snapshot = rendition.store.snapshot();
+		assert_eq!(snapshot.segments.len(), 2, "exactly one post-resume segment");
+		assert!(snapshot.segments[1].discontinuity, "post-resume segment marks the gap");
+	}
+
+	/// Explicit shutdown is a no-more-writes barrier: it releases an active source
+	/// subscription and finalizes retained stores before returning.
+	#[tokio::test(start_paused = true)]
+	async fn shutdown_active_source_finishes_store() {
+		let (_producer, _catalog, mut video, mut broadcaster) = video_fixture();
+		video.write(frame(0)).unwrap();
+		drive(&mut broadcaster);
+		video.used().await.unwrap();
+		let rendition = broadcaster.handle().rendition("video").unwrap();
+
+		broadcaster.shutdown();
+
+		video.unused().await.unwrap();
+		assert!(
+			rendition.store.snapshot().finished,
+			"shutdown must finalize retained stores"
+		);
+	}
+
 	/// A broadcast that goes away drives the broadcaster to completion instead of
 	/// hanging: the catalog stream ends and, with no renditions, `run()` returns.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn broadcast_gone_completes() {
 		let mut producer = moq_net::Broadcast::new().produce();
 		let catalog = producer

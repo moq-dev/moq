@@ -230,6 +230,11 @@ impl SegmentStore {
 		self.inner.lock().unwrap().discontinuity_pending = true;
 	}
 
+	/// Whether at least one media segment has been stored.
+	pub(super) fn has_media(&self) -> bool {
+		!self.inner.lock().unwrap().segments.is_empty()
+	}
+
 	/// Signal end-of-track. The playlist gains `#EXT-X-ENDLIST`.
 	pub fn finish(&self) {
 		{

@@ -73,13 +73,33 @@ impl ExportSource {
 		config: &VideoConfig,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
+		Self::for_video_with_start(broadcast, name, config, latency, false)
+	}
+
+	/// Subscribe to a video rendition starting at its latest available group.
+	pub fn for_video_live(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &VideoConfig,
+		latency: Duration,
+	) -> Result<Self, crate::Error> {
+		Self::for_video_with_start(broadcast, name, config, latency, true)
+	}
+
+	fn for_video_with_start(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &VideoConfig,
+		latency: Duration,
+		start_at_live: bool,
+	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let transform = build_video_transform(config);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
 			state: SourceState::Active(Box::new(
-				Consumer::new(broadcast.subscribe_track(&moq_net::Track::new(name))?, media).with_latency(latency),
+				Consumer::new(subscribe(broadcast, name, start_at_live)?, media).with_latency(latency),
 			)),
 			transform,
 			description,
@@ -116,12 +136,32 @@ impl ExportSource {
 		config: &AudioConfig,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
+		Self::for_audio_with_start(broadcast, name, config, latency, false)
+	}
+
+	/// Subscribe to an audio rendition starting at its latest available group.
+	pub fn for_audio_live(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &AudioConfig,
+		latency: Duration,
+	) -> Result<Self, crate::Error> {
+		Self::for_audio_with_start(broadcast, name, config, latency, true)
+	}
+
+	fn for_audio_with_start(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &AudioConfig,
+		latency: Duration,
+		start_at_live: bool,
+	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
 			state: SourceState::Active(Box::new(
-				Consumer::new(broadcast.subscribe_track(&moq_net::Track::new(name))?, media).with_latency(latency),
+				Consumer::new(subscribe(broadcast, name, start_at_live)?, media).with_latency(latency),
 			)),
 			transform: None,
 			description,
@@ -211,6 +251,18 @@ impl ExportSource {
 			self.description = Some(d.clone());
 		}
 	}
+}
+
+fn subscribe(
+	broadcast: &moq_net::BroadcastConsumer,
+	name: &str,
+	start_at_live: bool,
+) -> Result<moq_net::TrackConsumer, moq_net::Error> {
+	let mut track = broadcast.subscribe_track(&moq_net::Track::new(name))?;
+	if start_at_live && let Some(latest) = track.latest() {
+		track.start_at(latest);
+	}
+	Ok(track)
 }
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog

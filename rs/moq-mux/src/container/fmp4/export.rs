@@ -38,6 +38,7 @@ pub struct Export<S: Stream> {
 	catalog: Option<S>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
+	start_at_live: bool,
 
 	tracks: HashMap<String, Fmp4Track>,
 
@@ -111,6 +112,7 @@ impl<S: Stream> Export<S> {
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,
+			start_at_live: false,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
 			init_emitted: false,
@@ -123,6 +125,16 @@ impl<S: Stream> Export<S> {
 	/// Default is zero (skip aggressively).
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
+		self
+	}
+
+	/// Start each media subscription at its latest available group.
+	///
+	/// Remote subscriptions already resolve at the live edge by default. This also
+	/// positions reused or in-process tracks at their latest retained group, which is
+	/// required when rebuilding a live export after a pause.
+	pub fn with_start_at_live(mut self) -> Self {
+		self.start_at_live = true;
 		self
 	}
 
@@ -313,7 +325,11 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let source = if self.start_at_live {
+				ExportSource::for_video_live(&self.broadcast, name, config, self.latency)?
+			} else {
+				ExportSource::for_video(&self.broadcast, name, config, self.latency)?
+			};
 			let timescale = catalog_timescale_video(config);
 			// A zero / NaN / infinite framerate would make `1.0 / fps` non-finite and panic
 			// `Duration::from_secs_f64`; fall back to the default in that case.
@@ -343,7 +359,11 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let source = if self.start_at_live {
+				ExportSource::for_audio_live(&self.broadcast, name, config, self.latency)?
+			} else {
+				ExportSource::for_audio(&self.broadcast, name, config, self.latency)?
+			};
 			let timescale = catalog_timescale_audio(config);
 			self.tracks.insert(
 				name.clone(),
