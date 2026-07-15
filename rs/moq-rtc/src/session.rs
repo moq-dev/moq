@@ -13,13 +13,13 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, net::Receive};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use crate::egress::{EgressSource, WriteRequest};
+use crate::egress::{EgressClock, EgressSource, WriteRequest};
 use crate::{Error, Result, codec};
 
 /// One inbound UDP datagram plus its source address, the unit fed to a session.
@@ -114,7 +114,10 @@ pub struct Session {
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
 	/// Rebases each ingested track's raw RTP timestamps onto one session
 	/// timeline so audio and video stay in sync. Unused by egress sessions.
-	clock: IngestClock,
+	ingest_clock: IngestClock,
+	/// Maps the shared MoQ presentation timeline to str0m's sender-report
+	/// wallclock. Unused by ingest sessions.
+	egress_clock: EgressClock,
 }
 
 impl Session {
@@ -134,7 +137,8 @@ impl Session {
 			inbound,
 			role: MediaRole::Ingest(sink),
 			writes_rx: None,
-			clock: IngestClock::default(),
+			ingest_clock: IngestClock::default(),
+			egress_clock: EgressClock::default(),
 		}
 	}
 
@@ -155,7 +159,8 @@ impl Session {
 			inbound,
 			role: MediaRole::Egress(Box::new(source)),
 			writes_rx: Some(writes_rx),
-			clock: IngestClock::default(),
+			ingest_clock: IngestClock::default(),
+			egress_clock: EgressClock::default(),
 		}
 	}
 
@@ -219,7 +224,9 @@ impl Session {
 						None => std::future::pending::<Option<WriteRequest>>().await,
 					}
 				} => {
-					crate::egress::dispatch(&mut self.rtc, req, Instant::now());
+					let now = Instant::now();
+					let wallclock = self.egress_clock.wallclock(req.time, now);
+					crate::egress::dispatch(&mut self.rtc, req, wallclock);
 				}
 
 				packet = self.inbound.recv() => {
@@ -258,12 +265,12 @@ impl Session {
 			}
 			Event::MediaAdded(added) => self.handle_media_added(added)?,
 			Event::MediaData(data) => {
-				// `clock` and `role` are disjoint fields, so the borrow checker lets
+				// `ingest_clock` and `role` are disjoint fields, so the borrow checker lets
 				// us rebase the (random, per-track) RTP base and feed the sink in one
 				// block; egress sessions never get here so the clock stays untouched.
 				if let MediaRole::Ingest(sink) = &mut self.role {
 					let media_us = media_time_to_micros(&data.time);
-					let timestamp_us = self.clock.normalize(data.mid, data.network_time, media_us);
+					let timestamp_us = self.ingest_clock.normalize(data.mid, data.network_time, media_us);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -271,6 +278,11 @@ impl Session {
 							payload: bytes::Bytes::from_owner(data.data),
 						},
 					)?;
+				}
+			}
+			Event::SenderFeedback(feedback) => {
+				if matches!(&self.role, MediaRole::Ingest(_)) {
+					self.ingest_clock.observe(feedback.mid, feedback.sender_info);
 				}
 			}
 			Event::KeyframeRequest(req) => {
@@ -323,26 +335,34 @@ impl Session {
 /// is random and independent for each track, and str0m applies no RTCP
 /// sender-report correlation, so publishing the values as-is would desync audio
 /// from video (their bases differ by hours) and start the broadcast at an
-/// arbitrary offset. We anchor each track on its first frame to that packet's
-/// arrival time (relative to the first frame seen in the whole session), then
-/// advance within the track by the RTP delta (str0m extends the 32-bit RTP
-/// timestamp with a roll-over counter, so the delta is wrap-safe). The first
-/// frame of the session maps to 0.
+/// arbitrary offset. Until every track has an RTCP sender report, we anchor each
+/// track on its first frame's arrival. Once reports are available, their common
+/// NTP clock replaces arrival time as the cross-track reference. The NTP epoch
+/// is chosen so the transition can only move timestamps forward, never rewind a
+/// track that has already been published.
 #[derive(Default)]
 pub(crate) struct IngestClock {
 	/// Arrival time of the first frame seen in the session; the timeline origin.
-	epoch: Option<Instant>,
-	/// Per-track additive offset (microseconds) applied to the raw RTP time.
-	offsets: HashMap<str0m::media::Mid, i64>,
+	arrival_epoch: Option<Instant>,
+	/// Remote NTP time corresponding to timestamp zero on the published timeline.
+	ntp_epoch_us: Option<i128>,
+	tracks: HashMap<str0m::media::Mid, IngestTrackClock>,
 }
 
 impl IngestClock {
+	/// Record the newest RTP-to-NTP correlation for a track.
+	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) {
+		self.tracks.entry(mid).or_default().sender = Some(SenderAnchor::new(sender));
+		self.establish_ntp_epoch();
+	}
+
 	/// Map a raw RTP-derived microsecond timestamp onto the session timeline.
 	/// `arrival` is the packet's network time
 	/// ([`MediaData::network_time`](str0m::media::MediaData::network_time)).
 	fn normalize(&mut self, mid: str0m::media::Mid, arrival: Instant, media_us: u64) -> u64 {
-		let epoch = *self.epoch.get_or_insert(arrival);
-		let offset = *self.offsets.entry(mid).or_insert_with(|| {
+		let epoch = *self.arrival_epoch.get_or_insert(arrival);
+		let track = self.tracks.entry(mid).or_default();
+		let offset = *track.arrival_offset_us.get_or_insert_with(|| {
 			// Signed wall delta from the epoch: a track whose first frame we dequeue
 			// after the epoch frame may have actually arrived *before* it, and that
 			// lead must pull its timeline earlier (not clamp to the epoch via an
@@ -352,10 +372,91 @@ impl IngestClock {
 			} else {
 				-(epoch.duration_since(arrival).as_micros() as i64)
 			};
-			wall_us - media_us as i64
+			wall_us as i128 - media_us as i128
 		});
-		(media_us as i64 + offset).max(0) as u64
+		let fallback = to_u64(media_us as i128 + offset);
+		let previous = track.last_output_us;
+		track.last_media_us = Some(media_us);
+		track.last_output_us = Some(fallback);
+
+		self.establish_ntp_epoch();
+		let mapped = self
+			.ntp_epoch_us
+			.zip(self.tracks.get(&mid).and_then(|track| track.sender))
+			.map(|(epoch, sender)| to_u64(sender.capture_time_us(media_us) - epoch));
+		let output = match mapped {
+			// The epoch chosen during the transition makes `mapped >= fallback`.
+			// Later sender reports can make tiny clock corrections, so retain strict
+			// monotonicity if one would otherwise move this track backwards.
+			Some(mapped) => mapped.max(previous.map_or(fallback, |last| last.saturating_add(1))),
+			None => fallback,
+		};
+		self.tracks.get_mut(&mid).expect("track was inserted").last_output_us = Some(output);
+		output
 	}
+
+	/// Switch to the sender's common clock once every negotiated track has both
+	/// a media sample and an RTCP sender report.
+	fn establish_ntp_epoch(&mut self) {
+		// A single RTP clock needs rebasing but no cross-track synchronization.
+		// Waiting for two observed tracks also avoids a dormant negotiated m-line
+		// preventing active audio and video from ever switching to sender reports.
+		if self.ntp_epoch_us.is_some() || self.tracks.len() < 2 {
+			return;
+		}
+
+		let mut epoch = i128::MAX;
+		for track in self.tracks.values() {
+			let (Some(sender), Some(media_us), Some(output_us)) =
+				(track.sender, track.last_media_us, track.last_output_us)
+			else {
+				return;
+			};
+			// Choosing the minimum candidate makes every track's NTP-derived
+			// timestamp at least its last published timestamp. The common timeline
+			// may jump forward, but no individual track can rewind.
+			epoch = epoch.min(sender.capture_time_us(media_us) - output_us as i128);
+		}
+		self.ntp_epoch_us = Some(epoch);
+	}
+}
+
+#[derive(Default)]
+struct IngestTrackClock {
+	arrival_offset_us: Option<i128>,
+	sender: Option<SenderAnchor>,
+	last_media_us: Option<u64>,
+	last_output_us: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct SenderAnchor {
+	ntp_us: i128,
+	rtp_us: i128,
+}
+
+impl SenderAnchor {
+	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> Self {
+		Self {
+			ntp_us: system_time_to_micros(sender.ntp_time),
+			rtp_us: media_time_to_micros(&sender.rtp_time) as i128,
+		}
+	}
+
+	fn capture_time_us(self, media_us: u64) -> i128 {
+		self.ntp_us + media_us as i128 - self.rtp_us
+	}
+}
+
+fn system_time_to_micros(time: SystemTime) -> i128 {
+	match time.duration_since(UNIX_EPOCH) {
+		Ok(duration) => duration.as_micros() as i128,
+		Err(err) => -(err.duration().as_micros() as i128),
+	}
+}
+
+fn to_u64(value: i128) -> u64 {
+	value.clamp(0, u64::MAX as i128) as u64
 }
 
 /// Log a finished session at the right level: an ordinary peer disconnect
@@ -530,9 +631,11 @@ pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> mpsc::Receiver<Packet> {
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
+	use std::time::{Duration, UNIX_EPOCH};
 
 	use str0m::media::Mid;
+	use str0m::rtp::Ssrc;
+	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
 
@@ -643,5 +746,50 @@ mod tests {
 			clock.normalize(video, video_arrival + Duration::from_millis(33), 8_033_000),
 			28_000
 		);
+	}
+
+	#[test]
+	fn ingest_clock_replaces_arrival_jitter_with_sender_report_sync() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		let audio_base = 1_000_000_000;
+		let video_base = 8_000_000_000;
+
+		assert_eq!(clock.normalize(audio, t0, audio_base), 0);
+		assert_eq!(
+			clock.normalize(video, t0 + Duration::from_millis(50), video_base),
+			50_000
+		);
+		assert_eq!(
+			clock.normalize(audio, t0 + Duration::from_secs(1), audio_base + 1_000_000),
+			1_000_000
+		);
+		assert_eq!(
+			clock.normalize(video, t0 + Duration::from_millis(1_050), video_base + 1_000_000,),
+			1_050_000
+		);
+
+		// Both reports identify the same capture instant despite unrelated RTP
+		// bases. The 50 ms first-packet arrival skew must disappear permanently.
+		let report_time = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
+		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
+		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
+
+		let audio_time = clock.normalize(audio, t0 + Duration::from_millis(1_020), audio_base + 1_020_000);
+		let video_time = clock.normalize(video, t0 + Duration::from_millis(1_070), video_base + 1_020_000);
+		assert_eq!(audio_time, video_time);
+		assert_eq!(audio_time, 1_070_000);
+	}
+
+	fn sender_info(ssrc: u32, ntp_time: SystemTime, rtp_us: u64) -> SenderInfo {
+		SenderInfo {
+			ssrc: Ssrc::from(ssrc),
+			ntp_time,
+			rtp_time: str0m::media::MediaTime::from_micros(rtp_us),
+			sender_packet_count: 0,
+			sender_octet_count: 0,
+		}
 	}
 }

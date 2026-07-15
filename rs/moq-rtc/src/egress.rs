@@ -11,7 +11,7 @@
 //! client). SDP negotiation lives in the matching modules; this file is
 //! transport-agnostic.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodec};
@@ -27,10 +27,58 @@ use crate::{Error, Result, codec};
 /// Pump tasks build these and send them down the channel; the session loop
 /// receives them and calls `rtc.writer(mid).write(pt, wallclock, time, payload)`.
 pub struct WriteRequest {
+	/// Negotiated media line to write to.
 	pub mid: Mid,
+	/// Negotiated RTP payload type.
 	pub pt: Pt,
+	/// Presentation timestamp in the negotiated RTP clock domain.
 	pub time: MediaTime,
+	/// Complete encoded media frame.
 	pub payload: Bytes,
+}
+
+/// Maps the shared MoQ presentation timeline to str0m's wallclock.
+///
+/// The first observed frame supplies an initial epoch. Later frames can prove
+/// that epoch too recent when buffered media arrives faster than real time. In
+/// that case the anchor moves earlier so no observed frame maps into the future.
+/// Arrival delays never move it later, so dequeue jitter cannot become a
+/// permanent difference between audio and video sender reports.
+#[derive(Default)]
+pub(crate) struct EgressClock {
+	anchor: Option<(Duration, Instant)>,
+}
+
+impl EgressClock {
+	/// Return the production wallclock corresponding to a presentation timestamp.
+	pub(crate) fn wallclock(&mut self, time: MediaTime, now: Instant) -> Instant {
+		let presentation = Duration::from(time);
+		let Some((anchor_presentation, anchor_wallclock)) = self.anchor else {
+			self.anchor = Some((presentation, now));
+			return now;
+		};
+
+		if presentation >= anchor_presentation {
+			let delta = presentation - anchor_presentation;
+			let Some(mapped) = anchor_wallclock.checked_add(delta) else {
+				self.anchor = Some((presentation, now));
+				return now;
+			};
+			if mapped > now {
+				// A catch-up burst revealed that the previous anchor was too recent.
+				// Tighten it to the newest constraint. This anchor is shared by every
+				// track, so equal presentation times map to equal wallclocks.
+				self.anchor = Some((presentation, now));
+				now
+			} else {
+				mapped
+			}
+		} else {
+			anchor_wallclock
+				.checked_sub(anchor_presentation - presentation)
+				.unwrap_or(now)
+		}
+	}
 }
 
 /// Holds the broadcast + catalog and spawns per-rendition pump tasks.
@@ -229,5 +277,47 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 	} = request;
 	if let Err(err) = writer.write(pt, wallclock, time, payload.to_vec()) {
 		tracing::warn!(%err, "egress write rejected by str0m");
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn egress_clock_ignores_cross_track_dequeue_jitter() {
+		let mut clock = EgressClock::default();
+		let t0 = Instant::now();
+
+		assert_eq!(clock.wallclock(MediaTime::from_millis(1_000), t0), t0);
+		assert_eq!(
+			clock.wallclock(MediaTime::from_millis(1_100), t0 + Duration::from_millis(100)),
+			t0 + Duration::from_millis(100)
+		);
+
+		// Two tracks dequeue the same presentation time 50 ms apart. Their
+		// sender-report wallclocks must still agree.
+		let audio = clock.wallclock(MediaTime::from_millis(1_200), t0 + Duration::from_millis(250));
+		let video = clock.wallclock(MediaTime::from_millis(1_200), t0 + Duration::from_millis(300));
+		assert_eq!(audio, t0 + Duration::from_millis(200));
+		assert_eq!(video, audio);
+	}
+
+	#[test]
+	fn egress_clock_moves_epoch_earlier_for_catch_up_bursts() {
+		let mut clock = EgressClock::default();
+		let t0 = Instant::now();
+
+		assert_eq!(clock.wallclock(MediaTime::from_millis(1_000), t0), t0);
+		// The next 100 ms of media was already buffered and arrives immediately.
+		// Re-anchor it at now instead of handing str0m a future wallclock.
+		assert_eq!(clock.wallclock(MediaTime::from_millis(1_100), t0), t0);
+
+		// Once the live edge is known, another track uses the same mapping even
+		// when its frames dequeue later.
+		assert_eq!(
+			clock.wallclock(MediaTime::from_millis(1_100), t0 + Duration::from_millis(50)),
+			t0
+		);
 	}
 }
