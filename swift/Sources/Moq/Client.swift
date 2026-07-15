@@ -32,12 +32,12 @@ public final class Client: Sendable {
         ffi.setTlsFingerprints(fingerprints: fingerprints)
     }
 
-    /// Present a PEM certificate chain when the relay requires mTLS.
+    /// Set the path to a PEM certificate chain to present when the relay requires mTLS.
     public func setTlsCert(_ path: String?) {
         ffi.setTlsCert(path: path)
     }
 
-    /// Present a PEM private key when the relay requires mTLS.
+    /// Set the path to a PEM private key to present when the relay requires mTLS.
     public func setTlsKey(_ path: String?) {
         ffi.setTlsKey(path: path)
     }

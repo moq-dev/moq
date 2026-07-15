@@ -16,8 +16,8 @@ import uniffi.moq.MoqSession
  * auto-created), so you can [announce] broadcasts and iterate [announcements]
  * without touching the raw [MoqClient] handle.
  *
- * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) cancels the client,
- * which tears down the session.
+ * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
+ * the session and cancels the client.
  */
 class Moq internal constructor(
     /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
@@ -57,8 +57,8 @@ class Moq internal constructor(
          * @param tlsRoots PEM root certificate paths to trust instead of platform roots.
          * @param tlsSystemRoots whether to also trust platform roots when custom roots are set.
          * @param tlsFingerprints peer certificate SHA-256 fingerprints to pin.
-         * @param tlsCert PEM certificate chain to present for mTLS.
-         * @param tlsKey PEM private key to present for mTLS.
+         * @param tlsCert path to a PEM certificate chain to present for mTLS.
+         * @param tlsKey path to a PEM private key to present for mTLS.
          * @param bind local socket address to bind, e.g. "0.0.0.0:0".
          * @param publish origin to announce broadcasts through; auto-created when null.
          * @param subscribe origin to discover broadcasts through; auto-created when null.

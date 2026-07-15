@@ -56,12 +56,12 @@ func WithTLSFingerprints(fingerprints ...string) ClientOption {
 	}
 }
 
-// WithClientTLSCert presents a PEM certificate chain when the relay requires mTLS.
+// WithClientTLSCert sets the path to a PEM certificate chain for mTLS.
 func WithClientTLSCert(path string) ClientOption {
 	return func(c *clientConfig) { c.tlsCert = &path }
 }
 
-// WithClientTLSKey presents a PEM private key when the relay requires mTLS.
+// WithClientTLSKey sets the path to a PEM private key for mTLS.
 func WithClientTLSKey(path string) ClientOption {
 	return func(c *clientConfig) { c.tlsKey = &path }
 }
