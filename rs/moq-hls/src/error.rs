@@ -40,6 +40,35 @@ pub enum Error {
 	#[error("encountered segment with empty URI")]
 	EmptySegmentUri,
 
+	/// An implicit HLS byte range had no preceding range for the same resource.
+	#[error("implicit byte range for {url} has no preceding range for the same resource")]
+	MissingByteRangeOffset {
+		/// The resource whose range omitted an offset.
+		url: url::Url,
+	},
+
+	/// An HLS byte range was empty or overflowed its integer representation.
+	#[error("invalid byte range {start}+{length} for {url}")]
+	InvalidByteRange {
+		/// The ranged resource.
+		url: url::Url,
+		/// The first requested byte.
+		start: u64,
+		/// The requested byte count.
+		length: u64,
+	},
+
+	/// A ranged resource response did not contain the complete requested range.
+	#[error("byte range for {url} returned {actual} bytes, expected {expected}")]
+	ShortByteRange {
+		/// The ranged resource.
+		url: url::Url,
+		/// The requested byte count.
+		expected: u64,
+		/// The returned byte count.
+		actual: usize,
+	},
+
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
 	#[error("HLS {kind} sequence {value} is too large to encode")]
 	SequenceOverflow {

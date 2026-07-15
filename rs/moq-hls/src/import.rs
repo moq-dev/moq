@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use m3u8_rs::{
-	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
+	AlternativeMedia, AlternativeMediaType, ByteRange, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution,
+	VariantStream,
 };
 use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
@@ -113,7 +114,33 @@ struct TrackState {
 	select: select::Broadcast,
 	next_sequence: Option<u64>,
 	next_discontinuity: Option<u64>,
-	init_ready: bool,
+	map: Option<MapState>,
+	map_range: RangeCursor,
+	media_range: RangeCursor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Resource {
+	url: Url,
+	range: Option<ResolvedRange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedRange {
+	start: u64,
+	length: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RangeCursor {
+	previous: Option<(Url, u64)>,
+}
+
+#[derive(Clone, Debug)]
+struct MapState {
+	sequence: u64,
+	tag: Map,
+	resource: Resource,
 }
 
 impl TrackState {
@@ -123,8 +150,46 @@ impl TrackState {
 			select,
 			next_sequence: None,
 			next_discontinuity: None,
-			init_ready: false,
+			map: None,
+			map_range: RangeCursor::default(),
+			media_range: RangeCursor::default(),
 		}
+	}
+}
+
+impl RangeCursor {
+	fn resolve(&mut self, url: Url, range: Option<&ByteRange>) -> Result<Resource> {
+		let Some(range) = range else {
+			self.previous = None;
+			return Ok(Resource { url, range: None });
+		};
+
+		let start = match range.offset {
+			Some(offset) => offset,
+			None => self
+				.previous
+				.as_ref()
+				.filter(|(previous_url, _)| previous_url == &url)
+				.map(|(_, end)| *end)
+				.ok_or_else(|| Error::MissingByteRangeOffset { url: url.clone() })?,
+		};
+		let end = start
+			.checked_add(range.length)
+			.filter(|_| range.length > 0)
+			.ok_or_else(|| Error::InvalidByteRange {
+				url: url.clone(),
+				start,
+				length: range.length,
+			})?;
+
+		self.previous = Some((url.clone(), end));
+		Ok(Resource {
+			url,
+			range: Some(ResolvedRange {
+				start,
+				length: range.length,
+			}),
+		})
 	}
 }
 
@@ -328,6 +393,12 @@ impl Import {
 
 		let body = self.fetch_bytes(self.base_url.clone()).await?;
 		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
+			// The permissive master parser also accepts media playlists as an empty
+			// master. Only take this branch when it actually contains variants.
+			if master.variants.is_empty() {
+				self.video.push(TrackState::new(self.base_url.clone(), select_muxed()));
+				return Ok(());
+			}
 			let variants = select_variants(&master);
 			if variants.is_empty() {
 				return Err(Error::NoVariants);
@@ -382,8 +453,6 @@ impl Import {
 		playlist: &MediaPlaylist,
 		limit: Option<usize>,
 	) -> Result<usize> {
-		self.ensure_init_segment(kind, track, playlist).await?;
-
 		let next_seq = track.next_sequence.unwrap_or(0);
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
@@ -403,6 +472,7 @@ impl Import {
 				);
 			}
 			track.next_sequence = None;
+			track.media_range = RangeCursor::default();
 			0
 		} else if next_seq < playlist_seq {
 			if track.next_sequence.is_some() {
@@ -414,6 +484,7 @@ impl Import {
 				);
 			}
 			track.next_sequence = None;
+			track.media_range = RangeCursor::default();
 			0
 		} else {
 			(next_seq - playlist_seq) as usize
@@ -450,10 +521,17 @@ impl Import {
 			}
 
 			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
+				let sequence = base_seq + i as u64;
 				if segment.discontinuity {
 					discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
 				}
-				self.push_segment(kind, track, segment, base_seq + i as u64, discontinuity_seq)
+				if let Some(map) = &segment.map {
+					self.ensure_map(kind, track, map, sequence).await?;
+				}
+				if track.map.is_none() {
+					return Err(Error::MissingMap);
+				}
+				self.push_segment(kind, track, segment, sequence, discontinuity_seq)
 					.await?;
 			}
 			info!(?kind, consumed = to_process, "consumed HLS segments");
@@ -464,32 +542,47 @@ impl Import {
 		Ok(to_process)
 	}
 
-	async fn ensure_init_segment(
-		&mut self,
-		kind: TrackKind,
-		track: &mut TrackState,
-		playlist: &MediaPlaylist,
-	) -> Result<()> {
-		if track.init_ready {
+	async fn ensure_map(&mut self, kind: TrackKind, track: &mut TrackState, map: &Map, sequence: u64) -> Result<()> {
+		if track
+			.map
+			.as_ref()
+			.is_some_and(|current| current.sequence == sequence && current.tag == *map)
+		{
 			return Ok(());
 		}
 
-		let map = self.find_map(playlist).ok_or(Error::MissingMap)?;
-
 		let url = resolve_uri(&track.playlist, &map.uri)?;
-		let bytes = self.fetch_bytes(url).await?;
-		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index, &track.select),
-			TrackKind::Audio => self.ensure_audio_importer(&track.select),
-		};
+		let mut range = track.map_range.clone();
+		let resource = range.resolve(url, map.byte_range.as_ref())?;
+		if track.map.as_ref().is_some_and(|current| current.resource == resource) {
+			track.map = Some(MapState {
+				sequence,
+				tag: map.clone(),
+				resource,
+			});
+			track.map_range = range;
+			return Ok(());
+		}
+
+		let bytes = self.fetch_resource(&resource).await?;
+		let mut importer = self.new_importer(&track.select);
 
 		// The importer buffers internally, so a fully-parsed init segment leaves it
 		// initialized; any trailing partial atom just waits for the next segment. A
 		// segment that never yields a moov surfaces later as a decode error.
 		importer.decode(&bytes)?;
 
-		track.init_ready = true;
-		info!(?kind, "loaded HLS init segment");
+		// A changed map starts a new track generation. The new importer publishes its
+		// configuration first, then dropping the old importer retires its catalog entries.
+		self.replace_importer(kind, importer);
+		track.map = Some(MapState {
+			sequence,
+			tag: map.clone(),
+			resource,
+		});
+		track.map_range = range;
+		track.next_discontinuity = None;
+		info!(?kind, "loaded HLS init segment generation");
 		Ok(())
 	}
 
@@ -506,10 +599,12 @@ impl Import {
 		}
 
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
-		let bytes = self.fetch_bytes(url).await?;
+		let mut range = track.media_range.clone();
+		let resource = range.resolve(url, segment.byte_range.as_ref())?;
+		let bytes = self.fetch_resource(&resource).await?;
 
-		// `consume_segments` always runs `ensure_init_segment` before reaching here, so
-		// the importer is already initialized.
+		// `consume_segments` always resolves the effective map before reaching here, so
+		// the importer is already initialized for this segment generation.
 		let importer = match kind {
 			TrackKind::Video(index) => self.ensure_video_importer_for(index, &track.select),
 			TrackKind::Audio => self.ensure_audio_importer(&track.select),
@@ -527,26 +622,95 @@ impl Import {
 		}
 
 		importer.decode(&bytes)?;
+		track.media_range = range;
 		track.next_sequence = Some(sequence + 1);
 		track.next_discontinuity = Some(discontinuity_sequence);
 
 		Ok(())
 	}
 
-	fn find_map<'a>(&self, playlist: &'a MediaPlaylist) -> Option<&'a Map> {
-		playlist.segments.iter().find_map(|segment| segment.map.as_ref())
+	async fn fetch_bytes(&self, url: Url) -> Result<Bytes> {
+		self.fetch_resource(&Resource { url, range: None }).await
 	}
 
-	async fn fetch_bytes(&self, url: Url) -> Result<Bytes> {
+	async fn fetch_resource(&self, resource: &Resource) -> Result<Bytes> {
+		let url = &resource.url;
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
 			let bytes = tokio::fs::read(&path).await.map_err(Error::from)?;
-			Ok(Bytes::from(bytes))
+			self.slice_full_response(resource, Bytes::from(bytes))
 		} else {
-			let response = self.client.get(url).send().await.map_err(Error::from)?;
+			let response = self.request(resource).send().await.map_err(Error::from)?;
 			let response = response.error_for_status().map_err(Error::from)?;
+			let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
 			let bytes = response.bytes().await.map_err(Error::from)?;
-			Ok(bytes)
+			if resource.range.is_some() && !partial {
+				self.slice_full_response(resource, bytes)
+			} else {
+				self.validate_range_length(resource, bytes)
+			}
+		}
+	}
+
+	fn request(&self, resource: &Resource) -> reqwest::RequestBuilder {
+		let mut request = self.client.get(resource.url.clone());
+		if let Some(range) = resource.range {
+			let end = range.start + range.length - 1;
+			request = request.header(reqwest::header::RANGE, format!("bytes={}-{}", range.start, end));
+		}
+		request
+	}
+
+	fn slice_full_response(&self, resource: &Resource, bytes: Bytes) -> Result<Bytes> {
+		let Some(range) = resource.range else {
+			return Ok(bytes);
+		};
+		let start = usize::try_from(range.start).ok();
+		let end = range
+			.start
+			.checked_add(range.length)
+			.and_then(|end| usize::try_from(end).ok());
+		match start
+			.zip(end)
+			.and_then(|(start, end)| bytes.get(start..end).map(|_| (start, end)))
+		{
+			Some((start, end)) => Ok(bytes.slice(start..end)),
+			None => Err(Error::ShortByteRange {
+				url: resource.url.clone(),
+				expected: range.length,
+				actual: bytes.len().saturating_sub(start.unwrap_or(bytes.len())),
+			}),
+		}
+	}
+
+	fn validate_range_length(&self, resource: &Resource, bytes: Bytes) -> Result<Bytes> {
+		let Some(range) = resource.range else {
+			return Ok(bytes);
+		};
+		if u64::try_from(bytes.len()).ok() != Some(range.length) {
+			return Err(Error::ShortByteRange {
+				url: resource.url.clone(),
+				expected: range.length,
+				actual: bytes.len(),
+			});
+		}
+		Ok(bytes)
+	}
+
+	fn new_importer(&self, select: &select::Broadcast) -> Fmp4 {
+		Fmp4::new(self.broadcast.clone(), self.catalog.clone()).with_select(select.clone())
+	}
+
+	fn replace_importer(&mut self, kind: TrackKind, importer: Fmp4) {
+		match kind {
+			TrackKind::Video(index) => {
+				while self.video_importers.len() <= index {
+					self.video_importers
+						.push(self.new_importer(&select::Broadcast::default()));
+				}
+				self.video_importers[index] = importer;
+			}
+			TrackKind::Audio => self.audio_importer = Some(importer),
 		}
 	}
 
@@ -556,7 +720,7 @@ impl Import {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize, select: &select::Broadcast) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone()).with_select(select.clone());
+			let importer = self.new_importer(select);
 			self.video_importers.push(importer);
 		}
 
@@ -728,6 +892,54 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::path::Path;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+	fn temp_dir() -> PathBuf {
+		let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+		let dir = std::env::temp_dir().join(format!("moq-hls-test-{}-{n}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		dir
+	}
+
+	fn write_import(dir: &Path, resource: &[u8], playlist: &str) -> (Import, CatalogProducer) {
+		std::fs::write(dir.join("media.mp4"), resource).unwrap();
+		let playlist_path = dir.join("media.m3u8");
+		std::fs::write(&playlist_path, playlist).unwrap();
+
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let cfg = Config::new(playlist_path.to_string_lossy().into_owned());
+		let import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+		(import, catalog)
+	}
+
+	fn fmp4_parts() -> (Vec<u8>, Vec<Vec<u8>>) {
+		let data = include_bytes!("../../moq-mux/src/container/fmp4/test_data/bbb.mp4");
+		let mut moofs = Vec::new();
+		let mut position = 0usize;
+		while position + 8 <= data.len() {
+			let size = u32::from_be_bytes(data[position..position + 4].try_into().unwrap()) as usize;
+			if size < 8 || position + size > data.len() {
+				break;
+			}
+			if &data[position + 4..position + 8] == b"moof" {
+				moofs.push(position);
+			}
+			position += size;
+		}
+		assert!(moofs.len() >= 3);
+
+		let init = data[..moofs[0]].to_vec();
+		let fragments = moofs
+			.windows(2)
+			.take(2)
+			.map(|window| data[window[0]..window[1]].to_vec())
+			.collect();
+		(init, fragments)
+	}
 
 	#[test]
 	fn hls_config_new_sets_fields() {
@@ -759,12 +971,7 @@ mod tests {
 
 	/// Resolve `ensure_tracks` against a master playlist written to a temp file.
 	async fn discover(master_body: &str) -> Import {
-		use std::sync::atomic::{AtomicUsize, Ordering};
-		static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-		let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-		let dir = std::env::temp_dir().join(format!("moq-hls-test-{}-{n}", std::process::id()));
-		std::fs::create_dir_all(&dir).unwrap();
+		let dir = temp_dir();
 		let path = dir.join("master.m3u8");
 		std::fs::write(&path, master_body).unwrap();
 
@@ -775,6 +982,130 @@ mod tests {
 		let mut hls = Import::new(broadcast, catalog, cfg).unwrap();
 		hls.ensure_tracks().await.unwrap();
 		hls
+	}
+
+	#[test]
+	fn byte_ranges_advance_implicit_offsets_for_the_same_resource() {
+		let url = Url::parse("https://example.com/media.mp4").unwrap();
+		let mut cursor = RangeCursor::default();
+		let first = cursor
+			.resolve(
+				url.clone(),
+				Some(&ByteRange {
+					length: 20,
+					offset: Some(10),
+				}),
+			)
+			.unwrap();
+		let second = cursor
+			.resolve(
+				url,
+				Some(&ByteRange {
+					length: 5,
+					offset: None,
+				}),
+			)
+			.unwrap();
+
+		assert_eq!(first.range.unwrap().start, 10);
+		assert_eq!(second.range.unwrap().start, 30);
+	}
+
+	#[test]
+	fn implicit_byte_range_rejects_a_different_resource() {
+		let mut cursor = RangeCursor::default();
+		cursor
+			.resolve(
+				Url::parse("https://example.com/a.mp4").unwrap(),
+				Some(&ByteRange {
+					length: 20,
+					offset: Some(10),
+				}),
+			)
+			.unwrap();
+		let err = cursor
+			.resolve(
+				Url::parse("https://example.com/b.mp4").unwrap(),
+				Some(&ByteRange {
+					length: 5,
+					offset: None,
+				}),
+			)
+			.unwrap_err();
+
+		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
+	}
+
+	#[test]
+	fn ranged_resource_builds_http_range_request() {
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let url = Url::parse("https://example.com/media.mp4").unwrap();
+		let import = Import::new(broadcast, catalog, Config::new(url.to_string())).unwrap();
+		let request = import
+			.request(&Resource {
+				url,
+				range: Some(ResolvedRange { start: 2, length: 3 }),
+			})
+			.build()
+			.unwrap();
+
+		assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=2-4");
+	}
+
+	#[tokio::test]
+	async fn imports_single_file_with_implicit_segment_ranges() {
+		let (init, fragments) = fmp4_parts();
+		let mut resource = init.clone();
+		resource.extend_from_slice(&fragments[0]);
+		resource.extend_from_slice(&fragments[1]);
+		let playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n",
+			init.len(),
+			fragments[0].len(),
+			init.len(),
+			fragments[1].len()
+		);
+		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
+
+		import.init().await.unwrap();
+
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 1);
+		assert_eq!(snapshot.audio.renditions.len(), 1);
+		assert_eq!(import.video[0].next_sequence, Some(2));
+	}
+
+	#[tokio::test]
+	async fn map_change_replaces_importer_and_catalog_generation() {
+		let (init, fragments) = fmp4_parts();
+		let second_init = init.len() + fragments[0].len();
+		let second_fragment = second_init + init.len();
+		let mut resource = init.clone();
+		resource.extend_from_slice(&fragments[0]);
+		resource.extend_from_slice(&init);
+		resource.extend_from_slice(&fragments[1]);
+		let playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@{}\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n",
+			init.len(),
+			fragments[0].len(),
+			init.len(),
+			init.len(),
+			second_init,
+			fragments[1].len(),
+			second_fragment
+		);
+		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
+
+		import.init().await.unwrap();
+
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 1);
+		assert_eq!(snapshot.audio.renditions.len(), 1);
+		assert_eq!(
+			import.video[0].map.as_ref().unwrap().resource.range.unwrap().start,
+			second_init as u64
+		);
 	}
 
 	/// A master with a separate audio rendition: variants publish video only, the

@@ -75,6 +75,25 @@ fn test_bbb_catalog() {
 }
 
 #[test]
+fn dropping_import_retires_catalog_renditions() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	{
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
+		let _ = fmp4.decode(data);
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 1);
+		assert_eq!(snapshot.audio.renditions.len(), 1);
+	}
+
+	let snapshot = catalog.snapshot();
+	assert!(snapshot.video.renditions.is_empty());
+	assert!(snapshot.audio.renditions.is_empty());
+}
+
+#[test]
 fn select_video_only() {
 	use crate::select::{Broadcast, Video};
 
