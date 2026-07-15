@@ -43,6 +43,14 @@ pub use log::*;
 pub use reconnect::*;
 pub use server::*;
 
+pub(crate) fn spawn_connection(connection: moq_net::Connection) -> moq_net::Session {
+	let session = connection.session().clone();
+	tokio::spawn(async move {
+		let _ = connection.await;
+	});
+	session
+}
+
 // Re-export these crates.
 pub use moq_net;
 pub use rustls;

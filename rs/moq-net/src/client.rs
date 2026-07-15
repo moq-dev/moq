@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
+	ALPN_LITE_06_WIP, Connection, Consume, Error, NEGOTIATED, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -81,8 +81,8 @@ impl Client {
 		self
 	}
 
-	/// Perform the MoQ handshake as a client negotiating the version.
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
+	/// Perform the MoQ handshake and return its caller-driven connection.
+	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Connection, Error> {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -96,8 +96,8 @@ impl Client {
 					.select(Version::Ietf(ietf::Version::Draft19))
 					.ok_or(Error::Version)?;
 
-				// Draft-17+: SETUP is exchanged in the background by the session.
-				ietf::start(
+				// Draft-17+: SETUP is exchanged by the connection driver.
+				let driver = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -111,7 +111,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(Connection::new(session, v, None, driver));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -119,9 +119,9 @@ impl Client {
 					.select(Version::Ietf(ietf::Version::Draft18))
 					.ok_or(Error::Version)?;
 
-				// Draft-17+: SETUP is exchanged in the background by the session.
+				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				ietf::start(
+				let driver = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -135,7 +135,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(Connection::new(session, v, None, driver));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -143,9 +143,9 @@ impl Client {
 					.select(Version::Ietf(ietf::Version::Draft17))
 					.ok_or(Error::Version)?;
 
-				// Draft-17+: SETUP is exchanged in the background by the session.
+				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				ietf::start(
+				let driver = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -159,7 +159,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(Connection::new(session, v, None, driver));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -199,7 +199,7 @@ impl Client {
 					role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 				};
 
-				let (recv_bw, connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					None,
 					self.publish.clone(),
@@ -213,16 +213,17 @@ impl Client {
 				// Block until the initial announce set has landed (Lite05+ reports it
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
 				// immediately instead of racing announcement gossip.
-				connecting.ready().await;
+				let mut connection = Connection::new(session, version.into(), start.recv_bandwidth, start.driver);
+				connection.wait_ready(start.connecting.ready()).await?;
 
-				return Ok(Session::new(session, version.into(), recv_bw));
+				return Ok(connection);
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 
-				let (recv_bw, connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					None,
 					self.publish.clone(),
@@ -234,9 +235,15 @@ impl Client {
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
-				connecting.ready().await;
+				let mut connection = Connection::new(
+					session,
+					lite::Version::Lite04.into(),
+					start.recv_bandwidth,
+					start.driver,
+				);
+				connection.wait_ready(start.connecting.ready()).await?;
 
-				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
+				return Ok(connection);
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -244,7 +251,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let (recv_bw, connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					None,
 					self.publish.clone(),
@@ -256,9 +263,15 @@ impl Client {
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
-				connecting.ready().await;
+				let mut connection = Connection::new(
+					session,
+					lite::Version::Lite03.into(),
+					start.recv_bandwidth,
+					start.driver,
+				);
+				connection.wait_ready(start.connecting.ready()).await?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
+				return Ok(connection);
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -296,10 +309,10 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let recv_bw = match version {
+		let (recv_bw, driver, connecting) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				let (recv_bw, connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					Some(stream),
 					self.publish.clone(),
@@ -312,11 +325,7 @@ impl Client {
 					None,
 				)?;
 
-				// Block until the initial announce set has landed (for versions that
-				// report one); resolves immediately otherwise.
-				connecting.ready().await;
-
-				recv_bw
+				(start.recv_bandwidth, start.driver, Some(start.connecting))
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID.
@@ -327,7 +336,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				ietf::start(
+				let driver = ietf::start(
 					session.clone(),
 					Some(stream),
 					request_id_max,
@@ -339,11 +348,18 @@ impl Client {
 					None,
 					None,
 				)?;
-				None
+				(None, driver, None)
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw))
+		let mut connection = Connection::new(session, version, recv_bw, driver);
+		if let Some(connecting) = connecting {
+			// Block until the initial announce set has landed (for versions that
+			// report one); resolves immediately otherwise.
+			connection.wait_ready(connecting.ready()).await?;
+		}
+
+		Ok(connection)
 	}
 }
 
@@ -551,7 +567,7 @@ mod tests {
 			.into(),
 		);
 
-		let _session = client.connect(fake.clone()).await.unwrap();
+		let _connection = client.connect(fake.clone()).await.unwrap();
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -566,7 +582,7 @@ mod tests {
 			]
 		);
 
-		// The first close comes from the background lite session task.
+		// The first close comes from the lite connection driver.
 		// Any non-Version error here means SessionInfo decoded successfully
 		// after set_version(). This test cares about the SETUP framing
 		// fallback, not the specific close code. Cancel is what we'd see
@@ -584,5 +600,20 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn no_alpn_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(None).await;
+	}
+
+	#[test]
+	fn driven_connection_can_be_polled_without_a_tokio_runtime() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let mut connection = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		assert_eq!(connection.session().version(), Version::Lite(lite::Version::Lite04));
+
+		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(std::future::Future::poll(std::pin::Pin::new(&mut connection), &mut context).is_pending());
+
+		drop(connection);
+		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 	}
 }

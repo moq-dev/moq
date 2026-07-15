@@ -9,7 +9,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use crate::util::{MaybeBoxedExt, MaybeSendBox};
+use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks};
 
 use crate::{
 	AsPath, Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Timescale, Timestamp, bandwidth,
@@ -42,6 +42,8 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
+	/// Driver-owned scope for broadcast and track handlers.
+	pub tasks: Tasks,
 }
 
 #[derive(Clone)]
@@ -71,6 +73,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	tasks: Tasks,
 }
 
 #[derive(Clone)]
@@ -102,6 +105,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			tasks: config.tasks,
 		}
 	}
 
@@ -110,7 +114,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
 	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
 	/// open and hang `connect()`.
-	pub async fn run(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
+	pub async fn run(self, connecting: Option<ConnectingProducer>, tasks: TaskSet) -> Result<(), Error> {
 		let bw = self.clone();
 		let dg = self.clone();
 		tokio::select! {
@@ -118,21 +122,29 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			res = self.run_uni() => res,
 			Err(err) = bw.run_recv_bandwidth() => Err(err),
 			Err(err) = dg.run_datagrams() => Err(err),
+			_ = tasks.run() => Ok(()),
 		}
 	}
 
 	async fn run_uni(self) -> Result<(), Error> {
+		let mut tasks = FuturesUnordered::new();
 		loop {
-			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
+			let stream = tokio::select! {
+				stream = self.session.accept_uni() => stream.map_err(Error::from_transport)?,
+				Some(()) = tasks.next(), if !tasks.is_empty() => continue,
+			};
 
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			web_async::spawn(async move {
-				if let Err(err) = this.run_uni_stream(stream).await {
-					tracing::debug!(%err, "error running uni stream");
+			tasks.push(
+				async move {
+					if let Err(err) = this.run_uni_stream(stream).await {
+						tracing::debug!(%err, "error running uni stream");
+					}
 				}
-			});
+				.maybe_boxed(),
+			);
 		}
 	}
 
@@ -229,7 +241,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// dashboard sees on the origin.
 
 		// `connecting` is a local (a param), not a `self` field, so the `self.clone()` that
-		// start_announce uses to spawn long-lived broadcast tasks doesn't carry the producer
+		// start_announce uses for long-lived broadcast tasks doesn't carry the producer
 		// (which would keep the channel open for the broadcast's lifetime). Dropping it marks
 		// this prefix connected; on an early error it drops via scope exit, so a failed prefix
 		// can't hang connect().
@@ -521,15 +533,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Publish into the origin. An error means the path is outside our scope, so don't announce
-		// or spawn a server for it. Reflections are already filtered above.
+		// or start a server for it. Reflections are already filtered above.
 		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
 			return Ok(false);
 		};
 
 		producers.insert(path.clone(), publish);
 
-		// Run the broadcast in the background until all consumers are dropped.
-		web_async::spawn(self.clone().run_broadcast(path, dynamic));
+		// Run the broadcast under the connection driver until all consumers are dropped.
+		self.tasks.push(self.clone().run_broadcast(path, dynamic));
 
 		Ok(true)
 	}
@@ -580,7 +592,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		let old = producers.insert(path.clone(), publish);
-		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
+		self.tasks.push(self.clone().run_broadcast(path.clone(), dynamic));
 
 		// Drop the replaced broadcast's guard last, unannouncing it now that the replacement is live.
 		drop(old);
@@ -590,6 +602,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: broadcast::Dynamic) {
 		// Serve track requests until every consumer of the broadcast is gone.
+		let mut tracks = FuturesUnordered::new();
 		loop {
 			let request = tokio::select! {
 				request = broadcast.requested_track() => match request {
@@ -600,6 +613,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					}
 				},
 				_ = self.session.closed() => break,
+				Some(()) = tracks.next(), if !tracks.is_empty() => continue,
 			};
 
 			let name = request.name().to_string();
@@ -619,7 +633,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// One task per track serves its lone subscription and any number of
 			// fetches concurrently, then lingers before tearing the upstream down.
-			web_async::spawn(serve.run(request));
+			tracks.push(serve.run(request).maybe_boxed());
 		}
 	}
 

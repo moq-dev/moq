@@ -60,18 +60,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub async fn run(self) -> Result<(), Error> {
 		// `origin::Consumer` and friends are cheap to clone (shared handles), so each control
-		// stream gets its own task and they all make progress independently.
+		// stream gets its own child future and they all make progress independently.
 		let this = Arc::new(self);
+		let mut tasks = FuturesUnordered::new();
 
 		loop {
-			let stream = Stream::accept(&this.session, this.version).await?;
+			let stream = tokio::select! {
+				stream = Stream::accept(&this.session, this.version) => stream?,
+				Some(()) = tasks.next(), if !tasks.is_empty() => continue,
+			};
 
 			let this = this.clone();
-			web_async::spawn(async move {
-				if let Err(err) = this.handle(stream).await {
-					tracing::warn!(%err, "control stream error");
+			tasks.push(
+				async move {
+					if let Err(err) = this.handle(stream).await {
+						tracing::warn!(%err, "control stream error");
+					}
 				}
-			});
+				.maybe_boxed(),
+			);
 		}
 	}
 
@@ -944,7 +951,7 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 }
 
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
-/// field is either small or already Arc-backed) for each spawned serve_group task
+/// field is either small or already Arc-backed for each in-flight serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
 /// watch::Receiver.
 #[derive(Clone)]
@@ -1014,7 +1021,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 									.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: group.sequence }))
 									.await?;
 							}
-							self.spawn_serve(group, &mut tasks);
+							self.queue_serve(group, &mut tasks);
 						}
 						Recv::Datagram(datagram) => self.serve_datagram(datagram),
 						Recv::Boundary(group) => {
@@ -1066,7 +1073,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	fn spawn_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
+	fn queue_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 

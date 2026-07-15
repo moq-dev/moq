@@ -1,8 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+	future::Future,
+	pin::Pin,
+	sync::Arc,
+	task::{Context, Poll},
+	time::Duration,
+};
 
 use web_transport_trait::Stats;
 
-use crate::{Error, Version, bandwidth, util::MaybeSendBox};
+use crate::{
+	Error, Version, bandwidth,
+	util::{MaybeBoxedExt, MaybeSendBox},
+};
 
 /// A snapshot of connection statistics for a [`Session`].
 ///
@@ -45,15 +54,90 @@ pub struct ConnectionStats {
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
-/// Created via:
-/// - [`crate::Client::connect`] for clients.
-/// - [`crate::Server::accept`] for servers.
+/// Borrowed or cloned from the [`Connection`] returned by [`crate::Client::connect`]
+/// or [`crate::Server::accept`].
 #[derive(Clone)]
 pub struct Session {
 	session: Arc<SessionShared>,
 	version: Version,
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
+}
+
+/// A connected session and the future that drives its protocol state.
+///
+/// Poll this future for the lifetime of the session. Dropping it cancels protocol
+/// work and closes the session.
+pub struct Connection {
+	session: Session,
+	inner: MaybeSendBox<'static, Result<(), Error>>,
+	result: Option<Result<(), Error>>,
+}
+
+impl Connection {
+	pub(super) fn new<S: web_transport_trait::Session>(
+		transport: S,
+		version: Version,
+		recv_bandwidth: Option<bandwidth::Consumer>,
+		protocol: MaybeSendBox<'static, Result<(), Error>>,
+	) -> Self {
+		let (session, maintenance) = Session::new(transport, version, recv_bandwidth);
+		let inner = async move {
+			let mut protocol = protocol;
+			tokio::select! {
+				result = &mut protocol => result,
+				_ = maintenance => protocol.await,
+			}
+		}
+		.maybe_boxed();
+
+		Self {
+			session,
+			inner,
+			result: None,
+		}
+	}
+
+	/// Borrow the connected session handle.
+	pub fn session(&self) -> &Session {
+		&self.session
+	}
+
+	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) -> Result<(), Error> {
+		tokio::pin!(ready);
+		tokio::select! {
+			biased;
+			_ = &mut ready => Ok(()),
+			result = &mut *self => {
+				// Connecting producers live inside the driver. Its completion drops
+				// them and releases the barrier on an early session error. The cached
+				// result remains available when the caller polls the connection.
+				let _ = result;
+				ready.await;
+				Ok(())
+			}
+		}
+	}
+}
+
+impl Future for Connection {
+	type Output = Result<(), Error>;
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		if let Some(result) = &self.result {
+			return Poll::Ready(result.clone());
+		}
+
+		let result = std::task::ready!(self.inner.as_mut().poll(cx));
+		self.result = Some(result.clone());
+		Poll::Ready(result)
+	}
+}
+
+impl Drop for Connection {
+	fn drop(&mut self) {
+		self.session.close(Error::Cancel);
+	}
 }
 
 // Close-once state shared by every clone: the transport closes when [`Session::close`]
@@ -78,27 +162,29 @@ impl Drop for SessionShared {
 }
 
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(
+	fn new<S: web_transport_trait::Session>(
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
-	) -> Self {
+	) -> (Self, MaybeSendBox<'static, ()>) {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
 			let producer = bandwidth::Producer::new();
 			let consumer = producer.consume();
 
 			let session = session.clone();
-			web_async::spawn(async move {
+			let maintenance = async move {
 				run_send_bandwidth(&session, producer).await;
-			});
+			}
+			.maybe_boxed();
 
-			Some(consumer)
+			(Some(consumer), maintenance)
 		} else {
-			None
+			(None, std::future::pending().maybe_boxed())
 		};
+		let (send_bandwidth, maintenance) = send_bandwidth;
 
-		Self {
+		let session = Self {
 			session: Arc::new(SessionShared {
 				inner: Box::new(session),
 				closed: std::sync::atomic::AtomicBool::new(false),
@@ -106,7 +192,9 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
-		}
+		};
+
+		(session, maintenance)
 	}
 
 	/// Returns the negotiated protocol version.
