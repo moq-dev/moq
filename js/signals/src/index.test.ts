@@ -126,6 +126,44 @@ describe("Effect", () => {
 
 		expect(log).toEqual(["run 0", "cleanup 0", "run 1", "cleanup 1"]);
 	});
+
+	test("run() returns a disposer that closes the child and releases it from the parent", async () => {
+		const parent = new Effect();
+		const trigger = new Signal(0);
+		const runs: number[] = [];
+		const log: string[] = [];
+
+		const dispose = parent.run((e) => {
+			runs.push(e.get(trigger));
+			e.cleanup(() => log.push("cleanup"));
+		});
+		await settle();
+		expect(runs).toEqual([0]);
+
+		// Disposing runs the child's cleanup and stops it from rerunning.
+		dispose();
+		expect(log).toEqual(["cleanup"]);
+		trigger.set(1);
+		await settle();
+		expect(runs).toEqual([0]);
+
+		// Idempotent, and the child was released so closing the parent doesn't re-run its cleanup.
+		dispose();
+		parent.close();
+		expect(log).toEqual(["cleanup"]);
+	});
+
+	test("run() children left undisposed are still closed with the parent", async () => {
+		const parent = new Effect();
+		const log: string[] = [];
+
+		parent.run((e) => e.cleanup(() => log.push("a")));
+		parent.run((e) => e.cleanup(() => log.push("b")));
+		await settle();
+
+		parent.close();
+		expect(log.sort()).toEqual(["a", "b"]);
+	});
 });
 
 describe("Computed", () => {
