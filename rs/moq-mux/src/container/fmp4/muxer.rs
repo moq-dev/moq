@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
+use hang::catalog::{AudioConfig, VideoConfig};
 use mp4_atom::Encode;
 
 use crate::catalog::hang::Container as HangContainer;
@@ -144,11 +144,11 @@ impl Muxer {
 			Kind::Audio(config) => &config.container,
 		};
 
-		match container {
-			CatalogContainer::Cmaf { init, .. } => {
+		match container.init() {
+			Some(init) => {
 				extract_init(init, TRACK_ID, &mut ftyp, &mut traks, &mut trexs)?;
 			}
-			CatalogContainer::Legacy | CatalogContainer::Loc => {
+			None => {
 				let trak = match &self.kind {
 					Kind::Video(config) => {
 						synthesize_video_trak(TRACK_ID, self.timescale, config, self.description.as_deref())?

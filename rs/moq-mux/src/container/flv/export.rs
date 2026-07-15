@@ -640,10 +640,15 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -
 }
 
 fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
-	match container {
-		Container::Legacy | Container::Loc => Ok(()),
-		Container::Cmaf { .. } => anyhow::bail!("FLV export does not support CMAF {kind} track '{name}'"),
+	// FLV carries raw codec payloads, so the frames have to be raw codec bitstreams.
+	if !container.is_raw() {
+		anyhow::bail!(
+			"FLV export requires a raw-codec container: {kind} track '{name}' uses {}",
+			container.kind()
+		);
 	}
+
+	Ok(())
 }
 
 fn is_video_flavor(flavor: Flavor) -> bool {

@@ -65,14 +65,13 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	renditions.insert(video_track.to_string(), video_config);
 
 	// Create the catalog describing our video track.
-	let catalog = hang::catalog::Catalog {
-		video: hang::catalog::Video {
-			renditions,
-			display: None,
-			rotation: None,
-			flip: None,
-		},
-		..Default::default()
+	// `Catalog` is #[non_exhaustive], so start from the default and assign the sections you need.
+	let mut catalog = hang::catalog::Catalog::default();
+	catalog.video = hang::catalog::Video {
+		renditions,
+		display: None,
+		rotation: None,
+		flip: None,
 	};
 
 	// Publish the catalog as a "catalog.json" track in the broadcast.

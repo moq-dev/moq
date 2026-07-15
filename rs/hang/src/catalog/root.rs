@@ -9,10 +9,15 @@ use serde::{Deserialize, Serialize};
 /// their own root sections (e.g. `scte35`) by flattening this struct into their own with
 /// `#[serde(flatten)]`. The catalog does not deny unknown fields, so a base consumer ignores the
 /// extra sections and an extended catalog stays wire-compatible. See the `extension_roundtrip` test.
+///
+/// Marked `#[non_exhaustive]` so additional sections can be added without bumping the major
+/// version. External callers start from [`Catalog::default`] and assign the sections they need;
+/// struct-literal construction (with or without `..base`) is not available outside this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Catalog {
 	/// Video track information with multiple renditions.
 	///

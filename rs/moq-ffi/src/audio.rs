@@ -246,7 +246,7 @@ impl MoqBroadcastConsumer {
 		);
 		cfg.bitrate = catalog_audio.bitrate;
 		cfg.description = catalog_audio.description.map(Into::into);
-		cfg.container = catalog_audio.container.into();
+		cfg.container = catalog_audio.container.try_into()?;
 
 		let consumer = moq_audio::AudioConsumer::new(
 			self.inner(),

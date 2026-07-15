@@ -9,8 +9,13 @@ pub struct MoqDimensions {
 #[derive(Clone, uniffi::Enum)]
 pub enum Container {
 	Legacy,
-	Cmaf { init: Vec<u8> },
+	Cmaf {
+		init: Vec<u8>,
+	},
 	Loc,
+	/// A container this build has no binding for, reported so the rest of the catalog still
+	/// converts. Subscribing to a track that uses it fails.
+	Unknown,
 }
 
 impl From<hang::catalog::Container> for Container {
@@ -19,17 +24,25 @@ impl From<hang::catalog::Container> for Container {
 			hang::catalog::Container::Legacy => Self::Legacy,
 			hang::catalog::Container::Cmaf { init, .. } => Self::Cmaf { init: init.to_vec() },
 			hang::catalog::Container::Loc => Self::Loc,
+			// `hang::catalog::Container` is #[non_exhaustive], so it can gain a variant with no
+			// binding here yet. Report it rather than guessing, and keep the catalog convertible.
+			_ => Self::Unknown,
 		}
 	}
 }
 
-impl From<Container> for hang::catalog::Container {
-	fn from(container: Container) -> Self {
-		match container {
+impl TryFrom<Container> for hang::catalog::Container {
+	type Error = crate::error::MoqError;
+
+	fn try_from(container: Container) -> Result<Self, Self::Error> {
+		Ok(match container {
 			Container::Legacy => Self::Legacy,
 			Container::Cmaf { init } => Self::Cmaf { init: init.into() },
 			Container::Loc => Self::Loc,
-		}
+			Container::Unknown => {
+				return Err(crate::error::MoqError::Codec("unsupported container".into()));
+			}
+		})
 	}
 }
 

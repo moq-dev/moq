@@ -421,7 +421,13 @@ async fn export_rejects_cmaf_track() {
 		.expect("exporter timed out");
 
 	let err = result.expect_err("expected an error");
-	assert!(err.to_string().contains("CMAF"), "expected CMAF rejection, got: {err}");
+	assert!(
+		matches!(
+			err,
+			crate::Error::Mkv(crate::container::mkv::Error::UnsupportedContainerTrack { .. })
+		),
+		"expected a non-raw container rejection, got: {err}"
+	);
 }
 
 #[tokio::test(start_paused = true)]

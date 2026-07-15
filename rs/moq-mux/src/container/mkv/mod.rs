@@ -70,8 +70,12 @@ pub enum Error {
 	#[error("MKV track layout changed after header was emitted: track '{0}' removed")]
 	HeaderRemovedTrack(String),
 
-	#[error("MKV export does not support CMAF {kind} track '{name}'")]
-	UnsupportedCmafTrack { kind: String, name: String },
+	#[error("MKV export requires a raw-codec container: {kind} track '{name}' uses {container}")]
+	UnsupportedContainerTrack {
+		kind: String,
+		name: String,
+		container: String,
+	},
 
 	#[error("MKV export does not support video codec {0}")]
 	UnsupportedVideoExport(String),

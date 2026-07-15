@@ -122,6 +122,11 @@ pub enum Error {
 	/// reserved media section (`video`/`audio`).
 	#[error("reserved catalog section: {0}")]
 	ReservedSection(String),
+
+	/// The catalog's container has no wire format here. [`hang::catalog::Container`] is
+	/// `#[non_exhaustive]`, so it can gain a variant that this crate doesn't handle yet.
+	#[error("unsupported container")]
+	UnsupportedContainer,
 }
 
 impl From<anyhow::Error> for Error {

@@ -513,16 +513,18 @@ impl<S: Stream> Export<S> {
 }
 
 fn ensure_legacy(container: &Container, kind: &str, name: &str) -> Result<()> {
-	match container {
-		// MKV emits raw codec payloads, so it accepts both wire formats whose
-		// frames are raw codec bitstreams (Legacy varint, LOC properties).
-		Container::Legacy | Container::Loc => Ok(()),
-		Container::Cmaf { .. } => Err(Error::UnsupportedCmafTrack {
-			kind: kind.to_string(),
-			name: name.to_string(),
-		}
-		.into()),
+	// MKV emits raw codec payloads, so it only accepts a container whose frames are raw
+	// codec bitstreams (Legacy varint, LOC properties).
+	if container.is_raw() {
+		return Ok(());
 	}
+
+	Err(Error::UnsupportedContainerTrack {
+		kind: kind.to_string(),
+		name: name.to_string(),
+		container: container.kind().to_string(),
+	}
+	.into())
 }
 
 fn build_video_track_entry(

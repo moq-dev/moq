@@ -27,6 +27,9 @@ impl TryFrom<&hang::catalog::Container> for Container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
 			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(fmp4::Wire::from_init(init)?)),
 			hang::catalog::Container::Loc => Ok(Self::Loc),
+			// `hang::catalog::Container` is #[non_exhaustive], so hang can add a container without
+			// breaking this build. Reject it until there's a wire format here to match.
+			_ => Err(crate::Error::UnsupportedContainer),
 		}
 	}
 }

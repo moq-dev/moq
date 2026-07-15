@@ -1069,11 +1069,15 @@ fn is_complete_section(section: &[u8]) -> bool {
 }
 
 fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
-	match container {
-		// TS carries raw codec payloads, like the Legacy varint and LOC formats.
-		Container::Legacy | Container::Loc => Ok(()),
-		Container::Cmaf { .. } => anyhow::bail!("TS export does not support CMAF {kind} track '{name}'"),
+	// TS carries raw codec payloads, like the Legacy varint and LOC formats.
+	if !container.is_raw() {
+		anyhow::bail!(
+			"TS export requires a raw-codec container: {kind} track '{name}' uses {}",
+			container.kind()
+		);
 	}
+
+	Ok(())
 }
 
 /// Author a monotonic decode timestamp (DTS) for a reordered (B-frame) video frame.

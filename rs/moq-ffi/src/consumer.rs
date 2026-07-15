@@ -204,7 +204,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
-		let container: hang::catalog::Container = container.into();
+		let container: hang::catalog::Container = container.try_into()?;
 		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;

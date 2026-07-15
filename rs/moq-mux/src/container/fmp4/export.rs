@@ -3,7 +3,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{Catalog, Container, VideoConfig};
+use hang::catalog::{Catalog, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::Result;
@@ -393,11 +393,11 @@ impl<S: Stream> Export<S> {
 				.tracks
 				.get(name)
 				.ok_or_else(|| Error::MissingVideoTrack(name.clone()))?;
-			match &config.container {
-				Container::Cmaf { init, .. } => {
+			match config.container.init() {
+				Some(init) => {
 					extract_init(init, track.track_id, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
-				Container::Legacy | Container::Loc => {
+				None => {
 					// H.264/H.265 need a synthesized config record here; VP8 has none.
 					let description = track.source.description();
 					let trak = crate::container::fmp4::synthesize_video_trak(
@@ -421,11 +421,11 @@ impl<S: Stream> Export<S> {
 				.tracks
 				.get(name)
 				.ok_or_else(|| Error::MissingAudioTrack(name.clone()))?;
-			match &config.container {
-				Container::Cmaf { init, .. } => {
+			match config.container.init() {
+				Some(init) => {
 					extract_init(init, track.track_id, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
-				Container::Legacy | Container::Loc => {
+				None => {
 					let trak = crate::container::fmp4::synthesize_audio_trak(track.track_id, track.timescale, config)?;
 					trexs.push(mp4_atom::Trex {
 						track_id: trak.tkhd.track_id,
@@ -659,18 +659,18 @@ fn next_timestamp(frames: &[Frame], successor: Option<&Frame>, index: usize) -> 
 }
 
 pub(crate) fn catalog_timescale_video(config: &VideoConfig) -> u64 {
-	match &config.container {
-		Container::Cmaf { init, .. } => {
+	match config.container.init() {
+		Some(init) => {
 			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::default_video_timescale(config))
 		}
-		Container::Loc | Container::Legacy => crate::container::fmp4::default_video_timescale(config),
+		None => crate::container::fmp4::default_video_timescale(config),
 	}
 }
 
 pub(crate) fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> u64 {
-	match &config.container {
-		Container::Cmaf { init, .. } => parse_timescale_from_init(init).unwrap_or(config.sample_rate as u64),
-		Container::Loc | Container::Legacy => config.sample_rate as u64,
+	match config.container.init() {
+		Some(init) => parse_timescale_from_init(init).unwrap_or(config.sample_rate as u64),
+		None => config.sample_rate as u64,
 	}
 }
 
