@@ -578,17 +578,32 @@ export class Effect {
 		this.cleanup(() => clearInterval(interval));
 	}
 
-	/** Creates a nested effect that reruns independently and is closed with its parent. */
-	run(fn: (effect: Effect) => void) {
+	/**
+	 * Creates a nested effect that reruns independently and is closed with its parent.
+	 *
+	 * Returns a disposer that closes the child early and releases it from the parent, so a long-lived
+	 * effect spawning a child per event (e.g. one per accepted subscription) doesn't accumulate dead
+	 * scopes until it finally reruns or closes.
+	 */
+	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {
 			if (DEV) {
-				console.warn("Effect.nested called when closed, ignoring");
+				console.warn("Effect.run called when closed, ignoring");
 			}
-			return;
+			return () => {};
 		}
 
 		const effect = new Effect(fn);
-		this.#dispose.push(() => effect.close());
+		const dispose = () => effect.close();
+		this.#dispose.push(dispose);
+
+		return () => {
+			effect.close();
+			// Drop our disposer from the parent so repeated run()/dispose() cycles don't pile up.
+			const disposers = this.#dispose;
+			const index = disposers?.indexOf(dispose) ?? -1;
+			if (index !== -1) disposers?.splice(index, 1);
+		};
 	}
 
 	/** Creates a derived signal scoped to this effect, closed when the effect reruns or closes. */

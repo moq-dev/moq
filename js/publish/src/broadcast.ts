@@ -201,11 +201,14 @@ export class Broadcast {
 			if (request.name === Broadcast.CATALOG_TRACK || request.name === Broadcast.CATALOG_TRACK_COMPRESSED) {
 				const compression = request.name === Broadcast.CATALOG_TRACK_COMPRESSED;
 				const track = request.accept();
-				effect.cleanup(() => track.close());
-				effect.run((effect) => {
-					if (effect.get(track.closedSignal)) return;
+
+				// Serve from a per-subscription child scope. Releasing it when this subscriber leaves keeps
+				// serving state from piling up on the connection-lifetime effect as viewers come and go.
+				const dispose = effect.run((effect) => {
+					effect.cleanup(() => track.close());
 					this.catalog.serve(track, effect, { compression });
 				});
+				void track.closed.then(dispose);
 				continue;
 			}
 
@@ -222,9 +225,9 @@ export class Broadcast {
 			signal.peek()?.close();
 			signal.set(track);
 
-			// Clear the signal when this track closes on its own, unless it's already been replaced.
-			effect.run((effect) => {
-				if (!effect.get(track.closedSignal)) return;
+			// Clear the signal when this track closes on its own, unless it's already been replaced. A
+			// plain promise callback (no child effect) so nothing lingers on the connection effect.
+			void track.closed.then(() => {
 				if (signal.peek() === track) signal.set(undefined);
 			});
 		}
