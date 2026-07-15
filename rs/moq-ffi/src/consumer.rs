@@ -5,6 +5,7 @@ use bytes::Buf;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
+use crate::origin::MoqRoute;
 use crate::producer::MoqTrackInfo;
 
 fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
@@ -91,6 +92,33 @@ impl MoqBroadcastConsumer {
 	}
 }
 
+/// A watch over a broadcast's route. Created by `MoqBroadcastConsumer::route_updates`.
+#[derive(uniffi::Object)]
+pub struct MoqRouteWatch {
+	task: Task<RouteWatch>,
+}
+
+struct RouteWatch {
+	inner: moq_net::broadcast::Consumer,
+}
+
+#[uniffi::export]
+impl MoqRouteWatch {
+	/// Wait for the next route: the current one on the first call, then each change.
+	///
+	/// Errors with `Closed` once the broadcast is gone.
+	pub async fn next(&self) -> Result<MoqRoute, MoqError> {
+		self.task
+			.run(|mut state| async move { Ok(state.inner.route_updated().await?.into()) })
+			.await
+	}
+
+	/// Cancel all current and future `next()` calls.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqCatalogConsumer {
 	task: Task<Catalog>,
@@ -146,6 +174,23 @@ impl Media {
 
 #[uniffi::export]
 impl MoqBroadcastConsumer {
+	/// The route the broadcast currently takes to reach this origin.
+	pub fn route(&self) -> MoqRoute {
+		self.inner.route().into()
+	}
+
+	/// Watch the broadcast's route for changes.
+	///
+	/// The returned watch yields the current route first, then every update
+	/// (e.g. an upstream failover), so a loop observes the full history from now.
+	pub fn route_updates(&self) -> Arc<MoqRouteWatch> {
+		Arc::new(MoqRouteWatch {
+			task: Task::new(RouteWatch {
+				inner: self.inner.clone(),
+			}),
+		})
+	}
+
 	/// Subscribe to the catalog for this broadcast.
 	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let track = self

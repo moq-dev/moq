@@ -71,6 +71,10 @@ pub enum MoqError {
 	#[error("unsupported")]
 	Unsupported,
 
+	/// A route carried an invalid hop id or too many hops.
+	#[error("invalid route: {0}")]
+	InvalidRoute(String),
+
 	#[error("log: {0}")]
 	Log(String),
 }

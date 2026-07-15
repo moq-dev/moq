@@ -165,11 +165,11 @@ async def test_serve_helper_accepts_clients():
             broadcast.finish()
 
 
-async def test_announcement_hops_over_wire():
-    """An announcement received over the wire exposes its relay hop chain as a list of ints."""
+async def test_broadcast_route_over_wire():
+    """A broadcast received over the wire exposes its route: hop chain and cost."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.publish("with-hops", broadcast)
+        server.publish("with-route", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -179,12 +179,15 @@ async def test_announcement_hops_over_wire():
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in client.announced():
-                    assert announcement.path == "with-hops"
-                    hops = announcement.hops
-                    assert isinstance(hops, list)
-                    assert all(isinstance(h, int) for h in hops)
+                    assert announcement.path == "with-route"
+                    # route_updated yields the current route first.
+                    route = await announcement.broadcast.route_updated()
+                    assert route == announcement.broadcast.route
+                    assert all(isinstance(h, int) for h in route.hops)
                     # A broadcast crossing at least one session carries a non-empty hop chain.
-                    assert len(hops) >= 1
+                    assert len(route.hops) >= 1
+                    # Cost doesn't ride the wire yet, so a received route has the default.
+                    assert route.cost == 0
                     break
         finally:
             serve_task.cancel()

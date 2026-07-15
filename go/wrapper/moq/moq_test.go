@@ -254,8 +254,8 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann.Path() != "live" {
 		t.Fatalf("path = %q, want %q", ann.Path(), "live")
 	}
-	if hops := ann.Hops(); len(hops) != 0 {
-		t.Fatalf("hops = %v, want empty for local origin", hops)
+	if route := ann.Broadcast().Route(); len(route.Hops) != 0 {
+		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
 	}
 
 	catalog, err := ann.Broadcast().Catalog(ctx)

@@ -140,11 +140,6 @@ func (a *Announcement) Path() string {
 	return a.inner.Path()
 }
 
-// Hops returns the origin ids of relay hops this broadcast traversed, oldest first.
-func (a *Announcement) Hops() []uint64 {
-	return a.inner.Hops()
-}
-
 // Broadcast returns a consumer for the announced broadcast's tracks.
 func (a *Announcement) Broadcast() *BroadcastConsumer {
 	return &BroadcastConsumer{inner: a.inner.Broadcast()}

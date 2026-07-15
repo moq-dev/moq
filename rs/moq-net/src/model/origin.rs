@@ -782,9 +782,10 @@ pub struct OriginAnnounce {
 /// What happened to a broadcast at a path.
 ///
 /// There is deliberately no "restart" event: a broadcast reached over the network is
-/// fed by one or more routes that attach and detach behind the scenes (see
-/// [`Producer::attach_route`]), and a route change never invalidates the consumer's
-/// handles. An `Ended` means the broadcast is actually gone.
+/// fed by one or more routes that attach and detach behind the scenes, and a route
+/// change never invalidates the consumer's handles (observe it via
+/// [`broadcast::Consumer::route_updated`]). An `Ended` means the broadcast is
+/// actually gone.
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum Announced {
@@ -966,7 +967,7 @@ impl Producer {
 	/// be called with a runtime available (it spawns the broadcast's lifecycle
 	/// task). Callers must not attach a route whose hop chain contains this
 	/// origin's id (a routing loop), checked by a `debug_assert`.
-	pub fn attach_route(&self, path: impl AsPath, route: broadcast::Route) -> Result<Route, Error> {
+	pub(crate) fn attach_route(&self, path: impl AsPath, route: broadcast::Route) -> Result<Route, Error> {
 		let path = path.as_path();
 
 		debug_assert!(
@@ -1467,9 +1468,6 @@ impl Route {
 	pub fn unannounce(mut self) {
 		self.graceful = true;
 	}
-
-	/// Detach the route. Equivalent to dropping it, but spells out the intent.
-	pub fn detach(self) {}
 }
 
 impl Drop for Route {

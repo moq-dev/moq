@@ -20,6 +20,7 @@ type (
 	Frame              = ffi.MoqFrame
 	FetchGroupOptions  = ffi.MoqFetchGroupOptions
 	OriginOptions      = ffi.MoqOriginOptions
+	Route              = ffi.MoqRoute
 	Subscription       = ffi.MoqSubscription
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo

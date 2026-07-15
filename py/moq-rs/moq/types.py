@@ -43,6 +43,9 @@ from moq_ffi import (
     MoqFrame as Frame,
 )
 from moq_ffi import (
+    MoqRoute as Route,
+)
+from moq_ffi import (
     MoqSubscription as Subscription,
 )
 from moq_ffi import (
@@ -70,6 +73,7 @@ __all__ = [
     "Dimensions",
     "Frame",
     "FetchGroupOptions",
+    "Route",
     "Subscription",
     "TrackInfo",
     "Video",

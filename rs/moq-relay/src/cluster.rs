@@ -326,8 +326,8 @@ pub struct ClusterConfig {
 /// A relay cluster built around a single [`origin::Producer`].
 ///
 /// Local sessions and remote cluster connections all publish into the same
-/// origin. Loop prevention and shortest-path preference come from the
-/// hop list carried on each broadcast (see [`moq_net::broadcast::Info::hops`]).
+/// origin. Loop prevention and route preference come from the hop list carried
+/// on each broadcast's route (see [`moq_net::broadcast::Route`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
 /// a [`Stats`] aggregator with the `with_*` builder methods. A cluster without
