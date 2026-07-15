@@ -207,9 +207,8 @@ el.reset();
 This removes the need to pace writes on the producer: emit the whole response as
 fast as possible with correct (future) timestamps, and `reset()` on interruption.
 
-> Buffered playback uses the WebCodecs path (a `<canvas>` child). It does not
-> apply to the MSE `<video>` path. Set the range before the broadcast starts
-> decoding; changing it mid-stream takes effect on the next decoder.
+> Set the range before the broadcast starts decoding; changing it mid-stream
+> takes effect on the next decoder.
 
 ### Custom tracks and catalog sections
 

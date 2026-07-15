@@ -129,7 +129,6 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` el
 ## Features
 
 - **WebCodecs decoding** — Hardware-accelerated video and audio decoding
-- **MSE fallback** — Media Source Extensions for broader codec support
 - **Reactive state** — All properties are signals from `@moq/signals`
 - **Chat** — Subscribe to text chat channels
 - **Location** — Peer location and window tracking

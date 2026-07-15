@@ -30,11 +30,6 @@ The demo connects to a relay and renders video using WebCodecs.
 - WebCodecs decoding
 - Latency measurement and adjustment
 
-## Watch Demo (MSE)
-
-The same thing as above but using MSE (Media Source Extensions) instead of WebCodecs.
-The latency will be a bit higher but it'll work on more devices.
-
 ## Publish Demo
 
 Stream your camera, microphone, or screen to the relay.
