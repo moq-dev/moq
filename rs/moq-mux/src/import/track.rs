@@ -281,6 +281,22 @@ impl<E: CatalogExt> Track<E> {
 		}
 	}
 
+	/// Cut the current group at `end` without finishing the track.
+	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
+		match self.kind {
+			TrackKind::Avc3 { ref mut import, .. } => import.cut(end),
+			TrackKind::Avc1 { ref mut import, .. } => import.cut(end),
+			TrackKind::Hev1 { ref mut import, .. } => import.cut(end),
+			TrackKind::Av01 { ref mut import, .. } => import.cut(end),
+			TrackKind::Vp8(ref mut import) => import.cut(end),
+			TrackKind::Vp9(ref mut import) => import.cut(end),
+			TrackKind::Aac(ref mut import) => import.cut(end),
+			TrackKind::Opus(ref mut import) => import.cut(end),
+			TrackKind::Mp3(ref mut import) => import.cut(end),
+			TrackKind::Flac(ref mut import) => import.cut(end),
+		}
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self.kind {
@@ -531,6 +547,15 @@ impl<E: CatalogExt> TrackStream<E> {
 			TrackStreamKind::Avc3 { ref mut import, .. } => import.abort(err),
 			TrackStreamKind::Hev1 { ref mut import, .. } => import.abort(err),
 			TrackStreamKind::Av01 { ref mut import, .. } => import.abort(err),
+		}
+	}
+
+	/// Cut the current group at `end` without finishing the track.
+	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
+		match self.kind {
+			TrackStreamKind::Avc3 { ref mut import, .. } => import.cut(end),
+			TrackStreamKind::Hev1 { ref mut import, .. } => import.cut(end),
+			TrackStreamKind::Av01 { ref mut import, .. } => import.cut(end),
 		}
 	}
 

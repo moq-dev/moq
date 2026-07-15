@@ -120,7 +120,7 @@ async fn export_aac_roundtrip() {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish_group().unwrap();
+		producer.cut(None).unwrap();
 	}
 	producer.finish().unwrap();
 
@@ -247,7 +247,7 @@ async fn export_lead_audio() -> BytesMut {
 	// Lead audio (0..80 ms) precedes the first video keyframe at 100 ms; both continue after.
 	for ms in [0, 20, 40, 60, 80] {
 		audio.write(audio_frame(ms)).unwrap();
-		audio.finish_group().unwrap();
+		audio.cut(None).unwrap();
 	}
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 200));
@@ -259,10 +259,10 @@ async fn export_lead_audio() -> BytesMut {
 			keyframe: true,
 		})
 		.unwrap();
-	video.finish_group().unwrap();
+	video.cut(None).unwrap();
 	for ms in [100, 120, 140] {
 		audio.write(audio_frame(ms)).unwrap();
-		audio.finish_group().unwrap();
+		audio.cut(None).unwrap();
 	}
 	video.finish().unwrap();
 	audio.finish().unwrap();
@@ -605,7 +605,7 @@ async fn export_scte35_roundtrip() {
 			keyframe: true,
 		})
 		.unwrap();
-	scte_producer.finish_group().unwrap();
+	scte_producer.cut(None).unwrap();
 	scte_producer.finish().unwrap();
 
 	// Now add the real video/audio by importing bbb.ts (this moves `broadcast`).
@@ -720,7 +720,7 @@ async fn export_pes_verbatim_roundtrip() {
 			keyframe: true,
 		})
 		.unwrap();
-	data_producer.finish_group().unwrap();
+	data_producer.cut(None).unwrap();
 	data_producer.finish().unwrap();
 
 	// Real video/audio supplies the media clock (moves `broadcast`).
@@ -809,7 +809,7 @@ async fn scte35_without_video_export_is_rejected() {
 			keyframe: true,
 		})
 		.unwrap();
-	producer.finish_group().unwrap();
+	producer.cut(None).unwrap();
 	producer.finish().unwrap();
 
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
@@ -1357,7 +1357,7 @@ async fn export_opus_roundtrip() {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish_group().unwrap();
+		producer.cut(None).unwrap();
 	}
 	producer.finish().unwrap();
 
@@ -1436,7 +1436,7 @@ async fn opus_export_import_roundtrip() {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish_group().unwrap();
+		producer.cut(None).unwrap();
 	}
 	producer.finish().unwrap();
 

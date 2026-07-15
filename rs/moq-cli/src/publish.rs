@@ -449,7 +449,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		section_producer.finish_group().unwrap();
+		section_producer.cut(None).unwrap();
 		section_producer.finish().unwrap();
 
 		// PES-framed verbatim stream (undecoded private data, stream_type 0x06), with
@@ -474,7 +474,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		pes_producer.finish_group().unwrap();
+		pes_producer.cut(None).unwrap();
 		pes_producer.finish().unwrap();
 
 		// Add the real video/audio (moves `broadcast` into the importer).

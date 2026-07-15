@@ -72,7 +72,7 @@ pub struct Frame {
 /// A non-keyframe frame arrived with no open group.
 ///
 /// A track must open with a keyframe (and so must the frame after
-/// [`finish_group`](Producer::finish_group) / [`seek`](Producer::seek)).
+/// [`cut`](Producer::cut) / [`seek`](Producer::seek)).
 /// [`Producer::write`] returns this so a caller joining mid-stream can skip
 /// frames until the first keyframe instead of treating it as fatal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

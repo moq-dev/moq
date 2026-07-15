@@ -35,21 +35,26 @@ impl Container for Wire {
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
-		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
-			return Poll::Ready(Ok(None));
-		};
+		loop {
+			let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
+				return Poll::Ready(Ok(None));
+			};
 
-		let mut hang_frame = hang::container::Frame::decode(data.payload)?;
-		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
+			let mut hang_frame = hang::container::Frame::decode(data.payload)?;
+			if !hang_frame.payload.has_remaining() {
+				continue;
+			}
 
-		Poll::Ready(Ok(Some(vec![Frame {
-			timestamp: hang_frame.timestamp,
-			payload,
-			// Legacy doesn't carry the keyframe bit on the wire; the
-			// wrapping Consumer fills it in from group position.
-			keyframe: false,
-			// Legacy carries no per-frame duration.
-			duration: None,
-		}])))
+			let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
+			return Poll::Ready(Ok(Some(vec![Frame {
+				timestamp: hang_frame.timestamp,
+				payload,
+				// Legacy doesn't carry the keyframe bit on the wire; the
+				// wrapping Consumer fills it in from group position.
+				keyframe: false,
+				// Legacy carries no per-frame duration.
+				duration: None,
+			}])));
+		}
 	}
 }
