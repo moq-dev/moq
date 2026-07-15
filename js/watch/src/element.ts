@@ -210,7 +210,15 @@ export default class MoqWatch extends HTMLElement {
 
 		// Watch to see if the canvas element is added or removed.
 		const setCanvas = () => {
-			this.#canvas.set(this.querySelector("canvas") ?? undefined);
+			const canvas = this.querySelector("canvas") ?? undefined;
+
+			// A <video> child used to render via MSE. Nothing renders it now, and audio still plays,
+			// so the failure looks like a bug in the page instead of a removed feature.
+			if (!canvas && this.querySelector("video")) {
+				console.warn("moq-watch: rendering requires a <canvas> child; a <video> child does nothing.");
+			}
+
+			this.#canvas.set(canvas);
 		};
 
 		const observer = new MutationObserver(setCanvas);
