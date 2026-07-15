@@ -117,7 +117,7 @@ pub trait Container {
 	/// [`Producer::end_group`] writes a zero-length tail frame to mark it. When true
 	/// (CMAF), the boundary is backfilled onto the last sample instead, and no tail
 	/// is written. Defaults to false; the duration-carrying containers override it.
-	fn carries_duration(&self) -> bool {
+	fn has_duration(&self) -> bool {
 		false
 	}
 }

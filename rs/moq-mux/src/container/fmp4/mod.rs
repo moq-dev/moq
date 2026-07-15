@@ -193,7 +193,7 @@ impl Container for Wire {
 
 	// CMAF carries a per-sample duration in the trun, so a group's end is expressed
 	// as the last sample's duration -- no tail frame needed.
-	fn carries_duration(&self) -> bool {
+	fn has_duration(&self) -> bool {
 		true
 	}
 

@@ -50,10 +50,10 @@ impl ContainerTrait for Container {
 		}
 	}
 
-	fn carries_duration(&self) -> bool {
+	fn has_duration(&self) -> bool {
 		match self {
 			Self::Legacy | Self::Loc => false,
-			Self::Cmaf(cmaf) => cmaf.carries_duration(),
+			Self::Cmaf(cmaf) => cmaf.has_duration(),
 		}
 	}
 }

@@ -67,6 +67,12 @@ pub struct Fragment {
 
 	/// Presentation duration of the fragment in seconds (0 for the init segment).
 	pub duration: f64,
+
+	/// This fragment opens a new continuity region: the media timeline jumped
+	/// forward before it (a publisher pause/idle, surfaced by the previous group's
+	/// tail bounding its last frame). A segmenting consumer emits an
+	/// `#EXT-X-DISCONTINUITY` before it. Always false for the init segment.
+	pub discontinuity: bool,
 }
 
 struct Fmp4Track {
@@ -92,6 +98,10 @@ struct Fmp4Track {
 
 	/// Whether the source has signalled end-of-track.
 	finished: bool,
+
+	/// Set when the fragment just emitted ended before its successor (a forward gap):
+	/// the *next* fragment opens a new continuity region. Consumed by that fragment.
+	pending_discontinuity: bool,
 
 	track_id: u32,
 	timescale: u64,
@@ -220,6 +230,7 @@ impl<S: Stream> Export<S> {
 					init: true,
 					independent: false,
 					duration: 0.0,
+					discontinuity: false,
 				})));
 			}
 			// Still waiting for codec configs. If every track is finished and
@@ -331,6 +342,7 @@ impl<S: Stream> Export<S> {
 					is_video: true,
 					default_frame: Duration::from_secs_f64(1.0 / framerate),
 					finished: false,
+					pending_discontinuity: false,
 					track_id: next_track_id,
 					timescale,
 					sequence_number: 1,
@@ -356,6 +368,7 @@ impl<S: Stream> Export<S> {
 					// Fallback for a duration-less trailing sample (~1024 samples/frame).
 					default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
 					finished: false,
+					pending_discontinuity: false,
 					track_id: next_track_id,
 					timescale,
 					sequence_number: 1,
@@ -564,19 +577,49 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 	)?)
 }
 
+/// A forward jump larger than this between one fragment's end and the next fragment's
+/// start is treated as a real discontinuity (a publisher pause/idle) rather than
+/// ordinary spacing. Comfortably above any frame interval, so a dropped frame or a
+/// low framerate never trips it; a pause is seconds to hours.
+const DISCONTINUITY_GAP: Duration = Duration::from_secs(1);
+
+/// The furthest presentation point in a run of frames, i.e. max(timestamp + duration).
+fn fragment_end(frames: &[Frame]) -> Option<Duration> {
+	frames
+		.iter()
+		.map(|f| Duration::from(f.timestamp) + f.duration.map(Duration::from).unwrap_or_default())
+		.max()
+}
+
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
 fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>, successor: Option<&Frame>) -> Result<Fragment> {
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
+	// A gap detected when the previous fragment was emitted lands on this one: it
+	// opens the new continuity region after the jump.
+	let discontinuity = std::mem::take(&mut track.pending_discontinuity);
 	let frames = infer_missing_durations(frames, successor, track.default_frame);
 	let duration = fragment_seconds(&frames, track.default_frame);
+
+	// If this fragment ends (durations now known -- the tail bounds the trailing frame)
+	// before its successor begins, the timeline jumped forward: flag the *next*
+	// fragment as discontinuous. Without a tail the trailing duration is inferred up to
+	// the successor, leaving no gap, so this only fires on an explicit end_group.
+	if let Some(successor) = successor
+		&& let Some(end) = fragment_end(&frames)
+		&& Duration::from(successor.timestamp).saturating_sub(end) > DISCONTINUITY_GAP
+	{
+		track.pending_discontinuity = true;
+	}
+
 	let data = encode_fragment(track, frames)?;
 	Ok(Fragment {
 		data,
 		init: false,
 		independent,
 		duration,
+		discontinuity,
 	})
 }
 

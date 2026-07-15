@@ -160,8 +160,10 @@ impl SegmentStore {
 
 			// A pending discontinuity forces a fresh segment so the resumed media never
 			// shares a segment with pre-pause media (matters for audio, which otherwise
-			// rolls on duration, not keyframes).
-			let discontinuity = inner.discontinuity_pending;
+			// rolls on duration, not keyframes). Either the store was told out of band
+			// (a recording pause/resume), or the exporter flagged a forward gap in the
+			// media timeline itself (a publisher idle, surfaced by a group's tail).
+			let discontinuity = inner.discontinuity_pending || fragment.discontinuity;
 			let need_new = discontinuity
 				|| match inner.segments.back() {
 					None => true,
@@ -387,6 +389,16 @@ mod tests {
 			init: false,
 			independent: true,
 			duration,
+			discontinuity: false,
+		}
+	}
+
+	/// Like [`fragment`], but flags a timeline discontinuity (the exporter saw a
+	/// forward gap), as opposed to `store.mark_discontinuity()` (told out of band).
+	fn fragment_discontinuous(duration: f64) -> Fragment {
+		Fragment {
+			discontinuity: true,
+			..fragment(duration)
 		}
 	}
 
@@ -431,5 +443,22 @@ mod tests {
 		let snapshot = store.snapshot();
 		assert_eq!(snapshot.media_sequence, 2);
 		assert_eq!(snapshot.target_duration, 6);
+	}
+
+	/// A fragment flagged discontinuous (the exporter saw a forward timeline gap)
+	/// opens a fresh segment tagged for `#EXT-X-DISCONTINUITY`, just like an
+	/// out-of-band `mark_discontinuity()`.
+	#[test]
+	fn discontinuous_fragment_tags_next_segment() {
+		let cfg = config(Duration::from_secs(10));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.push(fragment(1.0)); // segment 0: pre-gap
+		store.push(fragment_discontinuous(1.0)); // forward gap: new, tagged segment 1
+
+		let snapshot = store.snapshot();
+		assert_eq!(snapshot.segments.len(), 2);
+		assert!(!snapshot.segments[0].discontinuity);
+		assert!(snapshot.segments[1].discontinuity, "the post-gap segment is tagged");
 	}
 }

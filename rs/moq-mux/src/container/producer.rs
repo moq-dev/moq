@@ -178,7 +178,7 @@ impl<C: Container> Producer<C> {
 		// Legacy/LOC can't express the end as a duration, so mark it with a tail frame
 		// (empty payload) as the group's last frame. CMAF already got `end` backfilled
 		// onto its last sample by the flush above.
-		if !self.container.carries_duration()
+		if !self.container.has_duration()
 			&& let Some(group) = self.group.as_mut()
 		{
 			let tail = Frame {

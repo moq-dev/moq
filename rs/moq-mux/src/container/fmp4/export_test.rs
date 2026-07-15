@@ -274,6 +274,71 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	moov.encode(&mut buf).expect("encode synthesized moov");
 }
 
+/// A source that closes a group with an explicit end (a tail) then resumes ~2h later
+/// must export a *short* pre-gap fragment (bounded by the tail, not stretched to 2h)
+/// followed by a fragment flagged `discontinuity` -- the seam an HLS packager turns
+/// into `#EXT-X-DISCONTINUITY`. Guards the whole moq-boy-pause chain end to end.
+#[tokio::test(start_paused = true)]
+async fn forward_gap_yields_short_fragment_then_discontinuity() {
+	use crate::container::Timestamp;
+	use bytes::Bytes;
+	use hang::catalog::{Container, VideoCodec, VideoConfig};
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".vp8")))
+		.unwrap();
+	let mut config = VideoConfig::new(VideoCodec::VP8);
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
+
+	let keyframe = |us: u64| crate::container::Frame {
+		timestamp: Timestamp::from_micros(us).unwrap(),
+		payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a]),
+		keyframe: true,
+		duration: None,
+	};
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	track_producer.write(keyframe(0)).unwrap(); // group 0
+	track_producer.end_group(Timestamp::from_micros(16_000).unwrap()).unwrap(); // tail at 16ms
+	track_producer.write(keyframe(7_200_000_000)).unwrap(); // group 1, resumes ~2h later
+	track_producer.finish().unwrap();
+
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+
+	// Collect the two media fragments (skip the init). The producers stay alive: the
+	// vp8 track is finished, so group 1 flushes at drain, but the catalog stays open
+	// so the exporter never returns None -- take exactly what we need and stop.
+	let mut media = Vec::new();
+	while media.len() < 2 {
+		let fragment = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next_fragment())
+			.await
+			.expect("exporter timed out")
+			.expect("exporter error");
+		match fragment {
+			Some(fragment) if !fragment.init => media.push(fragment),
+			Some(_) => {}
+			None => break,
+		}
+	}
+
+	assert_eq!(media.len(), 2, "one media fragment per group");
+	// Group 0 is bounded by its tail (~16ms), NOT stretched across the 2h gap.
+	assert!(media[0].duration < 1.0, "pre-gap fragment is short, got {}s", media[0].duration);
+	assert!(!media[0].discontinuity, "pre-gap fragment is continuous");
+	// Group 1 opens a new continuity region after the forward jump.
+	assert!(media[1].discontinuity, "post-gap fragment is flagged discontinuous");
+}
+
 /// VP9 source (catalog `Container::Legacy`, codec `vp09`, no `description`) →
 /// fMP4 export must synthesize a `vp09` sample entry whose `vpcC` round-trips
 /// the catalog's VP9 parameters.
