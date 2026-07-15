@@ -172,7 +172,7 @@ impl<C: Container> Producer<C> {
 	/// get a zero-length "tail" frame at `end`. That encoding stays inside this crate;
 	/// callers only ever express the end timestamp. The next [`write`](Self::write)
 	/// must be a keyframe.
-	pub fn end_group(&mut self, end: Timestamp) -> Result<(), C::Error> {
+	pub fn cut(&mut self, end: Timestamp) -> Result<(), C::Error> {
 		self.flush(Some(end))?;
 
 		// Legacy/LOC can't express the end as a duration, so mark it with a tail frame
@@ -442,11 +442,11 @@ mod tests {
 		assert_eq!(group0[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
 	}
 
-	/// `end_group(end)` on a duration-less container (Legacy) marks the group end with
+	/// `cut(end)` on a duration-less container (Legacy) marks the group end with
 	/// a tail frame, so a Consumer bounds the last frame at `end` instead of stretching
 	/// it across a gap to the next group ~2h later. The tail is never surfaced as media.
 	#[tokio::test]
-	async fn end_group_bounds_last_frame_across_gap() {
+	async fn cut_bounds_last_frame_across_gap() {
 		use crate::container::Consumer;
 
 		let track = track_producer("test");
@@ -454,7 +454,7 @@ mod tests {
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
-		producer.end_group(Timestamp::from_micros(16_000).unwrap()).unwrap();
+		producer.cut(Timestamp::from_micros(16_000).unwrap()).unwrap();
 		producer.write(frame(7_200_000_000, true)).unwrap(); // resume ~2h later
 		producer.finish().unwrap();
 
@@ -468,7 +468,7 @@ mod tests {
 
 		assert_eq!(frames.len(), 2, "the tail is not surfaced as a media frame");
 		assert_eq!(frames[0].timestamp, Timestamp::from_micros(0).unwrap());
-		// Bounded by end_group's tail (16ms), NOT the 2h jump to the next group.
+		// Bounded by cut's tail (16ms), NOT the 2h jump to the next group.
 		assert_eq!(frames[0].duration, Some(Timestamp::from_micros(16_000).unwrap()));
 		assert_eq!(frames[1].timestamp, Timestamp::from_micros(7_200_000_000).unwrap());
 	}

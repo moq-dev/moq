@@ -605,7 +605,7 @@ fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>, successor: Option<&F
 	// If this fragment ends (durations now known -- the tail bounds the trailing frame)
 	// before its successor begins, the timeline jumped forward: flag the *next*
 	// fragment as discontinuous. Without a tail the trailing duration is inferred up to
-	// the successor, leaving no gap, so this only fires on an explicit end_group.
+	// the successor, leaving no gap, so this only fires on an explicit cut.
 	if let Some(successor) = successor
 		&& let Some(end) = fragment_end(&frames)
 		&& Duration::from(successor.timestamp).saturating_sub(end) > DISCONTINUITY_GAP

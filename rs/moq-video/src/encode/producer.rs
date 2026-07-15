@@ -67,8 +67,8 @@ impl Producer {
 	/// at `end` rather than stretching it across the gap to the next group. The next
 	/// [`publish`](Self::publish) must carry a keyframe -- the caller is responsible
 	/// for forcing the encoder to emit one.
-	pub fn end_group(&mut self, end: Timestamp) -> Result<(), Error> {
-		self.import.end_group(end)?;
+	pub fn cut(&mut self, end: Timestamp) -> Result<(), Error> {
+		self.import.cut(end)?;
 		Ok(())
 	}
 }

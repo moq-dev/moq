@@ -78,13 +78,13 @@ impl VideoEncoder {
 	/// group, and the resumed group still opens on a decodable keyframe. This replaces
 	/// a separate force-keyframe-on-resume: closing a group already requires the next
 	/// frame to be a keyframe, so the two are one operation.
-	pub fn end_group(&self, end: hang::container::Timestamp) {
+	pub fn cut(&self, end: hang::container::Timestamp) {
 		// Arm the keyframe before the close so the resumed group opens on an IDR.
 		self.force_keyframe.store(true, Ordering::Release);
 		// Blocking, not try_send: end-of-group is rare and must not be dropped, or the
 		// last pre-pause frame would stretch across the gap -- the bug this prevents.
 		if self.tx.blocking_send(EncoderMsg::EndGroup { end }).is_err() {
-			tracing::warn!("video end_group dropped: encoder gone");
+			tracing::warn!("video cut dropped: encoder gone");
 		}
 	}
 
@@ -108,8 +108,8 @@ fn encoder_thread(
 			EncoderMsg::EndGroup { end } => {
 				// Close the current group at the pre-pause end so the last frame isn't
 				// stretched across the idle gap. No encoder work: it's just a boundary.
-				if let Err(e) = producer.end_group(end) {
-					tracing::error!(error = %e, "video end_group failed; stopping encoder");
+				if let Err(e) = producer.cut(end) {
+					tracing::error!(error = %e, "video cut failed; stopping encoder");
 					return;
 				}
 				continue;

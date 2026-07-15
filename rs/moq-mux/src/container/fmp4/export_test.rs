@@ -307,7 +307,7 @@ async fn forward_gap_yields_short_fragment_then_discontinuity() {
 
 	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
 	track_producer.write(keyframe(0)).unwrap(); // group 0
-	track_producer.end_group(Timestamp::from_micros(16_000).unwrap()).unwrap(); // tail at 16ms
+	track_producer.cut(Timestamp::from_micros(16_000).unwrap()).unwrap(); // tail at 16ms
 	track_producer.write(keyframe(7_200_000_000)).unwrap(); // group 1, resumes ~2h later
 	track_producer.finish().unwrap();
 

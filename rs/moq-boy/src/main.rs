@@ -292,7 +292,7 @@ fn close_video_group(
 	if let Some(ts) = last.take() {
 		let end = hang::container::Timestamp::from_micros(ts.as_micros() as u64 + frame_duration.as_micros() as u64)
 			.unwrap_or(ts);
-		encoder.end_group(end);
+		encoder.cut(end);
 	}
 }
 

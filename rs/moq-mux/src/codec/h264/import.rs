@@ -136,9 +136,9 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// Use before a gap (a publisher pausing) so a consumer bounds the last frame at
 	/// `end` instead of stretching it to the next group. The next published frame must
-	/// be a keyframe. See [`Producer::end_group`](crate::container::Producer::end_group).
-	pub fn end_group(&mut self, end: crate::container::Timestamp) -> Result<()> {
-		self.track.end_group(end)?;
+	/// be a keyframe. See [`Producer::cut`](crate::container::Producer::cut).
+	pub fn cut(&mut self, end: crate::container::Timestamp) -> Result<()> {
+		self.track.cut(end)?;
 		Ok(())
 	}
 
