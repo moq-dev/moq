@@ -5,6 +5,8 @@
 //! selected endpoint.
 
 mod args;
+#[cfg(feature = "capture")]
+mod devices;
 mod hls;
 mod moq;
 mod publish;
@@ -16,7 +18,7 @@ mod subscribe;
 mod transcode;
 mod web;
 
-use args::{Cli, Direction, Export, ExportSink, Import, ImportSource, MoqSide};
+use args::{Cli, Command, Export, ExportSink, Import, ImportSource, MoqSide};
 use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
@@ -60,16 +62,28 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init()?;
 
+	// `devices` only talks to the local hardware, so answer it before binding any
+	// transport.
+	#[cfg(feature = "capture")]
+	if matches!(cli.command, Command::Devices) {
+		cli.moq.reject("devices")?;
+		return devices::run().await;
+	}
+
+	cli.moq.validate()?;
+
 	let net = Net {
 		#[cfg(feature = "iroh")]
 		iroh: cli.moq.iroh.clone().bind(&cli.moq.client.quic).await?,
 	};
 
-	match cli.direction {
-		Direction::Import(import) => run_import(cli.moq, import, net).await,
-		Direction::Export(export) => run_export(cli.moq, export, net).await,
+	match cli.command {
+		Command::Import(import) => run_import(cli.moq, import, net).await,
+		Command::Export(export) => run_export(cli.moq, export, net).await,
 		#[cfg(feature = "transcode")]
-		Direction::Transcode(args) => transcode::run(cli.moq, args, net).await,
+		Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
+		#[cfg(feature = "capture")]
+		Command::Devices => unreachable!("handled above, before the transport is bound"),
 	}
 }
 

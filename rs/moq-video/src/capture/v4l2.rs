@@ -21,13 +21,15 @@ use crate::Error;
 use crate::frame::{Frame, I420};
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
-pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
 	let config = config.clone();
+	// The camera opens on the pump thread, so the selector has to be owned.
+	let device = device.map(str::to_string);
 	let chan = FrameChannel::new();
 	let (geo, guard) = pump::spawn(
 		chan.clone(),
 		move || {
-			let camera = Camera::open(&config)?;
+			let camera = Camera::open(&config, device.as_deref())?;
 			let geometry = Geometry {
 				width: camera.width,
 				height: camera.height,
@@ -83,8 +85,8 @@ pub(crate) struct Camera {
 }
 
 impl Camera {
-	fn open(config: &Config) -> Result<Self, Error> {
-		let (device, name) = open_device(config)?;
+	fn open(config: &Config, selector: Option<&str>) -> Result<Self, Error> {
+		let (device, name) = open_device(selector)?;
 		let width = config.width.unwrap_or(DEFAULT_WIDTH);
 		let height = config.height.unwrap_or(DEFAULT_HEIGHT);
 
@@ -160,10 +162,10 @@ impl Camera {
 	}
 }
 
-/// Open `config.device`: a bare integer selects `/dev/videoN` by index, anything
+/// Open `device`: a bare integer selects `/dev/videoN` by index, anything
 /// else is a device path. `None` opens index 0.
-fn open_device(config: &Config) -> Result<(Device, String), Error> {
-	match config.device.as_deref() {
+fn open_device(device: Option<&str>) -> Result<(Device, String), Error> {
+	match device {
 		None => {
 			let device = Device::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("open /dev/video0: {e}")))?;
 			Ok((device, "/dev/video0".to_string()))

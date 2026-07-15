@@ -16,6 +16,11 @@ pub enum Error {
 	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),
 
+	/// The requested capture source or enumeration has no implementation on this
+	/// platform (the message names what is missing).
+	#[error("not supported on this platform: {0}")]
+	Unsupported(String),
+
 	/// The configured framerate was zero (would divide by zero / produce a
 	/// degenerate codec time base).
 	#[error("invalid framerate: {0} (must be non-zero)")]

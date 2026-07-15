@@ -104,6 +104,7 @@ dispatch2 = "0.3.1"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
 objc2-core-foundation = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay"] }
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"

@@ -8,6 +8,9 @@
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
+//! - `devices` touches no network at all, so it's the one verb that takes no MoQ
+//!   side. That's why the requirement is enforced per-verb ([`MoqSide::validate`])
+//!   rather than by clap: an `ArgGroup` can't be conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
 //!   `rtmp`, `srt`, `rtc`). Exactly one per invocation, so "which endpoint" is
@@ -32,15 +35,18 @@ pub struct Cli {
 	#[command(flatten)]
 	pub moq: MoqSide,
 
-	/// The routing direction and endpoint.
+	/// The verb and endpoint.
 	#[command(subcommand)]
-	pub direction: Direction,
+	pub command: Command,
 }
 
 /// The MoQ attachment. At least one of `--client-connect` / `--server-bind`;
 /// both may be given at once.
+///
+/// The group is not `required`, because `devices` runs without a MoQ side. Every
+/// verb that does need one calls [`validate`](Self::validate).
 #[derive(Args, Clone)]
-#[command(group = ArgGroup::new("moq").required(true).multiple(true).args(["client-connect", "server-bind"]))]
+#[command(group = ArgGroup::new("moq").multiple(true).args(["client-connect", "server-bind"]))]
 pub struct MoqSide {
 	/// The broadcast name. Optional for the point endpoints (stdin/stdout, HLS
 	/// import, and the `--connect` dials), which default to the root broadcast at
@@ -63,9 +69,34 @@ pub struct MoqSide {
 	pub iroh: moq_native::iroh::EndpointConfig,
 }
 
-/// The data direction: the pivot between the MoQ side and the endpoint.
+impl MoqSide {
+	/// Reject a verb that needs the MoQ network but was given no way to reach it.
+	/// Stands in for the clap `required` the `moq` group can't carry, since
+	/// `devices` is exempt.
+	pub fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.client.connect.is_some() || self.server.bind.is_some(),
+			"a MoQ side is required: pass --client-connect <url> to dial a relay, or --server-bind <addr> to self-host"
+		);
+		Ok(())
+	}
+
+	/// Reject the MoQ flags on a verb that never touches the network, rather than
+	/// silently ignoring them. Only `devices` qualifies, hence the gate.
+	#[cfg(feature = "capture")]
+	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.client.connect.is_none() && self.server.bind.is_none(),
+			"`{command}` runs locally and takes no MoQ side; drop --client-connect / --server-bind"
+		);
+		Ok(())
+	}
+}
+
+/// The verb: for `import`/`export` it is also the data direction, the pivot
+/// between the MoQ side and the endpoint.
 #[derive(Subcommand, Clone)]
-pub enum Direction {
+pub enum Command {
 	/// Route media INTO MoQ from one source.
 	#[command(alias = "publish")]
 	Import(Import),
@@ -76,6 +107,9 @@ pub enum Direction {
 	/// only encoded while watched (just-in-time).
 	#[cfg(feature = "transcode")]
 	Transcode(crate::transcode::Args),
+	/// List the capture devices `import capture` can name.
+	#[cfg(feature = "capture")]
+	Devices,
 }
 
 // ------------------------------------------------------------------ import
@@ -108,7 +142,8 @@ pub enum ImportSource {
 	Srt(crate::srt::Args),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
-	/// Capture the camera/microphone (or screen) and encode natively.
+	/// Capture a local source (camera, display, window, app, microphone) and
+	/// encode natively. Run `moq devices` to list them.
 	#[cfg(feature = "capture")]
 	Capture(crate::publish::CaptureArgs),
 }

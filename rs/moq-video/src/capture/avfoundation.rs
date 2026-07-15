@@ -22,7 +22,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
 use super::surface::surface_frame;
-use super::{Config, FrameChannel, FrameStream};
+use super::{Camera, Config, FrameChannel, FrameStream};
 use crate::Error;
 
 /// How long `open` waits for the first frame before assuming the camera never
@@ -33,8 +33,28 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// first time capture runs.
 const ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Open the default (or configured) camera and stream its frames.
-pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
+/// List the cameras. Unlike capture, enumeration needs no TCC grant: an
+/// unauthorized process still sees the devices, just not their frames.
+pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
+	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
+	// The suggested replacement, AVCaptureDeviceDiscoverySession, has to be handed
+	// an explicit list of device types, and the constants for external and
+	// Continuity cameras are macOS 14+. Naming them would drop those cameras on
+	// older systems (or miss a symbol); this returns every video device on every
+	// version, which is exactly what listing wants.
+	#[allow(deprecated)]
+	let devices = unsafe { AVCaptureDevice::devicesWithMediaType(media) };
+	Ok((0..devices.count())
+		.map(|index| devices.objectAtIndex(index))
+		.map(|device| Camera {
+			id: unsafe { device.uniqueID() }.to_string(),
+			name: unsafe { device.localizedName() }.to_string(),
+		})
+		.collect())
+}
+
+/// Open the default (or requested) camera and stream its frames.
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
 	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
 
 	// Gate on camera authorization before opening the device, so an unauthorized
@@ -42,7 +62,7 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 	// first-frame timeout.
 	ensure_camera_access(media).await?;
 
-	let device = match &config.device {
+	let device = match device {
 		Some(id) => {
 			let id = NSString::from_str(id);
 			unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }
@@ -51,6 +71,13 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 		None => unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }
 			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no default camera")))?,
 	};
+
+	// Honoring these means picking an `activeFormat` and locking a frame
+	// duration, which this backend doesn't do yet. Say so rather than letting the
+	// camera quietly come up at its default mode.
+	if config.width.is_some() || config.height.is_some() || config.framerate.is_some() {
+		tracing::warn!("width/height/framerate are ignored for camera capture on macOS; using the device default");
+	}
 	let device_id = unsafe { device.uniqueID() }.to_string();
 
 	let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }

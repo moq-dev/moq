@@ -7,7 +7,10 @@
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
 //!   on Linux, native Media Foundation (camera) and DXGI Desktop Duplication
-//!   (screen) on Windows. Today that's a webcam or the screen.
+//!   (screen) on Windows. [`capture::Source`] picks a camera, a display, or
+//!   (macOS only) a single window or every window of an application;
+//!   [`capture::cameras`], [`capture::displays`], [`capture::windows`], and
+//!   [`capture::apps`] list what's available and hand back the ids it takes.
 //! - [`encode`] encodes frames with a native backend and publishes them through
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
