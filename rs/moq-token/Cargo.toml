@@ -20,8 +20,8 @@ tokio = ["dep:tokio"]
 aws-lc-rs = "1"
 base64 = "0.22"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
-p256 = "0.13.2"
-p384 = "0.13.1"
+p256 = "0.14.0"
+p384 = "0.14.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 rsa = "0.9.10"
 serde = { version = "1", features = ["derive"] }
