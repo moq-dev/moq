@@ -15,8 +15,8 @@ const ANNOUNCE_RESTART: u64 = 2;
 /// Whether the negotiated version carries restart (REANNOUNCE) semantics. On lite-05 a restart
 /// travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on lite-06+
 /// it is the explicit `restart` status referencing an announce id. Older versions never defined
-/// this, so we neither send nor interpret it there; a restart is sent as an unannounce followed
-/// by a fresh announce instead.
+/// this, so we neither send nor interpret it there; their peers keep the hop chain from the
+/// original announce.
 pub fn restart_supported(version: Version) -> bool {
 	// Explicitly list older versions so future versions default to supported.
 	!matches!(

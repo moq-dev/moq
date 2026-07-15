@@ -718,9 +718,13 @@ async fn broadcast_route_migration() {
 	// ── publisher B: the standby, carrying an extra hop so A wins ───
 	let origin_b = Origin::random().produce();
 	let mut info_b = moq_net::broadcast::Info::new();
-	info_b.hops.push(Origin::new(0x1234).unwrap()).unwrap();
 	info_b.origin = origin_b.info();
 	let mut broadcast_b = info_b.produce();
+	let mut hops_b = moq_net::OriginList::new();
+	hops_b.push(Origin::new(0x1234).unwrap()).unwrap();
+	broadcast_b
+		.update_route(moq_net::broadcast::Route::new(hops_b))
+		.expect("update route");
 	let mut track_b = broadcast_b.create_track("video", None).expect("create track");
 	// B carries the continuation of the same content: groups 2 and 3.
 	for sequence in 2..4u64 {
@@ -820,6 +824,140 @@ async fn broadcast_route_migration() {
 	handle_a.await.expect("server a panicked").expect("server a failed");
 	drop(_session_b);
 	handle_b.await.expect("server b panicked").expect("server b failed");
+}
+
+/// A publisher-side route change re-advertises downstream as a restart.
+///
+/// The publisher updates its broadcast's route (a new hop chain, as if its own
+/// upstream failed over); the subscriber observes the new chain on the same
+/// broadcast handle via `route_updated`, with zero announce events and an
+/// uninterrupted subscription.
+async fn route_reannounce_test(version: Option<&str>) {
+	use moq_net::Timestamp;
+
+	let version: Option<moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
+
+	// ── publisher (server) ──────────────────────────────────────────
+	let origin = Origin::random().produce();
+	let mut info = moq_net::broadcast::Info::new();
+	info.origin = origin.info();
+	let mut producer = info.produce();
+	let mut track = producer.create_track("video", None).expect("create track");
+	{
+		let mut group = track
+			.create_group(moq_net::group::Info { sequence: 0 })
+			.expect("create group");
+		group.write_frame(Timestamp::ZERO, b"g0".as_ref()).expect("write frame");
+		group.finish().expect("finish group");
+	}
+	let publish = origin
+		.publish_broadcast("test", producer.consume())
+		.expect("publish broadcast");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	if let Some(v) = version {
+		server_config.version = vec![v];
+	}
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("local addr");
+
+	// A clone to re-advertise from the test body while the task owns the rest.
+	let mut route_producer = producer.clone();
+
+	let handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&origin).ok().await?;
+		let _producer = producer;
+		let _publish = publish;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	if let Some(v) = version {
+		client_config.version = vec![v];
+	}
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "test");
+	let broadcast = event.broadcast().expect("expected announce");
+
+	// The initial route: a direct publish, so just the publisher session's hop.
+	let mut watch = broadcast.clone();
+	let initial = tokio::time::timeout(TIMEOUT, watch.route_updated())
+		.await
+		.expect("route timeout")
+		.expect("route dropped");
+
+	let mut sub = broadcast
+		.track("video")
+		.unwrap()
+		.subscribe(None)
+		.await
+		.expect("subscribe failed");
+	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
+
+	// The publisher re-advertises with a synthetic upstream hop.
+	let mut hops = moq_net::OriginList::new();
+	hops.push(Origin::new(0x4444).unwrap()).unwrap();
+	route_producer
+		.update_route(moq_net::broadcast::Route::new(hops))
+		.expect("update route");
+
+	// The subscriber sees the new chain on the same handle...
+	let updated = tokio::time::timeout(TIMEOUT, watch.route_updated())
+		.await
+		.expect("route update timeout")
+		.expect("route dropped");
+	assert_ne!(initial, updated, "route must change");
+	assert!(
+		updated.hops.iter().any(|h| h.id() == 0x4444),
+		"the new chain must carry the advertised hop"
+	);
+
+	// ...with no announce churn, and the subscription keeps flowing.
+	assert!(
+		announcements.try_next().is_none(),
+		"a route change must not emit announce events"
+	);
+	{
+		let mut group = track
+			.create_group(moq_net::group::Info { sequence: 1 })
+			.expect("create group");
+		group.write_frame(Timestamp::ZERO, b"g1".as_ref()).expect("write frame");
+		group.finish().expect("finish group");
+	}
+	assert_eq!(read_payloads(&mut sub, 1).await, ["g1"]);
+
+	drop(session);
+	handle.await.expect("server panicked").expect("server failed");
+}
+
+/// Route re-advertisement on the default version (lite-05: a duplicate ANNOUNCE).
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_route_reannounce() {
+	route_reannounce_test(None).await;
+}
+
+/// Route re-advertisement on lite-06 (an explicit ANNOUNCE_RESTART by id).
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_route_reannounce_lite_06() {
+	route_reannounce_test(Some("moq-lite-06-wip")).await;
 }
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────

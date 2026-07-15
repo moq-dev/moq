@@ -362,6 +362,13 @@ fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 	(hops.len(), hash)
 }
 
+/// Full ordering key for a [`broadcast::Route`]: cost first (the publisher's own
+/// preference), then the [`route_key`] hop ordering. Lower wins.
+fn route_order(name: &Path, route: &broadcast::Route) -> (u64, usize, u64) {
+	let (len, hash) = route_key(name, &route.hops);
+	(route.cost, len, hash)
+}
+
 /// One coalesced update queued for an `AnnounceConsumer`.
 ///
 /// At most one entry exists per path, so a slow consumer's pending set is bounded
@@ -553,7 +560,9 @@ impl OriginNode {
 				return;
 			}
 
-			if route_key(&full, &broadcast.info().hops) < route_key(&full, &existing.active.info().hops) {
+			// The route is sampled when the competing publish arrives; a later
+			// route update on either broadcast doesn't re-run this selection.
+			if route_order(&full, &broadcast.route()) < route_order(&full, &existing.active.route()) {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
 				existing.backup.push_back(old);
@@ -651,7 +660,7 @@ impl OriginNode {
 				.backup
 				.iter()
 				.enumerate()
-				.min_by_key(|(_, b)| route_key(&full, &b.info().hops))
+				.min_by_key(|(_, b)| route_order(&full, &b.route()))
 				.map(|(i, _)| i);
 			if let Some(idx) = best {
 				let active = entry.backup.remove(idx).expect("index in range");
@@ -872,11 +881,7 @@ impl Producer {
 	/// unannounces the broadcast. See [`publish_broadcast`](Self::publish_broadcast) for the
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<Broadcast, Error> {
-		let producer = broadcast::Info {
-			origin: self.info(),
-			..Default::default()
-		}
-		.produce();
+		let producer = broadcast::Info { origin: self.info() }.produce();
 		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(Broadcast { producer, publish })
 	}
@@ -914,7 +919,7 @@ impl Producer {
 		// Callers must filter reflections (a hop chain already containing our id) before publishing;
 		// relays do this on the announce path. Re-announcing one here would form a routing loop.
 		debug_assert!(
-			!broadcast.info().hops.contains(&self.info),
+			!broadcast.route().hops.contains(&self.info),
 			"publish_broadcast called with a looping hop chain",
 		);
 
@@ -942,25 +947,30 @@ impl Producer {
 	///
 	/// This is how a broadcast reached over the network enters the origin: the
 	/// origin owns the broadcast (and every track and cached group in it), and each
-	/// session feeding it holds a [`Route`]. The first attach announces the
+	/// session feeding it holds a [`Route`] describing its current
+	/// [`broadcast::Route`] (hop chain + cost). The first attach announces the
 	/// broadcast; later attaches at the same path join it silently as standby
-	/// routes. Track requests are dispatched to the best route (shortest `hops`,
-	/// with a deterministic tie-break); when a route detaches, its tracks are
-	/// re-dispatched to the next-best route and resume at the first missing group,
-	/// so consumers never observe the change. When the last route detaches the
-	/// broadcast lingers briefly before unannouncing, giving a reconnecting session
-	/// the chance to resume transparently.
+	/// routes. Track requests are dispatched to the best route (lowest cost, then
+	/// shortest hops with a deterministic tie-break); when a route detaches, its
+	/// tracks are re-dispatched to the next-best route and resume at the first
+	/// missing group, so consumers never observe the change. When the last route
+	/// detaches the broadcast lingers briefly before unannouncing, giving a
+	/// reconnecting session the chance to resume transparently.
+	///
+	/// The broadcast advertises the best attached route's metadata (observable via
+	/// [`broadcast::Consumer::route_updated`]); attach, detach, and
+	/// [`Route::update`] keep it current so downstream sessions re-announce.
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside this producer's
 	/// prefixes, or [`Error::BoundsExceeded`] if the rooted path is too deep. Must
 	/// be called with a runtime available (it spawns the broadcast's lifecycle
 	/// task). Callers must not attach a route whose hop chain contains this
 	/// origin's id (a routing loop), checked by a `debug_assert`.
-	pub fn attach_route(&self, path: impl AsPath, hops: OriginList) -> Result<Route, Error> {
+	pub fn attach_route(&self, path: impl AsPath, route: broadcast::Route) -> Result<Route, Error> {
 		let path = path.as_path();
 
 		debug_assert!(
-			!hops.contains(&self.info),
+			!route.hops.contains(&self.info),
 			"attach_route called with a looping hop chain",
 		);
 
@@ -977,22 +987,20 @@ impl Producer {
 		};
 
 		// Join the existing front if the path already has one.
-		if let Some(route) = Self::join_front(&leaf, &hops) {
-			return Ok(route);
+		if let Some(handle) = Self::join_front(&leaf, &route) {
+			return Ok(handle);
 		}
 
 		// First route: create the front, publish its broadcast, and hand its
 		// lifecycle to a janitor task.
-		let producer = broadcast::Producer::new_spliced(broadcast::Info {
-			hops: hops.clone(),
-			origin: self.info(),
-		});
+		let mut producer = broadcast::Producer::new_spliced(broadcast::Info { origin: self.info() });
+		let _ = producer.update_route(route.clone());
 		let state = kio::Producer::new(FrontState {
 			path: full.clone(),
 			next_route: 1,
 			routes: vec![FrontRoute {
 				id: 0,
-				hops: hops.clone(),
+				route: route.clone(),
 			}],
 			active: Some(0),
 			served: HashMap::new(),
@@ -1004,8 +1012,8 @@ impl Producer {
 			// A concurrent attach may have raced us to the leaf; join theirs.
 			if leaf_guard.front.is_some() {
 				drop(leaf_guard);
-				if let Some(route) = Self::join_front(&leaf, &hops) {
-					return Ok(route);
+				if let Some(handle) = Self::join_front(&leaf, &route) {
+					return Ok(handle);
 				}
 				// Theirs closed in between; fall through and install ours.
 				leaf_guard = leaf.lock();
@@ -1037,8 +1045,8 @@ impl Producer {
 
 	/// Join the live front at `leaf` as an additional route, or `None` if the leaf
 	/// has no front (or it already closed).
-	fn join_front(leaf: &Lock<OriginNode>, hops: &OriginList) -> Option<Route> {
-		let (route, handover) = {
+	fn join_front(leaf: &Lock<OriginNode>, route: &broadcast::Route) -> Option<Route> {
+		let (handle, handover, advert) = {
 			let leaf_guard = leaf.lock();
 			let front = leaf_guard.front.as_ref()?;
 			let mut s = front.state.write().ok()?;
@@ -1047,23 +1055,16 @@ impl Producer {
 			}
 			let id = s.next_route;
 			s.next_route += 1;
-			s.routes.push(FrontRoute { id, hops: hops.clone() });
+			s.routes.push(FrontRoute {
+				id,
+				route: route.clone(),
+			});
 
-			// If the new route wins dispatch (a strictly better hop chain), hand the
+			// If the new route wins dispatch (a strictly better route), hand the
 			// live tracks over: each is re-queued, the new route splices in at a
 			// group boundary, and the old sessions wind down as their demand caps.
-			let prev = s.active;
-			let best = s.best_route();
-			s.active = best;
-			let mut handover = Vec::new();
-			if s.active != prev && s.active == Some(id) {
-				for (name, entry) in s.served.iter_mut() {
-					if entry.route != Some(id) {
-						entry.route = None;
-						handover.push(name.clone());
-					}
-				}
-			}
+			let handover = s.reselect();
+			let advert = s.active_route();
 			drop(s);
 
 			(
@@ -1074,15 +1075,20 @@ impl Producer {
 					graceful: false,
 				},
 				handover,
+				advert,
 			)
 		};
 
-		// Outside the leaf and route-table locks: queue the handovers.
+		// Outside the leaf and route-table locks: queue the handovers and refresh
+		// the broadcast's advertised route.
 		for name in &handover {
-			route.broadcast.requeue_spliced(name);
+			handle.broadcast.requeue_spliced(name);
+		}
+		if let Some(advert) = advert {
+			let _ = handle.broadcast.clone().update_route(advert);
 		}
 
-		Some(route)
+		Some(handle)
 	}
 
 	/// Returns a new Producer restricted to publishing under one of `prefixes`.
@@ -1249,9 +1255,10 @@ struct Front {
 /// One attached route in a [`FrontState`] table.
 struct FrontRoute {
 	id: u64,
-	/// This route's hop chain, used to pick the active route (shortest wins, with
-	/// the same deterministic tie-break as direct publishes).
-	hops: OriginList,
+	/// This route's metadata, used to pick the active route (lowest cost, then
+	/// shortest hops with the same deterministic tie-break as direct publishes).
+	/// Updated in place by [`Route::update`].
+	route: broadcast::Route,
 }
 
 /// Bookkeeping for a track assigned to a route, so it can be re-assigned when the
@@ -1283,13 +1290,40 @@ struct FrontState {
 }
 
 impl FrontState {
-	/// The route new track requests should dispatch to: shortest hop chain, with
-	/// the deterministic hash tie-break shared with direct publishes.
+	/// The route new track requests should dispatch to: lowest cost, then shortest
+	/// hop chain, with the deterministic hash tie-break shared with direct publishes.
 	fn best_route(&self) -> Option<u64> {
 		self.routes
 			.iter()
-			.min_by_key(|r| route_key(&self.path.as_path(), &r.hops))
+			.min_by_key(|r| route_order(&self.path.as_path(), &r.route))
 			.map(|r| r.id)
+	}
+
+	/// Re-pick the active route after the table changed. If it moved, every track
+	/// served by another route is marked for re-assignment; the caller must
+	/// [`broadcast::Producer::requeue_spliced`] the returned names outside the lock.
+	fn reselect(&mut self) -> Vec<Arc<str>> {
+		let prev = self.active;
+		self.active = self.best_route();
+		let mut handover = Vec::new();
+		if self.active != prev
+			&& let Some(active) = self.active
+		{
+			for (name, entry) in self.served.iter_mut() {
+				if entry.route != Some(active) {
+					entry.route = None;
+					handover.push(name.clone());
+				}
+			}
+		}
+		handover
+	}
+
+	/// The active route's metadata, advertised on the front's broadcast. The caller
+	/// applies it via [`broadcast::Producer::update_route`] outside the lock.
+	fn active_route(&self) -> Option<broadcast::Route> {
+		let id = self.active?;
+		self.routes.iter().find(|r| r.id == id).map(|r| r.route.clone())
 	}
 }
 
@@ -1307,6 +1341,7 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 	// so the broadcast lock is never nested inside it.
 	let mut requeue = Vec::new();
 	let mut close = false;
+	let mut advert = None;
 	{
 		let Ok(mut s) = state.write() else { return };
 		let Some(pos) = s.routes.iter().position(|r| r.id == id) else {
@@ -1316,6 +1351,9 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 		if s.active == Some(id) {
 			let best = s.best_route();
 			s.active = best;
+			// The promoted route's metadata becomes the broadcast's advertised
+			// route, so downstream sessions re-announce the new path.
+			advert = s.active_route();
 		}
 		if graceful && s.routes.is_empty() && !s.closed {
 			// Deliberate end: close now. The janitor observes `closed` and finishes
@@ -1335,6 +1373,9 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 	if close {
 		broadcast.abort_spliced(Error::Dropped);
 	}
+	if let Some(advert) = advert {
+		let _ = broadcast.clone().update_route(advert);
+	}
 	for name in requeue {
 		// Queued for whichever route pops it next; if none ever attaches, the
 		// janitor eventually closes the front and aborts the track.
@@ -1346,8 +1387,9 @@ fn detach_route(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produc
 ///
 /// Returned by [`Producer::attach_route`]; the route's tracks are served by
 /// draining [`Self::assignments`], usually from a dedicated task. Only the best
-/// attached route (shortest hop chain) is dispatched assignments; the others park
-/// as hot standbys.
+/// attached route (lowest [`broadcast::Route`] cost, then shortest hop chain) is
+/// dispatched assignments; the others park as hot standbys. Keep the metadata
+/// current with [`Self::update`].
 ///
 /// Dropping the route detaches it: every track it was serving is re-assigned to
 /// the next-best route, resuming at the first missing group sequence, and
@@ -1377,6 +1419,43 @@ impl Route {
 			state: self.state.clone(),
 			broadcast: self.broadcast.clone(),
 		}
+	}
+
+	/// Update this route's metadata in place (a restart: new hops after an upstream
+	/// failover, or a cost change as the publisher's preference shifts).
+	///
+	/// The front re-picks its active route: if this update wins (or loses) the
+	/// dispatch, live tracks hand over at a group boundary exactly like an attach.
+	/// The broadcast's advertised route follows the new winner, so downstream
+	/// sessions re-announce; consumers never observe churn. An update equal to the
+	/// current metadata is a no-op.
+	///
+	/// The caller must have filtered looping hop chains (containing its own
+	/// origin), same as [`Producer::attach_route`]; detach instead.
+	pub fn update(&mut self, route: broadcast::Route) -> Result<(), Error> {
+		let (handover, advert) = {
+			let mut s = self.state.write().map_err(|_| Error::Dropped)?;
+			if s.closed {
+				return Err(Error::Closed);
+			}
+			let Some(entry) = s.routes.iter_mut().find(|r| r.id == self.id) else {
+				return Err(Error::Dropped);
+			};
+			if entry.route == route {
+				return Ok(());
+			}
+			entry.route = route;
+			let handover = s.reselect();
+			(handover, s.active_route())
+		};
+
+		for name in &handover {
+			self.broadcast.requeue_spliced(name);
+		}
+		if let Some(advert) = advert {
+			let _ = self.broadcast.update_route(advert);
+		}
+		Ok(())
 	}
 
 	/// Detach because the peer deliberately retracted the path.
@@ -2657,13 +2736,13 @@ mod tests {
 		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 
 		// The first route announces the broadcast.
-		let route_a = origin.attach_route("test", hops_a).unwrap();
+		let route_a = origin.attach_route("test", broadcast::Route::new(hops_a)).unwrap();
 		let mut assignments_a = route_a.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
 
 		// A second (longer) route joins silently as a standby.
-		let route_b = origin.attach_route("test", hops_b).unwrap();
+		let route_b = origin.attach_route("test", broadcast::Route::new(hops_b)).unwrap();
 		let mut assignments_b = route_b.assignments();
 		announced.assert_next_wait();
 
@@ -2718,6 +2797,107 @@ mod tests {
 		sub.assert_not_closed();
 	}
 
+	/// `route_updated` yields the current route first, then each change; equal
+	/// updates coalesce, and the watch errors once every producer is gone.
+	#[tokio::test]
+	async fn test_broadcast_route_watch() {
+		let mut producer = broadcast::Info::new().produce();
+		let mut consumer = producer.consume();
+
+		// Initial value: the default route.
+		assert_eq!(consumer.route_updated().await.unwrap(), broadcast::Route::default());
+
+		// An equal update is a no-op.
+		producer.update_route(broadcast::Route::default()).unwrap();
+		assert!(consumer.route_updated().now_or_never().is_none());
+
+		let mut hops = OriginList::new();
+		hops.push(Origin::new(7).unwrap()).unwrap();
+		let route = broadcast::Route::new(hops).with_cost(3);
+		producer.update_route(route.clone()).unwrap();
+		assert_eq!(consumer.route_updated().await.unwrap(), route);
+
+		// A fresh consumer sees the current value immediately.
+		let mut fresh = producer.consume();
+		assert_eq!(fresh.route_updated().await.unwrap(), route);
+
+		drop(producer);
+		assert!(matches!(consumer.route_updated().await.unwrap_err(), Error::Dropped));
+	}
+
+	/// A cost update that flips the winning route hands live tracks over at a
+	/// group boundary and re-advertises the broadcast's route, without announce
+	/// churn.
+	#[tokio::test]
+	async fn test_route_cost_update() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
+
+		// A (shorter chain) wins at equal cost.
+		let mut route_a = origin
+			.attach_route("test", broadcast::Route::new(hops_a.clone()))
+			.unwrap();
+		let mut assignments_a = route_a.assignments();
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		announced.assert_next("test", &broadcast);
+
+		let mut watch = broadcast.clone();
+		assert_eq!(watch.route_updated().await.unwrap().hops, hops_a);
+
+		let mut route_b = origin
+			.attach_route("test", broadcast::Route::new(hops_b.clone()))
+			.unwrap();
+		let mut assignments_b = route_b.assignments();
+		assert!(
+			watch.route_updated().now_or_never().is_none(),
+			"a losing standby must not change the advertised route"
+		);
+
+		// Dispatch a track to A and deliver a group.
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let assignment = assignments_a.next().now_or_never().expect("assigned").unwrap();
+		let mut producer = assignment.serve(None).unwrap();
+		let mut sub = subscribing.await.unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// A's cost rises above B's: B takes over at the boundary and the
+		// broadcast re-advertises B's route. No announce events.
+		route_a
+			.update(broadcast::Route::new(hops_a.clone()).with_cost(10))
+			.unwrap();
+		assert_eq!(watch.route_updated().await.unwrap().hops, hops_b);
+		announced.assert_next_wait();
+
+		let assignment = assignments_b
+			.next()
+			.now_or_never()
+			.expect("track should hand over to the cheaper route")
+			.unwrap();
+		assert_eq!(assignment.name(), "video");
+		let mut producer_b = assignment.serve(None).unwrap();
+		// Demand registers as the subscriber polls; the new segment starts at the
+		// splice boundary.
+		sub.assert_no_group();
+		assert_eq!(producer_b.subscription().unwrap().group_start, Some(1));
+		producer_b.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(sub.assert_group().sequence, 1);
+		sub.assert_not_closed();
+
+		// The active route updating its own metadata re-advertises in place.
+		route_b
+			.update(broadcast::Route::new(hops_b.clone()).with_cost(5))
+			.unwrap();
+		let advertised = watch.route_updated().await.unwrap();
+		assert_eq!(advertised.hops, hops_b);
+		assert_eq!(advertised.cost, 5);
+		announced.assert_next_wait();
+	}
+
 	/// After the last route detaches the broadcast lingers: consumers stall (no
 	/// error), and a route re-attaching within the window resumes transparently.
 	#[tokio::test(start_paused = true)]
@@ -2727,7 +2907,9 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let route_a = origin.attach_route("test", hops.clone()).unwrap();
+		let route_a = origin
+			.attach_route("test", broadcast::Route::new(hops.clone()))
+			.unwrap();
 		let mut assignments_a = route_a.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
@@ -2750,7 +2932,7 @@ mod tests {
 		sub.assert_not_closed();
 
 		// A reconnecting session re-attaches within the window and resumes.
-		let route_b = origin.attach_route("test", hops).unwrap();
+		let route_b = origin.attach_route("test", broadcast::Route::new(hops)).unwrap();
 		let mut assignments_b = route_b.assignments();
 		let assignment = assignments_b.next().await.unwrap();
 		let mut producer = assignment.serve(None).unwrap();
@@ -2777,7 +2959,7 @@ mod tests {
 		let hops_long = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
 
-		let route_a = origin.attach_route("test", hops_long).unwrap();
+		let route_a = origin.attach_route("test", broadcast::Route::new(hops_long)).unwrap();
 		let mut assignments_a = route_a.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
@@ -2793,7 +2975,7 @@ mod tests {
 
 		// A strictly shorter route attaches: the live track is handed over with no
 		// announce churn.
-		let route_b = origin.attach_route("test", hops_short).unwrap();
+		let route_b = origin.attach_route("test", broadcast::Route::new(hops_short)).unwrap();
 		let mut assignments_b = route_b.assignments();
 		announced.assert_next_wait();
 
@@ -2826,7 +3008,9 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let route = origin.attach_route("test", hops.clone()).unwrap();
+		let route = origin
+			.attach_route("test", broadcast::Route::new(hops.clone()))
+			.unwrap();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
 
@@ -2838,7 +3022,7 @@ mod tests {
 		announced.assert_next_none("test");
 
 		// A re-announce at the same path is a brand-new broadcast.
-		let _route = origin.attach_route("test", hops).unwrap();
+		let _route = origin.attach_route("test", broadcast::Route::new(hops)).unwrap();
 		let fresh = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &fresh);
 		assert!(
@@ -2856,7 +3040,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let route = origin.attach_route("test", hops).unwrap();
+		let route = origin.attach_route("test", broadcast::Route::new(hops)).unwrap();
 		let mut assignments = route.assignments();
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next("test", &broadcast);
@@ -2882,11 +3066,11 @@ mod tests {
 		// unannounce followed by a fresh announce, since the identity changed.
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
-		let a = broadcast::Info {
-			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
-			..Default::default()
-		}
-		.produce();
+		let mut a = broadcast::Info::new().produce();
+		a.update_route(broadcast::Route::new(
+			OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+		))
+		.unwrap();
 		let b = broadcast::Info::new().produce();
 
 		let mut announced = origin.consume().announced();
@@ -2905,11 +3089,11 @@ mod tests {
 		// just swaps in the newer broadcast and is still delivered as a fresh Active.
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
-		let a = broadcast::Info {
-			hops: OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
-			..Default::default()
-		}
-		.produce();
+		let mut a = broadcast::Info::new().produce();
+		a.update_route(broadcast::Route::new(
+			OriginList::try_from(vec![Origin::new(1u64).unwrap()]).unwrap(),
+		))
+		.unwrap();
 		let b = broadcast::Info::new().produce();
 
 		let mut announced = origin.consume().announced();
@@ -2958,11 +3142,9 @@ mod tests {
 					.collect::<Vec<_>>(),
 			)
 			.unwrap();
-			broadcast::Info {
-				hops,
-				..Default::default()
-			}
-			.produce()
+			let mut producer = broadcast::Info::new().produce();
+			producer.update_route(broadcast::Route::new(hops)).unwrap();
+			producer
 		}
 
 		// Resolve the active route for "test" after publishing both routes in the given order.
@@ -2972,7 +3154,7 @@ mod tests {
 			let b = route(second);
 			origin.publish_broadcast_spawn("test", a.consume());
 			origin.publish_broadcast_spawn("test", b.consume());
-			let hops = origin.consume().get_broadcast("test").unwrap().info().hops.clone();
+			let hops = origin.consume().get_broadcast("test").unwrap().route().hops;
 			// Keep the producers alive until after we read the active route.
 			drop((a, b));
 			hops

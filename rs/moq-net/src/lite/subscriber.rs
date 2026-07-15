@@ -510,7 +510,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// (other sessions announcing the same path) join it silently as standbys.
 		// An error means the path is outside our scope, so don't serve it.
 		// Reflections are already filtered above.
-		let Ok(route) = self.origin.attach_route(path.clone(), hops) else {
+		let Ok(route) = self
+			.origin
+			.attach_route(path.clone(), crate::broadcast::Route::new(hops))
+		else {
 			return Ok(false);
 		};
 
@@ -523,13 +526,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	/// Handle a RESTART (an explicit restart status, or a duplicate ANNOUNCE on lite-05):
-	/// swap this session's route under the broadcast.
+	/// update this session's route metadata in place.
 	///
-	/// Attaching the replacement route before detaching the old one keeps the broadcast
-	/// continuously fed: in-flight tracks are re-dispatched to the new route and resume
-	/// at the first missing group. Consumers observe nothing. Returns `Ok(false)` if the
-	/// replacement was a reflected loop (this session's route is now gone), `Ok(true)`
-	/// otherwise.
+	/// The broadcast keeps its identity and in-flight tracks keep flowing on this
+	/// session; the origin just re-picks its serving route with the new metadata, so
+	/// a handover only happens if the winner actually changed. Consumers observe
+	/// nothing. Returns `Ok(false)` if the new hop chain is a reflected loop (this
+	/// session's route is now gone), `Ok(true)` otherwise.
 	fn restart_announce(
 		&mut self,
 		path: PathOwned,
@@ -540,7 +543,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		responder_origin: Option<crate::Origin>,
 		routes: &mut HashMap<PathOwned, origin::Route>,
 	) -> Result<bool, Error> {
-		// Reflected loop (or a full chain): the replacement can't be used here. Retire the route.
+		// Reflected loop (or a full chain): the route can't be used here anymore. Retire it.
 		let reflected = match responder_origin {
 			Some(responder) => hops.push(responder).is_err() || hops.contains(&self.self_origin),
 			None => hops.contains(&self.self_origin),
@@ -555,22 +558,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
+		let metadata = crate::broadcast::Route::new(hops);
 
-		// Attach the replacement first so the broadcast never goes route-less; the old
-		// route's tracks then re-dispatch straight onto the replacement when it drops.
-		let Ok(route) = self.origin.attach_route(path.clone(), hops) else {
-			// Origin rejected the replacement; retire the existing route.
-			if let Some(route) = routes.remove(&path) {
-				route.unannounce();
+		if let Some(route) = routes.get_mut(&path) {
+			if route.update(metadata.clone()).is_ok() {
+				return Ok(true);
 			}
+			// The front closed underneath the handle (should not happen while we hold
+			// it); drop the stale route and attach fresh below.
+			routes.remove(&path);
+		}
+
+		let Ok(route) = self.origin.attach_route(path.clone(), metadata) else {
 			return Ok(false);
 		};
-
 		web_async::spawn(self.clone().run_route(path.clone(), route.assignments()));
-		let old = routes.insert(path, route);
-
-		// Detach the replaced route last, handing its in-flight tracks over.
-		drop(old);
+		routes.insert(path, route);
 
 		Ok(true)
 	}

@@ -62,7 +62,7 @@ impl Announced {
 					let Some(broadcast) = event.broadcast() else {
 						continue;
 					};
-					let hops = broadcast.info().hops.iter().map(|origin| origin.id()).collect();
+					let hops = broadcast.route().hops.iter().map(|origin| origin.id()).collect();
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
 						hops,
