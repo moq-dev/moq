@@ -31,29 +31,31 @@ impl Container for Wire {
 	fn poll_read(&self, group: &mut moq_net::GroupConsumer, waiter: &kio::Waiter) -> Poll<Result<Read, Self::Error>> {
 		use std::task::ready;
 
-		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
-			return Poll::Ready(Ok(Read::Done));
-		};
+		loop {
+			let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
+				return Poll::Ready(Ok(Read::Done));
+			};
 
-		let mut hang_frame = hang::container::Frame::decode(data)?;
+			let mut hang_frame = hang::container::Frame::decode(data)?;
 
-		// An empty payload is a marker, not a sample: it says content stops at this
-		// timestamp, so there's nothing to decode. Skip it and read on rather than
-		// handing an empty access unit to a decoder. Yielding no frames (instead of
-		// erroring) is what lets a publisher start emitting these without breaking us.
-		if !hang_frame.payload.has_remaining() {
-			return Poll::Ready(Ok(Read::Fragment(Vec::new())));
+			// An empty payload is a marker, not a sample: it says content stops at this
+			// timestamp, so there's nothing to decode. Read on rather than hand an empty
+			// access unit to a decoder. Skipping (rather than erroring) is what lets a
+			// publisher start emitting markers without breaking us.
+			if !hang_frame.payload.has_remaining() {
+				continue;
+			}
+
+			let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
+			return Poll::Ready(Ok(Read::Frame(Frame {
+				timestamp: hang_frame.timestamp,
+				payload,
+				// Legacy doesn't carry the keyframe bit on the wire; the
+				// wrapping Consumer fills it in from group position.
+				keyframe: false,
+				// Legacy carries no per-frame duration.
+				duration: None,
+			})));
 		}
-
-		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
-		Poll::Ready(Ok(Read::Frame(Frame {
-			timestamp: hang_frame.timestamp,
-			payload,
-			// Legacy doesn't carry the keyframe bit on the wire; the
-			// wrapping Consumer fills it in from group position.
-			keyframe: false,
-			// Legacy carries no per-frame duration.
-			duration: None,
-		})))
 	}
 }

@@ -18,7 +18,7 @@ trait Importer: Send {
 	fn finish(&mut self) -> Result<()>;
 	/// Close the current group without finishing the track
 	/// (see `Track::cut`).
-	fn cut(&mut self, end: Timestamp) -> Result<()>;
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
 }
@@ -30,7 +30,7 @@ trait StreamImporter: Send {
 	fn finish(&mut self) -> Result<()>;
 	/// Close the current group without finishing the track
 	/// (see `Track::cut`).
-	fn cut(&mut self, end: Timestamp) -> Result<()>;
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
 }
@@ -49,7 +49,7 @@ trait FrameSink: Send {
 	fn finish(&mut self) -> Result<()>;
 	/// Close the current group without finishing the track
 	/// (see `Track::cut`).
-	fn cut(&mut self, end: Timestamp) -> Result<()>;
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
 }
@@ -85,7 +85,7 @@ macro_rules! impl_frame_sink {
 			fn finish(&mut self) -> Result<()> {
 				<$ty>::finish(self)
 			}
-			fn cut(&mut self, end: Timestamp) -> Result<()> {
+			fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 				<$ty>::cut(self, end)
 			}
 			fn seek(&mut self, sequence: u64) -> Result<()> {
@@ -117,7 +117,7 @@ impl<S: Splitter, I: FrameSink> Importer for SplitWhole<S, I> {
 	fn finish(&mut self) -> Result<()> {
 		self.import.finish()
 	}
-	fn cut(&mut self, end: Timestamp) -> Result<()> {
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 		self.import.cut(end)
 	}
 	fn seek(&mut self, sequence: u64) -> Result<()> {
@@ -158,7 +158,7 @@ impl<S: Splitter, I: FrameSink> StreamImporter for SplitStream<S, I> {
 		self.import.decode(tail)?;
 		self.import.finish()
 	}
-	fn cut(&mut self, end: Timestamp) -> Result<()> {
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 		self.import.cut(end)
 	}
 	fn seek(&mut self, sequence: u64) -> Result<()> {
@@ -186,7 +186,7 @@ impl<E: CatalogExt> Importer for Avc1<E> {
 	fn finish(&mut self) -> Result<()> {
 		self.import.finish()
 	}
-	fn cut(&mut self, end: Timestamp) -> Result<()> {
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 		self.import.cut(end)
 	}
 	fn seek(&mut self, sequence: u64) -> Result<()> {
@@ -208,7 +208,7 @@ macro_rules! impl_importer_direct {
 			fn finish(&mut self) -> Result<()> {
 				<$ty>::finish(self)
 			}
-			fn cut(&mut self, end: Timestamp) -> Result<()> {
+			fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 				<$ty>::cut(self, end)
 			}
 			fn seek(&mut self, sequence: u64) -> Result<()> {
@@ -385,15 +385,19 @@ impl<E: CatalogExt> Track<E> {
 		self.inner.finish()
 	}
 
-	/// Cut the current group at `end`, leaving the track (and its catalog rendition)
-	/// OPEN — unlike [`finish`](Self::finish), which ends the track. Publishing
-	/// resumes into a fresh group on the next keyframe.
+	/// Cut the current group, leaving the track (and its catalog rendition) OPEN —
+	/// unlike [`finish`](Self::finish), which ends the track. Publishing resumes into a
+	/// fresh group on the next keyframe.
 	///
-	/// `end` is where this group's content stops, i.e. the presentation end of its
-	/// last frame — NOT the timestamp of whatever resumes later. It bounds that last
-	/// frame, which otherwise has no end of its own: a consumer would have to wait for
-	/// the *next* group's first frame to infer one, and that group may be late,
-	/// reordered, or never arrive at all. So a group cut at `end` is self-describing.
+	/// `end` is where this group's content stops, i.e. the presentation end of its last
+	/// frame — NOT the timestamp of whatever resumes later. It bounds that last frame,
+	/// which otherwise has no end of its own: a consumer would have to wait for the
+	/// *next* group's first frame to infer one, and that group may be late, reordered,
+	/// or never arrive at all. So a group cut at a known `end` is self-describing.
+	///
+	/// `None` is for callers with no boundary to give — audio, where every frame is a
+	/// keyframe and the duration is deterministic, so the next packet bounds this one
+	/// anyway.
 	///
 	/// Typical use: pause a track that has lost its last subscriber while leaving a
 	/// COMPLETE final group rather than a truncated one.
@@ -405,7 +409,7 @@ impl<E: CatalogExt> Track<E> {
 	/// content ends somewhere that keyframe won't tell us. Composes with
 	/// [`finish`](Self::finish) and [`seek`](Self::seek). This is the canonical
 	/// description — the codec `Import`s and `TrackStream` reference it.
-	pub fn cut(&mut self, end: Timestamp) -> Result<()> {
+	pub fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 		self.inner.cut(end)
 	}
 
@@ -520,7 +524,7 @@ impl<E: CatalogExt> TrackStream<E> {
 
 	/// Close the current group cleanly without finishing the track
 	/// (see [`Track::cut`]).
-	pub fn cut(&mut self, end: Timestamp) -> Result<()> {
+	pub fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
 		self.inner.cut(end)
 	}
 
@@ -700,7 +704,7 @@ mod tests {
 		import
 			.decode(b"frame-one", Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
-		import.cut(Timestamp::from_micros(1_500).unwrap()).unwrap();
+		import.cut(Some(Timestamp::from_micros(1_500).unwrap())).unwrap();
 
 		// Track is still open: a later frame opens a fresh group 2 (resume after pause).
 		import

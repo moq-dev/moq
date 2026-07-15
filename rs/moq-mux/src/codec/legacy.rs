@@ -161,7 +161,7 @@ impl<E: CatalogExt> Import<E> {
 	// Kept for codec-`Import` surface parity; the legacy importer isn't in the
 	// object-safe dispatch set, so it isn't wired in.
 	#[allow(dead_code)]
-	pub fn cut(&mut self, end: crate::container::Timestamp) -> crate::Result<()> {
+	pub fn cut(&mut self, end: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
 		Ok(())
 	}
@@ -181,7 +181,7 @@ impl<E: CatalogExt> Import<E> {
 			payload: bytes::Bytes::copy_from_slice(frame),
 			keyframe: true,
 		})?;
-		self.track.close(None)?;
+		self.track.cut(None)?;
 		Ok(())
 	}
 }

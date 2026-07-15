@@ -454,7 +454,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			payload: Bytes::copy_from_slice(data),
 			keyframe: true,
 		})?;
-		stream.track.close(None)?;
+		stream.track.cut(None)?;
 		Ok(())
 	}
 

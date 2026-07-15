@@ -117,7 +117,7 @@ async fn export_aac_roundtrip() {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.close(None).unwrap();
+		producer.cut(None).unwrap();
 	}
 	producer.finish().unwrap();
 
@@ -238,7 +238,7 @@ async fn export_lead_audio() -> BytesMut {
 	// Lead audio (0..80 ms) precedes the first video keyframe at 100 ms; both continue after.
 	for ms in [0, 20, 40, 60, 80] {
 		audio.write(audio_frame(ms)).unwrap();
-		audio.close(None).unwrap();
+		audio.cut(None).unwrap();
 	}
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 200));
@@ -250,10 +250,10 @@ async fn export_lead_audio() -> BytesMut {
 			keyframe: true,
 		})
 		.unwrap();
-	video.close(None).unwrap();
+	video.cut(None).unwrap();
 	for ms in [100, 120, 140] {
 		audio.write(audio_frame(ms)).unwrap();
-		audio.close(None).unwrap();
+		audio.cut(None).unwrap();
 	}
 	video.finish().unwrap();
 	audio.finish().unwrap();
@@ -582,7 +582,7 @@ async fn export_scte35_roundtrip() {
 			keyframe: true,
 		})
 		.unwrap();
-	scte_producer.close(None).unwrap();
+	scte_producer.cut(None).unwrap();
 	scte_producer.finish().unwrap();
 
 	// Now add the real video/audio by importing bbb.ts (this moves `broadcast`).
@@ -687,7 +687,7 @@ async fn export_pes_verbatim_roundtrip() {
 			keyframe: true,
 		})
 		.unwrap();
-	data_producer.close(None).unwrap();
+	data_producer.cut(None).unwrap();
 	data_producer.finish().unwrap();
 
 	// Real video/audio supplies the media clock (moves `broadcast`).
@@ -766,7 +766,7 @@ async fn scte35_without_video_export_is_rejected() {
 			keyframe: true,
 		})
 		.unwrap();
-	producer.close(None).unwrap();
+	producer.cut(None).unwrap();
 	producer.finish().unwrap();
 
 	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
@@ -1304,7 +1304,7 @@ async fn export_opus_roundtrip() {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.close(None).unwrap();
+		producer.cut(None).unwrap();
 	}
 	producer.finish().unwrap();
 
@@ -1380,7 +1380,7 @@ async fn opus_export_import_roundtrip() {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.close(None).unwrap();
+		producer.cut(None).unwrap();
 	}
 	producer.finish().unwrap();
 

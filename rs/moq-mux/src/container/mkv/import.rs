@@ -368,7 +368,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			TrackKind::Audio => {
 				track.track.write(frame)?;
-				track.track.close(None)?;
+				track.track.cut(None)?;
 			}
 		}
 

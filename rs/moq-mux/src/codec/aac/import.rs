@@ -69,7 +69,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Cut the current group at `end` without finishing the track; publishing resumes on
 	/// the next keyframe. See `import::Track::cut` for the full contract.
-	pub fn cut(&mut self, end: crate::container::Timestamp) -> crate::Result<()> {
+	pub fn cut(&mut self, end: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
 		Ok(())
 	}
@@ -89,7 +89,7 @@ impl<E: CatalogExt> Import<E> {
 			keyframe: true,
 			duration: None,
 		})?;
-		self.track.close(None)?;
+		self.track.cut(None)?;
 		Ok(())
 	}
 }
