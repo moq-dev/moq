@@ -93,10 +93,10 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 
 Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `--help`, and doc comments should describe only the current/canonical surface, so a reader is steered to the right thing and never learns the dead one. Keep the deprecated path *working* but invisible:
 
-- Hide the deprecated symbol from every published surface: no `--help` entry, no "deprecated, use X" note in its doc comment, and drop it from the generated API docs. The per-language mechanics (clap hidden aliases, `#[doc(hidden)]`, `@internal`) live in [`rs/CLAUDE.md`](rs/CLAUDE.md) and [`js/CLAUDE.md`](js/CLAUDE.md).
+- Hide the deprecated symbol from every published surface: no `--help` entry, no "deprecated, use X" note in its doc comment, and drop it from the generated API docs. The per-language mechanics (clap hidden aliases, `#[doc(hidden)]` + `#[deprecated]`, `@internal`) live in [`rs/CLAUDE.md`](rs/CLAUDE.md) and [`js/CLAUDE.md`](js/CLAUDE.md).
 - Remove the example invocations and prose that mention it from `/doc`.
 
-The rename/removal rationale lives in the commit message and PR description, not in docs that users read. A runtime warning when someone *uses* the deprecated path is fine (it fires on use, it isn't documentation); a standing note that advertises the dead name is not.
+The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
 
 ## Root Cause First
 
