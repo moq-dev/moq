@@ -19,7 +19,7 @@
 	},
 	"dependencies": {
 		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
-		"@libav.js/variant-opus-af": "^6.8.8",
+		"@libav.js/variant-opus-af": "^6.9.8",
 		"@moq/json": "workspace:^",
 		"@moq/loc": "workspace:^",
 		"@moq/net": "workspace:^",
