@@ -1,24 +1,23 @@
 const TRACK_ALIAS_TIMEOUT_MS = 1000;
 
-interface Pending<T> extends PromiseWithResolvers<T> {
-	waiters: number;
-}
+type Resolver<T> = PromiseWithResolvers<T>["resolve"];
 
 /** Resolves publisher-chosen track aliases after control/data stream reordering. @internal */
 export class TrackAliases<T> {
 	#active = new Map<bigint, T>();
-	#pending = new Map<bigint, Pending<T>>();
+	#pending = new Map<bigint, Set<Resolver<T>>>();
 
 	/** Waits briefly for an alias to be established by SUBSCRIBE_OK or PUBLISH. */
 	async get(alias: bigint): Promise<T> {
 		if (this.#active.has(alias)) return this.#active.get(alias) as T;
 
-		let pending = this.#pending.get(alias);
-		if (!pending) {
-			pending = { ...Promise.withResolvers<T>(), waiters: 0 };
-			this.#pending.set(alias, pending);
+		const { promise, resolve } = Promise.withResolvers<T>();
+		let resolvers = this.#pending.get(alias);
+		if (!resolvers) {
+			resolvers = new Set();
+			this.#pending.set(alias, resolvers);
 		}
-		pending.waiters += 1;
+		resolvers.add(resolve);
 
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const timeout = new Promise<never>((_, reject) => {
@@ -26,11 +25,11 @@ export class TrackAliases<T> {
 		});
 
 		try {
-			return await Promise.race([pending.promise, timeout]);
+			return await Promise.race([promise, timeout]);
 		} finally {
 			clearTimeout(timer);
-			pending.waiters -= 1;
-			if (this.#pending.get(alias) === pending && pending.waiters === 0) this.#pending.delete(alias);
+			resolvers.delete(resolve);
+			if (this.#pending.get(alias) === resolvers && resolvers.size === 0) this.#pending.delete(alias);
 		}
 	}
 
@@ -43,9 +42,9 @@ export class TrackAliases<T> {
 		}
 
 		this.#active.set(alias, value);
-		const pending = this.#pending.get(alias);
+		const resolvers = this.#pending.get(alias);
 		this.#pending.delete(alias);
-		pending?.resolve(value);
+		for (const resolve of resolvers ?? []) resolve(value);
 	}
 
 	/** Removes an alias only if it still belongs to the supplied value. */

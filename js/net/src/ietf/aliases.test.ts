@@ -11,6 +11,16 @@ test("waits for the control message that establishes an alias", async () => {
 	expect(await pending).toBe(track);
 });
 
+test("resolves every subgroup waiting for the same alias", async () => {
+	const aliases = new TrackAliases<object>();
+	const track = {};
+	const pending = [aliases.get(7n), aliases.get(7n)];
+
+	aliases.set(7n, track);
+
+	expect(await Promise.all(pending)).toEqual([track, track]);
+});
+
 test("rejects an alias used by two active tracks", () => {
 	const aliases = new TrackAliases<object>();
 	aliases.set(7n, {});
