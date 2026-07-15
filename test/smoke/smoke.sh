@@ -251,10 +251,15 @@ prepare_c() {
         mark_broken c "libmoq artifacts missing ($header / $lib)"
         return
     }
+    # libmoq.a bundles moq-video (AVFoundation capture + VideoToolbox codecs on
+    # macOS, libva on Linux) and openh264 (C++), so the static link needs the
+    # media frameworks and the C++ runtime alongside the usual system libs.
     case "$(uname -s)" in
-        Darwin) os_libs=(-framework CoreFoundation -framework Security -framework CoreServices) ;;
-        # libmoq.a bundles openh264 (C++) and, on Linux, moq-vaapi (libva), so
-        # the static link needs their runtimes alongside the usual system libs.
+        Darwin) os_libs=(
+            -framework CoreFoundation -framework Foundation -framework Security -framework CoreServices
+            -framework CoreMedia -framework CoreVideo -framework AVFoundation -framework VideoToolbox
+            -lc++
+        ) ;;
         *) os_libs=(-ldl -lm -lpthread -lstdc++ -lva -lva-drm) ;;
     esac
     C_SMOKE="$TMP/c-smoke"
