@@ -157,7 +157,9 @@ impl<E: moq_mux::catalog::hang::CatalogExt> AudioProducer<E> {
 			duration: None,
 		};
 		self.track.write(mux_frame)?;
-		self.track.finish_group()?;
+		// No boundary to give: the next packet bounds this one, and Opus frames have a
+		// deterministic duration anyway.
+		self.track.cut(None)?;
 		Ok(())
 	}
 
