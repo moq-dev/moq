@@ -156,13 +156,13 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Close the current group without finishing the track; publishing resumes on
-	/// the next keyframe. See `import::Track::finish_group` for the full contract.
+	/// Cut the current group at `end` without finishing the track; publishing resumes on
+	/// the next keyframe. See `import::Track::cut` for the full contract.
 	// Kept for codec-`Import` surface parity; the legacy importer isn't in the
 	// object-safe dispatch set, so it isn't wired in.
 	#[allow(dead_code)]
-	pub fn finish_group(&mut self) -> crate::Result<()> {
-		self.track.finish_group()?;
+	pub fn cut(&mut self, end: crate::container::Timestamp) -> crate::Result<()> {
+		self.track.cut(end)?;
 		Ok(())
 	}
 
@@ -181,7 +181,7 @@ impl<E: CatalogExt> Import<E> {
 			payload: bytes::Bytes::copy_from_slice(frame),
 			keyframe: true,
 		})?;
-		self.track.finish_group()?;
+		self.track.close(None)?;
 		Ok(())
 	}
 }

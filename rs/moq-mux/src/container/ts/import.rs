@@ -704,7 +704,7 @@ impl<E: CatalogExt> SectionStream<E> {
 			keyframe: true,
 		};
 		self.track.write(frame)?;
-		self.track.finish_group()?;
+		self.track.close(None)?;
 		Ok(())
 	}
 
@@ -789,7 +789,7 @@ impl<E: CatalogExt> VerbatimStream<E> {
 			keyframe: true,
 		};
 		self.track.write(frame)?;
-		self.track.finish_group()?;
+		self.track.close(None)?;
 		Ok(())
 	}
 
