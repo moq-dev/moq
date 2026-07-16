@@ -5,14 +5,20 @@ use crate::container::Frame;
 /// AAC importer.
 ///
 /// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
-/// an MP4 ESDS atom), so its catalog is known up front. Each packet passed to
-/// [`decode`](Self::decode) is published as one hang frame in its own group, so the relay can
-/// forward each frame without waiting for a group boundary. The codec's packet loss
-/// concealment handles drops. Build it with [`new`](Self::new), passing the track producer
-/// and the [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
+/// an MP4 ESDS atom), so its catalog is known up front. By default each packet is published as
+/// one hang frame in its own group (every AAC frame is independently decodable), so the relay can
+/// forward each frame without waiting for a group boundary. A publisher that drives its own group
+/// boundaries (e.g. aligning audio groups to a media-segment cadence) can call
+/// [`with_keyframe_grouping(false)`](Self::with_keyframe_grouping) and mark boundaries via
+/// [`seek`](Self::seek); frames then accumulate into the current group instead of one per packet.
+/// Build it with [`new`](Self::new), passing the track producer and the
+/// [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
+	/// When true, the caller drives group boundaries (via [`seek`](Self::seek)) and
+	/// [`decode`](Self::decode) does not close a group per packet. Default false = one group/packet.
+	manual_groups: bool,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -40,7 +46,27 @@ impl<E: CatalogExt> Import<E> {
 		Ok(Self {
 			track: catalog.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
+			manual_groups: false,
 		})
+	}
+
+	/// Opt into caller-driven group boundaries.
+	///
+	/// Default (`true`, the parameter passed as `enabled`) keeps one group per packet. Pass
+	/// `false` when the publisher marks its own boundaries via [`seek`](Self::seek) (e.g. aligning
+	/// audio groups to a media-segment cadence): keyframes no longer roll a new group per packet,
+	/// so frames accumulate into the current group until the next explicit boundary.
+	pub fn with_keyframe_grouping(mut self, enabled: bool) -> Self {
+		self.track.set_keyframe_grouping(enabled);
+		self.manual_groups = !enabled;
+		self
+	}
+
+	/// Post-construction form of [`with_keyframe_grouping`](Self::with_keyframe_grouping), for
+	/// callers that build the importer before knowing the policy (e.g. a C-ABI toggle).
+	pub fn set_keyframe_grouping(&mut self, enabled: bool) {
+		self.track.set_keyframe_grouping(enabled);
+		self.manual_groups = !enabled;
 	}
 
 	/// The MoQ track name this importer publishes on.
@@ -80,7 +106,12 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
+	/// Publish one AAC packet, stamping `pts` or a wall clock when absent.
+	///
+	/// By default the packet is published as its own group (closed immediately). If the importer
+	/// was built with [`with_keyframe_grouping(false)`](Self::with_keyframe_grouping), the frame
+	/// instead accumulates into the current group and the caller closes groups via
+	/// [`seek`](Self::seek).
 	pub fn decode(&mut self, frame: &[u8], pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
 		self.track.write(Frame {
@@ -89,7 +120,11 @@ impl<E: CatalogExt> Import<E> {
 			keyframe: true,
 			duration: None,
 		})?;
-		self.track.cut(None)?;
+		if !self.manual_groups {
+			// One group per packet: close it immediately so the relay forwards it without
+			// waiting for the next frame. In manual mode the caller bounds groups via `seek`.
+			self.track.cut(None)?;
+		}
 		Ok(())
 	}
 }

@@ -704,7 +704,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let fragment_bytes = Bytes::from(moof_buf);
 
 			// Write the per-track fragment as a single MoQ frame (passthrough).
-			let mut g = if contains_keyframe {
+			//
+			// A new group starts only at an explicit caller boundary (`pending_sequence` from
+			// `moq_publish_media_group`), a *video* keyframe, or when no group is open yet.
+			// Audio samples are all flagged keyframes above (for the consumer's independent-
+			// decode fast path), but that must NOT open a group per audio frame: audio frames
+			// belong to the segment's group, which the caller opens at its own group_id cadence.
+			// Grouping per audio frame produced a new MoQ group (hence a new QUIC/qmux stream)
+			// per audio frame, a stream storm that desynced the co-multiplexed video track.
+			let start_group = track.pending_sequence.is_some()
+				|| track.group.is_none()
+				|| (contains_keyframe && matches!(track.kind, TrackKind::Video));
+
+			let mut g = if start_group {
 				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
 				}

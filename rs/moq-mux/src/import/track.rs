@@ -21,6 +21,10 @@ trait Importer: Send {
 	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
+	/// Control whether a keyframe starts a new group (see
+	/// [`container::Producer::with_keyframe_grouping`](crate::container::Producer::with_keyframe_grouping)).
+	/// Default no-op: only importers where every frame is a keyframe (audio) act on it.
+	fn set_keyframe_grouping(&mut self, _enabled: bool) {}
 }
 
 /// Object-safe dispatch for a [`TrackStream`] importer (raw byte stream).
@@ -222,10 +226,33 @@ macro_rules! impl_importer_direct {
 }
 impl_importer_direct!(crate::codec::vp8::Import<E>);
 impl_importer_direct!(crate::codec::vp9::Import<E>);
-impl_importer_direct!(crate::codec::aac::Import<E>);
 impl_importer_direct!(crate::codec::opus::Import<E>);
 impl_importer_direct!(crate::codec::flac::Import<E>);
 impl_importer_direct!(crate::codec::mp3::Import<E>);
+
+// AAC is impl'd by hand (not via impl_importer_direct!) so it can forward
+// set_keyframe_grouping: every AAC frame is a keyframe, so a caller driving its own
+// group boundaries needs to stop keyframes from rolling a group per packet.
+impl<E: CatalogExt> Importer for crate::codec::aac::Import<E> {
+	fn decode(&mut self, frame: &[u8], pts: Option<Timestamp>) -> Result<()> {
+		crate::codec::aac::Import::decode(self, frame, pts)
+	}
+	fn finish(&mut self) -> Result<()> {
+		crate::codec::aac::Import::finish(self)
+	}
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+		crate::codec::aac::Import::cut(self, end)
+	}
+	fn seek(&mut self, sequence: u64) -> Result<()> {
+		crate::codec::aac::Import::seek(self, sequence)
+	}
+	fn demand(&self) -> moq_net::TrackDemand {
+		crate::codec::aac::Import::demand(self)
+	}
+	fn set_keyframe_grouping(&mut self, enabled: bool) {
+		crate::codec::aac::Import::set_keyframe_grouping(self, enabled);
+	}
+}
 
 /// An av1C config record (ISO/IEC 14496-15) starts with a 0x81 marker and is at
 /// least 16 bytes; raw OBUs never look like this.
@@ -416,6 +443,14 @@ impl<E: CatalogExt> Track<E> {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
+	}
+
+	/// Control whether a keyframe starts a new group. Default `true` (video GOP semantics; audio
+	/// otherwise opens a group per packet). Pass `false` for a publisher that drives its own group
+	/// boundaries via [`seek`](Self::seek), so audio frames accumulate into the current group
+	/// instead of one group per packet. No-op for codecs that don't group per keyframe.
+	pub fn set_keyframe_grouping(&mut self, enabled: bool) {
+		self.inner.set_keyframe_grouping(enabled);
 	}
 
 	/// A watch-only handle to the track's subscriber demand.

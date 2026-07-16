@@ -42,6 +42,14 @@ pub struct Producer<C: Container> {
 	/// Records each group open (sequence + keyframe timestamp) into this rendition's
 	/// timeline track, when the producer was built with one.
 	recorder: Option<crate::timeline::Recorder>,
+
+	/// Whether a keyframe closes the current group and starts a new one.
+	///
+	/// Default `true`: every keyframe rolls the group (video GOP semantics). Set `false` for
+	/// tracks where every frame is independently decodable (e.g. audio) so a keyframe does *not*
+	/// force a new group; grouping is then driven explicitly by [`finish_group`](Self::finish_group)
+	/// / [`seek`](Self::seek) (i.e. the caller's segment boundaries) rather than per frame.
+	keyframe_starts_group: bool,
 }
 
 impl<C: Container> Producer<C> {
@@ -59,6 +67,7 @@ impl<C: Container> Producer<C> {
 			latency: std::time::Duration::ZERO,
 			pending_sequence: None,
 			recorder: None,
+			keyframe_starts_group: true,
 		}
 	}
 
@@ -90,15 +99,34 @@ impl<C: Container> Producer<C> {
 		&self.inner
 	}
 
+	/// Control whether a keyframe closes the current group and starts a new one.
+	///
+	/// Default `true` (video GOP semantics). Pass `false` for tracks where every frame is a
+	/// keyframe (e.g. audio): the frames stay flagged as keyframes, but grouping is driven by
+	/// [`finish_group`](Self::finish_group) / [`seek`](Self::seek) instead of rolling a new group
+	/// per frame, so the caller's segment boundaries define the groups. Without an explicit
+	/// boundary the frames accumulate into the current group.
+	pub fn with_keyframe_grouping(mut self, enabled: bool) -> Self {
+		self.keyframe_starts_group = enabled;
+		self
+	}
+
+	/// Set whether a keyframe rolls a new group. See [`with_keyframe_grouping`](Self::with_keyframe_grouping).
+	/// Post-construction form, for importers that build the producer before knowing the policy.
+	pub fn set_keyframe_grouping(&mut self, enabled: bool) {
+		self.keyframe_starts_group = enabled;
+	}
+
 	/// Write a frame to the track.
 	///
 	/// A keyframe closes any open group and starts a new one. A non-keyframe extends
 	/// the current group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe),
 	/// so a caller joining mid-stream can skip frames until the first keyframe.
 	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
-		// A keyframe cuts the previous group, its own timestamp being the boundary the
-		// group's last frame ends at.
-		if frame.keyframe {
+		// A keyframe cuts the previous group (its timestamp is where the last frame ends),
+		// unless keyframe grouping is disabled (e.g. audio: every frame is a keyframe, but
+		// groups are bounded explicitly via seek/cut, not per frame).
+		if frame.keyframe && self.keyframe_starts_group {
 			self.cut(Some(frame.timestamp))?;
 		}
 
@@ -310,6 +338,29 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![2, 2]);
+	}
+
+	/// With keyframe grouping disabled (e.g. audio, where every frame is a keyframe), keyframes do
+	/// NOT roll a new group per frame: they accumulate into the current group, and only an explicit
+	/// boundary (seek/cut) starts a new one. Regression for the "one audio group per frame" bug on
+	/// the hang path.
+	#[tokio::test]
+	async fn keyframe_grouping_disabled_packs_into_one_group() {
+		let track = track_producer("test");
+		let consumer = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy).with_keyframe_grouping(false);
+
+		// Every frame is a keyframe (audio), but they must all land in ONE group...
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(10_000, true)).unwrap();
+		producer.write(frame(20_000, true)).unwrap();
+		// ...until an explicit boundary opens the next group.
+		producer.seek(1).unwrap();
+		producer.write(frame(30_000, true)).unwrap();
+		producer.write(frame(40_000, true)).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![3, 2]);
 	}
 
 	/// `cut()` closes the current group immediately; the next write must be a keyframe.
