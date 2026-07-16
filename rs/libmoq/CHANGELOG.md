@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Linking `libmoq.a` on macOS no longer fails on undefined Apple framework
+  symbols, and the CMake package config carries the same libraries the
+  pkg-config file does.
+
 ### Changed
 
-- Generated pkg-config metadata includes the Apple media frameworks and C++
-  runtime required to link the static library on macOS.
+- The native libraries an external linker needs alongside `libmoq.a` now come
+  from `rs/libmoq/native-libs/`, so the pkg-config file and the CMake package
+  config can no longer drift apart. This adds the Apple media frameworks, the
+  capture frameworks, and the C++ runtime on macOS, `libva` and the C++ runtime
+  on Linux, and the full system library set on Windows.
 - JSON snapshot C ABI renamed for symmetry with the stream mode, so the caller
   opts explicitly into one of the two modes: `moq_json_config` ->
   `moq_json_snapshot_config`, `moq_publish_json` -> `moq_publish_json_snapshot`

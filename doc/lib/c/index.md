@@ -49,18 +49,21 @@ and `lib/` (`libmoq.a` plus the dynamic library).
 
 ### Compile against it
 
-Point your compiler at the extracted `include/` and `lib/` directories and link
-`-lmoq`, plus the platform system libraries `libmoq` needs:
+`libmoq.a` is a static library, so your linker also needs the system libraries it
+depends on (media frameworks, the C++ runtime, and so on). The bundle ships a
+pkg-config file that lists them, which saves you tracking the set by hand:
 
 ```bash
 root=moq-$ver-$target
+export PKG_CONFIG_PATH="$root/lib/pkgconfig"
 
-# Linux
-cc subscribe.c -I"$root/include" -L"$root/lib" -lmoq -lpthread -ldl -lm -o subscribe
+cc subscribe.c $(pkg-config --cflags --libs --static moq) -o subscribe
+```
 
-# macOS
-cc subscribe.c -I"$root/include" -L"$root/lib" -lmoq \
-  -framework CoreFoundation -framework Security -o subscribe
+Without pkg-config, pass the same flags yourself:
+
+```bash
+pkg-config --libs --static moq   # prints exactly what to add
 ```
 
 The static library (`libmoq.a`) links the whole Rust runtime in, so the result

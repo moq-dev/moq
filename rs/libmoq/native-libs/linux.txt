@@ -1,0 +1,14 @@
+# Native libraries an external linker must pass when it links libmoq.a on Linux.
+# See apple.txt for the format and the regeneration command.
+
+# std
+dl
+m
+pthread
+
+# openh264 (the software H.264 fallback) is C++
+stdc++
+
+# moq-video: the vaapi feature links libva for hardware encode and decode
+va
+va-drm

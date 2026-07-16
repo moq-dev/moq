@@ -22,29 +22,13 @@ if(NOT TARGET moq::moq)
         INTERFACE_INCLUDE_DIRECTORIES "${_moq_includedir}"
     )
 
-    # Link required system frameworks on macOS
-    if(APPLE)
-        set_property(TARGET moq::moq APPEND PROPERTY
-            INTERFACE_LINK_LIBRARIES "-framework CoreFoundation" "-framework Security" "-framework CoreServices"
-        )
-    endif()
-
-    # On Windows, add the system libraries Rust std/deps pull in (from
-    # `cargo rustc -- --print native-static-libs`). An external linker
-    # consuming the staticlib needs these spelled out; cargo can't inject them.
-    if(WIN32)
-        set_property(TARGET moq::moq APPEND PROPERTY
-            INTERFACE_LINK_LIBRARIES
-                "ws2_32" "userenv" "bcrypt" "ntdll" "dbghelp" "advapi32" "legacy_stdio_definitions"
-        )
-    endif()
-
-    # On Linux, add required system libraries
-    if(UNIX AND NOT APPLE)
-        set_property(TARGET moq::moq APPEND PROPERTY
-            INTERFACE_LINK_LIBRARIES "dl" "m" "pthread"
-        )
-    endif()
+    # System libraries Rust std/deps pull in. An external linker consuming the
+    # staticlib needs these spelled out; cargo can't inject them. Baked in at
+    # install time from rs/libmoq/native-libs/ for the platform this was built
+    # for, which is the only platform the installed static library works on.
+    set_property(TARGET moq::moq APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES @MOQ_NATIVE_LIBS_QUOTED@
+    )
 endif()
 
 # Clean up internal variables

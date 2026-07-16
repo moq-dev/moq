@@ -254,18 +254,21 @@ prepare_c() {
         mark_broken c "libmoq artifacts missing ($header / $lib)"
         return
     }
+    # cargo can't inject libmoq.a's native deps into an external link, so read
+    # them from the same list build.rs and CMake use.
+    local native_libs
     case "$(uname -s)" in
-        Darwin)
-            os_libs=(
-                -framework CoreFoundation -framework Security -framework CoreServices
-                -framework Foundation -framework AVFoundation -framework CoreMedia
-                -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -lc++
-            )
-            ;;
-        # libmoq.a bundles openh264 (C++) and, on Linux, moq-vaapi (libva), so
-        # the static link needs their runtimes alongside the usual system libs.
-        *) os_libs=(-ldl -lm -lpthread -lstdc++ -lva -lva-drm) ;;
+        Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;
+        *) native_libs="$WORKSPACE/rs/libmoq/native-libs/linux.txt" ;;
     esac
+    os_libs=()
+    while read -r entry; do
+        case "$entry" in
+            '' | '#'*) continue ;;
+            framework:*) os_libs+=(-framework "${entry#framework:}") ;;
+            *) os_libs+=("-l$entry") ;;
+        esac
+    done <"$native_libs"
     C_SMOKE="$TMP/c-smoke"
     if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_SMOKE" >"$TMP/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"

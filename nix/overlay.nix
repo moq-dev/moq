@@ -76,16 +76,46 @@ let
   };
 
   libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
+
+  # The native libraries an external linker must pass alongside libmoq.a.
+  # rs/libmoq/native-libs/ is the single source: build.rs bakes it into moq.pc
+  # and rs/libmoq/CMakeLists.txt reads it for in-tree consumers. This installPhase
+  # substitutes the find_package template directly rather than running CMake, so
+  # format the same list here, matching CMakeLists.txt's MOQ_NATIVE_LIBS_QUOTED.
+  libmoqNativeLibs =
+    let
+      platform =
+        if final.stdenv.hostPlatform.isDarwin then
+          "apple"
+        else if final.stdenv.hostPlatform.isWindows then
+          "windows"
+        else
+          "linux";
+      lines = final.lib.splitString "\n" (builtins.readFile ../rs/libmoq/native-libs/${platform}.txt);
+      entries = builtins.filter (line: line != "" && !(final.lib.hasPrefix "#" line)) lines;
+      quote =
+        entry:
+        if final.lib.hasPrefix "framework:" entry then
+          ''"-framework ${final.lib.removePrefix "framework:" entry}"''
+        else
+          ''"${entry}"'';
+    in
+    final.lib.concatMapStringsSep " " quote entries;
+
   libmoqArgs = libmoqInfo // {
-    # libmoq's build.rs reads moq.pc.in at compile time to generate the
-    # pkgconfig file. craneLib.cleanCargoSource's default filter drops
-    # .pc.in files, which makes build.rs silently skip pkgconfig
-    # generation (see the `if let Ok(template)` in rs/libmoq/build.rs)
+    # libmoq's build.rs reads moq.pc.in and native-libs/*.txt at compile time to
+    # generate the pkgconfig file. craneLib.cleanCargoSource's default filter
+    # drops both, which makes build.rs skip pkgconfig generation (see the
+    # `if let Ok(template)` in rs/libmoq/build.rs) or fail reading the lib list,
     # and the installPhase's `cp .../moq.pc` then fails.
     src = final.lib.cleanSourceWith {
       src = ../.;
       name = "source";
-      filter = path: type: (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
+      filter =
+        path: type:
+        (final.lib.hasSuffix ".pc.in" path)
+        || (final.lib.hasInfix "/rs/libmoq/native-libs/" path)
+        || (craneLib.filterCargoSources path type);
     };
     cargoExtraArgs = "-p libmoq";
     doCheck = false;
@@ -127,7 +157,8 @@ let
       substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
         $out/lib/cmake/moq/moq-config.cmake \
         --subst-var-by LIB_FILE libmoq.a \
-        --subst-var-by VERSION "${libmoqInfo.version}"
+        --subst-var-by VERSION "${libmoqInfo.version}" \
+        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg libmoqNativeLibs}
       substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
         $out/lib/cmake/moq/moq-config-version.cmake \
         --subst-var-by VERSION "${libmoqInfo.version}" \
