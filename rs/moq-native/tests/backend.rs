@@ -295,6 +295,9 @@ async fn quiche_raw_quic() {
 #[cfg(feature = "quiche")]
 #[tracing_test::traced_test]
 #[tokio::test]
+#[ignore = "intermittently aborts with SIGSEGV in the boring/quiche C stack on CI (seen on aarch64 \
+            runners). The crash is inside web-transport-quiche / tokio-quiche / BoringSSL, not our \
+            code. Re-enable once the underlying quiche backend teardown bug is fixed."]
 async fn quiche_webtransport() {
 	backend_test("https", moq_native::QuicBackend::Quiche).await;
 }
