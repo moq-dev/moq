@@ -87,6 +87,17 @@ struct StepOutcome {
 	target_duration: Option<u64>,
 }
 
+/// What a step does when a rendition fails.
+#[derive(Clone, Copy)]
+enum OnError {
+	/// Fail the whole step. Used at startup, where a rendition that can't be imported
+	/// means a broken import, and reporting it beats signalling readiness for nothing.
+	Fail,
+	/// Log it and keep the other renditions going. Used by the steady-state loop, where a
+	/// transient upstream error must not tear the import down.
+	Warn,
+}
+
 /// A resource to fetch: a URL, optionally narrowed to a resolved byte range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Resource {
@@ -557,10 +568,13 @@ impl Import {
 
 	/// Discover the renditions and import the first batch of segments.
 	///
-	/// Lets a caller signal readiness once media is actually flowing. [`run`](Self::run)
-	/// does the same work on its first iteration, so calling this first is optional.
+	/// Lets a caller signal readiness once media is actually flowing, so unlike
+	/// [`run`](Self::run) this fails rather than retries: a rendition that can't be
+	/// imported at startup is a broken import, and saying so beats reporting ready and
+	/// then warning forever. [`run`](Self::run) does the same work on its first iteration,
+	/// so calling this first is optional.
 	pub async fn init(&mut self) -> Result<()> {
-		let wrote = self.step().await?.wrote_segments;
+		let wrote = self.step(OnError::Fail).await?.wrote_segments;
 		if wrote == 0 {
 			warn!("HLS playlist had no new segments during init step");
 		} else {
@@ -575,7 +589,7 @@ impl Import {
 	/// retried after a short backoff rather than ending the import.
 	pub async fn run(&mut self) -> Result<()> {
 		loop {
-			let outcome = match self.step().await {
+			let outcome = match self.step(OnError::Warn).await {
 				Ok(outcome) => outcome,
 				Err(err) => {
 					warn!(%err, "HLS import step failed, retrying");
@@ -601,18 +615,23 @@ impl Import {
 	/// This fetches the current media playlists, consumes any fresh segments,
 	/// and returns how many segments were written along with the target
 	/// duration to guide scheduling of the next step.
-	async fn step(&mut self) -> Result<StepOutcome> {
+	///
+	/// `on_error` decides what a failing rendition costs: the whole step, or a log line.
+	async fn step(&mut self, on_error: OnError) -> Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
 		let mut wrote_segments = 0;
 		let mut target_duration = None;
 
-		// A single rendition failing is logged and skipped so one bad variant or segment
-		// doesn't drop the others or abort the whole step.
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			match track.ingest(&self.fetcher, &mut target_duration).await {
 				Ok(count) => wrote_segments += count,
-				Err(err) => warn!(label = %track.label, %err, "rendition import step failed, will retry"),
+				Err(err) => match on_error {
+					OnError::Fail => return Err(err),
+					// Keep the other renditions going: one bad variant or segment shouldn't
+					// drop the rest or abort the whole step.
+					OnError::Warn => warn!(label = %track.label, %err, "rendition import step failed, will retry"),
+				},
 			}
 		}
 
