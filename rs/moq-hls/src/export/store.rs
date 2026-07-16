@@ -226,8 +226,16 @@ impl SegmentStore {
 	/// once on each pause->resume transition: the media timeline jumps across the
 	/// dropped span, so the renderer emits `#EXT-X-DISCONTINUITY` before it. The
 	/// next [`push`](Self::push) forces a fresh segment and tags it.
+	///
+	/// A discontinuity only means something *between* two spans of media, so this is a
+	/// no-op until a fragment has landed: a rendition paused before it ever produced
+	/// has nothing to be discontinuous from.
 	pub fn mark_discontinuity(&self) {
-		self.inner.lock().unwrap().discontinuity_pending = true;
+		let mut inner = self.inner.lock().unwrap();
+		if inner.segments.is_empty() {
+			return;
+		}
+		inner.discontinuity_pending = true;
 	}
 
 	/// Signal end-of-track. The playlist gains `#EXT-X-ENDLIST`.
@@ -411,6 +419,25 @@ mod tests {
 		assert_eq!(snapshot.media_sequence, 2);
 		assert_eq!(snapshot.discontinuity_sequence, 1);
 		assert!(snapshot.segments.iter().all(|s| !s.discontinuity));
+	}
+
+	/// A rendition paused before it ever produced media has nothing to be discontinuous
+	/// from, so the first segment must not carry a leading `#EXT-X-DISCONTINUITY`.
+	#[test]
+	fn discontinuity_ignored_before_any_media() {
+		let cfg = config(Duration::from_secs(2));
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		store.mark_discontinuity();
+		store.push(fragment(1.0));
+
+		let snapshot = store.snapshot();
+		assert!(!snapshot.segments[0].discontinuity);
+
+		// Once media exists, a later pause does tag the seam.
+		store.mark_discontinuity();
+		store.push(fragment(1.0));
+		assert!(store.snapshot().segments[1].discontinuity);
 	}
 
 	#[test]
