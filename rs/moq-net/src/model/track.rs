@@ -1300,16 +1300,6 @@ impl Consumer {
 		})
 	}
 
-	/// Return a cached group by sequence without blocking, or `None` if it isn't in
-	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`Dynamic`]
-	/// will serve on demand.
-	pub fn get_group(&self, sequence: u64) -> Option<group::Consumer> {
-		match &self.inner {
-			ConsumerKind::Plain(state) => state.read().cached_group(sequence),
-			ConsumerKind::Spliced(resume) => resume.get_group(sequence),
-		}
-	}
-
 	/// Fetching a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
@@ -1854,7 +1844,7 @@ impl Subscriber {
 	///
 	/// Takes `&mut self` because a spliced track subscribes to each segment lazily:
 	/// waiting for a group is what registers the demand that delivers it, so this
-	/// can't be a shared read. [`Consumer::get_group`] is the `&self` cache lookup.
+	/// can't be a shared read.
 	pub fn poll_get_group(&mut self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll(waiter, |state| state.poll_get_group(sequence)),
@@ -2130,6 +2120,19 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	/// Whether a group is still in the cache, for the pool eviction tests.
+	///
+	/// Production code never guesses at cache residency: it asks for a past group
+	/// with [`Consumer::fetch_group`], which a [`Dynamic`] serves on demand whether
+	/// or not it is still cached. So this probe lives with the tests that need it
+	/// rather than on the public API.
+	fn cached_group(consumer: &Consumer, sequence: u64) -> Option<group::Consumer> {
+		match &consumer.inner {
+			ConsumerKind::Plain(state) => state.read().cached_group(sequence),
+			ConsumerKind::Spliced(_) => unreachable!("the cache tests use plain tracks"),
+		}
+	}
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
@@ -3183,15 +3186,14 @@ mod test {
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.finish().unwrap();
 
-		let mut consumer = producer.subscribe(None);
+		let mut sub = producer.subscribe(None);
 		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
 		assert!(
-			consumer.get_group(0).now_or_never().is_none(),
+			sub.get_group(0).now_or_never().is_none(),
 			"sequence below fin should block (group could still arrive)"
 		);
 		assert!(
-			consumer
-				.get_group(2)
+			sub.get_group(2)
 				.now_or_never()
 				.expect("sequence at-or-after fin should resolve")
 				.expect("should not error")
@@ -3226,7 +3228,7 @@ mod test {
 		// also returns it synchronously.
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
-		assert!(consumer.get_group(0).is_some());
+		assert!(cached_group(&consumer, 0).is_some());
 		let mut g = consumer.fetch_group(0, None).await.unwrap();
 		assert_eq!(g.sequence, 0);
 		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hello");
@@ -3244,7 +3246,7 @@ mod test {
 		// A cache miss isn't in `get_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
 		// wrapper to the inner `Fetching` (a `kio::Future`).
-		assert!(consumer.get_group(5).is_none());
+		assert!(cached_group(&consumer, 5).is_none());
 		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
 		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
@@ -3398,9 +3400,9 @@ mod test {
 		assert!(pool.used() <= 3000, "pool should be back under budget");
 
 		let consumer = producer.consume();
-		assert!(consumer.get_group(0).is_none(), "evicted group is a cache miss");
-		assert!(consumer.get_group(1).is_some());
-		assert!(consumer.get_group(2).is_some());
+		assert!(cached_group(&consumer, 0).is_none(), "evicted group is a cache miss");
+		assert!(cached_group(&consumer, 1).is_some());
+		assert!(cached_group(&consumer, 2).is_some());
 
 		// A fresh subscriber skips the evicted group entirely.
 		let mut subscriber = producer.subscribe(None);
@@ -3445,12 +3447,12 @@ mod test {
 
 		let consumer = producer.consume();
 		assert!(
-			consumer.get_group(0).is_some(),
+			cached_group(&consumer, 0).is_some(),
 			"recently read group survives: {:?}",
 			pool.debug_entries()
 		);
 		assert!(
-			consumer.get_group(1).is_none(),
+			cached_group(&consumer, 1).is_none(),
 			"stale group is evicted: {:?}",
 			pool.debug_entries()
 		);
@@ -3547,7 +3549,7 @@ mod test {
 			.unwrap();
 
 		assert!(pool.used() <= 3000);
-		let mut group = consumer.get_group(1).expect("refetched latest must stay pinned");
+		let mut group = cached_group(&consumer, 1).expect("refetched latest must stay pinned");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
 	}
 
@@ -3567,7 +3569,7 @@ mod test {
 		// The evicted group is a miss, so the fetch queues for the dynamic handler
 		// (a relay would issue a wire FETCH upstream).
 		let consumer = producer.consume();
-		assert!(consumer.get_group(0).is_none());
+		assert!(cached_group(&consumer, 0).is_none());
 		let pending = consumer.fetch_group(0, None);
 
 		let req = dynamic
