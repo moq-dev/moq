@@ -9,6 +9,18 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Inputs for [`connect_test`].
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+struct ConnectTest<'a> {
+	/// URL scheme to dial (`moqt` for raw QUIC, `https` for WebTransport).
+	scheme: &'a str,
+	/// Server bind address, e.g. `[::]:0` or `127.0.0.1:0`.
+	bind: &'a str,
+	/// Authority the client dials: a DNS name (sends SNI) or a bare IP (no SNI).
+	authority: &'a str,
+	backend: moq_native::QuicBackend,
+}
+
 /// Publish a broadcast on the server, subscribe on the client, and verify
 /// the data arrives correctly using the specified QUIC backend and URL scheme.
 ///
@@ -16,7 +28,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// the SNI-less path.
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
-	connect_test(scheme, "[::]:0", "localhost", backend).await;
+	connect_test(ConnectTest {
+		scheme,
+		bind: "[::]:0",
+		authority: "localhost",
+		backend,
+	})
+	.await;
 }
 
 /// Dial a bare IP so the client sends no TLS SNI (RFC 6066 forbids IP literals
@@ -25,13 +43,26 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 /// than reject. Binds the loopback IP directly to avoid dual-stack flakiness.
 #[cfg(any(feature = "quinn", feature = "noq"))]
 async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
-	connect_test(scheme, "127.0.0.1:0", "127.0.0.1", backend).await;
+	connect_test(ConnectTest {
+		scheme,
+		bind: "127.0.0.1:0",
+		authority: "127.0.0.1",
+		backend,
+	})
+	.await;
 }
 
 /// Publish a broadcast on the server bound to `bind`, subscribe on a client that
 /// dials `authority`, and verify the data arrives over the given backend + scheme.
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
-async fn connect_test(scheme: &str, bind: &str, authority: &str, backend: moq_native::QuicBackend) {
+async fn connect_test(config: ConnectTest<'_>) {
+	let ConnectTest {
+		scheme,
+		bind,
+		authority,
+		backend,
+	} = config;
+
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
