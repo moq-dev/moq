@@ -42,6 +42,16 @@ pub(crate) trait Backend: Send {
 	/// Flush the encoder, returning any buffered packets.
 	fn finish(&mut self) -> Result<Vec<Bytes>, Error>;
 
+	/// Retune the live encoder to `bitrate` bits per second, taking effect from
+	/// roughly the next frame. Called as the congestion controller's estimate
+	/// moves, so it must not force an IDR or rebuild the session: a keyframe on
+	/// every bandwidth change is exactly the burst a closing uplink can't take.
+	///
+	/// No default: a backend that can't retune has to say so with
+	/// [`Error::BitrateUnsupported`](crate::Error::BitrateUnsupported) rather
+	/// than inherit a silent no-op and quietly ignore congestion.
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error>;
+
 	/// The encoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;
 }

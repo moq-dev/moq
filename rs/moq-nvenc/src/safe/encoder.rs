@@ -430,12 +430,20 @@ impl Encoder {
 		let width = initialize_params.encodeWidth;
 		let height = initialize_params.encodeHeight;
 		unsafe { (ENCODE_API.initialize_encoder)(self.ptr, initialize_params) }.result(&self)?;
+
+		// Copy the caller's config before their borrow ends, so the session can
+		// resubmit it to `reconfigure` later. NVENC has already copied it
+		// internally by this point, so the copy is only for our own use.
+		let config = unsafe { initialize_params.encodeConfig.as_ref() }.map(|c| Box::new(*c));
+
 		Ok(Session {
 			encoder: self,
 			width,
 			height,
 			buffer_format,
 			encode_guid: initialize_params.encodeGUID,
+			init: *initialize_params,
+			config,
 		})
 	}
 }

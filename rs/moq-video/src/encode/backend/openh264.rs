@@ -7,6 +7,7 @@ use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType};
 use openh264::formats::YUVSlices;
+use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
 use super::super::encoder::Config;
 use super::Backend;
@@ -17,6 +18,12 @@ pub(crate) const NAME: &str = "openh264";
 
 pub(crate) struct Openh264 {
 	encoder: Encoder,
+	/// openh264 builds the underlying encoder lazily on the first frame and
+	/// rejects `SetOption` with `cmInitExpected` until it exists, so a rate set
+	/// before then waits here and is applied once there's something to set it on.
+	pending: Option<u64>,
+	/// Whether a frame has gone through, i.e. whether the encoder exists yet.
+	started: bool,
 }
 
 impl Openh264 {
@@ -38,12 +45,48 @@ impl Openh264 {
 			height = config.height,
 			"opened H.264 encoder"
 		);
-		Ok(Box::new(Self { encoder }))
+		Ok(Box::new(Self {
+			encoder,
+			pending: None,
+			started: false,
+		}))
+	}
+
+	/// Set the rate on the live encoder. Only valid once it exists; see `pending`.
+	fn apply_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		// The safe wrapper only takes a bitrate at construction, so go through the
+		// raw API. Safe to do here: the wrapper re-applies its own cached
+		// SEncParamExt (which would clobber this) only when the frame dimensions
+		// change, and ours are fixed for the encoder's lifetime.
+		let mut info = SBitrateInfo {
+			iLayer: SPATIAL_LAYER_ALL,
+			iBitrate: bitrate.min(i32::MAX as u64) as i32,
+		};
+
+		let status = unsafe {
+			let api = self.encoder.raw_api();
+			api.set_option(ENCODER_OPTION_BITRATE, std::ptr::from_mut(&mut info).cast())
+		};
+		if status != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"openh264 set bitrate to {bitrate}: status {status}"
+			)));
+		}
+		Ok(())
 	}
 }
 
 impl Backend for Openh264 {
 	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		// A rate deferred from before the encoder existed lands here, ahead of the
+		// frame rather than after it, so a rejected rate can't cost us a frame's
+		// packets on the way out.
+		if self.started {
+			if let Some(bitrate) = self.pending.take() {
+				self.apply_bitrate(bitrate)?;
+			}
+		}
+
 		if keyframe {
 			self.encoder.force_intra_frame();
 		}
@@ -61,6 +104,10 @@ impl Backend for Openh264 {
 		// One Annex-B access unit per frame (low-delay, no B-frames). A skipped
 		// frame yields an empty bitstream.
 		let bytes = bitstream.to_vec();
+
+		// The encode above built the underlying encoder, so any pending rate can
+		// be set from the next frame on.
+		self.started = true;
 		Ok(if bytes.is_empty() {
 			Vec::new()
 		} else {
@@ -71,6 +118,16 @@ impl Backend for Openh264 {
 	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
 		// Low-delay: nothing is buffered, so there's nothing to flush.
 		Ok(Vec::new())
+	}
+
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		// Nothing to set it on yet: defer to the first frame. The contract is only
+		// that the rate takes effect from roughly the next frame, and it does.
+		if !self.started {
+			self.pending = Some(bitrate);
+			return Ok(());
+		}
+		self.apply_bitrate(bitrate)
 	}
 
 	fn name(&self) -> &str {

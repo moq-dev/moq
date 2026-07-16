@@ -156,6 +156,15 @@ device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
 ALSA) and encodes Opus.
 
+`--bitrate` is a ceiling rather than a fixed rate. When publishing with
+`--client-connect`, the video encoder follows the connection's congestion
+estimate: it drops below the ceiling as soon as the uplink tightens, and climbs
+back gradually once it clears, so a degrading network costs picture quality
+instead of stalling the stream. It never encodes above `--bitrate`. Encoders that
+can't retune while running (VAAPI today) hold the configured rate and log a
+warning. Without `--client-connect` there is no estimate to follow, so the
+configured rate is used as-is.
+
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
 
 ```bash

@@ -4654,6 +4654,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "objc2-video-toolbox",
  "openh264",
+ "openh264-sys2",
  "pipewire",
  "thiserror 2.0.18",
  "tokio",

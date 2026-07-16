@@ -21,6 +21,11 @@ pub enum Error {
 	#[error("invalid framerate: {0} (must be non-zero)")]
 	InvalidFramerate(u32),
 
+	/// This encoder can't change its bitrate once open, so it can't follow a
+	/// congestion-control estimate. Encoding continues at the configured rate.
+	#[error("encoder {0} cannot change bitrate while running")]
+	BitrateUnsupported(&'static str),
+
 	/// Capture / encode / codec failure (the message carries the detail).
 	#[error(transparent)]
 	Codec(#[from] anyhow::Error),

@@ -7,12 +7,17 @@
 
 use std::fmt::Debug;
 
-use super::{api::ENCODE_API, encoder::Encoder, result::EncodeError};
+use super::{
+	api::ENCODE_API,
+	encoder::Encoder,
+	result::{EncodeError, ErrorKind},
+};
 use crate::{
 	sys::nvEncodeAPI::{
 		GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID,
-		NV_ENC_CODEC_PIC_PARAMS, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_AV1, NV_ENC_PIC_PARAMS_H264,
-		NV_ENC_PIC_PARAMS_HEVC, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE,
+		NV_ENC_CODEC_PIC_PARAMS, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS,
+		NV_ENC_PIC_PARAMS_AV1, NV_ENC_PIC_PARAMS_H264, NV_ENC_PIC_PARAMS_HEVC, NV_ENC_PIC_PARAMS_VER,
+		NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE, NV_ENC_RECONFIGURE_PARAMS, NV_ENC_RECONFIGURE_PARAMS_VER,
 	},
 	EncoderInput, EncoderOutput,
 };
@@ -22,13 +27,39 @@ use crate::{
 /// You need to call [`Encoder::start_session`] before you can
 /// encode frames using the session. On drop, the session will automatically
 /// send an empty EOS frame to flush the encoder.
-#[derive(Debug)]
 pub struct Session {
 	pub(crate) encoder: Encoder,
 	pub(crate) width: u32,
 	pub(crate) height: u32,
 	pub(crate) buffer_format: NV_ENC_BUFFER_FORMAT,
 	pub(crate) encode_guid: GUID,
+
+	/// The parameters the session was initialized with, retained so
+	/// [`reconfigure`](Self::reconfigure) can resubmit them with one field
+	/// changed: `NvEncReconfigureEncoder` takes the *whole* init params, not a
+	/// delta.
+	pub(crate) init: NV_ENC_INITIALIZE_PARAMS,
+
+	/// Owned copy of the encode config `init.encodeConfig` points at. Boxed so
+	/// the pointer survives moving the `Session`, and owned because the caller's
+	/// config is borrowed only for the duration of `start_session`. `None` when
+	/// the caller supplied no config (NVENC then uses preset defaults, which we
+	/// can't resubmit because we never saw them).
+	pub(crate) config: Option<Box<NV_ENC_CONFIG>>,
+}
+
+// Hand-written because the retained bindgen params are plain C structs with no
+// `Debug`, and dumping hundreds of codec fields would drown the useful ones.
+impl Debug for Session {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Session")
+			.field("encoder", &self.encoder)
+			.field("width", &self.width)
+			.field("height", &self.height)
+			.field("buffer_format", &self.buffer_format)
+			.field("encode_guid", &self.encode_guid)
+			.finish_non_exhaustive()
+	}
 }
 
 impl Session {
@@ -71,6 +102,47 @@ impl Session {
 	#[must_use]
 	pub fn get_encoder(&self) -> &Encoder {
 		&self.encoder
+	}
+
+	/// Change the average bitrate (bits per second) of the running session,
+	/// taking effect from roughly the next frame.
+	///
+	/// The encoder keeps running: no IDR is forced and no state is reset, so
+	/// this is safe to call as often as a congestion controller updates. That is
+	/// the point of the narrow signature. `NvEncReconfigureEncoder` can also
+	/// change the resolution and reset the encoder, but those need a new session
+	/// (the width/height this `Session` caches would go stale) and would emit
+	/// exactly the keyframe burst a congested link cannot absorb.
+	///
+	/// # Errors
+	///
+	/// Returns [`ErrorKind::InvalidParam`] when the session was started without
+	/// an encode config, since there is then no config to resubmit. Otherwise
+	/// returns whatever `NvEncReconfigureEncoder` reports, e.g.
+	/// [`ErrorKind::UnsupportedParam`] if the driver rejects the rate change.
+	pub fn reconfigure(&mut self, bitrate: u32) -> Result<(), EncodeError> {
+		let Some(config) = self.config.as_mut() else {
+			return Err(EncodeError::new(
+				ErrorKind::InvalidParam,
+				Some("session was started without an encode config to reconfigure".into()),
+			));
+		};
+
+		config.rcParams.averageBitRate = bitrate;
+		// The caller's original pointer died with `start_session`; re-point at
+		// our owned copy in case the `Session` moved since.
+		self.init.encodeConfig = std::ptr::from_mut::<NV_ENC_CONFIG>(&mut **config);
+
+		let mut params = NV_ENC_RECONFIGURE_PARAMS {
+			version: NV_ENC_RECONFIGURE_PARAMS_VER,
+			reInitEncodeParams: self.init,
+			..unsafe { std::mem::zeroed() }
+		};
+		// Leave resetEncoder and forceIDR clear: retune in place, no keyframe.
+		params.set_resetEncoder(0);
+		params.set_forceIDR(0);
+
+		unsafe { (ENCODE_API.reconfigure_encoder)(self.encoder.ptr, &mut params) }.result(&self.encoder)
 	}
 
 	/// Encode a frame.

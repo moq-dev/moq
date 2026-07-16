@@ -6,7 +6,10 @@
 //! mirrors `moq-boy`, which pauses its emulator on `TrackProducer::used()` /
 //! `unused()`.
 
+use std::time::Instant;
+
 use moq_net::Timestamp;
+use moq_net::bandwidth::{Control, Policy};
 
 use crate::Error;
 use crate::capture;
@@ -126,15 +129,43 @@ impl Producer {
 ///
 /// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
 /// new knobs can be added without breaking callers.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct Options {
 	/// Target bitrate in bits per second; `None` derives from resolution.
+	///
+	/// This is a ceiling, not a fixed rate: with [`bandwidth`](Self::bandwidth)
+	/// set, the encoder backs off below it while the uplink is congested and
+	/// climbs back afterwards, but never exceeds it.
 	pub bitrate: Option<u64>,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	/// Encoder implementation preference.
 	pub kind: encoder::Kind,
+	/// The connection's send-bandwidth estimate, from
+	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth) (or
+	/// `moq_native::Reconnect::send_bandwidth`, which survives reconnects).
+	///
+	/// Set it and the encoder tracks the estimate per
+	/// [`bandwidth::Policy`](moq_net::bandwidth::Policy), so a closing uplink
+	/// gets a softer picture instead of a stalled one. Leave it `None` and the
+	/// encoder holds [`bitrate`](Self::bitrate) regardless of congestion, which
+	/// is what you want when the estimate isn't meaningful (a local file, a test
+	/// harness) or unavailable (a publisher that only accepts inbound sessions).
+	pub bandwidth: Option<moq_net::bandwidth::Consumer>,
+}
+
+// Hand-written: `bandwidth::Consumer` isn't `Debug`, but its presence is the
+// only part worth printing anyway.
+impl std::fmt::Debug for Options {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Options")
+			.field("bitrate", &self.bitrate)
+			.field("codec", &self.codec)
+			.field("kind", &self.kind)
+			.field("bandwidth", &self.bandwidth.is_some())
+			.finish()
+	}
 }
 
 /// Capture a webcam and publish it as an on-demand video track.
@@ -194,6 +225,57 @@ fn assert_publish_capture_send(
 ) {
 	fn is_send<T: Send>(_: &T) {}
 	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
+}
+
+/// The live rate control state: the estimate source paired with the policy
+/// tracking it. `None` once there's nothing left to track, which is what stops
+/// the `select!` arm from spinning on a channel that is permanently ready.
+type Rate = Option<(moq_net::bandwidth::Consumer, Control)>;
+
+/// Wait for the next bandwidth estimate, or forever when rate control is off or
+/// finished. Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
+/// only reads shared state, so losing this race to a frame drops no estimate,
+/// it just re-reads the latest one next time round.
+async fn next_estimate(rate: &mut Rate) -> Option<Option<u64>> {
+	match rate {
+		Some((bandwidth, _)) => bandwidth.changed().await.ok(),
+		// No estimate source: park this arm forever so `select!` ignores it.
+		None => std::future::pending().await,
+	}
+}
+
+/// Feed an estimate through the policy and retune the encoder if it moved.
+///
+/// `None` means the producer is gone (the session ended for good), so rate
+/// control retires; a `Some(None)` estimate means the value is merely
+/// unavailable right now, which the policy holds through.
+async fn apply_estimate(encoder: &mut Sink, rate: &mut Rate, estimate: Option<Option<u64>>) {
+	let Some((_, control)) = rate.as_mut() else { return };
+
+	let Some(estimate) = estimate else {
+		tracing::debug!("bandwidth estimate ended; holding the current encoder bitrate");
+		*rate = None;
+		return;
+	};
+
+	let Some(bitrate) = control.update(estimate, Instant::now()) else {
+		return;
+	};
+
+	match encoder.set_bitrate(bitrate).await {
+		Ok(()) => tracing::debug!(bitrate, estimate, "adjusted encoder bitrate"),
+		// The encoder can't retune, so keep encoding at the rate it opened with
+		// and stop asking. Dropping the source also stops the estimate arm, which
+		// would otherwise wake this loop for nothing on every change.
+		Err(Error::BitrateUnsupported(name)) => {
+			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
+			*rate = None;
+		}
+		// A transient failure: keep the policy running so the next change retries.
+		// The policy already moved its target, so a persistent failure just means
+		// the encoder trails it; that's better than giving up on the first blip.
+		Err(err) => tracing::warn!(error = %err, bitrate, "failed to adjust encoder bitrate"),
+	}
 }
 
 /// A dropped or closed track is the normal end of a publish; any other cause is
@@ -259,6 +341,15 @@ async fn capture_loop(
 		let mut force_keyframe = true;
 		tracing::info!(encoder = encoder.name(), device = camera.device(), "capturing");
 
+		// Rate control is per encoder: this one opened at the configured bitrate,
+		// so the policy's ceiling is that rate and the target starts there. A
+		// reopened camera starts optimistic again rather than inheriting the
+		// backed-off rate from whatever the link was doing last time.
+		let mut rate = encode
+			.bandwidth
+			.clone()
+			.map(|bandwidth| (bandwidth, Control::new(Policy::new(encoder_config.resolved_bitrate()))));
+
 		loop {
 			// While watched, race the next frame against the last viewer leaving so
 			// we release the camera promptly when demand drops. `biased` checks
@@ -272,6 +363,12 @@ async fn capture_loop(
 							return Ok(());
 						}
 						break; // no viewers: release the camera, then wait for one
+					}
+					// Retune between frames rather than mid-encode, and only when
+					// the policy says the target actually moved.
+					estimate = next_estimate(&mut rate) => {
+						apply_estimate(&mut encoder, &mut rate, estimate).await;
+						continue;
 					}
 					frame = camera.read() => frame,
 				}

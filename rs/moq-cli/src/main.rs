@@ -92,10 +92,25 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		}
 	}
 
+	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
+	// an outbound client has one: a `--server-bind` publisher's sessions are
+	// inbound and never surfaced here, so it stays `None` and those sources encode
+	// at their configured rate. Capture is the only such source today, so without
+	// that feature nothing reads this.
+	#[cfg(feature = "capture")]
+	let mut send_bandwidth = None;
+
 	// MoQ side: publish the Origin outward.
 	if moq.client.connect.is_some() {
 		if let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume()) {
 			moq::notify_ready();
+			// Read before the handle moves into the task. This consumer is
+			// persistent: it survives reconnects, reading `None` while down, so it
+			// can be wired up before anything connects.
+			#[cfg(feature = "capture")]
+			{
+				send_bandwidth = Some(reconnect.send_bandwidth());
+			}
 			tasks.spawn(async move { Ok(reconnect.closed().await?) });
 		}
 	}
@@ -159,7 +174,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let publish = Publish::capture(&capture)?;
+				let publish = Publish::capture(&capture, send_bandwidth)?;
 				announce.push(
 					origin
 						.publish_broadcast(&name, publish.consume())

@@ -64,7 +64,10 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub fps: Option<u32>,
 
-	/// Target video bitrate in bits per second. Omit to derive one from the resolution.
+	/// Maximum video bitrate in bits per second. Omit to derive one from the resolution.
+	///
+	/// When publishing to a relay, the encoder backs off below this while the uplink is
+	/// congested and climbs back afterwards; it never encodes above it.
 	#[arg(long)]
 	pub bitrate: Option<u64>,
 
@@ -227,12 +230,17 @@ impl Publish {
 	}
 
 	/// Build a publisher capturing local devices (camera/screen and microphone).
+	///
+	/// `bandwidth` is the uplink's send estimate, when there is one: the video
+	/// encoder follows it down while the link is congested rather than
+	/// overshooting a pipe that can't carry it. Pass `None` to encode at the
+	/// configured bitrate regardless.
 	#[cfg(feature = "capture")]
-	pub fn capture(args: &CaptureArgs) -> anyhow::Result<Self> {
+	pub fn capture(args: &CaptureArgs, bandwidth: Option<moq_net::bandwidth::Consumer>) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
-		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode()));
+		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
@@ -336,7 +344,7 @@ impl CaptureArgs {
 		config
 	}
 
-	fn video_encode(&self) -> moq_video::encode::Options {
+	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Consumer>) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
 		options.codec = self.codec.into();
@@ -347,6 +355,7 @@ impl CaptureArgs {
 		} else {
 			moq_video::encode::Kind::Auto
 		};
+		options.bandwidth = bandwidth;
 		options
 	}
 

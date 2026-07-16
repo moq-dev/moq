@@ -119,6 +119,12 @@ pub struct EncodeError {
 }
 
 impl EncodeError {
+	/// Build an error for a condition this wrapper detects itself, rather than
+	/// one reported by an NVENC call.
+	pub(crate) fn new(kind: ErrorKind, string: Option<String>) -> Self {
+		Self { kind, string }
+	}
+
 	/// Getter for the error kind.
 	#[must_use]
 	pub fn kind(&self) -> ErrorKind {
