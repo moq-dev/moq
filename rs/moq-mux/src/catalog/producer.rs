@@ -142,6 +142,14 @@ impl<E: CatalogExt> Producer<E> {
 		super::AudioTrack::new(self.clone(), name)
 	}
 
+	/// A handle for publishing one custom rendition, retired on drop.
+	pub fn custom_track(&self, name: impl Into<String>) -> super::CustomTrack<E>
+	where
+		E: super::CustomTrackExt,
+	{
+		super::CustomTrack::new(self.clone(), name)
+	}
+
 	/// Build the media [`container::Producer`](crate::container::Producer) for the rendition named by
 	/// `track`, with its timeline recorder wired in.
 	///
@@ -160,8 +168,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// The catalog [`Timeline`](hang::catalog::Timeline) section for media rendition `name`, to
 	/// advertise on the rendition's config (creating the timeline track on first use).
 	///
-	/// [`VideoTrack::set`](super::VideoTrack::set) / [`AudioTrack::set`](super::AudioTrack::set) do
-	/// this automatically; callers that build a rendition config by hand attach it themselves.
+	/// [`VideoTrack::set`](super::VideoTrack::set), [`AudioTrack::set`](super::AudioTrack::set), and
+	/// [`CustomTrack::set`](super::CustomTrack::set) do this automatically when their config exposes
+	/// a timeline field; callers that build a rendition config by hand attach it themselves.
 	pub fn timeline_section(&self, name: &str) -> hang::catalog::Timeline {
 		self.with_timeline(name, |timeline| timeline.section())
 	}

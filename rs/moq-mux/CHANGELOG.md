@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add typed custom catalog rendition handles with automatic publishing, timeline configuration, and drop cleanup.
+
 ## [0.7.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.3...moq-mux-v0.7.4) - 2026-07-12
 
 ### Other

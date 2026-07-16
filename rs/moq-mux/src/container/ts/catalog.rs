@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 
+use crate::catalog::CustomTrackExt;
 use crate::catalog::hang::CatalogExt;
 
 /// The `mpegts` catalog section.
@@ -143,6 +144,14 @@ pub struct Ext {
 }
 
 impl CatalogExt for Ext {}
+
+impl CustomTrackExt for Ext {
+	type Config = Track;
+
+	fn renditions(&mut self) -> &mut BTreeMap<String, Self::Config> {
+		&mut self.mpegts.tracks
+	}
+}
 
 /// Typed `&mut` access to the `mpegts` section of a catalog whose extension is
 /// [`Ext`], or `None` for any other extension.
