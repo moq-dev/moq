@@ -33,7 +33,7 @@ pub mod origin {
 /// Subscribing to broadcast (un)announcements from an origin.
 pub mod announce {
 	pub use super::origin_impl::{
-		AnnounceConsumer as Consumer, AnnounceProducer as Producer, Announced as Event, OriginAnnounce as Update,
+		AnnounceConsumer as Consumer, AnnounceProducer as Producer, OriginAnnounce as Update,
 	};
 }
 

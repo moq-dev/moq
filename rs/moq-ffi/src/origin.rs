@@ -58,8 +58,8 @@ impl Announced {
 		loop {
 			match self.inner.next().await {
 				// Active and Restart both carry a broadcast; skip unannounce events.
-				Some(moq_net::announce::Update { path, event, .. }) => {
-					let Some(broadcast) = event.broadcast() else {
+				Some(moq_net::announce::Update { path, broadcast }) => {
+					let Some(broadcast) = broadcast else {
 						continue;
 					};
 					let hops = broadcast.info().hops.iter().map(|origin| origin.id()).collect();
@@ -78,7 +78,7 @@ impl Announced {
 		loop {
 			match self.inner.next().await {
 				// Active and Restart both carry a broadcast; skip unannounce events.
-				Some(moq_net::announce::Update { event, .. }) => match event.broadcast() {
+				Some(moq_net::announce::Update { broadcast, .. }) => match broadcast {
 					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
 					None => continue,
 				},

@@ -224,14 +224,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
+				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
 						.to_owned();
 					let absolute = origin.absolute(&path).to_owned();
 
-					if event.broadcast().is_some() {
+					if broadcast.is_some() {
 						tracing::debug!(broadcast = %absolute, "announce");
 						let guard = stats.broadcast(&absolute).publisher();
 						stats_guards.entry(absolute).or_insert(guard);
@@ -263,14 +263,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
-				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
+				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
 						.to_owned();
 					let absolute = origin.absolute(&path).to_owned();
 
-					match event.broadcast() {
+					match broadcast {
 						Some(broadcast) => {
 							let info = broadcast.info();
 							let hops = &info.hops;
@@ -338,7 +338,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				res = stream.reader.closed() => return res,
 				next = announced.next() => {
-						let Some(crate::announce::Update { path, event, .. }) = next else {
+						let Some(crate::announce::Update { path, broadcast }) = next else {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
 						};
@@ -346,8 +346,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 						let absolute = origin.absolute(&path).to_owned();
 
-						match event {
-							announce::Event::Active(active) => {
+						match broadcast {
+							Some(active) => {
 								let info = active.info();
 								let Some(hops) = Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
@@ -366,7 +366,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								}
 								stream.writer.encode(&lite::AnnounceBroadcast::Active { suffix, hops }).await?;
 							}
-							announce::Event::Ended => {
+							None => {
 								tracing::debug!(broadcast = %absolute, "unannounce");
 								stats_guards.remove(&absolute);
 								if version.has_announce_id() {

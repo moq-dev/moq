@@ -365,9 +365,9 @@ fn route_key(name: &Path, info: &broadcast::Info) -> (usize, u64) {
 /// At most one entry exists per path, so a slow consumer's pending set is bounded
 /// by the number of distinct paths. `UnannounceAnnounce` preserves the signal
 /// that a broadcast genuinely went away and a different one took its place (the
-/// consumer must see [`Announced::Ended`] before [`Announced::Active`]), while a
-/// stale `Announce` cancels with a subsequent `unannounce` because the consumer
-/// has not yet observed it.
+/// consumer must see the `None` before the `Some`), while a stale `Announce`
+/// cancels with a subsequent `unannounce` because the consumer has not yet
+/// observed it.
 enum PendingUpdate {
 	Announce(broadcast::Consumer),
 	Unannounce,
@@ -414,17 +414,17 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<OriginAnnounce> {
 		let path = self.pending.keys().next()?.clone();
-		let event = match self.pending.remove(&path).unwrap() {
-			PendingUpdate::Announce(broadcast) => Announced::Active(broadcast),
-			PendingUpdate::Unannounce => Announced::Ended,
+		let broadcast = match self.pending.remove(&path).unwrap() {
+			PendingUpdate::Announce(broadcast) => Some(broadcast),
+			PendingUpdate::Unannounce => None,
 			PendingUpdate::UnannounceAnnounce(broadcast) => {
 				// Deliver the unannounce now; leave the trailing announce pending so
 				// the next take returns it for the same path.
 				self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
-				Announced::Ended
+				None
 			}
 		};
-		Some(OriginAnnounce { path, event })
+		Some(OriginAnnounce { path, broadcast })
 	}
 }
 
@@ -750,34 +750,16 @@ impl Default for OriginNodes {
 	}
 }
 
-/// A path and what happened to the broadcast there, delivered by [`AnnounceConsumer`].
+/// A path and the broadcast now available there, delivered by [`AnnounceConsumer`].
 #[derive(Clone)]
-#[non_exhaustive]
 pub struct OriginAnnounce {
 	/// The path of the broadcast, relative to the consuming cursor's root.
 	pub path: PathOwned,
-	/// What happened to the broadcast at that path.
-	pub event: Announced,
-}
-
-/// What happened to a broadcast at a path.
-#[derive(Clone)]
-#[non_exhaustive]
-pub enum Announced {
-	/// A broadcast became available.
-	Active(broadcast::Consumer),
-	/// The broadcast is no longer available.
-	Ended,
-}
-
-impl Announced {
-	/// The broadcast consumer, or `None` if the broadcast ended.
-	pub fn broadcast(self) -> Option<broadcast::Consumer> {
-		match self {
-			Self::Active(broadcast) => Some(broadcast),
-			Self::Ended => None,
-		}
-	}
+	/// The broadcast now available at that path, or `None` if it is no longer available.
+	///
+	/// A replacement (a relay failover, or a shorter hop path arriving) is delivered as a
+	/// `None` followed by a `Some`, never as a swap in place.
+	pub broadcast: Option<broadcast::Consumer>,
 }
 
 /// Announces broadcasts to consumers over the network.
@@ -1529,11 +1511,11 @@ impl Consumer {
 		loop {
 			let OriginAnnounce {
 				path: announced_path,
-				event,
+				broadcast,
 			} = announced.next().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced_path.as_path() == path {
-				if let Some(broadcast) = event.broadcast() {
+				if let Some(broadcast) = broadcast {
 					return Some(broadcast);
 				}
 			}
@@ -1776,13 +1758,10 @@ use futures::FutureExt;
 impl AnnounceConsumer {
 	pub fn assert_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert!(matches!(event, Announced::Active(_)), "should be an active announce");
-		assert_eq!(path, expected, "wrong path");
-		assert!(
-			event.broadcast().unwrap().is_clone(broadcast),
-			"should be the same broadcast"
-		);
+		let announce = self.next().now_or_never().expect("next blocked").expect("no next");
+		assert_eq!(announce.path, expected, "wrong path");
+		let announced = announce.broadcast.expect("should be an active announce");
+		assert!(announced.is_clone(broadcast), "should be the same broadcast");
 	}
 
 	/// A replacement route arrives as an unannounce/announce pair for the same path.
@@ -1794,19 +1773,17 @@ impl AnnounceConsumer {
 
 	pub fn assert_try_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.try_next().expect("no next");
-		assert_eq!(path, expected, "wrong path");
-		assert!(
-			event.broadcast().unwrap().is_clone(broadcast),
-			"should be the same broadcast"
-		);
+		let announce = self.try_next().expect("no next");
+		assert_eq!(announce.path, expected, "wrong path");
+		let announced = announce.broadcast.expect("should be an active announce");
+		assert!(announced.is_clone(broadcast), "should be the same broadcast");
 	}
 
 	pub fn assert_next_none(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(path, expected, "wrong path");
-		assert!(event.broadcast().is_none(), "should be unannounced");
+		let announce = self.next().now_or_never().expect("next blocked").expect("no next");
+		assert_eq!(announce.path, expected, "wrong path");
+		assert!(announce.broadcast.is_none(), "should be unannounced");
 	}
 
 	pub fn assert_next_wait(&mut self) {
