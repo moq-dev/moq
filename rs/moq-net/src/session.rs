@@ -64,14 +64,25 @@ pub struct Session {
 	recv_bandwidth: Option<bandwidth::Consumer>,
 }
 
-/// A connected session and the future that drives its protocol state.
+/// A connected session bundled with the future that drives its protocol state.
 ///
-/// Poll this future for the lifetime of the session. Dropping it cancels protocol
-/// work and closes the session.
+/// Poll this future for the lifetime of every [`Session`] clone taken from it:
+/// nothing else drives the protocol, so a session whose connection isn't polled
+/// makes no progress. Dropping it cancels protocol work and closes the session.
+/// It resolves when the session ends, and keeps returning that same result if
+/// polled again.
+///
+/// To run the driver elsewhere (an executor task) while handing the session to a
+/// caller, use [`split`](Self::split) rather than moving the whole connection: a
+/// [`Connection`] holds a [`Session`] clone, so a detached one would keep the
+/// session's close-on-last-drop from ever firing.
+///
+/// Polling requires a tokio runtime with a time driver; see the crate-level Async
+/// docs.
 pub struct Connection {
-	session: Session,
-	inner: MaybeSendBox<'static, Result<(), Error>>,
-	result: Option<Result<(), Error>>,
+	// Both are `Some` until `split` takes them, which also suppresses `Drop`.
+	session: Option<Session>,
+	driver: Option<Driver>,
 }
 
 impl Connection {
@@ -86,41 +97,86 @@ impl Connection {
 			let mut protocol = protocol;
 			tokio::select! {
 				result = &mut protocol => result,
+				// Bandwidth sampling stops at close; the protocol still owns the teardown.
 				_ = maintenance => protocol.await,
 			}
 		}
 		.maybe_boxed();
 
 		Self {
-			session,
-			inner,
-			result: None,
+			session: Some(session),
+			driver: Some(Driver { inner, result: None }),
 		}
 	}
 
 	/// Borrow the connected session handle.
 	pub fn session(&self) -> &Session {
-		&self.session
+		self.session.as_ref().expect("connection split")
 	}
 
-	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) -> Result<(), Error> {
+	/// Split into the session handle and the future driving it.
+	///
+	/// The [`Driver`] holds no [`Session`] clone, so the session still closes once
+	/// the caller drops its last handle, and the driver then finishes on its own.
+	/// That makes this the right way to hand the driver to an executor.
+	pub fn split(mut self) -> (Session, Driver) {
+		let session = self.session.take().expect("connection split");
+		let driver = self.driver.take().expect("connection split");
+		(session, driver)
+	}
+
+	fn driver_mut(&mut self) -> &mut Driver {
+		self.driver.as_mut().expect("connection split")
+	}
+
+	/// Drive the connection until `ready` resolves, so `connect` can block on the
+	/// initial announce set.
+	///
+	/// A session that dies first still resolves `ready`: the connecting producers
+	/// live inside the driver, so its completion drops them and releases the barrier.
+	/// The error isn't lost, it's cached for whoever polls the connection next.
+	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) {
 		tokio::pin!(ready);
 		tokio::select! {
 			biased;
-			_ = &mut ready => Ok(()),
-			result = &mut *self => {
-				// Connecting producers live inside the driver. Its completion drops
-				// them and releases the barrier on an early session error. The cached
-				// result remains available when the caller polls the connection.
-				let _ = result;
-				ready.await;
-				Ok(())
-			}
+			_ = &mut ready => {},
+			_ = self.driver_mut() => ready.await,
 		}
 	}
 }
 
 impl Future for Connection {
+	type Output = Result<(), Error>;
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		Pin::new(self.driver_mut()).poll(cx)
+	}
+}
+
+impl Drop for Connection {
+	fn drop(&mut self) {
+		// `split` handed the session off, so there's nothing to cancel.
+		if let Some(session) = &self.session {
+			session.close(Error::Cancel);
+		}
+	}
+}
+
+/// The future driving a [`Session`]'s protocol state, split off from its
+/// [`Connection`].
+///
+/// Poll it for the lifetime of the session. Unlike a [`Connection`], dropping it
+/// cancels protocol work without closing the session, since it holds no session
+/// handle of its own. It resolves when the session ends, and keeps returning that
+/// same result if polled again.
+pub struct Driver {
+	inner: MaybeSendBox<'static, Result<(), Error>>,
+	// Cached so a poll after `wait_ready` consumed the result doesn't re-poll a
+	// completed future.
+	result: Option<Result<(), Error>>,
+}
+
+impl Future for Driver {
 	type Output = Result<(), Error>;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -131,12 +187,6 @@ impl Future for Connection {
 		let result = std::task::ready!(self.inner.as_mut().poll(cx));
 		self.result = Some(result.clone());
 		Poll::Ready(result)
-	}
-}
-
-impl Drop for Connection {
-	fn drop(&mut self) {
-		self.session.close(Error::Cancel);
 	}
 }
 
@@ -168,7 +218,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 	) -> (Self, MaybeSendBox<'static, ()>) {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
-		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
+		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
 			let producer = bandwidth::Producer::new();
 			let consumer = producer.consume();
 
@@ -182,7 +232,6 @@ impl Session {
 		} else {
 			(None, std::future::pending().maybe_boxed())
 		};
-		let (send_bandwidth, maintenance) = send_bandwidth;
 
 		let session = Self {
 			session: Arc::new(SessionShared {

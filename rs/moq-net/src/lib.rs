@@ -43,12 +43,19 @@
 //!
 //! ## Async
 //! This library is async-first. [`Client::connect`] and [`Server::accept`] return a
-//! [`Connection`] future whose protocol work is
-//! polled by the caller, so task coordination does not require a Tokio runtime.
+//! [`Connection`] future that owns all of the session's protocol work, so the caller
+//! decides where it runs and dropping it cancels the session. Nothing is spawned
+//! behind your back.
 //!
-//! More methods are gaining `poll_xxx` counterparts built on [`kio`], so you can
-//! drive them from custom executors or synchronously. [`kio`] is built on the
-//! standard [`std::task::Waker`] API, and any [`std::task::Waker`] is a valid driver.
+//! You still need a tokio runtime (with its time driver) to poll a [`Connection`]:
+//! bandwidth sampling, the control stream timeout, and subscription linger all use
+//! tokio timers, which panic outside a runtime. Awaiting any other plain `async`
+//! method has the same requirement.
+//!
+//! That requirement is being phased out as more methods grow `poll_xxx` counterparts
+//! built on [`kio`], so you can drive them from custom executors without a tokio
+//! runtime. You can also call them synchronously, since [`kio`] is built on the
+//! standard [`std::task::Waker`] API and any [`std::task::Waker`] is a valid driver.
 
 mod client;
 mod coding;

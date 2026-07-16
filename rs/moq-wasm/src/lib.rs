@@ -72,9 +72,11 @@ impl Session {
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
 		let connection = client.connect(transport).await.map_err(js_err)?;
-		let inner = connection.session().clone();
+		// Split so the spawned driver holds no session handle: dropping this `Session`
+		// then still closes the transport, which ends the driver.
+		let (inner, driver) = connection.split();
 		web_async::spawn(async move {
-			let _ = connection.await;
+			let _ = driver.await;
 		});
 		Ok(Session { inner, consumer })
 	}

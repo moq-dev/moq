@@ -7,8 +7,6 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
-use futures::{StreamExt, stream::FuturesUnordered};
-
 use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
 
 // Handshake dispatcher: each argument is an independent session parameter, so
@@ -230,51 +228,42 @@ async fn run_unis<S: web_transport_trait::Session>(
 	version: Version,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
-	let mut tasks = FuturesUnordered::new();
+	let mut tasks = TaskSet::owned();
 
 	loop {
-		let recv = tokio::select! {
-			recv = session.accept_uni() => recv.map_err(Error::from_transport)?,
-			Some(()) = tasks.next(), if !tasks.is_empty() => continue,
-		};
+		let recv = tasks.drive(session.accept_uni()).await.map_err(Error::from_transport)?;
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
-		let kind: u64 = reader.decode_peek().await?;
+		let kind: u64 = tasks.drive(reader.decode_peek()).await?;
 
 		// v17+: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
 		// We accept it in the background without blocking, since there are no
 		// extensions that require waiting on the SETUP before proceeding.
 		if kind == setup::SETUP_V17 {
-			tasks.push(
-				async move {
-					// Decode and discard the unified SETUP message.
-					if let Err(err) = reader.decode::<setup::Setup>().await {
-						tracing::warn!(%err, "setup decode error");
-						return;
-					}
-
-					// Monitor for GOAWAY after setup completes.
-					if let Err(err) = run_goaway(reader.with_version(version), version).await {
-						tracing::warn!(%err, "goaway error");
-					}
+			tasks.push(async move {
+				// Decode and discard the unified SETUP message.
+				if let Err(err) = reader.decode::<setup::Setup>().await {
+					tracing::warn!(%err, "setup decode error");
+					return;
 				}
-				.maybe_boxed(),
-			);
+
+				// Monitor for GOAWAY after setup completes.
+				if let Err(err) = run_goaway(reader.with_version(version), version).await {
+					tracing::warn!(%err, "goaway error");
+				}
+			});
 
 			continue;
 		}
 
 		// Poll one child handler for each group stream.
 		let mut sub = subscriber.clone();
-		tasks.push(
-			async move {
-				let mut reader = reader.with_version(version);
-				if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
-					tracing::debug!(%err, "uni stream error");
-					reader.abort(&err);
-				}
+		tasks.push(async move {
+			let mut reader = reader.with_version(version);
+			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
+				tracing::debug!(%err, "uni stream error");
+				reader.abort(&err);
 			}
-			.maybe_boxed(),
-		);
+		});
 	}
 }
 
@@ -306,16 +295,19 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 	mut subscriber: Subscriber<S>,
 	version: Version,
 ) -> Result<(), Error> {
-	let mut tasks = FuturesUnordered::new();
+	let mut tasks = TaskSet::owned();
 	loop {
-		let mut stream = tokio::select! {
-			stream = Stream::accept(&session, version) => stream?,
-			Some(()) = tasks.next(), if !tasks.is_empty() => continue,
-		};
+		let mut stream = tasks.drive(Stream::accept(&session, version)).await?;
 
-		let id: u64 = stream.reader.decode().await?;
-		let size: u16 = stream.reader.decode().await?;
-		let data = stream.reader.read_exact(size as usize).await?;
+		let header = tasks
+			.drive(async {
+				let id: u64 = stream.reader.decode().await?;
+				let size: u16 = stream.reader.decode().await?;
+				let data = stream.reader.read_exact(size as usize).await?;
+				Ok::<_, Error>((id, data))
+			})
+			.await;
+		let (id, data) = header?;
 
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /

@@ -43,11 +43,15 @@ pub use log::*;
 pub use reconnect::*;
 pub use server::*;
 
+/// Run the connection's protocol driver on the current tokio runtime, handing back
+/// the session it drives.
+///
+/// Splitting first keeps the driver task out of the session's handle count, so the
+/// session still closes when the caller drops the returned [`moq_net::Session`],
+/// which in turn lets the driver task finish.
 pub(crate) fn spawn_connection(connection: moq_net::Connection) -> moq_net::Session {
-	let session = connection.session().clone();
-	tokio::spawn(async move {
-		let _ = connection.await;
-	});
+	let (session, driver) = connection.split();
+	tokio::spawn(driver);
 	session
 }
 

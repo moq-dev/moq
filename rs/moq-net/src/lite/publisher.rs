@@ -12,7 +12,7 @@ use crate::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	util::{MaybeBoxedExt, MaybeSendBox},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
 use super::Version;
@@ -62,23 +62,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// `origin::Consumer` and friends are cheap to clone (shared handles), so each control
 		// stream gets its own child future and they all make progress independently.
 		let this = Arc::new(self);
-		let mut tasks = FuturesUnordered::new();
+		let mut tasks = TaskSet::owned();
 
 		loop {
-			let stream = tokio::select! {
-				stream = Stream::accept(&this.session, this.version) => stream?,
-				Some(()) = tasks.next(), if !tasks.is_empty() => continue,
-			};
+			let stream = tasks.drive(Stream::accept(&this.session, this.version)).await?;
 
 			let this = this.clone();
-			tasks.push(
-				async move {
-					if let Err(err) = this.handle(stream).await {
-						tracing::warn!(%err, "control stream error");
-					}
+			tasks.push(async move {
+				if let Err(err) = this.handle(stream).await {
+					tracing::warn!(%err, "control stream error");
 				}
-				.maybe_boxed(),
-			);
+			});
 		}
 	}
 
