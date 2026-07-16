@@ -518,9 +518,8 @@ impl MoqGroupRequest {
 	}
 
 	/// Reject the fetch with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		self.take()?.reject(moq_net::Error::App(error_code));
 		Ok(())
 	}
@@ -587,9 +586,8 @@ impl MoqTrackRequest {
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
 		Ok(())
@@ -710,27 +708,26 @@ impl MoqTrackProducer {
 	}
 
 	/// Abort this track with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let mut guard = self.inner.lock().unwrap();
 		let mut track = guard.take().ok_or(MoqError::Closed)?;
 		track.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
 
-	/// Release this producer after declaring the track's final sequence.
+	/// Release this producer, ending the track at the live edge.
 	///
-	/// When [`finish_at`](Self::finish_at) already declared a future boundary,
-	/// this preserves that boundary instead of replacing it with the current edge.
+	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
+	/// that boundary and only releases the producer.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut track = guard.take().ok_or(MoqError::Closed)?;
-		match track.finish() {
-			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
-			Err(err) => Err(err.into()),
+		if track.final_sequence().is_none() {
+			track.finish()?;
 		}
+		Ok(())
 	}
 
 	/// Declare the exclusive final group sequence, possibly ahead of the live edge.
@@ -791,9 +788,8 @@ impl MoqGroupProducer {
 	}
 
 	/// Abort this group with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let mut guard = self.inner.lock().unwrap();
 		let mut group = guard.take().ok_or(MoqError::Closed)?;
 		group.abort(moq_net::Error::App(error_code))?;

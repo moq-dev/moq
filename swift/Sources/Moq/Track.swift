@@ -163,7 +163,7 @@ public final class TrackProducer: Sendable {
     }
 
     /// Abort the track with an application error code, failing active consumers.
-    public func abort(errorCode: Int32) throws {
+    public func abort(errorCode: UInt16) throws {
         try ffi.abort(errorCode: errorCode)
     }
 
@@ -208,7 +208,7 @@ public final class GroupProducer: Sendable {
     }
 
     /// Abort the group with an application error code.
-    public func abort(errorCode: Int32) throws {
+    public func abort(errorCode: UInt16) throws {
         try ffi.abort(errorCode: errorCode)
     }
 }

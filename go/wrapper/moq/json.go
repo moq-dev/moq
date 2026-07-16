@@ -8,7 +8,7 @@ import (
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
 
-// JSONSnapshotOptions configures a lossy latest-value JSON track.
+// JSONSnapshotOptions configures publishing a lossy latest-value JSON track.
 type JSONSnapshotOptions struct {
 	// DeltaRatio controls how aggressively deltas replace full snapshots. Zero disables deltas.
 	DeltaRatio uint32
@@ -16,9 +16,18 @@ type JSONSnapshotOptions struct {
 	Compression bool
 }
 
-// JSONStreamOptions configures a lossless append-log JSON track.
+// JSONStreamOptions configures publishing a lossless append-log JSON track.
 type JSONStreamOptions struct {
 	// Compression enables group-scoped DEFLATE and must match on the consumer.
+	Compression bool
+}
+
+// JSONSubscribeOptions configures subscribing to either kind of JSON track.
+//
+// Delta encoding is a producer-side choice the consumer reconstructs automatically,
+// so only the compression setting has to match.
+type JSONSubscribeOptions struct {
+	// Compression enables group-scoped DEFLATE and must match the producer.
 	Compression bool
 }
 
@@ -137,7 +146,7 @@ func (b *BroadcastProducer) PublishJSONStream(name string, options JSONStreamOpt
 // SubscribeJSONSnapshot subscribes to a lossy latest-value JSON track.
 func (b *BroadcastConsumer) SubscribeJSONSnapshot(
 	name string,
-	options JSONSnapshotOptions,
+	options JSONSubscribeOptions,
 ) (*JSONSnapshotConsumer, error) {
 	inner, err := b.inner.SubscribeJsonSnapshot(name, ffi.MoqJsonSnapshotConfig{
 		DeltaRatio:  0,
@@ -152,7 +161,7 @@ func (b *BroadcastConsumer) SubscribeJSONSnapshot(
 // SubscribeJSONStream subscribes to a lossless append-log JSON track.
 func (b *BroadcastConsumer) SubscribeJSONStream(
 	name string,
-	options JSONStreamOptions,
+	options JSONSubscribeOptions,
 ) (*JSONStreamConsumer, error) {
 	inner, err := b.inner.SubscribeJsonStream(name, ffi.MoqJsonStreamConfig{Compression: options.Compression})
 	if err != nil {

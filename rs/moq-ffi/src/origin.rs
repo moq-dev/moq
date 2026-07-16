@@ -270,9 +270,8 @@ impl MoqBroadcastRequest {
 	}
 
 	/// Abort the request with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
 		Ok(())

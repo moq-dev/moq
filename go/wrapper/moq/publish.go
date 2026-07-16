@@ -192,7 +192,7 @@ func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 
 // Abort rejects the request with an application error code.
 func (r *TrackRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(int32(errorCode))
+	return r.inner.Abort(errorCode)
 }
 
 // MediaProducer writes timestamped frames into a media track.
@@ -307,7 +307,7 @@ func (t *TrackProducer) AppendDatagram(timestampUs uint64, payload []byte) (uint
 
 // Abort closes the track with an application error code.
 func (t *TrackProducer) Abort(errorCode uint16) error {
-	return t.inner.Abort(int32(errorCode))
+	return t.inner.Abort(errorCode)
 }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
@@ -362,7 +362,7 @@ func (g *GroupProducer) Finish() error {
 
 // Abort terminates the group with an application error code.
 func (g *GroupProducer) Abort(errorCode uint16) error {
-	return g.inner.Abort(int32(errorCode))
+	return g.inner.Abort(errorCode)
 }
 
 // TrackDynamic yields uncached groups requested by fetch consumers.
@@ -409,7 +409,7 @@ func (r *GroupRequest) Accept() (*GroupProducer, error) {
 }
 
 // Abort rejects the fetch with an application error code.
-func (r *GroupRequest) Abort(errorCode int32) error {
+func (r *GroupRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }
 
