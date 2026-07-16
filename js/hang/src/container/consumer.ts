@@ -189,12 +189,20 @@ export class Consumer {
 
 					this.#updateBuffered();
 
-					if (group.consumer.sequence === this.#active) {
+					// Wake next() for the current delivery head so its frames surface as they
+					// arrive. Gating only on `=== #active` assumed +1 group numbering: with
+					// non-sequential group ids (large jumps between groups) #active lags one group
+					// behind as a stale `+1` phantom, so the real head never matched and its whole
+					// group was held until completion, then flushed in a burst. The earliest
+					// buffered group is the delivery head regardless of id scheme; next()'s
+					// promotion guard advances #active to it. Works for sequential and
+					// non-sequential ids alike.
+					if (group.consumer.sequence === this.#active || group === this.#groups[0]) {
 						this.#notify?.();
 						this.#notify = undefined;
 					} else {
-						// Newer group: resolve it against an active reset (dropping a reneged
-						// straggler), else detect a new rewind, then check latency.
+						// A newer, non-head group: resolve it against an active reset (dropping a
+						// reneged straggler), else detect a new rewind, then check latency.
 						if (this.#classifyStale(group)) return;
 						this.#checkReset(group);
 						this.#checkLatency();
@@ -216,8 +224,15 @@ export class Consumer {
 			group.done = true;
 
 			if (group.consumer.sequence === this.#active) {
-				// Advance to the next group.
-				this.#active += 1;
+				// Advance to the next group's actual sequence. Some encoders number
+				// groups non-sequentially with large gaps (not +1), so `+= 1` would point #active at a
+				// nonexistent sequence and stall next() until #checkLatency skipped it -- every
+				// group through the skip path, i.e. constant stutter. Fall back to +1 only when
+				// no later group is buffered yet (a promotion guard in next() fixes it up when
+				// the real next group arrives).
+				const idx = this.#groups.indexOf(group);
+				const next = this.#groups[idx + 1];
+				this.#active = next?.consumer.sequence ?? group.consumer.sequence + 1;
 			}
 
 			// Recompute buffered ranges now that this group is done,
@@ -402,6 +417,18 @@ export class Consumer {
 			// A group may have buffered a rewind while the live edge was still behind it; catch it
 			// now that delivery has advanced the edge.
 			this.#checkBufferedReset();
+
+			// If #active points below all buffered groups -- e.g. the finally block's `+ 1`
+			// fallback fired because no later group was buffered yet, and the real (large-gap,
+			// non-sequential) next group has since arrived -- promote #active to the first real
+			// group so delivery resumes instead of stalling on a nonexistent sequence.
+			if (
+				this.#active !== undefined &&
+				this.#groups.length > 0 &&
+				this.#groups[0].consumer.sequence > this.#active
+			) {
+				this.#active = this.#groups[0].consumer.sequence;
+			}
 
 			if (
 				this.#groups.length > 0 &&
