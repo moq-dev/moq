@@ -114,6 +114,37 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Close the current group on every track of this media importer and open the
+	/// next one at `sequence`.
+	///
+	/// Forces a synchronized group boundary across all tracks. This is how a caller
+	/// drives aligned, explicitly-numbered groups when the encoder produces deterministic
+	/// group IDs (e.g. two encoders publishing the same content align their groups per GOP
+	/// for dual-pipeline redundancy). Without it, boundaries follow video keyframes.
+	pub fn media_seek(&mut self, media: Id, sequence: u64) -> Result<(), Error> {
+		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		match media {
+			Media::Track(track) => track.seek(sequence)?,
+			Media::Container(container) => container.seek(sequence)?,
+		}
+		Ok(())
+	}
+
+	/// Control whether a keyframe starts a new group for this media importer.
+	///
+	/// Default `true` (video GOP semantics; audio codecs where every frame is a keyframe otherwise
+	/// open a group per packet). Pass `false` when the caller drives its own group boundaries via
+	/// [`media_seek`](Self::media_seek), so audio frames accumulate into the current group instead
+	/// of one group (one QUIC stream) per packet. No-op for the container passthrough path, which
+	/// already groups by track kind.
+	pub fn media_grouping(&mut self, media: Id, enabled: bool) -> Result<(), Error> {
+		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		if let Media::Track(track) = media {
+			track.set_keyframe_grouping(enabled);
+		}
+		Ok(())
+	}
+
 	/// Insert or replace a video rendition in the broadcast's catalog.
 	///
 	/// The catalog is republished automatically.

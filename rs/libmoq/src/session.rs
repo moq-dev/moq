@@ -28,6 +28,8 @@ impl Session {
 		url: Url,
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
+		tls_disable_verify: bool,
+		backoff: moq_native::Backoff,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
 		let closed = oneshot::channel();
@@ -42,7 +44,7 @@ impl Session {
 			let res = tokio::select! {
 				// close() requested: a clean shutdown delivers a terminal 0.
 				_ = closed.1 => Ok(()),
-				res = Self::connect_run(callback, url, publish, consume) => res,
+				res = Self::connect_run(callback, url, publish, consume, tls_disable_verify, backoff) => res,
 			};
 
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
@@ -67,8 +69,14 @@ impl Session {
 		url: Url,
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
+		tls_disable_verify: bool,
+		backoff: moq_native::Backoff,
 	) -> Result<(), Error> {
-		let reconnect = moq_native::ClientConfig::default()
+		let mut config = moq_native::ClientConfig::default();
+		config.tls.disable_verify = Some(tls_disable_verify);
+		config.backoff = backoff;
+
+		let reconnect = config
 			.init()?
 			.with_publish(publish)
 			.with_consume(consume)

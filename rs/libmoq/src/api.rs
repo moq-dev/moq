@@ -165,6 +165,41 @@ pub extern "C" fn moq_error() -> *const c_char {
 	ffi::last_error_ptr()
 }
 
+/// Disable TLS certificate verification for all future sessions.
+///
+/// Global setting; call before [moq_session_connect]. Convenient for local
+/// development against a self-signed relay; use with caution in production.
+///
+/// Returns a zero on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_tls_disable_verify(disable: bool) -> i32 {
+	ffi::enter(move || {
+		State::lock().tls_disable_verify = disable;
+		Ok(())
+	})
+}
+
+/// Configure the exponential backoff used when a session reconnects.
+///
+/// Global setting; call before [moq_session_connect]. Durations are in milliseconds.
+/// `multiplier` scales the delay after each failed attempt. A `timeout_ms` of 0 retries
+/// forever; otherwise reconnection gives up (delivering a terminal negative status) once
+/// the timeout is exceeded.
+///
+/// Returns a zero on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_backoff_config(initial_ms: u64, multiplier: u32, max_ms: u64, timeout_ms: u64) -> i32 {
+	ffi::enter(move || {
+		State::lock().backoff = moq_native::Backoff {
+			initial: std::time::Duration::from_millis(initial_ms),
+			multiplier,
+			max: std::time::Duration::from_millis(max_ms),
+			timeout: std::time::Duration::from_millis(timeout_ms),
+		};
+		Ok(())
+	})
+}
+
 /// Start establishing a connection to a MoQ server.
 ///
 /// Takes origin handles, which are used for publishing and consuming broadcasts respectively.
@@ -220,8 +255,12 @@ pub unsafe extern "C" fn moq_session_connect(
 			.transpose()?
 			.cloned();
 
+		let tls_disable_verify = state.tls_disable_verify;
+		let backoff = state.backoff.clone();
 		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
-		state.session.connect(url, publish, consume, on_status)
+		state
+			.session
+			.connect(url, publish, consume, tls_disable_verify, backoff, on_status)
 	})
 }
 
@@ -492,6 +531,43 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
 		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
 		State::lock().publish.media_frame(media, payload, timestamp)
+	})
+}
+
+/// Begin a new group at an explicit `sequence` across every track of a media
+/// importer created with [moq_publish_media_ordered].
+///
+/// Closes the current group on each track and opens the next one numbered
+/// `sequence`, forcing a synchronized (aligned) group boundary across all tracks.
+/// Use it when the encoder produces deterministic group IDs and you want aligned,
+/// caller-controlled boundaries: two independent encoders publishing the same content
+/// each call this with the same `sequence` per GOP so their groups line up for
+/// dual-pipeline redundancy.
+/// Without it, group boundaries follow video keyframes automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_group(media: u32, sequence: u64) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_seek(media, sequence)
+	})
+}
+
+/// Control whether a keyframe starts a new group for a media importer.
+///
+/// Default `true`: a keyframe rolls a new group (video GOP semantics), and audio codecs where
+/// every frame is a keyframe (e.g. AAC) publish one group per packet. Pass `false` when the caller
+/// drives its own group boundaries via [`moq_publish_media_group`]: audio frames then accumulate
+/// into the current group until the next explicit boundary, instead of opening a QUIC stream per
+/// packet. No-op for the container passthrough path, which already groups by track kind.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_keyframe_grouping(media: u32, enabled: bool) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_grouping(media, enabled)
 	})
 }
 
