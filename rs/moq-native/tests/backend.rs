@@ -11,8 +11,27 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
 /// the data arrives correctly using the specified QUIC backend and URL scheme.
+///
+/// Dials `localhost`, so the client sends an SNI. Use [`no_sni_test`] to cover
+/// the SNI-less path.
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
+	connect_test(scheme, "[::]:0", "localhost", backend).await;
+}
+
+/// Dial a bare IP so the client sends no TLS SNI (RFC 6066 forbids IP literals
+/// in the server name). Raw QUIC has no in-band request URL, so this exercises
+/// the accept path with an empty server name, which must still establish rather
+/// than reject. Binds the loopback IP directly to avoid dual-stack flakiness.
+#[cfg(any(feature = "quinn", feature = "noq"))]
+async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
+	connect_test(scheme, "127.0.0.1:0", "127.0.0.1", backend).await;
+}
+
+/// Publish a broadcast on the server bound to `bind`, subscribe on a client that
+/// dials `authority`, and verify the data arrives over the given backend + scheme.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn connect_test(scheme: &str, bind: &str, authority: &str, backend: moq_native::QuicBackend) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
@@ -25,7 +44,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some(bind.to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
 
@@ -39,9 +58,12 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	client_config.backend = Some(backend);
+	// Bind the client to the same address family as the server so an IPv4 dial
+	// doesn't try to egress from an IPv6 socket (and vice versa).
+	client_config.bind = bind.parse().expect("invalid bind address");
 
 	let client = client_config.init().expect("failed to init client");
-	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+	let url: url::Url = format!("{scheme}://{authority}:{}", addr.port()).parse().unwrap();
 
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
@@ -211,6 +233,13 @@ async fn quinn_raw_quic() {
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
+async fn quinn_raw_quic_no_sni() {
+	no_sni_test("moqt", moq_native::QuicBackend::Quinn).await;
+}
+
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
 async fn quinn_mtls() {
 	mtls_test("https", moq_native::QuicBackend::Quinn).await;
 }
@@ -365,6 +394,13 @@ async fn iroh_connect() {
 #[tokio::test]
 async fn noq_raw_quic() {
 	backend_test("moqt", moq_native::QuicBackend::Noq).await;
+}
+
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_raw_quic_no_sni() {
+	no_sni_test("moqt", moq_native::QuicBackend::Noq).await;
 }
 
 #[cfg(feature = "noq")]
