@@ -101,10 +101,12 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
-- **`Client(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
+- **`connect(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
+  - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
   - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
+  - `tls_cert`, `tls_key`. Paired PEM certificate chain and private key paths for mTLS.
   - `.session`. The established `Session` (or `None` before connecting / after exit).
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
@@ -136,6 +138,9 @@ client = moq.Client(
   - `.finish()`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp_us)` writes a payload with a presentation timestamp in microseconds.
+  - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
+  - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
+  - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(timestamp_us, payload) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Subscribing

@@ -365,16 +365,13 @@ fn route_key(name: &Path, info: &broadcast::Info) -> (usize, u64) {
 /// At most one entry exists per path, so a slow consumer's pending set is bounded
 /// by the number of distinct paths. `UnannounceAnnounce` preserves the signal
 /// that a broadcast genuinely went away and a different one took its place (the
-/// consumer must see [`Announced::Ended`] before [`Announced::Active`]), while a
-/// stale `Announce` cancels with a subsequent `unannounce` because the consumer
-/// has not yet observed it. `Restart` is the atomic replacement: the broadcast
-/// at the path never became unavailable, so it collapses to a single
-/// [`Announced::Restart`] delivery.
+/// consumer must see the `None` before the `Some`), while a stale `Announce`
+/// cancels with a subsequent `unannounce` because the consumer has not yet
+/// observed it.
 enum PendingUpdate {
 	Announce(broadcast::Consumer),
 	Unannounce,
 	UnannounceAnnounce(broadcast::Consumer),
-	Restart(broadcast::Consumer),
 }
 
 /// Pending updates keyed by path. `BTreeMap` keeps memory strictly bounded by
@@ -395,22 +392,6 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Unannounce | PendingUpdate::UnannounceAnnounce(_)) => {
 				PendingUpdate::UnannounceAnnounce(broadcast)
 			}
-			// A restart the consumer hasn't drained yet; just swap in the newer broadcast.
-			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(broadcast),
-		};
-		self.pending.insert(path, new);
-	}
-
-	fn apply_restart(&mut self, path: PathOwned, broadcast: broadcast::Consumer) {
-		let new = match self.pending.remove(&path) {
-			// Consumer has already drained the prior active; replace it atomically.
-			None => PendingUpdate::Restart(broadcast),
-			// Consumer hasn't seen the original announce yet; keep it a fresh announce.
-			Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(broadcast),
-			// Consumer saw the original active; collapse everything into one restart.
-			Some(PendingUpdate::Unannounce | PendingUpdate::UnannounceAnnounce(_) | PendingUpdate::Restart(_)) => {
-				PendingUpdate::Restart(broadcast)
-			}
 		};
 		self.pending.insert(path, new);
 	}
@@ -422,9 +403,9 @@ impl OriginConsumerState {
 			None | Some(PendingUpdate::Unannounce) => {
 				self.pending.insert(path, PendingUpdate::Unannounce);
 			}
-			// The embedded/replacement announce cancels with this unannounce; the
-			// consumer still needs the leading unannounce.
-			Some(PendingUpdate::UnannounceAnnounce(_) | PendingUpdate::Restart(_)) => {
+			// The embedded announce cancels with this unannounce; the consumer still
+			// needs the leading unannounce.
+			Some(PendingUpdate::UnannounceAnnounce(_)) => {
 				self.pending.insert(path, PendingUpdate::Unannounce);
 			}
 		}
@@ -433,18 +414,17 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<OriginAnnounce> {
 		let path = self.pending.keys().next()?.clone();
-		let event = match self.pending.remove(&path).unwrap() {
-			PendingUpdate::Announce(broadcast) => Announced::Active(broadcast),
-			PendingUpdate::Unannounce => Announced::Ended,
+		let broadcast = match self.pending.remove(&path).unwrap() {
+			PendingUpdate::Announce(broadcast) => Some(broadcast),
+			PendingUpdate::Unannounce => None,
 			PendingUpdate::UnannounceAnnounce(broadcast) => {
 				// Deliver the unannounce now; leave the trailing announce pending so
 				// the next take returns it for the same path.
 				self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
-				Announced::Ended
+				None
 			}
-			PendingUpdate::Restart(broadcast) => Announced::Restart(broadcast),
 		};
-		Some(OriginAnnounce { path, event })
+		Some(OriginAnnounce { path, broadcast })
 	}
 }
 
@@ -462,15 +442,6 @@ impl AnnounceConsumerNotify {
 			.ok()
 			.expect("consumer closed")
 			.apply_announce(path, broadcast);
-	}
-
-	fn restart(&self, path: impl AsPath, broadcast: broadcast::Consumer) {
-		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		self.state
-			.write()
-			.ok()
-			.expect("consumer closed")
-			.apply_restart(path, broadcast);
 	}
 
 	fn unannounce(&self, path: impl AsPath) {
@@ -502,16 +473,6 @@ impl NotifyNode {
 
 		if let Some(parent) = &self.parent {
 			parent.lock().announce(path, broadcast);
-		}
-	}
-
-	fn restart(&mut self, path: impl AsPath, broadcast: &broadcast::Consumer) {
-		for consumer in self.consumers.values() {
-			consumer.restart(path.as_path(), broadcast.clone());
-		}
-
-		if let Some(parent) = &self.parent {
-			parent.lock().restart(path, broadcast);
 		}
 	}
 
@@ -589,7 +550,11 @@ impl OriginNode {
 				existing.active = broadcast.clone();
 				existing.backup.push_back(old);
 
-				self.notify.lock().restart(full, broadcast);
+				// A replacement is an unannounce/announce pair: the path briefly reads as
+				// unavailable rather than swapping atomically.
+				let mut notify = self.notify.lock();
+				notify.unannounce(&full);
+				notify.announce(&full, broadcast);
 			} else {
 				// Loses the ordering (longer path, or the tie-break): keep as a backup
 				// in case the active one drops.
@@ -683,7 +648,12 @@ impl OriginNode {
 			if let Some(idx) = best {
 				let active = entry.backup.remove(idx).expect("index in range");
 				entry.active = active;
-				self.notify.lock().restart(full, &entry.active);
+
+				// Promoting a backup is an unannounce/announce pair: the path briefly reads
+				// as unavailable rather than swapping atomically.
+				let mut notify = self.notify.lock();
+				notify.unannounce(&full);
+				notify.announce(&full, &entry.active);
 			} else {
 				// No more backups, so remove the entry.
 				self.broadcast = None;
@@ -780,47 +750,16 @@ impl Default for OriginNodes {
 	}
 }
 
-/// A path and what happened to the broadcast there, delivered by [`AnnounceConsumer`].
+/// A path and the broadcast now available there, delivered by [`AnnounceConsumer`].
 #[derive(Clone)]
-#[non_exhaustive]
 pub struct OriginAnnounce {
 	/// The path of the broadcast, relative to the consuming cursor's root.
 	pub path: PathOwned,
-	/// What happened to the broadcast at that path.
-	pub event: Announced,
-}
-
-/// What happened to a broadcast at a path.
-#[derive(Clone)]
-#[non_exhaustive]
-pub enum Announced {
-	/// A broadcast became available.
-	Active(broadcast::Consumer),
-	/// The broadcast was replaced without an interruption in availability (e.g. a
-	/// relay failover or a shorter hop path arriving).
+	/// The broadcast now available at that path, or `None` if it is no longer available.
 	///
-	/// Carries the replacement broadcast. On the wire this is the explicit `restart`
-	/// status referencing the announce id (lite-06+), or a duplicate ANNOUNCE (an
-	/// active announcement for a path that is already announced, with no intervening
-	/// unannounce) on lite-05.
-	Restart(broadcast::Consumer),
-	/// The broadcast is no longer available.
-	Ended,
-}
-
-impl Announced {
-	/// The broadcast consumer, or `None` if the broadcast ended.
-	///
-	/// Both [`Active`](Self::Active) and [`Restart`](Self::Restart) carry a
-	/// broadcast; [`Ended`](Self::Ended) does not. This is the legacy
-	/// `Option<broadcast::Consumer>` view for callers that don't distinguish a fresh
-	/// announce from a restart.
-	pub fn broadcast(self) -> Option<broadcast::Consumer> {
-		match self {
-			Self::Active(broadcast) | Self::Restart(broadcast) => Some(broadcast),
-			Self::Ended => None,
-		}
-	}
+	/// A replacement (a relay failover, or a shorter hop path arriving) is delivered as a
+	/// `None` followed by a `Some`, never as a swap in place.
+	pub broadcast: Option<broadcast::Consumer>,
 }
 
 /// Announces broadcasts to consumers over the network.
@@ -841,7 +780,7 @@ pub struct Producer {
 	// Fallback request queue, shared with every derived consumer. Separate from
 	// `nodes` because dynamic broadcasts are never announced: they only resolve a
 	// consumer's `request_broadcast` when no live announcement exists.
-	dynamic: kio::Producer<OriginDynamicState>,
+	dynamic: kio::Shared<OriginDynamicState>,
 
 	// The cache pool inherited by broadcasts created under this origin (sessions
 	// mint their remote broadcasts with it). Unbounded by default.
@@ -865,7 +804,7 @@ impl Producer {
 			info: info.id,
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
-			dynamic: kio::Producer::default(),
+			dynamic: kio::Shared::default(),
 			pool: info.pool,
 		}
 	}
@@ -888,7 +827,7 @@ impl Producer {
 			info,
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: PathOwned::default(),
-			dynamic: kio::Producer::default(),
+			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
 		}
 	}
@@ -998,7 +937,7 @@ impl Producer {
 	/// Use [`Consumer::announced`] to register interest and start receiving
 	/// announcement events; the consumer itself does not allocate any channels.
 	pub fn consume(&self) -> Consumer {
-		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.consume())
+		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
 	}
 
 	/// Handle to the announcement stream for this producer's subtree.
@@ -1047,9 +986,10 @@ impl Producer {
 ///
 /// Returned by [`Producer::publish_broadcast`]. While held, the broadcast stays
 /// announced to all consumers. Dropping it (or calling [`Self::unannounce`]) removes the
-/// broadcast from the tree: the origin promotes the best remaining backup route (emitting a
-/// restart) or, if none remain, unannounces the path. The guard is independent of the
-/// broadcast's own lifetime, so it can outlive or be dropped before the broadcast itself.
+/// broadcast from the tree: the origin promotes the best remaining backup route (unannouncing
+/// the path and re-announcing it with the backup) or, if none remain, unannounces the path.
+/// The guard is independent of the broadcast's own lifetime, so it can outlive or be dropped
+/// before the broadcast itself.
 #[must_use = "the broadcast is unannounced as soon as this guard is dropped"]
 pub struct Publish {
 	node: Lock<OriginNode>,
@@ -1107,7 +1047,8 @@ impl std::ops::DerefMut for Broadcast {
 /// Shared fallback request queue for an origin.
 ///
 /// Lives off to the side of the announce tree because dynamically served broadcasts
-/// are never announced. Mirrors the `dynamic`/`requests`/`request_order` fields of the
+/// are never announced. Carried in a [`kio::Shared`], so consumers enqueue and handlers
+/// drain under one lock. Mirrors the `dynamic`/`requests`/`request_order` fields of the
 /// broadcast and track models.
 #[derive(Default)]
 struct OriginDynamicState {
@@ -1165,7 +1106,7 @@ struct PendingBroadcast {
 pub struct Dynamic {
 	info: Origin,
 	root: PathOwned,
-	state: kio::Producer<OriginDynamicState>,
+	state: kio::Shared<OriginDynamicState>,
 }
 
 impl Clone for Dynamic {
@@ -1173,9 +1114,7 @@ impl Clone for Dynamic {
 		// Mirror `new`: bump `dynamic` so each live handle is counted. Without this,
 		// dropping a clone would decrement past `new`'s increment and prematurely flip
 		// `dynamic` to zero, making future `request_broadcast` calls return `Unroutable`.
-		if let Ok(mut state) = self.state.write() {
-			state.dynamic += 1;
-		}
+		self.state.lock().dynamic += 1;
 
 		Self {
 			info: self.info,
@@ -1186,10 +1125,8 @@ impl Clone for Dynamic {
 }
 
 impl Dynamic {
-	fn new(info: Origin, root: PathOwned, state: kio::Producer<OriginDynamicState>) -> Self {
-		if let Ok(mut state) = state.write() {
-			state.dynamic += 1;
-		}
+	fn new(info: Origin, root: PathOwned, state: kio::Shared<OriginDynamicState>) -> Self {
+		state.lock().dynamic += 1;
 
 		Self { info, root, state }
 	}
@@ -1199,26 +1136,15 @@ impl Dynamic {
 		&self.info
 	}
 
-	// Gate readiness on a queued request; mutate through the returned `Mut`.
-	fn poll<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, OriginDynamicState>, Error>>
-	where
-		F: FnMut(&kio::Ref<'_, OriginDynamicState>) -> Poll<()>,
-	{
-		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
-			Ok(state) => Ok(state),
-			Err(_) => Err(Error::Dropped),
-		})
-	}
-
 	/// Poll for the next requested broadcast, without blocking.
 	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
-		let mut state = ready!(self.poll(waiter, |state| {
+		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.request_order.is_empty() {
 				Poll::Pending
 			} else {
 				Poll::Ready(())
 			}
-		}))?;
+		}));
 
 		let path = state.request_order.pop_front().expect("predicate guaranteed a request");
 		// Leave the request in `requests` (only drain it from `request_order`) so a repeat
@@ -1248,13 +1174,13 @@ impl Dynamic {
 
 impl Drop for Dynamic {
 	fn drop(&mut self) {
-		if let Ok(mut state) = self.state.write() {
-			// Saturating sub so `Producer::dynamic` can stay infallible.
-			state.dynamic = state.dynamic.saturating_sub(1);
-			if state.dynamic == 0 {
-				// No handlers left to fulfill queued requests; close them.
-				state.reject_requests();
-			}
+		// Decrement and reject under one lock, so a `request_broadcast` that saw
+		// `dynamic > 0` through the same lock can't slip a request past the rejection.
+		let mut state = self.state.lock();
+		state.dynamic -= 1;
+		if state.dynamic == 0 {
+			// No handlers left to fulfill queued requests; close them.
+			state.reject_requests();
 		}
 	}
 }
@@ -1274,7 +1200,7 @@ pub struct Request {
 	producer: kio::Producer<PendingBroadcast>,
 
 	// Shared dynamic state, so `accept` can cache the served broadcast for repeat requests.
-	state: kio::Producer<OriginDynamicState>,
+	state: kio::Shared<OriginDynamicState>,
 }
 
 impl Request {
@@ -1296,12 +1222,11 @@ impl Request {
 		// (and subscribe upstream) again. Re-check under the lock: if a live broadcast was already
 		// served for this path while we were fetching upstream, dedup onto it and drop ours rather
 		// than replace a good entry with a duplicate subscription.
-		let resolved = if let Ok(mut state) = self.state.write() {
+		let resolved = {
+			let mut state = self.state.lock();
 			let existing = state.served.insert(self.path.clone(), broadcast.weak());
 			state.requests.remove(&self.path);
 			existing.map(|weak| weak.consume()).unwrap_or(broadcast)
-		} else {
-			broadcast
 		};
 
 		if let Ok(mut pending) = self.producer.write() {
@@ -1312,9 +1237,7 @@ impl Request {
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
-		if let Ok(mut state) = self.state.write() {
-			state.requests.remove(&self.path);
-		}
+		self.state.lock().requests.remove(&self.path);
 		if let Ok(mut state) = self.producer.write() {
 			state.resolved = Some(Err(err));
 		}
@@ -1331,11 +1254,11 @@ impl Drop for Request {
 		// lock before we run, so a concurrent request for the same path may have registered a
 		// *new* one here. Removing unconditionally would clobber it (stranding its requesters and
 		// desyncing `request_order` from `requests`), so only remove while it's still ours.
-		if let Ok(mut state) = self.state.write()
-			&& state
-				.requests
-				.get(&self.path)
-				.is_some_and(|producer| producer.same_channel(&self.producer))
+		let mut state = self.state.lock();
+		if state
+			.requests
+			.get(&self.path)
+			.is_some_and(|producer| producer.same_channel(&self.producer))
 		{
 			state.requests.remove(&self.path);
 		}
@@ -1355,8 +1278,8 @@ pub struct Requesting {
 enum RequestState {
 	// Already announced: resolves immediately with a clone of this broadcast.
 	Ready(broadcast::Consumer),
-	// Unroutable at request time, or the origin was already dropped: resolves immediately
-	// with this error. Baked in so `request_broadcast` itself stays infallible.
+	// Unroutable at request time: resolves immediately with this error. Baked in so
+	// `request_broadcast` itself stays infallible.
 	Failed(Error),
 	// Awaiting a handler: resolves when the request's result channel is written.
 	Pending(kio::Consumer<PendingBroadcast>),
@@ -1430,7 +1353,7 @@ impl Consume<Consumer> for Producer {
 	fn consume(&self) -> Consumer {
 		// Mirrors the inherent `Producer::consume`; inlined to avoid the
 		// inherent-vs-trait `consume` ambiguity.
-		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.consume())
+		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
 	}
 }
 
@@ -1481,7 +1404,7 @@ pub struct Consumer {
 
 	// Shared fallback request queue, fed to any `Dynamic` handler on the
 	// producer side. Used only by `request_broadcast`; announced lookups ignore it.
-	dynamic: kio::Consumer<OriginDynamicState>,
+	dynamic: kio::Shared<OriginDynamicState>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -1493,7 +1416,7 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	fn new(info: Origin, root: PathOwned, nodes: OriginNodes, dynamic: kio::Consumer<OriginDynamicState>) -> Self {
+	fn new(info: Origin, root: PathOwned, nodes: OriginNodes, dynamic: kio::Shared<OriginDynamicState>) -> Self {
 		Self {
 			info,
 			nodes,
@@ -1571,11 +1494,11 @@ impl Consumer {
 		loop {
 			let OriginAnnounce {
 				path: announced_path,
-				event,
+				broadcast,
 			} = announced.next().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced_path.as_path() == path {
-				if let Some(broadcast) = event.broadcast() {
+				if let Some(broadcast) = broadcast {
 					return Some(broadcast);
 				}
 			}
@@ -1612,10 +1535,9 @@ impl Consumer {
 	/// long as it stays live; a closed one is re-served on the next request.
 	///
 	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
-	/// dynamic handler exists, or [`Error::Dropped`] once the origin is gone. A request that is
-	/// registered while a handler is live but then loses every handler before being served also
-	/// resolves to [`Error::Unroutable`]. Unlike an announced broadcast, a dynamically served one
-	/// is never visible to [`Self::announced`].
+	/// dynamic handler exists. A request that is registered while a handler is live but then loses
+	/// every handler before being served also resolves to [`Error::Unroutable`]. Unlike an announced
+	/// broadcast, a dynamically served one is never visible to [`Self::announced`].
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
@@ -1628,9 +1550,7 @@ impl Consumer {
 		// (which may have a different root) agree on the same entry.
 		let absolute = self.root.join(&path).to_owned();
 
-		let Ok(mut state) = self.dynamic.write() else {
-			return kio::Pending::new(Requesting::failed(Error::Dropped));
-		};
+		let mut state = self.dynamic.lock();
 
 		// Reuse a still-live broadcast a handler already served for this path, so repeat
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
@@ -1818,41 +1738,32 @@ use futures::FutureExt;
 impl AnnounceConsumer {
 	pub fn assert_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert!(matches!(event, Announced::Active(_)), "should be an active announce");
-		assert_eq!(path, expected, "wrong path");
-		assert!(
-			event.broadcast().unwrap().is_clone(broadcast),
-			"should be the same broadcast"
-		);
+		let announce = self.next().now_or_never().expect("next blocked").expect("no next");
+		assert_eq!(announce.path, expected, "wrong path");
+		let announced = announce.broadcast.expect("should be an active announce");
+		assert!(announced.is_clone(broadcast), "should be the same broadcast");
 	}
 
-	pub fn assert_next_restart(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
+	/// A replacement route arrives as an unannounce/announce pair for the same path.
+	pub fn assert_next_replaced(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert!(matches!(event, Announced::Restart(_)), "should be a restart");
-		assert_eq!(path, expected, "wrong path");
-		assert!(
-			event.broadcast().unwrap().is_clone(broadcast),
-			"should be the same broadcast"
-		);
+		self.assert_next_none(&expected);
+		self.assert_next(&expected, broadcast);
 	}
 
 	pub fn assert_try_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.try_next().expect("no next");
-		assert_eq!(path, expected, "wrong path");
-		assert!(
-			event.broadcast().unwrap().is_clone(broadcast),
-			"should be the same broadcast"
-		);
+		let announce = self.try_next().expect("no next");
+		assert_eq!(announce.path, expected, "wrong path");
+		let announced = announce.broadcast.expect("should be an active announce");
+		assert!(announced.is_clone(broadcast), "should be the same broadcast");
 	}
 
 	pub fn assert_next_none(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		let OriginAnnounce { path, event, .. } = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(path, expected, "wrong path");
-		assert!(event.broadcast().is_none(), "should be unannounced");
+		let announce = self.next().now_or_never().expect("next blocked").expect("no next");
+		assert_eq!(announce.path, expected, "wrong path");
+		assert!(announce.broadcast.is_none(), "should be unannounced");
 	}
 
 	pub fn assert_next_wait(&mut self) {
@@ -2037,7 +1948,7 @@ mod tests {
 		assert!(consumer.get_broadcast("test").is_some());
 
 		// Identical (empty) hop chains tie on the deterministic key, so the first publish
-		// stays active and the rest queue as backups. No churn, no restart.
+		// stays active and the rest queue as backups. No churn.
 		announced.assert_next("test", &consumer1);
 		announced.assert_next_wait();
 
@@ -2050,14 +1961,14 @@ mod tests {
 		assert!(consumer.get_broadcast("test").is_some());
 		announced.assert_next_wait();
 
-		// Drop the active, we should restart with the remaining backup.
+		// Drop the active, we should promote the remaining backup.
 		drop(broadcast1);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.get_broadcast("test").is_some());
-		announced.assert_next_restart("test", &consumer3);
+		announced.assert_next_replaced("test", &consumer3);
 
 		// Drop the final broadcast, we should unannounce.
 		drop(broadcast3);
@@ -2071,10 +1982,10 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_restart_after_drain() {
+	async fn test_replace_after_drain() {
 		// A strictly-better route (shorter hop chain) replacing the active broadcast
-		// after the consumer has drained the original announce is delivered as a
-		// single atomic restart.
+		// after the consumer has drained the original announce is delivered as an
+		// unannounce/announce pair.
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {
@@ -2089,14 +2000,15 @@ mod tests {
 		announced.assert_next("test", &a.consume());
 
 		origin.publish_broadcast_spawn("test", b.consume());
-		announced.assert_next_restart("test", &b.consume());
+		announced.assert_next_replaced("test", &b.consume());
 		announced.assert_next_wait();
 	}
 
 	#[tokio::test]
-	async fn test_restart_undrained_stays_active() {
+	async fn test_replace_undrained_stays_active() {
 		// If the consumer hasn't observed the original announce yet, a winning route
-		// just swaps in the newer broadcast and is still delivered as a fresh Active.
+		// just swaps in the newer broadcast: the unannounce cancels the undrained
+		// announce, so a single fresh Active is delivered with no leading Ended.
 		let origin = Origin::random().produce();
 		// `a` carries one hop; `b` has none, so `b` wins the route and replaces it.
 		let a = broadcast::Info {

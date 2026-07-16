@@ -190,8 +190,10 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 
 /// The pool's eviction hook: abort the group with [`Error::Evicted`], freeing its
 /// frames immediately. A no-op once the group is already aborted or fully dropped.
-fn evict(state: &kio::Weak<GroupState>) {
-	let Ok(mut state) = state.write() else { return };
+fn evict(weak: &kio::ProducerWeak<GroupState>) {
+	// Upgrade to write; a closed (finished or fully dropped) group has nothing to free.
+	let Some(producer) = weak.produce() else { return };
+	let Ok(mut state) = producer.write() else { return };
 	if state.abort.is_some() {
 		return;
 	}

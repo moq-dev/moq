@@ -15,8 +15,10 @@ const ANNOUNCE_RESTART: u64 = 2;
 /// Whether the negotiated version carries restart (REANNOUNCE) semantics. On lite-05 a restart
 /// travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on lite-06+
 /// it is the explicit `restart` status referencing an announce id. Older versions never defined
-/// this, so we neither send nor interpret it there; a restart is sent as an unannounce followed
-/// by a fresh announce instead.
+/// this, so a duplicate ANNOUNCE is a protocol violation there rather than a restart.
+///
+/// This is a receive-side capability: we only ever advertise a replacement as an unannounce
+/// followed by a fresh announce, but a peer may still restart.
 pub fn restart_supported(version: Version) -> bool {
 	// Explicitly list older versions so future versions default to supported.
 	!matches!(
@@ -46,6 +48,8 @@ pub enum AnnounceBroadcast<'a> {
 	EndedId { id: u64 },
 	/// ANNOUNCE_RESTART (lite-06+): atomically replace the announcement with this id
 	/// (e.g. a new hop chain after a relay failover). The id stays live.
+	///
+	/// Only ever received: we advertise a replacement as an `EndedId` + `Active` pair.
 	Restart { id: u64, hops: OriginList },
 }
 
@@ -171,11 +175,11 @@ impl AnnounceBroadcast<'_> {
 		Ok(match status {
 			AnnounceStatus::Active => Self::Active { suffix, hops },
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
-			// On lite-05 we encode a restart as a duplicate ANNOUNCE (a second `Active`), but we
-			// also accept the draft's explicit `restart` status and treat it the same. For an
-			// already-announced path the subscriber turns it into a restart; for an unknown path
-			// it's a fresh announce. Older versions never defined this status, so it's an invalid
-			// value there.
+			// On lite-05 a restart travels as a duplicate ANNOUNCE (a second `Active`), so accept
+			// the draft's explicit `restart` status and treat it the same. Either way the
+			// subscriber retires an already-announced path before republishing it; for an unknown
+			// path it's a fresh announce. Older versions never defined this status, so it's an
+			// invalid value there.
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops },
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
@@ -229,9 +233,8 @@ impl Message for AnnounceRequest<'_> {
 enum AnnounceStatus {
 	Ended = 0,
 	Active = 1,
-	/// The explicit restart status. Encoded on lite-06+ (referencing an announce id); on lite-05
-	/// a restart goes out as a duplicate `Active` instead, but we still accept the explicit
-	/// status on decode for forward/cross-compatibility.
+	/// The explicit restart status, accepted on decode for forward/cross-compatibility. We never
+	/// encode it: a replacement goes out as an `Ended` + `Active` pair.
 	Restart = 2,
 }
 
@@ -358,7 +361,7 @@ mod tests {
 	}
 
 	// On lite-05+ the explicit `restart` status is accepted and surfaced as an `Active` (the
-	// subscriber turns it into a restart for an already-announced path).
+	// subscriber retires an already-announced path before republishing it).
 	#[test]
 	fn decodes_explicit_restart_status_as_active_on_lite05() {
 		let version = Version::Lite05;

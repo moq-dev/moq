@@ -327,6 +327,33 @@ async fn raw_frame_timestamps() {
 	track.finish().unwrap();
 }
 
+#[test]
+fn raw_track_supports_sparse_groups_and_known_end() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("sparse".into(), None).unwrap();
+
+	let group = track.create_group(2).unwrap();
+	assert_eq!(group.sequence(), 2);
+	group.finish().unwrap();
+
+	track.finish_at(5).unwrap();
+	let group = track.create_group(4).unwrap();
+	group.finish().unwrap();
+	assert!(track.create_group(5).is_err());
+	track.finish().unwrap();
+}
+
+#[tokio::test]
+async fn raw_group_abort_reaches_consumer() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("aborted".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	let consumer = group.consume().unwrap();
+
+	group.abort(409).unwrap();
+	assert!(consumer.read_frame().await.is_err());
+}
+
 #[tokio::test]
 async fn dynamic_track_request_can_abort() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

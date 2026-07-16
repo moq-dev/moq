@@ -31,11 +31,11 @@ The browser implementation. Uses [WebTransport](/concept/layer/web-transport), W
 
 ## FFI bindings
 
-These all link against the same [Rust core](https://crates.io/crates/moq-ffi) (via [`libmoq`](/lib/rs/crate/libmoq) + UniFFI) and present an idiomatic API in their host language.
+Python, Kotlin, Swift, and Go are generated from the same [`moq-ffi`](https://crates.io/crates/moq-ffi) UniFFI crate, then wrapped with idiomatic APIs. C uses the separate [`libmoq`](/lib/rs/crate/libmoq) ABI over the same Rust protocol and media crates.
 
 ### [C](/lib/c/)
 
-Raw C bindings via `libmoq`. The lowest-level entry point and the foundation for every other binding listed below.
+Raw C bindings via `libmoq`. It is independent of the UniFFI-generated bindings.
 
 ### [Python](/lib/py/)
 
@@ -63,4 +63,4 @@ cgo bindings with prebuilt static libraries per platform. Published as [`github.
 - **Go service or tooling** → [Go](/lib/go/)
 - **Anything else with a C ABI** → [C](/lib/c/)
 
-All FFI bindings expose the same protocol surface as the Rust core, so a publisher in Python can be consumed by a Swift subscriber, etc.
+Every binding uses the same wire protocol, so a publisher in Python can be consumed by a Swift subscriber. See the [binding parity audit](/lib/parity) for the local APIs exposed in each language.

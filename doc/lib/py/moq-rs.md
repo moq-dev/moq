@@ -34,7 +34,7 @@ async with moq.Client("https://relay.example.com") as client:
     ...
 ```
 
-`Client(url, *, tls_verify=True, publish=None, subscribe=None)`. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
+`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
 
 A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting:
 
@@ -127,6 +127,7 @@ async for group in track:
 ```
 
 `write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, including `payload`, `timestamp_us`, and `keyframe`. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+Use `create_group(sequence)` for sparse or replayed groups. `finish_at(final_sequence)` declares the exclusive end while still permitting lower groups to arrive, and `abort(error_code)` terminates a track or group with an application error.
 `TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering priority), and `update()` changes this subscriber's delivery preferences without resubscribing.
 `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 

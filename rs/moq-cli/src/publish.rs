@@ -35,24 +35,45 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 	}
 }
 
-/// Device capture options. Video (camera -> H.264/H.265) maps to `moq-video`;
-/// audio (microphone -> Opus) to `moq-audio`. Both are captured by default; use
-/// `--no-video` / `--no-audio` to publish only one.
+/// Device capture options. Video (camera/screen -> H.264/H.265) maps to
+/// `moq-video`; audio (microphone/system -> Opus) to `moq-audio`. Both are
+/// captured by default; use `--no-video` / `--no-audio` to publish only one.
+///
+/// The video source is one of `--camera` / `--display` / `--window` / `--app`,
+/// and the audio source one of `--microphone` / `--system-audio`, defaulting to
+/// the default camera and microphone. Run `moq devices` to list the ids each one
+/// takes.
 #[cfg(feature = "capture")]
 #[derive(clap::Args, Clone)]
+#[command(group = clap::ArgGroup::new("video-source").multiple(false))]
+#[command(group = clap::ArgGroup::new("audio-source").multiple(false))]
 pub struct CaptureArgs {
-	/// Camera device. Platform-specific: an AVFoundation `uniqueID` on macOS, or
-	/// a camera index / `/dev/videoN` path on Linux. Omit to use the default
-	/// camera. Ignored with `--screen`.
-	#[arg(long, conflicts_with = "screen")]
-	pub camera: Option<String>,
+	/// Capture a camera, by the id `moq devices` reports (an AVFoundation
+	/// `uniqueID` on macOS, a camera index / `/dev/videoN` path elsewhere).
+	/// Bare `--camera`, or no source flag at all, opens the default camera.
+	#[arg(long, num_args = 0..=1, group = "video-source")]
+	pub camera: Option<Option<String>>,
 
-	/// Capture a display (whole screen) instead of a camera. On Linux the
-	/// desktop portal opens a picker dialog to choose the screen.
+	/// Capture a whole display, by the index `moq devices` reports. Bare
+	/// `--display` captures the main display. On Linux the desktop portal opens a
+	/// picker dialog and the index is ignored.
+	#[arg(long, num_args = 0..=1, group = "video-source", alias = "screen")]
+	pub display: Option<Option<String>>,
+
+	/// Capture a single window, by the id `moq devices` reports. macOS only.
+	#[arg(long, group = "video-source")]
+	pub window: Option<String>,
+
+	/// Capture every window of an application, by the bundle id `moq devices`
+	/// reports. Windows opened later are included. macOS only.
+	#[arg(long, group = "video-source")]
+	pub app: Option<String>,
+
+	/// Hide the mouse cursor. Display/window/app capture only.
 	#[arg(long)]
-	pub screen: bool,
+	pub no_cursor: bool,
 
-	/// Requested capture width. The camera snaps to its nearest supported mode.
+	/// Requested capture width. The source snaps to its nearest supported mode.
 	#[arg(long)]
 	pub width: Option<u32>,
 
@@ -60,11 +81,14 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub height: Option<u32>,
 
-	/// Capture/encode framerate. Omit to use the camera's reported rate.
+	/// Capture/encode framerate. Omit to use the source's reported rate.
 	#[arg(long)]
 	pub fps: Option<u32>,
 
-	/// Target video bitrate in bits per second. Omit to derive one from the resolution.
+	/// Maximum video bitrate in bits per second. Omit to derive one from the resolution.
+	///
+	/// When publishing to a relay, the encoder backs off below this while the uplink is
+	/// congested and climbs back afterwards; it never encodes above it.
 	#[arg(long)]
 	pub bitrate: Option<u64>,
 
@@ -80,20 +104,27 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub software: bool,
 
-	/// Microphone device name. Omit to use the default input.
-	#[arg(long)]
-	pub microphone: Option<String>,
+	/// Capture a microphone, by the name `moq devices` reports. Bare
+	/// `--microphone`, or no audio source flag, opens the default input.
+	#[arg(long, num_args = 0..=1, group = "audio-source")]
+	pub microphone: Option<Option<String>>,
+
+	/// Capture the system (desktop) audio instead of a microphone: everything the
+	/// machine is playing, minus this process. macOS only, and it needs the Screen
+	/// Recording permission.
+	#[arg(long, group = "audio-source")]
+	pub system_audio: bool,
 
 	/// Target audio bitrate in bits per second (Opus). Omit for the codec default.
 	#[arg(long)]
 	pub audio_bitrate: Option<u32>,
 
 	/// Capture audio only (no camera).
-	#[arg(long, conflicts_with = "no_audio")]
+	#[arg(long, conflicts_with = "no_audio", conflicts_with = "video-source")]
 	pub no_video: bool,
 
 	/// Capture video only (no microphone).
-	#[arg(long)]
+	#[arg(long, conflicts_with = "audio-source")]
 	pub no_audio: bool,
 }
 
@@ -227,12 +258,17 @@ impl Publish {
 	}
 
 	/// Build a publisher capturing local devices (camera/screen and microphone).
+	///
+	/// `bandwidth` is the uplink's send estimate, when there is one: the video
+	/// encoder follows it down while the link is congested rather than
+	/// overshooting a pipe that can't carry it. Pass `None` to encode at the
+	/// configured bitrate regardless.
 	#[cfg(feature = "capture")]
-	pub fn capture(args: &CaptureArgs) -> anyhow::Result<Self> {
+	pub fn capture(args: &CaptureArgs, bandwidth: Option<moq_net::bandwidth::Consumer>) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
-		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode()));
+		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
@@ -304,11 +340,11 @@ impl Publish {
 					let broadcast = self.broadcast.clone();
 					async move {
 						match audio {
-							Some((config, output)) => moq_audio::capture::publish_microphone(
-								broadcast, catalog, config, "audio", output, clock,
-							)
-							.await
-							.map_err(anyhow::Error::from),
+							Some((config, output)) => {
+								moq_audio::capture::publish_capture(broadcast, catalog, config, "audio", output, clock)
+									.await
+									.map_err(anyhow::Error::from)
+							}
 							None => Ok(()),
 						}
 					}
@@ -323,20 +359,34 @@ impl Publish {
 
 #[cfg(feature = "capture")]
 impl CaptureArgs {
+	/// The video source named by the flags, defaulting to the default camera.
+	/// The `video-source` arg group makes these mutually exclusive, so the order
+	/// here only decides the default.
+	fn video_source(&self) -> moq_video::capture::Source {
+		use moq_video::capture::Source;
+
+		if let Some(id) = &self.window {
+			Source::Window(id.clone())
+		} else if let Some(id) = &self.app {
+			Source::App(id.clone())
+		} else if let Some(index) = &self.display {
+			Source::Display(index.clone())
+		} else {
+			Source::Camera(self.camera.clone().flatten())
+		}
+	}
+
 	fn video_config(&self) -> moq_video::capture::Config {
 		let mut config = moq_video::capture::Config::default();
-		if self.screen {
-			config.source = moq_video::capture::Source::Display;
-		} else {
-			config.device = self.camera.clone();
-		}
+		config.source = self.video_source();
 		config.width = self.width;
 		config.height = self.height;
 		config.framerate = self.fps;
+		config.cursor = !self.no_cursor;
 		config
 	}
 
-	fn video_encode(&self) -> moq_video::encode::Options {
+	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Consumer>) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
 		options.codec = self.codec.into();
@@ -347,12 +397,25 @@ impl CaptureArgs {
 		} else {
 			moq_video::encode::Kind::Auto
 		};
+		options.bandwidth = bandwidth;
 		options
+	}
+
+	/// The audio source named by the flags, defaulting to the default
+	/// microphone. The `audio-source` arg group makes these mutually exclusive.
+	fn audio_source(&self) -> moq_audio::capture::Source {
+		use moq_audio::capture::Source;
+
+		if self.system_audio {
+			Source::System
+		} else {
+			Source::Microphone(self.microphone.clone().flatten())
+		}
 	}
 
 	fn audio_config(&self) -> moq_audio::capture::Config {
 		let mut config = moq_audio::capture::Config::default();
-		config.device = self.microphone.clone();
+		config.source = self.audio_source();
 		config
 	}
 

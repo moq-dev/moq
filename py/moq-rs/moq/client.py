@@ -35,6 +35,7 @@ class Client:
         *,
         tls_verify: bool = True,
         tls_roots: list[str] | None = None,
+        tls_system_roots: bool | None = None,
         tls_fingerprints: list[str] | None = None,
         tls_cert: str | None = None,
         tls_key: str | None = None,
@@ -45,6 +46,7 @@ class Client:
         self._url = url
         self._tls_verify = tls_verify
         self._tls_roots = tls_roots
+        self._tls_system_roots = tls_system_roots
         self._tls_fingerprints = tls_fingerprints
         self._tls_cert = tls_cert
         self._tls_key = tls_key
@@ -71,6 +73,8 @@ class Client:
             self._inner.set_tls_disable_verify(True)
         if self._tls_roots:
             self._inner.set_tls_roots(self._tls_roots)
+        if self._tls_system_roots is not None:
+            self._inner.set_tls_system_roots(self._tls_system_roots)
         if self._tls_fingerprints:
             self._inner.set_tls_fingerprints(self._tls_fingerprints)
         if self._tls_cert is not None:
@@ -96,6 +100,9 @@ class Client:
 
     async def __aexit__(self, *exc) -> None:
         self._consumer = None
+        if self._session is not None:
+            self._session.shutdown()
+            self._session = None
         if self._inner is not None:
             self._inner.cancel()
             self._inner = None
@@ -139,7 +146,10 @@ def connect(
     *,
     tls_verify: bool = True,
     tls_roots: list[str] | None = None,
+    tls_system_roots: bool | None = None,
     tls_fingerprints: list[str] | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
     bind: str | None = None,
     publish: OriginProducer | None = None,
     subscribe: OriginProducer | None = None,
@@ -155,7 +165,10 @@ def connect(
         url,
         tls_verify=tls_verify,
         tls_roots=tls_roots,
+        tls_system_roots=tls_system_roots,
         tls_fingerprints=tls_fingerprints,
+        tls_cert=tls_cert,
+        tls_key=tls_key,
         bind=bind,
         publish=publish,
         subscribe=subscribe,

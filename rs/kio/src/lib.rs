@@ -4,6 +4,10 @@
 //! a mutex-protected value. Producers can modify the state and consumers are
 //! automatically notified via async wakers. The channel auto-closes when all
 //! producers are dropped.
+//!
+//! For state that both sides legitimately mutate (e.g. a reverse request queue),
+//! [`Shared`] is a role-less sibling: every handle can lock, read, or park on a
+//! predicate, with no liveness of its own.
 
 use std::{
 	ops::{Deref, DerefMut},
@@ -16,6 +20,7 @@ mod waiter;
 mod consumer;
 mod future;
 mod producer;
+mod shared;
 mod weak;
 
 #[cfg(feature = "tokio")]
@@ -27,8 +32,9 @@ mod tests;
 pub use consumer::Consumer;
 pub use future::{Future, Pending};
 pub use producer::{Mut, Producer, Ref};
+pub use shared::Shared;
 pub use waiter::{Waiter, WaiterList, wait};
-pub use weak::Weak;
+pub use weak::{ConsumerWeak, ProducerWeak};
 
 /// Waiters split by what they're waiting on, so an event only wakes the
 /// waiters that care about it. The big win is per-modification writes (the hot

@@ -77,6 +77,11 @@ const PAUSE_STABILITY_MS = 750;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitForWatch(page: Page): Promise<void> {
+	await page.evaluate((tag) => customElements.whenDefined(tag), SELECTORS.watch);
+	await page.locator(`${SELECTORS.watch}[data-smoke-ready]`).waitFor({ state: "attached" });
+}
+
 function throwPageErrors(errors: BrowserErrors): void {
 	const messages = [
 		...errors.page.map((error) => `page: ${error}`),
@@ -87,27 +92,7 @@ function throwPageErrors(errors: BrowserErrors): void {
 
 async function readPlayerState(page: Page): Promise<PlayerState> {
 	return page.evaluate((selectors) => {
-		type Signal<T> = { peek(): T };
-		type Watch = HTMLElement & {
-			backend: {
-				in: { paused: Signal<boolean> };
-				video: {
-					out: {
-						stats: Signal<{ frameCount?: number } | undefined>;
-						timestamp: Signal<number | undefined>;
-					};
-				};
-				audio: {
-					out: {
-						stats: Signal<{ bytesReceived?: number } | undefined>;
-						context: Signal<AudioContext | undefined>;
-					};
-				};
-			};
-			broadcast: { out: { catalog: Signal<{ audio?: unknown } | undefined> } };
-		};
-
-		const watch = document.querySelector(selectors.watch) as Watch | null;
+		const watch = document.querySelector<HTMLElement>(selectors.watch);
 		const canvas = watch?.querySelector("canvas");
 		let painted = false;
 		if (canvas && canvas.width > 0 && canvas.height > 0) {
@@ -130,13 +115,13 @@ async function readPlayerState(page: Page): Promise<PlayerState> {
 		const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
 
 		return {
-			videoFrames: watch?.backend.video.out.stats.peek()?.frameCount ?? 0,
-			videoTimestamp: watch?.backend.video.out.timestamp.peek(),
+			videoFrames: Number(watch?.dataset.smokeVideoFrames ?? 0),
+			videoTimestamp: Number(watch?.dataset.smokeVideoTimestamp) || undefined,
 			painted,
-			audioBytes: watch?.backend.audio.out.stats.peek()?.bytesReceived ?? 0,
-			audioContext: watch?.backend.audio.out.context.peek()?.state,
-			hasAudio: watch?.broadcast.out.catalog.peek()?.audio !== undefined,
-			paused: watch?.backend.in.paused.peek() ?? false,
+			audioBytes: Number(watch?.dataset.smokeAudioBytes ?? 0),
+			audioContext: watch?.dataset.smokeAudioContext || undefined,
+			hasAudio: watch?.dataset.smokeHasAudio === "true",
+			paused: watch?.dataset.smokePaused === "true",
 			pausedAttribute: watch?.hasAttribute("paused") ?? false,
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,
 			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
@@ -213,6 +198,7 @@ try {
 		errors.page.push(error.message);
 	});
 	await page.goto(pageUrl, { waitUntil: "load" });
+	if (role === "subscribe") await waitForWatch(page);
 
 	if (role === "publish") {
 		console.error(`publishing ${broadcast} (fake camera + microphone) to ${url}`);
@@ -234,6 +220,7 @@ try {
 			if (!reloaded && Date.now() - start > timeoutMs / 2) {
 				reloaded = true;
 				await page.reload({ waitUntil: "load" });
+				await waitForWatch(page);
 			}
 			await sleep(POLL_INTERVAL_MS);
 		}

@@ -38,13 +38,15 @@ fn err(ctx: &str, e: windows::core::Error) -> Error {
 }
 
 /// Open a display capture and stream its frames over a pump thread.
-pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
 	let config = config.clone();
+	// The device opens on the pump thread, so the selector has to be owned.
+	let device = device.map(str::to_string);
 	let chan = FrameChannel::new();
 	let (geo, guard) = pump::spawn(
 		chan.clone(),
 		move || {
-			let cap = Duplicator::open(&config)?;
+			let cap = Duplicator::open(&config, device.as_deref())?;
 			let geometry = Geometry {
 				width: cap.width,
 				height: cap.height,
@@ -91,7 +93,7 @@ struct Duplicator {
 }
 
 impl Duplicator {
-	fn open(config: &Config) -> Result<Self, Error> {
+	fn open(config: &Config, selector: Option<&str>) -> Result<Self, Error> {
 		let device = d3d11::create_device()?;
 		let context = unsafe {
 			device
@@ -99,7 +101,7 @@ impl Duplicator {
 				.map_err(|e| err("GetImmediateContext", e))?
 		};
 
-		let index = select_output(config)?;
+		let index = select_output(selector)?;
 		let output = enumerate_output(&device, index)?;
 		let device_name = format!("display:{index}");
 		let dupl = duplicate(&output, &device)?;
@@ -280,8 +282,8 @@ impl Drop for UnmapGuard<'_> {
 
 /// Which monitor to capture: a bare index or the `display:{index}` form that
 /// [`FrameStream::device`](super::FrameStream) reports; `None` is the first one.
-fn select_output(config: &Config) -> Result<u32, Error> {
-	match config.device.as_deref() {
+fn select_output(selector: Option<&str>) -> Result<u32, Error> {
+	match selector {
 		None => Ok(0),
 		Some(spec) => spec
 			.strip_prefix("display:")
@@ -324,7 +326,7 @@ mod tests {
 	#[test]
 	#[ignore]
 	fn duplicates_primary_display() {
-		let mut cap = match Duplicator::open(&Config::default()) {
+		let mut cap = match Duplicator::open(&Config::default(), None) {
 			Ok(cap) => cap,
 			Err(e) => {
 				eprintln!("skipping: no Desktop Duplication available: {e}");

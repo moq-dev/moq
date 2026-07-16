@@ -248,6 +248,14 @@ impl Backend for Nvenc {
 		Ok(Vec::new())
 	}
 
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		// Retunes the running session in place: no IDR, no reset. The CBR rate
+		// control mode set at open still applies, only the target moves.
+		self.session
+			.reconfigure(bitrate.min(u32::MAX as u64) as u32)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC set bitrate to {bitrate}: {e}")))
+	}
+
 	fn name(&self) -> &str {
 		NAME
 	}

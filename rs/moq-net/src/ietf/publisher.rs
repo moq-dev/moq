@@ -1,4 +1,4 @@
-use crate::{announce, group, origin, track};
+use crate::{group, origin, track};
 use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -525,22 +525,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				next = announced.next() => next,
 			};
 
-			let Some(crate::announce::Update { path, event, .. }) = next else {
+			let Some(crate::announce::Update { path, broadcast }) = next else {
 				break;
 			};
 
 			let suffix = path.to_owned();
 
-			match event {
-				announce::Event::Active(_) => {
+			match broadcast {
+				Some(_) => {
 					self.announce_namespace(suffix, &mut namespace_streams).await?;
 				}
-				announce::Event::Restart(_) => {
-					// moq-transport has no RESTART; fall back to done + re-announce.
-					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
-					self.announce_namespace(suffix, &mut namespace_streams).await?;
-				}
-				announce::Event::Ended => {
+				None => {
 					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
 				}
 			}
@@ -700,11 +695,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			_ => {
 				let mut announced = origin.announced();
 
-				// Send initial NAMESPACE messages for currently active namespaces
 				// Send initial NAMESPACE messages for currently active namespaces.
-				// A restart is indistinguishable from an active here (the namespace is present).
-				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
-					if event.broadcast().is_some() {
+				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
+					if broadcast.is_some() {
 						let suffix = path
 							.strip_prefix(&prefix)
 							.expect("origin returned invalid path")
@@ -721,7 +714,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						biased;
 						res = stream.reader.closed() => return res,
 					next = announced.next() => {
-						let Some(crate::announce::Update { path, event, .. }) = next else {
+						let Some(crate::announce::Update { path, broadcast }) = next else {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
 						};
@@ -729,22 +722,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 						let absolute = origin.absolute(&path).to_owned();
 
-						match event {
-							announce::Event::Active(_) => {
+						match broadcast {
+							Some(_) => {
 								tracing::debug!(broadcast = %absolute, "namespace");
 								stream.writer.encode(&ietf::Namespace::ID).await?;
 								stream.writer.encode(&ietf::Namespace { suffix }).await?;
 							}
-							announce::Event::Restart(_) => {
-								// moq-transport has no RESTART; fall back to namespace_done + namespace.
-								tracing::debug!(broadcast = %absolute, "namespace_done");
-								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-								stream.writer.encode(&ietf::NamespaceDone { suffix: suffix.clone() }).await?;
-								tracing::debug!(broadcast = %absolute, "namespace");
-								stream.writer.encode(&ietf::Namespace::ID).await?;
-								stream.writer.encode(&ietf::Namespace { suffix }).await?;
-							}
-							announce::Event::Ended => {
+							None => {
 								tracing::debug!(broadcast = %absolute, "namespace_done");
 								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
 								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;

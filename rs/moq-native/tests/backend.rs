@@ -65,14 +65,14 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+	let moq_native::moq_net::announce::Update { path, broadcast: bc } =
 		tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announce timed out")
 			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.broadcast().expect("expected announce, got unannounce");
+	let bc = bc.expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.track("video")
@@ -342,14 +342,14 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let moq_native::moq_net::announce::Update { path, event: bc, .. } =
+	let moq_native::moq_net::announce::Update { path, broadcast: bc } =
 		tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announce timed out")
 			.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.broadcast().expect("expected announce, got unannounce");
+	let bc = bc.expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.track("video")

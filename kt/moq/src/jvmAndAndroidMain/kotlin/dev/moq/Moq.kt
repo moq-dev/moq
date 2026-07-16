@@ -16,8 +16,8 @@ import uniffi.moq.MoqSession
  * auto-created), so you can [announce] broadcasts and iterate [announcements]
  * without touching the raw [MoqClient] handle.
  *
- * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) cancels the client,
- * which tears down the session.
+ * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
+ * the session and cancels the client.
  */
 class Moq internal constructor(
     /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
@@ -45,6 +45,7 @@ class Moq internal constructor(
     fun announced(prefix: String = ""): MoqAnnounced = session.consumer().announced(prefix)
 
     override fun close() {
+        session.shutdown()
         client.cancel()
     }
 
@@ -53,6 +54,11 @@ class Moq internal constructor(
          * Connect to a relay at [url] and return the live [Moq] connection.
          *
          * @param tlsVerify set false to skip certificate verification (local dev only).
+         * @param tlsRoots PEM root certificate paths to trust instead of platform roots.
+         * @param tlsSystemRoots whether to also trust platform roots when custom roots are set.
+         * @param tlsFingerprints peer certificate SHA-256 fingerprints to pin.
+         * @param tlsCert path to a PEM certificate chain to present for mTLS.
+         * @param tlsKey path to a PEM private key to present for mTLS.
          * @param bind local socket address to bind, e.g. "0.0.0.0:0".
          * @param publish origin to announce broadcasts through; auto-created when null.
          * @param subscribe origin to discover broadcasts through; auto-created when null.
@@ -60,6 +66,11 @@ class Moq internal constructor(
         suspend fun connect(
             url: String,
             tlsVerify: Boolean = true,
+            tlsRoots: List<String>? = null,
+            tlsSystemRoots: Boolean? = null,
+            tlsFingerprints: List<String>? = null,
+            tlsCert: String? = null,
+            tlsKey: String? = null,
             bind: String? = null,
             publish: MoqOriginProducer? = null,
             subscribe: MoqOriginProducer? = null,
@@ -75,6 +86,11 @@ class Moq internal constructor(
             val client = MoqClient()
             try {
                 if (!tlsVerify) client.setTlsDisableVerify(true)
+                if (tlsRoots != null) client.setTlsRoots(tlsRoots)
+                if (tlsSystemRoots != null) client.setTlsSystemRoots(tlsSystemRoots)
+                if (tlsFingerprints != null) client.setTlsFingerprints(tlsFingerprints)
+                if (tlsCert != null) client.setTlsCert(tlsCert)
+                if (tlsKey != null) client.setTlsKey(tlsKey)
                 if (bind != null) client.setBind(bind)
                 if (publishOrigin != null) client.setPublish(publishOrigin)
                 if (subscribeOrigin != null) client.setConsume(subscribeOrigin)

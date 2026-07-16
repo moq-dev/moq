@@ -152,6 +152,7 @@ export default defineConfig({
 					text: "Libraries",
 					link: "/lib/",
 					items: [
+						{ text: "Binding parity", link: "/lib/parity" },
 						{
 							text: "Rust",
 							link: "/lib/rs/",

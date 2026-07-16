@@ -39,6 +39,22 @@ class SmokeTest {
     }
 
     @Test
+    fun `all public ffi records and handles have aliases`() {
+        val hint: VideoHint = VideoHint(
+            coded = Dimensions(1920u, 1080u),
+            displayAspect = null,
+            bitrate = 4_000_000uL,
+            framerate = 60.0,
+            optimizeForLatency = true,
+        )
+        val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
+        val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
+        assertEquals(4_000_000uL, hint.bitrate)
+        assertEquals(8u, snapshot.deltaRatio)
+        assertEquals(false, stream.compression)
+    }
+
+    @Test
     fun `broadcast consumer fetches cached group`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
@@ -54,6 +70,18 @@ class SmokeTest {
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    @Test
+    fun `raw track supports sparse groups and a known end`() {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("sparse", null)
+            track.createGroup(2uL).finish()
+            track.finishAt(5uL)
+            track.createGroup(4uL).finish()
+            assertFailsWith<MoqException> { track.createGroup(5uL) }
+            track.finish()
         }
     }
 }

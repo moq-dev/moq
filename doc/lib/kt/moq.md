@@ -35,7 +35,13 @@ val moq = Moq.connect("https://relay.example.com")
 `Moq.connect(url)` builds the client, wires an internal origin for both publishing and subscribing, and returns a `Moq` connection. It is `AutoCloseable`, so prefer `use {}`:
 
 ```kotlin
-Moq.connect("https://localhost:4443", tlsVerify = false, bind = "127.0.0.1:0").use { moq ->
+Moq.connect(
+    "https://localhost:4443",
+    tlsVerify = false,
+    tlsRoots = listOf("local-ca.pem"),
+    tlsSystemRoots = true,
+    bind = "127.0.0.1:0",
+).use { moq ->
     // ... moq.session is the underlying MoqSession ...
 }  // close() cancels the client + session
 ```
@@ -91,7 +97,7 @@ import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
-    val audio = broadcast.publishMedia(MoqInit(format = "opus", data = opusInitBytes, video = null))
+    val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
 
     moq.announce("my-stream", broadcast)
 

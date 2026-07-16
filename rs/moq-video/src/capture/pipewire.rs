@@ -57,12 +57,12 @@ fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 }
 
 /// Open a portal screen capture and stream its frames from a PipeWire loop thread.
-pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
-	if let Some(device) = &config.device {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
+	if let Some(device) = device {
 		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
 	}
 
-	let (node_id, fd, session) = portal_negotiate().await?;
+	let (node_id, fd, session) = portal_negotiate(config.cursor).await?;
 
 	let chan = FrameChannel::new();
 	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
@@ -146,7 +146,7 @@ pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
 /// Ask the ScreenCast portal for a monitor: create a session, (re)select the
 /// source, and start it, returning the PipeWire node to stream, the fd of the
 /// portal's PipeWire remote, and a guard that closes the session on drop.
-async fn portal_negotiate() -> Result<(u32, OwnedFd, SessionGuard), Error> {
+async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), Error> {
 	let proxy = Screencast::new().await.map_err(|e| err("screencast portal", e))?;
 	let session = proxy
 		.create_session(Default::default())
@@ -158,7 +158,11 @@ async fn portal_negotiate() -> Result<(u32, OwnedFd, SessionGuard), Error> {
 		.select_sources(
 			&session,
 			SelectSourcesOptions::default()
-				.set_cursor_mode(CursorMode::Embedded)
+				.set_cursor_mode(if cursor {
+					CursorMode::Embedded
+				} else {
+					CursorMode::Hidden
+				})
 				.set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
 				.set_multiple(false)
 				.set_persist_mode(PersistMode::Application)
@@ -556,7 +560,7 @@ mod tests {
 	#[tokio::test]
 	#[ignore]
 	async fn portal_captures_frames() {
-		let mut stream = match open(&Config::default()).await {
+		let mut stream = match open(&Config::default(), None).await {
 			Ok(stream) => stream,
 			Err(e) => {
 				eprintln!("skipping: no portal screen capture available: {e}");

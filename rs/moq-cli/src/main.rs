@@ -5,6 +5,8 @@
 //! selected endpoint.
 
 mod args;
+#[cfg(feature = "capture")]
+mod devices;
 mod hls;
 mod moq;
 mod publish;
@@ -16,7 +18,7 @@ mod subscribe;
 mod transcode;
 mod web;
 
-use args::{Cli, Direction, Export, ExportSink, Import, ImportSource, MoqSide};
+use args::{Cli, Command, Export, ExportSink, Import, ImportSource, MoqSide};
 use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
@@ -60,16 +62,28 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init()?;
 
+	// `devices` only talks to the local hardware, so answer it before binding any
+	// transport.
+	#[cfg(feature = "capture")]
+	if matches!(cli.command, Command::Devices) {
+		cli.moq.reject("devices")?;
+		return devices::run().await;
+	}
+
+	cli.moq.validate()?;
+
 	let net = Net {
 		#[cfg(feature = "iroh")]
 		iroh: cli.moq.iroh.clone().bind(&cli.moq.client.quic).await?,
 	};
 
-	match cli.direction {
-		Direction::Import(import) => run_import(cli.moq, import, net).await,
-		Direction::Export(export) => run_export(cli.moq, export, net).await,
+	match cli.command {
+		Command::Import(import) => run_import(cli.moq, import, net).await,
+		Command::Export(export) => run_export(cli.moq, export, net).await,
 		#[cfg(feature = "transcode")]
-		Direction::Transcode(args) => transcode::run(cli.moq, args, net).await,
+		Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
+		#[cfg(feature = "capture")]
+		Command::Devices => unreachable!("handled above, before the transport is bound"),
 	}
 }
 
@@ -92,10 +106,25 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		}
 	}
 
+	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
+	// an outbound client has one: a `--server-bind` publisher's sessions are
+	// inbound and never surfaced here, so it stays `None` and those sources encode
+	// at their configured rate. Capture is the only such source today, so without
+	// that feature nothing reads this.
+	#[cfg(feature = "capture")]
+	let mut send_bandwidth = None;
+
 	// MoQ side: publish the Origin outward.
 	if moq.client.connect.is_some() {
 		if let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume()) {
 			moq::notify_ready();
+			// Read before the handle moves into the task. This consumer is
+			// persistent: it survives reconnects, reading `None` while down, so it
+			// can be wired up before anything connects.
+			#[cfg(feature = "capture")]
+			{
+				send_bandwidth = Some(reconnect.send_bandwidth());
+			}
 			tasks.spawn(async move { Ok(reconnect.closed().await?) });
 		}
 	}
@@ -159,7 +188,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let publish = Publish::capture(&capture)?;
+				let publish = Publish::capture(&capture, send_bandwidth)?;
 				announce.push(
 					origin
 						.publish_broadcast(&name, publish.consume())

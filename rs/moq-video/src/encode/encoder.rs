@@ -102,6 +102,7 @@ pub struct Encoder {
 	codec: Codec,
 	width: u32,
 	height: u32,
+	bitrate: u64,
 }
 
 impl Encoder {
@@ -134,12 +135,45 @@ impl Encoder {
 			codec: config.codec,
 			width: config.width,
 			height: config.height,
+			bitrate: config.resolved_bitrate(),
 		})
 	}
 
 	/// The encoder name in use, e.g. `"videotoolbox"`.
 	pub fn name(&self) -> &str {
 		self.backend.name()
+	}
+
+	/// The current target bitrate in bits per second: what
+	/// [`Config::bitrate`] resolved to at open, or the last value
+	/// [`set_bitrate`](Self::set_bitrate) accepted.
+	pub fn bitrate(&self) -> u64 {
+		self.bitrate
+	}
+
+	/// Retune the live encoder to `bitrate` bits per second, taking effect from
+	/// roughly the next frame. No IDR is forced, so this is cheap enough to
+	/// drive from a congestion controller: pair it with
+	/// [`rate::Control`](super::rate::Control), which decides *when* the target
+	/// is worth moving.
+	///
+	/// Setting the rate the encoder is already at does nothing and succeeds.
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::BitrateUnsupported`] if this backend can't retune while
+	/// running. That's not fatal: the encoder keeps running at its current rate,
+	/// so a caller driving a control loop should stop adapting rather than stop
+	/// encoding.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		if bitrate == self.bitrate {
+			return Ok(());
+		}
+		self.backend.set_bitrate(bitrate)?;
+		// Only after the backend accepts it, so a failed set doesn't leave the
+		// getter reporting a rate the encoder isn't using.
+		self.bitrate = bitrate;
+		Ok(())
 	}
 
 	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
@@ -618,6 +652,74 @@ mod tests {
 			types.contains(&7) && types.contains(&8) && types.contains(&5),
 			"no IDR: {types:?}"
 		);
+	}
+
+	/// The openh264 retune goes through the raw `set_option` FFI, so this covers
+	/// both that the call is accepted and that the encoder keeps producing after
+	/// it. A wrong option id or a bad `SBitrateInfo` layout would fail here.
+	#[test]
+	fn set_bitrate_retunes_software_encoder() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		let rgba = gray_rgba(320, 240);
+
+		let opened = encoder.bitrate();
+		assert_eq!(opened, config.resolved_bitrate());
+
+		// Encode first: this is the live-retune path, once the encoder exists.
+		encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+
+		let halved = opened / 2;
+		encoder.set_bitrate(halved).unwrap();
+		assert_eq!(encoder.bitrate(), halved);
+
+		// The retuned encoder must still emit a decodable keyframe, not wedge.
+		let packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		assert!(!packets.is_empty(), "encoder produced nothing after a retune");
+		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+	}
+
+	/// Regression: openh264 creates its encoder lazily on the first frame and
+	/// rejects `SetOption` with `cmInitExpected` until then. A retune before any
+	/// frame must be deferred to the first encode, not reported as a failure.
+	#[test]
+	fn set_bitrate_before_the_first_frame_is_deferred() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		let halved = encoder.bitrate() / 2;
+		encoder.set_bitrate(halved).expect("a retune before the first frame");
+		assert_eq!(encoder.bitrate(), halved);
+
+		// The deferred rate is applied during this encode, which must still work.
+		let rgba = gray_rgba(320, 240);
+		let packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		assert!(!packets.is_empty());
+
+		// And the encoder is live now, so a further retune takes the direct path.
+		encoder.set_bitrate(halved / 2).unwrap();
+		assert!(encoder.encode_rgba(&rgba, 320, 240, false).is_ok());
+	}
+
+	/// Setting the current rate must not reach the backend at all: the control
+	/// loop is allowed to be chatty, and the encoder shouldn't pay for it.
+	#[test]
+	fn set_bitrate_to_current_is_a_noop() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		let opened = encoder.bitrate();
+		encoder.set_bitrate(opened).unwrap();
+		assert_eq!(encoder.bitrate(), opened);
 	}
 
 	#[test]

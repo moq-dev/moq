@@ -32,12 +32,25 @@ mod threaded {
 	use crate::Error;
 	use crate::frame::Frame;
 
-	/// One encode request: a frame and whether to force a keyframe, plus a
-	/// oneshot to return that frame's packets (or an error) in order.
-	struct Request {
-		frame: Frame,
-		keyframe: bool,
-		resp: oneshot::Sender<Result<Vec<Bytes>, Error>>,
+	/// Work for the encode thread. Both variants go down the same channel so a
+	/// bitrate change lands in order with the frames around it, rather than
+	/// racing them.
+	enum Request {
+		/// A frame and whether to force a keyframe, plus a oneshot to return that
+		/// frame's packets (or an error) in order.
+		Encode {
+			frame: Frame,
+			keyframe: bool,
+			resp: oneshot::Sender<Result<Vec<Bytes>, Error>>,
+		},
+		/// Retune to a new bitrate, reporting whether the backend took it so the
+		/// caller can stop adapting against an encoder that can't. The round trip
+		/// is affordable because the rate control policy only sends one of these
+		/// when the target moves meaningfully, not per frame.
+		SetBitrate {
+			bitrate: u64,
+			resp: oneshot::Sender<Result<(), Error>>,
+		},
 	}
 
 	/// An [`Encoder`] running on its own thread. See the module docs.
@@ -71,11 +84,17 @@ mod threaded {
 					return;
 				}
 
-				// Encode each request in arrival order. The encoder and its COM /
+				// Serve each request in arrival order. The encoder and its COM /
 				// MFT handles are created, used, and dropped only on this thread.
 				while let Some(req) = req_rx.blocking_recv() {
-					let result = encoder.encode_raw(&req.frame, req.keyframe);
-					let _ = req.resp.send(result);
+					match req {
+						Request::Encode { frame, keyframe, resp } => {
+							let _ = resp.send(encoder.encode_raw(&frame, keyframe));
+						}
+						Request::SetBitrate { bitrate, resp } => {
+							let _ = resp.send(encoder.set_bitrate(bitrate));
+						}
+					}
 				}
 				// `encoder` drops here, on this thread, balancing the COM apartment.
 			});
@@ -102,13 +121,26 @@ mod threaded {
 		/// Encode one frame, awaiting its packets. The frame is moved to the
 		/// encode thread; the result returns over a oneshot.
 		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+			self.request(|resp| Request::Encode { frame, keyframe, resp }).await
+		}
+
+		/// Retune the encoder, awaiting the backend's verdict.
+		pub(in crate::encode) async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+			self.request(|resp| Request::SetBitrate { bitrate, resp }).await
+		}
+
+		/// Send a request built around a fresh oneshot and await its reply,
+		/// mapping a dead encode thread onto an error either way.
+		async fn request<T>(
+			&self,
+			build: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Request,
+		) -> Result<T, Error> {
 			let (resp_tx, resp_rx) = oneshot::channel();
-			let req = Request {
-				frame,
-				keyframe,
-				resp: resp_tx,
-			};
-			self.tx.as_ref().ok_or_else(gone)?.send(req).map_err(|_| gone())?;
+			self.tx
+				.as_ref()
+				.ok_or_else(gone)?
+				.send(build(resp_tx))
+				.map_err(|_| gone())?;
 			resp_rx.await.map_err(|_| gone())?
 		}
 	}
@@ -154,6 +186,12 @@ mod inline {
 
 		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 			self.0.encode_raw(&frame, keyframe)
+		}
+
+		/// Retune the encoder. Async only to match the threaded `Sink`; there's
+		/// no thread to hand this to, so it applies inline.
+		pub(in crate::encode) async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+			self.0.set_bitrate(bitrate)
 		}
 	}
 }

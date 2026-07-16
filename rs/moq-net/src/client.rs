@@ -694,10 +694,10 @@ mod tests {
 		tokio::spawn(driver);
 
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
-		assert_eq!(bandwidth.changed().await, Some(1_000_000));
+		assert_eq!(bandwidth.changed().await.unwrap(), Some(1_000_000));
 
 		// A later change is picked up by the next interval tick.
 		fake.set_send_rate(Some(2_000_000));
-		assert_eq!(bandwidth.changed().await, Some(2_000_000));
+		assert_eq!(bandwidth.changed().await.unwrap(), Some(2_000_000));
 	}
 }
