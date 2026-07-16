@@ -265,8 +265,17 @@ async fn forward(
 				}
 			},
 
-			_ = send_bandwidth.changed() => notify(&element, &["estimated-send-bitrate"]),
-			_ = recv_bandwidth.changed() => notify(&element, &["estimated-recv-bitrate"]),
+				// A closed estimate means the reconnect loop is gone for good, so stop rather than spin on
+				// a channel that is now always ready. The biased status arm above wins when it has the
+				// reason, which is the usual way this loop ends.
+				result = send_bandwidth.changed() => match result {
+					Ok(_) => notify(&element, &["estimated-send-bitrate"]),
+					Err(_) => return,
+				},
+				result = recv_bandwidth.changed() => match result {
+					Ok(_) => notify(&element, &["estimated-recv-bitrate"]),
+					Err(_) => return,
+				},
 		}
 	}
 }

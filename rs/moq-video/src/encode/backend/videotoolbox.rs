@@ -211,6 +211,16 @@ impl Backend for VideoToolbox {
 		Ok(Vec::new())
 	}
 
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		// AverageBitRate is settable on a live session and takes effect without
+		// an IDR, which is exactly what the rate control loop wants.
+		set_number(
+			&self.session,
+			unsafe { kVTCompressionPropertyKey_AverageBitRate },
+			clamp_i32(bitrate),
+		)
+	}
+
 	fn name(&self) -> &str {
 		NAME
 	}

@@ -77,6 +77,16 @@ impl Backend for Vaapi {
 		Ok(Vec::new())
 	}
 
+	fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+		// moq-vaapi rebuilds its rate control parameter from `Config::bitrate` on
+		// every frame, so this needs nothing more than a setter on that config to
+		// work. It doesn't have one as of 0.0.2 and the field is private, so the
+		// rate is fixed at open until moq-vaapi exposes one. Rebuilding the
+		// session per estimate isn't worth it: that forces an IDR on a link that
+		// just told us it's congested.
+		Err(Error::BitrateUnsupported(NAME))
+	}
+
 	fn name(&self) -> &str {
 		NAME
 	}

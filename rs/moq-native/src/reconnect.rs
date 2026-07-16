@@ -350,19 +350,26 @@ async fn run_session(
 }
 
 /// Mirror `bw`'s live estimate into `out` for as long as it changes, dropping the source handle once
-/// the backend stops reporting (`None`) so we don't keep polling a dead arm. A `poll_*` step: on
-/// return, `waiter` is registered for the next change (unless the source is gone). Seeding is implicit
+/// the session's producer is gone so we don't keep polling a dead arm. A `poll_*` step: on return,
+/// `waiter` is registered for the next change (unless the source is gone). Seeding is implicit
 /// (the first call forwards the current value if there is one).
+///
+/// A `None` estimate is forwarded but keeps the arm alive: the backend reporting nothing right now
+/// isn't the same as the session ending, and the caller resets `out` to `None` on disconnect anyway.
 fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, waiter: &kio::Waiter) {
 	loop {
 		let Some(consumer) = bw.as_mut() else { return };
-		let Poll::Ready(rate) = consumer.poll_changed(waiter) else {
+		let Poll::Ready(res) = consumer.poll_changed(waiter) else {
 			return;
 		};
-		let _ = out.set(rate);
-		if rate.is_none() {
-			*bw = None;
-			return;
+		match res {
+			Ok(rate) => {
+				let _ = out.set(rate);
+			}
+			Err(_) => {
+				*bw = None;
+				return;
+			}
 		}
 	}
 }
@@ -395,7 +402,7 @@ mod tests {
 	}
 
 	#[test]
-	fn poll_forward_mirrors_then_drops_on_none() {
+	fn poll_forward_mirrors_until_the_source_closes() {
 		let src = BandwidthProducer::new();
 		let out = BandwidthProducer::new();
 		let out_rx = out.consume();
@@ -412,15 +419,23 @@ mod tests {
 		poll_forward(&mut bw, &out, &waiter);
 		assert_eq!(out_rx.peek(), Some(3_000));
 
-		// Going None mirrors the None and drops the source, so we stop polling a dead arm.
+		// The estimate becoming unavailable is mirrored, but the arm stays: the
+		// backend reporting nothing right now is not the session ending.
 		src.set(None).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
 		assert_eq!(out_rx.peek(), None);
-		assert!(bw.is_none());
+		assert!(bw.is_some());
 
-		// Source gone: a later value on the (now-defunct) session's producer is ignored.
+		// So a later value on the same live session still gets through. Dropping the
+		// arm on the `None` above would have stranded the estimate at `None` for the
+		// rest of the session.
 		src.set(Some(9_000)).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
-		assert_eq!(out_rx.peek(), None);
+		assert_eq!(out_rx.peek(), Some(9_000));
+
+		// Closing the source is what retires the arm, so we stop polling a dead one.
+		src.close(moq_net::Error::Cancel).unwrap();
+		poll_forward(&mut bw, &out, &waiter);
+		assert!(bw.is_none());
 	}
 }

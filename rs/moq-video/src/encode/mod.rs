@@ -13,11 +13,16 @@
 //! [`Options`] / [`Kind`] / [`Config`] configure them. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
+//!
+//! [`rate`] holds the policy mapping a congestion-control bandwidth estimate
+//! onto the encoder's bitrate, which [`publish_capture`] drives for you.
 
 mod backend;
 mod encoder;
 mod producer;
 mod sink;
+
+pub mod rate;
 
 pub use encoder::{Codec, Config, Encoder, Kind};
 pub use producer::{Options, Producer, publish_capture};
