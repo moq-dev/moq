@@ -13,6 +13,27 @@ use super::store::Snapshot;
 /// LL-HLS compatibility version: required for `EXT-X-PART` and friends.
 const VERSION: u32 = 9;
 
+/// Index of the oldest segment whose parts still belong in the playlist.
+///
+/// A player only fetches parts near the live edge, and HLS requires them to be listed
+/// only within three target durations of it. Listing parts for the whole (16s+) window
+/// instead just bloats every reload with URIs nobody requests.
+fn oldest_with_parts(snapshot: &Snapshot) -> usize {
+	let keep = (snapshot.target_duration * 3) as f64;
+
+	let mut duration = 0.0;
+	let mut oldest = snapshot.segments.len();
+	for (position, segment) in snapshot.segments.iter().enumerate().rev() {
+		if duration >= keep {
+			break;
+		}
+		duration += segment.duration;
+		oldest = position;
+	}
+
+	oldest
+}
+
 /// Render a media playlist for one rendition from a [`Snapshot`].
 pub fn render_media(snapshot: &Snapshot) -> String {
 	// PART-HOLD-BACK must be at least 3x the part target (HLS spec).
@@ -33,17 +54,21 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 	}
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
 
-	for segment in &snapshot.segments {
+	let oldest_with_parts = oldest_with_parts(snapshot);
+
+	for (position, segment) in snapshot.segments.iter().enumerate() {
 		if segment.discontinuity {
 			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
 		}
-		for (index, part) in segment.parts.iter().enumerate() {
-			let independent = if part.independent { ",INDEPENDENT=YES" } else { "" };
-			let _ = writeln!(
-				out,
-				"#EXT-X-PART:DURATION={:.5},URI=\"part/{}/{}.m4s\"{}",
-				part.duration, segment.sequence, index, independent
-			);
+		if position >= oldest_with_parts {
+			for (index, part) in segment.parts.iter().enumerate() {
+				let independent = if part.independent { ",INDEPENDENT=YES" } else { "" };
+				let _ = writeln!(
+					out,
+					"#EXT-X-PART:DURATION={:.5},URI=\"part/{}/{}.m4s\"{}",
+					part.duration, segment.sequence, index, independent
+				);
+			}
 		}
 		if segment.complete {
 			let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
@@ -186,6 +211,40 @@ mod tests {
 			seg0 < disc && disc < seg1,
 			"discontinuity must sit between seg 0 and seg 1"
 		);
+	}
+
+	/// Parts far behind the live edge are dropped, but their segments stay playable.
+	#[test]
+	fn trims_parts_far_behind_the_live_edge() {
+		let segments = (0..10)
+			.map(|sequence| SegmentMeta {
+				sequence,
+				parts: vec![part(1.0, true)],
+				duration: 1.0,
+				complete: true,
+				discontinuity: false,
+			})
+			.collect();
+		let snapshot = Snapshot {
+			init_ready: true,
+			part_target: 1.0,
+			target_duration: 1,
+			media_sequence: 0,
+			discontinuity_sequence: 0,
+			next_sequence: 10,
+			segments,
+			finished: false,
+		};
+
+		let out = render_media(&snapshot);
+
+		// TARGETDURATION is 1, so only the last 3 seconds of media keep their parts.
+		assert!(!out.contains("part/6/0.m4s"));
+		assert!(out.contains("part/7/0.m4s"));
+		assert!(out.contains("part/9/0.m4s"));
+		// Every segment is still listed and playable, parts or not.
+		assert!(out.contains("\nseg/0.m4s\n"));
+		assert!(out.contains("\nseg/9.m4s\n"));
 	}
 
 	#[test]

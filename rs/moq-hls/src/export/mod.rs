@@ -55,8 +55,12 @@ pub struct Config {
 	/// Exporter latency budget. Generous so live GOPs aren't skipped; see the
 	/// group-skip note in the crate plan.
 	pub latency: Duration,
-	/// Target segment duration for audio renditions (video rolls on GOPs).
-	pub audio_segment_target: Duration,
+	/// Expected segment duration, and the seed for `EXT-X-TARGETDURATION`.
+	///
+	/// Audio renditions roll a segment once they reach this duration. Video rolls on GOP
+	/// boundaries instead, so for video this is only the expected GOP length: if the
+	/// encoder's actual GOPs run longer, `EXT-X-TARGETDURATION` latches up to match.
+	pub segment_target: Duration,
 }
 
 impl Default for Config {
@@ -65,7 +69,7 @@ impl Default for Config {
 			part_target: Duration::from_millis(500),
 			window: Duration::from_secs(16),
 			latency: Duration::from_secs(10),
-			audio_segment_target: Duration::from_secs(2),
+			segment_target: Duration::from_secs(2),
 		}
 	}
 }
@@ -85,23 +89,10 @@ impl Generation {
 	}
 }
 
-#[derive(Default)]
-struct State {
-	generation: Generation,
-	renditions: BTreeMap<String, Arc<Rendition>>,
-}
-
-impl State {
-	fn snapshot(&self) -> Snapshot {
-		Snapshot {
-			generation: self.generation,
-			renditions: self.renditions.clone(),
-		}
-	}
-}
-
 /// An atomic view of one rendition-set generation.
-#[derive(Clone)]
+///
+/// Doubles as the driver's own shared state: a reader's snapshot is a clone of it.
+#[derive(Clone, Default)]
 pub struct Snapshot {
 	generation: Generation,
 	renditions: BTreeMap<String, Arc<Rendition>>,
@@ -257,7 +248,7 @@ pub struct Broadcaster {
 	/// The discovery catalog has ended (broadcast closed) or errored.
 	catalog_done: bool,
 	renditions: BTreeMap<String, Driver>,
-	state: kio::Producer<State>,
+	state: kio::Producer<Snapshot>,
 	/// While true, no rendition holds an exporter, so the recording has no media
 	/// subscriptions. The discovery catalog stays subscribed, so this also gates
 	/// discovery: a rendition found while paused is registered `Idle` and only builds
@@ -280,7 +271,7 @@ impl Broadcaster {
 			catalog,
 			catalog_done: false,
 			renditions: BTreeMap::new(),
-			state: kio::Producer::new(State::default()),
+			state: kio::Producer::new(Snapshot::default()),
 			paused: false,
 		})
 	}
@@ -527,13 +518,13 @@ fn build_export(
 /// this handle's reads see the final state.
 #[derive(Clone)]
 pub struct Handle {
-	state: kio::Consumer<State>,
+	state: kio::Consumer<Snapshot>,
 }
 
 impl Handle {
 	/// Capture the current rendition set and generation atomically.
 	pub fn snapshot(&self) -> Snapshot {
-		self.state.read().snapshot()
+		self.state.read().clone()
 	}
 
 	/// Look up a rendition by name.
@@ -583,7 +574,7 @@ impl Handle {
 
 /// A rendition-set change subscription.
 pub struct Changes {
-	state: kio::Consumer<State>,
+	state: kio::Consumer<Snapshot>,
 	observed: Option<Generation>,
 }
 
@@ -599,7 +590,9 @@ impl Changes {
 				if Some(state.generation) == observed {
 					Poll::Pending
 				} else {
-					Poll::Ready(state.snapshot())
+					// Spelled out: `state` is a guard, so a bare `.clone()` would clone the
+					// borrow rather than the snapshot.
+					Poll::Ready(Snapshot::clone(state))
 				}
 			}) {
 				Poll::Ready(Ok(snapshot)) => Poll::Ready(Some(snapshot)),

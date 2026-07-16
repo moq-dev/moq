@@ -22,3 +22,9 @@ pub mod server;
 pub use error::*;
 #[cfg(feature = "server")]
 pub use server::Server;
+
+/// The HTTP client library used by [`import`], re-exported so callers can supply their
+/// own client via [`import::Config::client`] (e.g. to reach an authenticated origin).
+///
+/// A major version bump of this dependency is a breaking change for that field.
+pub use reqwest;
