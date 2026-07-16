@@ -1189,11 +1189,19 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		Ok(())
 	}
 
+	/// Open the SUBSCRIBE control stream and send the request.
+	async fn open_subscribe(&self, msg: &lite::Subscribe<'_>) -> Result<Stream<S, Version>, Error> {
+		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
+		stream.writer.encode(&lite::ControlType::Subscribe).await?;
+		stream.writer.encode(msg).await?;
+		Ok(stream)
+	}
+
 	/// Open the upstream SUBSCRIBE and start routing groups into the producer.
 	///
 	/// On Lite05+ the producer already exists (accepted from TRACK_INFO) and the
-	/// subscription is accepted implicitly. On older drafts this waits for the first
-	/// SUBSCRIBE_OK and promotes the pending request to a producer.
+	/// subscription is accepted implicitly. On older drafts this promotes the pending
+	/// request to a producer, then confirms with the first SUBSCRIBE_OK.
 	async fn establish(
 		&self,
 		track: &mut Option<Track>,
@@ -1216,10 +1224,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
-		stream.writer.encode(&lite::ControlType::Subscribe).await?;
-		stream.writer.encode(&msg).await?;
-
 		let producer = if self.subscriber.version.has_track_stream() {
 			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
 			let Some(Track::Active(producer)) = track.as_ref() else {
@@ -1227,25 +1231,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			};
 			producer.clone()
 		} else {
-			// Older drafts: the first SUBSCRIBE_OK promotes the pending request. Bail if
-			// the broadcast dies meanwhile.
-			let resp = tokio::select! {
-				err = self.broadcast.closed() => return Err(err),
-				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp?,
-			};
-			if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
-				return Err(Error::ProtocolViolation);
-			}
-
-			// Accept with defaults: pre-lite-05 carries no timescale, and the cache
-			// window falls back to the model default.
+			// Older drafts promote the pending request themselves. Accept with defaults
+			// (pre-lite-05 carries no timescale, and the cache window falls back to the
+			// model default), which needs nothing from SUBSCRIBE_OK.
 			let Some(Track::Pending(request)) = track.take() else {
 				unreachable!("establish called without a pending track");
 			};
 			let mut producer = request.accept(track::Info::default());
 			// The accepted producer starts with a fresh subscription cursor, so its first
-			// poll would re-report the subscription we just sent as a "change". Prime it
-			// now (the params are already on the wire) so only genuine later changes fire.
+			// poll would re-report the subscription we're about to send as a "change".
+			// Prime it now so only genuine later changes fire.
 			let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
 			*track = Some(Track::Active(producer.clone()));
 			producer
@@ -1256,6 +1251,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
 		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
 
+		// Register before the SUBSCRIBE hits the wire. `id` is live the moment the peer
+		// reads it, and a publisher may serve its first group immediately, so a late
+		// insert races the group stream: `recv_group` would find no entry and drop it,
+		// stalling the track forever.
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -1264,6 +1263,36 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				timescale,
 			},
 		);
+
+		let mut stream = match self.open_subscribe(&msg).await {
+			Ok(stream) => stream,
+			Err(err) => {
+				self.subscriber.subscribes.lock().remove(&id);
+				return Err(err);
+			}
+		};
+
+		if !self.subscriber.version.has_track_stream() {
+			// Older drafts: the first SUBSCRIBE_OK confirms it. Bail if the broadcast
+			// dies meanwhile.
+			let resp = tokio::select! {
+				err = self.broadcast.closed() => Err(err),
+				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp,
+			};
+
+			let ok = match resp {
+				Ok(resp) => matches!(resp, lite::SubscribeResponse::Ok(_)),
+				Err(err) => {
+					self.subscriber.subscribes.lock().remove(&id);
+					return Err(err);
+				}
+			};
+
+			if !ok {
+				self.subscriber.subscribes.lock().remove(&id);
+				return Err(Error::ProtocolViolation);
+			}
+		}
 
 		*sub = Sub::Active(SubStream {
 			stream,
