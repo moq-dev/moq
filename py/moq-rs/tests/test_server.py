@@ -52,7 +52,7 @@ async def test_server_client_roundtrip():
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await announcement.broadcast.subscribe_media(track_name, audio, 10_000)
+                    media_consumer = await announcement.broadcast.subscribe_media(track_name, audio)
 
                     payload = b"hello over the wire"
                     media.write_frame(payload, 1_000_000)

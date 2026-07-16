@@ -276,7 +276,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, 10_000, nil)
+	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestDynamicTrackRequestCanPublishMedia(t *testing.T) {
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := consumer.SubscribeMedia("requested-audio", moq.LegacyContainer(), 10_000, nil)
+		media, err := consumer.SubscribeMedia("requested-audio", moq.LegacyContainer(), nil)
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 

@@ -27,8 +27,8 @@ use std::{
 	time::Duration,
 };
 
-/// Default [`Info::cache`] age when the publisher doesn't set one.
-pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
+/// Default [`Info::latency_max`] age when the publisher doesn't set one.
+pub const DEFAULT_LATENCY_MAX: Duration = Duration::from_secs(5);
 
 /// How long a datagram stays in the per-track buffer before it is dropped.
 ///
@@ -55,12 +55,15 @@ pub struct Info {
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
 	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
 	pub timescale: Timescale,
-	/// How long the publisher keeps old groups available before evicting them
-	/// (the newest group is always retained). A subscriber's
-	/// [`Subscription::stale`] window is clamped to this, since a group can't be
+	/// The maximum age of a non-latest group before the publisher evicts it (the
+	/// newest group is always retained). A subscriber's
+	/// [`Subscription::latency_max`] window is clamped to this, since a group can't be
 	/// waited for longer than it's kept around. Reported in TRACK_INFO so
-	/// relays re-serve with the same window. Defaults to [`DEFAULT_CACHE`].
-	pub cache: Duration,
+	/// relays re-serve with the same window. Defaults to [`DEFAULT_LATENCY_MAX`].
+	///
+	/// This is the `Publisher Max Latency` on the wire, the publisher-side half of
+	/// the same budget [`Subscription::latency_max`] sets for a subscriber.
+	pub latency_max: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
@@ -90,7 +93,7 @@ impl Default for Info {
 	fn default() -> Self {
 		Self {
 			timescale: Timescale::default(),
-			cache: DEFAULT_CACHE,
+			latency_max: DEFAULT_LATENCY_MAX,
 			priority: 0,
 			ordered: false,
 			broadcast: default_broadcast(),
@@ -108,9 +111,9 @@ impl Info {
 		self
 	}
 
-	/// Set how long old groups stay available before eviction, returning `self` for chaining.
-	pub fn with_cache(mut self, cache: Duration) -> Self {
-		self.cache = cache;
+	/// Set the maximum age of a non-latest group before eviction, returning `self` for chaining.
+	pub fn with_latency_max(mut self, latency_max: Duration) -> Self {
+		self.latency_max = latency_max;
 		self
 	}
 
@@ -128,11 +131,11 @@ impl Info {
 		self
 	}
 
-	/// Clamp a subscriber's stale window to this track's [`Self::cache`]: a
+	/// Clamp a subscriber's latency budget to this track's [`Self::latency_max`]: a
 	/// subscriber can't wait for a late group longer than the publisher keeps it.
 	/// `Duration::ZERO` (skip immediately) is left untouched by the `min`.
-	fn clamp_stale(&self, stale: Duration) -> Duration {
-		stale.min(self.cache)
+	fn clamp_latency_max(&self, latency_max: Duration) -> Duration {
+		latency_max.min(self.latency_max)
 	}
 }
 
@@ -622,12 +625,12 @@ impl TrackState {
 				.unwrap_or(Err(Error::Duplicate));
 		}
 
-		let cache = info.cache;
+		let latency_max = info.latency_max;
 		let group = group::Producer::new(group::Info { sequence }, info);
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
 		self.groups.push_back(Some((group.clone(), now)));
 		self.pin_latest(&group);
-		self.evict_expired(now, cache);
+		self.evict_expired(now, latency_max);
 		Ok(group)
 	}
 }
@@ -689,7 +692,7 @@ impl Producer {
 		}
 		let info = state.info.as_ref().unwrap();
 		let track = info.clone();
-		let cache = info.cache;
+		let latency_max = info.latency_max;
 		let now = web_async::time::Instant::now();
 
 		if !state.duplicates.insert(group.sequence) {
@@ -703,7 +706,7 @@ impl Producer {
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.pin_latest(&group);
-		state.evict_expired(now, cache);
+		state.evict_expired(now, latency_max);
 
 		Ok(group)
 	}
@@ -723,7 +726,7 @@ impl Producer {
 
 		let info = state.info.as_ref().unwrap();
 		let track = info.clone();
-		let cache = info.cache;
+		let latency_max = info.latency_max;
 
 		let group = group::Producer::new(group::Info { sequence }, track);
 
@@ -732,7 +735,7 @@ impl Producer {
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
 		state.pin_latest(&group);
-		state.evict_expired(now, cache);
+		state.evict_expired(now, latency_max);
 
 		Ok(group)
 	}
@@ -941,7 +944,7 @@ impl Producer {
 	/// Subscribing to this in-process track, resolving synchronously.
 	///
 	/// The info is fixed at creation, so there's nothing to wait for (no
-	/// SUBSCRIBE_OK round trip). The subscriber's stale window is clamped to the
+	/// SUBSCRIBE_OK round trip). The subscriber's latency budget is clamped to the
 	/// track's cache. Pass `None` for [`Subscription::default`].
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let mut preferences = subscription.into().unwrap_or_default();
@@ -957,7 +960,7 @@ impl Producer {
 			.as_ref()
 			.expect("producer always has info")
 			.clone();
-		preferences.stale = info.clamp_stale(preferences.stale);
+		preferences.latency_max = info.clamp_latency_max(preferences.latency_max);
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
@@ -1825,11 +1828,11 @@ impl Subscriber {
 	}
 
 	///
-	/// The stale window is clamped to the track's cache, like the initial subscribe.
+	/// The latency budget is clamped to the track's cache, like the initial subscribe.
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, mut subscription: Subscription) -> Result<()> {
-		subscription.stale = self.info.clamp_stale(subscription.stale);
+		subscription.latency_max = self.info.clamp_latency_max(subscription.latency_max);
 		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
 		*state = subscription;
 		Ok(())
@@ -2258,7 +2261,7 @@ mod test {
 		}
 
 		// Advance time past the eviction threshold.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -2285,7 +2288,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -2323,7 +2326,7 @@ mod test {
 
 		let mut consumer = producer.subscribe(None);
 
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
@@ -2336,10 +2339,10 @@ mod test {
 		tokio::time::pause();
 
 		// A shorter cache evicts sooner than the default.
-		let mut producer = track_producer("test", Info::default().with_cache(Duration::from_secs(1)));
+		let mut producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
-		// Past the custom cache but well within DEFAULT_CACHE.
+		// Past the custom budget but well within DEFAULT_LATENCY_MAX.
 		tokio::time::advance(Duration::from_secs(2)).await;
 		producer.append_group().unwrap(); // seq 1
 
@@ -2350,24 +2353,24 @@ mod test {
 	}
 
 	#[test]
-	fn stale_clamped_to_cache() {
-		let producer = track_producer("test", Info::default().with_cache(Duration::from_secs(2)));
+	fn latency_max_clamped_to_cache() {
+		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
 
-		// A stale window beyond the cache is capped to the cache; a group can't be
+		// A latency budget beyond the cache is capped to the cache; a group can't be
 		// waited for longer than the publisher keeps it.
-		let mut subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
+		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
+		assert_eq!(subscriber.subscription().latency_max, Duration::from_secs(2));
 
-		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
+		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_stale(Duration::from_millis(500)))
+			.update(Subscription::default().with_latency_max(Duration::from_millis(500)))
 			.unwrap();
-		assert_eq!(subscriber.subscription().stale, Duration::from_millis(500));
+		assert_eq!(subscriber.subscription().latency_max, Duration::from_millis(500));
 
 		subscriber
-			.update(Subscription::default().with_stale(Duration::ZERO))
+			.update(Subscription::default().with_latency_max(Duration::ZERO))
 			.unwrap();
-		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
+		assert_eq!(subscriber.subscription().latency_max, Duration::ZERO);
 	}
 
 	#[test]
@@ -2406,7 +2409,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -2433,7 +2436,7 @@ mod test {
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -2447,7 +2450,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();

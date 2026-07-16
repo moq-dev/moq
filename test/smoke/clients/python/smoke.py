@@ -16,7 +16,7 @@ import sys
 import moq
 
 READ_CHUNK = 64 * 1024
-MAX_LATENCY_MS = 1_000  # subscribe_media congestion-control / lookahead window
+LATENCY_MAX_MS = 1_000  # subscribe_media congestion-control / lookahead window
 
 
 async def publish(url: str, broadcast: str) -> None:
@@ -62,7 +62,9 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         track_name = next(iter(catalog.video))
         video = catalog.video[track_name]
 
-        media = await consumer.subscribe_media(track_name, video.container, MAX_LATENCY_MS)
+        media = await consumer.subscribe_media(
+            track_name, video.container, moq.Subscription(latency_max_ms=LATENCY_MAX_MS)
+        )
 
         total = 0
 

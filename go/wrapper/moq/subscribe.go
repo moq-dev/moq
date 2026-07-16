@@ -42,10 +42,11 @@ func (b *BroadcastConsumer) FetchGroup(name string, sequence uint64, options *Fe
 }
 
 // SubscribeMedia subscribes to a media track, decoded with the given container.
-// maxLatencyMs bounds buffering before a stalled group is skipped. subscription
-// tunes delivery priority, group ordering priority, and group range; pass nil for defaults.
-func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, maxLatencyMs uint64, subscription *Subscription) (*MediaConsumer, error) {
-	inner, err := b.inner.SubscribeMedia(name, container, maxLatencyMs, subscription)
+// subscription tunes delivery priority, group ordering priority, group range, and
+// the latency budget; pass nil for defaults. Raise Subscription.LatencyMaxMs to
+// buffer instead of skipping a stalled group.
+func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, subscription *Subscription) (*MediaConsumer, error) {
+	inner, err := b.inner.SubscribeMedia(name, container, subscription)
 	if err != nil {
 		return nil, err
 	}

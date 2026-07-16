@@ -1032,7 +1032,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// `Request::accept`, which stamps the track's real broadcast.
 		let model = track::Info::default()
 			.with_timescale(info.timescale)
-			.with_cache(info.cache)
+			.with_latency_max(info.latency_max)
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
 		Ok(model)
@@ -1071,7 +1071,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					active.paused = false;
 					active.priority = subscription.priority;
 					active.ordered = subscription.ordered;
-					active.max_latency = subscription.stale;
+					active.max_latency = subscription.latency_max;
 					active.start_group = subscription.group_start;
 					self.send_update(active, subscription.group_end).await?;
 					tracing::info!(track = %self.name, "subscribe resumed");
@@ -1081,7 +1081,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 					active.priority = subscription.priority;
 					active.ordered = subscription.ordered;
-					active.max_latency = subscription.stale;
+					active.max_latency = subscription.latency_max;
 					active.start_group = subscription.group_start;
 					if supports_linger {
 						self.send_update(active, subscription.group_end).await?;
@@ -1135,7 +1135,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			track: self.name.as_str().into(),
 			priority: subscription.priority,
 			ordered: subscription.ordered,
-			max_latency: subscription.stale,
+			max_latency: subscription.latency_max,
 			start_group: subscription.group_start,
 			end_group: subscription.group_end,
 		};
@@ -1196,7 +1196,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			id,
 			paused: false,
 			ordered: subscription.ordered,
-			max_latency: subscription.stale,
+			max_latency: subscription.latency_max,
 			start_group: subscription.group_start,
 			priority: subscription.priority,
 			_broadcast_sub: broadcast_sub,

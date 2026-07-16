@@ -11,8 +11,8 @@ import { Timescale, type Timestamp } from "./time.ts";
 
 export type { Datagram } from "./datagram.ts";
 
-/** Default {@link Info.cache} window (milliseconds) when the publisher doesn't set one. */
-export const DEFAULT_CACHE_MS = 5000;
+/** Default {@link Info.latencyMax} window (milliseconds) when the publisher does not set one. */
+export const DEFAULT_LATENCY_MAX_MS = 5000;
 
 /**
  * How long (milliseconds) a datagram stays in the per-subscriber buffer before it is dropped.
@@ -48,10 +48,11 @@ export interface Info {
 	 */
 	timescale: Timescale;
 	/**
-	 * Publisher Max Latency: how long (milliseconds) old groups stay available before
-	 * eviction. Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound.
+	 * Publisher Max Latency: the maximum age (milliseconds) of a non-latest group before
+	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
+	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
 	 */
-	cache: number;
+	latencyMax: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
 	priority: number;
 	/**
@@ -65,7 +66,7 @@ export interface Info {
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: info.timescale ?? Timescale.MILLI,
-		cache: info.cache ?? DEFAULT_CACHE_MS,
+		latencyMax: info.latencyMax ?? DEFAULT_LATENCY_MAX_MS,
 		priority: info.priority ?? 0,
 		ordered: info.ordered ?? false,
 	};
@@ -238,7 +239,7 @@ let makeSubscriber: (name: string, state: TrackState) => Subscriber;
  * subscription the publisher serves from it) gets an independent
  * {@link Subscriber} that receives a full copy of the groups, each with its own
  * read cursor. Groups are mirrored into every live subscriber and retained for the
- * track's `cache` window so a late subscriber replays the recent groups.
+ * track's `latencyMax` window so a late subscriber replays the recent groups.
  *
  * Obtained from {@link Request.accept} (the wire asks the application for a track to
  * serve) or constructed directly for an in-process track.
@@ -363,8 +364,8 @@ export class Producer {
 	// Evict cached groups that are closed and older than the cache window, dropping
 	// each evicted group's mirror from every sink so no consumer can pin it.
 	#prune(): void {
-		const cacheMs = this.#state.info.peek()?.cache ?? DEFAULT_CACHE_MS;
-		const cutoff = Date.now() - cacheMs;
+		const latencyMaxMs = this.#state.info.peek()?.latencyMax ?? DEFAULT_LATENCY_MAX_MS;
+		const cutoff = Date.now() - latencyMaxMs;
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {

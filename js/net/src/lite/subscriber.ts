@@ -446,7 +446,7 @@ export class Subscriber {
 			timescale: Time.Timescale(info.timescale),
 			// Publisher Max Latency rides on the wire, so the local retention window
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			cache: info.cache,
+			latencyMax: info.latencyMax,
 			priority: info.priority,
 			ordered: info.ordered,
 		};

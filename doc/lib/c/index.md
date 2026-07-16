@@ -151,8 +151,8 @@ network.
 struct moq_track_info info = {0};
 info.priority = 3;
 info.ordered = true;
-info.cache_ms = 1000;
-info.cache_valid = true;
+info.latency_max_ms = 1000;
+info.latency_max_valid = true;
 info.timescale = 1000000;
 info.timescale_valid = true;
 
@@ -171,7 +171,7 @@ Fields ending in `_valid` decide whether the matching optional value is present:
 struct moq_subscription sub = {0};
 sub.priority = 5;
 sub.ordered = true;
-sub.stale_ms = 25;
+sub.latency_max_ms = 25;
 sub.group_start = 10;
 sub.group_start_valid = true;
 

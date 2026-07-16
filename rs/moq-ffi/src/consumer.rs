@@ -37,10 +37,13 @@ pub struct MoqSubscription {
 	/// aggregate is ordered only when every subscriber asks for it.
 	#[uniffi(default = false)]
 	pub ordered: bool,
-	/// How long to wait for an older group once a newer one has arrived before
-	/// skipping it, in milliseconds. `0` skips immediately.
+	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
+	/// `0` skips immediately; a larger value tolerates that much reordering.
+	///
+	/// Enforced both by the publisher's cache (sent on the wire) and by any local
+	/// buffering, such as `subscribe_media`'s jitter buffer.
 	#[uniffi(default = 0)]
-	pub stale_ms: u64,
+	pub latency_max_ms: u64,
 	/// First group to deliver, or null to start at the latest group.
 	#[uniffi(default = None)]
 	pub group_start: Option<u64>,
@@ -68,7 +71,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_ordered(s.ordered)
-			.with_stale(std::time::Duration::from_millis(s.stale_ms))
+			.with_latency_max(std::time::Duration::from_millis(s.latency_max_ms))
 			.with_group_start(s.group_start)
 			.with_group_end(s.group_end)
 	}
@@ -193,13 +196,14 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `container` is the track container from the catalog.
-	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
 	/// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
+	///
+	/// [`MoqSubscription::latency_max_ms`] bounds the local jitter buffer as well as
+	/// the publisher's cache, so both ends skip a stalled group on the same budget.
 	pub async fn subscribe_media(
 		&self,
 		name: String,
 		container: Container,
-		max_latency_ms: u64,
 		subscription: Option<MoqSubscription>,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		// Parse the container before subscribing so we don't leave a dangling
@@ -208,9 +212,9 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let subscription = subscription.map(moq_net::track::Subscription::from);
+		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
+		let latency = subscription.latency_max;
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
-		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),

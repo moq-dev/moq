@@ -5,7 +5,7 @@ import MoqFFI
 ///
 /// Pull-per-demand: `next` is called only when the consumer asks for the next
 /// element, never ahead of it. This is what preserves the FFI jitter buffer's
-/// fall-behind skipping (`maxLatencyMs` GoP-skipping): draining eagerly would
+/// fall-behind skipping (`latencyMaxMs` GoP-skipping): draining eagerly would
 /// move the backlog into an unbounded Swift buffer, so a slow consumer would
 /// grow memory and receive stale groups instead of skipping forward.
 ///

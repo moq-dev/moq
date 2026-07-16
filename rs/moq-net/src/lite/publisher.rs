@@ -462,7 +462,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.encode(&lite::TrackInfo {
 				priority: info.priority,
 				ordered: info.ordered,
-				cache: info.cache,
+				latency_max: info.latency_max,
 				timescale: info.timescale,
 			})
 			.await?;
@@ -536,7 +536,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let subscription = crate::track::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
-			stale: subscribe.max_latency,
+			latency_max: subscribe.max_latency,
 			group_start: subscribe.start_group,
 			group_end: subscribe.end_group,
 		};
@@ -989,7 +989,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					let _ = track.update(crate::track::Subscription {
 						priority: upd.priority,
 						ordered: upd.ordered,
-						stale: upd.max_latency,
+						latency_max: upd.max_latency,
 						group_start: upd.start_group,
 						group_end: upd.end_group,
 						..Default::default()

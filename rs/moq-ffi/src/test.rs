@@ -101,7 +101,7 @@ async fn raw_track_datagram_roundtrip() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				ordered: true,
-				cache_ms: None,
+				latency_max_ms: None,
 				timescale: Some(1_000_000),
 			}),
 		)
@@ -127,7 +127,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		ordered: false,
-		cache_ms: Some(2_500),
+		latency_max_ms: Some(2_500),
 		timescale: Some(90_000),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
@@ -136,7 +136,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info().await.unwrap();
 	assert_eq!(got.priority, 7);
 	assert!(!got.ordered);
-	assert_eq!(got.cache_ms, Some(2_500));
+	assert_eq!(got.latency_max_ms, Some(2_500));
 	assert_eq!(got.timescale, Some(90_000));
 }
 
@@ -163,7 +163,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer.update(MoqSubscription {
 		priority: 10,
 		ordered: false,
-		stale_ms: 25,
+		latency_max_ms: 25,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -529,7 +529,7 @@ async fn dynamic_track_request_can_publish_media() {
 		let consumer = consumer.clone();
 		tokio::spawn(async move {
 			consumer
-				.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000, None)
+				.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, None)
 				.await
 		})
 	};
@@ -685,7 +685,7 @@ async fn local_publish_consume_audio() {
 	assert!(catalog.video.is_empty());
 
 	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000, None)
+		.subscribe_media(track_name.clone(), audio.container.clone(), None)
 		.await
 		.unwrap();
 
@@ -741,7 +741,7 @@ async fn video_publish_consume() {
 	assert!(catalog.audio.is_empty());
 
 	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), video.container.clone(), 10_000, None)
+		.subscribe_media(track_name.clone(), video.container.clone(), None)
 		.await
 		.unwrap();
 
@@ -784,7 +784,7 @@ async fn multiple_frames_ordering() {
 
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
 	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000, None)
+		.subscribe_media(track_name.clone(), audio.container.clone(), None)
 		.await
 		.unwrap();
 
@@ -1048,7 +1048,7 @@ async fn server_client_roundtrip() {
 		.expect("expected a catalog");
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
 	let media_consumer = bc
-		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000, None)
+		.subscribe_media(track_name.clone(), audio.container.clone(), None)
 		.await
 		.unwrap();
 

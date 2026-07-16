@@ -183,7 +183,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		setSystemTime(new Date(10_000));
 
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { cache: 1000 });
+		const producer = broadcast.createTrack("video", { latencyMax: 1000 });
 
 		// A subscriber that never reads. Its sink must not grow without bound.
 		const stalled = broadcast.track("video").subscribe();
@@ -212,11 +212,11 @@ test("a stalled consumer does not pin evicted groups", async () => {
 test("createTrack commits info up front", async () => {
 	const broadcast = new BroadcastProducer();
 
-	const producer = broadcast.createTrack("video", { cache: 2000, priority: 3 });
+	const producer = broadcast.createTrack("video", { latencyMax: 2000, priority: 3 });
 	expect(producer.name).toBe("video");
 
 	const info = await broadcast.track("video").info();
-	expect(info.cache).toBe(2000);
+	expect(info.latencyMax).toBe(2000);
 	expect(info.priority).toBe(3);
 });
 

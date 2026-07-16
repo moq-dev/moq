@@ -68,7 +68,7 @@ export class TrackInfo {
 	 * Publisher Max Latency: an upper bound (milliseconds) on how long the publisher
 	 * caches a non-latest group past the arrival of a newer one.
 	 */
-	cache: number;
+	latencyMax: number;
 	/**
 	 * Per-frame timestamp scale (units per second). Mandatory on Lite05: a real
 	 * (non-zero) scale, and every frame on the wire is prefixed with a zigzag-delta
@@ -79,36 +79,36 @@ export class TrackInfo {
 	constructor({
 		priority = 0,
 		ordered = false,
-		cache = 0,
+		latencyMax = 0,
 		timescale = 0,
 	}: {
 		priority?: number;
 		ordered?: boolean;
-		cache?: number;
+		latencyMax?: number;
 		timescale?: number;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
-		this.cache = cache;
+		this.latencyMax = latencyMax;
 		this.timescale = timescale;
 	}
 
 	async #encode(w: Writer) {
 		await w.u8(this.priority);
 		await w.bool(this.ordered);
-		await w.u53(this.cache);
+		await w.u53(this.latencyMax);
 		await w.u53(this.timescale);
 	}
 
 	static async #decode(r: Reader): Promise<TrackInfo> {
 		const priority = await r.u8();
 		const ordered = await r.bool();
-		const cache = await r.u53();
+		const latencyMax = await r.u53();
 		const timescale = await r.u53();
 		// Mandatory on Lite05: a zero scale is invalid (mirrors Rust's Timescale::new rejection),
 		// and would otherwise throw later when wrapped in Timescale().
 		if (timescale === 0) throw new Error("track timescale must be non-zero");
-		return new TrackInfo({ priority, ordered, cache, timescale });
+		return new TrackInfo({ priority, ordered, latencyMax, timescale });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
