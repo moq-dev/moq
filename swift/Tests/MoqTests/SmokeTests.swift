@@ -8,6 +8,11 @@ final class SmokeTests: XCTestCase {
     /// exercise the cancel path.
     func testClientConstructsAndCancels() async throws {
         let client = Client()
+        client.setTlsRoots([])
+        client.setTlsSystemRoots(true)
+        client.setTlsFingerprints([])
+        client.setTlsCert(nil)
+        client.setTlsKey(nil)
         client.cancel()
         do {
             _ = try await client.connect(to: "https://localhost:0/test")
@@ -37,6 +42,20 @@ final class SmokeTests: XCTestCase {
         let track = try broadcast.publishTrack(name: "events")
         XCTAssertEqual(try track.name, "events")
         try track.finish()
+        try broadcast.finish()
+    }
+
+    func testVideoHintsReachMediaPublishApi() throws {
+        let broadcast = try BroadcastProducer()
+        let hint = VideoHint(
+            coded: Dimensions(width: 1920, height: 1080),
+            displayAspect: nil,
+            bitrate: 4_000_000,
+            framerate: 60,
+            optimizeForLatency: true
+        )
+        let media = try broadcast.publishMedia(format: "avc3", video: hint)
+        try media.finish()
         try broadcast.finish()
     }
 
@@ -128,6 +147,20 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(groupFrame?.payload, groupPayload)
         XCTAssertEqual(groupFrame?.timestampUs, 23_456)
 
+        try track.finish()
+        try broadcast.finish()
+    }
+
+    func testSparseGroupsAndKnownEnd() throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "sparse")
+        let group = try track.createGroup(sequence: 2)
+        XCTAssertEqual(group.sequence, 2)
+        try group.finish()
+
+        try track.finish(at: 5)
+        try track.createGroup(sequence: 4).finish()
+        XCTAssertThrowsError(try track.createGroup(sequence: 5))
         try track.finish()
         try broadcast.finish()
     }

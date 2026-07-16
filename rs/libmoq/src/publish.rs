@@ -196,6 +196,13 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
+	/// Create a raw group with an explicit sequence number.
+	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
+		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		let group = track.create_group(moq_net::group::Info { sequence })?;
+		self.groups.insert(group)
+	}
+
 	/// Write a single-frame group to a raw track with an explicit timestamp.
 	pub fn track_frame(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
@@ -217,7 +224,23 @@ impl Publish {
 	/// Finish a raw track. No more groups or frames can be written.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
-		track.finish()?;
+		match track.finish() {
+			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
+			Err(err) => Err(err.into()),
+		}
+	}
+
+	/// Declare a raw track's exclusive final group sequence.
+	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
+		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		track.finish_at(final_sequence)?;
+		Ok(())
+	}
+
+	/// Abort a raw track with an application error code.
+	pub fn track_abort(&mut self, track: Id, error_code: u16) -> Result<(), Error> {
+		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
+		track.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
 
@@ -292,6 +315,13 @@ impl Publish {
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
 		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
 		group.finish()?;
+		Ok(())
+	}
+
+	/// Abort a raw group with an application error code.
+	pub fn group_abort(&mut self, group: Id, error_code: u16) -> Result<(), Error> {
+		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
 }

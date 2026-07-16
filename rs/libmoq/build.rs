@@ -30,7 +30,11 @@ fn main() {
 		let target = env::var("TARGET").unwrap();
 		let profile = env::var("PROFILE").unwrap();
 		let libs_private = if target.contains("apple") {
-			"-framework CoreFoundation -framework Security -framework CoreServices"
+			concat!(
+				"-framework CoreFoundation -framework Security -framework CoreServices ",
+				"-framework Foundation -framework AVFoundation -framework CoreMedia ",
+				"-framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -lc++"
+			)
 		} else if target.contains("windows") {
 			"-lws2_32 -lbcrypt -luserenv -lntdll"
 		} else {

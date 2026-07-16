@@ -255,7 +255,13 @@ prepare_c() {
         return
     }
     case "$(uname -s)" in
-        Darwin) os_libs=(-framework CoreFoundation -framework Security -framework CoreServices) ;;
+        Darwin)
+            os_libs=(
+                -framework CoreFoundation -framework Security -framework CoreServices
+                -framework Foundation -framework AVFoundation -framework CoreMedia
+                -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -lc++
+            )
+            ;;
         # libmoq.a bundles openh264 (C++) and, on Linux, moq-vaapi (libva), so
         # the static link needs their runtimes alongside the usual system libs.
         *) os_libs=(-ldl -lm -lpthread -lstdc++ -lva -lva-drm) ;;

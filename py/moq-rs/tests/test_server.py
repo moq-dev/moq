@@ -74,7 +74,7 @@ async def test_server_client_roundtrip():
 
 
 async def test_server_request_close():
-    """A client connecting to a server that rejects requests sees a connect failure."""
+    """A session reports when the server rejects its request."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
 
         async def reject_loop() -> None:
@@ -88,8 +88,9 @@ async def test_server_request_close():
             client.set_bind("127.0.0.1:0")
             # MoqError is an Exception subclass at runtime; UniFFI's generated
             # code rebinds the name so the static checker doesn't see it.
+            session = await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
             with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
+                await asyncio.wait_for(session.closed(), timeout=5.0)
         finally:
             reject_task.cancel()
             try:
@@ -207,8 +208,9 @@ async def test_serve_helper_with_on_request_rejection():
             client = moq_ffi.MoqClient()
             client.set_tls_disable_verify(True)
             client.set_bind("127.0.0.1:0")
+            session = await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
             with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
+                await asyncio.wait_for(session.closed(), timeout=5.0)
         finally:
             serve_task.cancel()
             try:
