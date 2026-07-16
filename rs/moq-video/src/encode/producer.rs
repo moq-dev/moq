@@ -9,12 +9,12 @@
 use std::time::Instant;
 
 use moq_net::Timestamp;
-use moq_net::bandwidth::{Control, Policy};
 
 use crate::Error;
 use crate::capture;
 
 use super::encoder::{self, Codec};
+use super::rate::{Control, Policy};
 use super::sink::Sink;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
@@ -146,9 +146,9 @@ pub struct Options {
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth) (or
 	/// `moq_native::Reconnect::send_bandwidth`, which survives reconnects).
 	///
-	/// Set it and the encoder tracks the estimate per
-	/// [`bandwidth::Policy`](moq_net::bandwidth::Policy), so a closing uplink
-	/// gets a softer picture instead of a stalled one. Leave it `None` and the
+	/// Set it and the encoder tracks the estimate per the default
+	/// [`rate::Policy`](super::rate::Policy), so a closing uplink gets a softer
+	/// picture instead of a stalled one. Leave it `None` and the
 	/// encoder holds [`bitrate`](Self::bitrate) regardless of congestion, which
 	/// is what you want when the estimate isn't meaningful (a local file, a test
 	/// harness) or unavailable (a publisher that only accepts inbound sessions).

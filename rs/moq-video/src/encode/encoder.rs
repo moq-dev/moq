@@ -154,8 +154,8 @@ impl Encoder {
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
 	/// roughly the next frame. No IDR is forced, so this is cheap enough to
 	/// drive from a congestion controller: pair it with
-	/// [`bandwidth::Control`](moq_net::bandwidth::Control), which decides *when*
-	/// the target is worth moving.
+	/// [`rate::Control`](super::rate::Control), which decides *when* the target
+	/// is worth moving.
 	///
 	/// Setting the rate the encoder is already at does nothing and succeeds.
 	///
