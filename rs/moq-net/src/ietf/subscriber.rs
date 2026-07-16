@@ -5,15 +5,13 @@ use std::{
 	time::Duration,
 };
 
-use futures::StreamExt;
-
 use crate::{
 	Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	origin, track,
-	util::{MaybeBoxedExt, MaybeSendBox, Tasks},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
 use super::{Message, Version};
@@ -675,30 +673,34 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
-		let mut subscribes = futures::stream::FuturesUnordered::new();
+		let mut subscribes = TaskSet::owned();
 		loop {
-			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
-					Ok(request) => request,
-					Err(err) => {
-						tracing::debug!(%err, "broadcast closed");
-						break;
+			let next = subscribes
+				.drive(async {
+					tokio::select! {
+						request = broadcast.requested_track() => Some(request),
+						_ = self.session.closed() => None,
 					}
-				},
-				_ = self.session.closed() => break,
-				Some(()) = subscribes.next(), if !subscribes.is_empty() => continue,
+				})
+				.await;
+
+			let request = match next {
+				Some(Ok(request)) => request,
+				Some(Err(err)) => {
+					tracing::debug!(%err, "broadcast closed");
+					break;
+				}
+				// Session gone.
+				None => break,
 			};
 
 			let mut this = self.clone();
 
 			let path = path.to_owned();
 			let broadcast = broadcast.clone();
-			subscribes.push(
-				async move {
-					this.run_subscribe(path, broadcast, request).await;
-				}
-				.maybe_boxed(),
-			);
+			subscribes.push(async move {
+				this.run_subscribe(path, broadcast, request).await;
+			});
 		}
 
 		Ok(())

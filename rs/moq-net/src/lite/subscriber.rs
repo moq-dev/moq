@@ -127,24 +127,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_uni(self) -> Result<(), Error> {
-		let mut tasks = FuturesUnordered::new();
+		let mut tasks = TaskSet::owned();
 		loop {
-			let stream = tokio::select! {
-				stream = self.session.accept_uni() => stream.map_err(Error::from_transport)?,
-				Some(()) = tasks.next(), if !tasks.is_empty() => continue,
-			};
+			let stream = tasks
+				.drive(self.session.accept_uni())
+				.await
+				.map_err(Error::from_transport)?;
 
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			tasks.push(
-				async move {
-					if let Err(err) = this.run_uni_stream(stream).await {
-						tracing::debug!(%err, "error running uni stream");
-					}
+			tasks.push(async move {
+				if let Err(err) = this.run_uni_stream(stream).await {
+					tracing::debug!(%err, "error running uni stream");
 				}
-				.maybe_boxed(),
-			);
+			});
 		}
 	}
 
@@ -602,18 +599,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: broadcast::Dynamic) {
 		// Serve track requests until every consumer of the broadcast is gone.
-		let mut tracks = FuturesUnordered::new();
+		let mut tracks = TaskSet::owned();
 		loop {
-			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
-					Ok(request) => request,
-					Err(err) => {
-						tracing::debug!(%err, "broadcast closed");
-						break;
+			let next = tracks
+				.drive(async {
+					tokio::select! {
+						request = broadcast.requested_track() => Some(request),
+						_ = self.session.closed() => None,
 					}
-				},
-				_ = self.session.closed() => break,
-				Some(()) = tracks.next(), if !tracks.is_empty() => continue,
+				})
+				.await;
+
+			let request = match next {
+				Some(Ok(request)) => request,
+				Some(Err(err)) => {
+					tracing::debug!(%err, "broadcast closed");
+					break;
+				}
+				// Session gone.
+				None => break,
 			};
 
 			let name = request.name().to_string();
@@ -633,7 +637,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// One task per track serves its lone subscription and any number of
 			// fetches concurrently, then lingers before tearing the upstream down.
-			tracks.push(serve.run(request).maybe_boxed());
+			tracks.push(serve.run(request));
 		}
 	}
 

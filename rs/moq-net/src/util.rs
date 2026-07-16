@@ -40,8 +40,11 @@ pub(crate) struct Tasks {
 
 impl Tasks {
 	/// Queue a future for polling by the associated [`TaskSet`].
+	///
+	/// A task submitted after the set is gone is dropped: the driver has torn down,
+	/// so the task would have been cancelled anyway.
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
-		self.tx.unbounded_send(task.maybe_boxed()).expect("task driver dropped");
+		let _ = self.tx.unbounded_send(task.maybe_boxed());
 	}
 }
 
@@ -66,6 +69,35 @@ impl TaskSet {
 				active: FuturesUnordered::new(),
 			},
 		)
+	}
+
+	/// Create a set that only its owner can push to, for a loop that accepts streams
+	/// and serves each one as a child.
+	pub fn owned() -> Self {
+		let (_, set) = Self::new();
+		set
+	}
+
+	/// Queue a future for polling by this set.
+	pub fn push(&mut self, task: impl MaybeBoxedExt<'static, Output = ()>) {
+		self.active.push(task.maybe_boxed());
+	}
+
+	/// Poll every child while awaiting `future`, returning its output.
+	///
+	/// `future` is polled in place rather than cancelled and rebuilt each time a
+	/// child finishes, so an accept loop can serve its children without assuming the
+	/// transport's `accept_*` is cancel-safe (`web_transport_trait` promises nothing).
+	pub async fn drive<F: Future>(&mut self, future: F) -> F::Output {
+		tokio::pin!(future);
+
+		loop {
+			tokio::select! {
+				output = &mut future => return output,
+				Some(task) = self.rx.next() => self.active.push(task),
+				Some(()) = self.active.next(), if !self.active.is_empty() => {},
+			}
+		}
 	}
 
 	/// Drive submitted children until every submission handle is dropped and all

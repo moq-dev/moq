@@ -78,11 +78,13 @@ let connection = moq_net::Client::new()
     .with_subscriber(origin)
     .connect(transport)
     .await?;
-let session = connection.session().clone();
 
-// The connection is the protocol driver and must be polled for its lifetime.
+// Nothing drives the protocol but this driver, so it has to be polled for as long
+// as you hold the session. Split it off first: a whole `Connection` holds a session
+// handle, so spawning one would stop `session` from ever closing the transport.
+let (session, driver) = connection.split();
 wasm_bindgen_futures::spawn_local(async move {
-    let _ = connection.await;
+    let _ = driver.await;
 });
 
 // Read announcements off `consumer` exactly as on native...

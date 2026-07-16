@@ -214,7 +214,7 @@ impl Client {
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
 				// immediately instead of racing announcement gossip.
 				let mut connection = Connection::new(session, version.into(), start.recv_bandwidth, start.driver);
-				connection.wait_ready(start.connecting.ready()).await?;
+				connection.wait_ready(start.connecting.ready()).await;
 
 				return Ok(connection);
 			}
@@ -241,7 +241,7 @@ impl Client {
 					start.recv_bandwidth,
 					start.driver,
 				);
-				connection.wait_ready(start.connecting.ready()).await?;
+				connection.wait_ready(start.connecting.ready()).await;
 
 				return Ok(connection);
 			}
@@ -269,7 +269,7 @@ impl Client {
 					start.recv_bandwidth,
 					start.driver,
 				);
-				connection.wait_ready(start.connecting.ready()).await?;
+				connection.wait_ready(start.connecting.ready()).await;
 
 				return Ok(connection);
 			}
@@ -356,7 +356,7 @@ impl Client {
 		if let Some(connecting) = connecting {
 			// Block until the initial announce set has landed (for versions that
 			// report one); resolves immediately otherwise.
-			connection.wait_ready(connecting.ready()).await?;
+			connection.wait_ready(connecting.ready()).await;
 		}
 
 		Ok(connection)
@@ -602,18 +602,43 @@ mod tests {
 		run_alpn_lite_fallback_case(None).await;
 	}
 
+	// This fake reports no send-rate estimate, so it never reaches the tokio timer in
+	// the bandwidth loop. A connection is NOT runtime-free in general; see the Async
+	// docs in lib.rs.
 	#[test]
-	fn driven_connection_can_be_polled_without_a_tokio_runtime() {
+	fn connection_is_caller_polled_and_closes_on_drop() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
 		let mut connection = futures::executor::block_on(client.connect(fake.clone())).unwrap();
 		assert_eq!(connection.session().version(), Version::Lite(lite::Version::Lite04));
 
+		// An arbitrary waker drives it: nothing was spawned onto a runtime.
 		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
 		assert!(std::future::Future::poll(std::pin::Pin::new(&mut connection), &mut context).is_pending());
 
 		drop(connection);
+		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+	}
+
+	// A split driver must hold no Session clone, or the close-on-last-drop contract
+	// silently stops firing for every caller that runs the driver detached
+	// (moq-native's spawn_connection, moq-wasm's handshake).
+	#[test]
+	fn split_driver_does_not_keep_the_session_alive() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let connection = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let (session, driver) = connection.split();
+
+		// Stand in for spawning: the driver outlives the caller's handle.
+		let mut driver = Box::pin(driver);
+		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(driver.as_mut().poll(&mut context).is_pending());
+
+		// The caller drops their only handle, so the transport closes.
+		drop(session);
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 	}
 }
