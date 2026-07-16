@@ -66,19 +66,20 @@ pub struct Session {
 
 /// A connected session bundled with the future that drives its protocol state.
 ///
-/// Poll this future for the lifetime of every [`Session`] clone taken from it:
-/// nothing else drives the protocol, so a session whose connection isn't polled
-/// makes no progress. Dropping it cancels protocol work and closes the session.
-/// It resolves when the session ends, and keeps returning that same result if
-/// polled again.
+/// Poll this for the lifetime of every [`Session`] clone taken from it: nothing
+/// else drives the protocol, so a session whose connection isn't polled makes no
+/// progress. Either `.await` it, or call [`poll`](Self::poll) with a
+/// [`kio::Waiter`] to step it from inside another `poll_*` function. Dropping it
+/// cancels protocol work and closes the session. It resolves when the session
+/// ends, and keeps returning that same result if polled again.
 ///
 /// To run the driver elsewhere (an executor task) while handing the session to a
 /// caller, use [`split`](Self::split) rather than moving the whole connection: a
 /// [`Connection`] holds a [`Session`] clone, so a detached one would keep the
 /// session's close-on-last-drop from ever firing.
 ///
-/// Polling requires a tokio runtime with a time driver; see the crate-level Async
-/// docs.
+/// Polling still requires a tokio runtime with a time driver; see the crate-level
+/// Async docs.
 pub struct Connection {
 	// Both are `Some` until `split` takes them, which also suppresses `Drop`.
 	session: Option<Session>,
@@ -93,20 +94,24 @@ impl Connection {
 		protocol: MaybeSendBox<'static, Result<(), Error>>,
 	) -> Self {
 		let (session, maintenance) = Session::new(transport, version, recv_bandwidth);
-		let inner = async move {
-			let mut protocol = protocol;
-			tokio::select! {
-				result = &mut protocol => result,
-				// Bandwidth sampling stops at close; the protocol still owns the teardown.
-				_ = maintenance => protocol.await,
-			}
-		}
-		.maybe_boxed();
 
 		Self {
 			session: Some(session),
-			driver: Some(Driver { inner, result: None }),
+			driver: Some(Driver {
+				protocol,
+				maintenance,
+				result: None,
+				waiter: None,
+			}),
 		}
+	}
+
+	/// Drive the connection one step, registering `waiter` for the next wakeup.
+	///
+	/// The `poll_*` counterpart of `.await`ing the connection, for callers composing
+	/// it into their own [`kio`]-style poll functions. See [`Driver::poll`].
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.driver_mut().poll(waiter)
 	}
 
 	/// Borrow the connected session handle.
@@ -133,15 +138,19 @@ impl Connection {
 	/// initial announce set.
 	///
 	/// A session that dies first still resolves `ready`: the connecting producers
-	/// live inside the driver, so its completion drops them and releases the barrier.
-	/// The error isn't lost, it's cached for whoever polls the connection next.
+	/// live inside the driver, so its completion drops them (waking `ready`) and
+	/// releases the barrier. The error isn't lost, it's cached for whoever polls
+	/// the connection next.
 	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) {
-		tokio::pin!(ready);
-		tokio::select! {
-			biased;
-			_ = &mut ready => {},
-			_ = self.driver_mut() => ready.await,
-		}
+		let mut ready = std::pin::pin!(ready);
+		kio::wait(|waiter| {
+			if waiter.poll_future(ready.as_mut()).is_ready() {
+				return Poll::Ready(());
+			}
+			let _ = self.poll(waiter);
+			Poll::Pending
+		})
+		.await
 	}
 }
 
@@ -165,28 +174,59 @@ impl Drop for Connection {
 /// The future driving a [`Session`]'s protocol state, split off from its
 /// [`Connection`].
 ///
-/// Poll it for the lifetime of the session. Unlike a [`Connection`], dropping it
-/// cancels protocol work without closing the session, since it holds no session
-/// handle of its own. It resolves when the session ends, and keeps returning that
-/// same result if polled again.
+/// Poll it for the lifetime of the session, either by `.await`ing it or via
+/// [`poll`](Self::poll). Unlike a [`Connection`], dropping it cancels protocol
+/// work without closing the session, since it holds no session handle of its
+/// own. It resolves when the session ends, and keeps returning that same result
+/// if polled again.
 pub struct Driver {
-	inner: MaybeSendBox<'static, Result<(), Error>>,
+	protocol: MaybeSendBox<'static, Result<(), Error>>,
+	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
+	// the driver: the protocol owns the teardown. `None` once finished (or when the
+	// transport reports no send-rate estimate), since a completed future must not be
+	// polled again.
+	maintenance: Option<MaybeSendBox<'static, ()>>,
 	// Cached so a poll after `wait_ready` consumed the result doesn't re-poll a
 	// completed future.
 	result: Option<Result<(), Error>>,
+	// Retains the previous poll's waiter so its kio registrations stay live until
+	// the next poll replaces it (same dance as `kio::wait`).
+	waiter: Option<kio::Waiter>,
+}
+
+impl Driver {
+	/// Drive the protocol one step, registering `waiter` for the next wakeup.
+	///
+	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing it
+	/// into their own [`kio`]-style poll functions.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(result) = &self.result {
+			return Poll::Ready(result.clone());
+		}
+
+		if let Some(maintenance) = &mut self.maintenance
+			&& waiter.poll_future(maintenance.as_mut()).is_ready()
+		{
+			self.maintenance = None;
+		}
+
+		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
+		self.result = Some(result.clone());
+		Poll::Ready(result)
+	}
 }
 
 impl Future for Driver {
 	type Output = Result<(), Error>;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		if let Some(result) = &self.result {
-			return Poll::Ready(result.clone());
-		}
-
-		let result = std::task::ready!(self.inner.as_mut().poll(cx));
-		self.result = Some(result.clone());
-		Poll::Ready(result)
+		let this = &mut *self;
+		// Replacing drops the previous waiter, keeping this one live until the next
+		// poll so any kio registrations it made survive (see `kio::wait`).
+		let waiter = kio::Waiter::new(cx.waker().clone());
+		let result = this.poll(&waiter);
+		this.waiter = Some(waiter);
+		result
 	}
 }
 
@@ -216,7 +256,7 @@ impl Session {
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
-	) -> (Self, MaybeSendBox<'static, ()>) {
+	) -> (Self, Option<MaybeSendBox<'static, ()>>) {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
 			let producer = bandwidth::Producer::new();
@@ -228,9 +268,9 @@ impl Session {
 			}
 			.maybe_boxed();
 
-			(Some(consumer), maintenance)
+			(Some(consumer), Some(maintenance))
 		} else {
-			(None, std::future::pending().maybe_boxed())
+			(None, None)
 		};
 
 		let session = Self {

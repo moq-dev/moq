@@ -69,6 +69,8 @@ Two ways to drive things, both backed by `kio`:
 - `async fn` (requires an active tokio runtime; awaiting outside one may panic, see the Async section of `moq-net/src/lib.rs`).
 - `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `track::Consumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs`).
 
+Sessions are caller-driven: `Client::connect` / `Server::accept` return a `Connection` bundling the `Session` with the future that drives its protocol work; nothing is spawned behind the caller's back. `.await` it, `split()` it into `(Session, Driver)` to spawn the driver on an executor (spawning the whole `Connection` would leak the session's close-on-last-drop), or step it kio-style via `Connection::poll(&kio::Waiter)` (`moq-net/src/session.rs`).
+
 Follow the root `poll_*` conventions: collapse `Poll::Pending => Poll::Pending` with `ready!(...)`, and prefer `Ok(x?)` over `.map_err(Into::into)` so a fallible poll reads `let v = ready!(inner.poll_next(cx))?;`. Representative `ready!` sites: `moq-mux/src/container/consumer.rs`, `moq-net/src/model/group.rs`.
 
 ## Version matching

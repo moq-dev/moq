@@ -613,7 +613,10 @@ mod tests {
 		let mut connection = futures::executor::block_on(client.connect(fake.clone())).unwrap();
 		assert_eq!(connection.session().version(), Version::Lite(lite::Version::Lite04));
 
-		// An arbitrary waker drives it: nothing was spawned onto a runtime.
+		// An arbitrary waiter drives it kio-style: nothing was spawned onto a runtime.
+		assert!(connection.poll(&kio::Waiter::noop()).is_pending());
+
+		// The same connection is also a plain future.
 		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
 		assert!(std::future::Future::poll(std::pin::Pin::new(&mut connection), &mut context).is_pending());
 
