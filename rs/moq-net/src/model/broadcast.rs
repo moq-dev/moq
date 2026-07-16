@@ -79,10 +79,6 @@ struct BroadcastState {
 }
 
 impl BroadcastState {
-	fn modify(state: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>, Error> {
-		state.write().map_err(|_| Error::Dropped)
-	}
-
 	/// Insert a track weak handle into the lookup, returning an error if a live
 	/// track already holds the name. A closed entry under the name is reclaimed.
 	fn insert_track(&mut self, weak: track::TrackWeak) -> Result<(), Error> {
@@ -127,7 +123,14 @@ pub struct Producer {
 	// Held behind an Arc so each track born from this broadcast can inherit a shared
 	// handle (threaded down by [`Self::create_track`] / [`Self::reserve_track`]).
 	info: Arc<Info>,
-	state: kio::Producer<BroadcastState>,
+
+	// Broadcast liveness. Consumers watch this (read-only) for close; dropping every
+	// producer (this handle and every `Dynamic`) ends the broadcast.
+	alive: kio::Producer<()>,
+
+	// Track registry plus the dynamic request queue, mutated by producers and
+	// consumers alike under one lock.
+	state: kio::Shared<BroadcastState>,
 }
 
 impl Producer {
@@ -135,6 +138,7 @@ impl Producer {
 	pub fn new(info: Info) -> Self {
 		Self {
 			info: Arc::new(info),
+			alive: Default::default(),
 			state: Default::default(),
 		}
 	}
@@ -145,8 +149,7 @@ impl Producer {
 
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
-		let mut state = BroadcastState::modify(&self.state)?;
-		state.tracks.remove(name).ok_or(Error::NotFound)?;
+		self.state.lock().tracks.remove(name).ok_or(Error::NotFound)?;
 		Ok(())
 	}
 
@@ -161,9 +164,7 @@ impl Producer {
 	) -> Result<track::Producer, Error> {
 		let info = info.into().unwrap_or_default();
 		let track = track::Producer::new(self.info.clone(), name, info);
-		let mut state = BroadcastState::modify(&self.state)?;
-		state.insert_track(track.weak())?;
-		drop(state);
+		self.state.lock().insert_track(track.weak())?;
 		Ok(track)
 	}
 
@@ -176,9 +177,7 @@ impl Producer {
 	/// [`Dynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
 		let request = track::Request::new(self.info.clone(), name);
-		let mut state = BroadcastState::modify(&self.state)?;
-		state.insert_track(request.weak())?;
-		drop(state);
+		self.state.lock().insert_track(request.weak())?;
 		Ok(request)
 	}
 
@@ -210,14 +209,15 @@ impl Producer {
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.info.clone(), self.state.clone())
+		Dynamic::new(self.info.clone(), self.alive.clone(), self.state.clone())
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			state: self.state.consume(),
+			alive: self.alive.consume(),
+			state: self.state.clone(),
 		}
 	}
 
@@ -231,9 +231,7 @@ impl Producer {
 	/// gone, so a clone that outlives this call keeps it alive until it too is
 	/// dropped or finished.
 	pub fn finish(self) {
-		if let Ok(mut state) = self.state.write() {
-			state.closed = true;
-		}
+		self.state.lock().closed = true;
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -245,15 +243,14 @@ impl Producer {
 impl Drop for Producer {
 	fn drop(&mut self) {
 		// Only the last producer ending the broadcast matters; a clone dropping
-		// leaves it live. Warn if that last exit wasn't an explicit finish(), since
-		// consumers will then see Error::Dropped (classically a GC-collected handle
-		// in a language binding that tears the stream down mid-publish).
-		if !self.state.is_last() {
+		// leaves it live (`alive` is shared with every `Dynamic` too). Warn if that
+		// last exit wasn't an explicit finish(), since consumers will then see
+		// Error::Dropped (classically a GC-collected handle in a language binding
+		// that tears the stream down mid-publish).
+		if !self.alive.is_last() {
 			return;
 		}
-		if let Ok(state) = self.state.write()
-			&& !state.closed
-		{
+		if !self.state.read().closed {
 			tracing::warn!(
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
 			);
@@ -281,7 +278,9 @@ impl Producer {
 /// are automatically aborted.
 pub struct Dynamic {
 	info: Arc<Info>,
-	state: kio::Producer<BroadcastState>,
+	// Keeps the broadcast alive while a handler exists (mirrors a producer).
+	alive: kio::Producer<()>,
+	state: kio::Shared<BroadcastState>,
 }
 
 impl Clone for Dynamic {
@@ -290,52 +289,36 @@ impl Clone for Dynamic {
 		// Without this, deriving Clone would let `Drop` decrement past `new`'s
 		// single increment and prematurely flip `dynamic` to zero, causing
 		// future `track` calls to return `NotFound`.
-		if let Ok(mut state) = self.state.write() {
-			state.dynamic += 1;
-		}
+		self.state.lock().dynamic += 1;
 
 		Self {
 			info: self.info.clone(),
+			alive: self.alive.clone(),
 			state: self.state.clone(),
 		}
 	}
 }
 
 impl Dynamic {
-	fn new(info: Arc<Info>, state: kio::Producer<BroadcastState>) -> Self {
-		if let Ok(mut state) = state.write() {
-			// If the broadcast is already closed, we can't handle any new requests.
-			state.dynamic += 1;
-		}
+	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>) -> Self {
+		state.lock().dynamic += 1;
 
-		Self { info, state }
+		Self { info, alive, state }
 	}
 
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
 
-	// A helper to automatically apply Dropped if the state is closed. The predicate is
-	// read-only and just gates readiness; mutate through the returned `Mut`.
-	fn poll<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, BroadcastState>, Error>>
-	where
-		F: FnMut(&kio::Ref<'_, BroadcastState>) -> Poll<()>,
-	{
-		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
-			Ok(state) => Ok(state),
-			Err(_) => Err(Error::Dropped),
-		})
-	}
-
 	/// Poll for the next consumer-requested track, without blocking.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
-		let mut state = ready!(self.poll(waiter, |state| {
+		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.request_order.is_empty() {
 				Poll::Pending
 			} else {
 				Poll::Ready(())
 			}
-		}))?;
+		}));
 
 		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
 		let pending = state.requests.remove(&name).expect("request_order out of sync");
@@ -354,13 +337,14 @@ impl Dynamic {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			state: self.state.consume(),
+			alive: self.alive.consume(),
+			state: self.state.clone(),
 		}
 	}
 
 	/// Block until the broadcast is closed (every producer dropped), returning the cause.
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
+		self.alive.closed().await;
 		Error::Dropped
 	}
 
@@ -372,16 +356,16 @@ impl Dynamic {
 
 impl Drop for Dynamic {
 	fn drop(&mut self) {
-		if let Ok(mut state) = self.state.write() {
-			// We do a saturating sub so Producer::dynamic() can avoid returning an error.
-			state.dynamic = state.dynamic.saturating_sub(1);
-			if state.dynamic != 0 {
-				return;
-			}
-
-			// No dynamic handlers left to fulfill pending requests; reject them.
-			state.reject_requests(Error::Dropped);
+		// Decrement and reject under one lock, so a `track` call that saw
+		// `dynamic > 0` through the same lock can't slip a request past the rejection.
+		let mut state = self.state.lock();
+		state.dynamic -= 1;
+		if state.dynamic != 0 {
+			return;
 		}
+
+		// No dynamic handlers left to fulfill pending requests; reject them.
+		state.reject_requests(Error::Dropped);
 	}
 }
 
@@ -406,7 +390,10 @@ impl Dynamic {
 #[derive(Clone)]
 pub struct Consumer {
 	info: Arc<Info>,
-	state: kio::Consumer<BroadcastState>,
+	// Broadcast liveness (read-only): watched for close.
+	alive: kio::Consumer<()>,
+	// Track registry plus request queue; `track()` reads the registry and enqueues requests.
+	state: kio::Shared<BroadcastState>,
 }
 
 impl Consumer {
@@ -416,11 +403,12 @@ impl Consumer {
 
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
-		// Upgrade to a temporary producer so we can modify the state.
-		let mut state = match self.state.write() {
-			Ok(state) => state,
-			Err(_) => return Err(Error::Dropped),
-		};
+		// A closed broadcast (every producer and handler gone) serves nothing.
+		if self.is_closed() {
+			return Err(Error::Dropped);
+		}
+
+		let mut state = self.state.lock();
 
 		// Reuse a live producer if one is already publishing the track. `get` drops a
 		// closed entry and returns `None`, so we fall through to a fresh request.
@@ -455,13 +443,13 @@ impl Consumer {
 	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
 	/// only ends when every producer is gone. There is no way to abort it with a code.
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
+		self.alive.closed().await;
 		Error::Dropped
 	}
 
 	/// Returns true if every [`Producer`] has been dropped.
 	pub fn is_closed(&self) -> bool {
-		self.state.read().is_closed()
+		self.alive.is_closed()
 	}
 
 	/// Register a [`kio::Waiter`] that fires when the broadcast closes.
@@ -470,7 +458,7 @@ impl Consumer {
 	/// arming the waiter. Useful for composing close-detection into a larger poll
 	/// without spawning a task per broadcast.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll_closed(waiter)
+		self.alive.poll_closed(waiter)
 	}
 
 	/// Check if this is the exact same instance of a broadcast.
@@ -485,7 +473,8 @@ impl Consumer {
 	pub(crate) fn weak(&self) -> WeakConsumer {
 		WeakConsumer {
 			info: self.info.clone(),
-			state: self.state.weak(),
+			alive: self.alive.weak(),
+			state: self.state.clone(),
 		}
 	}
 }
@@ -494,10 +483,13 @@ impl Consumer {
 ///
 /// Mirrors [`track::TrackWeak`]: held by the origin's dynamic cache to share one
 /// dynamically-served broadcast across repeat requests without pinning it alive.
+/// Only the `alive` handle needs to be weak; a [`kio::Shared`] carries no liveness,
+/// so holding the state outright pins nothing.
 #[derive(Clone)]
 pub(crate) struct WeakConsumer {
 	info: Arc<Info>,
-	state: kio::Weak<BroadcastState>,
+	alive: kio::ConsumerWeak<()>,
+	state: kio::Shared<BroadcastState>,
 }
 
 impl WeakConsumer {
@@ -505,14 +497,15 @@ impl WeakConsumer {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			state: self.state.consume(),
+			alive: self.alive.consume(),
+			state: self.state.clone(),
 		}
 	}
 }
 
 impl super::WeakEntry for WeakConsumer {
 	fn is_closed(&self) -> bool {
-		self.state.is_closed()
+		self.alive.is_closed()
 	}
 
 	fn same_channel(&self, other: &Self) -> bool {

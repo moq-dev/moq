@@ -841,7 +841,7 @@ pub struct Producer {
 	// Fallback request queue, shared with every derived consumer. Separate from
 	// `nodes` because dynamic broadcasts are never announced: they only resolve a
 	// consumer's `request_broadcast` when no live announcement exists.
-	dynamic: kio::Producer<OriginDynamicState>,
+	dynamic: kio::Shared<OriginDynamicState>,
 
 	// The cache pool inherited by broadcasts created under this origin (sessions
 	// mint their remote broadcasts with it). Unbounded by default.
@@ -865,7 +865,7 @@ impl Producer {
 			info: info.id,
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
-			dynamic: kio::Producer::default(),
+			dynamic: kio::Shared::default(),
 			pool: info.pool,
 		}
 	}
@@ -888,7 +888,7 @@ impl Producer {
 			info,
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: PathOwned::default(),
-			dynamic: kio::Producer::default(),
+			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
 		}
 	}
@@ -998,7 +998,7 @@ impl Producer {
 	/// Use [`Consumer::announced`] to register interest and start receiving
 	/// announcement events; the consumer itself does not allocate any channels.
 	pub fn consume(&self) -> Consumer {
-		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.consume())
+		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
 	}
 
 	/// Handle to the announcement stream for this producer's subtree.
@@ -1107,7 +1107,8 @@ impl std::ops::DerefMut for Broadcast {
 /// Shared fallback request queue for an origin.
 ///
 /// Lives off to the side of the announce tree because dynamically served broadcasts
-/// are never announced. Mirrors the `dynamic`/`requests`/`request_order` fields of the
+/// are never announced. Carried in a [`kio::Shared`], so consumers enqueue and handlers
+/// drain under one lock. Mirrors the `dynamic`/`requests`/`request_order` fields of the
 /// broadcast and track models.
 #[derive(Default)]
 struct OriginDynamicState {
@@ -1165,7 +1166,7 @@ struct PendingBroadcast {
 pub struct Dynamic {
 	info: Origin,
 	root: PathOwned,
-	state: kio::Producer<OriginDynamicState>,
+	state: kio::Shared<OriginDynamicState>,
 }
 
 impl Clone for Dynamic {
@@ -1173,9 +1174,7 @@ impl Clone for Dynamic {
 		// Mirror `new`: bump `dynamic` so each live handle is counted. Without this,
 		// dropping a clone would decrement past `new`'s increment and prematurely flip
 		// `dynamic` to zero, making future `request_broadcast` calls return `Unroutable`.
-		if let Ok(mut state) = self.state.write() {
-			state.dynamic += 1;
-		}
+		self.state.lock().dynamic += 1;
 
 		Self {
 			info: self.info,
@@ -1186,10 +1185,8 @@ impl Clone for Dynamic {
 }
 
 impl Dynamic {
-	fn new(info: Origin, root: PathOwned, state: kio::Producer<OriginDynamicState>) -> Self {
-		if let Ok(mut state) = state.write() {
-			state.dynamic += 1;
-		}
+	fn new(info: Origin, root: PathOwned, state: kio::Shared<OriginDynamicState>) -> Self {
+		state.lock().dynamic += 1;
 
 		Self { info, root, state }
 	}
@@ -1199,26 +1196,15 @@ impl Dynamic {
 		&self.info
 	}
 
-	// Gate readiness on a queued request; mutate through the returned `Mut`.
-	fn poll<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, OriginDynamicState>, Error>>
-	where
-		F: FnMut(&kio::Ref<'_, OriginDynamicState>) -> Poll<()>,
-	{
-		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
-			Ok(state) => Ok(state),
-			Err(_) => Err(Error::Dropped),
-		})
-	}
-
 	/// Poll for the next requested broadcast, without blocking.
 	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
-		let mut state = ready!(self.poll(waiter, |state| {
+		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.request_order.is_empty() {
 				Poll::Pending
 			} else {
 				Poll::Ready(())
 			}
-		}))?;
+		}));
 
 		let path = state.request_order.pop_front().expect("predicate guaranteed a request");
 		// Leave the request in `requests` (only drain it from `request_order`) so a repeat
@@ -1248,13 +1234,13 @@ impl Dynamic {
 
 impl Drop for Dynamic {
 	fn drop(&mut self) {
-		if let Ok(mut state) = self.state.write() {
-			// Saturating sub so `Producer::dynamic` can stay infallible.
-			state.dynamic = state.dynamic.saturating_sub(1);
-			if state.dynamic == 0 {
-				// No handlers left to fulfill queued requests; close them.
-				state.reject_requests();
-			}
+		// Decrement and reject under one lock, so a `request_broadcast` that saw
+		// `dynamic > 0` through the same lock can't slip a request past the rejection.
+		let mut state = self.state.lock();
+		state.dynamic -= 1;
+		if state.dynamic == 0 {
+			// No handlers left to fulfill queued requests; close them.
+			state.reject_requests();
 		}
 	}
 }
@@ -1274,7 +1260,7 @@ pub struct Request {
 	producer: kio::Producer<PendingBroadcast>,
 
 	// Shared dynamic state, so `accept` can cache the served broadcast for repeat requests.
-	state: kio::Producer<OriginDynamicState>,
+	state: kio::Shared<OriginDynamicState>,
 }
 
 impl Request {
@@ -1296,12 +1282,11 @@ impl Request {
 		// (and subscribe upstream) again. Re-check under the lock: if a live broadcast was already
 		// served for this path while we were fetching upstream, dedup onto it and drop ours rather
 		// than replace a good entry with a duplicate subscription.
-		let resolved = if let Ok(mut state) = self.state.write() {
+		let resolved = {
+			let mut state = self.state.lock();
 			let existing = state.served.insert(self.path.clone(), broadcast.weak());
 			state.requests.remove(&self.path);
 			existing.map(|weak| weak.consume()).unwrap_or(broadcast)
-		} else {
-			broadcast
 		};
 
 		if let Ok(mut pending) = self.producer.write() {
@@ -1312,9 +1297,7 @@ impl Request {
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
-		if let Ok(mut state) = self.state.write() {
-			state.requests.remove(&self.path);
-		}
+		self.state.lock().requests.remove(&self.path);
 		if let Ok(mut state) = self.producer.write() {
 			state.resolved = Some(Err(err));
 		}
@@ -1331,11 +1314,11 @@ impl Drop for Request {
 		// lock before we run, so a concurrent request for the same path may have registered a
 		// *new* one here. Removing unconditionally would clobber it (stranding its requesters and
 		// desyncing `request_order` from `requests`), so only remove while it's still ours.
-		if let Ok(mut state) = self.state.write()
-			&& state
-				.requests
-				.get(&self.path)
-				.is_some_and(|producer| producer.same_channel(&self.producer))
+		let mut state = self.state.lock();
+		if state
+			.requests
+			.get(&self.path)
+			.is_some_and(|producer| producer.same_channel(&self.producer))
 		{
 			state.requests.remove(&self.path);
 		}
@@ -1355,8 +1338,8 @@ pub struct Requesting {
 enum RequestState {
 	// Already announced: resolves immediately with a clone of this broadcast.
 	Ready(broadcast::Consumer),
-	// Unroutable at request time, or the origin was already dropped: resolves immediately
-	// with this error. Baked in so `request_broadcast` itself stays infallible.
+	// Unroutable at request time: resolves immediately with this error. Baked in so
+	// `request_broadcast` itself stays infallible.
 	Failed(Error),
 	// Awaiting a handler: resolves when the request's result channel is written.
 	Pending(kio::Consumer<PendingBroadcast>),
@@ -1430,7 +1413,7 @@ impl Consume<Consumer> for Producer {
 	fn consume(&self) -> Consumer {
 		// Mirrors the inherent `Producer::consume`; inlined to avoid the
 		// inherent-vs-trait `consume` ambiguity.
-		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.consume())
+		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
 	}
 }
 
@@ -1481,7 +1464,7 @@ pub struct Consumer {
 
 	// Shared fallback request queue, fed to any `Dynamic` handler on the
 	// producer side. Used only by `request_broadcast`; announced lookups ignore it.
-	dynamic: kio::Consumer<OriginDynamicState>,
+	dynamic: kio::Shared<OriginDynamicState>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -1493,7 +1476,7 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	fn new(info: Origin, root: PathOwned, nodes: OriginNodes, dynamic: kio::Consumer<OriginDynamicState>) -> Self {
+	fn new(info: Origin, root: PathOwned, nodes: OriginNodes, dynamic: kio::Shared<OriginDynamicState>) -> Self {
 		Self {
 			info,
 			nodes,
@@ -1612,10 +1595,9 @@ impl Consumer {
 	/// long as it stays live; a closed one is re-served on the next request.
 	///
 	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
-	/// dynamic handler exists, or [`Error::Dropped`] once the origin is gone. A request that is
-	/// registered while a handler is live but then loses every handler before being served also
-	/// resolves to [`Error::Unroutable`]. Unlike an announced broadcast, a dynamically served one
-	/// is never visible to [`Self::announced`].
+	/// dynamic handler exists. A request that is registered while a handler is live but then loses
+	/// every handler before being served also resolves to [`Error::Unroutable`]. Unlike an announced
+	/// broadcast, a dynamically served one is never visible to [`Self::announced`].
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
@@ -1628,9 +1610,7 @@ impl Consumer {
 		// (which may have a different root) agree on the same entry.
 		let absolute = self.root.join(&path).to_owned();
 
-		let Ok(mut state) = self.dynamic.write() else {
-			return kio::Pending::new(Requesting::failed(Error::Dropped));
-		};
+		let mut state = self.dynamic.lock();
 
 		// Reuse a still-live broadcast a handler already served for this path, so repeat
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
