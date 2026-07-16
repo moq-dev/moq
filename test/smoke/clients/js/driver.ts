@@ -77,6 +77,11 @@ const PAUSE_STABILITY_MS = 750;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitForWatch(page: Page): Promise<void> {
+	await page.evaluate((tag) => customElements.whenDefined(tag), SELECTORS.watch);
+	await page.locator(SELECTORS.watch).waitFor({ state: "attached" });
+}
+
 function throwPageErrors(errors: BrowserErrors): void {
 	const messages = [
 		...errors.page.map((error) => `page: ${error}`),
@@ -213,6 +218,7 @@ try {
 		errors.page.push(error.message);
 	});
 	await page.goto(pageUrl, { waitUntil: "load" });
+	if (role === "subscribe") await waitForWatch(page);
 
 	if (role === "publish") {
 		console.error(`publishing ${broadcast} (fake camera + microphone) to ${url}`);
@@ -234,6 +240,7 @@ try {
 			if (!reloaded && Date.now() - start > timeoutMs / 2) {
 				reloaded = true;
 				await page.reload({ waitUntil: "load" });
+				await waitForWatch(page);
 			}
 			await sleep(POLL_INTERVAL_MS);
 		}
