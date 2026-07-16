@@ -42,15 +42,16 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Async
-//! This library is async-first. [`Client::connect`] and [`Server::accept`] return the
-//! unique [`Session`], which owns all of its protocol work: nothing runs unless the
-//! caller drives it (spawn [`Session::run`] on an executor, await it in place, or
-//! step [`Session::poll`] with a [`kio::Waiter`] from your own `poll_*` function),
-//! and dropping the session closes the transport. Nothing is spawned behind your
-//! back. For observing the session from elsewhere (stats, close), take cheap
-//! [`SessionHandle`] clones via [`Session::handle`].
+//! This library is async-first. [`Client::connect`] and [`Server::accept`] return a
+//! `(Session, Driver)` pair: the [`Session`] is the handle, and the [`Driver`] is
+//! the future that runs all of its protocol work. Nothing is spawned behind your
+//! back: spawn the driver on your executor, await it in place, or step
+//! [`Driver::poll`] with a [`kio::Waiter`] from your own `poll_*` function. The
+//! driver holds no session handle, so the transport still closes when the last
+//! [`Session`] clone drops (or on [`Session::abort`]), which in turn finishes the
+//! driver.
 //!
-//! You still need a tokio runtime (with its time driver) to drive a [`Session`]:
+//! You still need a tokio runtime (with its time driver) to poll a [`Driver`]:
 //! bandwidth sampling, the control stream timeout, and subscription linger all use
 //! tokio timers, which panic outside a runtime. Awaiting any other plain `async`
 //! method has the same requirement.

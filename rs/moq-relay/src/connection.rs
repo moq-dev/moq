@@ -135,7 +135,7 @@ impl Connection {
 			Ok(res) => Ok(res?),
 			Err(_) => {
 				tracing::info!("credential expired, closing session");
-				session.close(moq_net::Error::Unauthorized);
+				session.abort(moq_net::Error::Unauthorized);
 				Ok(())
 			}
 		}

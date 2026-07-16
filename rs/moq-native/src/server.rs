@@ -2,8 +2,8 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-use crate::Session;
 use crate::{Error, QuicBackend};
+use moq_net::Session;
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
@@ -1037,8 +1037,8 @@ impl Request {
 
 	/// Accept the session, starting the MoQ session loops.
 	pub async fn ok(self) -> crate::Result<Session> {
-		let session = request_into!(self.kind, request => request.ok().await?);
-		Ok(Session::spawn(session))
+		let pair = request_into!(self.kind, request => request.ok().await?);
+		Ok(crate::spawn_session(pair))
 	}
 
 	/// Returns the network transport carrying this session.

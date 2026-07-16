@@ -1786,7 +1786,7 @@ fn assert_connect_error(err: &moq_native::Error, expected: moq_native::ConnectEr
 	assert_eq!(err.connect_error(), Some(expected), "unexpected error: {err}",);
 }
 
-fn expect_connect_err(result: moq_native::Result<moq_native::Session>) -> moq_native::Error {
+fn expect_connect_err(result: moq_native::Result<moq_net::Session>) -> moq_native::Error {
 	match result {
 		Ok(_) => panic!("client connect unexpectedly succeeded"),
 		Err(err) => err,

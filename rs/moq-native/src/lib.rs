@@ -43,67 +43,15 @@ pub use log::*;
 pub use reconnect::*;
 pub use server::*;
 
-/// An established MoQ session, driven by a background tokio task.
+/// Spawn the session's protocol driver on the current tokio runtime, handing back
+/// the session it drives.
 ///
-/// Returned by [`Client::connect`] and [`Request::ok`]. Exposes the observer
-/// surface of [`moq_net::SessionHandle`] (stats, bandwidth, waiting on close) and
-/// closes the session when dropped, so the connection's lifetime follows this
-/// value even though the protocol work runs on its own task.
-pub struct Session {
-	handle: moq_net::SessionHandle,
-}
-
-impl Session {
-	/// Drive the session on the current tokio runtime, keeping its observer handle.
-	pub(crate) fn spawn(mut session: moq_net::Session) -> Self {
-		let handle = session.handle();
-		tokio::spawn(async move {
-			let _ = session.run().await;
-		});
-		Self { handle }
-	}
-
-	/// Returns the negotiated protocol version.
-	pub fn version(&self) -> moq_net::Version {
-		self.handle.version()
-	}
-
-	/// A cheap cloneable observer for this session; see [`moq_net::SessionHandle`].
-	pub fn handle(&self) -> moq_net::SessionHandle {
-		self.handle.clone()
-	}
-
-	/// Returns a snapshot of the current connection statistics.
-	pub fn stats(&self) -> moq_net::ConnectionStats {
-		self.handle.stats()
-	}
-
-	/// Returns a consumer for the estimated send bitrate, if the QUIC backend reports one.
-	pub fn send_bandwidth(&self) -> Option<moq_net::bandwidth::Consumer> {
-		self.handle.send_bandwidth()
-	}
-
-	/// Returns a consumer for the estimated receive bitrate, if the negotiated version supports PROBE.
-	pub fn recv_bandwidth(&self) -> Option<moq_net::bandwidth::Consumer> {
-		self.handle.recv_bandwidth()
-	}
-
-	/// Close the session with the given error. Dropping this value does the same
-	/// with [`moq_net::Error::Cancel`].
-	pub fn close(&self, err: moq_net::Error) {
-		self.handle.close(err);
-	}
-
-	/// Block until the session is closed.
-	pub async fn closed(&self) -> std::result::Result<(), moq_net::Error> {
-		self.handle.closed().await
-	}
-}
-
-impl Drop for Session {
-	fn drop(&mut self) {
-		self.handle.close(moq_net::Error::Cancel);
-	}
+/// The driver holds no session clone, so the session still closes when the caller
+/// drops their last [`moq_net::Session`] handle, which in turn lets the driver
+/// task finish.
+pub(crate) fn spawn_session((session, driver): (moq_net::Session, moq_net::Driver)) -> moq_net::Session {
+	tokio::spawn(driver);
+	session
 }
 
 // Re-export these crates.

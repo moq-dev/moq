@@ -276,15 +276,15 @@ impl From<moq_net::ConnectionStats> for MoqConnectionStats {
 
 #[derive(uniffi::Object)]
 pub struct MoqSession {
-	inner: Option<moq_native::Session>,
-	closed: Task<moq_net::SessionHandle>,
+	inner: Option<moq_net::Session>,
+	closed: Task<moq_net::Session>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
 }
 
 impl MoqSession {
 	pub(crate) fn new(
-		session: moq_native::Session,
+		session: moq_net::Session,
 		publish: moq_net::origin::Producer,
 		subscribe: moq_net::origin::Producer,
 	) -> Self {
@@ -294,8 +294,8 @@ impl MoqSession {
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe.consume()));
 		Self {
-			closed: Task::new(session.handle()),
-			inner: Some(session),
+			inner: Some(session.clone()),
+			closed: Task::new(session),
 			publisher,
 			consumer,
 		}
@@ -307,11 +307,11 @@ impl Drop for MoqSession {
 		let _guard = crate::ffi::RUNTIME.enter();
 		// Close the transport while the runtime is entered. The backend spawns a
 		// lingering CLOSE task, which panics (aborting under panic=abort) if no reactor
-		// is in context. We can't leave this to the field's own drop: fields drop after
-		// this body returns, when the guard is already released, off-runtime.
-		// Close-once dedup then makes the field drop's close a no-op.
+		// is in context. We can't leave this to the last `Session` clone's drop: that
+		// clone lives in the `closed` task and is released after this guard, off-runtime.
+		// Close-once dedup then makes that trailing drop a no-op.
 		if let Some(session) = self.inner.take() {
-			session.close(moq_net::Error::Cancel);
+			session.abort(moq_net::Error::Cancel);
 		}
 	}
 }
@@ -330,7 +330,7 @@ impl MoqSession {
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::RUNTIME.enter();
 		if let Some(inner) = &self.inner {
-			inner.close(moq_net::Error::Remote(code));
+			inner.abort(moq_net::Error::Remote(code));
 		}
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.
@@ -371,7 +371,7 @@ impl MoqSession {
 		let _guard = crate::ffi::RUNTIME.enter();
 		self.inner
 			.as_ref()
-			.map(moq_native::Session::stats)
+			.map(moq_net::Session::stats)
 			.unwrap_or_default()
 			.into()
 	}

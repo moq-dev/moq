@@ -42,19 +42,9 @@ pub fn setup() {
 /// A connected MoQ session.
 #[wasm_bindgen]
 pub struct Session {
-	// Observer for the session driven on the web executor; dropping this wrapper
-	// closes it (see the `Drop` impl).
-	inner: moq_net::SessionHandle,
+	inner: moq_net::Session,
 	// The origin remote broadcasts are announced into; read via `consume`.
 	consumer: moq_net::origin::Consumer,
-}
-
-impl Drop for Session {
-	fn drop(&mut self) {
-		// The handle is just an observer, so close explicitly: freeing the JS object
-		// ends the session, which in turn ends the spawned `run` task.
-		self.inner.close(moq_net::Error::Cancel);
-	}
 }
 
 #[wasm_bindgen]
@@ -81,12 +71,12 @@ impl Session {
 		let origin = moq_net::Origin::random().produce();
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
-		let mut session = client.connect(transport).await.map_err(js_err)?;
-		// The session only makes progress while driven; run it on the web executor
-		// and keep an observer handle for this wrapper.
-		let inner = session.handle();
+		let (inner, driver) = client.connect(transport).await.map_err(js_err)?;
+		// The session only makes progress while its driver runs. The driver holds no
+		// session clone, so dropping this `Session` still closes the transport, which
+		// in turn ends the spawned task.
 		web_async::spawn(async move {
-			let _ = session.run().await;
+			let _ = driver.await;
 		});
 		Ok(Session { inner, consumer })
 	}

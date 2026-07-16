@@ -1,4 +1,10 @@
-use std::{future::Future, sync::Arc, task::Poll, time::Duration};
+use std::{
+	future::Future,
+	pin::Pin,
+	sync::Arc,
+	task::{Context, Poll},
+	time::Duration,
+};
 
 use web_transport_trait::Stats;
 
@@ -48,113 +54,23 @@ pub struct ConnectionStats {
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
-/// Returned by [`crate::Client::connect`] and [`crate::Server::accept`]. The session
-/// owns all of its protocol work: nothing runs unless the caller drives it, either by
-/// awaiting [`run`](Self::run) (typically spawned on an executor) or by stepping
-/// [`poll`](Self::poll) from inside another [`kio`]-style poll function. Nothing is
-/// spawned behind your back.
+/// Returned by [`crate::Client::connect`] and [`crate::Server::accept`], paired with
+/// the [`Driver`] that runs its protocol work. Nothing is spawned behind your back:
+/// the session makes no progress unless its driver is polled.
 ///
-/// There is exactly one `Session` per connection; dropping it closes the transport
-/// and cancels the protocol work. For observation from elsewhere (stats, waiting on
-/// close, closing remotely), take cheap [`SessionHandle`] clones via
-/// [`handle`](Self::handle). A handle can end the session but never keeps it alive.
-///
-/// Driving still requires a tokio runtime with a time driver; see the crate-level
-/// Async docs.
+/// Like every handle in this library, the lifecycle is reference counted: clones
+/// share the connection, the transport closes when the last clone drops, and
+/// [`abort`](Self::abort) closes it explicitly with an error. The [`Driver`] holds
+/// no `Session` clone, so handing it to an executor never keeps the session alive.
+#[derive(Clone)]
 pub struct Session {
 	shared: Arc<SessionShared>,
 	version: Version,
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
-	driver: Driver,
 }
 
 impl Session {
-	/// Drive the protocol one step, registering `waiter` for the next wakeup.
-	///
-	/// The `poll_*` counterpart of [`run`](Self::run), for callers composing the
-	/// session into their own [`kio`]-style poll functions. Resolves when the
-	/// session ends, and keeps returning that same result if polled again.
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.driver.poll(waiter)
-	}
-
-	/// Drive the protocol until the session ends.
-	///
-	/// Run this for the lifetime of the session: spawn it on an executor, or await
-	/// it in place to serve the connection. Cancel-safe (dropping the future just
-	/// stops driving; the session itself stays usable), and idempotent after the
-	/// session ends.
-	pub async fn run(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll(waiter)).await
-	}
-
-	/// Create a cheap cloneable [`SessionHandle`] for observing this session.
-	pub fn handle(&self) -> SessionHandle {
-		SessionHandle {
-			shared: self.shared.clone(),
-			version: self.version,
-			send_bandwidth: self.send_bandwidth.clone(),
-			recv_bandwidth: self.recv_bandwidth.clone(),
-		}
-	}
-
-	/// Returns the negotiated protocol version.
-	pub fn version(&self) -> Version {
-		self.version
-	}
-
-	/// Close the transport with a specific error, cancelling the protocol work.
-	///
-	/// Dropping the session does the same with [`Error::Cancel`].
-	pub fn close(self, err: Error) {
-		self.shared.close(err.to_code(), err.to_string().as_ref());
-	}
-
-	/// Drive the session until `ready` resolves, so `connect` can block on the
-	/// initial announce set.
-	///
-	/// A session that dies first still resolves `ready`: the connecting producers
-	/// live inside the driver, so its completion drops them (waking `ready`) and
-	/// releases the barrier. The error isn't lost, it's cached for whoever drives
-	/// the session next.
-	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) {
-		let mut ready = std::pin::pin!(ready);
-		kio::wait(|waiter| {
-			if waiter.poll_future(ready.as_mut()).is_ready() {
-				return Poll::Ready(());
-			}
-			let _ = self.poll(waiter);
-			Poll::Pending
-		})
-		.await
-	}
-}
-
-impl Drop for Session {
-	fn drop(&mut self) {
-		// Close-once in `shared` makes this a no-op after an explicit `close` or a
-		// protocol teardown that already closed the transport.
-		self.shared
-			.close(Error::Cancel.to_code(), Error::Cancel.to_string().as_ref());
-	}
-}
-
-/// A cheap cloneable observer for a [`Session`].
-///
-/// Created via [`Session::handle`]. It can read [`stats`](Self::stats), wait for
-/// [`closed`](Self::closed), and [`close`](Self::close) the session remotely, but
-/// it never keeps the session alive: the unique [`Session`] owns the lifecycle,
-/// and dropping a handle does nothing.
-#[derive(Clone)]
-pub struct SessionHandle {
-	shared: Arc<SessionShared>,
-	version: Version,
-	send_bandwidth: Option<bandwidth::Consumer>,
-	recv_bandwidth: Option<bandwidth::Consumer>,
-}
-
-impl SessionHandle {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
@@ -184,8 +100,9 @@ impl SessionHandle {
 		stats
 	}
 
-	/// Close the transport with the given error. Idempotent: the first close wins.
-	pub fn close(&self, err: Error) {
+	/// Close the transport with an explicit error, instead of waiting for the last
+	/// clone to drop. Idempotent: the first close wins.
+	pub fn abort(&self, err: Error) {
 		self.shared.close(err.to_code(), err.to_string().as_ref());
 	}
 
@@ -196,8 +113,19 @@ impl SessionHandle {
 	}
 }
 
-/// The boxed protocol work driving a [`Session`], stepped by [`Session::poll`].
-struct Driver {
+/// The future driving a [`Session`]'s protocol state.
+///
+/// Poll it for the lifetime of the session, either by `.await`ing it (typically
+/// spawned on an executor) or by stepping [`poll`](Self::poll) from inside another
+/// [`kio`]-style poll function. It holds no [`Session`] clone, so it never keeps
+/// the session alive: once the last session clone drops (or [`Session::abort`]
+/// fires), the transport closes and the driver finishes on its own. Dropping the
+/// driver cancels the protocol work without closing the session. It resolves when
+/// the session ends, and keeps returning that same result if polled again.
+///
+/// Driving still requires a tokio runtime with a time driver; see the crate-level
+/// Async docs.
+pub struct Driver {
 	protocol: MaybeSendBox<'static, Result<(), Error>>,
 	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
 	// the driver: the protocol owns the teardown. `None` once finished (or when the
@@ -207,10 +135,17 @@ struct Driver {
 	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
 	// result) doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
+	// Retains the previous poll's waiter so its kio registrations stay live until
+	// the next poll replaces it (same dance as `kio::wait`).
+	waiter: Option<kio::Waiter>,
 }
 
 impl Driver {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	/// Drive the protocol one step, registering `waiter` for the next wakeup.
+	///
+	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing it
+	/// into their own [`kio`]-style poll functions.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if let Some(result) = &self.result {
 			return Poll::Ready(result.clone());
 		}
@@ -228,11 +163,44 @@ impl Driver {
 		self.maintenance = None;
 		Poll::Ready(result)
 	}
+
+	/// Drive the session until `ready` resolves, so `connect` can block on the
+	/// initial announce set.
+	///
+	/// A session that dies first still resolves `ready`: the connecting producers
+	/// live inside the driver, so its completion drops them (waking `ready`) and
+	/// releases the barrier. The error isn't lost, it's cached for whoever drives
+	/// the session next.
+	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) {
+		let mut ready = std::pin::pin!(ready);
+		kio::wait(|waiter| {
+			if waiter.poll_future(ready.as_mut()).is_ready() {
+				return Poll::Ready(());
+			}
+			let _ = self.poll(waiter);
+			Poll::Pending
+		})
+		.await
+	}
 }
 
-// Close-once state shared by the [`Session`] and its [`SessionHandle`]s: the first
-// close wins, whether it comes from an explicit close, the protocol teardown, a
-// handle, or the session's own drop.
+impl Future for Driver {
+	type Output = Result<(), Error>;
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let this = &mut *self;
+		// Replacing drops the previous waiter, keeping this one live until the next
+		// poll so any kio registrations it made survive (see `kio::wait`).
+		let waiter = kio::Waiter::new(cx.waker().clone());
+		let result = this.poll(&waiter);
+		this.waiter = Some(waiter);
+		result
+	}
+}
+
+// Close-once state shared by every [`Session`] clone: the first close wins,
+// whether it comes from an [`Session::abort`], the protocol teardown, or the
+// last clone dropping.
 struct SessionShared {
 	inner: Box<dyn SessionInner>,
 	closed: std::sync::atomic::AtomicBool,
@@ -258,7 +226,7 @@ impl Session {
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: MaybeSendBox<'static, Result<(), Error>>,
-	) -> Self {
+	) -> (Self, Driver) {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
 			let producer = bandwidth::Producer::new();
@@ -272,7 +240,7 @@ impl Session {
 			(None, None)
 		};
 
-		Self {
+		let session = Self {
 			shared: Arc::new(SessionShared {
 				inner: Box::new(session),
 				closed: std::sync::atomic::AtomicBool::new(false),
@@ -280,12 +248,15 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
-			driver: Driver {
-				protocol,
-				maintenance,
-				result: None,
-			},
-		}
+		};
+		let driver = Driver {
+			protocol,
+			maintenance,
+			result: None,
+			waiter: None,
+		};
+
+		(session, driver)
 	}
 }
 

@@ -74,17 +74,16 @@ let transport = web_transport::ClientBuilder::new()
 // Hand the transport to moq-net and run the MoQ handshake.
 let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
-let mut session = moq_net::Client::new()
+let (session, driver) = moq_net::Client::new()
     .with_subscriber(origin)
     .connect(transport)
     .await?;
 
-// Nothing drives the protocol but the session itself, so run it for as long as it
-// lives. Keep a cheap observer handle first: closing through it (or letting it
-// watch `closed()`) is how the rest of the app interacts with the spawned session.
-let handle = session.handle();
+// Nothing drives the protocol but the driver, so run it for as long as you hold
+// the session. It holds no session clone, so dropping your last `session` still
+// closes the transport, which in turn ends the spawned task.
 wasm_bindgen_futures::spawn_local(async move {
-    let _ = session.run().await;
+    let _ = driver.await;
 });
 
 // Read announcements off `consumer` exactly as on native...

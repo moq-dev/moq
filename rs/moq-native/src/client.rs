@@ -277,7 +277,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	)))]
-	pub async fn connect(&self, _url: Url) -> crate::Result<crate::Session> {
+	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
@@ -292,10 +292,10 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	pub async fn connect(&self, url: Url) -> crate::Result<crate::Session> {
-		let session = self.connect_inner(url).await?;
-		tracing::info!(version = %session.version(), "connected");
-		Ok(crate::Session::spawn(session))
+	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
+		let pair = self.connect_inner(url).await?;
+		tracing::info!(version = %pair.0.version(), "connected");
+		Ok(crate::spawn_session(pair))
 	}
 
 	/// The moq client builder, with `path` advertised in the SETUP if present.
@@ -316,7 +316,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
+	async fn connect_inner(&self, url: Url) -> crate::Result<(moq_net::Session, moq_net::Driver)> {
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
 		//
@@ -414,7 +414,7 @@ impl Client {
 	}
 
 	#[cfg(feature = "websocket")]
-	async fn race_moq_connect<Q, S>(&self, url: Url, quic: Q) -> crate::Result<moq_net::Session>
+	async fn race_moq_connect<Q, S>(&self, url: Url, quic: Q) -> crate::Result<(moq_net::Session, moq_net::Driver)>
 	where
 		Q: Future<Output = crate::Result<S>>,
 		S: web_transport_trait::Session,

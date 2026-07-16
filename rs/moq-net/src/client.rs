@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -81,8 +81,10 @@ impl Client {
 		self
 	}
 
-	/// Perform the MoQ handshake and return the caller-driven [`Session`].
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
+	/// Perform the MoQ handshake, returning the [`Session`] and the [`Driver`] that
+	/// runs its protocol work. The driver must be polled (spawned or awaited) for
+	/// the session to make progress.
+	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<(Session, Driver), Error> {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -97,7 +99,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
-				let driver = ietf::start(
+				let protocol = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -111,7 +113,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, driver));
+				return Ok(Session::new(session, v, None, protocol));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -121,7 +123,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let driver = ietf::start(
+				let protocol = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -135,7 +137,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, driver));
+				return Ok(Session::new(session, v, None, protocol));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -145,7 +147,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let driver = ietf::start(
+				let protocol = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -159,7 +161,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, driver));
+				return Ok(Session::new(session, v, None, protocol));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -213,10 +215,10 @@ impl Client {
 				// Block until the initial announce set has landed (Lite05+ reports it
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
 				// immediately instead of racing announcement gossip.
-				let mut session = Session::new(session, version.into(), start.recv_bandwidth, start.driver);
-				session.wait_ready(start.connecting.ready()).await;
+				let (session, mut driver) = Session::new(session, version.into(), start.recv_bandwidth, start.driver);
+				driver.wait_ready(start.connecting.ready()).await;
 
-				return Ok(session);
+				return Ok((session, driver));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -235,15 +237,15 @@ impl Client {
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
-				let mut session = Session::new(
+				let (session, mut driver) = Session::new(
 					session,
 					lite::Version::Lite04.into(),
 					start.recv_bandwidth,
 					start.driver,
 				);
-				session.wait_ready(start.connecting.ready()).await;
+				driver.wait_ready(start.connecting.ready()).await;
 
-				return Ok(session);
+				return Ok((session, driver));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -263,15 +265,15 @@ impl Client {
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
-				let mut session = Session::new(
+				let (session, mut driver) = Session::new(
 					session,
 					lite::Version::Lite03.into(),
 					start.recv_bandwidth,
 					start.driver,
 				);
-				session.wait_ready(start.connecting.ready()).await;
+				driver.wait_ready(start.connecting.ready()).await;
 
-				return Ok(session);
+				return Ok((session, driver));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -309,7 +311,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, driver, connecting) = match version {
+		let (recv_bw, protocol, connecting) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(
@@ -336,7 +338,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let driver = ietf::start(
+				let protocol = ietf::start(
 					session.clone(),
 					Some(stream),
 					request_id_max,
@@ -348,18 +350,18 @@ impl Client {
 					None,
 					None,
 				)?;
-				(None, driver, None)
+				(None, protocol, None)
 			}
 		};
 
-		let mut session = Session::new(session, version, recv_bw, driver);
+		let (session, mut driver) = Session::new(session, version, recv_bw, protocol);
 		if let Some(connecting) = connecting {
 			// Block until the initial announce set has landed (for versions that
 			// report one); resolves immediately otherwise.
-			session.wait_ready(connecting.ready()).await;
+			driver.wait_ready(connecting.ready()).await;
 		}
 
-		Ok(session)
+		Ok((session, driver))
 	}
 }
 
@@ -630,78 +632,72 @@ mod tests {
 	}
 
 	// This fake reports no send-rate estimate, so it never reaches the tokio timer in
-	// the bandwidth loop. A session is NOT runtime-free in general; see the Async
+	// the bandwidth loop. A driver is NOT runtime-free in general; see the Async
 	// docs in lib.rs.
+	//
+	// The driver must hold no Session clone (the #2286 leak), so the transport still
+	// closes when the caller drops their last session handle, which is what lets a
+	// spawned driver task finish.
 	#[test]
-	fn session_is_caller_polled_and_closes_on_drop() {
+	fn driver_is_caller_polled_and_holds_no_session() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let mut session = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let (session, mut driver) = futures::executor::block_on(client.connect(fake.clone())).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 
 		// An arbitrary waiter drives it kio-style: nothing was spawned onto a runtime.
-		assert!(session.poll(&kio::Waiter::noop()).is_pending());
+		assert!(driver.poll(&kio::Waiter::noop()).is_pending());
 
+		// The driver is also a plain future (stand in for spawning it).
+		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(std::future::Future::poll(std::pin::Pin::new(&mut driver), &mut context).is_pending());
+
+		// The caller drops their only session clone, so the transport closes even
+		// though the driver is still alive.
 		drop(session);
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 	}
 
-	// The send-bandwidth sampler lives inside the session's driver: it samples as
-	// soon as a consumer exists and keeps sampling on its interval. Paused tokio
-	// time makes the interval fire deterministically.
+	// Clones share the connection: the transport closes on the LAST drop, and
+	// abort() closes it explicitly (first close wins).
+	#[test]
+	fn session_clones_share_the_close() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let (session, _driver) = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let clone = session.clone();
+
+		// One clone dropping does nothing while another is alive.
+		drop(session);
+		assert!(fake.state.close_events.lock().unwrap().is_empty());
+
+		clone.abort(Error::Cancel);
+		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+
+		// The final drop is a no-op thanks to close-once.
+		drop(clone);
+		assert_eq!(fake.state.close_events.lock().unwrap().len(), 1);
+	}
+
+	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
+	// consumer exists and keeps sampling on its interval. Paused tokio time makes
+	// the interval fire deterministically.
 	#[tokio::test(start_paused = true)]
-	async fn send_bandwidth_samples_while_the_session_runs() {
+	async fn send_bandwidth_samples_while_the_driver_runs() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let mut session = client.connect(fake.clone()).await.unwrap();
-		let handle = session.handle();
-		tokio::spawn(async move { session.run().await });
+		let (session, driver) = client.connect(fake.clone()).await.unwrap();
+		tokio::spawn(driver);
 
-		let mut bandwidth = handle.send_bandwidth().expect("backend reports an estimate");
+		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(bandwidth.changed().await, Some(1_000_000));
 
 		// A later change is picked up by the next interval tick.
 		fake.set_send_rate(Some(2_000_000));
 		assert_eq!(bandwidth.changed().await, Some(2_000_000));
-	}
-
-	// A handle is an observer: it must not keep the session alive, and it must see
-	// the close once the unique Session drops.
-	#[test]
-	fn handle_observes_but_does_not_own_the_session() {
-		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
-		let session = futures::executor::block_on(client.connect(fake.clone())).unwrap();
-		let handle = session.handle();
-		assert_eq!(handle.version(), Version::Lite(lite::Version::Lite04));
-
-		// Dropping the unique Session closes the transport even though a handle
-		// is still alive.
-		drop(session);
-		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
-
-		// The handle observes the close.
-		assert!(futures::executor::block_on(handle.closed()).is_err());
-	}
-
-	// A handle can end the session remotely without owning it.
-	#[test]
-	fn handle_close_ends_the_session() {
-		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
-		let session = futures::executor::block_on(client.connect(fake.clone())).unwrap();
-		let handle = session.handle();
-
-		handle.close(Error::Cancel);
-		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
-
-		// The later Session drop is a no-op thanks to close-once.
-		drop(session);
-		assert_eq!(fake.state.close_events.lock().unwrap().len(), 1);
 	}
 }
