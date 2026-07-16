@@ -515,6 +515,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Dropping the [`origin::Publish`] guard is what unannounces. A no-op when the announce was
 	/// never accepted (`start_announce` silently drops reflected loops), which is expected rather
 	/// than an error: the peer doesn't know we dropped it, so it still retracts by path or id.
+	///
+	/// When retiring ahead of a replacement, this drops to whatever route the origin has left
+	/// before the replacement lands, so a path another session also announces briefly flaps to
+	/// that session's route. The replacement then wins the route key back. Harmless (every event
+	/// is true when emitted, and a consumer that hasn't drained coalesces the pair away) and only
+	/// reachable from a peer that restarts, since we never advertise one ourselves.
 	fn retire_announce(
 		path: &PathOwned,
 		absolute: &PathOwned,
