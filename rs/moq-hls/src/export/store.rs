@@ -107,6 +107,14 @@ struct Inner {
 	discontinuity_pending: bool,
 }
 
+impl Inner {
+	/// `EXT-X-MEDIA-SEQUENCE`: the oldest segment still in the window, or, while the
+	/// window is empty, the sequence the next segment will take.
+	fn media_sequence(&self) -> u64 {
+		self.segments.front().map(|s| s.sequence).unwrap_or(self.next_sequence)
+	}
+}
+
 /// Bounded per-rendition store of CMAF segments and LL-HLS parts.
 pub struct SegmentStore {
 	inner: Mutex<Inner>,
@@ -116,7 +124,7 @@ pub struct SegmentStore {
 	/// LL-HLS PART-TARGET, in seconds.
 	part_target: f64,
 	/// Target segment duration for audio (video rolls on GOP boundaries instead).
-	audio_segment_target: f64,
+	segment_target: f64,
 	/// Minimum duration (seconds) of media kept in the sliding window. The oldest
 	/// segment is evicted only while the remaining ones still cover this span.
 	window: f64,
@@ -127,7 +135,11 @@ impl SegmentStore {
 	/// timing from `config`.
 	pub fn new(kind: Kind, config: &Config) -> Self {
 		let (notify, _) = watch::channel(Version::default());
-		let target_duration = config.part_target.as_secs_f64().ceil().max(1.0) as u64;
+		// Seed from the expected segment duration, NOT the part target: a part is a
+		// fraction of a segment, so seeding from it would advertise a TARGETDURATION far
+		// below the real segments and force it to climb as they land. It still latches up
+		// if actual segments outrun the target.
+		let target_duration = config.segment_target.as_secs_f64().ceil().max(1.0) as u64;
 		Self {
 			inner: Mutex::new(Inner {
 				init: None,
@@ -141,7 +153,7 @@ impl SegmentStore {
 			notify,
 			kind,
 			part_target: config.part_target.as_secs_f64(),
-			audio_segment_target: config.audio_segment_target.as_secs_f64(),
+			segment_target: config.segment_target.as_secs_f64(),
 			window: config.window.as_secs_f64(),
 		}
 	}
@@ -171,7 +183,7 @@ impl SegmentStore {
 							fragment.independent
 						} else {
 							// Audio has no keyframes: roll once the segment is long enough.
-							cur.duration >= self.audio_segment_target
+							cur.duration >= self.segment_target
 						}
 					}
 				};
@@ -254,11 +266,7 @@ impl SegmentStore {
 	/// Current [`Version`] watermark (newest sequence/part counts and window edge).
 	pub fn version(&self) -> Version {
 		let inner = self.inner.lock().unwrap();
-		let media_sequence = inner
-			.segments
-			.front()
-			.map(|s| s.sequence)
-			.unwrap_or(inner.next_sequence);
+		let media_sequence = inner.media_sequence();
 		match inner.segments.back() {
 			Some(last) => Version {
 				last_sequence: last.sequence,
@@ -311,8 +319,7 @@ impl SegmentStore {
 		if inner.finished {
 			return true;
 		}
-		let media_sequence = inner.segments.front().map(|s| s.sequence).unwrap_or(0);
-		if sequence < media_sequence {
+		if sequence < inner.media_sequence() {
 			return true; // already rolled past; the playlist no longer carries it
 		}
 		match inner.segments.iter().find(|s| s.sequence == sequence) {
@@ -324,11 +331,7 @@ impl SegmentStore {
 	/// Capture a lock-free view for rendering a media playlist.
 	pub fn snapshot(&self) -> Snapshot {
 		let inner = self.inner.lock().unwrap();
-		let media_sequence = inner
-			.segments
-			.front()
-			.map(|s| s.sequence)
-			.unwrap_or(inner.next_sequence);
+		let media_sequence = inner.media_sequence();
 		let segments = inner
 			.segments
 			.iter()
@@ -377,7 +380,7 @@ mod tests {
 			part_target: Duration::from_millis(500),
 			window,
 			latency: Duration::from_secs(10),
-			audio_segment_target: Duration::from_secs(2),
+			segment_target: Duration::from_secs(2),
 		}
 	}
 
@@ -388,6 +391,17 @@ mod tests {
 			independent: true,
 			duration,
 		}
+	}
+
+	/// TARGETDURATION must describe segments, not parts: an empty store already advertises
+	/// the expected segment duration rather than the (much smaller) part target.
+	#[test]
+	fn target_duration_seeds_from_segment_target() {
+		let mut cfg = config(Duration::from_secs(16));
+		cfg.segment_target = Duration::from_secs(4);
+		let store = SegmentStore::new(Kind::Video, &cfg);
+
+		assert_eq!(store.snapshot().target_duration, 4);
 	}
 
 	#[test]

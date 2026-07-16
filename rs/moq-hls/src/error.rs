@@ -1,5 +1,23 @@
 //! Errors for the HLS / LL-HLS gateway.
 
+/// Which HLS sequence counter a value belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceKind {
+	/// `EXT-X-MEDIA-SEQUENCE`: names a segment within the live window.
+	Media,
+	/// `EXT-X-DISCONTINUITY-SEQUENCE`: names a media timeline.
+	Discontinuity,
+}
+
+impl std::fmt::Display for SequenceKind {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Media => write!(f, "media"),
+			Self::Discontinuity => write!(f, "discontinuity"),
+		}
+	}
+}
+
 /// Errors produced by the HLS <-> MoQ gateway (import and export).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -83,8 +101,8 @@ pub enum Error {
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
 	#[error("HLS {kind} sequence {value} is too large to encode")]
 	SequenceOverflow {
-		/// Which sequence overflowed: `"media"` or `"discontinuity"`.
-		kind: &'static str,
+		/// Which sequence overflowed.
+		kind: SequenceKind,
 		/// The offending sequence value.
 		value: u64,
 	},

@@ -9,6 +9,9 @@
 //! GET /{broadcast}/{rendition}/seg/{seq}.m4s
 //! GET /{broadcast}/{rendition}/part/{seq}/{idx}.m4s
 //! ```
+//!
+//! `{broadcast}` may span several path components, since MoQ broadcast names are
+//! hierarchical (`room/user`); the endpoint is matched from the end of the path.
 
 mod routes;
 
