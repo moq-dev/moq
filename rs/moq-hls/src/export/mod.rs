@@ -258,9 +258,10 @@ pub struct Broadcaster {
 	catalog_done: bool,
 	renditions: BTreeMap<String, Driver>,
 	state: kio::Producer<State>,
-	/// While true, no rendition holds an exporter, so the recording has no source
-	/// subscriptions at all. Also gates discovery: a rendition found while paused is
-	/// registered `Idle` and only builds its exporter on resume.
+	/// While true, no rendition holds an exporter, so the recording has no media
+	/// subscriptions. The discovery catalog stays subscribed, so this also gates
+	/// discovery: a rendition found while paused is registered `Idle` and only builds
+	/// its exporter on resume.
 	paused: bool,
 }
 
@@ -294,9 +295,10 @@ impl Broadcaster {
 
 	/// Pause or resume pulling media from the broadcast.
 	///
-	/// Pausing DROPS every rendition's exporter, so the source subscriptions are
+	/// Pausing DROPS every rendition's exporter, so the media subscriptions are
 	/// released here and now -- no [`poll`](Self::poll) required, and nothing is left
-	/// half-read. Unsubscribing (rather than just not reading) is what lets the relay
+	/// half-read. Only the discovery catalog stays subscribed, so the rendition set
+	/// keeps tracking the broadcast. Unsubscribing (rather than just not reading) is what lets the relay
 	/// drop the recording as a viewer and a subscription-driven publisher stop
 	/// producing for it; a still-live subscription would keep both busy for the whole
 	/// pause (#2255).
@@ -830,6 +832,8 @@ mod tests {
 	/// must not depend on the exporter making progress.
 	#[tokio::test]
 	async fn pausing_releases_media_subscription() {
+		tokio::time::pause();
+
 		let (_producer, _catalog, video_track, mut broadcaster) = stalled_video_broadcast();
 		drive_until_used(&mut broadcaster, &video_track).await;
 
@@ -844,6 +848,8 @@ mod tests {
 	/// Resuming rebuilds the exporter, so the recording resubscribes and keeps going.
 	#[tokio::test]
 	async fn resuming_resubscribes_media() {
+		tokio::time::pause();
+
 		let (_producer, _catalog, video_track, mut broadcaster) = stalled_video_broadcast();
 		drive_until_used(&mut broadcaster, &video_track).await;
 
@@ -864,6 +870,8 @@ mod tests {
 	/// `wait_ready` resolves) but must NOT subscribe until the resume.
 	#[tokio::test]
 	async fn rendition_discovered_while_paused_does_not_subscribe() {
+		tokio::time::pause();
+
 		use moq_mux::catalog::Producer as CatalogProducer;
 
 		let mut producer = moq_net::Broadcast::new().produce();
