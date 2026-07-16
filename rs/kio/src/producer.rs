@@ -198,7 +198,9 @@ impl<T> Producer<T> {
 		}
 	}
 
-	fn poll_used(&self, waiter: &Waiter) -> Poll<Option<()>> {
+	/// Poll-based variant of [`Self::used`]: `Ready(Some(()))` once a consumer
+	/// exists, `Ready(None)` if the channel closed first, else `Pending`.
+	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Option<()>> {
 		let mut state = self.state.lock();
 		if state.closed {
 			return Poll::Ready(None);

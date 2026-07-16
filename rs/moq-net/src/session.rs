@@ -212,6 +212,9 @@ impl Driver {
 
 		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
 		self.result = Some(result.clone());
+		// The session is over; release the maintenance future now rather than on
+		// Drop, since it holds a transport clone.
+		self.maintenance = None;
 		Poll::Ready(result)
 	}
 }
@@ -262,11 +265,8 @@ impl Session {
 			let producer = bandwidth::Producer::new();
 			let consumer = producer.consume();
 
-			let session = session.clone();
-			let maintenance = async move {
-				run_send_bandwidth(&session, producer).await;
-			}
-			.maybe_boxed();
+			let mut monitor = SendBandwidth::new(session.clone(), producer);
+			let maintenance = async move { kio::wait(|waiter| monitor.poll(waiter)).await }.maybe_boxed();
 
 			(Some(consumer), Some(maintenance))
 		} else {
@@ -330,44 +330,93 @@ impl Session {
 	}
 }
 
-/// Polls the QUIC congestion controller for estimated send rate.
+/// Samples the QUIC congestion controller's estimated send rate while anyone is
+/// consuming it, pausing when nobody is.
 ///
-/// Exits as soon as the session closes so we don't pin the underlying connection
-/// after the wrapping [`Session`] is dropped.
-async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: bandwidth::Producer) {
-	tokio::select! {
-		_ = session.closed() => {}
-		_ = producer.closed() => {}
-		_ = run_send_bandwidth_inner(session, &producer) => {}
-	}
+/// Finishes as soon as the transport or the producer channel closes, so it doesn't
+/// pin the underlying connection after the wrapping [`Session`] is dropped.
+struct SendBandwidth<S> {
+	session: S,
+	producer: bandwidth::Producer,
+	// The transport close, boxed once so it can be re-polled each step.
+	closed: MaybeSendBox<'static, ()>,
+	mode: SendBandwidthMode,
 }
 
-/// Toggles between waiting for a consumer and polling stats while one exists.
-/// Returns when the producer channel errors (closed by the consumer side).
-async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, producer: &bandwidth::Producer) {
+enum SendBandwidthMode {
+	/// No consumers; sampling is paused.
+	Idle,
+	/// At least one consumer; sample when the sleep elapses.
+	Polling { sleep: MaybeSendBox<'static, ()> },
+}
+
+impl<S: web_transport_trait::Session> SendBandwidth<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-	loop {
-		if producer.used().await.is_err() {
-			return;
+	fn new(session: S, producer: bandwidth::Producer) -> Self {
+		let closed = {
+			let session = session.clone();
+			async move {
+				session.closed().await;
+			}
+		}
+		.maybe_boxed();
+
+		Self {
+			session,
+			producer,
+			closed,
+			mode: SendBandwidthMode::Idle,
+		}
+	}
+
+	/// Sample the current estimate, arming the next sleep. Errors when the
+	/// producer channel is closed.
+	fn sample(&mut self) -> Result<(), Error> {
+		let bitrate = self.session.stats().estimated_send_rate();
+		self.producer.set(bitrate)?;
+		self.mode = SendBandwidthMode::Polling {
+			sleep: web_async::time::sleep(Self::POLL_INTERVAL).maybe_boxed(),
+		};
+		Ok(())
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if waiter.poll_future(self.closed.as_mut()).is_ready() {
+			return Poll::Ready(());
 		}
 
-		let mut interval = web_async::time::interval(POLL_INTERVAL);
 		loop {
-			tokio::select! {
-				biased;
-				res = producer.unused() => {
-					if res.is_err() {
-						return;
+			match &mut self.mode {
+				SendBandwidthMode::Idle => {
+					match self.producer.poll_used(waiter) {
+						// A consumer appeared: sample immediately, then on the interval.
+						Poll::Ready(Ok(())) => {}
+						Poll::Ready(Err(_)) => return Poll::Ready(()),
+						Poll::Pending => return Poll::Pending,
 					}
-					// No more consumers, pause polling.
-					break;
+					if self.sample().is_err() {
+						return Poll::Ready(());
+					}
 				}
-				_ = interval.tick() => {
-					let bitrate = session.stats().estimated_send_rate();
-					if producer.set(bitrate).is_err() {
-						return;
+				SendBandwidthMode::Polling { sleep } => {
+					// Pause before sampling: checked first, like the old biased select.
+					match self.producer.poll_unused(waiter) {
+						Poll::Ready(Ok(())) => {
+							self.mode = SendBandwidthMode::Idle;
+							continue;
+						}
+						Poll::Ready(Err(_)) => return Poll::Ready(()),
+						Poll::Pending => {}
 					}
+
+					if waiter.poll_future(sleep.as_mut()).is_pending() {
+						return Poll::Pending;
+					}
+					if self.sample().is_err() {
+						return Poll::Ready(());
+					}
+					// Loop so the fresh sleep registers the waiter.
 				}
 			}
 		}

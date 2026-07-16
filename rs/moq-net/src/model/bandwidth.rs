@@ -59,24 +59,39 @@ impl Producer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		kio::wait(|waiter| self.poll_unused(waiter)).await
+	}
+
+	/// Poll until there are no active consumers. Errors if the channel closes first.
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state.poll_unused(waiter).map(|used| match used {
+			Some(()) => Ok(()),
+			None => Err(self.abort()),
+		})
 	}
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		kio::wait(|waiter| self.poll_used(waiter)).await
+	}
+
+	/// Poll until at least one active consumer exists. Errors if the channel closes first.
+	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state.poll_used(waiter).map(|used| match used {
+			Some(()) => Ok(()),
+			None => Err(self.abort()),
+		})
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, State>> {
 		self.state
 			.write()
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// The close error, once the channel is closed.
+	fn abort(&self) -> Error {
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
 

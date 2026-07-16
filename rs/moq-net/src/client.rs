@@ -403,6 +403,7 @@ mod tests {
 		close_events: Mutex<Vec<(u32, String)>>,
 		close_notify: tokio::sync::Notify,
 		control_writes: Arc<Mutex<Vec<u8>>>,
+		send_rate: Mutex<Option<u64>>,
 	}
 
 	impl FakeSession {
@@ -418,8 +419,13 @@ mod tests {
 				close_events: Mutex::new(Vec::new()),
 				close_notify: tokio::sync::Notify::new(),
 				control_writes: writes,
+				send_rate: Mutex::new(None),
 			};
 			Self { state: Arc::new(state) }
+		}
+
+		fn set_send_rate(&self, rate: Option<u64>) {
+			*self.state.send_rate.lock().unwrap() = rate;
 		}
 
 		fn control_writes(&self) -> Vec<u8> {
@@ -482,6 +488,22 @@ mod tests {
 		async fn closed(&self) -> Self::Error {
 			self.state.close_notify.notified().await;
 			FakeError
+		}
+
+		fn stats(&self) -> impl web_transport_trait::Stats {
+			FakeStats {
+				send_rate: *self.state.send_rate.lock().unwrap(),
+			}
+		}
+	}
+
+	struct FakeStats {
+		send_rate: Option<u64>,
+	}
+
+	impl web_transport_trait::Stats for FakeStats {
+		fn estimated_send_rate(&self) -> Option<u64> {
+			self.send_rate
 		}
 	}
 
@@ -622,6 +644,27 @@ mod tests {
 
 		drop(connection);
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+	}
+
+	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
+	// consumer exists and keeps sampling on its interval. Paused tokio time makes
+	// the interval fire deterministically.
+	#[tokio::test(start_paused = true)]
+	async fn send_bandwidth_samples_on_the_driver() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		fake.set_send_rate(Some(1_000_000));
+
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let connection = client.connect(fake.clone()).await.unwrap();
+		let (session, driver) = connection.split();
+		tokio::spawn(driver);
+
+		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
+		assert_eq!(bandwidth.changed().await, Some(1_000_000));
+
+		// A later change is picked up by the next interval tick.
+		fake.set_send_rate(Some(2_000_000));
+		assert_eq!(bandwidth.changed().await, Some(2_000_000));
 	}
 
 	// A split driver must hold no Session clone, or the close-on-last-drop contract

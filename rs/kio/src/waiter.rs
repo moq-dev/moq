@@ -146,7 +146,9 @@ impl fmt::Debug for WaiterList {
 struct WaiterFn<F, R> {
 	poll: F,
 	waiter: Option<Waiter>, // Store the previous waiter to avoid dropping it.
-	_marker: PhantomData<R>,
+	// `fn() -> R` keeps the marker `Unpin` (and `Send`/`Sync`) regardless of `R`:
+	// the output is only ever moved out of `Poll::Ready`, never stored.
+	_marker: PhantomData<fn() -> R>,
 }
 
 /// Create a [`Future`] from a poll function that receives a [`Waiter`].
@@ -156,7 +158,6 @@ struct WaiterFn<F, R> {
 pub fn wait<F, R>(poll: F) -> impl Future<Output = R>
 where
 	F: FnMut(&Waiter) -> Poll<R> + Unpin,
-	R: Unpin,
 {
 	WaiterFn {
 		poll,
@@ -168,7 +169,6 @@ where
 impl<F, R> Future for WaiterFn<F, R>
 where
 	F: FnMut(&Waiter) -> Poll<R> + Unpin,
-	R: Unpin,
 {
 	type Output = R;
 
@@ -200,5 +200,14 @@ mod tests {
 		// A type-erased future works too (the `?Sized` bound).
 		let mut boxed: Pin<Box<dyn Future<Output = u8>>> = Box::pin(std::future::ready(9u8));
 		assert_eq!(waiter.poll_future(boxed.as_mut()), Poll::Ready(9));
+	}
+
+	#[test]
+	fn wait_output_need_not_be_unpin() {
+		struct NotUnpin(#[allow(dead_code)] std::marker::PhantomPinned);
+
+		let mut fut = std::pin::pin!(crate::wait(|_| Poll::Ready(NotUnpin(std::marker::PhantomPinned))));
+		let mut cx = Context::from_waker(Waker::noop());
+		assert!(fut.as_mut().poll(&mut cx).is_ready());
 	}
 }
