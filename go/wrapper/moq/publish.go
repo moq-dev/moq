@@ -57,11 +57,11 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 	return &BroadcastDynamic{inner: inner}, nil
 }
 
-// UpdateRoute updates the broadcast's route: the hop chain and cost it
+// SetRoute sets the broadcast's route: the hop chain and cost it
 // advertises. Use it as conditions shift (e.g. a standby transcoder lowering
 // its cost once warm); consumers observe the change via RouteUpdates.
-func (b *BroadcastProducer) UpdateRoute(route Route) error {
-	return b.inner.UpdateRoute(route)
+func (b *BroadcastProducer) SetRoute(route Route) error {
+	return b.inner.SetRoute(route)
 }
 
 // PublishMedia publishes a media track from an init segment, fed frame by

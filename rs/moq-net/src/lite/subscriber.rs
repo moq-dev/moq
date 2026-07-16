@@ -512,7 +512,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Reflections are already filtered above.
 		let Ok(route) = self
 			.origin
-			.attach_route(path.clone(), crate::broadcast::Route::new(hops))
+			.attach_route(path.clone(), crate::broadcast::Route::new().with_hops(hops))
 		else {
 			return Ok(false);
 		};
@@ -558,7 +558,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
-		let metadata = crate::broadcast::Route::new(hops);
+		let metadata = crate::broadcast::Route::new().with_hops(hops);
 
 		if let Some(route) = routes.get_mut(&path) {
 			if route.update(metadata.clone()).is_ok() {

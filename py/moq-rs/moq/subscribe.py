@@ -287,7 +287,7 @@ class BroadcastConsumer:
         """
         return self._inner.route()
 
-    async def route_updated(self) -> Route:
+    async def route_changed(self) -> Route:
         """Wait for the broadcast's route to change.
 
         The first call returns the current route immediately; each later call

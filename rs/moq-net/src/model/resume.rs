@@ -313,10 +313,20 @@ impl Consumer {
 	}
 
 	/// Return a cached group by sequence without blocking, or `None` if no segment
-	/// has it cached. Newer segments are preferred.
+	/// serving that sequence has it cached. Newer segments are preferred.
+	///
+	/// Bounds are enforced here like they are for a reader: a segment that kept
+	/// delivering past its cap never surfaces those groups, so the sequence space
+	/// is partitioned no matter which handle looks it up.
 	pub fn get_group(&self, sequence: u64) -> Option<group::Consumer> {
 		let state = self.state.read();
-		state.segments.iter().rev().find_map(|s| s.track.get_group(sequence))
+		state
+			.segments
+			.iter()
+			.rev()
+			.filter(|s| s.start.is_none_or(|start| sequence >= start))
+			.filter(|s| s.end.is_none_or(|end| sequence <= end))
+			.find_map(|s| s.track.get_group(sequence))
 	}
 
 	/// The latest group sequence across the segments, clamped to their bounds.
@@ -734,16 +744,11 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
 
-	/// Poll for the logical track ending: `Ok` after a clean finish, `Err` after
-	/// an abort.
-	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.poll_finished(waiter).map(|res| res.map(|_| ()))
-	}
-
-	/// Block until the logical track ends.
+	/// Block until the logical track ends: `Ok` after a clean finish, `Err` after
+	/// an abort. Readers use `finished()`; this just discards the group count.
 	#[cfg(test)]
 	pub async fn closed(&mut self) -> Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
+		kio::wait(|waiter| self.poll_finished(waiter)).await.map(|_| ())
 	}
 
 	/// Poll for the logical track finishing, returning the final segment's group
@@ -1072,6 +1077,32 @@ mod test {
 		assert_eq!(group.sequence, 2);
 		// Group 5 hasn't arrived yet: parked, not an error.
 		assert!(sub.get_group(5).now_or_never().is_none());
+	}
+
+	#[tokio::test]
+	async fn consumer_get_group_respects_bounds() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		// Segment a is capped at 1; b serves from 2 on.
+		producer.switch(&consumer_b, 2).unwrap();
+
+		write_group(&mut track_a, 0, "a0");
+		write_group(&mut track_b, 2, "b2");
+
+		let consumer = producer.consume();
+		assert_eq!(consumer.get_group(0).unwrap().sequence, 0);
+		assert_eq!(consumer.get_group(2).unwrap().sequence, 2);
+		// Nothing served it.
+		assert!(consumer.get_group(5).is_none());
+
+		// The capped segment races the switch and keeps delivering past its bound.
+		// Those groups stay filtered here exactly as they are for a reader, so the
+		// cache lookup and the reader agree on which segment owns a sequence.
+		write_group(&mut track_a, 3, "a3");
+		assert!(consumer.get_group(3).is_none());
 	}
 
 	#[tokio::test]

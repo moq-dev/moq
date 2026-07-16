@@ -723,7 +723,7 @@ async fn broadcast_route_migration() {
 	let mut hops_b = moq_net::OriginList::new();
 	hops_b.push(Origin::new(0x1234).unwrap()).unwrap();
 	broadcast_b
-		.update_route(moq_net::broadcast::Route::new(hops_b))
+		.set_route(moq_net::broadcast::Route::new().with_hops(hops_b))
 		.expect("update route");
 	let mut track_b = broadcast_b.create_track("video", None).expect("create track");
 	// B carries the continuation of the same content: groups 2 and 3.
@@ -830,7 +830,7 @@ async fn broadcast_route_migration() {
 ///
 /// The publisher updates its broadcast's route (a new hop chain, as if its own
 /// upstream failed over); the subscriber observes the new chain on the same
-/// broadcast handle via `route_updated`, with zero announce events and an
+/// broadcast handle via `route_changed`, with zero announce events and an
 /// uninterrupted subscription.
 async fn route_reannounce_test(version: Option<&str>) {
 	use moq_net::Timestamp;
@@ -897,7 +897,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 
 	// The initial route: a direct publish, so just the publisher session's hop.
 	let mut watch = broadcast.clone();
-	let initial = tokio::time::timeout(TIMEOUT, watch.route_updated())
+	let initial = tokio::time::timeout(TIMEOUT, watch.route_changed())
 		.await
 		.expect("route timeout")
 		.expect("route dropped");
@@ -914,11 +914,11 @@ async fn route_reannounce_test(version: Option<&str>) {
 	let mut hops = moq_net::OriginList::new();
 	hops.push(Origin::new(0x4444).unwrap()).unwrap();
 	route_producer
-		.update_route(moq_net::broadcast::Route::new(hops))
+		.set_route(moq_net::broadcast::Route::new().with_hops(hops))
 		.expect("update route");
 
 	// The subscriber sees the new chain on the same handle...
-	let updated = tokio::time::timeout(TIMEOUT, watch.route_updated())
+	let updated = tokio::time::timeout(TIMEOUT, watch.route_changed())
 		.await
 		.expect("route update timeout")
 		.expect("route dropped");

@@ -139,8 +139,8 @@ public final class BroadcastProducer: Sendable {
     ///
     /// Use this as conditions shift (e.g. a standby transcoder lowering its cost
     /// once warm); consumers observe the change via `BroadcastConsumer.routeUpdated`.
-    public func updateRoute(_ route: Route) throws {
-        try ffi.updateRoute(route: route)
+    public func setRoute(_ route: Route) throws {
+        try ffi.setRoute(route: route)
     }
 
     /// Open a media track. `format` controls how `initData` and frame payloads

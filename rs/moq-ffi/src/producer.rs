@@ -262,11 +262,11 @@ impl MoqBroadcastProducer {
 	///
 	/// Use this as conditions shift (e.g. a standby transcoder lowering its cost
 	/// once it is warm); consumers observe the change via
-	/// `MoqBroadcastConsumer::route_updated` and sessions forward it downstream.
-	pub fn update_route(&self, route: MoqRoute) -> Result<(), MoqError> {
+	/// `MoqBroadcastConsumer::route_changed` and sessions forward it downstream.
+	pub fn set_route(&self, route: MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let route = route.try_into()?;
-		self.with_state(|state| Ok(state.broadcast.update_route(route)?))
+		self.with_state(|state| Ok(state.broadcast.set_route(route)?))
 	}
 
 	/// Set (or replace) a top-level application catalog section by name.

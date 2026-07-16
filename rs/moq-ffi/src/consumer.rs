@@ -109,7 +109,7 @@ impl MoqRouteWatch {
 	/// Errors with `Closed` once the broadcast is gone.
 	pub async fn next(&self) -> Result<MoqRoute, MoqError> {
 		self.task
-			.run(|mut state| async move { Ok(state.inner.route_updated().await?.into()) })
+			.run(|mut state| async move { Ok(state.inner.route_changed().await?.into()) })
 			.await
 	}
 

@@ -1851,6 +1851,10 @@ impl Subscriber {
 	/// below the final sequence but was already evicted from the cache, this parks
 	/// until the track closes. Use [`Consumer::fetch_group`] for a past group that a
 	/// [`Dynamic`] can serve on demand.
+	///
+	/// Takes `&mut self` because a spliced track subscribes to each segment lazily:
+	/// waiting for a group is what registers the demand that delivers it, so this
+	/// can't be a shared read. [`Consumer::get_group`] is the `&self` cache lookup.
 	pub fn poll_get_group(&mut self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll(waiter, |state| state.poll_get_group(sequence)),

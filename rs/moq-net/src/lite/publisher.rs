@@ -377,7 +377,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// make that fine.
 			let route_update = kio::wait(|waiter| {
 				for (suffix, entry) in watched.iter_mut() {
-					if let Poll::Ready(res) = entry.consumer.poll_route_updated(waiter) {
+					if let Poll::Ready(res) = entry.consumer.poll_route_changed(waiter) {
 						return Poll::Ready((suffix.clone(), res));
 					}
 				}

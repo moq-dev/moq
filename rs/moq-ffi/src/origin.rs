@@ -16,8 +16,8 @@ pub struct MoqOriginOptions {
 /// The path a broadcast takes to reach this origin, and how preferable it is.
 ///
 /// Dynamic: it changes when the serving route fails over or the publisher
-/// re-advertises itself. Publish changes with `MoqBroadcastProducer::update_route`
-/// and observe them with `MoqBroadcastConsumer::route_updated`.
+/// re-advertises itself. Publish changes with `MoqBroadcastProducer::set_route`
+/// and observe them with `MoqBroadcastConsumer::route_updates`.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqRoute {
 	/// Origin ids of the relay hops the broadcast traversed, oldest first.
@@ -41,12 +41,14 @@ impl TryFrom<MoqRoute> for moq_net::broadcast::Route {
 	type Error = MoqError;
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let mut hops = moq_net::OriginList::new();
+		let mut out = moq_net::broadcast::Route::new().with_cost(route.cost);
 		for id in route.hops {
 			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
-			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			out = out
+				.with_hop(origin)
+				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
-		Ok(moq_net::broadcast::Route::new(hops).with_cost(route.cost))
+		Ok(out)
 	}
 }
 

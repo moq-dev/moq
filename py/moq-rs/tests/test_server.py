@@ -181,8 +181,8 @@ async def test_broadcast_route_over_wire():
             ) as client:
                 async for announcement in client.announced():
                     assert announcement.path == "with-route"
-                    # route_updated yields the current route first.
-                    route = await announcement.broadcast.route_updated()
+                    # route_changed yields the current route first.
+                    route = await announcement.broadcast.route_changed()
                     assert route == announcement.broadcast.route
                     assert all(isinstance(h, int) for h in route.hops)
                     # A broadcast crossing at least one session carries a non-empty hop chain.

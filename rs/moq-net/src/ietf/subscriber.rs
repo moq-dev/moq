@@ -546,7 +546,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				.produce();
 				broadcast
-					.update_route(broadcast::Route::new(hops))
+					.set_route(broadcast::Route::new().with_hops(hops))
 					.expect("a freshly created broadcast accepts a route");
 
 				// Create the dynamic handler BEFORE publishing so consumers see

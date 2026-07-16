@@ -44,8 +44,8 @@ impl Info {
 ///
 /// Unlike [`Info`], the route is dynamic: it changes when the serving session fails
 /// over, the upstream topology shifts, or the publisher re-advertises itself.
-/// Update it with [`Producer::update_route`] and observe changes with
-/// [`Consumer::route_updated`]; downstream sessions forward updates as a restart
+/// Publish a change with [`Producer::set_route`] and observe one with
+/// [`Consumer::route_changed`]; downstream sessions forward updates as a restart
 /// on the wire, so route churn never looks like a new broadcast.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -64,12 +64,27 @@ pub struct Route {
 }
 
 impl Route {
-	/// A route with the given hop chain and default (best) cost.
-	pub fn new(hops: OriginList) -> Self {
-		Self { hops, cost: 0 }
+	/// A direct route: no hops, best cost.
+	pub fn new() -> Self {
+		Self::default()
 	}
 
-	/// Set the route's cost, builder style.
+	/// Append a hop to the chain, oldest first.
+	///
+	/// Fails with [`crate::TooManyOrigins`] once the chain is full, the same limit
+	/// the wire enforces.
+	pub fn with_hop(mut self, origin: super::Origin) -> Result<Self, super::TooManyOrigins> {
+		self.hops.push(origin)?;
+		Ok(self)
+	}
+
+	/// Replace the hop chain.
+	pub fn with_hops(mut self, hops: OriginList) -> Self {
+		self.hops = hops;
+		self
+	}
+
+	/// Set the cost: lower wins among routes serving the same broadcast.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.cost = cost;
 		self
@@ -276,14 +291,14 @@ impl Producer {
 		Dynamic::new(self.info.clone(), self.state.clone())
 	}
 
-	/// Update the broadcast's [`Route`]: the hop chain and cost it advertises.
+	/// Set the broadcast's [`Route`]: the hop chain and cost it advertises.
 	///
 	/// Call this when the path to the content changes (an upstream failover) or the
 	/// publisher's preference changes (e.g. a transcoder warming up lowers its
-	/// cost). Consumers observe the change via [`Consumer::route_updated`] and
-	/// sessions forward it downstream as a restart, never as a new broadcast. An
-	/// update equal to the current route is a no-op.
-	pub fn update_route(&mut self, route: Route) -> Result<(), Error> {
+	/// cost). Consumers observe the change via [`Consumer::route_changed`] and
+	/// sessions forward it downstream as a restart, never as a new broadcast.
+	/// Setting the current route again is a no-op.
+	pub fn set_route(&mut self, route: Route) -> Result<(), Error> {
 		let mut state = BroadcastState::modify(&self.state)?;
 		if state.route == route {
 			return Ok(());
@@ -291,11 +306,6 @@ impl Producer {
 		state.route = route;
 		state.route_epoch += 1;
 		Ok(())
-	}
-
-	/// The route the broadcast currently advertises.
-	pub fn route(&self) -> Route {
-		self.state.read().route.clone()
 	}
 
 	/// Poll for the next spliced track awaiting a serving route, returning its name
@@ -557,8 +567,8 @@ impl Consumer {
 		self.state.read().route.clone()
 	}
 
-	/// Poll for a route change. See [`Self::route_updated`].
-	pub fn poll_route_updated(&mut self, waiter: &kio::Waiter) -> Poll<Result<Route, Error>> {
+	/// Poll for a route change. See [`Self::route_changed`].
+	pub fn poll_route_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Route, Error>> {
 		let seen = self.route_seen;
 		let route = match ready!(self.state.poll(waiter, |state| {
 			if seen != Some(state.route_epoch) {
@@ -581,8 +591,8 @@ impl Consumer {
 	/// The first call returns the current route immediately; each later call blocks
 	/// until it changes again, so a loop observes the initial value followed by
 	/// every update. Returns [`Error::Dropped`] once every producer is gone.
-	pub async fn route_updated(&mut self) -> Result<Route, Error> {
-		kio::wait(|waiter| self.poll_route_updated(waiter)).await
+	pub async fn route_changed(&mut self) -> Result<Route, Error> {
+		kio::wait(|waiter| self.poll_route_changed(waiter)).await
 	}
 
 	/// Get a handle to a track on this broadcast.
