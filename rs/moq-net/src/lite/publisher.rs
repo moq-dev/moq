@@ -617,20 +617,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				frame = group.next_frame() => frame,
-				new_pri = priority.next() => {
-					stream.set_priority(new_pri);
-					continue;
-				}
-				Ok(()) = track_priority.changed() => {
-					priority.set_track(*track_priority.borrow_and_update());
-					continue;
-				}
 			};
 
 			let mut frame = match frame? {
 				Some(frame) => frame,
 				None => break,
 			};
+
+			// Apply priority updates only between frames. Racing them against the
+			// encode/write awaits below cancels an in-flight write, which loses or
+			// duplicates bytes after the frame length was already written and
+			// desyncs the stream for the subscriber.
+			if track_priority.has_changed().unwrap_or(false) {
+				priority.set_track(*track_priority.borrow_and_update());
+			}
+			stream.set_priority(priority.current());
 
 			if version.has_track_stream() {
 				let now = i64::try_from(crate::Time::now().as_millis()).unwrap_or(i64::MAX);
@@ -648,34 +649,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					biased;
 					_ = stream.closed() => return Err(Error::Cancel),
 					chunk = frame.read_chunk() => chunk,
-					new_pri = priority.next() => {
-						stream.set_priority(new_pri);
-						continue;
-					}
-					Ok(()) = track_priority.changed() => {
-						priority.set_track(*track_priority.borrow_and_update());
-						continue;
-					}
 				};
 
 				match chunk? {
 					Some(mut chunk) => {
 						let n = chunk.len() as u64;
-						loop {
-							tokio::select! {
-								biased;
-								result = stream.write_all(&mut chunk) => {
-									result?;
-									break;
-								}
-								new_pri = priority.next() => {
-									stream.set_priority(new_pri);
-								}
-								Ok(()) = track_priority.changed() => {
-									priority.set_track(*track_priority.borrow_and_update());
-								}
-							}
-						}
+						stream.write_all(&mut chunk).await?;
 						track_stats.bytes(n);
 					}
 					None => break,
