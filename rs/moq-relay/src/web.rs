@@ -566,13 +566,21 @@ async fn serve_fetch(
 		let group = match params.group {
 			// "latest" needs a live subscription to learn the newest sequence;
 			// fetch only retrieves a specified past group.
-			FetchGroup::Latest => match async { broadcast.track(&track)?.subscribe(None).await }.await {
-				Ok(mut sub) => match sub.latest() {
-					Some(sequence) => sub.get_group(sequence).await,
-					None => sub.recv_group().await,
-				},
-				Err(err) => Err(err),
-			},
+			FetchGroup::Latest => {
+				async {
+					let track = broadcast.track(&track)?;
+					let mut sub = track.subscribe(None).await?;
+					match sub.latest() {
+						// The newest group is cached, so the fetch resolves immediately.
+						// If it was evicted in the meantime the fetch fails rather than
+						// waiting for a group that has already come and gone.
+						Some(sequence) => track.fetch_group(sequence, None).await.map(Some),
+						// Nothing published yet: wait for the first group to arrive.
+						None => sub.recv_group().await,
+					}
+				}
+				.await
+			}
 			// A one-shot fetch, no subscription required.
 			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch_group(sequence, None).await }
 				.await

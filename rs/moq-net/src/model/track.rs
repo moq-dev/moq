@@ -387,25 +387,6 @@ impl TrackState {
 			.map(|(group, _)| group.consume())
 	}
 
-	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
-		if let Some(group) = self.cached_group(sequence) {
-			return Poll::Ready(Ok(Some(group)));
-		}
-
-		// Once final_sequence is set, groups at or past it can never exist.
-		if let Some(fin) = self.final_sequence
-			&& sequence >= fin
-		{
-			return Poll::Ready(Ok(None));
-		}
-
-		if let Some(err) = &self.abort {
-			return Poll::Ready(Err(err.clone()));
-		}
-
-		Poll::Pending
-	}
-
 	/// Resolve a one-shot fetch: the cached group, or an [`Error`] once it can never
 	/// be served. Unlike [`Self::poll_get_group`] there's no `Ok(None)`, since a
 	/// missing group is a failure ([`Error::NotFound`]), not an end-of-stream.
@@ -1835,36 +1816,6 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
-	/// Poll for the group with the given sequence.
-	///
-	/// This waits for live arrival, not on-demand retrieval. If the sequence is
-	/// below the final sequence but was already evicted from the cache, this parks
-	/// until the track closes. Use [`Consumer::fetch_group`] for a past group that a
-	/// [`Dynamic`] can serve on demand.
-	///
-	/// Takes `&mut self` because a spliced track subscribes to each segment lazily:
-	/// waiting for a group is what registers the demand that delivers it, so this
-	/// can't be a shared read.
-	pub fn poll_get_group(&mut self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
-		match &mut self.inner {
-			SubscriberKind::Plain(plain) => plain.poll(waiter, |state| state.poll_get_group(sequence)),
-			SubscriberKind::Spliced(spliced) => spliced.poll_get_group(waiter, sequence),
-		}
-	}
-
-	/// Wait until the group with the given sequence becomes available.
-	///
-	/// Resolves to `Some(group::Consumer)` once the group is in the cache.
-	/// Resolves to `None` only when `sequence` is at or past the track's
-	/// `final_sequence` (set by `finish()` / `finish_at()`), since such a
-	/// group can never be produced. Sequences below `final_sequence` still
-	/// wait, since older groups may still arrive out of order. If the sequence
-	/// was already evicted, this waits until the track closes; use
-	/// [`Consumer::fetch_group`] for on-demand retrieval of past groups.
-	pub async fn get_group(&mut self, sequence: u64) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
-	}
-
 	/// Whether `other` was cloned from this subscriber (shares the same underlying state).
 	pub fn is_clone(&self, other: &Self) -> bool {
 		match (&self.inner, &other.inner) {
@@ -3181,24 +3132,24 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn get_group_finishes_without_waiting_for_gaps() {
+	async fn fetch_finishes_without_waiting_for_gaps() {
 		let mut producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.finish().unwrap();
 
-		let mut sub = producer.subscribe(None);
-		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
+		let consumer = producer.consume();
+		// A gap below final_sequence: no Dynamic can serve it, so the fetch fails
+		// fast rather than waiting for a group that may never arrive.
+		assert!(matches!(
+			consumer.fetch_group(0, None).now_or_never().expect("should not block"),
+			Err(Error::NotFound)
+		));
 		assert!(
-			sub.get_group(0).now_or_never().is_none(),
-			"sequence below fin should block (group could still arrive)"
-		);
-		assert!(
-			sub.get_group(2)
-				.now_or_never()
-				.expect("sequence at-or-after fin should resolve")
-				.expect("should not error")
-				.is_none(),
-			"sequence at-or-after fin should not exist"
+			matches!(
+				consumer.fetch_group(2, None).now_or_never().expect("should not block"),
+				Err(Error::NotFound)
+			),
+			"sequence at-or-after fin can never exist"
 		);
 	}
 

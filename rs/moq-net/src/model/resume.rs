@@ -682,51 +682,6 @@ impl Subscriber {
 		Poll::Pending
 	}
 
-	/// Poll for the group with the given sequence, waiting for live arrival on the
-	/// segment whose bounds contain it.
-	pub fn poll_get_group(&mut self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<group::Consumer>>> {
-		self.poll_sync(waiter);
-
-		for seg in &mut self.segments {
-			if seg.start.is_some_and(|start| sequence < start) {
-				continue;
-			}
-			if seg.end.is_some_and(|end| sequence > end) {
-				continue;
-			}
-			// Resolve a pending subscription first so the cursor exists.
-			match &mut seg.sub {
-				SubState::Pending(_) => match Self::poll_segment(seg, 0, None, waiter) {
-					// Promoted (or delivered a group we aren't looking for); re-check.
-					Poll::Ready(Some(_)) | Poll::Ready(None) => {}
-					Poll::Pending => {
-						if !matches!(seg.sub, SubState::Active(_)) {
-							return Poll::Pending;
-						}
-					}
-				},
-				SubState::Active(_) | SubState::Done(_) => {}
-			}
-			if let SubState::Active(sub) = &mut seg.sub {
-				return sub.poll_get_group(waiter, sequence);
-			}
-		}
-
-		if let Some(err) = &self.abort {
-			return Poll::Ready(Err(err.clone()));
-		}
-		if self.finished {
-			return Poll::Ready(Ok(None));
-		}
-		Poll::Pending
-	}
-
-	/// Wait until the group with the given sequence becomes available.
-	#[cfg(test)]
-	pub async fn get_group(&mut self, sequence: u64) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
-	}
-
 	/// Block until the logical track ends: `Ok` after a clean finish, `Err` after
 	/// an abort. Readers use `finished()`; this just discards the group count.
 	#[cfg(test)]
@@ -1039,27 +994,6 @@ mod test {
 		assert_eq!(&frame.payload[..], b"a0");
 		let frame = sub.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(&frame.payload[..], b"b1");
-	}
-
-	#[tokio::test]
-	async fn get_group_routes_by_bounds() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
-
-		let mut producer = Producer::new();
-		producer.switch(&consumer_a, None).unwrap();
-		producer.switch(&consumer_b, 2).unwrap();
-
-		write_group(&mut track_a, 0, "a0");
-		write_group(&mut track_b, 2, "b2");
-
-		let mut sub = producer.consume().subscribe(None);
-		let group = sub.get_group(0).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(group.sequence, 0);
-		let group = sub.get_group(2).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(group.sequence, 2);
-		// Group 5 hasn't arrived yet: parked, not an error.
-		assert!(sub.get_group(5).now_or_never().is_none());
 	}
 
 	#[tokio::test]
