@@ -570,9 +570,9 @@ async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_n
 }
 
 /// Lite06 announce lifecycle end-to-end: initial set, live announce, unannounce,
-/// re-announce, and restart. On lite-06 every retraction/restart references the
-/// implicit announce id rather than repeating the path (the path form doesn't even
-/// encode), so this exercises the id bookkeeping on both sides of the session.
+/// re-announce, and replacement. On lite-06 every retraction references the implicit
+/// announce id rather than repeating the path (the path form doesn't even encode), so
+/// this exercises the id bookkeeping on both sides of the session.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06_announce_lifecycle() {
@@ -636,9 +636,9 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	assert_eq!(path.as_str(), "second");
 	assert!(matches!(event, Event::Active(_)), "expected re-announce");
 
-	// Restart: publish a replacement at "first" and retire the original. Whichever
-	// of the two transitions wins the origin's route tie-break, downstream sees a
-	// single atomic restart (never an unannounce).
+	// Replace the broadcast at "first": publish a replacement, then retire the original
+	// so the origin promotes it. A replacement is an unannounce/announce pair, which on
+	// the wire retires the old id and assigns a fresh one.
 	let mut replacement_info = moq_net::broadcast::Info::new();
 	replacement_info.origin = pub_origin.info();
 	let replacement = replacement_info.produce();
@@ -648,9 +648,12 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	drop(first);
 	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "first");
-	assert!(matches!(event, Event::Restart(_)), "expected restart");
+	assert!(matches!(event, Event::Ended), "expected the replaced unannounce");
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "first");
+	assert!(matches!(event, Event::Active(_)), "expected the replacement announce");
 
-	// A sentinel proves no stray unannounce for "first" snuck in behind the restart.
+	// A sentinel proves no stray event for "first" snuck in behind the replacement.
 	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
 	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "sentinel");

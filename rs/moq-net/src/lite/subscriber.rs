@@ -220,7 +220,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Lite06+: announce ids. Each received `active` implicitly assigns the next
 		// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
 		// path. Tracked even for announces we drop locally (reflected loops), since
-		// the sender doesn't know we dropped them.
+		// the sender doesn't know we dropped them. We never send a restart ourselves,
+		// but a peer may.
 		let mut next_announce_id: u64 = 0;
 		let mut announced_by_id: HashMap<u64, PathOwned> = HashMap::new();
 
@@ -291,23 +292,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						announced_by_id.insert(next_announce_id, path.clone());
 						next_announce_id += 1;
 					}
-					if lite::restart_supported(self.version)
-						&& !self.version.has_announce_id()
-						&& producers.contains_key(&path)
-					{
-						// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
-						// atomically replace the broadcast. Lite06+ restarts by announce id, and older
-						// versions never defined restarts, so both fall through to start_announce, which
-						// rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
-							// Continuity: keep the existing stats guard if present.
-							stats_guards
-								.entry(abs.clone())
-								.or_insert_with(|| self.stats.broadcast(&abs).subscriber());
-						} else {
-							stats_guards.remove(&abs);
-						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
+					if lite::restart_supported(self.version) && !self.version.has_announce_id() {
+						// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a
+						// RESTART. Retire the old announcement so the replacement arrives as a
+						// fresh announce; the origin has no atomic swap. A no-op for a path we
+						// haven't announced, which is the common case. Lite06+ restarts by
+						// announce id, and older versions never defined restarts, so both fall
+						// through to start_announce, which rejects a duplicate (Error::Duplicate).
+						Self::retire_announce(&path, &abs, &mut producers, &mut stats_guards);
+					}
+					if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -328,13 +322,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
 
-					// The matching Active may have been silently dropped by
-					// start_announce as a reflected loop, in which case
-					// `producers` has no entry; that's expected, not an error.
-					// Dropping the entry drops its origin::Publish guard, which unannounces.
-					if producers.remove(&path).is_some() {
-						stats_guards.remove(&abs);
-					}
+					Self::retire_announce(&path, &abs, &mut producers, &mut stats_guards);
 				}
 				lite::AnnounceBroadcast::EndedId { id } => {
 					// Resolve and retire the id; an unknown or already-retired id is a
@@ -349,13 +337,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
 
-					// The matching Active may have been silently dropped by
-					// start_announce as a reflected loop, in which case
-					// `producers` has no entry; that's expected, not an error.
-					// Dropping the entry drops its origin::Publish guard, which unannounces.
-					if producers.remove(&path).is_some() {
-						stats_guards.remove(&abs);
-					}
+					Self::retire_announce(&path, &abs, &mut producers, &mut stats_guards);
 				}
 				lite::AnnounceBroadcast::Restart { id, hops } => {
 					// Resolve the id; it stays live (the replacement reuses it). An unknown
@@ -367,18 +349,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.stats
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
-					if producers.contains_key(&path) {
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
-							// Continuity: keep the existing stats guard if present.
-							stats_guards
-								.entry(abs.clone())
-								.or_insert_with(|| self.stats.broadcast(&abs).subscriber());
-						} else {
-							stats_guards.remove(&abs);
-						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
-						// The original announce was dropped locally (e.g. a reflected loop);
-						// the replacement may be routable, so treat it as a fresh start.
+
+					// The origin has no atomic swap, so retire the old announcement and let the
+					// replacement arrive as a fresh announce. A no-op if the original was dropped
+					// locally (e.g. a reflected loop); the replacement may still be routable.
+					Self::retire_announce(&path, &abs, &mut producers, &mut stats_guards);
+					if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -534,58 +510,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(true)
 	}
 
-	/// Handle a RESTART (a duplicate ANNOUNCE): atomically replace the broadcast at `path`.
+	/// Retire the announcement at `path`, unannouncing the broadcast.
 	///
-	/// Publishing the replacement before retiring the old producer lets the origin demote the old
-	/// broadcast to a backup and emit a single restart downstream, rather than an
-	/// unannounce/announce pair with a visible gap. Returns `Ok(false)` if the replacement was a
-	/// reflected loop (the broadcast is now gone), `Ok(true)` otherwise.
-	fn restart_announce(
-		&mut self,
-		path: PathOwned,
-		mut hops: crate::OriginList,
-		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
-		// rebuild the full chain since the sender no longer stamps itself. None for older
-		// versions. See `start_announce`.
-		responder_origin: Option<crate::Origin>,
+	/// Dropping the [`origin::Publish`] guard is what unannounces. A no-op when the announce was
+	/// never accepted (`start_announce` silently drops reflected loops), which is expected rather
+	/// than an error: the peer doesn't know we dropped it, so it still retracts by path or id.
+	fn retire_announce(
+		path: &PathOwned,
+		absolute: &PathOwned,
 		producers: &mut HashMap<PathOwned, origin::Publish>,
-	) -> Result<bool, Error> {
-		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
-		let reflected = match responder_origin {
-			Some(responder) => hops.push(responder).is_err() || hops.contains(&self.self_origin),
-			None => hops.contains(&self.self_origin),
-		};
-		if reflected {
-			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
-			// Dropping the entry drops its guard, unannouncing the broadcast.
-			producers.remove(&path);
-			return Ok(false);
+		stats_guards: &mut HashMap<PathOwned, SubscriberStats>,
+	) {
+		if producers.remove(path).is_some() {
+			stats_guards.remove(absolute);
 		}
-
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
-
-		let broadcast = broadcast::Info {
-			hops,
-			origin: self.origin.info(),
-		}
-		.produce();
-		let dynamic = broadcast.dynamic();
-
-		// Publish the replacement first so the origin restarts atomically; the old broadcast is
-		// demoted to a backup and removed silently when we drop its guard below.
-		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
-			// Origin rejected the replacement; retire the existing broadcast.
-			producers.remove(&path);
-			return Ok(false);
-		};
-
-		let old = producers.insert(path.clone(), publish);
-		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
-
-		// Drop the replaced broadcast's guard last, unannouncing it now that the replacement is live.
-		drop(old);
-
-		Ok(true)
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: broadcast::Dynamic) {
