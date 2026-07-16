@@ -65,13 +65,13 @@ pub async fn handle_viewers(
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	loop {
-		let Some(moq_net::announce::Update { path, event, .. }) = viewer_origin.next().await else {
+		let Some(moq_net::announce::Update { path, broadcast }) = viewer_origin.next().await else {
 			break;
 		};
 
 		let viewer_id = path.to_string();
 
-		if let Some(broadcast) = event.broadcast() {
+		if let Some(broadcast) = broadcast {
 			tracing::info!(%viewer_id, "viewer connected");
 			let cmd_tx = cmd_tx.clone();
 			let vid = viewer_id.clone();

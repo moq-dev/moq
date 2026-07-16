@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(moq_net::announce::Update { path, event, .. }) = origin.next() => match event.broadcast() {
+					Some(moq_net::announce::Update { path, broadcast }) = origin.next() => match broadcast {
 						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast

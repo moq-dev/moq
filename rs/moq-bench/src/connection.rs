@@ -239,10 +239,10 @@ async fn subscribe(
 	let mut seen: HashSet<String> = HashSet::new();
 
 	while (seen.len() as u64) < want {
-		let Some(moq_net::announce::Update { path, event, .. }) = announced.next().await else {
+		let Some(moq_net::announce::Update { path, broadcast }) = announced.next().await else {
 			break;
 		};
-		let Some(broadcast) = event.broadcast() else {
+		let Some(broadcast) = broadcast else {
 			continue;
 		};
 

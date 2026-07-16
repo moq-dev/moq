@@ -57,9 +57,11 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
 			match self.inner.next().await {
-				// Active and Restart both carry a broadcast; skip unannounce events.
-				Some(moq_net::announce::Update { path, event, .. }) => {
-					let Some(broadcast) = event.broadcast() else {
+				// Skip unannounce events; this surface only reports availability. A
+				// replacement arrives as an unannounce/announce pair, so the caller
+				// still sees a single announcement carrying the new broadcast.
+				Some(moq_net::announce::Update { path, broadcast }) => {
+					let Some(broadcast) = broadcast else {
 						continue;
 					};
 					let hops = broadcast.info().hops.iter().map(|origin| origin.id()).collect();
@@ -77,8 +79,8 @@ impl Announced {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
 			match self.inner.next().await {
-				// Active and Restart both carry a broadcast; skip unannounce events.
-				Some(moq_net::announce::Update { event, .. }) => match event.broadcast() {
+				// Skip unannounce events; we're waiting for the broadcast to become available.
+				Some(moq_net::announce::Update { broadcast, .. }) => match broadcast {
 					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
 					None => continue,
 				},

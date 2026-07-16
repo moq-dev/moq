@@ -80,7 +80,7 @@ impl Origin {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let moq_net::announce::Update { path, event, .. } = tokio::select! {
+			let moq_net::announce::Update { path, broadcast } = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {
@@ -90,11 +90,10 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			// Active and Restart both carry a broadcast; Ended does not.
 			let announced_id = State::lock()
 				.origin
 				.announced
-				.insert((path.to_string(), event.broadcast().is_some()))?;
+				.insert((path.to_string(), broadcast.is_some()))?;
 			callback.call(announced_id);
 		}
 	}
