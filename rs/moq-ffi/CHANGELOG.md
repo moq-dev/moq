@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expose explicit raw group sequences, known track ends, and raw group aborts
   across the generated bindings.
 
+### Changed
+
+- `abort` takes the application error code as a `u16`, matching the wire type,
+  instead of an `i32` that was range-checked at runtime. The `InvalidErrorCode`
+  error variant is gone with it: an out-of-range code no longer compiles.
+
 ## [0.2.30](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.29...moq-ffi-v0.2.30) - 2026-07-15
 
 ### Added

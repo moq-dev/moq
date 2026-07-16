@@ -842,6 +842,14 @@ impl Producer {
 		self.modify()?.set_final(final_sequence)
 	}
 
+	/// The exclusive final sequence, once [`Self::finish`] or [`Self::finish_at`] declared one.
+	///
+	/// `None` while the track is still open ended. Both methods reject a second boundary, so
+	/// callers that may have already declared one check here first.
+	pub fn final_sequence(&self) -> Option<u64> {
+		self.state.read().final_sequence
+	}
+
 	/// Abort the track with the given error.
 	///
 	/// Drops the cached groups so a stale [`Consumer`] can't pin them (and
@@ -2560,6 +2568,29 @@ mod test {
 		assert!(producer.finish_at(6).is_err());
 		assert!(producer.create_group(group::Info { sequence: 4 }).is_ok());
 		assert!(producer.create_group(group::Info { sequence: 6 }).is_err());
+	}
+
+	#[test]
+	fn final_sequence_reports_the_declared_boundary() {
+		let mut producer = track_producer("test", None);
+		assert_eq!(producer.final_sequence(), None);
+
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		assert_eq!(producer.final_sequence(), None, "a group does not declare a boundary");
+
+		producer.finish_at(9).unwrap();
+		assert_eq!(producer.final_sequence(), Some(9));
+
+		// finish() would try to declare a second boundary, so callers check first.
+		assert!(producer.finish().is_err());
+	}
+
+	#[test]
+	fn final_sequence_reports_the_live_edge_after_finish() {
+		let mut producer = track_producer("test", None);
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer.finish().unwrap();
+		assert_eq!(producer.final_sequence(), Some(6));
 	}
 
 	#[tokio::test]

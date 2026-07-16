@@ -1,0 +1,33 @@
+# Native libraries an external linker must pass when it links libmoq.a on Apple
+# targets. Cargo injects these itself for Rust consumers, but a C/C++ toolchain
+# linking the staticlib has to spell them out.
+#
+# Canonical list. build.rs bakes it into moq.pc, CMakeLists.txt reads it for the
+# moq::moq target and the installed find_package config, and test/smoke/smoke.sh
+# links its C client with it. Keep the derived consumers reading this file rather
+# than repeating the list.
+#
+# One entry per line. `framework:Foo` is an Apple framework; anything else is a
+# plain library name. `#` comments and blank lines are ignored.
+#
+# Regenerate after a dependency change with:
+#   cargo rustc -p libmoq --crate-type staticlib -- --print native-static-libs
+
+# rustls / std
+framework:CoreFoundation
+framework:Security
+# notify/FSEvents (see go/moq/cgo.go, which needs the same for moq-ffi)
+framework:CoreServices
+
+# moq-video / moq-audio: capture, hardware H.264/H.265 encode and decode
+framework:Foundation
+framework:AVFoundation
+framework:CoreMedia
+framework:CoreVideo
+framework:VideoToolbox
+# window/display/system-audio capture and display enumeration
+framework:ScreenCaptureKit
+framework:CoreGraphics
+
+# openh264 (the software H.264 fallback) is C++
+c++

@@ -67,6 +67,9 @@ carry lossy latest state, while `PublishJSONStream` / `SubscribeJSONStream` carr
 record in order. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
 
+Publishing takes `JSONSnapshotOptions` or `JSONStreamOptions`; both subscribe calls take
+`JSONSubscribeOptions`, where only `Compression` has to match the producer.
+
 ## Errors
 
 All FFI errors come back as the `moq.Error` type. The error variants are
