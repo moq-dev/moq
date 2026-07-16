@@ -76,7 +76,7 @@ moq-rtmp = { version = "0.1.3", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.1.2", path = "rs/moq-srt" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 moq-video = { version = "0.0.6", path = "rs/moq-video" }
-qmux = { version = "0.3", default-features = false }
+qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.5", features = ["tracing"] }
