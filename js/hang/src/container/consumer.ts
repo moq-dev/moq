@@ -74,6 +74,30 @@ class Rewind {
 	discontinuity = 0;
 }
 
+// Two adjacent groups are treated as timeline-contiguous when the next group's first PTS is within
+// this slack of the current group's end. Per-sample durations and base-decode-times are each rounded
+// to microseconds independently, so a genuinely contiguous boundary can be off by ~1µs (seen on 48kHz
+// audio). A real missing group spans ~one group duration (orders of magnitude larger), so 1ms cleanly
+// separates rounding noise from an actual gap.
+const CONTIGUITY_TOLERANCE_US = 1000;
+
+/**
+ * True when `nextStart` continues the timeline that ends at `end`: it lands at or before `end`,
+ * within CONTIGUITY_TOLERANCE_US to absorb the µs rounding of independently-rounded per-sample
+ * durations and base-decode-times. Undefined on either side means continuity can't be proven.
+ *
+ * The bound is one-sided (upper only) by design: a next start at or before `end` continues the
+ * timeline, a start past `end` beyond the tolerance is a gap. A start well before `end` (a backward
+ * jump) is a rewind, handled by Rewind / #checkReset, not here.
+ */
+function ptsContiguous(end: Time.Micro | undefined, nextStart: Time.Micro | undefined): boolean {
+	return (
+		end !== undefined &&
+		nextStart !== undefined &&
+		(nextStart as number) <= (end as number) + CONTIGUITY_TOLERANCE_US
+	);
+}
+
 /** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
@@ -81,6 +105,9 @@ export class Consumer {
 	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
+	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
+	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
+	#presentedEnd?: Time.Micro;
 	#rewind = new Rewind(); // live edge + active boundary + discontinuity count
 
 	// Wake up the consumer when a new frame is available.
@@ -172,6 +199,11 @@ export class Consumer {
 						// For index 0, we enforce this regardless of what the format reports.
 						// For index > 0, we trust the format's keyframe detection.
 						keyframe: index === 0 ? true : sample.keyframe,
+						// Carry the container's per-sample duration through so group.end is the real
+						// presentation end (ts + duration), not just the last frame's ts. This is what
+						// makes the PTS-contiguity check (next.firstPTS <= group.end) work; without it a
+						// contiguous next group looks one frame past the end. Undefined for Legacy (no duration).
+						duration: sample.duration,
 					};
 
 					index++;
@@ -189,12 +221,20 @@ export class Consumer {
 
 					this.#updateBuffered();
 
-					if (group.consumer.sequence === this.#active) {
+					// Wake next() for the current delivery head so its frames surface as they
+					// arrive. Gating only on `=== #active` assumed +1 group numbering: with
+					// non-sequential group ids (large jumps between groups) #active lags one group
+					// behind as a stale `+1` phantom, so the real head never matched and its whole
+					// group was held until completion, then flushed in a burst. The earliest
+					// buffered group is the delivery head regardless of id scheme; next()'s
+					// promotion guard advances #active to it. Works for sequential and
+					// non-sequential ids alike.
+					if (group.consumer.sequence === this.#active || group === this.#groups[0]) {
 						this.#notify?.();
 						this.#notify = undefined;
 					} else {
-						// Newer group: resolve it against an active reset (dropping a reneged
-						// straggler), else detect a new rewind, then check latency.
+						// A newer, non-head group: resolve it against an active reset (dropping a
+						// reneged straggler), else detect a new rewind, then check latency.
 						if (this.#classifyStale(group)) return;
 						this.#checkReset(group);
 						this.#checkLatency();
@@ -216,8 +256,28 @@ export class Consumer {
 			group.done = true;
 
 			if (group.consumer.sequence === this.#active) {
-				// Advance to the next group.
-				this.#active += 1;
+				// Advance to the next group's actual sequence. Some encoders number
+				// groups non-sequentially with large gaps (not +1), so `+= 1` would point #active at a
+				// nonexistent sequence and stall next() until #checkLatency skipped it -- every
+				// group through the skip path, i.e. constant stutter. Fall back to +1 only when
+				// no later group is buffered yet (a promotion guard in next() fixes it up when
+				// the real next group arrives).
+				// Record where this group's content ends for the promotion guard's contiguity check.
+				this.#presentedEnd = group.end;
+
+				// Advance to the next buffered group ONLY if it continues this group's timeline: the very
+				// next sequence, or PTS-contiguous (this group's end meets the next group's first frame).
+				// Non-contiguous group numbers are fine when the PTS timeline is unbroken; a real PTS gap
+				// means an intermediate group may still be in transit, so fall back to +1 (the promotion
+				// guard fixes it up once a continuous next group arrives) and let #checkLatency /
+				// #tryDurationSkip skip the gap only when latency or duration coverage proves it too old.
+				const idx = this.#groups.indexOf(group);
+				const next = this.#groups[idx + 1];
+				const contiguous =
+					next !== undefined &&
+					(next.consumer.sequence === group.consumer.sequence + 1 ||
+						ptsContiguous(group.end, next.frames.at(0)?.timestamp));
+				this.#active = contiguous && next !== undefined ? next.consumer.sequence : group.consumer.sequence + 1;
 			}
 
 			// Recompute buffered ranges now that this group is done,
@@ -352,6 +412,12 @@ export class Consumer {
 		// Resume from the earliest survivor; if none, from the rewound group. Anchor the live
 		// edge at the rewind point (delivered), not group.latest (buffered ahead of playback).
 		this.#active = this.#groups[0]?.consumer.sequence ?? reset.group;
+		// Clear the presented-timeline end. After a rewind the old value is a stale, higher timeline
+		// end; since the promotion guard's contiguity check is upper-bound only (see ptsContiguous), a
+		// new higher-sequence group with a low post-rewind PTS would otherwise look contiguous and be
+		// promoted across the discontinuity. Undefined means "unknown", so the guard waits until the
+		// resumed group's end is recomputed as it delivers.
+		this.#presentedEnd = undefined;
 		this.#rewind.liveEdge = { group: reset.group, timestamp: start };
 		this.#updateBuffered();
 
@@ -402,6 +468,24 @@ export class Consumer {
 			// A group may have buffered a rewind while the live edge was still behind it; catch it
 			// now that delivery has advanced the edge.
 			this.#checkBufferedReset();
+
+			// If #active points below all buffered groups -- e.g. the finally block's `+ 1`
+			// fallback fired because no later group was buffered yet, and the real (large-gap,
+			// non-sequential) next group has since arrived -- promote #active to the first real
+			// group so delivery resumes instead of stalling on a nonexistent sequence.
+			// Promote #active up to the first buffered group ONLY when it continues the timeline we left
+			// off at (PTS-contiguous with #presentedEnd). Otherwise a real gap sits before it and an
+			// in-transit group may still arrive, so wait -- #checkLatency skips the gap once the buffered
+			// span exceeds the latency budget, and #tryDurationSkip once the duration covers it.
+			if (this.#active !== undefined && this.#groups.length > 0) {
+				const head = this.#groups[0];
+				if (
+					head.consumer.sequence > this.#active &&
+					ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp)
+				) {
+					this.#active = head.consumer.sequence;
+				}
+			}
 
 			if (
 				this.#groups.length > 0 &&

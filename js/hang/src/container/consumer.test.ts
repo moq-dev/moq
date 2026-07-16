@@ -594,3 +594,134 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
 	consumer.close();
 });
+
+// --- Non-sequential group ids: PTS-timeline-gated incremental delivery (regression) ---
+
+// Group numbers may be non-sequential (large, non-+1 jumps). Delivery follows the PTS *timeline*,
+// not the numbering: a next group whose first frame continues where the active group ended must
+// surface immediately, even while still open.
+test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new CmafFormat(TEST_INIT), latency: 500 as Time.Milli });
+
+	// Group A (seq 1_000_000): one 3000-tick sample, so its content ends at 33_333µs (3000/90000 * 1e6).
+	const a = new Group.Producer(1_000_000);
+	a.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x01]),
+			timestamp: 0,
+			duration: 3000,
+			keyframe: true,
+			sequence: 0,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+	a.close();
+	track.writeGroup(a);
+
+	const firstFrame = await consumer.next();
+	expect(firstFrame?.frame?.payload).toEqual(new Uint8Array([0x01]));
+	await consumer.next(); // group-done marker
+
+	const pending = consumer.next();
+
+	// Group B: sequence jumps +90_000, and its first PTS (3045 ticks ~= 33_833µs) sits ~500µs past
+	// A.end (33_333µs) -- the sub-millisecond skew a genuinely contiguous CMAF boundary shows because
+	// per-sample durations and base-decode-times round to µs independently. It's within the contiguity
+	// tolerance, so the timeline is unbroken and B must deliver immediately even while still open.
+	const b = new Group.Producer(1_090_000);
+	track.writeGroup(b);
+	b.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x02]),
+			timestamp: 3045,
+			duration: 3000,
+			keyframe: true,
+			sequence: 1,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+
+	const result = await Promise.race([
+		pending,
+		new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+	]);
+	expect(result).not.toBe("timeout");
+	expect((result as { frame?: Frame } | undefined)?.frame?.payload).toEqual(new Uint8Array([0x02]));
+
+	consumer.close();
+});
+
+// A real PTS gap (the active group's end does NOT reach the next buffered group's first frame) means
+// an intermediate group may still be in transit, so we must NOT skip ahead and wreck ordering.
+// Delivery resumes only once the missing, timeline-continuous group arrives.
+test("Consumer waits on a PTS gap instead of skipping to a later buffered group (CMAF)", async () => {
+	const track = new Track.Producer("test");
+	// Large latency so the gap can't be latency-skipped during the test window.
+	const consumer = new Consumer(track.subscribe(), {
+		format: new CmafFormat(TEST_INIT),
+		latency: 10_000 as Time.Milli,
+	});
+
+	// Group A (seq 1_000_000): content ends at 33_333µs.
+	const a = new Group.Producer(1_000_000);
+	a.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x01]),
+			timestamp: 0,
+			duration: 3000,
+			keyframe: true,
+			sequence: 0,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+	a.close();
+	track.writeGroup(a);
+
+	const firstFrame = await consumer.next();
+	expect(firstFrame?.frame?.payload).toEqual(new Uint8Array([0x01]));
+	await consumer.next(); // group-done marker
+
+	const pending = consumer.next();
+
+	// Group C (seq 1_090_000) starts at 90_000 ticks (1_000_000µs) -- far past A.end (33_333µs), a real
+	// gap. An intermediate group may still be in transit, so C must NOT be delivered yet.
+	const c = new Group.Producer(1_090_000);
+	track.writeGroup(c);
+	c.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x03]),
+			timestamp: 90_000,
+			duration: 3000,
+			keyframe: true,
+			sequence: 1,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+
+	const gap = await Promise.race([
+		pending,
+		new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 300)),
+	]);
+	expect(gap).toBe("timeout"); // held: the gap is not eagerly skipped
+
+	// The missing group B arrives, contiguous with A (first PTS 3000 ticks = 33_333µs = A.end); it
+	// continues the timeline, so delivery resumes with B's frame.
+	const b = new Group.Producer(1_045_000);
+	track.writeGroup(b);
+	b.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x02]),
+			timestamp: 3000,
+			duration: 3000,
+			keyframe: true,
+			sequence: 2,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+
+	const result = await pending;
+	expect((result as { frame?: Frame } | undefined)?.frame?.payload).toEqual(new Uint8Array([0x02]));
+
+	consumer.close();
+});
