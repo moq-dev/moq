@@ -15,6 +15,7 @@ if (role === "publish") {
 	el.setAttribute("source", "camera");
 	document.body.appendChild(el);
 } else if (role === "subscribe") {
+	await customElements.whenDefined("moq-watch");
 	const el = document.createElement("moq-watch");
 	el.setAttribute("url", url);
 	el.setAttribute("name", broadcast);
@@ -26,6 +27,24 @@ if (role === "publish") {
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);
 	document.body.appendChild(player);
+
+	// Playwright may evaluate in a different JavaScript world, where DOM nodes
+	// are shared but custom-element instance fields are not. Mirror the state the
+	// driver needs through data attributes, which are visible in every world.
+	const syncState = () => {
+		el.dataset.smokeVideoFrames = String(el.backend.video.out.stats.peek()?.frameCount ?? 0);
+		el.dataset.smokeVideoTimestamp = String(el.backend.video.out.timestamp.peek());
+		el.dataset.smokeAudioBytes = String(el.backend.audio.out.stats.peek()?.bytesReceived ?? 0);
+		el.dataset.smokeAudioContext = el.backend.audio.out.context.peek()?.state ?? "";
+		el.dataset.smokeHasAudio = String(el.catalog?.audio !== undefined);
+		el.dataset.smokePaused = String(el.paused);
+		el.dataset.smokeReady = "";
+	};
+	syncState();
+	const stateTimer = window.setInterval(syncState, 50);
+	window.addEventListener("pagehide", () => window.clearInterval(stateTimer), { once: true });
 } else {
 	throw new Error("missing ?role=publish|subscribe");
 }
+
+export {};
