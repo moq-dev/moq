@@ -145,7 +145,7 @@ pub async fn run(
 	tasks.shutdown().await;
 
 	derived.finish()?;
-	output.close();
+	output.finish();
 	Ok(())
 }
 

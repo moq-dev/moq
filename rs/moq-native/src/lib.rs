@@ -80,3 +80,29 @@ pub enum QuicBackend {
 	#[cfg(feature = "noq")]
 	Noq,
 }
+
+fn default_quic_backend() -> QuicBackend {
+	#[cfg(feature = "quinn")]
+	{
+		QuicBackend::Quinn
+	}
+	#[cfg(all(feature = "noq", not(feature = "quinn")))]
+	{
+		QuicBackend::Noq
+	}
+	#[cfg(all(feature = "quiche", not(feature = "quinn"), not(feature = "noq")))]
+	{
+		QuicBackend::Quiche
+	}
+	#[cfg(all(not(feature = "quiche"), not(feature = "quinn"), not(feature = "noq")))]
+	panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
+}
+
+#[cfg(test)]
+mod tests {
+	#[cfg(feature = "quinn")]
+	#[test]
+	fn quinn_is_the_default_backend() {
+		assert!(matches!(super::default_quic_backend(), super::QuicBackend::Quinn));
+	}
+}

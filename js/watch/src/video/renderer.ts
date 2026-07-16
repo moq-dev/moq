@@ -40,27 +40,27 @@ type RendererOutput = {
 export class Renderer {
 	decoder: Decoder;
 
-	readonly input: Readonlys<RendererInput>;
+	readonly in: Readonlys<RendererInput>;
 
-	readonly #output: RendererOutput = {
+	readonly #out: RendererOutput = {
 		frame: new Signal<VideoFrame | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		visible: new Signal(false),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
 	constructor(decoder: Decoder, props?: Inputs<RendererInput>) {
 		this.decoder = decoder;
-		this.input = {
+		this.in = {
 			canvas: getter(props?.canvas),
 			visible: getter(props?.visible ?? "20%"),
 		};
 
 		this.#signals.run((effect) => {
-			const canvas = effect.get(this.input.canvas);
+			const canvas = effect.get(this.in.canvas);
 			this.#ctx.set(canvas?.getContext("2d") ?? undefined);
 		});
 
@@ -70,7 +70,7 @@ export class Renderer {
 	}
 
 	#runResize(effect: Effect) {
-		const values = effect.getAll([this.input.canvas, this.decoder.output.display]);
+		const values = effect.getAll([this.in.canvas, this.decoder.out.display]);
 		if (!values) return; // Keep current canvas size until we have new dimensions
 		const [canvas, display] = values;
 
@@ -84,30 +84,30 @@ export class Renderer {
 
 	// Track whether the canvas should currently download per the configured distance and tab focus.
 	#runVisible(effect: Effect): void {
-		const visible = effect.get(this.input.visible);
+		const visible = effect.get(this.in.visible);
 
 		// "never" forces the check off; "always" forces it on regardless of viewport or tab state.
 		if (visible === "never") {
-			this.#output.visible.set(false);
+			this.#out.visible.set(false);
 			return;
 		}
 
 		if (visible === "always") {
-			this.#output.visible.set(true);
-			effect.cleanup(() => this.#output.visible.set(false));
+			this.#out.visible.set(true);
+			effect.cleanup(() => this.#out.visible.set(false));
 			return;
 		}
 
 		// A distance gates on the viewport (used as the rootMargin) and the tab being visible.
-		const canvas = effect.get(this.input.canvas);
+		const canvas = effect.get(this.in.canvas);
 		if (!canvas) {
-			this.#output.visible.set(false);
+			this.#out.visible.set(false);
 			return;
 		}
 
 		let intersecting = false;
 		const update = () => {
-			this.#output.visible.set(intersecting && !document.hidden);
+			this.#out.visible.set(intersecting && !document.hidden);
 		};
 
 		const callback = (entries: IntersectionObserverEntry[]) => {
@@ -131,14 +131,14 @@ export class Renderer {
 		effect.event(document, "visibilitychange", update);
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
-		effect.cleanup(() => this.#output.visible.set(false));
+		effect.cleanup(() => this.#out.visible.set(false));
 	}
 
 	#runRender(effect: Effect) {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const frame = effect.get(this.decoder.output.frame);
+		const frame = effect.get(this.decoder.out.frame);
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
 		// Always render, even when paused (to show last frame).
@@ -146,17 +146,17 @@ export class Renderer {
 			this.#render(ctx, frame);
 
 			if (frame) {
-				this.#output.frame.update((current) => {
+				this.#out.frame.update((current) => {
 					current?.close();
 					return frame.clone();
 				});
-				this.#output.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+				this.#out.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 			} else {
-				this.#output.frame.update((current) => {
+				this.#out.frame.update((current) => {
 					current?.close();
 					return undefined;
 				});
-				this.#output.timestamp.set(undefined);
+				this.#out.timestamp.set(undefined);
 			}
 
 			animate = undefined;
@@ -182,7 +182,7 @@ export class Renderer {
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
 		// Apply horizontal flip if specified in the video config
-		const flip = this.decoder.source.output.catalog.peek()?.flip;
+		const flip = this.decoder.source.out.catalog.peek()?.flip;
 		if (flip) {
 			ctx.scale(-1, 1);
 			ctx.translate(-ctx.canvas.width, 0);
@@ -194,11 +194,11 @@ export class Renderer {
 
 	// Close the track and all associated resources.
 	close() {
-		this.#output.frame.update((current) => {
+		this.#out.frame.update((current) => {
 			current?.close();
 			return undefined;
 		});
-		this.#output.timestamp.set(undefined);
+		this.#out.timestamp.set(undefined);
 		this.#signals.close();
 	}
 }

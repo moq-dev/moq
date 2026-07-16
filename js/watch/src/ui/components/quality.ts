@@ -51,10 +51,10 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body q-list" });
 
 	parent.run((effect) => {
-		const source = watch.backend.video.source;
-		const catalog = effect.get(source.output.catalog);
+		const source = watch.video.source;
+		const catalog = effect.get(source.out.catalog);
 		const target = effect.get(watch.controls.target);
-		const active = effect.get(source.output.track);
+		const active = effect.get(source.out.track);
 		const renditions = catalog?.renditions ?? {};
 		const entries = Object.entries(renditions);
 

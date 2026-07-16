@@ -66,6 +66,13 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
+	/// Cut the current group at `end` without finishing the track.
+	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		self.rendition.record_group_end(end);
+		self.track.cut(end)?;
+		Ok(())
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.rendition.record_group_end(None);
@@ -84,7 +91,7 @@ impl<E: CatalogExt> Import<E> {
 			keyframe: true,
 			duration: None,
 		})?;
-		self.track.finish_group()?;
+		self.track.cut(None)?;
 		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
 	}

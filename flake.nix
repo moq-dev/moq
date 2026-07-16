@@ -124,6 +124,11 @@
             # #1837: if moq-vaapi switches to dlopen'ing libva, this stays needed
             # only to run it, and a libva-less build/host would fall back cleanly.)
             pkgs.libva
+            # moq-video's `pipewire` screen-capture feature: the pipewire crate
+            # links libpipewire-0.3 via pkg-config and generates bindings at build
+            # time (bindgenHook above provides libclang). Linux-only; macOS uses
+            # ScreenCaptureKit.
+            pkgs.pipewire
           ];
 
         # JavaScript dependencies
@@ -200,6 +205,16 @@
           actionlint
           taplo
           nixfmt
+        ];
+
+        # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
+        # the wrapper and runs :moq:jvmTest instead of silently skipping.
+        # Pinned to gradle 8.x (Kotlin 2.0.21's Gradle plugin predates Gradle
+        # 9) and JDK 17 (the wrapper's jvmTarget). Cross-platform: the kt check
+        # builds moq-ffi for the host and runs on both Linux and macOS.
+        ktDeps = with pkgs; [
+          jdk17
+          gradle_8
         ];
 
         # Dependencies for building the OBS plugin (`just obs build`).
@@ -289,6 +304,7 @@
             ++ packagingDeps
             ++ lintDeps
             ++ obsDeps
+            ++ ktDeps
             ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with

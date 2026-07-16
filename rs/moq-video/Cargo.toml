@@ -35,6 +35,11 @@ nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # binary carries NEEDED libva.so.2 / libva-drm.so.2), so disable this feature for a
 # build with no libva dependency. See #1837.
 vaapi = ["dep:moq-vaapi"]
+# Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
+# Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
+# at build time (and its bindgen needs libclang), so it only belongs in builds
+# that actually capture displays. Camera capture (V4L2) needs nothing extra.
+pipewire = ["dep:pipewire", "dep:ashpd"]
 
 [dependencies]
 anyhow = "1"
@@ -51,6 +56,12 @@ moq-net = { workspace = true }
 # NVENC / VAAPI) are preferred, but openh264 is the fallback when none is usable
 # (GPU-less box, or a resolution a hardware encoder rejects).
 openh264 = "0.9.3"
+# For the raw `ENCODER_OPTION_BITRATE` set_option: openh264 takes a bitrate only
+# at construction and re-exports none of the sys types needed to retune a live
+# encoder. `default-features = false` because openh264 already turns on the
+# features it needs; cargo unifies this on the same version it depends on, so the
+# raw API types stay identical.
+openh264-sys2 = { version = "0.9.6", default-features = false }
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
@@ -58,6 +69,10 @@ tracing = "0.1"
 yuv = "0.8.14"
 
 [target.'cfg(target_os="linux")'.dependencies]
+# xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,
+# zbus over DBus). The portal owns source selection: the user picks a monitor in a
+# compositor dialog, and we get back a PipeWire fd + node id to stream from.
+ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast"] }
 # NVENC hardware encoder, behind the default-on `nvenc` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
@@ -81,6 +96,9 @@ moq-nvenc = { workspace = true, optional = true }
 # switch moq-vaapi to dlopen libva (one portable binary that falls back like the
 # NVENC backend); the latter is tracked in #1837.
 moq-vaapi = { workspace = true, optional = true }
+# PipeWire video stream for the portal's node, behind the `pipewire` feature.
+# Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
+pipewire = { version = "0.10", optional = true }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
 v4l = "0.14"
@@ -92,6 +110,7 @@ dispatch2 = "0.3.1"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
 objc2-core-foundation = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay"] }
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"

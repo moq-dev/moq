@@ -29,7 +29,7 @@
 				cost of an extra encode + decode.
 			-->
 			<moq-publish-ui>
-				<moq-publish id="publish" name="me.hang" announce="source" simulcast>
+				<moq-publish id="publish" name="me.hang" announce="source">
 					<canvas style="width: 100%; height: auto; border-radius: 4px;"></canvas>
 				</moq-publish>
 			</moq-publish-ui>
@@ -270,15 +270,14 @@
 			are all editable live:
 		</p>
 		<pre><code class="language-typescript">const publish = document.getElementById("publish");
-publish.broadcast.video.hd.config.set({ maxBitrate: 2_000_000, frameRate: 30 });
-publish.broadcast.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pre>
+publish.video.config.set({ maxBitrate: 2_000_000, frameRate: 30 });
+publish.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pre>
 		<p>
 			Each setting defaults to "auto" (the field is omitted, so the encoder picks); the negotiated value
 			appears to the right once you go live. Codec support is probed with
 			<code class="language-typescript">VideoEncoder.isConfigSupported</code>; unsupported options are
-			disabled. The <code>simulcast</code> attribute also publishes a smaller <code>video/sd</code>
-			rendition (the panel tunes <code>video/hd</code>); the <a href="watch.html">watch inspector</a>
-			picks whichever fits the player size.
+			disabled. The component publishes a single video rendition; to add more (e.g. simulcast),
+				register your own encoders on a <code class="language-typescript">Broadcast</code> via the JS API.
 		</p>
 		<p>
 			The metadata editor serves a custom <code class="language-typescript">meta.json</code> track <em>within</em> the

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Generated pkg-config metadata includes the Apple media frameworks and C++
+  runtime required to link the static library on macOS.
 - JSON snapshot C ABI renamed for symmetry with the stream mode, so the caller
   opts explicitly into one of the two modes: `moq_json_config` ->
   `moq_json_snapshot_config`, `moq_publish_json` -> `moq_publish_json_snapshot`
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Raw track APIs for explicit group sequences, known track ends, and track or
+  group aborts.
 - Raw track options for the C ABI: `moq_publish_track` now accepts
   `moq_track_info`, and `moq_consume_track` now accepts `moq_subscription`;
   subscriptions can be updated with `moq_consume_track_update`.

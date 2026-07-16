@@ -1,5 +1,6 @@
 use anyhow::Context;
 use axum::http;
+use moq_native::Transport;
 #[cfg(test)]
 use moq_net::AsPath;
 use moq_net::{Path, PathOwned, PathPrefixes, Tier};
@@ -24,9 +25,8 @@ pub struct AuthParams {
 	/// The connection's transport, forwarded to the auth API as `transport=` so it
 	/// can bucket by connection type (e.g. bill traffic on the internal Unix-socket
 	/// listener -- the out-of-process RTMP/SRT/WebRTC gateways, `"unix"` -- into a
-	/// distinct tier). `Request::transport()` values: `"quic"`, `"websocket"`,
-	/// `"tcp"`, `"unix"`, `"iroh"`. Absent (`None`) sends no `transport` param.
-	pub transport: Option<String>,
+	/// distinct tier). Absent (`None`) sends no `transport` parameter.
+	pub transport: Option<Transport>,
 }
 
 impl AuthParams {
@@ -944,7 +944,7 @@ impl Auth {
 	/// This method applies the relay's canonical alias resolution and billing
 	/// tier decision, so embedded HTTP handlers get the same authorization scope
 	/// as the built-in relay routes.
-	pub async fn verify_mtls(&self, path: &str, transport: Option<&str>) -> Result<AuthToken, AuthError> {
+	pub async fn verify_mtls(&self, path: &str, transport: Option<Transport>) -> Result<AuthToken, AuthError> {
 		let (root, tier) = self.resolve_mtls(path, transport).await?;
 		let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
 		token.tier = tier;
@@ -965,12 +965,12 @@ impl Auth {
 	/// canonical root (e.g. `x7k2qp`), producing a zombie session: the publisher
 	/// believes it is connected and never reconnects, but nothing is ever served.
 	/// Failing closed lets the client retry and self-heal once the API recovers.
-	async fn resolve_mtls(&self, path: &str, transport: Option<&str>) -> Result<(String, Tier), AuthError> {
+	async fn resolve_mtls(&self, path: &str, transport: Option<Transport>) -> Result<(String, Tier), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
 			return Ok((path.to_string(), self.mtls_tier.clone()));
 		};
 
-		let resp = Self::fetch_auth_api(client, base, path, None, true, transport).await?;
+		let resp = Self::fetch_auth_api(client, base, path, None, true, transport.map(Transport::as_str)).await?;
 		// Fall back to the configured mTLS tier when the API omits one.
 		let tier = resp.tier().unwrap_or_else(|| self.mtls_tier.clone());
 		Ok((resp.alias.unwrap_or_else(|| path.to_string()), tier))
@@ -1039,7 +1039,7 @@ impl Auth {
 			&params.path,
 			kid.as_deref(),
 			false,
-			params.transport.as_deref(),
+			params.transport.map(Transport::as_str),
 		)
 		.await?;
 		// Resolve the tier before consuming `resp`'s other fields below.
@@ -3285,7 +3285,7 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 		let params = AuthParams {
 			path: "/customer/live".into(),
-			transport: Some("unix".into()),
+			transport: Some(Transport::Unix),
 			..Default::default()
 		};
 		let verified = auth.verify(&params).await?;

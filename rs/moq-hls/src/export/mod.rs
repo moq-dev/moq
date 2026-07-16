@@ -134,10 +134,29 @@ impl Broadcaster {
 		master::render_master(&video, &audio)
 	}
 
-	/// Add renditions newly present in `catalog`. Renditions are not removed when
-	/// they disappear; their timelines simply end (rare for a live broadcast).
+	/// Whether the current catalog contains no servable renditions.
+	pub(crate) fn is_empty(&self) -> bool {
+		self.renditions.lock().unwrap().is_empty()
+	}
+
+	/// Reconcile renditions with a complete catalog snapshot. Removed or reconfigured
+	/// renditions are dropped before replacements become visible, which also aborts
+	/// their timeline watchers and releases their subscriptions.
 	fn sync(&self, source: &moq_mux::Source, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
+		renditions.retain(|(kind, name), rendition| match kind {
+			Kind::Video => catalog
+				.video
+				.renditions
+				.get(name)
+				.is_some_and(|config| rendition.matches_video(config)),
+			Kind::Audio => catalog
+				.audio
+				.renditions
+				.get(name)
+				.is_some_and(|config| rendition.matches_audio(config)),
+		});
+
 		for (name, video) in &catalog.video.renditions {
 			let key = (Kind::Video, name.clone());
 			if renditions.contains_key(&key) {
@@ -294,5 +313,38 @@ mod tests {
 
 		// Keep the publisher alive for the whole test.
 		drop((media, registration, broadcast));
+	}
+
+	#[tokio::test]
+	async fn reconciles_removed_and_reconfigured_renditions() {
+		let origin = moq_net::Origin::random().produce();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let (ready, _) = watch::channel(0);
+		let broadcaster = Broadcaster {
+			broadcast: broadcast.consume(),
+			renditions: Mutex::new(BTreeMap::new()),
+			ready,
+			watcher: Mutex::new(None),
+		};
+
+		let mut media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		media.timeline = Some(hang::catalog::Timeline::new("video.timeline"));
+		let mut first = Catalog::default();
+		first.video.renditions.insert("video".to_string(), media.clone());
+		broadcaster.sync(&source, &Config::default(), &first);
+		let original = broadcaster.rendition(Kind::Video, "video").expect("initial rendition");
+
+		media.bitrate = Some(3_000_000);
+		let mut changed = Catalog::default();
+		changed.video.renditions.insert("video".to_string(), media);
+		broadcaster.sync(&source, &Config::default(), &changed);
+		let replacement = broadcaster
+			.rendition(Kind::Video, "video")
+			.expect("replacement rendition");
+		assert!(!Arc::ptr_eq(&original, &replacement));
+
+		broadcaster.sync(&source, &Config::default(), &Catalog::default());
+		assert!(broadcaster.is_empty());
 	}
 }

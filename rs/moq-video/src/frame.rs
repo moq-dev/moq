@@ -91,15 +91,16 @@ impl I420 {
 		luma + luma / 2
 	}
 
-	/// Convert tightly-packed RGBA (`width * height * 4` bytes) to I420, BT.601
+	/// Convert RGBA (`stride` bytes per row, >= `width * 4`) to I420, BT.601
 	/// limited range (studio swing, what H.264 decoders expect by default). Used
-	/// by [`Encoder::encode_rgba`](crate::encode::Encoder) and the Windows capture.
-	pub(crate) fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Self, Error> {
+	/// by [`Encoder::encode_rgba`](crate::encode::Encoder) (tightly packed) and
+	/// the screen-capture paths, whose surfaces carry a driver-chosen row pitch.
+	pub(crate) fn from_rgba(rgba: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
 		rgba_to_yuv420(
 			&mut planar,
 			rgba,
-			width * 4,
+			stride,
 			YuvRange::Limited,
 			YuvStandardMatrix::Bt601,
 			YuvConversionMode::Balanced,
@@ -110,9 +111,9 @@ impl I420 {
 
 	/// Convert BGRA to I420, BT.601 limited range. `stride` is the source row
 	/// pitch in bytes (>= `width * 4`), so a padded surface maps directly. Used by
-	/// the Windows Desktop Duplication screen-capture path, whose staging texture
-	/// is BGRA with a driver-chosen row pitch.
-	#[cfg(target_os = "windows")]
+	/// the screen-capture paths: Windows Desktop Duplication (BGRA staging
+	/// texture) and Linux PipeWire (BGRx/BGRA shared-memory buffers).
+	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
 	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
 		use yuv::bgra_to_yuv420;
 

@@ -277,7 +277,7 @@ export class Once<T> implements GetPromise<T> {
 type SetterType<S> = S extends Setter<infer T> ? T : never;
 export type GetterType<G> = G extends Getter<infer T> ? T : never;
 
-// A record of named signals, used to group a component's inputs or outputs.
+// A record of named signals, used to group a component's `in` or `out` signals.
 export type SignalMap = Record<string, Getter<unknown>>;
 
 // A read-only view over a SignalMap: every entry collapses to its Getter and the
@@ -289,10 +289,10 @@ export type Readonlys<T extends SignalMap> = {
 
 // Re-type a record of Signals as read-only Getters. This is the identity function at
 // runtime; it only narrows the static type. Keep the original (writable) reference
-// private for the component to set, and expose the result as the public output.
+// private for the component to set, and expose the result as the public `out`.
 //
-//   readonly #output = { status: new Signal("offline") };
-//   readonly output = readonlys(this.#output); // status is now a Getter to callers
+//   readonly #out = { status: new Signal("offline") };
+//   readonly out = readonlys(this.#out); // status is now a Getter to callers
 export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
 	return signals as unknown as Readonlys<T>;
 }
@@ -302,9 +302,9 @@ export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
 export type GetterInit<T> = T | Getter<T>;
 
 // Build a read-only Getter from a value or an existing readable. The read-only
-// counterpart to `Signal.from`: a branded Signal (including the output of `readonlys`)
-// is reused as-is, so one component's output can be wired straight into another's
-// input; any other value is wrapped in a fresh Signal. The brand check means a
+// counterpart to `Signal.from`: a branded Signal (including the result of `readonlys`)
+// is reused as-is, so one component's `out` can be wired straight into another's
+// `in`; any other value is wrapped in a fresh Signal. The brand check means a
 // hand-rolled Getter that isn't backed by a Signal would be treated as a value.
 export function getter<T>(value: GetterInit<T>): Getter<T> {
 	if (typeof value === "object" && value !== null && SIGNAL_BRAND in value) {
@@ -313,8 +313,8 @@ export function getter<T>(value: GetterInit<T>): Getter<T> {
 	return new Signal(value as T);
 }
 
-// Derive a component's constructor argument from its input map: every input becomes
-// optional and accepts a raw value, a Signal, or another component's output Getter
+// Derive a component's constructor argument from its `in` map: every entry becomes
+// optional and accepts a raw value, a Signal, or another component's `out` Getter
 // (the `getter()` contract). Removes the hand-written, drift-prone argument interface.
 export type Inputs<I extends SignalMap> = { [K in keyof I]?: GetterInit<GetterType<I[K]>> };
 
@@ -578,17 +578,32 @@ export class Effect {
 		this.cleanup(() => clearInterval(interval));
 	}
 
-	/** Creates a nested effect that reruns independently and is closed with its parent. */
-	run(fn: (effect: Effect) => void) {
+	/**
+	 * Creates a nested effect that reruns independently and is closed with its parent.
+	 *
+	 * Returns a disposer that closes the child early and releases it from the parent, so a long-lived
+	 * effect spawning a child per event (e.g. one per accepted subscription) doesn't accumulate dead
+	 * scopes until it finally reruns or closes.
+	 */
+	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {
 			if (DEV) {
-				console.warn("Effect.nested called when closed, ignoring");
+				console.warn("Effect.run called when closed, ignoring");
 			}
-			return;
+			return () => {};
 		}
 
 		const effect = new Effect(fn);
-		this.#dispose.push(() => effect.close());
+		const dispose = () => effect.close();
+		this.#dispose.push(dispose);
+
+		return () => {
+			effect.close();
+			// Drop our disposer from the parent so repeated run()/dispose() cycles don't pile up.
+			const disposers = this.#dispose;
+			const index = disposers?.indexOf(dispose) ?? -1;
+			if (index !== -1) disposers?.splice(index, 1);
+		};
 	}
 
 	/** Creates a derived signal scoped to this effect, closed when the effect reruns or closes. */

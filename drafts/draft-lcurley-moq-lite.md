@@ -594,6 +594,8 @@ The following Setup Parameters are defined:
 |------|----------|-------------|
 | 0x2  | Path     | Path (s)    |
 |------|----------|-------------|
+| 0x3  | Role     | Role (i)    |
+|------|----------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -627,6 +629,23 @@ The remaining bindings convey the path in their own handshake.
 - A server that receives a Path that is empty or is not a valid URI path MUST close the session with a PROTOCOL_VIOLATION. A server that does not recognize or support the requested path MUST close the session.
 
 A relay MUST NOT forward the Path Parameter; like other per-hop setup metadata it applies only to this hop (see [Session](#session)).
+
+### Role Parameter {#role-parameter}
+The Role Parameter advertises the direction the client intends to use the session for, letting a server reject a session whose authorization does not grant that direction during SETUP rather than accepting it and then silently carrying no data.
+
+A moq-lite session is bidirectional: either endpoint MAY publish and subscribe. A client's authorization (out of scope for this document; e.g. the credential carried in the [Path](#path-parameter)) may however grant only one direction. Without a hint, a server that authorizes, say, subscribe-only cannot tell whether a newly connected client meant to subscribe (and should be served) or to publish (and should be rejected), so it accepts the session and the client's data is silently dropped. The Role Parameter removes that ambiguity.
+
+The Parameter Value is a variable-length integer:
+
+- `0` **Both**: The client may publish and/or subscribe. The default, and equivalent to omitting the parameter.
+- `1` **Publisher**: The client intends to publish (and not subscribe).
+- `2` **Subscriber**: The client intends to subscribe (and not publish).
+
+A receiver that does not recognize the value MUST treat it as `Both`, so a newer client cannot break an older server; it simply loses the early rejection and falls back to authorizing per the client's actual actions.
+
+The Role Parameter is a hint that only ever narrows the session: a server MUST still enforce the client's authorization on every publish and subscribe regardless of the advertised role, and MUST NOT grant a direction the authorization does not already allow. A server MAY close a session when the advertised role requires a direction the client's authorization does not grant: `Publisher` without publish authorization, or `Subscriber` without subscribe authorization.
+
+Like the [Path Parameter](#path-parameter), the Role Parameter is meaningful only from client to server. A server MUST NOT send a Role Parameter; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it; it applies only to this hop.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -1098,6 +1117,7 @@ The `Message Length` describes the payload size on the wire.
 - Added a SETUP message and Setup Stream (0x1).
 - Added a SETUP `Probe` parameter.
 - Added a SETUP `Path` parameter to convey the request path on bindings that have no request URI (native QUIC and Qmux-over-TCP/TLS).
+- Added a SETUP `Role` parameter so a client can advertise its intended direction (Publisher/Subscriber/Both) and be rejected during SETUP when its authorization lacks that direction.
 - Added Track Stream (0x6) and TRACK_INFO.
 - Removed FETCH_OK.
 - Trimmed SUBSCRIBE_OK to a single resolved start group.

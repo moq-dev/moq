@@ -37,6 +37,9 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>, hea
 		return not_found();
 	};
 	broadcaster.wait_ready(READY_TIMEOUT).await;
+	if broadcaster.is_empty() {
+		return not_found();
+	}
 	m3u8(broadcaster.master_playlist())
 }
 

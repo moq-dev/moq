@@ -16,10 +16,10 @@ function config(codec: string): Catalog.VideoConfig {
 
 function broadcast(renditions: Record<string, Catalog.VideoConfig>): Broadcast {
 	return {
-		input: {
+		in: {
 			connection: new Signal(undefined),
 		},
-		output: {
+		out: {
 			catalog: new Signal({ video: { renditions } }),
 		},
 	} as unknown as Broadcast;
@@ -44,8 +44,8 @@ describe("Source error signal", () => {
 			});
 
 			await settle();
-			expect(source.output.error.peek()).toBe("unsupported");
-			expect(source.output.available.peek()).toEqual({});
+			expect(source.out.error.peek()).toBe("unsupported");
+			expect(source.out.available.peek()).toEqual({});
 
 			source.close();
 		});
@@ -65,8 +65,8 @@ describe("Source error signal", () => {
 			});
 
 			await settle();
-			expect(source.output.error.peek()).toBeUndefined();
-			expect(Object.keys(source.output.available.peek())).toEqual(["good"]);
+			expect(source.out.error.peek()).toBeUndefined();
+			expect(Object.keys(source.out.available.peek())).toEqual(["good"]);
 
 			source.close();
 		});
@@ -79,8 +79,8 @@ describe("Source error signal", () => {
 		});
 
 		await settle();
-		expect(source.output.error.peek()).toBeUndefined();
-		expect(source.output.available.peek()).toEqual({});
+		expect(source.out.error.peek()).toBeUndefined();
+		expect(source.out.available.peek()).toEqual({});
 
 		source.close();
 	});

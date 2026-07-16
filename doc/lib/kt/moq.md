@@ -35,7 +35,13 @@ val moq = Moq.connect("https://relay.example.com")
 `Moq.connect(url)` builds the client, wires an internal origin for both publishing and subscribing, and returns a `Moq` connection. It is `AutoCloseable`, so prefer `use {}`:
 
 ```kotlin
-Moq.connect("https://localhost:4443", tlsVerify = false, bind = "127.0.0.1:0").use { moq ->
+Moq.connect(
+    "https://localhost:4443",
+    tlsVerify = false,
+    tlsRoots = listOf("local-ca.pem"),
+    tlsSystemRoots = true,
+    bind = "127.0.0.1:0",
+).use { moq ->
     // ... moq.session is the underlying MoqSession ...
 }  // close() cancels the client + session
 ```
@@ -91,7 +97,7 @@ import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
-    val audio = broadcast.publishMedia(MoqInit(format = "opus", data = opusInitBytes, video = null))
+    val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
 
     moq.announce("my-stream", broadcast)
 
@@ -246,7 +252,7 @@ To build and run the JVM tests locally:
 just kt check
 ```
 
-This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. The wrapper resolves `:moq-ffi` from the sibling project, so it builds against the freshly generated bindings.
+This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. The wrapper resolves `:moq-ffi` from the sibling project, so it builds against the freshly generated bindings. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell. To regenerate the checked-in bindings without compiling or testing, use `just kt generate`.
 
 Android targets are opt-in via `-Pandroid.enabled=true`. Local builds without the Android SDK still produce a working JVM variant.
 

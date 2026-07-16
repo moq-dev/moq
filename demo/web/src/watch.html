@@ -122,8 +122,8 @@
 		<p>
 			The right panel reads everything reactively off the active tile's element:
 		<pre><code class="language-typescript">const watch = document.querySelector("moq-watch");
-watch.broadcast.output.catalog.subscribe((catalog) =&gt; { /* video/audio config */ });
-watch.backend.video.output.stats.subscribe((stats) =&gt; { /* decoded frames, bytes */ });</code></pre>
+watch.broadcast.out.catalog.subscribe((catalog) =&gt; { /* video/audio config */ });
+watch.video.out.stats.subscribe((stats) =&gt; { /* decoded frames, bytes */ });</code></pre>
 		</p>
 		<p>
 			The metadata panel subscribes to a custom <code>meta.json</code> track carried <em>within</em> the

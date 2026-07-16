@@ -248,6 +248,14 @@ impl Backend for Nvenc {
 		Ok(Vec::new())
 	}
 
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		// Retunes the running session in place: no IDR, no reset. The CBR rate
+		// control mode set at open still applies, only the target moves.
+		self.session
+			.reconfigure(bitrate.min(u32::MAX as u64) as u32)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC set bitrate to {bitrate}: {e}")))
+	}
+
 	fn name(&self) -> &str {
 		NAME
 	}
@@ -504,7 +512,7 @@ mod tests {
 		};
 
 		let rgba = gradient_rgba(w, h);
-		let expected = crate::frame::I420::from_rgba(&rgba, w, h).unwrap();
+		let expected = crate::frame::I420::from_rgba(&rgba, w * 4, w, h).unwrap();
 
 		let decode_config = crate::decode::Config {
 			kind: crate::decode::Kind::Software,

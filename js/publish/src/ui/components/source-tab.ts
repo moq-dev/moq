@@ -98,8 +98,8 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	parent.run((effect) => {
 		if (effect.get(publish.state.source) !== "camera") return;
 
-		const video = effect.get(publish.video);
-		const audio = effect.get(publish.audio);
+		const video = effect.get(publish.sources.video);
+		const audio = effect.get(publish.sources.audio);
 		const fields: HTMLElement[] = [];
 		if (video && "device" in video) fields.push(deviceField(effect, "Camera", camera, video.device as DeviceLike));
 		if (audio && "device" in audio)
@@ -118,7 +118,7 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const source = effect.get(publish.state.source);
 		if (source !== "file" && !(source instanceof File)) return;
 
-		const fileSource = effect.get(publish.file);
+		const fileSource = effect.get(publish.sources.file);
 		if (!fileSource) return;
 
 		DOM.render(effect, filePicker, fileField(effect, fileSource));

@@ -1,27 +1,36 @@
 import { expect, test } from "bun:test";
-import { Root } from "./index.ts";
+import { Broadcast } from "../broadcast.ts";
+import { Encoder } from "./index.ts";
 
-test("sd encoder defaults to a quarter-resolution scale", () => {
-	const root = new Root({ sd: { enabled: true } });
-	// Scales relative to the source rather than a fixed resolution.
-	expect(root.sd.config.peek()?.maxScale).toBe(0.1875);
-	expect(root.sd.config.peek()?.maxPixels).toBeUndefined();
-	// hd stays uncapped; it tracks the source resolution.
-	expect(root.hd.config.peek()).toBeUndefined();
-	root.close();
+// Registration runs inside an effect, which settles over a few microtasks.
+const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+async function settle(times = 5): Promise<void> {
+	for (let i = 0; i < times; i++) await flush();
+}
+
+test("an encoder registers its rendition on the broadcast", async () => {
+	const broadcast = new Broadcast({ enabled: true });
+	const encoder = new Encoder("video/hd", { broadcast });
+	await settle();
+
+	// Registered: the name is now taken.
+	expect(() => broadcast.video("video/hd")).toThrow();
+
+	encoder.close();
+	await settle();
+
+	// Freed on close, so the name can be reused.
+	expect(() => broadcast.video("video/hd")).not.toThrow();
+
+	broadcast.close();
 });
 
-test("an explicit sd config overrides the default", () => {
-	// 1234 is arbitrary; it just needs to differ from the default.
-	const root = new Root({ sd: { enabled: true, config: { maxPixels: 1234 } } });
-	expect(root.sd.config.peek()?.maxPixels).toBe(1234);
-	expect(root.sd.config.peek()?.maxScale).toBeUndefined();
-	root.close();
-});
+test("an encoder without a broadcast has nothing to publish", async () => {
+	const encoder = new Encoder("video/hd");
+	await settle();
 
-test("an explicit empty sd config opts out of the default cap", () => {
-	// Unlike omitting config entirely, `config: {}` takes ownership and skips the default cap.
-	const root = new Root({ sd: { enabled: true, config: {} } });
-	expect(root.sd.config.peek()?.maxPixels).toBeUndefined();
-	root.close();
+	// No broadcast, no subscriber: never active.
+	expect(encoder.out.active.peek()).toBe(false);
+
+	encoder.close();
 });

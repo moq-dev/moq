@@ -26,6 +26,8 @@ typealias Announcement = uniffi.moq.MoqAnnouncement
 // Broadcast / track / group producers and consumers.
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
+/** Receives tracks requested from a dynamically served broadcast. */
+typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
@@ -41,12 +43,24 @@ typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
 typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
+/** Publishes lossy latest-value JSON snapshots. */
+typealias JsonSnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
+/** Consumes reconstructed latest-value JSON snapshots. */
+typealias JsonSnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
+/** Publishes a lossless stream of JSON records. */
+typealias JsonStreamProducer = uniffi.moq.MoqJsonStreamProducer
+/** Consumes a lossless stream of JSON records. */
+typealias JsonStreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 
 // Data types.
 typealias Catalog = uniffi.moq.MoqCatalog
 typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 typealias Video = uniffi.moq.MoqVideo
+/** Caller-provided catalog fields for a video track. */
+typealias VideoHint = uniffi.moq.MoqVideoHint
+/** Media format, initialization bytes, and optional video hints. */
+typealias Init = uniffi.moq.MoqInit
 typealias Audio = uniffi.moq.MoqAudio
 typealias Dimensions = uniffi.moq.MoqDimensions
 typealias Route = uniffi.moq.MoqRoute
@@ -60,6 +74,12 @@ typealias AudioFormat = uniffi.moq.MoqAudioFormat
 typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
+/** A snapshot of transport connection statistics. */
+typealias ConnectionStats = uniffi.moq.MoqConnectionStats
+/** Configures a lossy latest-value JSON track. */
+typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
+/** Configures a lossless JSON stream track. */
+typealias JsonStreamConfig = uniffi.moq.MoqJsonStreamConfig
 
 // NOTE: a few types are intentionally NOT aliased. `Container` (sealed) and
 // `MoqException` (sealed) need subtype access (`Container.Loc`,

@@ -25,7 +25,7 @@ The project contains multiple layers of protocols:
 
 1. **quic** - Does all the networking.
 2. **web-transport** - A small layer on top of QUIC/HTTP3 for browser support. Provided by the browser or the `web-transport` crates.
-3. **moq-net** - The networking layer on top of `web-transport`, implemented by CDNs. At session setup it negotiates one of two wire protocols: the simplified `moq-lite` protocol (the layer name) or the full IETF `moq-transport` protocol. Content splits into:
+3. **moq-net** - The networking layer on top of `web-transport`, implemented by CDNs. At session setup it negotiates one of two wire protocols: the simplified `moq-lite` protocol or the full IETF `moq-transport` protocol. Content splits into:
    - broadcast: a collection of tracks produced by a publisher
    - track: a live stream of groups within a broadcast.
    - group: a live stream of frames within a track, each delivered independently over a QUIC stream.
@@ -34,10 +34,9 @@ The project contains multiple layers of protocols:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **moq-audio** - Native Opus encode/decode for raw PCM (more codecs to come). Used by `moq-ffi`/`libmoq` so native callers don't have to bring their own codec.
-6. **application** - Users building on top of `moq-net` or `hang`
+5. **application** - Users building on top of `moq-net` or `hang`
 
-Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
+Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq-net` layer should be generic, using rules on the wire on how to deliver content.
 
 ## Project Structure
 
@@ -48,6 +47,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
+- `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare).
 - `/drafts/` - IETF Internet-Drafts (kramdown-rfc) for the MoQ protocols implemented here. Built and published to the datatracker via `just drafts`. See `drafts/CLAUDE.md`.
 
@@ -65,19 +65,12 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 
 The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
 
-This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
+This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). When editing any of these guides, reference code by file path and symbol name, never by line number; line numbers rot with every edit. The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Dependencies
 
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
-
-## Development Tips
-
-1. The project uses `just` as the task runner - check `justfile` for all available commands
-2. For Rust development, the workspace is configured in the root `Cargo.toml`
-3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
-4. Consult `doc/` for documentation and the [IETF datatracker](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for specification drafts when working on protocol-level code
 
 ## Writing Style
 
@@ -95,11 +88,10 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 
 Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `--help`, and doc comments should describe only the current/canonical surface, so a reader is steered to the right thing and never learns the dead one. Keep the deprecated path *working* but invisible:
 
-- A deprecated CLI flag stays a hidden alias (clap `alias = "..."`, or a separate `#[arg(..., hide = true)]` when it needs its own deprecation warning). No `--help` entry, no "deprecated, use X" note in the doc comment.
-- A deprecated public item gets `#[doc(hidden)]` (Rust) / `@internal` or omission (JS) so it drops off the published docs.
+- Hide the deprecated symbol from every published surface: no `--help` entry, no "deprecated, use X" note in its doc comment, and drop it from the generated API docs. The per-language mechanics (clap hidden aliases, `#[doc(hidden)]` + `#[deprecated]`, `@internal`) live in [`rs/CLAUDE.md`](rs/CLAUDE.md) and [`js/CLAUDE.md`](js/CLAUDE.md).
 - Remove the example invocations and prose that mention it from `/doc`.
 
-The rename/removal rationale lives in the commit message and PR description, not in docs that users read. A runtime warning when someone *uses* the deprecated path is fine (it fires on use, it isn't documentation); a standing note that advertises the dead name is not.
+The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
 
 ## Root Cause First
 
@@ -168,6 +160,8 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+
+**Any change to the on-the-wire format MUST update the matching IETF draft under `drafts/` in the same PR.** The drafts are the normative spec other implementations (and future us) build against, so a wire change that lands without the draft update silently forks the code from the spec. This covers new/changed/removed SETUP parameters, messages, fields, framing, enum values, and version bumps anywhere under `rs/moq-net` (and the catalog/container framing in `rs/hang`). Update the draft for the specific feature you touched: `draft-lcurley-moq-lite.md` for moq-lite session/SETUP/framing, and the per-feature draft for the rest (`draft-lcurley-moq-probe.md`, `draft-lcurley-moq-relay-hops.md`, `draft-lcurley-moq-timestamp.md`, `draft-lcurley-moq-hang.md`, etc.). New capabilities go in as backward-compatible extensions even after a draft is published: SETUP requires receivers to ignore unknown parameter IDs, so a new parameter is additive. Validate with `just drafts check` (kramdown-rfc). See [`drafts/CLAUDE.md`](drafts/CLAUDE.md).
 
 For wire, `moq-ffi`, or gateway changes, also run the cross-language interop matrix: `just test smoke-full` (see `test/justfile`; plain `smoke` is rust-only).
 

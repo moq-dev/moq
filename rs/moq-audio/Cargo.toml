@@ -16,12 +16,25 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 doctest = false
 
 [features]
-# Microphone capture via cpal (pure-Rust: CoreAudio / WASAPI / ALSA). Off by
-# default so audio-only consumers (e.g. moq-ffi) don't pull cpal and, on Linux,
-# the ALSA build dependency. On macOS it also pulls AVFoundation for the TCC
-# permission pre-check (the objc deps below are target-gated, so this is a no-op
-# elsewhere).
-capture = ["dep:cpal", "dep:tokio", "dep:tracing", "dep:block2", "dep:objc2", "dep:objc2-av-foundation"]
+# Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
+# ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple
+# puts it. Off by default so audio-only consumers (e.g. moq-ffi) don't pull cpal
+# and, on Linux, the ALSA build dependency. On macOS it also pulls AVFoundation
+# for the TCC permission pre-check (the objc deps below are target-gated, so this
+# is a no-op elsewhere).
+capture = [
+    "dep:cpal",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-audio-types",
+    "dep:objc2-core-media",
+    "dep:objc2-foundation",
+    "dep:objc2-screen-capture-kit",
+]
 
 [dependencies]
 bytes = "1"
@@ -50,13 +63,20 @@ tracing = { version = "0.1", optional = true }
 # real-time budget.
 unsafe-libopus = "0.2"
 
-# macOS-only: query/request the microphone TCC permission so a denied mic fails
-# fast with a clear error instead of feeding silence into the capture loop. Only
-# pulled in by the `capture` feature (see above); a no-op on other platforms.
+# macOS-only, and only pulled in by the `capture` feature (see above); a no-op on
+# other platforms. AVFoundation queries/requests the microphone TCC permission so
+# a denied mic fails fast instead of feeding silence into the capture loop.
+# ScreenCaptureKit (plus CoreMedia/CoreAudioTypes to read the PCM out of its
+# sample buffers) is how macOS exposes system audio.
 [target.'cfg(target_os="macos")'.dependencies]
 block2 = { version = "0.6.2", optional = true }
+dispatch2 = { version = "0.3.0", optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-av-foundation = { version = "0.3.2", optional = true }
+objc2-core-audio-types = { version = "0.3.2", optional = true }
+objc2-core-media = { version = "0.3.2", optional = true, features = ["CMSampleBuffer", "CMBlockBuffer", "CMSync", "objc2-core-audio-types"] }
+objc2-foundation = { version = "0.3.2", optional = true }
+objc2-screen-capture-kit = { version = "0.3.2", optional = true, features = ["SCStream", "SCShareableContent"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

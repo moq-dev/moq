@@ -11,7 +11,7 @@ test("getter reuses an existing Signal instead of wrapping it", () => {
 	expect(getter(s)).toBe(s);
 });
 
-test("getter reuses a readonlys() output (so outputs wire into inputs)", () => {
+test("getter reuses a readonlys() result (so out wires into in)", () => {
 	const s = new Signal("hello");
 	const view = readonlys({ value: s }).value;
 	// The read-only view is the same branded Signal, so getter() passes it through.
@@ -26,8 +26,8 @@ test("readonlys exposes live reads without a writable handle", () => {
 	expect(out.count.peek()).toBe(2);
 });
 
-test("an output Getter feeds another component's input end to end", () => {
-	// Mimic: produced.output.value -> consumed input via getter().
+test("an out Getter feeds another component's in end to end", () => {
+	// Mimic: produced.out.value -> consumed input via getter().
 	const produced = new Signal(0);
 	const output: Getter<number> = readonlys({ value: produced }).value;
 

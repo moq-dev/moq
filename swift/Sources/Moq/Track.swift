@@ -144,6 +144,11 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.appendGroup())
     }
 
+    /// Create a group with an explicit sequence number.
+    public func createGroup(sequence: UInt64) throws -> GroupProducer {
+        GroupProducer(try ffi.createGroup(sequence: sequence))
+    }
+
     /// Write a single-frame group with a timestamp in microseconds.
     public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
         try ffi.writeFrame(payload: payload, timestampUs: timestampUs)
@@ -165,6 +170,12 @@ public final class TrackProducer: Sendable {
     /// Finish the track. No more groups can be appended.
     public func finish() throws {
         try ffi.finish()
+    }
+
+    /// Declare the exclusive final group sequence ahead of the live edge.
+    /// The producer remains open for groups below the boundary.
+    public func finish(at finalSequence: UInt64) throws {
+        try ffi.finishAt(finalSequence: finalSequence)
     }
 }
 
@@ -194,5 +205,10 @@ public final class GroupProducer: Sendable {
     /// Mark the group complete. No more frames can be written.
     public func finish() throws {
         try ffi.finish()
+    }
+
+    /// Abort the group with an application error code.
+    public func abort(errorCode: Int32) throws {
+        try ffi.abort(errorCode: errorCode)
     }
 }

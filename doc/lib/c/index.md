@@ -126,6 +126,12 @@ libmoq creates raw tracks with a microsecond timescale by default (used when
 `moq_track_info.timescale_valid` is false or no info is given), matching the C
 ABI's timestamp units.
 
+Use `moq_publish_track_group_at` to create sparse or replayed groups at an
+explicit sequence. `moq_publish_track_finish_at` declares the exclusive end
+while still permitting lower groups. `moq_publish_track_abort` and
+`moq_publish_group_abort` terminate a producer with an application error. Call
+`moq_publish_track_close` after filling the groups below a declared end.
+
 Subscribers receive raw frame handles from `moq_consume_track`; read each one
 with `moq_consume_track_frame`. The returned `moq_frame.timestamp_us` carries
 the timestamp, and `keyframe` is always false because raw tracks do not parse

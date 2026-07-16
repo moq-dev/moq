@@ -881,14 +881,49 @@ mod test {
 			.unwrap();
 		producer.finish().unwrap();
 
-		match recv_next(&mut subscriber, true).await.unwrap() {
+		match recv_next(&mut subscriber, true, false).await.unwrap() {
 			Recv::Datagram(datagram) => assert_eq!(&datagram.payload[..], b"last"),
 			_ => panic!("expected datagram before finished"),
 		}
 
-		match recv_next(&mut subscriber, true).await.unwrap() {
+		match recv_next(&mut subscriber, true, false).await.unwrap() {
 			Recv::Finished => {}
 			_ => panic!("expected finished after datagram"),
+		}
+	}
+
+	#[tokio::test]
+	async fn recv_next_reports_future_boundary_before_finished() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		// The last group is 6 (exclusive 7), but only group 5 has been produced so far.
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer.finish_at(7).unwrap();
+
+		// Group 5 is delivered first.
+		match recv_next(&mut subscriber, false, true).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 5),
+			_ => panic!("expected group 5"),
+		}
+
+		// With no more groups ready yet, the declared boundary surfaces even though the
+		// track isn't finished (group 6 is still outstanding).
+		match recv_next(&mut subscriber, false, true).await.unwrap() {
+			Recv::Boundary(group) => assert_eq!(group, 7),
+			_ => panic!("expected the future boundary"),
+		}
+
+		// The caller stops requesting the boundary once sent. The trailing group arrives,
+		// then the track finishes.
+		producer.create_group(group::Info { sequence: 6 }).unwrap();
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 6),
+			_ => panic!("expected group 6"),
+		}
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Finished => {}
+			_ => panic!("expected finished once the boundary is reached"),
 		}
 	}
 }
@@ -960,7 +995,8 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 }
 
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
-/// best-effort datagram to forward, or the track finishing.
+/// best-effort datagram to forward, the track declaring its exclusive final sequence, or
+/// the track finishing (the live edge having reached that boundary).
 // A `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the
 // others. This is a transient, one-at-a-time return value, so the padding is never held in
 // bulk; boxing would only add a per-group allocation.
@@ -968,13 +1004,19 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::Datagram),
+	Boundary(u64),
 	Finished,
 }
 
 /// Poll a single [`track::Subscriber`] for the next group (cap-aware) or datagram from one `&mut`
 /// borrow, so groups and datagrams share the same subscription. Groups are polled first so a
 /// datagram burst can't starve them; datagrams are polled only when the transport carries them.
-async fn recv_next(track: &mut track::Subscriber, datagrams: bool) -> Result<Recv, Error> {
+///
+/// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
+/// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
+/// SUBSCRIBE_END as soon as the ending is known rather than waiting for the live edge to reach
+/// it. The caller clears `emit_boundary` after the first boundary so it fires once.
+async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
 	kio::wait(|waiter| {
 		let mut groups_finished = false;
 		match track.poll_next_group(waiter) {
@@ -991,6 +1033,11 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool) -> Result<Rec
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => {}
 			}
+		}
+		// No live data ready: report the boundary (if declared) before signalling Finished, so a
+		// future boundary reaches the subscriber while the trailing groups are still in flight.
+		if emit_boundary && let Poll::Ready(res) = track.poll_finished(waiter) {
+			return Poll::Ready(res.map(Recv::Boundary));
 		}
 		if groups_finished {
 			return Poll::Ready(Ok(Recv::Finished));
@@ -1040,9 +1087,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		track.end_at(initial_end_group);
 
 		// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
-		// once the first group is known, SUBSCRIBE_END when the track finishes.
+		// once the first group is known, SUBSCRIBE_END as soon as the track declares its
+		// exclusive final sequence (which may be ahead of the live edge).
 		let emit_range = self.version.has_track_stream();
 		let mut start_sent = false;
+		let mut end_sent = false;
 
 		// Serve datagrams off this same subscriber, but only on lite-05 over a datagram-capable
 		// transport (qmux/WebSocket/TCP/UDS report size 0). No group fallback: otherwise off.
@@ -1060,7 +1109,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				// when enabled, the next best-effort datagram. Groups are polled first so a
 				// datagram burst can't starve them; datagrams flow whenever no group is ready
 				// (including while groups are paused above the cap).
-				res = recv_next(&mut track, datagrams) => {
+				res = recv_next(&mut track, datagrams, emit_range && !end_sent) => {
 					match res? {
 						Recv::Group(group) => {
 							if emit_range && !start_sent {
@@ -1072,19 +1121,19 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 							self.spawn_serve(group, &mut tasks);
 						}
 						Recv::Datagram(datagram) => self.serve_datagram(datagram),
+						Recv::Boundary(group) => {
+							// The track declared its exclusive final sequence. Forward it now,
+							// even if trailing groups (below `group`) are still in flight, then
+							// keep serving them until the live edge reaches the boundary.
+							end_sent = true;
+							writer
+								.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
+								.await?;
+						}
 						Recv::Finished => {
-							// Track finished cleanly. Tell the subscriber no group will
-							// follow, then drain in-flight tasks and exit.
-							if emit_range {
-								let group = track
-									.latest()
-									.map(|group| group.checked_add(1).ok_or(crate::coding::BoundsExceeded))
-									.transpose()?
-									.unwrap_or(0);
-								writer
-									.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
-									.await?;
-							}
+							// The live edge reached the boundary; SUBSCRIBE_END was already sent
+							// (or the version predates the track stream). Drain in-flight group
+							// tasks and FIN by returning.
 							while tasks.next().await.is_some() {}
 							return Ok(());
 						}

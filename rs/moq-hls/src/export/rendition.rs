@@ -54,6 +54,7 @@ impl std::str::FromStr for Kind {
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+#[derive(PartialEq)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -91,6 +92,14 @@ pub struct Rendition {
 }
 
 impl Rendition {
+	pub(crate) fn matches_video(&self, config: &VideoConfig) -> bool {
+		self.config == Config::Video(config.clone())
+	}
+
+	pub(crate) fn matches_audio(&self, config: &AudioConfig) -> bool {
+		self.config == Config::Audio(config.clone())
+	}
+
 	/// Build a video rendition and spawn its timeline watcher. `None` if the catalog doesn't
 	/// advertise a timeline (fetch-on-demand needs one).
 	pub(crate) fn video(

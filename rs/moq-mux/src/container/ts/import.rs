@@ -730,7 +730,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 			keyframe: true,
 		};
 		self.track.write(frame)?;
-		self.track.finish_group()?;
+		self.track.cut(None)?;
 		Ok(())
 	}
 
@@ -817,7 +817,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			keyframe: true,
 		};
 		self.track.write(frame)?;
-		self.track.finish_group()?;
+		self.track.cut(None)?;
 		Ok(())
 	}
 

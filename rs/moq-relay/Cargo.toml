@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.13.4"
+version = "0.13.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -21,7 +21,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "noq", "websocket", "uds"]
+default = ["iroh", "quinn", "websocket", "uds"]
 iroh = ["moq-native/iroh"]
 jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]

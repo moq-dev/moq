@@ -2,10 +2,10 @@ import type * as Catalog from "@moq/hang/catalog";
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { MultiBackend } from "./backend";
+import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
-import { type Bound, type Latency, latencyBounds, latencyFromBounds } from "./sync";
-import type * as Video from "./video";
+import { type Bound, type Latency, latencyBounds, latencyFromBounds, Sync } from "./sync";
+import * as Video from "./video";
 
 const OBSERVED = [
 	"url",
@@ -57,11 +57,23 @@ export default class MoqWatch extends HTMLElement {
 	// The broadcast being watched.
 	broadcast: Broadcast;
 
-	// The backend that powers this element.
-	backend: MultiBackend;
+	/** Downloads and decodes the video track. `video.source` picks the rendition. */
+	video: Video.Decoder;
+
+	/** Downloads and decodes the audio track. `audio.source` picks the rendition. */
+	audio: Audio.Decoder;
+
+	/** Paints decoded frames to the nested <canvas>. */
+	renderer: Video.Renderer;
+
+	/** Plays decoded samples through the speakers. */
+	emitter: Audio.Emitter;
+
+	/** Keeps audio and video playing at the target latency. */
+	sync: Sync;
 
 	// The mutable user controls. As the top of the tree, this element owns the
-	// writable Signals and wires read-only views into broadcast/backend. The UI and
+	// writable Signals and wires read-only views into the pipeline. The UI and
 	// the attribute/property accessors read and write these directly.
 	readonly controls = {
 		paused: new Signal(false),
@@ -80,8 +92,12 @@ export default class MoqWatch extends HTMLElement {
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
 
-	// The canvas/video element to render into.
-	#element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
+	// The canvas element to render into.
+	#canvas = new Signal<HTMLCanvasElement | undefined>(undefined);
+
+	// Whether to download. Driven by the renderer/emitter policy, read by the decoders.
+	#videoEnabled = new Signal(false);
+	#audioEnabled = new Signal(false);
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -112,18 +128,68 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		this.backend = new MultiBackend({
-			element: this.#element,
+		// The decoders' support probes drive rendition selection: anything WebCodecs can't play is filtered out.
+		const videoSource = new Video.Source({
 			broadcast: this.broadcast,
-			connection: this.connection.established,
-			paused: this.controls.paused,
-			visible: this.controls.visible,
+			target: this.controls.target,
+			supported: Video.Decoder.supported,
+		});
+		const audioSource = new Audio.Source({
+			broadcast: this.broadcast,
+			supported: Audio.Decoder.supported,
+		});
+		this.signals.cleanup(() => {
+			videoSource.close();
+			audioSource.close();
+		});
+
+		// Sources produce the per-rendition jitter that Sync reads, so they're created
+		// before Sync to avoid a construction cycle.
+		this.sync = new Sync({
 			latency: this.controls.latency,
+			connection: this.connection.established,
+			video: videoSource.out.jitter,
+			audio: audioSource.out.jitter,
+		});
+		this.signals.cleanup(() => this.sync.close());
+
+		this.video = new Video.Decoder(videoSource, this.sync, { enabled: this.#videoEnabled });
+		this.audio = new Audio.Decoder(audioSource, this.sync, { enabled: this.#audioEnabled });
+		this.signals.cleanup(() => {
+			this.video.close();
+			this.audio.close();
+		});
+
+		this.emitter = new Audio.Emitter(this.audio, {
 			volume: this.controls.volume,
 			muted: this.controls.muted,
-			target: this.controls.target,
+			paused: this.controls.paused,
 		});
-		this.signals.cleanup(() => this.backend.close());
+		this.renderer = new Video.Renderer(this.video, {
+			canvas: this.#canvas,
+			visible: this.controls.visible,
+		});
+		this.signals.cleanup(() => {
+			this.emitter.close();
+			this.renderer.close();
+		});
+
+		// Audio download follows the emitter's enable policy (paused/muted).
+		this.signals.proxy(this.#audioEnabled, this.emitter.out.enabled);
+
+		// Video downloads while playing and on-screen. When paused, keep downloading only
+		// until a frame is on the canvas, then stop: a cold paused start still shows a poster
+		// instead of black, without streaming while paused. Read the rendered frame only in
+		// the paused branch so playback doesn't re-run this every painted frame.
+		this.signals.run((effect) => {
+			const visible = effect.get(this.renderer.out.visible);
+			if (!effect.get(this.controls.paused)) {
+				this.#videoEnabled.set(visible);
+				return;
+			}
+			const frame = effect.get(this.renderer.out.frame);
+			this.#videoEnabled.set(visible && !frame);
+		});
 
 		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
 		// the policy lives here: muting stashes and zeroes the volume; a zero volume
@@ -142,29 +208,23 @@ export default class MoqWatch extends HTMLElement {
 			this.controls.muted.set(volume === 0);
 		});
 
-		// Keep the volume control in sync with native <video> controls (MSE backend).
-		this.signals.run((effect) => {
-			const element = effect.get(this.#element);
-			if (!(element instanceof HTMLVideoElement)) return;
-			effect.event(element, "volumechange", () => {
-				this.controls.volume.set(element.volume);
-			});
-		});
-
 		// Watch to see if the canvas element is added or removed.
-		const setElement = () => {
-			const canvas = this.querySelector("canvas") as HTMLCanvasElement | undefined;
-			const video = this.querySelector("video") as HTMLVideoElement | undefined;
-			if (canvas && video) {
-				throw new Error("Cannot have both canvas and video elements");
+		const setCanvas = () => {
+			const canvas = this.querySelector("canvas") ?? undefined;
+
+			// A <video> child used to render via MSE. Nothing renders it now, and audio still plays,
+			// so the failure looks like a bug in the page instead of a removed feature.
+			if (!canvas && this.querySelector("video")) {
+				console.warn("moq-watch: rendering requires a <canvas> child; a <video> child does nothing.");
 			}
-			this.#element.set(canvas ?? video);
+
+			this.#canvas.set(canvas);
 		};
 
-		const observer = new MutationObserver(setElement);
+		const observer = new MutationObserver(setCanvas);
 		observer.observe(this, { childList: true, subtree: true });
 		this.signals.cleanup(() => observer.disconnect());
-		setElement();
+		setCanvas();
 
 		// Optionally update attributes to match the library state.
 		// This is kind of dangerous because it can create loops.
@@ -221,7 +281,7 @@ export default class MoqWatch extends HTMLElement {
 			if (min === "real-time") {
 				this.setAttribute("latency", "real-time");
 			} else {
-				const jitter = Math.floor(effect.get(this.backend.output.jitter));
+				const jitter = Math.floor(effect.get(this.sync.out.jitter));
 				this.setAttribute("latency", jitter.toString());
 			}
 		});
@@ -405,12 +465,16 @@ export default class MoqWatch extends HTMLElement {
 
 	/** The jitter buffer in milliseconds. */
 	get jitter(): Time.Milli {
-		return this.backend.output.jitter.peek();
+		return this.sync.out.jitter.peek();
 	}
 
-	/** Re-anchor playback and flush the audio buffer at an utterance boundary (buffered mode). */
+	/**
+	 * Re-anchor playback at an utterance boundary in buffered mode: reset the sync reference
+	 * and flush the audio buffer so the next utterance plays from its own first frame.
+	 */
 	reset(): void {
-		this.backend.reset();
+		this.sync.reset();
+		this.audio.reset();
 	}
 
 	get catalogFormat(): CatalogFormat | undefined {
@@ -426,7 +490,7 @@ export default class MoqWatch extends HTMLElement {
 	 * for `"hang"` and `"msf"` this is overwritten by the fetch loop.
 	 */
 	get catalog(): Catalog.Root | undefined {
-		return this.broadcast.output.catalog.peek();
+		return this.broadcast.out.catalog.peek();
 	}
 
 	set catalog(value: Catalog.Root | undefined) {

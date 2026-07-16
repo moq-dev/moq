@@ -3,7 +3,7 @@ import type MoqWatch from "../../element";
 import { icon, pause, play } from "../icons";
 import { controlButton } from "./button";
 
-/** Play/pause control bound to the backend paused state. */
+/** Play/pause control bound to the paused state. */
 export function playPauseButton(parent: Effect, watch: MoqWatch): HTMLElement {
 	const button = controlButton(play, "Play");
 

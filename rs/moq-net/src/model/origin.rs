@@ -1746,8 +1746,8 @@ async fn run_front_janitor(
 	// subscribers) and unannounce.
 	broadcast.abort_spliced(Error::Dropped);
 
-	// Deliberate close; suppresses the dropped-without-close warning.
-	broadcast.close();
+	// Deliberate end; suppresses the dropped-without-finish warning.
+	broadcast.finish();
 
 	{
 		let mut leaf = leaf.lock();

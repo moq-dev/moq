@@ -41,6 +41,15 @@ test("LegacyFormat decodes a valid frame", () => {
 	expect(result[0].keyframe).toBe(false);
 });
 
+test("LegacyFormat skips a marker instead of decoding an empty chunk", () => {
+	const format = new LegacyFormat();
+	const frame = encodeLegacyFrame(1000 as Time.Micro, new Uint8Array());
+
+	// An empty payload is a marker: no media, so no frames -- and no throw. A
+	// publisher emitting these must not break an older decoder.
+	expect(format.decode(frame)).toEqual([]);
+});
+
 test("LegacyFormat always returns keyframe: false", () => {
 	const format = new LegacyFormat();
 	const frame = encodeLegacyFrame(0 as Time.Micro, new Uint8Array([0x01]));

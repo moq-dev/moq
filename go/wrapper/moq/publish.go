@@ -291,6 +291,15 @@ func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
 	return &GroupProducer{inner: inner}, nil
 }
 
+// CreateGroup creates a group with an explicit sequence number.
+func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
+	inner, err := t.inner.CreateGroup(sequence)
+	if err != nil {
+		return nil, err
+	}
+	return &GroupProducer{inner: inner}, nil
+}
+
 // WriteFrame writes a single-frame group with a timestamp in microseconds.
 func (t *TrackProducer) WriteFrame(payload []byte, timestampUs uint64) error {
 	return t.inner.WriteFrame(payload, timestampUs)
@@ -323,6 +332,12 @@ func (t *TrackProducer) Finish() error {
 	return t.inner.Finish()
 }
 
+// FinishAt declares the exclusive final group sequence ahead of the live edge.
+// The producer remains open for groups below the boundary.
+func (t *TrackProducer) FinishAt(finalSequence uint64) error {
+	return t.inner.FinishAt(finalSequence)
+}
+
 // GroupProducer writes frames into a single group on a track.
 type GroupProducer struct {
 	inner *ffi.MoqGroupProducer
@@ -350,6 +365,11 @@ func (g *GroupProducer) WriteFrame(payload []byte, timestampUs uint64) error {
 // Finish closes the group.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
+}
+
+// Abort terminates the group with an application error code.
+func (g *GroupProducer) Abort(errorCode uint16) error {
+	return g.inner.Abort(int32(errorCode))
 }
 
 // TrackDynamic yields uncached groups requested by fetch consumers.

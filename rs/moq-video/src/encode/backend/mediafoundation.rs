@@ -459,6 +459,22 @@ impl Backend for MediaFoundation {
 		Ok(out)
 	}
 
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		let bitrate = clamp_u32(bitrate);
+
+		// Not `set_codec`: that swallows failures because the knobs it sets at
+		// open are advisory, whereas an MFT refusing a rate change means the
+		// control loop is talking to itself and should hear about it.
+		let value = variant_u32(bitrate);
+		unsafe { self.codec_api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value) }
+			.map_err(|e| mf_err(&format!("set bitrate to {bitrate}"), e))?;
+
+		// Keep the cache in step: a later format renegotiation rebuilds the
+		// output type from it, and it would otherwise reinstate the old rate.
+		self.bitrate = bitrate;
+		Ok(())
+	}
+
 	fn name(&self) -> &str {
 		NAME
 	}

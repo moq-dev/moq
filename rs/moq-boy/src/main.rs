@@ -291,7 +291,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Cleanly close the broadcast so subscribers see a normal end rather than
 	// Error::Dropped.
-	broadcast.close();
+	broadcast.finish();
 	result
 }
 

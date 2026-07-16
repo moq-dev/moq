@@ -47,6 +47,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 - **`Moq.connect(...)`**: a connection facade (`Moq.kt`), so you never hand-wire a `MoqClient`.
 - **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Catalog`, `Frame`, ...), so you import `dev.moq.*` only. A couple of sealed types (`Container`, `MoqException`) are not aliased because Kotlin can't resolve their subtypes through a typealias; use `uniffi.moq.*` for those.
 - **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `announcements()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through.
+- **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
 - **Raw datagrams**: `TrackProducer.appendDatagram(timestampUs, payload)` sends one best-effort payload and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite, and have no stream fallback.
 - **`MoqException.isShutdown`** (`Errors.kt`): true for the graceful `Cancelled`/`Closed` cases.
 
@@ -57,9 +58,11 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 
 ## Local development
 
-`kt/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA-resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. Run via `just kt check`. Skips cleanly without a JDK or `cargo`.
+`just kt check` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA-resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell. A missing toolchain is an error so Kotlin wrapper drift cannot slip past a green check.
 
 The wrapper resolves `moq-ffi` from the sibling project (a Gradle `dependencySubstitution` in `kt/moq/build.gradle.kts`), so tests run against freshly-built bindings; the published metadata still carries the floating range.
+
+`just kt generate` runs only the generation half (build `moq-ffi`, install the host native library, and regenerate the checked-in bindings). Use it in environments that intentionally lack Gradle; it needs only `cargo`.
 
 The Android target is opt-in via `-Pandroid.enabled=true`. Without the flag the JVM variant builds without an Android SDK, though Gradle still resolves the AGP plugin marker against `google()` at sync time. CI sets the flag automatically when packaging.
 

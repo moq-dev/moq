@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.18.0"
+version = "0.18.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 doctest = false
 
 [features]
-default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs"]

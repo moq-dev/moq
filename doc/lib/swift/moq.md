@@ -107,6 +107,10 @@ try audio.finish()
 try broadcast.finish()
 ```
 
+Video publishers can pass `video: VideoHint(...)` to seed catalog fields before the stream reveals them. Use `publishMedia(on:format:initData:video:)` to accept a media track obtained from `BroadcastDynamic`.
+
+For sparse or replayed raw tracks, use `track.createGroup(sequence:)`. `track.finish(at:)` declares the exclusive end while still permitting lower groups, and `group.abort(errorCode:)` terminates a group with an application error.
+
 ### Fetching raw groups
 
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:

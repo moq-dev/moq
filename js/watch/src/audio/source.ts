@@ -13,7 +13,9 @@ export type Target = {
 };
 
 /**
- * A function that checks if an audio configuration is supported by the backend.
+ * A function that checks if an audio configuration can be played.
+ *
+ * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
  */
 export type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
@@ -23,8 +25,8 @@ type SourceInput = {
 	// The desired rendition/bitrate of the audio.
 	target: Getter<Target | undefined>;
 
-	// A function that checks if an audio configuration is supported by the backend.
-	// Provided by whichever backend (WebCodecs or MSE) is active.
+	// A function that checks if an audio configuration can be played. Renditions that fail the
+	// probe are filtered out. Nothing is selected until one is provided.
 	supported: Getter<Supported | undefined>;
 };
 
@@ -40,24 +42,24 @@ type SourceOutput = {
 
 /**
  * Source handles catalog extraction, support checking, and rendition selection
- * for audio playback. It is used by both MSE and Decoder backends.
+ * for audio playback. The Decoder consumes whichever rendition it picks.
  */
 export class Source {
-	readonly input: Readonlys<SourceInput>;
+	readonly in: Readonlys<SourceInput>;
 
-	readonly #output: SourceOutput = {
+	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Audio | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.AudioConfig>>({}),
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
 		jitter: new Signal<Moq.Time.Milli | undefined>(undefined),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SourceInput>) {
-		this.input = {
+		this.in = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
 			supported: getter(props?.supported),
@@ -69,18 +71,18 @@ export class Source {
 	}
 
 	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.input.broadcast);
+		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
-		const catalog = effect.get(broadcast.output.catalog)?.audio;
+		const catalog = effect.get(broadcast.out.catalog)?.audio;
 		if (!catalog) return;
 
-		effect.set(this.#output.catalog, catalog);
+		effect.set(this.#out.catalog, catalog);
 	}
 
 	#runSupported(effect: Effect): void {
-		const renditions = effect.get(this.#output.catalog)?.renditions ?? {};
-		const supported = effect.get(this.input.supported);
+		const renditions = effect.get(this.#out.catalog)?.renditions ?? {};
+		const supported = effect.get(this.in.supported);
 		if (!supported) return;
 
 		effect.spawn(async () => {
@@ -95,15 +97,15 @@ export class Source {
 				console.warn("no supported audio renditions found:", renditions);
 			}
 
-			this.#output.available.set(available);
+			this.#out.available.set(available);
 		});
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = effect.get(this.#output.available);
+		const available = effect.get(this.#out.available);
 		if (Object.keys(available).length === 0) return;
 
-		const target = effect.get(this.input.target);
+		const target = effect.get(this.in.target);
 
 		let selected: { track: string; config: Catalog.AudioConfig } | undefined;
 
@@ -116,15 +118,15 @@ export class Source {
 			if (!selected) return;
 		}
 
-		effect.set(this.#output.track, selected.track);
-		effect.set(this.#output.config, selected.config);
+		effect.set(this.#out.track, selected.track);
+		effect.set(this.#out.config, selected.config);
 
 		// Use catalog jitter if available, otherwise estimate from codec frame duration.
 		// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
 		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
 		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
 		const jitter = codecJitter + overhead;
-		effect.set(this.#output.jitter, Time.Milli(jitter));
+		effect.set(this.#out.jitter, Time.Milli(jitter));
 	}
 
 	/**

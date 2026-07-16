@@ -6,4 +6,5 @@
  */
 import "@moq/publish/element";
 import "@moq/watch/element";
+import "@moq/watch/ui";
 import "./setup.ts";

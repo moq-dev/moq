@@ -49,8 +49,8 @@ impl Waiter {
 		list.register(self);
 	}
 
-	/// The underlying [`Waker`]. Useful for bridging into other async machinery
-	/// (e.g. `futures::task::AtomicWaker`) that needs a `Waker` directly.
+	/// The underlying task [`Waker`], for hand-rolling foreign-future integration. Prefer
+	/// [`poll_future`](Self::poll_future), which wraps the usual [`Context`] dance.
 	pub fn waker(&self) -> &Waker {
 		&self.waker
 	}
@@ -59,6 +59,12 @@ impl Waiter {
 	/// repeat registrations (across polls, or across lists in one poll) share one allocation.
 	fn shared(&self) -> &Arc<Waker> {
 		self.shared.get_or_init(|| Arc::new(self.waker.clone()))
+	}
+
+	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
+	/// `poll_*` step when it is ready.
+	pub fn poll_future<F: Future + ?Sized>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
+		future.poll(&mut Context::from_waker(self.waker()))
 	}
 }
 
@@ -172,5 +178,27 @@ where
 		// list so the inner poll function's register call can recycle it.
 		this.waiter = Some(Waiter::new(cx.waker().clone()));
 		(this.poll)(this.waiter.as_ref().unwrap())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn poll_future_bridges_a_std_future() {
+		let waiter = Waiter::noop();
+
+		// A ready future resolves through the waiter.
+		let fut = std::pin::pin!(std::future::ready(7u8));
+		assert_eq!(waiter.poll_future(fut), Poll::Ready(7));
+
+		// A never-ready future stays pending.
+		let fut = std::pin::pin!(std::future::pending::<u8>());
+		assert_eq!(waiter.poll_future(fut), Poll::Pending);
+
+		// A type-erased future works too (the `?Sized` bound).
+		let mut boxed: Pin<Box<dyn Future<Output = u8>>> = Box::pin(std::future::ready(9u8));
+		assert_eq!(waiter.poll_future(boxed.as_mut()), Poll::Ready(9));
 	}
 }

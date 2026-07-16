@@ -190,6 +190,12 @@ track.Update(moq.Subscription{Priority: 20, Ordered: false})
 
 `Ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
+For sparse or replayed tracks, use `CreateGroup(sequence)`. `FinishAt(finalSequence)` declares the exclusive end while still permitting lower groups, and `Abort(errorCode)` terminates a track or group with an application error.
+
+## JSON tracks
+
+Use `PublishJSONSnapshot` / `SubscribeJSONSnapshot` for lossy latest state and `PublishJSONStream` / `SubscribeJSONStream` for a lossless append log. Producers accept values supported by `encoding/json`; consumers return `json.RawMessage`.
+
 ## Fetching raw groups
 
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:

@@ -1,4 +1,4 @@
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
@@ -81,6 +81,9 @@ export class Reload {
 	// True after the browser freezes or hides the page until it visibly resumes.
 	#suspended = new Signal(false);
 
+	// Use the serialized URL as the reactive connection key. URL objects use identity
+	// equality, but replacing one with an equivalent instance should not reconnect.
+	#url: Getter<string | undefined>;
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
@@ -104,6 +107,7 @@ export class Reload {
 			});
 		}
 
+		this.#url = this.signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
 		this.signals.run(this.#connect.bind(this));
 	}
@@ -116,8 +120,9 @@ export class Reload {
 		const enabled = effect.get(this.enabled);
 		if (!enabled || suspended) return;
 
-		const url = effect.get(this.url);
-		if (!url) return;
+		const href = effect.get(this.#url);
+		if (!href) return;
+		const url = new URL(href);
 
 		effect.set(this.status, "connecting", "disconnected");
 

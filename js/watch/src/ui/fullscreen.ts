@@ -2,9 +2,9 @@
 //
 // We fullscreen the shadow `.player` container (not the bare <moq-watch>) so the
 // overlay chrome stays visible. Safari needs webkit-prefixed methods, and iPhone
-// has no element fullscreen API at all: there we fall back to the native <video>
-// fullscreen if an MSE element exists, otherwise a CSS pseudo-fullscreen that
-// pins the player to the viewport (the only option for the canvas backend).
+// has no element fullscreen API at all: there we fall back to a CSS pseudo-fullscreen
+// that pins the player to the viewport. The native iOS fullscreen API is only exposed
+// on <video>, which we never render into.
 import type { Effect } from "@moq/signals";
 
 type WebkitDocument = Document & {
@@ -14,14 +14,6 @@ type WebkitDocument = Document & {
 
 type WebkitElement = HTMLElement & {
 	webkitRequestFullscreen?: () => void;
-};
-
-// iOS exposes fullscreen only on the media element itself, with its own
-// begin/end events and a `webkitDisplayingFullscreen` state flag.
-type IosVideo = HTMLVideoElement & {
-	webkitEnterFullscreen?: () => void;
-	webkitSupportsFullscreen?: boolean;
-	webkitDisplayingFullscreen?: boolean;
 };
 
 const PSEUDO_CLASS = "player--pseudo-fullscreen";
@@ -38,13 +30,8 @@ export interface Fullscreen {
 /**
  * @param parent Effect that owns the document listeners (auto-removed on cleanup).
  * @param player The shadow container to maximize.
- * @param media Resolves the current <canvas>/<video>, used for the iOS path.
  */
-export function createFullscreen(
-	parent: Effect,
-	player: HTMLElement,
-	media: () => HTMLElement | undefined,
-): Fullscreen {
+export function createFullscreen(parent: Effect, player: HTMLElement): Fullscreen {
 	const doc = document as WebkitDocument;
 	const listeners = new Set<() => void>();
 	const notify = () => {
@@ -55,12 +42,7 @@ export function createFullscreen(
 	parent.event(document, "fullscreenchange", notify);
 	parent.event(document, "webkitfullscreenchange", notify);
 
-	// iPhone native <video> fullscreen doesn't fire document events, so we track
-	// the element directly via its begin/end events + webkitDisplayingFullscreen.
-	let iosVideo: IosVideo | undefined;
-
-	const realActive = () =>
-		!!(document.fullscreenElement || doc.webkitFullscreenElement || iosVideo?.webkitDisplayingFullscreen);
+	const realActive = () => !!(document.fullscreenElement || doc.webkitFullscreenElement);
 	const pseudoActive = () => player.classList.contains(PSEUDO_CLASS);
 	const active = () => realActive() || pseudoActive();
 
@@ -76,19 +58,7 @@ export function createFullscreen(
 			return;
 		}
 
-		// iPhone: no element fullscreen. Use native video fullscreen if available.
-		const video = media() as IosVideo | undefined;
-		if (video?.webkitEnterFullscreen && video.webkitSupportsFullscreen !== false) {
-			// Bind the element's fullscreen events once so active()/icon stay in sync.
-			if (iosVideo !== video) {
-				iosVideo = video;
-				parent.event(video, "webkitbeginfullscreen", notify);
-				parent.event(video, "webkitendfullscreen", notify);
-			}
-			video.webkitEnterFullscreen();
-			return;
-		}
-
+		// iPhone: no element fullscreen API, so pin the player to the viewport instead.
 		enterPseudo();
 	};
 

@@ -9,6 +9,8 @@ import MoqFFI
 public typealias Frame = MoqFFI.MoqFrame
 public typealias Catalog = MoqFFI.MoqCatalog
 public typealias Video = MoqFFI.MoqVideo
+/// Caller-provided catalog fields for a video track.
+public typealias VideoHint = MoqFFI.MoqVideoHint
 public typealias Audio = MoqFFI.MoqAudio
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
 public typealias Dimensions = MoqFFI.MoqDimensions

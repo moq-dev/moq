@@ -16,7 +16,11 @@ Per-platform, picked at compile time:
 
 - **macOS**: AVFoundation (camera) and ScreenCaptureKit (display), yielding
   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-- **Linux**: native V4L2 (camera; YUYV resampled, MJPEG via `zune-jpeg`).
+- **Linux**: native V4L2 (camera; YUYV resampled, MJPEG via `zune-jpeg`) and
+  xdg-desktop-portal + PipeWire (display; RGB -> CPU I420, behind the `pipewire`
+  feature since it links libpipewire). Works on Wayland and X11; the desktop's
+  picker dialog chooses the screen, and the portal's restore token is reused so
+  demand-driven reopens don't re-prompt.
 - **Windows**: native Media Foundation (camera; `IMFSourceReader`) and DXGI
   Desktop Duplication (display; BGRA -> CPU I420). Display capture is
   whole-monitor; select one with a bare index or `display:{index}`.

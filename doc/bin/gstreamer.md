@@ -30,13 +30,20 @@ Both elements support the following properties:
 For `http://` URLs, `moq-native` automatically fetches the server's certificate fingerprint from `/certificate.sha256` and verifies TLS against it. You don't need `tls-disable-verify` for local development.
 :::
 
-`moqsink` additionally exposes these read-only properties for monitoring:
+`moqsink` additionally exposes these read-only properties for monitoring. Each emits a `notify`
+signal when it changes, so you can poll it via `g_object_get` or connect to `notify::<property>`:
 
 | Property                 | Type   | Description                                                  |
 | ------------------------ | ------ | ----------------------------------------------------------- |
-| `connected`              | bool   | Whether the publish session is currently connected          |
+| `status`                 | enum   | Publish connection lifecycle: `disconnected` (retrying), `connected`, or `failed` (gave up) |
+| `connected`              | bool   | Whether the publish session is currently connected (`status == connected`) |
 | `moq-version`            | string | The negotiated MoQ protocol version; null when disconnected |
-| `estimated-send-bitrate` | uint64 | Estimated send bitrate in bits per second; 0 when unavailable |
+| `estimated-send-bitrate` | uint64 | Estimated send bitrate in bits per second (congestion controller); 0 when unavailable |
+| `estimated-recv-bitrate` | uint64 | Estimated receive bitrate in bits per second; 0 when unavailable |
+
+`status` distinguishes a transient drop (`disconnected`, the reconnect loop is still retrying) from a
+permanent give-up (`failed`, a non-retryable error such as an auth rejection), which a bare
+`connected` bool cannot.
 
 ## Prerequisites
 

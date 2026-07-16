@@ -13,13 +13,13 @@ export function unsupportedIndicator(parent: Effect, watch: MoqWatch): HTMLEleme
 	container.appendChild(text);
 
 	parent.run((effect) => {
-		const unsupported = effect.get(watch.backend.video.source.output.error) === "unsupported";
-		const offline = effect.get(watch.broadcast.output.status) === "offline";
+		const unsupported = effect.get(watch.video.source.out.error) === "unsupported";
+		const offline = effect.get(watch.broadcast.out.status) === "offline";
 		const show = unsupported && !offline;
 		container.style.display = show ? "" : "none";
 		if (!show) return;
 
-		const renditions = effect.get(watch.backend.video.source.output.catalog)?.renditions ?? {};
+		const renditions = effect.get(watch.video.source.out.catalog)?.renditions ?? {};
 		const codecs = [...new Set(Object.values(renditions).map((rendition) => rendition.codec))].join(", ");
 		text.textContent = codecs
 			? `This video codec is not supported by your browser: ${codecs}`

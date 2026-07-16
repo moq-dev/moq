@@ -17,7 +17,7 @@ use gst::subclass::prelude::*;
 use hang::moq_net;
 
 use super::pad::{Pad, caps_supported};
-use super::session::{CAT, RUNTIME, ResolvedSettings, Session};
+use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session};
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -129,10 +129,15 @@ impl ObjectImpl for MoqSink {
 					.blurb("Disable TLS verification")
 					.default_value(false)
 					.build(),
-				// Read-only, served from the live session's status.
+				// Read-only, served from the live session's status. Each notifies on change.
+				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
+					.nick("Connection status")
+					.blurb("Publish connection lifecycle: disconnected (retrying), connected, or failed (gave up)")
+					.read_only()
+					.build(),
 				glib::ParamSpecBoolean::builder("connected")
 					.nick("Connected")
-					.blurb("Whether the session is currently connected")
+					.blurb("Whether the session is currently connected (status == connected)")
 					.read_only()
 					.build(),
 				glib::ParamSpecString::builder("moq-version")
@@ -143,6 +148,11 @@ impl ObjectImpl for MoqSink {
 				glib::ParamSpecUInt64::builder("estimated-send-bitrate")
 					.nick("Estimated send bitrate")
 					.blurb("Estimated send bitrate in bits per second (congestion controller), 0 when unavailable")
+					.read_only()
+					.build(),
+				glib::ParamSpecUInt64::builder("estimated-recv-bitrate")
+					.nick("Estimated receive bitrate")
+					.blurb("Estimated receive bitrate in bits per second, 0 when unavailable")
 					.read_only()
 					.build(),
 			]
@@ -162,13 +172,15 @@ impl ObjectImpl for MoqSink {
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
 		match pspec.name() {
-			"connected" | "moq-version" | "estimated-send-bitrate" => {
+			"status" | "connected" | "moq-version" | "estimated-send-bitrate" | "estimated-recv-bitrate" => {
 				let state = self.state.lock().unwrap();
-				let status = state.as_ref().map(|s| s.session.status());
+				let session = state.as_ref().map(|s| &s.session);
 				match pspec.name() {
-					"connected" => status.is_some_and(|s| s.connected()).to_value(),
-					"moq-version" => status.and_then(|s| s.version()).to_value(),
-					"estimated-send-bitrate" => status.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
+					"status" => session.map(|s| s.status().status()).unwrap_or_default().to_value(),
+					"connected" => session.is_some_and(|s| s.status().connected()).to_value(),
+					"moq-version" => session.and_then(|s| s.status().version()).to_value(),
+					"estimated-send-bitrate" => session.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
+					"estimated-recv-bitrate" => session.map(|s| s.recv_bitrate()).unwrap_or(0).to_value(),
 					_ => unreachable!(),
 				}
 			}

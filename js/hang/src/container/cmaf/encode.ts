@@ -1,6 +1,6 @@
 /**
- * MP4 encoding utilities for creating fMP4 init and data segments.
- * Used by MSE to create init segments (ftyp+moov) and data segments (moof+mdat).
+ * MP4 encoding utilities for creating fMP4 init segments (ftyp+moov) and data
+ * segments (moof+mdat).
  */
 
 import {
@@ -215,7 +215,7 @@ function createAvc1Box(width: number, height: number, avcC: Uint8Array): Uint8Ar
 }
 
 /**
- * Creates an MSE-compatible initialization segment (ftyp + moov) for H.264 video.
+ * Creates an initialization segment (ftyp + moov) for H.264 video.
  *
  * @example
  * ```ts
@@ -228,8 +228,6 @@ function createAvc1Box(width: number, height: number, avcC: Uint8Array): Uint8Ar
  *   height: metadata.codedHeight,
  *   avcC: new Uint8Array(metadata.description),
  * });
- *
- * sourceBuffer.appendBuffer(initSegment);
  * ```
  */
 export function createVideoInitSegment(config: Catalog.VideoConfig): Uint8Array {
@@ -438,7 +436,7 @@ export function createVideoInitSegment(config: Catalog.VideoConfig): Uint8Array 
 }
 
 /**
- * Creates an MSE-compatible initialization segment (ftyp + moov) for audio.
+ * Creates an initialization segment (ftyp + moov) for audio.
  * Supports AAC (mp4a) and Opus codecs.
  */
 export function createAudioInitSegment(config: Catalog.AudioConfig): Uint8Array {
@@ -902,7 +900,7 @@ export interface DataSegmentOptions {
 }
 
 /**
- * Encode a raw frame into a moof+mdat segment for MSE.
+ * Encode a raw frame into a moof+mdat data segment.
  *
  * @param opts - Options for the data segment
  * @returns The encoded moof+mdat segment

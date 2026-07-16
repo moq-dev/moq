@@ -13,7 +13,7 @@ export function centerPlay(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.run((effect) => {
 		const paused = effect.get(watch.controls.paused);
-		const sourceError = effect.get(watch.backend.video.source.output.error);
+		const sourceError = effect.get(watch.video.source.out.error);
 		button.style.display = paused && !sourceError ? "" : "none";
 	});
 

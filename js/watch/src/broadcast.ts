@@ -75,14 +75,14 @@ type BroadcastOutput = {
 
 // A catalog source that (optionally) reloads automatically when live/offline.
 export class Broadcast {
-	readonly input: Readonlys<BroadcastInput>;
+	readonly in: Readonlys<BroadcastInput>;
 
-	readonly #output: BroadcastOutput = {
+	readonly #out: BroadcastOutput = {
 		status: new Signal<Status>("offline"),
 		active: new Signal<Moq.Broadcast.Consumer | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	// The set of announced paths on the connection, for cross-broadcast (`broadcast: ../`) references
 	// so `relativeBroadcast` can gate on whether a sibling is announced. `undefined` until the stream
@@ -97,7 +97,7 @@ export class Broadcast {
 	signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
-		this.input = {
+		this.in = {
 			connection: getter(props?.connection),
 			name: getter(props?.name ?? Path.empty()),
 			enabled: getter(props?.enabled ?? false),
@@ -118,9 +118,9 @@ export class Broadcast {
 		this.#announced.set(undefined);
 
 		if (!effect.get(this.#wantAnnounced)) return;
-		if (!effect.get(this.input.reload)) return;
+		if (!effect.get(this.in.reload)) return;
 
-		const conn = effect.get(this.input.connection);
+		const conn = effect.get(this.in.connection);
 		if (!conn || skipDiscovery(conn)) return;
 
 		const announced = conn.announced(Path.empty());
@@ -144,9 +144,9 @@ export class Broadcast {
 	// true (subscribe immediately) when the gate can't apply: reload is off, or the relay doesn't
 	// support discovery. Opens the announcement stream on first use.
 	#isPathAnnounced(effect: Effect, path: Moq.Path.Valid): boolean {
-		if (!effect.get(this.input.reload)) return true;
+		if (!effect.get(this.in.reload)) return true;
 
-		const conn = effect.get(this.input.connection);
+		const conn = effect.get(this.in.connection);
 		if (conn && skipDiscovery(conn)) return true;
 
 		this.#wantAnnounced.set(true);
@@ -161,19 +161,19 @@ export class Broadcast {
 	// the dead one. Driven off the announcement stream's updates rather than a membership flag, since
 	// a coalesced republish leaves the active set unchanged yet still emits a fresh update.
 	#runBroadcast(effect: Effect): void {
-		const enabled = effect.get(this.input.enabled);
+		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
-		const conn = effect.get(this.input.connection);
+		const conn = effect.get(this.in.connection);
 		if (!conn) return;
 
-		const name = effect.get(this.input.name);
+		const name = effect.get(this.in.name);
 
 		// No announcement gate: subscribe immediately (reload off, or the relay lacks discovery).
-		if (!effect.get(this.input.reload) || skipDiscovery(conn)) {
+		if (!effect.get(this.in.reload) || skipDiscovery(conn)) {
 			const broadcast = conn.consume(name);
 			effect.cleanup(() => broadcast.close());
-			effect.set(this.#output.active, broadcast, undefined);
+			effect.set(this.#out.active, broadcast, undefined);
 			return;
 		}
 
@@ -184,7 +184,7 @@ export class Broadcast {
 		effect.cleanup(() => {
 			current?.close();
 			current = undefined;
-			this.#output.active.set(undefined);
+			this.#out.active.set(undefined);
 		});
 
 		effect.spawn(async () => {
@@ -200,22 +200,22 @@ export class Broadcast {
 					if (current && !current.closedSignal.peek()) continue;
 					current?.close();
 					current = conn.consume(name);
-					this.#output.active.set(current);
+					this.#out.active.set(current);
 				} else {
 					current?.close();
 					current = undefined;
-					this.#output.active.set(undefined);
+					this.#out.active.set(undefined);
 				}
 			}
 		});
 	}
 
 	#runCatalog(effect: Effect): void {
-		const enabled = effect.get(this.input.enabled);
+		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
-		const catalogFormat = effect.get(this.input.catalogFormat);
-		const name = effect.get(this.input.name);
+		const catalogFormat = effect.get(this.in.catalogFormat);
+		const name = effect.get(this.in.name);
 		// Explicit override beats name-derived auto-detection. When neither is
 		// set we fall back to the default, keeping legacy names that have no
 		// extension working.
@@ -223,16 +223,16 @@ export class Broadcast {
 
 		if (format === "manual") {
 			// Mirror the caller-supplied catalog into the effective output.
-			const catalog = effect.get(this.input.catalog);
-			effect.set(this.#output.catalog, catalog, undefined);
-			this.#output.status.set(catalog ? "live" : "loading");
+			const catalog = effect.get(this.in.catalog);
+			effect.set(this.#out.catalog, catalog, undefined);
+			this.#out.status.set(catalog ? "live" : "loading");
 			return;
 		}
 
-		const broadcast = effect.get(this.output.active);
+		const broadcast = effect.get(this.out.active);
 		if (!broadcast) return;
 
-		this.#output.status.set("loading");
+		this.#out.status.set("loading");
 
 		const trackName = format === "hang" ? Catalog.TRACK : format === "hangz" ? Catalog.TRACK_COMPRESSED : "catalog";
 		const track = broadcast.track(trackName).subscribe({ priority: Catalog.PRIORITY.catalog });
@@ -260,16 +260,16 @@ export class Broadcast {
 					const update = await Promise.race([effect.cancel, fetchNext()]);
 					if (!update) break;
 
-					console.debug("received catalog", format, this.input.name.peek(), update);
+					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#output.catalog.set(update);
-					this.#output.status.set("live");
+					this.#out.catalog.set(update);
+					this.#out.status.set("live");
 				}
 			} catch (err) {
-				console.warn("error fetching catalog", this.input.name.peek(), err);
+				console.warn("error fetching catalog", this.in.name.peek(), err);
 			} finally {
-				this.#output.catalog.set(undefined);
-				this.#output.status.set("offline");
+				this.#out.catalog.set(undefined);
+				this.#out.status.set("offline");
 			}
 		});
 	}
@@ -286,19 +286,19 @@ export class Broadcast {
 	 * changes exactly like the catalog broadcast.
 	 */
 	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast.Consumer | undefined {
-		if (!rel) return effect.get(this.output.active);
+		if (!rel) return effect.get(this.out.active);
 
-		const base = effect.get(this.input.name);
+		const base = effect.get(this.in.name);
 		const resolved = Path.resolve(base, rel);
 
 		// A reference that walks back to the catalog's own broadcast (or resolves to
 		// the empty root, via excess `..`) is served by the catalog broadcast itself,
 		// avoiding a duplicate subscription on the same path.
-		if (resolved === base || resolved === Path.empty()) return effect.get(this.output.active);
+		if (resolved === base || resolved === Path.empty()) return effect.get(this.out.active);
 
-		if (!effect.get(this.input.enabled)) return undefined;
+		if (!effect.get(this.in.enabled)) return undefined;
 
-		const conn = effect.get(this.input.connection);
+		const conn = effect.get(this.in.connection);
 		if (!conn) return undefined;
 
 		if (!this.#isPathAnnounced(effect, resolved)) return undefined;

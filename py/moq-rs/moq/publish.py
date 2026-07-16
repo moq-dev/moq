@@ -103,6 +103,10 @@ class GroupProducer:
     def finish(self) -> None:
         self._inner.finish()
 
+    def abort(self, error_code: int) -> None:
+        """Abort this group with an application error code."""
+        self._inner.abort(error_code)
+
 
 class TrackProducer:
     """Track producer: write arbitrary byte payloads with no codec required.
@@ -134,6 +138,10 @@ class TrackProducer:
         """Start a new group; write frames into it, then finish()."""
         return GroupProducer(self._inner.append_group())
 
+    def create_group(self, sequence: int) -> GroupProducer:
+        """Create a group with an explicit sequence number."""
+        return GroupProducer(self._inner.create_group(sequence))
+
     def write_frame(self, payload: bytes, timestamp_us: int) -> None:
         """Write a single-frame group with a timestamp in microseconds."""
         self._inner.write_frame(payload, timestamp_us)
@@ -161,6 +169,10 @@ class TrackProducer:
 
     def finish(self) -> None:
         self._inner.finish()
+
+    def finish_at(self, final_sequence: int) -> None:
+        """Declare the exclusive final group sequence ahead of the live edge."""
+        self._inner.finish_at(final_sequence)
 
 
 class TrackRequest:

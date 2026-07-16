@@ -41,7 +41,7 @@ export function liveBadge(parent: Effect, watch: MoqWatch, state: UiState): HTML
 	parent.run((effect) => {
 		const url = effect.get(watch.connection.url);
 		const conn = effect.get(watch.connection.status);
-		const broadcast = effect.get(watch.broadcast.output.status);
+		const broadcast = effect.get(watch.broadcast.out.status);
 		const { variant, text: label } = deriveStatus(url, conn, broadcast);
 
 		// The center overlay already shows a prominent OFFLINE notice; don't
@@ -54,7 +54,7 @@ export function liveBadge(parent: Effect, watch: MoqWatch, state: UiState): HTML
 	parent.run((effect) => {
 		// Show the total added latency (jitter buffer + codec frame overhead),
 		// which is what the viewer actually experiences.
-		const total = effect.get(watch.backend.sync.output.buffer);
+		const total = effect.get(watch.sync.out.buffer);
 		latency.textContent = `+${formatMillis(total)} latency`;
 	});
 

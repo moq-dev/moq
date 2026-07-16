@@ -18,6 +18,8 @@ type clientConfig struct {
 	tlsSystemRootsSet  bool
 	tlsFingerprints    []string
 	tlsFingerprintsSet bool
+	tlsCert            *string
+	tlsKey             *string
 	bind               *string
 	publish            *OriginProducer
 	subscribe          *OriginProducer
@@ -52,6 +54,16 @@ func WithTLSFingerprints(fingerprints ...string) ClientOption {
 		c.tlsFingerprints = pins
 		c.tlsFingerprintsSet = true
 	}
+}
+
+// WithClientTLSCert sets the path to a PEM certificate chain for mTLS.
+func WithClientTLSCert(path string) ClientOption {
+	return func(c *clientConfig) { c.tlsCert = &path }
+}
+
+// WithClientTLSKey sets the path to a PEM private key for mTLS.
+func WithClientTLSKey(path string) ClientOption {
+	return func(c *clientConfig) { c.tlsKey = &path }
 }
 
 // WithBind sets the local UDP socket bind address (default "[::]:0").
@@ -115,6 +127,12 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	if cfg.tlsFingerprintsSet {
 		inner.SetTlsFingerprints(cfg.tlsFingerprints)
+	}
+	if cfg.tlsCert != nil {
+		inner.SetTlsCert(cfg.tlsCert)
+	}
+	if cfg.tlsKey != nil {
+		inner.SetTlsKey(cfg.tlsKey)
 	}
 	if cfg.bind != nil {
 		if err := inner.SetBind(*cfg.bind); err != nil {
@@ -194,10 +212,13 @@ func (c *Client) Session() *Session {
 	return c.session
 }
 
-// Close stops the client. In-flight sessions stay alive until their handles are
-// dropped or cancelled. Safe to call more than once.
+// Close gracefully shuts down the session and stops the client. Safe to call
+// more than once.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
+		if c.session != nil {
+			c.session.Shutdown()
+		}
 		if c.inner != nil {
 			c.inner.Cancel()
 		}

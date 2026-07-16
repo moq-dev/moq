@@ -466,88 +466,55 @@ fn generate_quiche_cert(
 // ── QuicheQuicRequest ───────────────────────────────────────────────
 
 /// A raw QUIC connection request via the quiche backend (not using HTTP/3).
-pub(crate) enum QuicheRequest {
-	Raw {
-		connection: web_transport_quiche::ez::Connection,
-		request: web_transport_quiche::proto::ConnectRequest,
-		response: web_transport_quiche::proto::ConnectResponse,
-	},
-	WebTransport {
-		request: web_transport_quiche::h3::Request,
-		alpns: Vec<&'static str>,
-	},
-}
+/// Accept a quiche QUIC connection, negotiate WebTransport or raw moq, and complete the
+/// handshake (a `200 OK` for WebTransport). Returns the established connection plus the
+/// request URL. The quiche backend exposes no client-cert identity, so the identity is
+/// always `None`; raw QUIC carries no request URL (the path rides the SETUP instead).
+pub(crate) async fn accept(
+	incoming: web_transport_quiche::ez::Incoming,
+	alpns: Vec<&'static str>,
+) -> Result<(
+	web_transport_quiche::Connection,
+	Option<Url>,
+	Option<crate::tls::PeerIdentity>,
+)> {
+	tracing::debug!(ip = %incoming.peer_addr(), "accepting via quiche");
 
-impl QuicheRequest {
-	pub async fn accept(incoming: web_transport_quiche::ez::Incoming, alpns: Vec<&'static str>) -> Result<Self> {
-		tracing::debug!(ip = %incoming.peer_addr(), "accepting via quiche");
+	// Accept the connection and wait for it to be established
+	let conn = incoming.accept().await?;
 
-		// Accept the connection and wait for it to be established
-		let conn = incoming.accept().await?;
+	// Get the negotiated ALPN from the established connection
+	let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
+	let alpn = std::str::from_utf8(&alpn)?;
+	tracing::debug!(ip = %conn.peer_addr(), ?alpn, "accepted via quiche");
 
-		// Get the negotiated ALPN from the established connection
-		let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
-		let alpn = std::str::from_utf8(&alpn)?;
-		tracing::debug!(ip = %conn.peer_addr(), ?alpn, "accepted via quiche");
+	match alpn {
+		web_transport_quiche::ALPN => {
+			// WebTransport over HTTP/3
+			let request = web_transport_quiche::h3::Request::accept(conn)
+				.await
+				.map_err(Error::AcceptRequest)?;
+			let url = Some(request.url.clone());
 
-		match alpn {
-			web_transport_quiche::ALPN => {
-				// WebTransport over HTTP/3
-				let request = web_transport_quiche::h3::Request::accept(conn)
-					.await
-					.map_err(Error::AcceptRequest)?;
-				Ok(Self::WebTransport { request, alpns })
+			let mut response = web_transport_quiche::proto::ConnectResponse::OK;
+			// Pick the first sub-protocol that we actually support.
+			// This is the WebTransport equivalent of ALPN negotiation.
+			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
+				response = response.with_protocol(protocol);
 			}
-			// Recognize any moq ALPN this server actually offered (its configured versions),
-			// not the global default set, so opt-in / work-in-progress versions (e.g.
-			// moq-lite-06-wip) that are deliberately absent from `moq_net::ALPNS` still work.
-			alpn if alpns.contains(&alpn) => Ok(Self::Raw {
-				connection: conn,
-				request: ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap()),
-				response: web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn),
-			}),
-			_ => Err(Error::UnsupportedAlpn(alpn.to_string())),
+			let session = request.respond(response).await.map_err(Error::Accept)?;
+			Ok((session, url, None))
 		}
-	}
-	/// Accept the session, wrapping as a raw WebTransport-compatible connection.
-	pub async fn ok(self) -> std::result::Result<web_transport_quiche::Connection, web_transport_quiche::ServerError> {
-		match self {
-			QuicheRequest::Raw {
-				connection,
-				request,
-				response,
-			} => Ok(web_transport_quiche::Connection::raw(connection, request, response)),
-			QuicheRequest::WebTransport { request, alpns } => {
-				let mut response = web_transport_quiche::proto::ConnectResponse::OK;
-				// Pick the first sub-protocol that we actually support.
-				// This is the WebTransport equivalent of ALPN negotiation.
-				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
-					response = response.with_protocol(protocol);
-				}
-				request.respond(response).await
-			}
+		// Recognize any moq ALPN this server actually offered (its configured versions),
+		// not the global default set, so opt-in / work-in-progress versions (e.g.
+		// moq-lite-06-wip) that are deliberately absent from `moq_net::ALPNS` still work.
+		alpn if alpns.contains(&alpn) => {
+			let request = ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap());
+			let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
+			// Raw QUIC carries no request URL; the path rides the SETUP.
+			let session = web_transport_quiche::Connection::raw(conn, request, response);
+			Ok((session, None, None))
 		}
-	}
-
-	/// Returns the URL for this connection.
-	pub fn url(&self) -> Option<&Url> {
-		match self {
-			QuicheRequest::Raw { .. } => None,
-			QuicheRequest::WebTransport { request, .. } => Some(&request.url),
-		}
-	}
-
-	/// Reject the session with a status code.
-	pub async fn reject(
-		self,
-		status: web_transport_quiche::http::StatusCode,
-	) -> std::result::Result<(), web_transport_quiche::ServerError> {
-		match self {
-			QuicheRequest::Raw { connection, .. } => {
-				let _: () = connection.close(status.as_u16().into(), status.as_str());
-				Ok(())
-			}
-			QuicheRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
-		}
+		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),
 	}
 }

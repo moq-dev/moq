@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.3...moq-cli-v0.8.4) - 2026-07-15
+
+### Other
+
+- rewrite export::Broadcaster as an owned poll-driven state machine ([#2258](https://github.com/moq-dev/moq/pull/2258))
+
 ## [0.8.3](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.2...moq-cli-v0.8.3) - 2026-07-12
 
 ### Added

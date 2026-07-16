@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.18](https://github.com/moq-dev/moq/compare/moq-net-v0.1.17...moq-net-v0.1.18) - 2026-07-15
+
+### Fixed
+
+- *(moq-net)* resolve reordered track aliases ([#2262](https://github.com/moq-dev/moq/pull/2262))
+
 ## [0.1.17](https://github.com/moq-dev/moq/compare/moq-net-v0.1.16...moq-net-v0.1.17) - 2026-07-12
 
 ### Other

@@ -35,9 +35,9 @@ const $ = <T extends HTMLElement>(id: string): T => {
 	return el as T;
 };
 
-// The component builds its Broadcast in the constructor, so `.broadcast` is ready
-// as soon as the element upgrades. `broadcast.video.hd` and `broadcast.audio` are
-// the encoders whose signals we drive below.
+// The component builds its encoders in the constructor, so they're ready as soon as
+// the element upgrades. `publish.video`/`publish.audio` are the encoders whose signals
+// we drive below.
 const publish = $<MoqPublish>("publish");
 publish.url = RELAY_URL;
 
@@ -132,7 +132,7 @@ function cameraConstraints(target: VideoTarget): Video.Constraints | undefined {
 	return Object.keys(constraints).length ? constraints : undefined;
 }
 
-function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.EncoderConfig {
+function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.Config {
 	const br = effect.get(bitrateKbps);
 	const kf = effect.get(keyframeMs);
 	return {
@@ -147,15 +147,15 @@ function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.Encod
 // Compose the WebCodecs/MoQ video encoder config and push it onto the HD
 // rendition. Undefined fields are omitted, so the encoder auto-sizes them.
 ui.run((effect) => {
-	publish.broadcast.video.hd.config.set(encoderConfig(effect, readVideoTarget(effect)));
+	publish.video.config.set(encoderConfig(effect, readVideoTarget(effect)));
 });
 
-// Request the selected resolution from the camera itself, not just cap the encoder. publish.video
-// holds the active Camera source (undefined for screen/file); its constraints re-acquire the track
-// on change. getUserMedia uses `ideal`, so a camera that can't reach the target falls back to its
-// best (the green "actual" readout shows what it gave).
+// Request the selected resolution from the camera itself, not just cap the encoder.
+// publish.sources.video holds the active Camera source (undefined for screen/file); its constraints
+// re-acquire the track on change. getUserMedia uses `ideal`, so a camera that can't reach the target
+// falls back to its best (the green "actual" readout shows what it gave).
 ui.run((effect) => {
-	const source = effect.get(publish.video);
+	const source = effect.get(publish.sources.video);
 	if (!(source instanceof Source.Camera)) return;
 
 	effect.set(source.constraints, cameraConstraints(readVideoTarget(effect)));
@@ -163,15 +163,15 @@ ui.run((effect) => {
 
 // Audio general settings (volume gain, output sample rate, channel mix).
 ui.run((effect) => {
-	publish.broadcast.audio.volume.set(effect.get(volume));
-	publish.broadcast.audio.sampleRate.set(effect.get(sampleRate));
-	publish.broadcast.audio.channelCount.set(effect.get(channelCount));
+	publish.audio.volume.set(effect.get(volume));
+	publish.audio.sampleRate.set(effect.get(sampleRate));
+	publish.audio.channelCount.set(effect.get(channelCount));
 });
 
 // Mic processing constraints go to the capture itself (getUserMedia re-acquires the track on
-// change). publish.audio holds the active Microphone source (undefined for screen/file).
+// change). publish.sources.audio holds the active Microphone source (undefined for screen/file).
 ui.run((effect) => {
-	const source = effect.get(publish.audio);
+	const source = effect.get(publish.sources.audio);
 	if (!source || !("constraints" in source)) return;
 
 	const constraints = {
@@ -200,7 +200,7 @@ ui.run((effect) => {
 		useinbandfec: effect.get(opusFec),
 		usedtx: effect.get(opusDtx),
 	};
-	publish.broadcast.audio.codec.set(config);
+	publish.audio.codec.set(config);
 });
 
 // ---------------------------------------------------------------------------
@@ -341,7 +341,7 @@ const setActual = (id: string, value: string | undefined) => {
 
 // Video: the resolved encoder config (codec / resolution / fps / bitrate).
 ui.run((effect) => {
-	const v = effect.get(publish.broadcast.video.hd.resolved);
+	const v = effect.get(publish.video.out.resolved);
 	setActual("codec-actual", v?.codec);
 	setActual("resolution-actual", v?.width && v?.height ? `${v.width}×${v.height}` : undefined);
 	setActual("framerate-actual", v?.framerate ? formatFps(v.framerate) : undefined);
@@ -365,7 +365,7 @@ ui.run((effect) => {
 
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).
 ui.run((effect) => {
-	const a = effect.get(publish.broadcast.audio.config);
+	const a = effect.get(publish.audio.config);
 	setActual("audiocodec-actual", a?.codec);
 	setActual("samplerate-actual", a?.sampleRate ? `${a.sampleRate} Hz` : undefined);
 	setActual("channels-actual", a?.numberOfChannels ? String(a.numberOfChannels) : undefined);
@@ -451,7 +451,7 @@ $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 // is the capture rate feeding the encoder (a good proxy for output fps).
 let frames = 0;
 viz.run((effect) => {
-	if (effect.get(publish.broadcast.video.frame)) frames++;
+	if (effect.get(publish.capture.out.frame)) frames++;
 });
 
 let prevFrames = 0;

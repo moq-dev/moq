@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 rust-version.workspace = true
 
@@ -18,7 +18,7 @@ name = "moq"
 path = "src/main.rs"
 
 [features]
-default = ["iroh", "noq", "websocket", "nvenc", "vaapi", "nvdec"]
+default = ["iroh", "quinn", "websocket", "nvenc", "vaapi", "nvdec", "pipewire"]
 iroh = ["moq-native/iroh"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
@@ -38,10 +38,14 @@ transcode = ["dep:moq-transcode", "dep:moq-video"]
 # NVENC / VAAPI / NVDEC hardware codecs for `capture` (Linux), on by default. Each
 # just turns on the matching moq-video feature, and only bites when `capture` pulls
 # in moq-video. For a `capture` build with no CUDA / libva system deps, drop them, e.g.
-#   cargo build -p moq-cli --no-default-features --features "iroh noq websocket capture"
+#   cargo build -p moq-cli --no-default-features --features "iroh quinn websocket capture"
 nvenc = ["moq-video?/nvenc", "moq-transcode?/nvenc"]
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 nvdec = ["moq-video?/nvdec", "moq-transcode?/nvdec"]
+# Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
+# on by default like the hardware codecs above and trimmable the same way. Only
+# bites when `capture` pulls in moq-video; links libpipewire-0.3 at build time.
+pipewire = ["moq-video?/pipewire"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

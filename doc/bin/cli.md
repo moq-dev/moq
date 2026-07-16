@@ -125,12 +125,71 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang import 
 
 # Pick a codec (default h264). h265 is hardware-only:
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --codec h265
+
+# Capture a display instead of a camera:
+moq --client-connect https://relay.example.com/anon --broadcast screen.hang import capture --display --no-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders are compiled in by
-default and link the CUDA / libva system libraries. To build `capture` without
-them (software openh264 + V4L2 capture only, no CUDA/libva dependency), drop the
-default features:
+### Pick a source
+
+The video source is one of `--camera`, `--display`, `--window`, or `--app`;
+without one, `capture` opens the default camera. `--camera` and `--display` also
+take no value, meaning "the default one".
+
+`moq devices` lists every source and the id each flag expects, so you can read an
+id off it and paste it straight in. It talks only to the local hardware, so it is
+the one verb that takes no MoQ side:
+
+```bash
+moq devices
+```
+
+```
+Cameras:
+  6C707041-05AC-0010-000D-000000000001  FaceTime HD Camera
+
+Displays:
+  0  Display 1 (3456x2234)
+
+Windows:
+  39193  Safari - MoQ Demo (1200x800)
+
+Applications:
+  com.apple.Safari  Safari
+
+Microphones:
+  * MacBook Pro Microphone
+```
+
+```bash
+# A single window, followed as it moves and resizes (macOS only):
+moq --client-connect https://relay.example.com/anon --broadcast win.hang \
+    import capture --window 39193 --no-audio
+
+# Every window of an application, including ones opened later (macOS only):
+moq --client-connect https://relay.example.com/anon --broadcast app.hang \
+    import capture --app com.apple.Safari --no-audio
+
+# A specific display, without the mouse cursor:
+moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
+    import capture --display 1 --no-cursor --no-audio
+```
+
+The audio source is `--microphone` or `--system-audio`, defaulting to the default
+microphone. `--system-audio` captures everything the machine is playing (minus
+this process, so playing the broadcast back doesn't feed itself), which is what
+you usually want next to a screen share:
+
+```bash
+# Share a screen with its sound (macOS only):
+moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
+    import capture --display --system-audio
+```
+
+On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
+screen capture are compiled in by default and link the CUDA / libva / libpipewire
+system libraries. To build `capture` without them (software openh264 + V4L2
+camera capture only, no system library dependency), drop the default features:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
@@ -138,15 +197,37 @@ cargo build --release -p moq-cli --no-default-features \
 ```
 
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
-Linux, Media Foundation on Windows). The codec is chosen with `--codec`
+Linux, Media Foundation on Windows). `--display` captures a screen instead:
+ScreenCaptureKit on macOS, DXGI Desktop Duplication on Windows, and
+xdg-desktop-portal + PipeWire on Linux (Wayland and X11), where the desktop's
+picker dialog chooses the screen (so the display id is ignored there).
+`--window` and `--app` are macOS-only, and `--no-cursor` applies to all three.
+On macOS these capture at the logical resolution, i.e. what the screen looks like
+to its owner rather than its native pixels: a 2x retina display shares as
+1710x1106, not 3420x2214, which keeps the derived bitrate sane. Pass
+`--width`/`--height` to capture native pixels instead.
+The Linux screen backend links libpipewire and
+is behind the default-on `pipewire` feature; drop it (like the codecs above) for
+a build without the dependency. The codec is chosen with `--codec`
 (`h264` default, or `h265`). For H.264 it picks a hardware encoder
 (VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
 is present, falling back to the built-in software encoder (openh264); force either
 with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
 Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
 device path (Linux) or name (a friendly-name substring on Windows, the
-AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
-ALSA) and encodes Opus.
+AVFoundation `uniqueID` on macOS). Microphone capture uses cpal (CoreAudio /
+WASAPI / ALSA) and encodes Opus. `--system-audio` is macOS-only: there is no
+loopback input device, so it goes through ScreenCaptureKit (the same API as
+screen capture, and the same Screen Recording permission) rather than cpal.
+
+`--bitrate` is a ceiling rather than a fixed rate. When publishing with
+`--client-connect`, the video encoder follows the connection's congestion
+estimate: it drops below the ceiling as soon as the uplink tightens, and climbs
+back gradually once it clears, so a degrading network costs picture quality
+instead of stalling the stream. It never encodes above `--bitrate`. Encoders that
+can't retune while running (VAAPI today) hold the configured rate and log a
+warning. Without `--client-connect` there is no estimate to follow, so the
+configured rate is used as-is.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
 

@@ -433,9 +433,9 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.state.lock().unwrap();
 		let mut state = guard.take().ok_or(MoqError::Closed)?;
-		// Close the broadcast first so the clean end reaches subscribers even if
+		// Finish the broadcast first so the clean end reaches subscribers even if
 		// finalizing the catalog fails.
-		state.broadcast.close();
+		state.broadcast.finish();
 		state.catalog.finish()?;
 		Ok(())
 	}
@@ -680,6 +680,21 @@ impl MoqTrackProducer {
 		}))
 	}
 
+	/// Create a group with an explicit sequence number.
+	///
+	/// Use this for sparse or replayed tracks. [`append_group`](Self::append_group)
+	/// remains the convenient live-stream path.
+	pub fn create_group(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
+		let group = track.create_group(moq_net::group::Info { sequence })?;
+		Ok(Arc::new(MoqGroupProducer {
+			sequence: group.sequence,
+			inner: std::sync::Mutex::new(Some(group)),
+		}))
+	}
+
 	/// Write a single-frame group with a presentation timestamp in microseconds.
 	///
 	/// Raw tracks default to a microsecond timescale. Custom timescales may round
@@ -716,11 +731,30 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
+	/// Release this producer after declaring the track's final sequence.
+	///
+	/// When [`finish_at`](Self::finish_at) already declared a future boundary,
+	/// this preserves that boundary instead of replacing it with the current edge.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut track = guard.take().ok_or(MoqError::Closed)?;
-		track.finish()?;
+		match track.finish() {
+			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
+			Err(err) => Err(err.into()),
+		}
+	}
+
+	/// Declare the exclusive final group sequence, possibly ahead of the live edge.
+	///
+	/// Groups below `final_sequence` may still be created afterwards. Groups at or
+	/// above it are rejected. The producer remains open for groups below the boundary;
+	/// call [`finish`](Self::finish) after producing the remaining groups.
+	pub fn finish_at(&self, final_sequence: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
+		track.finish_at(final_sequence)?;
 		Ok(())
 	}
 }
@@ -765,6 +799,16 @@ impl MoqGroupProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let mut group = guard.take().ok_or_else(|| MoqError::Closed)?;
 		group.finish()?;
+		Ok(())
+	}
+
+	/// Abort this group with an application error code.
+	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
+		let mut guard = self.inner.lock().unwrap();
+		let mut group = guard.take().ok_or(MoqError::Closed)?;
+		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
 }

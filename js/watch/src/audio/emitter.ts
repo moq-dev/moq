@@ -24,12 +24,12 @@ type EmitterOutput = {
 export class Emitter {
 	source: Decoder;
 
-	readonly input: Readonlys<EmitterInput>;
+	readonly in: Readonlys<EmitterInput>;
 
-	readonly #output: EmitterOutput = {
+	readonly #out: EmitterOutput = {
 		enabled: new Signal<boolean>(false),
 	};
-	readonly output = readonlys(this.#output);
+	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
 
@@ -38,7 +38,7 @@ export class Emitter {
 
 	constructor(source: Decoder, props?: Inputs<EmitterInput>) {
 		this.source = source;
-		this.input = {
+		this.in = {
 			volume: getter(props?.volume ?? 0.5),
 			muted: getter(props?.muted ?? false),
 			paused: getter(props?.paused ?? false),
@@ -46,15 +46,15 @@ export class Emitter {
 
 		// Only download while playing audible audio. Pausing or muting stops it.
 		this.#signals.run((effect) => {
-			const enabled = !effect.get(this.input.paused) && !effect.get(this.input.muted);
-			this.#output.enabled.set(enabled);
+			const enabled = !effect.get(this.in.paused) && !effect.get(this.in.muted);
+			this.#out.enabled.set(enabled);
 		});
 
 		this.#signals.run((effect) => {
-			const root = effect.get(this.source.output.root);
+			const root = effect.get(this.source.out.root);
 			if (!root) return;
 
-			const gain = new GainNode(root.context, { gain: effect.get(this.input.volume) });
+			const gain = new GainNode(root.context, { gain: effect.get(this.in.volume) });
 			root.connect(gain);
 
 			effect.set(this.#gain, gain);
@@ -62,7 +62,7 @@ export class Emitter {
 			effect.run((inner) => {
 				// We only connect/disconnect when enabled to save power.
 				// Otherwise the worklet keeps running in the background returning 0s.
-				const enabled = inner.get(this.#output.enabled);
+				const enabled = inner.get(this.#out.enabled);
 				if (!enabled) return;
 
 				gain.connect(root.context.destination); // speakers
@@ -77,7 +77,7 @@ export class Emitter {
 			// Cancel any scheduled transitions on change.
 			effect.cleanup(() => gain.gain.cancelScheduledValues(gain.context.currentTime));
 
-			const volume = effect.get(this.input.volume);
+			const volume = effect.get(this.in.volume);
 			if (volume < MIN_GAIN) {
 				gain.gain.exponentialRampToValueAtTime(MIN_GAIN, gain.context.currentTime + FADE_TIME);
 				gain.gain.setValueAtTime(0, gain.context.currentTime + FADE_TIME + 0.01);

@@ -1,11 +1,11 @@
-//! Microphone capture via [`cpal`] (pure-Rust: CoreAudio / WASAPI / ALSA).
+//! Audio capture: a microphone via [`cpal`] (pure-Rust: CoreAudio / WASAPI /
+//! ALSA), or macOS system audio via ScreenCaptureKit.
 //!
-//! [`Microphone`] opens an input device and yields interleaved-`f32` PCM
-//! [`Frame`]s, ready to feed an [`AudioProducer`] with
-//! an [`EncoderInput`] of `format = AudioFormat::F32`.
+//! [`Source`] picks between them and [`publish_capture`] is the turnkey entry
+//! point: it yields interleaved-`f32` PCM and publishes it as an Opus track.
 //! Encoding stays on `unsafe-libopus`, so audio never touches ffmpeg.
 //!
-//! The cpal callback (a realtime thread) forwards buffers through an async
+//! Both backends deliver buffers from a realtime callback through an async
 //! channel that the on-demand capture loop awaits, so dropping the publish
 //! future (e.g. on Ctrl+C) cancels the read and releases the device.
 
@@ -18,35 +18,112 @@ use crate::{AudioError, AudioFormat, AudioProducer, EncoderInput, EncoderOutput,
 
 mod permission;
 
+#[cfg(target_os = "macos")]
+mod screencapture;
+
+/// Where the audio comes from.
+///
+/// The identifiers come from [`devices`]; each listed device's `source()` builds
+/// the matching variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Source {
+	/// An audio input device, by the name [`devices`] reports. `None` opens the
+	/// system default input.
+	Microphone(Option<String>),
+
+	/// System (desktop) audio: everything the machine is playing, minus this
+	/// process. macOS only, and it needs the Screen Recording permission, since
+	/// that's the API Apple exposes it through.
+	System,
+}
+
+/// The default microphone, matching the historical `Config::default()`.
+impl Default for Source {
+	fn default() -> Self {
+		Self::Microphone(None)
+	}
+}
+
 /// How long `open` waits for the first buffer before assuming the mic never
 /// started (e.g. permission denied), mirroring the camera path's first-frame
 /// timeout. Without this the capture loop hangs silently forever when macOS TCC
 /// denies microphone access.
 const FIRST_BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Microphone capture configuration. All fields are hints; the backend picks
-/// the closest supported mode and the [`AudioProducer`]
-/// resamples to the codec rate anyway.
+/// Audio capture configuration. All fields are hints; the backend picks the
+/// closest supported mode and the [`AudioProducer`] resamples to the codec rate
+/// anyway.
+///
+/// `#[non_exhaustive]`: construct via [`Config::default`] and set fields, so
+/// new options can be added without breaking callers.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Input device name. `None` opens the system default input.
-	pub device: Option<String>,
+	/// What to capture.
+	pub source: Source,
 	pub sample_rate: Option<u32>,
 	pub channels: Option<u32>,
 }
 
-/// An open microphone, read frame-by-frame via [`read`](Self::read).
+/// An open capture source, read buffer-by-buffer via [`read`](Self::read).
+///
+/// Private: [`publish_capture`] is the entry point, so the per-source backends
+/// stay an implementation detail.
+enum Input {
+	Microphone(Microphone),
+	#[cfg(target_os = "macos")]
+	System(screencapture::SystemAudio),
+}
+
+impl Input {
+	/// The format `config` will capture at, without opening the device, so the
+	/// catalog can be populated before anything turns on.
+	fn format(config: &Config) -> Result<(u32, u32), AudioError> {
+		match &config.source {
+			Source::Microphone(device) => Microphone::format(device.as_deref(), config),
+			#[cfg(target_os = "macos")]
+			Source::System => Ok(screencapture::SystemAudio::format(config.sample_rate, config.channels)),
+			#[cfg(not(target_os = "macos"))]
+			Source::System => Err(AudioError::Unsupported(
+				"system audio capture is only supported on macOS".into(),
+			)),
+		}
+	}
+
+	async fn open(config: &Config) -> Result<Self, AudioError> {
+		match &config.source {
+			Source::Microphone(device) => Ok(Self::Microphone(Microphone::open(device.as_deref(), config).await?)),
+			#[cfg(target_os = "macos")]
+			Source::System => Ok(Self::System(
+				screencapture::SystemAudio::open(config.sample_rate, config.channels).await?,
+			)),
+			#[cfg(not(target_os = "macos"))]
+			Source::System => Err(AudioError::Unsupported(
+				"system audio capture is only supported on macOS".into(),
+			)),
+		}
+	}
+
+	/// Await the next buffer of interleaved `f32` PCM, or `None` once the source
+	/// stops. Cancel-safe: drop the future to release the device.
+	async fn read(&mut self) -> Option<Vec<f32>> {
+		match self {
+			Self::Microphone(mic) => mic.read().await,
+			#[cfg(target_os = "macos")]
+			Self::System(system) => system.read().await,
+		}
+	}
+}
+
+/// An open microphone.
 ///
 /// Holds the live `cpal` stream, which is `!Send`, so build and use it on a
 /// single task. Buffers arrive from the realtime callback over an async channel.
-pub struct Microphone {
+struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
 	rx: mpsc::UnboundedReceiver<Vec<f32>>,
-	sample_rate: u32,
-	channels: u32,
-	frames_read: u64,
 	/// The first buffer, captured during `open` to surface a permission failure
 	/// as an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
@@ -55,18 +132,18 @@ pub struct Microphone {
 impl Microphone {
 	/// The device's negotiated format `(sample_rate, channels)` without opening
 	/// a stream, so the catalog can be populated before the mic is turned on.
-	pub fn format(config: &Config) -> Result<(u32, u32), AudioError> {
-		let (_, _, stream_config) = resolve(config)?;
+	fn format(device: Option<&str>, config: &Config) -> Result<(u32, u32), AudioError> {
+		let (_, _, stream_config) = resolve(device, config)?;
 		Ok((stream_config.sample_rate, stream_config.channels as u32))
 	}
 
-	/// Open (and start) the microphone described by `config`.
-	pub async fn open(config: &Config) -> Result<Self, AudioError> {
+	/// Open (and start) the requested microphone.
+	async fn open(selector: Option<&str>, config: &Config) -> Result<Self, AudioError> {
 		// Fail fast on a denied/restricted mic (macOS TCC) instead of opening a
 		// stream that silently delivers nothing. A no-op on other platforms.
 		permission::ensure_microphone_access().await?;
 
-		let (device, sample_format, stream_config) = resolve(config)?;
+		let (device, sample_format, stream_config) = resolve(selector, config)?;
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
@@ -124,55 +201,25 @@ impl Microphone {
 		Ok(Self {
 			_stream: stream,
 			rx,
-			sample_rate,
-			channels,
-			frames_read: 0,
 			pending: Some(pending),
 		})
 	}
 
-	pub fn sample_rate(&self) -> u32 {
-		self.sample_rate
-	}
-
-	pub fn channels(&self) -> u32 {
-		self.channels
-	}
-
-	/// Await the next buffer of PCM, or `None` once the stream stops. The
-	/// returned [`Frame`] holds interleaved little-endian `f32` samples (i.e.
-	/// `AudioFormat::F32`). Cancel-safe: drop the future to stop reading.
-	pub async fn read(&mut self) -> Option<Frame> {
-		let samples = match self.pending.take() {
-			Some(samples) => samples,
-			None => self.rx.recv().await?, // stream dropped / device gone
-		};
-		Some(self.frame_from(samples))
-	}
-
-	/// Build a timestamped [`Frame`] from a buffer of interleaved `f32` samples,
-	/// advancing the read cursor so consecutive frames carry monotonic PTS.
-	fn frame_from(&mut self, samples: Vec<f32>) -> Frame {
-		let timestamp_us = self.frames_read * 1_000_000 / self.sample_rate as u64;
-		self.frames_read += (samples.len() / self.channels.max(1) as usize) as u64;
-
-		let mut bytes = Vec::with_capacity(samples.len() * 4);
-		for sample in &samples {
-			bytes.extend_from_slice(&sample.to_le_bytes());
-		}
-
-		Frame {
-			timestamp_us,
-			data: bytes.into(),
+	/// Await the next buffer of interleaved `f32` PCM, or `None` once the stream
+	/// stops. Cancel-safe: drop the future to stop reading.
+	async fn read(&mut self) -> Option<Vec<f32>> {
+		match self.pending.take() {
+			Some(samples) => Some(samples),
+			None => self.rx.recv().await, // stream dropped / device gone
 		}
 	}
 }
 
-/// Capture the microphone on demand and publish it as an Opus moq track named
+/// Capture audio on demand and publish it as an Opus moq track named
 /// `track_name`.
 ///
-/// The catalog rendition is registered up front from the device's reported
-/// format (no capture needed), but the mic only opens while a subscriber is
+/// The catalog rendition is registered up front from the source's reported
+/// format (no capture needed), but the device only opens while a subscriber is
 /// listening and is released when the last one leaves. On resume the timeline
 /// re-anchors (via [`AudioProducer::reset_epoch`]) so the idle gap lands in the
 /// PTS, keeping audio aligned with a wall-clock video track.
@@ -180,7 +227,7 @@ impl Microphone {
 /// The capture-side settings come from [`Config`]; the encode-side settings
 /// (codec, bitrate, frame duration) from [`EncoderOutput`]. Returns when the
 /// broadcast is dropped or the capture loop fails.
-pub async fn publish_microphone(
+pub async fn publish_capture(
 	mut broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	config: Config,
@@ -188,7 +235,7 @@ pub async fn publish_microphone(
 	output: EncoderOutput,
 	clock: moq_mux::Clock,
 ) -> Result<(), AudioError> {
-	let (sample_rate, channels) = Microphone::format(&config)?;
+	let (sample_rate, channels) = Input::format(&config)?;
 	let input = EncoderInput {
 		format: AudioFormat::F32,
 		sample_rate,
@@ -209,13 +256,13 @@ pub async fn publish_microphone(
 	result
 }
 
-/// Async capture/encode loop: open the mic while a listener is subscribed,
+/// Async capture/encode loop: open the source while a listener is subscribed,
 /// release it when the last one leaves, and re-anchor the timeline on resume so
 /// the idle gap lands in the PTS.
 ///
 /// Cancel safety: every wait is a real `.await` (a buffer read or a demand
-/// transition), so dropping this future (e.g. on Ctrl+C) drops the [`Microphone`]
-/// and stops the cpal stream. No blocking thread is left behind.
+/// transition), so dropping this future (e.g. on Ctrl+C) drops the [`Input`] and
+/// stops the underlying stream. No blocking thread is left behind.
 async fn capture_loop(
 	producer: &mut AudioProducer,
 	track: &moq_net::track::Producer,
@@ -229,36 +276,35 @@ async fn capture_loop(
 			return Ok(());
 		}
 
-		let mut mic = Microphone::open(config).await?;
+		let mut input = Input::open(config).await?;
 
 		loop {
 			// Race the next buffer against the last listener leaving so we release
-			// the mic promptly. `biased` checks demand first so an unwatched track
+			// the device promptly. `biased` checks demand first so an unwatched track
 			// stops before reading another buffer.
-			let frame = tokio::select! {
+			let samples = tokio::select! {
 				biased;
 				res = track.unused() => {
 					if let Err(err) = res {
 						log_track_ended(err);
 						return Ok(());
 					}
-					break; // no listeners: release the mic, then wait for one
+					break; // no listeners: release the device, then wait for one
 				}
-				frame = mic.read() => frame,
+				samples = input.read() => samples,
 			};
 
-			let Some(mut frame) = frame else { break }; // device stopped producing samples
+			let Some(samples) = samples else { break }; // device stopped producing samples
 
 			// Stamp from the shared clock (including any idle gap) so the producer's
 			// epoch re-anchors and audio stays aligned with the video track.
-			frame.timestamp_us = clock.micros();
-			producer.write(&frame)?;
+			producer.write(&frame(samples, clock.micros()))?;
 		}
 
-		// Release the mic and re-anchor so the next frame after resume reflects the gap.
-		drop(mic);
+		// Release the device and re-anchor so the next frame after resume reflects the gap.
+		drop(input);
 		producer.reset_epoch();
-		tracing::info!("no listeners: released microphone");
+		tracing::info!("no listeners: released audio capture");
 	}
 }
 
@@ -279,14 +325,51 @@ fn forward(tx: &mpsc::UnboundedSender<Vec<f32>>, samples: Vec<f32>) {
 	let _ = tx.send(samples);
 }
 
-/// Resolve the input device and its negotiated stream config from `config`.
-fn resolve(config: &Config) -> Result<(cpal::Device, cpal::SampleFormat, cpal::StreamConfig), AudioError> {
+/// An audio input reported by [`devices`].
+#[derive(Clone, Debug)]
+pub struct Device {
+	/// The device name, which is also its identifier: pass it to
+	/// [`Source::Microphone`].
+	pub name: String,
+	/// Whether this is the system default input.
+	pub default: bool,
+}
+
+impl Device {
+	/// The [`Source`] that captures this device.
+	pub fn source(&self) -> Source {
+		Source::Microphone(Some(self.name.clone()))
+	}
+}
+
+/// List the audio inputs.
+pub fn devices() -> Result<Vec<Device>, AudioError> {
 	let host = cpal::default_host();
-	let device = match &config.device {
+	let default = host.default_input_device().map(|d| d.to_string());
+	Ok(host
+		.input_devices()
+		.map_err(cpal_err)?
+		.map(|device| {
+			let name = device.to_string();
+			Device {
+				default: Some(&name) == default.as_ref(),
+				name,
+			}
+		})
+		.collect())
+}
+
+/// Resolve the input device and its negotiated stream config from `config`.
+fn resolve(
+	selector: Option<&str>,
+	config: &Config,
+) -> Result<(cpal::Device, cpal::SampleFormat, cpal::StreamConfig), AudioError> {
+	let host = cpal::default_host();
+	let device = match selector {
 		Some(name) => host
 			.input_devices()
 			.map_err(cpal_err)?
-			.find(|d| d.to_string() == *name)
+			.find(|d| d.to_string() == name)
 			.ok_or_else(|| AudioError::Unsupported(format!("input device {name:?} not found")))?,
 		None => host
 			.default_input_device()
@@ -303,6 +386,19 @@ fn resolve(config: &Config) -> Result<(cpal::Device, cpal::SampleFormat, cpal::S
 		stream_config.channels = channels as u16;
 	}
 	Ok((device, sample_format, stream_config))
+}
+
+/// Pack interleaved `f32` samples into a timestamped [`Frame`] of
+/// little-endian bytes (i.e. `AudioFormat::F32`).
+fn frame(samples: Vec<f32>, timestamp_us: u64) -> Frame {
+	let mut bytes = Vec::with_capacity(samples.len() * size_of::<f32>());
+	for sample in &samples {
+		bytes.extend_from_slice(&sample.to_le_bytes());
+	}
+	Frame {
+		timestamp_us,
+		data: bytes.into(),
+	}
 }
 
 fn stream_err(err: cpal::Error) {

@@ -42,12 +42,16 @@ pub struct ExportArgs {
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
 pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: String) -> anyhow::Result<()> {
 	let mut producer = moq_net::broadcast::Info::new().produce();
+
+	// Create catalog tracks before announcing the broadcast so a subscriber can
+	// consume the catalog as soon as it observes the announcement.
+	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
+
 	// Hold the RAII announcement for the lifetime of the import.
 	let _announce = origin
 		.publish_broadcast(&name, producer.consume())
 		.context("failed to publish broadcast")?;
 
-	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 
 	tracing::info!(%name, "importing HLS");

@@ -1,25 +1,54 @@
-use crate::{broadcast, frame, group, origin, track};
-use std::collections::{HashMap, hash_map::Entry};
-
-use std::sync::Arc;
+use std::{
+	collections::{HashMap, hash_map::Entry},
+	sync::Arc,
+	task::Poll,
+	time::Duration,
+};
 
 use crate::{
-	Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
+	Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, broadcast,
 	coding::{Reader, Stream},
+	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
+	origin, track,
 };
 
 use super::{Message, Version};
 
 use web_async::Lock;
 
+const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
+
+type TrackAliases = kio::Producer<HashMap<u64, RequestId>>;
+
+fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) -> Result<(), Error> {
+	let mut aliases = aliases.write().map_err(|_| Error::Dropped)?;
+	match aliases.entry(alias) {
+		Entry::Occupied(entry) if *entry.get() == request_id => Ok(()),
+		Entry::Occupied(_) => Err(Error::Duplicate),
+		Entry::Vacant(entry) => {
+			entry.insert(request_id);
+			Ok(())
+		}
+	}
+}
+
+fn remove_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) {
+	let Ok(mut aliases) = aliases.write() else {
+		return;
+	};
+	if aliases.get(&alias) == Some(&request_id) {
+		aliases.remove(&alias);
+	}
+}
+
 #[derive(Default)]
 struct State {
 	// Each active subscription
 	subscribes: HashMap<RequestId, TrackState>,
 
-	// A map of track aliases to request IDs.
-	aliases: HashMap<u64, RequestId>,
+	// Track aliases chosen by the remote publisher.
+	aliases: TrackAliases,
 
 	// Each broadcast created by either a PUBLISH or PUBLISH_NAMESPACE message.
 	broadcasts: HashMap<PathOwned, BroadcastState>,
@@ -72,6 +101,26 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 }
 
+async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
+	let resolved = kio::wait(move |waiter| {
+		aliases
+			.poll(waiter, |aliases| match aliases.get(&alias) {
+				Some(request_id) => Poll::Ready(*request_id),
+				None => Poll::Pending,
+			})
+			.map(|result| result.map_err(|_| Error::Dropped))
+	});
+	let timeout = web_async::time::sleep(TRACK_ALIAS_TIMEOUT);
+
+	tokio::pin!(resolved);
+	tokio::pin!(timeout);
+
+	tokio::select! {
+		request_id = &mut resolved => request_id,
+		_ = &mut timeout => Err(Error::NotFound),
+	}
+}
+
 impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn new(session: S, origin: origin::Producer, control: Control, stats: StatsHandle, version: Version) -> Self {
 		let broadcasts = stats.subscriber_broadcasts();
@@ -85,6 +134,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			state: Default::default(),
 			version,
 		}
+	}
+
+	fn register_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
+		let mut state = self.state.lock();
+		if !state.subscribes.contains_key(&request_id) {
+			return Err(Error::NotFound);
+		}
+
+		insert_track_alias(&state.aliases, alias, request_id)?;
+		state.subscribes.get_mut(&request_id).unwrap().alias = Some(alias);
+		Ok(())
+	}
+
+	fn remove_subscribe(&self, request_id: RequestId) -> Option<TrackState> {
+		let mut state = self.state.lock();
+		let track = state.subscribes.remove(&request_id)?;
+		if let Some(alias) = track.alias {
+			remove_track_alias(&state.aliases, alias, request_id);
+		}
+		Some(track)
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
@@ -259,6 +328,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let request_id = msg.request_id;
 
 		if let Err(err) = self.start_publish(&msg) {
+			if matches!(err, Error::Duplicate) {
+				self.session.close(err.to_code(), err.to_string().as_ref());
+				return Err(err);
+			}
 			self.write_publish_error(&mut stream, request_id, 400, &err.to_string())
 				.await?;
 			return Ok(());
@@ -282,7 +355,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		if let Some(mut track) = state.subscribes.remove(&request_id) {
 			let _ = track.producer.finish();
 			if let Some(alias) = track.alias {
-				state.aliases.remove(&alias);
+				remove_track_alias(&state.aliases, alias, request_id);
 			}
 		}
 		if let Some(path) = state.publishes.remove(&request_id) {
@@ -572,16 +645,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		match state.aliases.entry(msg.track_alias) {
-			Entry::Vacant(entry) => {
-				entry.insert(request_id);
-			}
-			Entry::Occupied(_) => {
-				state.subscribes.remove(&request_id);
-				drop(state);
-				let _ = self.stop_announce(namespace, false);
-				return Err(Error::Duplicate);
-			}
+		if let Err(err) = insert_track_alias(&state.aliases, msg.track_alias, request_id) {
+			state.subscribes.remove(&request_id);
+			drop(state);
+			let _ = self.stop_announce(namespace, false);
+			return Err(err);
 		}
 		state.publishes.insert(request_id, namespace);
 		drop(state);
@@ -650,9 +718,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let abs = self.origin.absolute(&broadcast_path).to_owned();
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(track.name()));
 
-		// Pre-register the track so group data arriving before SubscribeOk can be routed.
-		// The publisher uses request_id.0 as track_alias, and recv_group falls back to
-		// RequestId(track_alias) when no alias mapping exists, so this works.
+		// Register the request before writing SUBSCRIBE so SUBSCRIBE_OK can bind its alias.
 		{
 			let mut state = self.state.lock();
 			state.subscribes.insert(
@@ -671,7 +737,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.await
 		{
 			tracing::debug!(%err, "failed to write subscribe");
-			self.state.lock().subscribes.remove(&request_id);
+			self.remove_subscribe(request_id);
 			let _ = track.abort(err);
 			return;
 		}
@@ -679,20 +745,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe started");
 
 		// Read the response and register the alias mapping
-		let track_alias = match self.read_subscribe_response(&mut stream).await {
-			Ok(alias) => {
-				if let Some(alias) = alias {
-					let mut state = self.state.lock();
-					state.aliases.insert(alias, request_id);
-					if let Some(track_state) = state.subscribes.get_mut(&request_id) {
-						track_state.alias = Some(alias);
-					}
+		match self.read_subscribe_response(&mut stream).await {
+			Ok(Some(alias)) => {
+				if let Err(err) = self.register_alias(request_id, alias) {
+					self.session.close(err.to_code(), err.to_string().as_ref());
+					self.remove_subscribe(request_id);
+					let _ = track.abort(err);
+					return;
 				}
-				alias
 			}
+			Ok(None) => {}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
-				self.state.lock().subscribes.remove(&request_id);
+				self.remove_subscribe(request_id);
 				let _ = track.abort(err);
 				return;
 			}
@@ -727,10 +792,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Clean up
-		self.state.lock().subscribes.remove(&request_id);
-		if let Some(alias) = track_alias {
-			self.state.lock().aliases.remove(&alias);
-		}
+		self.remove_subscribe(request_id);
 
 		stream.writer.finish().ok();
 	}
@@ -791,15 +853,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
+		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
+		// subgroup header while waiting so the data stream cannot consume flow control.
+		let aliases = self.state.lock().aliases.consume();
+		let request_id = resolve_track_alias(aliases, group.track_alias).await.inspect_err(|_| {
+			tracing::warn!(track_alias = %group.track_alias, "unknown track alias");
+		})?;
+
 		let (mut producer, track, track_stats) = {
 			let mut state = self.state.lock();
-			let request_id = match state.aliases.get(&group.track_alias) {
-				Some(request_id) => *request_id,
-				None => {
-					tracing::warn!(track_alias = %group.track_alias, "unknown track alias, using request ID");
-					RequestId(group.track_alias)
-				}
-			};
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
 			let group_info = group::Info {
@@ -905,5 +967,43 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use futures::poll;
+
+	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn track_alias_waits_for_control_message() {
+		let aliases = TrackAliases::default();
+		let pending = resolve_track_alias(aliases.consume(), 7);
+		tokio::pin!(pending);
+
+		assert!(poll!(&mut pending).is_pending());
+
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+
+		assert_eq!(pending.await.unwrap(), RequestId(11));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unknown_track_alias_times_out() {
+		let aliases = TrackAliases::default();
+		assert!(matches!(
+			resolve_track_alias(aliases.consume(), 7).await,
+			Err(Error::NotFound)
+		));
+	}
+
+	#[test]
+	fn removing_old_track_does_not_remove_reused_alias() {
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+		remove_track_alias(&aliases, 7, RequestId(13));
+
+		assert_eq!(aliases.read().get(&7), Some(&RequestId(11)));
 	}
 }

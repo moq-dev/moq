@@ -1,4 +1,3 @@
-import type { Catalog } from "@moq/hang";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../../element";
@@ -23,7 +22,7 @@ function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: 
 }
 
 /** Show an active/idle pill: an encoder only runs (and uses bandwidth) while a viewer is subscribed. */
-function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean>) {
+function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean | undefined>) {
 	parent.run((effect) => {
 		const on = effect.get(active);
 		status.style.display = "";
@@ -40,10 +39,6 @@ function line(grid: HTMLElement, label: string): HTMLSpanElement {
 	return value;
 }
 
-function firstRendition<T>(catalog: { renditions?: Record<string, T> } | undefined): T | undefined {
-	return catalog ? Object.values(catalog.renditions ?? {})[0] : undefined;
-}
-
 /** The Stats tab: what we're capturing and publishing. */
 export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body" });
@@ -57,14 +52,14 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
 
 	// active = a viewer is subscribed and we're actually encoding/sending.
-	trackActive(parent, videoCard.status, publish.broadcast.video.hd.active);
+	trackActive(parent, videoCard.status, publish.video.out.active);
 
 	const audioCard = card("audio", "Audio", audioIcon);
 	const aCodec = line(audioCard.grid, "Codec");
 	const aRate = line(audioCard.grid, "Sample rate");
 	const aChannels = line(audioCard.grid, "Channels");
 	const aBitrate = line(audioCard.grid, "Bitrate");
-	trackActive(parent, audioCard.status, publish.broadcast.audio.active);
+	trackActive(parent, audioCard.status, publish.audio.active);
 
 	const netCard = card("network", "Connection", wifiIcon);
 	const nStatus = line(netCard.grid, "Status");
@@ -75,15 +70,15 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 
 	// Resolution/codec from the live capture (display) + catalog; card hides when not capturing video.
 	parent.run((effect) => {
-		const display = effect.get(publish.broadcast.video.display);
-		const cfg = firstRendition<Catalog.VideoConfig>(effect.get(publish.broadcast.video.catalog) as Catalog.Video);
+		const display = effect.get(publish.capture.out.display);
+		const cfg = effect.get(publish.video.out.catalog);
 		videoCard.el.style.display = display ? "" : "none";
 		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
 		vCodec.textContent = cfg?.codec ?? "—";
 	});
 
 	parent.run((effect) => {
-		const cfg = firstRendition<Catalog.AudioConfig>(effect.get(publish.broadcast.audio.catalog) as Catalog.Audio);
+		const cfg = effect.get(publish.audio.config);
 		audioCard.el.style.display = cfg ? "" : "none";
 		if (!cfg) return;
 		aCodec.textContent = cfg.codec ?? "—";
@@ -95,31 +90,39 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	parent.run((effect) => {
 		const url = effect.get(publish.connection.url);
 		const status = effect.get(publish.connection.status);
-		const name = effect.get(publish.broadcast.name);
+		const name = effect.get(publish.broadcast.in.name);
 		nStatus.textContent = status;
 		nServer.textContent = url?.host ?? "—";
 		nName.textContent = name?.toString() || "—";
 	});
 
-	// Live graphs: frame rate from captured frames, bitrate from the upload estimate.
+	// Live graphs: frame rate from captured frames, bitrate measured from the bytes we encoded.
+	// The congestion controller's send estimate would be simpler, but Safari's WebTransport has no
+	// getStats(), so it has no estimate at all and the graph stayed empty there.
 	let frames = 0;
-	parent.subscribe(publish.broadcast.video.frame, () => {
+	parent.subscribe(publish.capture.out.frame, () => {
 		frames++;
 	});
+
+	const encoded = () => publish.video.out.stats.peek().bytes;
+
 	let prevFrames = 0;
+	let prevBytes = encoded();
 	let prevWhen = performance.now();
 
 	parent.interval(() => {
 		const now = performance.now();
 		const elapsed = now - prevWhen;
-		const delta = frames - prevFrames;
-		const fps = elapsed > 0 && delta > 0 ? delta / (elapsed / 1000) : undefined;
-		prevFrames = frames;
 		prevWhen = now;
-		vFpsGraph.push(fps);
 
-		const upload = publish.connection.established.peek()?.sendBandwidth?.peek();
-		vBitrateGraph.push(upload && upload > 0 ? upload : undefined);
+		const frameDelta = frames - prevFrames;
+		prevFrames = frames;
+		vFpsGraph.push(elapsed > 0 && frameDelta > 0 ? frameDelta / (elapsed / 1000) : undefined);
+
+		const bytes = encoded();
+		const byteDelta = bytes - prevBytes;
+		prevBytes = bytes;
+		vBitrateGraph.push(elapsed > 0 && byteDelta > 0 ? (byteDelta * 8) / (elapsed / 1000) : undefined);
 	}, POLL_MS);
 
 	return container;

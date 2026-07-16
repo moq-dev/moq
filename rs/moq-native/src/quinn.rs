@@ -438,129 +438,83 @@ impl QuinnServer {
 
 // ── QuinnRequest ────────────────────────────────────────────────────
 
-/// A raw QUIC connection request without WebTransport framing (quinn backend).
-pub(crate) enum QuinnRequest {
-	Raw {
-		request: web_transport_quinn::proto::ConnectRequest,
-		response: web_transport_quinn::proto::ConnectResponse,
-		connection: quinn::Connection,
-	},
-	WebTransport {
-		request: web_transport_quinn::Request,
-		alpns: Vec<&'static str>,
-	},
-}
+/// Accept a QUIC connection, negotiate WebTransport or raw moq, and complete the
+/// handshake (a `200 OK` for WebTransport). Returns the established session plus the
+/// request URL and validated mTLS identity, both captured before the response consumes
+/// the request. Raw QUIC carries no request URL (the path rides the SETUP instead).
+pub(crate) async fn accept(
+	conn: quinn::Incoming,
+	alpns: Vec<&'static str>,
+) -> Result<(
+	web_transport_quinn::Session,
+	Option<Url>,
+	Option<crate::tls::PeerIdentity>,
+)> {
+	let mut conn = conn.accept()?;
 
-impl QuinnRequest {
-	pub async fn accept(conn: quinn::Incoming, alpns: Vec<&'static str>) -> Result<Self> {
-		let mut conn = conn.accept()?;
+	let handshake = conn
+		.handshake_data()
+		.await?
+		.downcast::<quinn::crypto::rustls::HandshakeData>()
+		.unwrap();
 
-		let handshake = conn
-			.handshake_data()
-			.await?
-			.downcast::<quinn::crypto::rustls::HandshakeData>()
-			.unwrap();
+	let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
+	let alpn = String::from_utf8(alpn)?;
+	let host = handshake.server_name.unwrap_or_default();
 
-		let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
-		let alpn = String::from_utf8(alpn)?;
-		let host = handshake.server_name.unwrap_or_default();
+	tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
 
-		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
+	// Wait for the QUIC connection to be established.
+	let conn = conn.await.map_err(Error::Establish)?;
 
-		// Wait for the QUIC connection to be established.
-		let conn = conn.await.map_err(Error::Establish)?;
+	let span = tracing::Span::current();
+	span.record("id", conn.stable_id()); // TODO can we get this earlier?
+	tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
 
-		let span = tracing::Span::current();
-		span.record("id", conn.stable_id()); // TODO can we get this earlier?
-		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
+	match alpn.as_str() {
+		web_transport_quinn::ALPN => {
+			// Wait for the CONNECT request, then capture its URL and mTLS identity before
+			// the response consumes it.
+			let request = web_transport_quinn::Request::accept(conn)
+				.await
+				.map_err(Error::RecvRequest)?;
+			let url = Some(request.url.clone());
+			let identity = crate::tls::PeerIdentity::from_any(request.conn().peer_identity());
 
-		match alpn.as_str() {
-			web_transport_quinn::ALPN => {
-				// Wait for the CONNECT request.
-				let request = web_transport_quinn::Request::accept(conn)
-					.await
-					.map_err(Error::RecvRequest)?;
-				Ok(Self::WebTransport { request, alpns })
+			let mut response = web_transport_quinn::proto::ConnectResponse::OK;
+			// Pick the first sub-protocol that we actually support.
+			// This is the WebTransport equivalent of ALPN negotiation.
+			// If no match is found, we default to no sub-protocol to support older
+			// clients that don't use ALPN. We assume moq-transport-14/moq-lite-02
+			// and perform the SETUP_x exchange instead.
+			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
+				response = response.with_protocol(protocol);
 			}
-			// Recognize any moq ALPN this server actually offered (its configured versions),
-			// not the global default set. rustls only negotiates an ALPN the server offered, so
-			// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
-			// deliberately absent from `moq_net::ALPNS`.
-			alpn if alpns.contains(&alpn) => {
-				if host.is_empty() {
-					return Err(Error::MissingServerName);
-				}
-				let host_str = if host.contains(':') {
-					format!("[{}]", host)
-				} else {
-					host.clone()
-				};
-				let url = format!("moqt://{}", host_str).parse::<Url>().map_err(Error::BuildUrl)?;
-				let request = web_transport_quinn::proto::ConnectRequest::new(url);
-				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
-				Ok(Self::Raw {
-					connection: conn,
-					request,
-					response,
-				})
+			let session = request.respond(response).await.map_err(Error::Server)?;
+			Ok((session, url, identity))
+		}
+		// Recognize any moq ALPN this server actually offered (its configured versions),
+		// not the global default set. rustls only negotiates an ALPN the server offered, so
+		// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
+		// deliberately absent from `moq_net::ALPNS`.
+		alpn if alpns.contains(&alpn) => {
+			if host.is_empty() {
+				return Err(Error::MissingServerName);
 			}
-			_ => Err(Error::UnsupportedAlpn(alpn)),
+			let host_str = if host.contains(':') {
+				format!("[{}]", host)
+			} else {
+				host.clone()
+			};
+			let url = format!("moqt://{}", host_str).parse::<Url>().map_err(Error::BuildUrl)?;
+			let request = web_transport_quinn::proto::ConnectRequest::new(url);
+			let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
+			let identity = crate::tls::PeerIdentity::from_any(conn.peer_identity());
+			// Raw QUIC carries no request URL; the path rides the SETUP.
+			let session = web_transport_quinn::Session::raw(conn, request, response);
+			Ok((session, None, identity))
 		}
-	}
-
-	/// Accept the session, returning a 200 OK if using WebTransport.
-	pub async fn ok(self) -> std::result::Result<web_transport_quinn::Session, web_transport_quinn::ServerError> {
-		match self {
-			QuinnRequest::Raw {
-				connection,
-				request,
-				response,
-			} => Ok(web_transport_quinn::Session::raw(connection, request, response)),
-			QuinnRequest::WebTransport { request, alpns } => {
-				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
-				// Pick the first sub-protocol that we actually support.
-				// This is the WebTransport equivalent of ALPN negotiation.
-				// If no match is found, we default to no sub-protocol to support older
-				// clients that don't use ALPN. We assume moq-transport-14/moq-lite-02
-				// and perform the SETUP_x exchange instead.
-				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
-					response = response.with_protocol(protocol);
-				}
-				request.respond(response).await
-			}
-		}
-	}
-
-	/// Returns the URL provided by the client.
-	pub fn url(&self) -> Option<&Url> {
-		match self {
-			QuinnRequest::Raw { .. } => None,
-			QuinnRequest::WebTransport { request, .. } => Some(&request.url),
-		}
-	}
-
-	/// The client certificate chain the peer presented, if any, validated by
-	/// rustls against the configured `tls.root` during the handshake.
-	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
-		let conn = match self {
-			QuinnRequest::Raw { connection, .. } => connection,
-			QuinnRequest::WebTransport { request, .. } => request.conn(),
-		};
-		crate::tls::PeerIdentity::from_any(conn.peer_identity())
-	}
-
-	/// Reject the session with a status code.
-	pub async fn close(
-		self,
-		status: web_transport_quinn::http::StatusCode,
-	) -> std::result::Result<(), web_transport_quinn::ServerError> {
-		match self {
-			QuinnRequest::Raw { connection, .. } => {
-				connection.close(status.as_u16().into(), status.as_str().as_bytes());
-				Ok(())
-			}
-			QuinnRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
-		}
+		_ => Err(Error::UnsupportedAlpn(alpn)),
 	}
 }
 

@@ -9,6 +9,7 @@ import type * as track from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
+import { TrackAliases } from "./aliases.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, PublishError } from "./publish.ts";
 import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
@@ -47,9 +48,8 @@ type SubscribeSetupState = {
 export class Subscriber {
 	#session: Session;
 
-	// Our subscribed tracks, keyed by trackAlias for group routing.
-	// trackAlias -> the write side; incoming object streams are routed here.
-	#subscribes = new Map<bigint, track.Producer>();
+	// Publisher-chosen aliases used by incoming group streams.
+	#aliases = new TrackAliases<track.Producer>();
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
@@ -272,7 +272,7 @@ export class Subscriber {
 			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
 			// stream is already open.
 			const cleanup = () => {
-				if (state.registeredAlias !== undefined) this.#subscribes.delete(state.registeredAlias);
+				if (state.registeredAlias !== undefined) this.#aliases.delete(state.registeredAlias, producer);
 				state.stream?.abort(e);
 			};
 			setup.then(cleanup, cleanup);
@@ -305,7 +305,7 @@ export class Subscriber {
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
 			);
 		} finally {
-			this.#subscribes.delete(trackAlias);
+			this.#aliases.delete(trackAlias, producer);
 		}
 	}
 
@@ -334,11 +334,6 @@ export class Subscriber {
 		await msg.encode(state.stream.writer, version);
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
-		// Pre-register with requestId so early group uni streams aren't dropped.
-		// The publisher typically uses requestId as the trackAlias.
-		this.#subscribes.set(requestId, producer);
-		state.registeredAlias = requestId;
-
 		const respTypeId = await state.stream.reader.u53();
 		if (respTypeId !== SubscribeOk.id) {
 			let reasonPhrase = "unknown error";
@@ -357,11 +352,13 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
-		if (ok.trackAlias !== requestId) {
-			this.#subscribes.delete(requestId);
-			this.#subscribes.set(ok.trackAlias, producer);
-			state.registeredAlias = ok.trackAlias;
+		try {
+			this.#aliases.set(ok.trackAlias, producer);
+		} catch (err) {
+			this.#session.close();
+			throw err;
 		}
+		state.registeredAlias = ok.trackAlias;
 		return { stream: state.stream, alias: ok.trackAlias };
 	}
 
@@ -487,12 +484,8 @@ export class Subscriber {
 		}
 
 		try {
-			// Look up by trackAlias directly
-			const track = this.#subscribes.get(group.trackAlias);
-			if (!track) {
-				// Fallback: try treating trackAlias as requestId (for compat)
-				throw new Error(`unknown track: trackAlias=${group.trackAlias}`);
-			}
+			// The control message establishing this alias can arrive after the data stream.
+			const track = await this.#aliases.get(group.trackAlias);
 
 			track.writeGroup(producer);
 

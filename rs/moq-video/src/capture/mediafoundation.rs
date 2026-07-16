@@ -33,13 +33,15 @@ use crate::frame::d3d11::Texture;
 use crate::frame::{Frame, I420};
 
 /// Open a Media Foundation camera and stream its frames over a pump thread.
-pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
 	let config = config.clone();
+	// The device opens on the pump thread, so the selector has to be owned.
+	let device = device.map(str::to_string);
 	let chan = FrameChannel::new();
 	let (geo, guard) = pump::spawn(
 		chan.clone(),
 		move || {
-			let camera = Camera::open(&config)?;
+			let camera = Camera::open(&config, device.as_deref())?;
 			let geometry = Geometry {
 				width: camera.width,
 				height: camera.height,
@@ -83,9 +85,9 @@ struct Camera {
 }
 
 impl Camera {
-	fn open(config: &Config) -> Result<Self, Error> {
+	fn open(config: &Config, selector: Option<&str>) -> Result<Self, Error> {
 		let com = ComGuard::new()?;
-		let (source, device_name) = open_source(config)?;
+		let (source, device_name) = open_source(selector)?;
 
 		// Try for a GPU device; fall back to the CPU video processor if it (or any
 		// of its setup) fails, e.g. on a headless VM with no D3D11 hardware.
@@ -323,11 +325,11 @@ enum Selector {
 	Name(String),
 }
 
-/// Enumerate video capture devices and activate the one matching `config.device`
+/// Enumerate video capture devices and activate the one matching `selector`
 /// (a bare integer selects by index, anything else is a friendly-name substring;
 /// `None` opens index 0).
-fn open_source(config: &Config) -> Result<(IMFMediaSource, String), Error> {
-	let selector = match config.device.as_deref() {
+fn open_source(selector: Option<&str>) -> Result<(IMFMediaSource, String), Error> {
+	let selector = match selector {
 		None => Selector::Index(0),
 		Some(spec) => match spec.parse::<usize>() {
 			Ok(i) => Selector::Index(i),
