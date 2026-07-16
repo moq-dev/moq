@@ -31,11 +31,27 @@ if (role === "publish") {
 	// Playwright may evaluate in a different JavaScript world, where DOM nodes
 	// are shared but custom-element instance fields are not. Mirror the state the
 	// driver needs through data attributes, which are visible in every world.
+	type Signal<T> = { peek(): T };
+	type Backend = {
+		video: {
+			out: {
+				stats: Signal<{ frameCount?: number } | undefined>;
+				timestamp: Signal<number>;
+			};
+		};
+		audio: {
+			out: {
+				stats: Signal<{ bytesReceived?: number } | undefined>;
+				context: Signal<AudioContext | undefined>;
+			};
+		};
+	};
+	const backend = Reflect.get(el, "backend") as Backend;
 	const syncState = () => {
-		el.dataset.smokeVideoFrames = String(el.backend.video.out.stats.peek()?.frameCount ?? 0);
-		el.dataset.smokeVideoTimestamp = String(el.backend.video.out.timestamp.peek());
-		el.dataset.smokeAudioBytes = String(el.backend.audio.out.stats.peek()?.bytesReceived ?? 0);
-		el.dataset.smokeAudioContext = el.backend.audio.out.context.peek()?.state ?? "";
+		el.dataset.smokeVideoFrames = String(backend.video.out.stats.peek()?.frameCount ?? 0);
+		el.dataset.smokeVideoTimestamp = String(backend.video.out.timestamp.peek());
+		el.dataset.smokeAudioBytes = String(backend.audio.out.stats.peek()?.bytesReceived ?? 0);
+		el.dataset.smokeAudioContext = backend.audio.out.context.peek()?.state ?? "";
 		el.dataset.smokeHasAudio = String(el.catalog?.audio !== undefined);
 		el.dataset.smokePaused = String(el.paused);
 		el.dataset.smokeReady = "";
