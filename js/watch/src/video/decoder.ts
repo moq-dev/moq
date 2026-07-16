@@ -7,7 +7,6 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { base64ToBytes } from "../base64";
 import type { BufferedRanges } from "../buffered";
 import type { Sync } from "../sync";
-import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
@@ -18,6 +17,15 @@ type DecoderInput = {
 	// Whether to download the video track. Wired from the renderer's output by the parent.
 	enabled: Getter<boolean>;
 };
+
+/** Cumulative video statistics since the decoder started. */
+export interface Stats {
+	/** Number of decoded frames. */
+	frameCount: number;
+
+	/** Number of encoded bytes received. */
+	bytesReceived: number;
+}
 
 type DecoderOutput = {
 	// The current frame to render.
@@ -41,7 +49,8 @@ type DecoderOutput = {
 // This way we can keep the current subscription active.
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
-export class Decoder implements Backend {
+/** Downloads video from a track and decodes it into {@link VideoFrame}s with WebCodecs. */
+export class Decoder {
 	readonly in: Readonlys<DecoderInput>;
 	source: Source;
 	sync: Sync;

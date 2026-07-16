@@ -25,7 +25,7 @@ type DecoderOutput = {
 	root: Signal<AudioNode | undefined>;
 
 	sampleRate: Signal<number | undefined>;
-	stats: Signal<AudioStats | undefined>;
+	stats: Signal<Stats | undefined>;
 
 	// Current playback timestamp from worklet
 	timestamp: Signal<Time.Milli | undefined>;
@@ -37,7 +37,8 @@ type DecoderOutput = {
 	buffered: Signal<BufferedRanges>;
 };
 
-export interface AudioStats {
+/** Cumulative audio statistics since the decoder started. */
+export interface Stats {
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
 }
@@ -56,7 +57,7 @@ export class Decoder {
 		context: new Signal<AudioContext | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 		sampleRate: new Signal<number | undefined>(undefined),
-		stats: new Signal<AudioStats | undefined>(undefined),
+		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
 		buffered: new Signal<BufferedRanges>([]),

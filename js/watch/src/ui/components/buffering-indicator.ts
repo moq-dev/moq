@@ -9,9 +9,9 @@ export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement
 	container.appendChild(spinner);
 
 	parent.run((effect) => {
-		const buffering = effect.get(watch.backend.video.out.stalled);
+		const buffering = effect.get(watch.video.out.stalled);
 		const offline = effect.get(watch.broadcast.out.status) === "offline";
-		const unsupported = effect.get(watch.backend.video.source.out.error) === "unsupported";
+		const unsupported = effect.get(watch.video.source.out.error) === "unsupported";
 		container.style.display = buffering && !offline && !unsupported ? "" : "none";
 	});
 

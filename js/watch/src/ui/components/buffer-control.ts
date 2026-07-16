@@ -127,7 +127,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 	let hasInteracted = false;
 
 	parent.run((effect) => {
-		const jitter = effect.get(watch.backend.out.jitter);
+		const jitter = effect.get(watch.sync.out.jitter);
 		const pct = (jitter / max) * 100;
 		targetLine.style.left = `${pct}%`;
 		targetLabel.textContent = `${Math.round(jitter)}ms`;
@@ -179,16 +179,16 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 		}
 		e.preventDefault();
 		interact();
-		const current = watch.backend.out.jitter.peek();
+		const current = watch.sync.out.jitter.peek();
 		const value = Moq.Time.Milli(Math.max(MIN_RANGE, Math.min(max, current + delta)));
 		watch.latencyMin = value;
 	});
 
 	const draw = () => {
-		const timestamp = watch.backend.sync.now();
-		const isBuffering = watch.backend.video.out.stalled.peek();
-		drawRanges(videoCanvas, watch.backend.video.out.buffered.peek(), timestamp, max, isBuffering);
-		drawRanges(audioCanvas, watch.backend.audio.out.buffered.peek(), timestamp, max, isBuffering);
+		const timestamp = watch.sync.now();
+		const isBuffering = watch.video.out.stalled.peek();
+		drawRanges(videoCanvas, watch.video.out.buffered.peek(), timestamp, max, isBuffering);
+		drawRanges(audioCanvas, watch.audio.out.buffered.peek(), timestamp, max, isBuffering);
 		parent.animate(draw);
 	};
 	parent.animate(draw);

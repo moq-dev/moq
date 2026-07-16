@@ -5,7 +5,7 @@
  * live broadcast on the left: a `<moq-watch-ui>` (player chrome) wrapping a
  * `<moq-watch>` element. The right column shows live stats (catalog, decode,
  * network, metadata) for the *active* tile only, read straight off that tile's
- * `<moq-watch>` `broadcast`/`backend` signals.
+ * `<moq-watch>` `broadcast`/decoder signals.
  *
  * Audio policy: only the active tile plays sound. Clicking a tile makes it
  * active (and is the user gesture that lets its audio start); every other tile
@@ -102,7 +102,7 @@ function createTile(name: string): WatchTile {
 	// Each tile is a <moq-watch-ui> (player chrome: play/pause, volume,
 	// fullscreen) wrapping a bare <moq-watch> that renders into its <canvas>
 	// child. We still drive audio on the inner <moq-watch> and read its stats off
-	// `broadcast`/`backend`, so the shared inspector panel reflects the active tile.
+	// `broadcast` and decoders, so the shared inspector panel reflects the active tile.
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
 	watch.muted = true; // unmuted only while active (see below)
@@ -304,7 +304,7 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
-	const stalled = effect.get(watch.backend.video.out.stalled);
+	const stalled = effect.get(watch.video.out.stalled);
 	const live = effect.get(watch.broadcast.out.status) === "live";
 	const r = Object.values(video.renditions)[0];
 
@@ -361,8 +361,8 @@ ui.run((effect) => {
 	const conn = effect.get(connection.established);
 	$("network-transport").textContent = conn ? (conn.transport === "websocket" ? "WebSocket" : "WebTransport") : "";
 
-	const video = effect.get(watch.backend.video.out.stats);
-	const audio = effect.get(watch.backend.audio.out.stats);
+	const video = effect.get(watch.video.out.stats);
+	const audio = effect.get(watch.audio.out.stats);
 	const bytes = (video?.bytesReceived ?? 0) + (audio?.bytesReceived ?? 0);
 	renderRows($("network-info"), [["bytes received", bytes > 0 ? formatBytes(bytes) : undefined]]);
 });
@@ -479,8 +479,8 @@ viz.interval(() => {
 		return;
 	}
 
-	const v = watch.backend.video.out.stats.peek();
-	const a = watch.backend.audio.out.stats.peek();
+	const v = watch.video.out.stats.peek();
+	const a = watch.audio.out.stats.peek();
 	const videoBytes = v?.bytesReceived ?? 0;
 	const totalBytes = videoBytes + (a?.bytesReceived ?? 0);
 	const frames = v?.frameCount ?? 0;

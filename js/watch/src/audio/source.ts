@@ -13,7 +13,9 @@ export type Target = {
 };
 
 /**
- * A function that checks if an audio configuration is supported by the backend.
+ * A function that checks if an audio configuration can be played.
+ *
+ * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
  */
 export type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
@@ -23,8 +25,8 @@ type SourceInput = {
 	// The desired rendition/bitrate of the audio.
 	target: Getter<Target | undefined>;
 
-	// A function that checks if an audio configuration is supported by the backend.
-	// Provided by whichever backend (WebCodecs or MSE) is active.
+	// A function that checks if an audio configuration can be played. Renditions that fail the
+	// probe are filtered out. Nothing is selected until one is provided.
 	supported: Getter<Supported | undefined>;
 };
 
@@ -40,7 +42,7 @@ type SourceOutput = {
 
 /**
  * Source handles catalog extraction, support checking, and rendition selection
- * for audio playback. It is used by both MSE and Decoder backends.
+ * for audio playback. The Decoder consumes whichever rendition it picks.
  */
 export class Source {
 	readonly in: Readonlys<SourceInput>;

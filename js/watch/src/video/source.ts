@@ -5,7 +5,9 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import type { Broadcast } from "../broadcast";
 
 /**
- * A function that checks if a video configuration is supported by the backend.
+ * A function that checks if a video configuration can be played.
+ *
+ * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
 
@@ -33,8 +35,8 @@ type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 	target: Getter<Target | undefined>;
 
-	// A function that checks if a video configuration is supported by the backend.
-	// Provided by whichever backend (WebCodecs or MSE) is active.
+	// A function that checks if a video configuration can be played. Renditions that fail the
+	// probe are filtered out. Nothing is selected until one is provided.
 	supported: Getter<Supported | undefined>;
 };
 
@@ -207,7 +209,7 @@ function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
 
 /**
  * Source handles catalog extraction, support checking, and rendition selection
- * for video playback. It is used by both MSE and Decoder backends.
+ * for video playback. The Decoder consumes whichever rendition it picks.
  */
 export class Source {
 	readonly in: Readonlys<SourceInput>;

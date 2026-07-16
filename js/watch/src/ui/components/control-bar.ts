@@ -18,7 +18,7 @@ export function controlBar(parent: Effect, watch: MoqWatch, state: UiState, play
 	const spacer = DOM.create("div", { className: "controls-spacer" });
 
 	const right = DOM.create("div", { className: "controls-group" });
-	right.append(settingsButton(parent, state), fullscreenButton(parent, player, watch));
+	right.append(settingsButton(parent, state), fullscreenButton(parent, player));
 
 	bar.append(left, spacer, right);
 	return bar;
