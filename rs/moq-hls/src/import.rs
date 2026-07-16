@@ -381,9 +381,10 @@ impl TrackState {
 	}
 
 	/// Forget where we were, so the next pushed segment re-bases the MoQ group sequence.
+	/// The byte-range cursor needs no reset: `consume_segments` rebuilds it from the
+	/// playlist prefix on every step.
 	fn reanchor(&mut self) {
 		self.next_sequence = None;
-		self.media_range = RangeCursor::default();
 	}
 
 	async fn consume_segments(&mut self, fetcher: &Fetcher, playlist: &MediaPlaylist) -> Result<usize> {
@@ -408,24 +409,45 @@ impl TrackState {
 			return Ok(0);
 		}
 
-		let base_seq = playlist_seq + skip as u64;
-
-		// Discontinuity sequence names a fresh media timeline; the tag count for the
-		// skipped prefix gets us to the discontinuity sequence of the first segment
-		// we actually push.
+		// Replay the skipped prefix. HLS defines this state relative to the whole playlist
+		// rather than to the segments we happen to download, so joining mid-window (which
+		// we do by design) has to reconstruct it rather than start blank:
+		//
+		// - the discontinuity counter, which names the media timeline,
+		// - the `EXT-X-MAP` still in effect, since it applies until the next one,
+		// - the byte-range cursor an offset-less `EXT-X-BYTERANGE` chains from.
+		//
+		// Rebuilding from the playlist is idempotent, so a contiguous resume lands on
+		// exactly the state it left off with.
 		let mut discontinuity_seq = playlist.discontinuity_sequence;
+		let mut map = None;
+		self.media_range = RangeCursor::default();
 		for segment in &playlist.segments[..skip] {
 			if segment.discontinuity {
 				discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
 			}
+			if segment.map.is_some() {
+				map = segment.map.as_ref();
+			}
+			if !segment.uri.is_empty() {
+				let url = resolve_uri(&self.playlist, &segment.uri)?;
+				self.media_range.resolve(url, segment.byte_range.as_ref())?;
+			}
 		}
+
+		let base_seq = playlist_seq + skip as u64;
 
 		for (i, segment) in playlist.segments[skip..].iter().enumerate() {
 			let sequence = base_seq + i as u64;
 			if segment.discontinuity {
 				discontinuity_seq = bump_discontinuity(discontinuity_seq)?;
 			}
-			if let Some(map) = &segment.map {
+			if segment.map.is_some() {
+				map = segment.map.as_ref();
+			}
+			// m3u8-rs only attaches `EXT-X-MAP` to the segment directly after the tag, so
+			// on every segment but that one this is the map carried down from the prefix.
+			if let Some(map) = map {
 				self.ensure_map(fetcher, map).await?;
 			}
 			self.push_segment(fetcher, segment, sequence, discontinuity_seq).await?;
@@ -870,7 +892,8 @@ mod tests {
 		(import, catalog)
 	}
 
-	fn fmp4_parts() -> (Vec<u8>, Vec<Vec<u8>>) {
+	/// The init segment plus `count` media fragments carved out of the fMP4 fixture.
+	fn fmp4_parts(count: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
 		let data = include_bytes!("../../moq-mux/src/container/fmp4/test_data/bbb.mp4");
 		let mut moofs = Vec::new();
 		let mut position = 0usize;
@@ -884,12 +907,13 @@ mod tests {
 			}
 			position += size;
 		}
-		assert!(moofs.len() >= 3);
+		// `windows(2)` yields one fragment per adjacent moof pair.
+		assert!(moofs.len() > count, "fixture has too few fragments for {count}");
 
 		let init = data[..moofs[0]].to_vec();
 		let fragments = moofs
 			.windows(2)
-			.take(2)
+			.take(count)
 			.map(|window| data[window[0]..window[1]].to_vec())
 			.collect();
 		(init, fragments)
@@ -1205,7 +1229,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn imports_single_file_with_implicit_segment_ranges() {
-		let (init, fragments) = fmp4_parts();
+		let (init, fragments) = fmp4_parts(2);
 		let mut resource = init.clone();
 		resource.extend_from_slice(&fragments[0]);
 		resource.extend_from_slice(&fragments[1]);
@@ -1226,9 +1250,54 @@ mod tests {
 		assert_eq!(import.video[0].next_sequence, Some(2));
 	}
 
+	/// A live window longer than `ANCHOR_SEGMENTS` is joined mid-playlist, which means the
+	/// state HLS carries across the whole playlist has to be replayed from the skipped
+	/// prefix. m3u8-rs attaches `EXT-X-MAP` only to the segment right after the tag, so
+	/// without that replay the importer is never built and every segment fails with
+	/// `MissingMap`; the offset-less byte ranges would not resolve either.
+	#[tokio::test]
+	async fn joins_mid_window_using_prefix_map_and_byte_ranges() {
+		// Every HLS segment starts a decodable group, as a real one does. The fixture
+		// interleaves per-track moofs, so only fragments 0, 1, 2 and 4 open a group;
+		// fragment 3 continues an earlier one and is left out of the byte layout.
+		let (init, fragments) = fmp4_parts(5);
+		let segments: Vec<&Vec<u8>> = [0, 1, 2, 4].iter().map(|&k| &fragments[k]).collect();
+
+		let mut resource = init.clone();
+		for segment in &segments {
+			resource.extend_from_slice(segment);
+		}
+
+		// Only the first segment carries an explicit offset; the rest chain off it, so
+		// resolving a later segment depends on every earlier one.
+		let mut playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n",
+			init.len(),
+			segments[0].len(),
+			init.len()
+		);
+		for segment in &segments[1..] {
+			playlist.push_str(&format!("#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n", segment.len()));
+		}
+
+		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
+
+		import.init().await.unwrap();
+
+		let track = &import.video[0];
+		assert!(
+			track.importer.is_some(),
+			"the EXT-X-MAP from the skipped prefix must initialize the importer"
+		);
+		// Four segments and a three-segment rewind, so segment 0 is skipped: the one
+		// carrying both the EXT-X-MAP and the only explicit byte offset.
+		assert_eq!(track.next_sequence, Some(4));
+		assert_eq!(catalog.snapshot().video.renditions.len(), 1);
+	}
+
 	#[tokio::test]
 	async fn map_change_replaces_importer_and_catalog_generation() {
-		let (init, fragments) = fmp4_parts();
+		let (init, fragments) = fmp4_parts(2);
 		let second_init = init.len() + fragments[0].len();
 		let second_fragment = second_init + init.len();
 		let mut resource = init.clone();
