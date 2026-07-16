@@ -85,9 +85,9 @@ struct State {
 	version: Option<Version>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Error>,
-	/// The currently-connected session, or `None` while reconnecting. Read by
-	/// [`ConnectionStatsReader`] to snapshot live connection stats.
-	session: Option<moq_net::Session>,
+	/// An observer for the currently-connected session, or `None` while
+	/// reconnecting. Read by [`ConnectionStatsReader`] to snapshot live stats.
+	session: Option<moq_net::SessionHandle>,
 }
 
 /// A cloneable read handle for the live connection stats of a [`Reconnect`] loop.
@@ -102,7 +102,7 @@ pub struct ConnectionStatsReader {
 impl ConnectionStatsReader {
 	/// Snapshot the current connection's stats, or `None` if not currently connected.
 	pub fn stats(&self) -> Option<moq_net::ConnectionStats> {
-		self.state.read().session.as_ref().map(moq_net::Session::stats)
+		self.state.read().session.as_ref().map(moq_net::SessionHandle::stats)
 	}
 }
 
@@ -186,7 +186,7 @@ impl Reconnect {
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Connected);
 						state.version = Some(session.version());
-						state.session = Some(session.clone());
+						state.session = Some(session.handle());
 					}
 
 					let connected = tokio::time::Instant::now();
@@ -334,7 +334,7 @@ impl Reconnect {
 async fn run_session(
 	send_bw: &BandwidthProducer,
 	recv_bw: &BandwidthProducer,
-	session: &moq_net::Session,
+	session: &crate::Session,
 ) -> Result<(), moq_net::Error> {
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();

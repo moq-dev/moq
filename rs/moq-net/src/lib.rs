@@ -42,14 +42,15 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Async
-//! This library is async-first. [`Client::connect`] and [`Server::accept`] return a
-//! [`Connection`] that owns all of the session's protocol work, so the caller
-//! decides where it runs and dropping it cancels the session. Nothing is spawned
-//! behind your back. Drive it either as a plain future (`.await`, or spawn it on
-//! your executor) or by calling [`Connection::poll`] with a [`kio::Waiter`] from
-//! inside your own `poll_*` function.
+//! This library is async-first. [`Client::connect`] and [`Server::accept`] return the
+//! unique [`Session`], which owns all of its protocol work: nothing runs unless the
+//! caller drives it (spawn [`Session::run`] on an executor, await it in place, or
+//! step [`Session::poll`] with a [`kio::Waiter`] from your own `poll_*` function),
+//! and dropping the session closes the transport. Nothing is spawned behind your
+//! back. For observing the session from elsewhere (stats, close), take cheap
+//! [`SessionHandle`] clones via [`Session::handle`].
 //!
-//! You still need a tokio runtime (with its time driver) to poll a [`Connection`]:
+//! You still need a tokio runtime (with its time driver) to drive a [`Session`]:
 //! bandwidth sampling, the control stream timeout, and subscription linger all use
 //! tokio timers, which panic outside a runtime. Awaiting any other plain `async`
 //! method has the same requirement.

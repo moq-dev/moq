@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Connection, Consume, Error, NEGOTIATED, StatsHandle, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -81,8 +81,8 @@ impl Client {
 		self
 	}
 
-	/// Perform the MoQ handshake and return its caller-driven connection.
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Connection, Error> {
+	/// Perform the MoQ handshake and return the caller-driven [`Session`].
+	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -111,7 +111,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Connection::new(session, v, None, driver));
+				return Ok(Session::new(session, v, None, driver));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -135,7 +135,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Connection::new(session, v, None, driver));
+				return Ok(Session::new(session, v, None, driver));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -159,7 +159,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Connection::new(session, v, None, driver));
+				return Ok(Session::new(session, v, None, driver));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -213,10 +213,10 @@ impl Client {
 				// Block until the initial announce set has landed (Lite05+ reports it
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
 				// immediately instead of racing announcement gossip.
-				let mut connection = Connection::new(session, version.into(), start.recv_bandwidth, start.driver);
-				connection.wait_ready(start.connecting.ready()).await;
+				let mut session = Session::new(session, version.into(), start.recv_bandwidth, start.driver);
+				session.wait_ready(start.connecting.ready()).await;
 
-				return Ok(connection);
+				return Ok(session);
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -235,15 +235,15 @@ impl Client {
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
-				let mut connection = Connection::new(
+				let mut session = Session::new(
 					session,
 					lite::Version::Lite04.into(),
 					start.recv_bandwidth,
 					start.driver,
 				);
-				connection.wait_ready(start.connecting.ready()).await;
+				session.wait_ready(start.connecting.ready()).await;
 
-				return Ok(connection);
+				return Ok(session);
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -263,15 +263,15 @@ impl Client {
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
-				let mut connection = Connection::new(
+				let mut session = Session::new(
 					session,
 					lite::Version::Lite03.into(),
 					start.recv_bandwidth,
 					start.driver,
 				);
-				connection.wait_ready(start.connecting.ready()).await;
+				session.wait_ready(start.connecting.ready()).await;
 
-				return Ok(connection);
+				return Ok(session);
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -352,14 +352,14 @@ impl Client {
 			}
 		};
 
-		let mut connection = Connection::new(session, version, recv_bw, driver);
+		let mut session = Session::new(session, version, recv_bw, driver);
 		if let Some(connecting) = connecting {
 			// Block until the initial announce set has landed (for versions that
 			// report one); resolves immediately otherwise.
-			connection.wait_ready(connecting.ready()).await;
+			session.wait_ready(connecting.ready()).await;
 		}
 
-		Ok(connection)
+		Ok(session)
 	}
 }
 
@@ -486,8 +486,13 @@ mod tests {
 		}
 
 		async fn closed(&self) -> Self::Error {
-			self.state.close_notify.notified().await;
-			FakeError
+			loop {
+				let notified = self.state.close_notify.notified();
+				if !self.state.close_events.lock().unwrap().is_empty() {
+					return FakeError;
+				}
+				notified.await;
+			}
 		}
 
 		fn stats(&self) -> impl web_transport_trait::Stats {
@@ -625,41 +630,37 @@ mod tests {
 	}
 
 	// This fake reports no send-rate estimate, so it never reaches the tokio timer in
-	// the bandwidth loop. A connection is NOT runtime-free in general; see the Async
+	// the bandwidth loop. A session is NOT runtime-free in general; see the Async
 	// docs in lib.rs.
 	#[test]
-	fn connection_is_caller_polled_and_closes_on_drop() {
+	fn session_is_caller_polled_and_closes_on_drop() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let mut connection = futures::executor::block_on(client.connect(fake.clone())).unwrap();
-		assert_eq!(connection.session().version(), Version::Lite(lite::Version::Lite04));
+		let mut session = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 
 		// An arbitrary waiter drives it kio-style: nothing was spawned onto a runtime.
-		assert!(connection.poll(&kio::Waiter::noop()).is_pending());
+		assert!(session.poll(&kio::Waiter::noop()).is_pending());
 
-		// The same connection is also a plain future.
-		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-		assert!(std::future::Future::poll(std::pin::Pin::new(&mut connection), &mut context).is_pending());
-
-		drop(connection);
+		drop(session);
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 	}
 
-	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
-	// consumer exists and keeps sampling on its interval. Paused tokio time makes
-	// the interval fire deterministically.
+	// The send-bandwidth sampler lives inside the session's driver: it samples as
+	// soon as a consumer exists and keeps sampling on its interval. Paused tokio
+	// time makes the interval fire deterministically.
 	#[tokio::test(start_paused = true)]
-	async fn send_bandwidth_samples_on_the_driver() {
+	async fn send_bandwidth_samples_while_the_session_runs() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let connection = client.connect(fake.clone()).await.unwrap();
-		let (session, driver) = connection.split();
-		tokio::spawn(driver);
+		let mut session = client.connect(fake.clone()).await.unwrap();
+		let handle = session.handle();
+		tokio::spawn(async move { session.run().await });
 
-		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
+		let mut bandwidth = handle.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(bandwidth.changed().await, Some(1_000_000));
 
 		// A later change is picked up by the next interval tick.
@@ -667,24 +668,40 @@ mod tests {
 		assert_eq!(bandwidth.changed().await, Some(2_000_000));
 	}
 
-	// A split driver must hold no Session clone, or the close-on-last-drop contract
-	// silently stops firing for every caller that runs the driver detached
-	// (moq-native's spawn_connection, moq-wasm's handshake).
+	// A handle is an observer: it must not keep the session alive, and it must see
+	// the close once the unique Session drops.
 	#[test]
-	fn split_driver_does_not_keep_the_session_alive() {
+	fn handle_observes_but_does_not_own_the_session() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let connection = futures::executor::block_on(client.connect(fake.clone())).unwrap();
-		let (session, driver) = connection.split();
+		let session = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let handle = session.handle();
+		assert_eq!(handle.version(), Version::Lite(lite::Version::Lite04));
 
-		// Stand in for spawning: the driver outlives the caller's handle.
-		let mut driver = Box::pin(driver);
-		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-		assert!(driver.as_mut().poll(&mut context).is_pending());
-
-		// The caller drops their only handle, so the transport closes.
+		// Dropping the unique Session closes the transport even though a handle
+		// is still alive.
 		drop(session);
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+
+		// The handle observes the close.
+		assert!(futures::executor::block_on(handle.closed()).is_err());
+	}
+
+	// A handle can end the session remotely without owning it.
+	#[test]
+	fn handle_close_ends_the_session() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let session = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let handle = session.handle();
+
+		handle.close(Error::Cancel);
+		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+
+		// The later Session drop is a no-op thanks to close-once.
+		drop(session);
+		assert_eq!(fake.state.close_events.lock().unwrap().len(), 1);
 	}
 }
