@@ -129,9 +129,11 @@ impl Session {
 		};
 
 		config.rcParams.averageBitRate = bitrate;
-		// The caller's original pointer died with `start_session`; re-point at
-		// our owned copy in case the `Session` moved since.
-		self.init.encodeConfig = std::ptr::from_mut::<NV_ENC_CONFIG>(&mut **config);
+		debug_assert_eq!(
+			self.init.encodeConfig,
+			std::ptr::from_mut::<NV_ENC_CONFIG>(&mut **config),
+			"init.encodeConfig must point at our owned copy, not the caller's dead one"
+		);
 
 		let mut params = NV_ENC_RECONFIGURE_PARAMS {
 			version: NV_ENC_RECONFIGURE_PARAMS_VER,

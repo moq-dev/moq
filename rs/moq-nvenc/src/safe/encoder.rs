@@ -434,7 +434,17 @@ impl Encoder {
 		// Copy the caller's config before their borrow ends, so the session can
 		// resubmit it to `reconfigure` later. NVENC has already copied it
 		// internally by this point, so the copy is only for our own use.
-		let config = unsafe { initialize_params.encodeConfig.as_ref() }.map(|c| Box::new(*c));
+		let mut config = unsafe { initialize_params.encodeConfig.as_ref() }.map(|c| Box::new(*c));
+
+		// Re-point at our copy immediately. The caller's pointer dies with their
+		// borrow, so retaining it would leave a dangling pointer in `init` until
+		// something fixed it up. The box keeps its address when the `Session`
+		// moves, so this stays valid for the session's life.
+		let mut init = *initialize_params;
+		init.encodeConfig = match config.as_mut() {
+			Some(config) => std::ptr::from_mut::<NV_ENC_CONFIG>(&mut **config),
+			None => std::ptr::null_mut(),
+		};
 
 		Ok(Session {
 			encoder: self,
@@ -442,7 +452,7 @@ impl Encoder {
 			height,
 			buffer_format,
 			encode_guid: initialize_params.encodeGUID,
-			init: *initialize_params,
+			init,
 			config,
 		})
 	}

@@ -28,6 +28,10 @@ pub(crate) struct Openh264 {
 
 impl Openh264 {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self::new(config)?))
+	}
+
+	fn new(config: &Config) -> Result<Self, Error> {
 		let cfg = EncoderConfig::new()
 			.bitrate(BitRate::from_bps(config.resolved_bitrate().min(u32::MAX as u64) as u32))
 			.max_frame_rate(FrameRate::from_hz(config.framerate as f32))
@@ -45,11 +49,27 @@ impl Openh264 {
 			height = config.height,
 			"opened H.264 encoder"
 		);
-		Ok(Box::new(Self {
+		Ok(Self {
 			encoder,
 			pending: None,
 			started: false,
-		}))
+		})
+	}
+
+	/// Read the rate back off the live encoder, so a test can tell what the
+	/// encoder is actually doing rather than what we think we told it.
+	#[cfg(test)]
+	fn read_bitrate(&mut self) -> i64 {
+		let mut info = SBitrateInfo {
+			iLayer: SPATIAL_LAYER_ALL,
+			iBitrate: 0,
+		};
+		let status = unsafe {
+			let api = self.encoder.raw_api();
+			api.get_option(ENCODER_OPTION_BITRATE, std::ptr::from_mut(&mut info).cast())
+		};
+		assert_eq!(status, 0, "openh264 get bitrate failed");
+		info.iBitrate as i64
 	}
 
 	/// Set the rate on the live encoder. Only valid once it exists; see `pending`.
@@ -127,10 +147,95 @@ impl Backend for Openh264 {
 			self.pending = Some(bitrate);
 			return Ok(());
 		}
+		// Drop anything still deferred: it is older than this rate, and would
+		// otherwise resurrect on the next encode and clobber it.
+		self.pending = None;
 		self.apply_bitrate(bitrate)
 	}
 
 	fn name(&self) -> &str {
 		NAME
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::super::super::encoder::Kind;
+	use super::*;
+	use crate::frame::I420;
+
+	fn config() -> Config {
+		Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		}
+	}
+
+	fn gray() -> Frame {
+		Frame::I420(I420 {
+			width: 320,
+			height: 240,
+			data: vec![0x80u8; I420::len(320, 240)],
+		})
+	}
+
+	/// The rate reaches the encoder, verified by reading it back rather than by
+	/// trusting our own bookkeeping.
+	#[test]
+	fn set_bitrate_reaches_the_encoder() {
+		let mut enc = Openh264::new(&config()).unwrap();
+		enc.encode(&gray(), true).unwrap();
+
+		let lower = config().resolved_bitrate() / 2;
+		enc.set_bitrate(lower).unwrap();
+		assert_eq!(enc.read_bitrate(), lower as i64);
+	}
+
+	/// openh264 rejects a target above the rate it was opened with
+	/// (`cmInitParaError`), which is why the rate control policy's ceiling is the
+	/// encoder's own opening bitrate. Pinned here so a future policy change that
+	/// lets the target climb past it fails loudly rather than at runtime.
+	#[test]
+	fn set_bitrate_above_the_opening_rate_is_rejected() {
+		let mut enc = Openh264::new(&config()).unwrap();
+		enc.encode(&gray(), true).unwrap();
+
+		let higher = config().resolved_bitrate() * 4;
+		assert!(enc.set_bitrate(higher).is_err());
+	}
+
+	/// The policy's ceiling is exactly the opening rate, so full recovery sets
+	/// that value back. It sits one step from the rate openh264 rejects above,
+	/// so pin that the boundary itself is allowed.
+	#[test]
+	fn set_bitrate_at_the_opening_rate_is_accepted() {
+		let mut enc = Openh264::new(&config()).unwrap();
+		enc.encode(&gray(), true).unwrap();
+		let opened = config().resolved_bitrate();
+
+		enc.set_bitrate(opened / 2).unwrap();
+		enc.set_bitrate(opened).unwrap();
+		assert_eq!(enc.read_bitrate(), opened as i64);
+	}
+
+	/// Regression: a rate set before the first frame is deferred, and a later
+	/// live set must supersede it. Leaving the deferred value queued lets it
+	/// resurrect on the next encode and silently clobber the newer rate, leaving
+	/// the encoder at a bitrate nobody asked for while `Encoder::bitrate()`
+	/// reports the newer one.
+	#[test]
+	fn a_live_set_supersedes_a_deferred_one() {
+		let mut enc = Openh264::new(&config()).unwrap();
+		let opened = config().resolved_bitrate();
+
+		// Deferred: the encoder doesn't exist yet.
+		enc.set_bitrate(opened / 2).unwrap();
+		enc.encode(&gray(), true).unwrap();
+
+		// Live: this is the rate the caller last asked for.
+		enc.set_bitrate(opened / 4).unwrap();
+		enc.encode(&gray(), false).unwrap();
+
+		assert_eq!(enc.read_bitrate(), (opened / 4) as i64, "the deferred rate resurrected");
 	}
 }
