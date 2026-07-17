@@ -88,7 +88,8 @@ public final class BroadcastConsumer: Sendable {
 }
 
 /// A watch over a broadcast's route: an async sequence yielding the current
-/// route first, then every change. Created by `BroadcastConsumer.routeUpdates`.
+/// route first, then every change, ending when the broadcast does. Created by
+/// `BroadcastConsumer.routeUpdates`.
 public final class RouteWatch: AsyncSequence, Sendable {
     public typealias Element = Route
 
@@ -98,8 +99,9 @@ public final class RouteWatch: AsyncSequence, Sendable {
         self.ffi = ffi
     }
 
-    /// Suspend until the next route: the current one on the first call, then each change.
-    public func next() async throws -> Route {
+    /// Suspend until the next route: the current one on the first call, then
+    /// each change. Returns nil once the broadcast ends.
+    public func next() async throws -> Route? {
         try await ffi.next()
     }
 
@@ -138,7 +140,7 @@ public final class BroadcastProducer: Sendable {
     /// Update the broadcast's route: the hop chain and cost it advertises.
     ///
     /// Use this as conditions shift (e.g. a standby transcoder lowering its cost
-    /// once warm); consumers observe the change via `BroadcastConsumer.routeUpdated`.
+    /// once warm); consumers observe the change via `BroadcastConsumer.routeUpdates()`.
     public func setRoute(_ route: Route) throws {
         try ffi.setRoute(route: route)
     }

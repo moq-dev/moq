@@ -183,6 +183,7 @@ async def test_broadcast_route_over_wire():
                     assert announcement.path == "with-route"
                     # route_changed yields the current route first.
                     route = await announcement.broadcast.route_changed()
+                    assert route is not None
                     assert route == announcement.broadcast.route
                     assert all(isinstance(h, int) for h in route.hops)
                     # A broadcast crossing at least one session carries a non-empty hop chain.
@@ -197,6 +198,55 @@ async def test_broadcast_route_over_wire():
             except asyncio.CancelledError:
                 pass
             broadcast.finish()
+
+
+async def test_route_changed_observes_update():
+    """Repeated announcement.broadcast access shares one route cursor.
+
+    Regression test: the broadcast property used to mint a fresh consumer per
+    access, so each route_changed() call restarted at the current route and a
+    watch loop busy-looped instead of blocking for the next change.
+    """
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        broadcast = moq.BroadcastProducer()
+        server.publish("routed", broadcast)
+
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                tls_verify=False,
+                bind="127.0.0.1:0",
+            ) as client:
+                async for announcement in client.announced():
+                    assert announcement.path == "routed"
+
+                    # The property returns the same consumer every time.
+                    assert announcement.broadcast is announcement.broadcast
+
+                    # First call yields the current route (via a fresh access each time).
+                    first = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
+                    assert first is not None
+                    assert 42 not in first.hops
+
+                    # The publisher advertises a new route; the shared cursor
+                    # observes the update rather than replaying the old route.
+                    broadcast.set_route(moq.Route(hops=[42], cost=0))
+                    updated = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
+                    assert updated is not None
+                    assert 42 in updated.hops
+
+                    # Once the broadcast ends, the watch ends cleanly with None.
+                    broadcast.finish()
+                    ended = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
+                    assert ended is None
+                    break
+        finally:
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def test_serve_helper_with_on_request_rejection():

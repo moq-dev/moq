@@ -21,6 +21,8 @@ public typealias AudioFormat = MoqFFI.MoqAudioFormat
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias Container = MoqFFI.Container
 public typealias Datagram = MoqFFI.MoqDatagram
+/// The route a broadcast takes to reach this origin: relay hop ids (oldest
+/// first) plus the publisher's advertised cost (lower wins).
 public typealias Route = MoqFFI.MoqRoute
 public typealias Subscription = MoqFFI.MoqSubscription
 /// Options for fetching one complete group by sequence.

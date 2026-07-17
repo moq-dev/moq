@@ -53,14 +53,15 @@ target_include_directories(moq INTERFACE ${RUST_TARGET_DIR}/include)
 target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
 # Link required system frameworks on macOS. The media frameworks and the C++
-# runtime cover the bundled moq-video (AVFoundation capture, VideoToolbox
-# codecs) and openh264.
+# runtime cover the bundled moq-video (AVFoundation and ScreenCaptureKit
+# capture, VideoToolbox codecs) and openh264.
 if(APPLE)
     target_link_options(moq INTERFACE
         "LINKER:-framework,CoreFoundation" "LINKER:-framework,Foundation"
         "LINKER:-framework,Security" "LINKER:-framework,CoreServices"
         "LINKER:-framework,CoreMedia" "LINKER:-framework,CoreVideo"
         "LINKER:-framework,AVFoundation" "LINKER:-framework,VideoToolbox"
+        "LINKER:-framework,ScreenCaptureKit"
     )
     target_link_libraries(moq INTERFACE c++)
 endif()

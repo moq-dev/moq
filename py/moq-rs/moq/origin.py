@@ -22,6 +22,7 @@ class Announcement:
 
     def __init__(self, inner: MoqAnnouncement) -> None:
         self._inner = inner
+        self._broadcast: BroadcastConsumer | None = None
 
     @property
     def path(self) -> str:
@@ -29,7 +30,14 @@ class Announcement:
 
     @property
     def broadcast(self) -> BroadcastConsumer:
-        return BroadcastConsumer(self._inner.broadcast())
+        """The broadcast's consumer, one shared instance per announcement.
+
+        Cached so stateful accessors (like the ``route_changed`` cursor)
+        survive repeated property access.
+        """
+        if self._broadcast is None:
+            self._broadcast = BroadcastConsumer(self._inner.broadcast())
+        return self._broadcast
 
 
 class Announced:

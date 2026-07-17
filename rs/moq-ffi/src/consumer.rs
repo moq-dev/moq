@@ -102,15 +102,24 @@ struct RouteWatch {
 	inner: moq_net::broadcast::Consumer,
 }
 
+impl RouteWatch {
+	async fn next(&mut self) -> Result<Option<MoqRoute>, MoqError> {
+		match self.inner.route_changed().await {
+			Ok(route) => Ok(Some(route.into())),
+			// A broadcast has no abort; Dropped (every producer gone) is its clean end.
+			Err(moq_net::Error::Dropped) => Ok(None),
+			Err(e) => Err(e.into()),
+		}
+	}
+}
+
 #[uniffi::export]
 impl MoqRouteWatch {
 	/// Wait for the next route: the current one on the first call, then each change.
 	///
-	/// Errors with `Closed` once the broadcast is gone.
-	pub async fn next(&self) -> Result<MoqRoute, MoqError> {
-		self.task
-			.run(|mut state| async move { Ok(state.inner.route_changed().await?.into()) })
-			.await
+	/// Returns `None` once the broadcast ends (every producer gone).
+	pub async fn next(&self) -> Result<Option<MoqRoute>, MoqError> {
+		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
 	/// Cancel all current and future `next()` calls.

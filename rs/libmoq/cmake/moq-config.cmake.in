@@ -23,8 +23,8 @@ if(NOT TARGET moq::moq)
     )
 
     # Link required system frameworks on macOS. The media frameworks and the
-    # C++ runtime cover the bundled moq-video (AVFoundation capture,
-    # VideoToolbox codecs) and openh264.
+    # C++ runtime cover the bundled moq-video (AVFoundation and
+    # ScreenCaptureKit capture, VideoToolbox codecs) and openh264.
     if(APPLE)
         set_property(TARGET moq::moq APPEND PROPERTY
             INTERFACE_LINK_LIBRARIES
@@ -32,6 +32,7 @@ if(NOT TARGET moq::moq)
                 "-framework Security" "-framework CoreServices"
                 "-framework CoreMedia" "-framework CoreVideo"
                 "-framework AVFoundation" "-framework VideoToolbox"
+                "-framework ScreenCaptureKit"
                 c++
         )
     endif()

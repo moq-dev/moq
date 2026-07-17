@@ -17,6 +17,7 @@ description: Capability parity across moq-ffi, language wrappers, and libmoq
 | Server listen and accept | Yes | Yes | Yes | Yes | No |
 | Client TLS roots, system roots, fingerprints, mTLS, and bind | Yes | Yes | Yes | Yes | No |
 | Announce, discover, and request broadcasts | Yes | Yes | Yes | Yes | Yes |
+| Broadcast routes and route updates | Yes | Yes | Yes | Yes | No |
 | Dynamically requested broadcasts | Yes | Yes | Yes | Yes | No |
 | Raw tracks, explicit groups, timestamps, and aborts | Yes | Yes | Yes | Yes | Yes |
 | Subscription controls and track metadata | Yes | Yes | Yes | Yes | Yes |

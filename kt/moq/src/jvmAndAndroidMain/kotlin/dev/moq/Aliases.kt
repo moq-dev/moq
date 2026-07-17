@@ -26,6 +26,8 @@ typealias Announcement = uniffi.moq.MoqAnnouncement
 // Broadcast / track / group producers and consumers.
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
+/** Watches a broadcast's route: yields the current route first, then every change. */
+typealias RouteWatch = uniffi.moq.MoqRouteWatch
 /** Receives tracks requested from a dynamically served broadcast. */
 typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
@@ -63,8 +65,8 @@ typealias VideoHint = uniffi.moq.MoqVideoHint
 typealias Init = uniffi.moq.MoqInit
 typealias Audio = uniffi.moq.MoqAudio
 typealias Dimensions = uniffi.moq.MoqDimensions
+/** The route a broadcast takes to reach this origin: relay hop ids (oldest first) plus advertised cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
-typealias RouteWatch = uniffi.moq.MoqRouteWatch
 typealias Subscription = uniffi.moq.MoqSubscription
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 typealias TrackInfo = uniffi.moq.MoqTrackInfo

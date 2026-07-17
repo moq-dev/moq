@@ -29,8 +29,9 @@ type RouteWatch struct {
 	inner *ffi.MoqRouteWatch
 }
 
-// Next returns the next route: the current one on the first call, then each change.
-func (r *RouteWatch) Next(ctx context.Context) (Route, error) {
+// Next returns the next route: the current one on the first call, then each
+// change, or (nil, nil) when the broadcast ends.
+func (r *RouteWatch) Next(ctx context.Context) (*Route, error) {
 	return runCancellable(ctx, r.inner.Cancel, r.inner.Next)
 }
 

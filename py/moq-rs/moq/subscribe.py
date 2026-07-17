@@ -287,11 +287,12 @@ class BroadcastConsumer:
         """
         return self._inner.route()
 
-    async def route_changed(self) -> Route:
+    async def route_changed(self) -> Route | None:
         """Wait for the broadcast's route to change.
 
         The first call returns the current route immediately; each later call
-        blocks until it changes again (e.g. an upstream failover).
+        blocks until it changes again (e.g. an upstream failover). Returns
+        ``None`` once the broadcast ends.
         """
         if self._route_watch is None:
             self._route_watch = self._inner.route_updates()
