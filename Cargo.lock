@@ -4326,6 +4326,7 @@ dependencies = [
  "reqwest",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tracing",
  "url",
 ]

@@ -9,8 +9,8 @@
 //!   broadcasts (an HTTP *server*). It subscribes only to each broadcast's
 //!   catalog and per-rendition timeline tracks; media bytes are FETCHed from
 //!   the relay one group at a time, only when a segment is actually requested.
-//!   It serves every request by default; gate access with
-//!   [`Server::with_authorizer`](server::Server::with_authorizer).
+//!   It serves every request; gate access by layering your own middleware onto
+//!   [`Server::router`](server::Server::router).
 //!
 //! All CMAF byte handling (import via [`moq_mux::container::fmp4::Import`],
 //! export via [`moq_mux::container::fmp4::Muxer`]) lives in `moq-mux`; this
@@ -25,4 +25,22 @@ pub mod server;
 
 pub use error::*;
 #[cfg(feature = "server")]
-pub use server::{Authorizer, Server};
+pub use server::Server;
+
+/// Re-export of the HTTP stack behind the export server, so consumers can name the
+/// types that surface through [`Server::router`] (and layer their own middleware on
+/// it) without adding their own axum dependency and risking a version mismatch.
+/// `axum::http` covers the `http` crate types too. A major axum bump is therefore a
+/// breaking change for this crate.
+#[cfg(feature = "server")]
+pub use axum;
+
+/// Re-export of the HTTP client used by [`import`], so consumers can name the
+/// [`reqwest::Error`] carried by [`Error::Reqwest`] without adding their own reqwest
+/// dependency. A major reqwest bump is therefore a breaking change for this crate.
+pub use reqwest;
+
+/// Re-export of the URL parser, so consumers can name the [`url::Url`] and
+/// [`url::ParseError`] carried by [`Error`] without adding their own url dependency.
+/// A major url bump is therefore a breaking change for this crate.
+pub use url;

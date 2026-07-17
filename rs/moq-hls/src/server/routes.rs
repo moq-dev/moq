@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
@@ -29,10 +29,7 @@ pub fn router(server: Server) -> Router {
 		.with_state(server)
 }
 
-async fn master(State(server): State<Server>, Path(broadcast): Path<String>, headers: HeaderMap) -> Response {
-	if let Err(status) = server.authorize(&broadcast, &headers, None) {
-		return status.into_response();
-	}
+async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> Response {
 	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
 		return not_found();
 	};
@@ -46,12 +43,7 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>, hea
 async fn media(
 	State(server): State<Server>,
 	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
-	RawQuery(query): RawQuery,
-	headers: HeaderMap,
 ) -> Response {
-	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
-		return status.into_response();
-	}
 	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
 		return not_found();
 	};
@@ -78,12 +70,7 @@ async fn media(
 async fn init(
 	State(server): State<Server>,
 	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
-	RawQuery(query): RawQuery,
-	headers: HeaderMap,
 ) -> Response {
-	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
-		return status.into_response();
-	}
 	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
 		return not_found();
 	};
@@ -97,12 +84,7 @@ async fn init(
 async fn segment(
 	State(server): State<Server>,
 	Path((broadcast, kind, rendition, file)): Path<(String, String, String, String)>,
-	RawQuery(query): RawQuery,
-	headers: HeaderMap,
 ) -> Response {
-	if let Err(status) = server.authorize(&broadcast, &headers, query.as_deref()) {
-		return status.into_response();
-	}
 	let Some(sequence) = file.strip_suffix(".m4s").and_then(|s| s.parse::<u64>().ok()) else {
 		return not_found();
 	};
