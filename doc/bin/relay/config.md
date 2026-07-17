@@ -243,13 +243,15 @@ counterpart no traffic can flow, so the entry is dropped:
     "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 5, "subscriptions_closed": 2,
-    "bytes": 12345, "frames": 678, "groups": 9
+    "bytes": 12345, "frames": 678, "groups": 9,
+    "announced_seconds": 42.5, "subscriptions_seconds": 118.2, "broadcasts_seconds": 42.5
   },
   "anon/foo": {
     "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 2, "subscriptions_closed": 0,
-    "bytes": 234, "frames": 12, "groups": 1
+    "bytes": 234, "frames": 12, "groups": 1,
+    "announced_seconds": 5.0, "subscriptions_seconds": 9.7, "broadcasts_seconds": 5.0
   }
 }
 ```
@@ -275,20 +277,30 @@ Field semantics:
   track-level subscription guards opened and dropped.
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
   session loops (both the `moq-lite` and IETF `moq-transport` paths).
+- `announced_seconds` / `subscriptions_seconds` / `broadcasts_seconds`:
+  cumulative live-time in seconds for the matching open/closed pair (broadcast
+  publish time, track-subscription time, and viewer time respectively). Time
+  accrues continuously, so a span still open at snapshot time already includes
+  its elapsed duration. A long-lived broadcast or viewer therefore accrues
+  within the period instead of only when it closes, which is what connection-time
+  billing wants without integrating the live counts yourself. Emitted as a float
+  (seconds) so a cumulative value stays within JSON's safe-integer range.
 
 The session tracks (`sessions.json`, `internal/sessions.json`) instead map
-each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`
-bumps when a session authenticated under that root connects and
+each auth root to a `{ sessions, sessions_closed, sessions_seconds }` snapshot.
+`sessions` bumps when a session authenticated under that root connects and
 `sessions_closed` when it disconnects, so `sessions - sessions_closed` is
-the number of sessions currently connected under the root. This counts
+the number of sessions currently connected under the root. `sessions_seconds`
+is the cumulative connected time (still-connected sessions included, accruing
+continuously), which is the connection-time figure to bill on. This counts
 presence regardless of whether any data flows, so a client connected to
 e.g. `/acme` is billable even while idle. A root entry is emitted while live
 or on the tick it changed, then dropped once no session under it remains:
 
 ```json
 {
-  "acme":   { "sessions": 3, "sessions_closed": 1 },
-  "globex": { "sessions": 1, "sessions_closed": 0 }
+  "acme":   { "sessions": 3, "sessions_closed": 1, "sessions_seconds": 512.4 },
+  "globex": { "sessions": 1, "sessions_closed": 0, "sessions_seconds": 88.0 }
 }
 ```
 

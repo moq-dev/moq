@@ -63,6 +63,16 @@
 //! * `sessions` / `sessions_closed` (session tracks only): cumulative count
 //!   of sessions connected/disconnected under an auth root on this tier.
 //!   Driven by [`StatsHandle::session`].
+//! * `announced_seconds` / `subscriptions_seconds` / `broadcasts_seconds`
+//!   (and `sessions_seconds` on the session tracks): cumulative live-time for
+//!   the matching open/closed pair, in seconds. Time accrues continuously:
+//!   a span still open at snapshot time contributes its elapsed time so far,
+//!   so a long-lived connection or broadcast bills within the period rather
+//!   than only when it closes. This is exact (no per-tick sampling), which is
+//!   what connection-time billing wants without integrating the live count
+//!   downstream. Emitted as a float (seconds, not microseconds) so a
+//!   cumulative value can't overflow the `2^53` JSON-safe-integer range at
+//!   scale. See [`DurationCounter`] for the accrual mechanism.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across snapshots means the underlying entry was garbage
@@ -100,7 +110,10 @@
 //! On each tick the task compares the just-built per-(tier, role) JSON payload
 //! against the last one it emitted and writes a frame only when something
 //! changed. New subscribers still pick up a baseline immediately because
-//! track-latest semantics retain the most recent emitted frame.
+//! track-latest semantics retain the most recent emitted frame. A slot with any
+//! open span changes every tick anyway (its `*_seconds` advances), so idle-skip
+//! only elides ticks for fully-drained slots; live-but-idle broadcasts now emit
+//! a frame per tick so their running duration stays current.
 //!
 //! # Snapshot atomicity
 //!
@@ -128,16 +141,87 @@
 use std::{
 	collections::{BTreeMap, HashMap, HashSet},
 	sync::{
-		Arc, Weak,
+		Arc, LazyLock, Weak,
 		atomic::{AtomicU64, Ordering},
 	},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
 use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProducer};
+
+/// Process-wide monotonic epoch for stats timekeeping. Every duration offset is
+/// microseconds elapsed since this instant, so a guard's open and close read the
+/// same clock and their difference is the guard's lifetime.
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Microseconds elapsed since [`EPOCH`], saturating into `u64` (~584,000 years
+/// of range, so it never wraps in practice).
+fn now_micros() -> u64 {
+	EPOCH.elapsed().as_micros() as u64
+}
+
+/// Convert cumulative microseconds to `f64` seconds for the public edge (wire
+/// JSON, `StatsSnapshot`, `/metrics`), where a raw microsecond integer would
+/// overflow the `2^53` JSON-safe range once summed across many spans.
+fn micros_to_seconds(micros: u128) -> f64 {
+	micros as f64 / 1_000_000.0
+}
+
+/// Lock-free, time-weighted duration accumulator paired with an open/closed
+/// counter. Tracks cumulative live-microseconds for a set of RAII guards: exact
+/// for spans that have already closed and, at snapshot time, for the still-open
+/// tail, with no per-tick sampling.
+///
+/// `accrued` sums the full lifetime of every guard that has closed. `open_start`
+/// sums the start offset (microseconds since [`EPOCH`]) of every guard still
+/// open: bumped up on open, back down on close, so it nets to zero once every
+/// guard closes. Given the live count `open` and the current time `now`, total
+/// live-microseconds is `accrued + open*now - open_start`, where the second term
+/// is the open guards' elapsed `now - start` summed in closed form.
+///
+/// Magnitude stays bounded by concurrency, not churn: `accrued` is the integral
+/// of the live count, so it can't exceed `max_open * uptime`, and `open_start`
+/// can't exceed `open * uptime`. Both fit `u64` for years even at high open
+/// counts, which is why timekeeping stays in integer microseconds internally;
+/// callers convert to `f64` seconds only at the public edge, where a cumulative
+/// microsecond count would overflow the `2^53` JSON-safe-integer range.
+#[derive(Default, Debug)]
+struct DurationCounter {
+	accrued_micros: AtomicU64,
+	open_start_micros: AtomicU64,
+}
+
+impl DurationCounter {
+	/// Record a guard opening at `start` (microseconds since [`EPOCH`]).
+	fn open(&self, start: u64) {
+		self.open_start_micros.fetch_add(start, Ordering::Relaxed);
+	}
+
+	/// Record a guard that opened at `start` closing at `now`. Adds its lifetime
+	/// to `accrued` (with `Release`, so a snapshot's `Acquire` load of `accrued`
+	/// sees the open work that happened-before this close) and removes its start
+	/// from `open_start`.
+	fn close(&self, start: u64, now: u64) {
+		self.accrued_micros
+			.fetch_add(now.saturating_sub(start), Ordering::Release);
+		self.open_start_micros.fetch_sub(start, Ordering::Relaxed);
+	}
+
+	/// Cumulative live-microseconds through `now`, given `open` live guards.
+	/// `accrued` is read with `Acquire` to pair with [`Self::close`]; the open
+	/// tail is clamped at zero to absorb the bounded skew between the two atomics
+	/// (the same slight upward bias the open counters already tolerate; see the
+	/// module "Snapshot atomicity" note).
+	fn micros(&self, open: u64, now: u64) -> u128 {
+		let accrued = self.accrued_micros.load(Ordering::Acquire) as u128;
+		let open_start = self.open_start_micros.load(Ordering::Relaxed) as u128;
+		let tail = (open as u128 * now as u128).saturating_sub(open_start);
+		accrued + tail
+	}
+}
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -165,6 +249,13 @@ pub struct Counters {
 	pub bytes: AtomicU64,
 	pub frames: AtomicU64,
 	pub groups: AtomicU64,
+	/// Time-weighted duration for the `announced`, `subscriptions`, and
+	/// `broadcasts` open/closed pairs. Private (the accumulator type is
+	/// internal); surfaced as `f64` seconds through [`RawCounts`] and the public
+	/// snapshots.
+	announced_time: DurationCounter,
+	subscriptions_time: DurationCounter,
+	broadcasts_time: DurationCounter,
 }
 
 impl Counters {
@@ -175,7 +266,7 @@ impl Counters {
 	/// Acquire on close synchronizes-with the matching Release on the
 	/// close bump, which transitively makes all earlier writes (including
 	/// the prior open bump) visible to this thread.
-	fn snapshot(&self) -> RawCounts {
+	fn snapshot(&self, now: u64) -> RawCounts {
 		let announced_closed = self.announced_closed.load(Ordering::Acquire);
 		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Acquire);
 		let broadcasts_closed = self.broadcasts_closed.load(Ordering::Acquire);
@@ -197,6 +288,15 @@ impl Counters {
 			bytes,
 			frames,
 			groups,
+			announced_micros: self
+				.announced_time
+				.micros(announced.saturating_sub(announced_closed), now),
+			subscriptions_micros: self
+				.subscriptions_time
+				.micros(subscriptions.saturating_sub(subscriptions_closed), now),
+			broadcasts_micros: self
+				.broadcasts_time
+				.micros(broadcasts.saturating_sub(broadcasts_closed), now),
 		}
 	}
 }
@@ -208,16 +308,19 @@ impl Counters {
 struct SessionCounters {
 	sessions: AtomicU64,
 	sessions_closed: AtomicU64,
+	/// Time-weighted connected-session duration for this `(tier, root)`.
+	session_time: DurationCounter,
 }
 
 impl SessionCounters {
-	/// Read `(sessions, sessions_closed)`. Closed is loaded with `Acquire`
-	/// before open with `Relaxed`, the same pairing as [`Counters::snapshot`],
-	/// so the readout never shows `closed > open`.
-	fn snapshot(&self) -> (u64, u64) {
+	/// Read `(sessions, sessions_closed, live_micros)` through `now`. Closed is
+	/// loaded with `Acquire` before open with `Relaxed`, the same pairing as
+	/// [`Counters::snapshot`], so the readout never shows `closed > open`.
+	fn snapshot(&self, now: u64) -> (u64, u64, u128) {
 		let closed = self.sessions_closed.load(Ordering::Acquire);
 		let open = self.sessions.load(Ordering::Relaxed);
-		(open, closed)
+		let micros = self.session_time.micros(open.saturating_sub(closed), now);
+		(open, closed, micros)
 	}
 }
 
@@ -234,6 +337,11 @@ struct RawCounts {
 	bytes: u64,
 	frames: u64,
 	groups: u64,
+	/// Cumulative live-microseconds for the matching open/closed pair, through
+	/// the snapshot instant. Converted to `f64` seconds at the public edge.
+	announced_micros: u128,
+	subscriptions_micros: u128,
+	broadcasts_micros: u128,
 }
 
 /// Distinguishes traffic classes so a single [`Stats`] can record
@@ -299,7 +407,7 @@ impl Role {
 /// [`Counters`]: per-broadcast detail is collapsed away (it lives on the
 /// published `.stats` broadcast, not here). Every counter is cumulative, so a
 /// rate is `delta / delta_t` and a live count is `open - closed`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct CounterTotals {
 	pub announced: u64,
@@ -312,6 +420,14 @@ pub struct CounterTotals {
 	pub bytes: u64,
 	pub frames: u64,
 	pub groups: u64,
+	/// Cumulative broadcast-lifetime seconds (time each broadcast was announced),
+	/// summed across broadcasts. Includes broadcasts still live at snapshot time.
+	pub announced_seconds: f64,
+	/// Cumulative track-subscription seconds, summed across broadcasts.
+	pub subscriptions_seconds: f64,
+	/// Cumulative viewer seconds: time each distinct `(broadcast, session)` held
+	/// at least one active subscription, summed across broadcasts.
+	pub broadcasts_seconds: f64,
 }
 
 impl CounterTotals {
@@ -327,17 +443,24 @@ impl CounterTotals {
 		self.bytes += raw.bytes;
 		self.frames += raw.frames;
 		self.groups += raw.groups;
+		self.announced_seconds += micros_to_seconds(raw.announced_micros);
+		self.subscriptions_seconds += micros_to_seconds(raw.subscriptions_micros);
+		self.broadcasts_seconds += micros_to_seconds(raw.broadcasts_micros);
 	}
 }
 
 /// Connected-session presence for one tier: cumulative connects and
 /// disconnects summed over every auth root. `sessions - sessions_closed` is the
 /// current live session count.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct SessionTotals {
 	pub sessions: u64,
 	pub sessions_closed: u64,
+	/// Cumulative connected-session seconds, summed across auth roots. Includes
+	/// sessions still connected at snapshot time, so a long-lived connection
+	/// accrues continuously rather than only when it disconnects.
+	pub sessions_seconds: f64,
 }
 
 /// A point-in-time, host-level rollup of this node's stats counters, returned
@@ -348,7 +471,7 @@ pub struct SessionTotals {
 /// scrape / `/metrics`-style endpoint where per-broadcast cardinality is
 /// unwanted; the per-broadcast breakdown lives on the published `.stats`
 /// broadcast instead. A no-op aggregator (stats disabled) yields all zeros.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct StatsSnapshot {
 	/// Traffic totals indexed `[tier][role]`; read via [`Self::traffic`].
@@ -702,12 +825,13 @@ impl Stats {
 		let Some(shared) = self.shared.as_ref() else {
 			return snap;
 		};
+		let now = now_micros();
 		{
 			let entries = shared.entries.lock();
 			for entry in entries.values() {
 				for tier in [Tier::External, Tier::Internal] {
-					snap.traffic[tier.idx()][Role::Publisher.idx()].add(entry.publisher[tier.idx()].snapshot());
-					snap.traffic[tier.idx()][Role::Subscriber.idx()].add(entry.subscriber[tier.idx()].snapshot());
+					snap.traffic[tier.idx()][Role::Publisher.idx()].add(entry.publisher[tier.idx()].snapshot(now));
+					snap.traffic[tier.idx()][Role::Subscriber.idx()].add(entry.subscriber[tier.idx()].snapshot(now));
 				}
 			}
 		}
@@ -715,9 +839,10 @@ impl Stats {
 			let sessions = shared.sessions[tier.idx()].lock();
 			let totals = &mut snap.sessions[tier.idx()];
 			for counters in sessions.values() {
-				let (open, closed) = counters.snapshot();
+				let (open, closed, micros) = counters.snapshot(now);
 				totals.sessions += open;
 				totals.sessions_closed += closed;
+				totals.sessions_seconds += micros_to_seconds(micros);
 			}
 		}
 		snap
@@ -817,14 +942,16 @@ impl BroadcastStats {
 	/// (The `broadcasts` sentinel is driven separately by
 	/// [`SessionBroadcasts`]; see the module docs.)
 	pub fn publisher(&self) -> PublisherStats {
+		let start = now_micros();
 		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()]
-				.announced
-				.fetch_add(1, Ordering::Relaxed);
+			let counters = &entry.publisher[self.tier.idx()];
+			counters.announced.fetch_add(1, Ordering::Relaxed);
+			counters.announced_time.open(start);
 		}
 		PublisherStats {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			start_micros: start,
 		}
 	}
 
@@ -833,14 +960,16 @@ impl BroadcastStats {
 	/// (The `broadcasts` sentinel is driven separately by
 	/// [`SessionBroadcasts`]; see the module docs.)
 	pub fn subscriber(&self) -> SubscriberStats {
+		let start = now_micros();
 		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()]
-				.announced
-				.fetch_add(1, Ordering::Relaxed);
+			let counters = &entry.subscriber[self.tier.idx()];
+			counters.announced.fetch_add(1, Ordering::Relaxed);
+			counters.announced_time.open(start);
 		}
 		SubscriberStats {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			start_micros: start,
 		}
 	}
 
@@ -850,14 +979,16 @@ impl BroadcastStats {
 	/// parameter is kept for symmetry with the rest of moq-net so callers
 	/// don't have to thread an `Option<&str>` through subscribe sites.
 	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
+		let start = now_micros();
 		if let Some(entry) = &self.entry {
-			entry.publisher[self.tier.idx()]
-				.subscriptions
-				.fetch_add(1, Ordering::Relaxed);
+			let counters = &entry.publisher[self.tier.idx()];
+			counters.subscriptions.fetch_add(1, Ordering::Relaxed);
+			counters.subscriptions_time.open(start);
 		}
 		PublisherTrack {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			start_micros: start,
 		}
 	}
 
@@ -886,14 +1017,16 @@ impl BroadcastStats {
 
 	/// Subscriber-side counterpart to [`Self::publisher_track`].
 	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
+		let start = now_micros();
 		if let Some(entry) = &self.entry {
-			entry.subscriber[self.tier.idx()]
-				.subscriptions
-				.fetch_add(1, Ordering::Relaxed);
+			let counters = &entry.subscriber[self.tier.idx()];
+			counters.subscriptions.fetch_add(1, Ordering::Relaxed);
+			counters.subscriptions_time.open(start);
 		}
 		SubscriberTrack {
 			entry: self.entry.clone(),
 			tier: self.tier,
+			start_micros: start,
 		}
 	}
 }
@@ -933,7 +1066,17 @@ pub struct SessionBroadcasts {
 	stats: Stats,
 	tier: Tier,
 	side: Side,
-	counts: Arc<std::sync::Mutex<HashMap<PathOwned, u32>>>,
+	counts: Arc<std::sync::Mutex<HashMap<PathOwned, ViewerRefcount>>>,
+}
+
+/// Per-broadcast viewer state for one session: how many subscriptions it holds
+/// and when the current viewer span (the `0 -> 1` transition) began, so the
+/// `1 -> 0` transition can charge the span's duration.
+#[derive(Default)]
+struct ViewerRefcount {
+	count: u32,
+	/// Span start (microseconds since [`EPOCH`]) captured on the `0 -> 1` bump.
+	start_micros: u64,
 }
 
 impl SessionBroadcasts {
@@ -953,19 +1096,22 @@ impl SessionBroadcasts {
 	pub fn subscribe(&self, path: impl AsPath) -> BroadcastSubscription {
 		let path = path.as_path().to_owned();
 		let entry = self.stats.entry(&path);
-		let first = {
+		// `Some(start)` on the session's first subscription to this broadcast.
+		let opened = {
 			let mut counts = self.counts.lock().expect("stats refcount poisoned");
-			let n = counts.entry(path.clone()).or_insert(0);
-			let first = *n == 0;
-			*n += 1;
-			first
+			let rc = counts.entry(path.clone()).or_default();
+			let first = rc.count == 0;
+			if first {
+				rc.start_micros = now_micros();
+			}
+			rc.count += 1;
+			first.then_some(rc.start_micros)
 		};
-		if first {
+		if let Some(start) = opened {
 			if let Some(entry) = &entry {
-				self.side
-					.counters(entry, self.tier)
-					.broadcasts
-					.fetch_add(1, Ordering::Relaxed);
+				let counters = self.side.counters(entry, self.tier);
+				counters.broadcasts.fetch_add(1, Ordering::Relaxed);
+				counters.broadcasts_time.open(start);
 			}
 		}
 		BroadcastSubscription {
@@ -985,35 +1131,37 @@ pub struct BroadcastSubscription {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
 	side: Side,
-	counts: Arc<std::sync::Mutex<HashMap<PathOwned, u32>>>,
+	counts: Arc<std::sync::Mutex<HashMap<PathOwned, ViewerRefcount>>>,
 	path: PathOwned,
 }
 
 impl Drop for BroadcastSubscription {
 	fn drop(&mut self) {
-		let last = {
+		// `Some(start)` when this was the session's last subscription to the
+		// broadcast, carrying the span start captured on the `0 -> 1` bump.
+		let closed = {
 			let mut counts = self.counts.lock().expect("stats refcount poisoned");
 			match counts.get_mut(&self.path) {
-				Some(n) => {
-					*n -= 1;
-					if *n == 0 {
+				Some(rc) => {
+					rc.count -= 1;
+					if rc.count == 0 {
+						let start = rc.start_micros;
 						counts.remove(&self.path);
-						true
+						Some(start)
 					} else {
-						false
+						None
 					}
 				}
-				None => false,
+				None => None,
 			}
 		};
-		if last {
+		if let Some(start) = closed {
 			if let Some(entry) = &self.entry {
+				let counters = self.side.counters(entry, self.tier);
+				counters.broadcasts_time.close(start, now_micros());
 				// Release pairs with the snapshot reader's Acquire load of
 				// `broadcasts_closed`; see `PublisherStats::drop`.
-				self.side
-					.counters(entry, self.tier)
-					.broadcasts_closed
-					.fetch_add(1, Ordering::Release);
+				counters.broadcasts_closed.fetch_add(1, Ordering::Release);
 			}
 		}
 	}
@@ -1026,20 +1174,28 @@ impl Drop for BroadcastSubscription {
 pub struct SessionStats {
 	/// `None` for a no-op aggregator; bumps are then dropped.
 	counters: Option<Arc<SessionCounters>>,
+	/// Connect time, microseconds since [`EPOCH`].
+	start_micros: u64,
 }
 
 impl SessionStats {
 	fn new(counters: Option<Arc<SessionCounters>>) -> Self {
+		let start = now_micros();
 		if let Some(counters) = &counters {
 			counters.sessions.fetch_add(1, Ordering::Relaxed);
+			counters.session_time.open(start);
 		}
-		Self { counters }
+		Self {
+			counters,
+			start_micros: start,
+		}
 	}
 }
 
 impl Drop for SessionStats {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
+			counters.session_time.close(self.start_micros, now_micros());
 			// Release pairs with the snapshot reader's Acquire load of
 			// `sessions_closed`; see `PublisherStats::drop`.
 			counters.sessions_closed.fetch_add(1, Ordering::Release);
@@ -1052,6 +1208,8 @@ impl Drop for SessionStats {
 pub struct PublisherStats {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	/// Announce time, microseconds since [`EPOCH`].
+	start_micros: u64,
 }
 
 impl PublisherStats {
@@ -1069,12 +1227,12 @@ impl PublisherStats {
 impl Drop for PublisherStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			let counters = &entry.publisher[self.tier.idx()];
+			counters.announced_time.close(self.start_micros, now_micros());
 			// Release pairs with the snapshot reader's Acquire load of
 			// `announced_closed`, propagating the open-bump from this
 			// guard's construction to whichever thread observes the close.
-			entry.publisher[self.tier.idx()]
-				.announced_closed
-				.fetch_add(1, Ordering::Release);
+			counters.announced_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1084,6 +1242,8 @@ impl Drop for PublisherStats {
 pub struct SubscriberStats {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	/// Announce time, microseconds since [`EPOCH`].
+	start_micros: u64,
 }
 
 impl SubscriberStats {
@@ -1100,10 +1260,10 @@ impl SubscriberStats {
 impl Drop for SubscriberStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			let counters = &entry.subscriber[self.tier.idx()];
+			counters.announced_time.close(self.start_micros, now_micros());
 			// See `PublisherStats::drop` for why this is Release.
-			entry.subscriber[self.tier.idx()]
-				.announced_closed
-				.fetch_add(1, Ordering::Release);
+			counters.announced_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1113,6 +1273,8 @@ impl Drop for SubscriberStats {
 pub struct PublisherTrack {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	/// Subscription open time, microseconds since [`EPOCH`].
+	start_micros: u64,
 }
 
 impl PublisherTrack {
@@ -1141,10 +1303,10 @@ impl PublisherTrack {
 impl Drop for PublisherTrack {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			let counters = &entry.publisher[self.tier.idx()];
+			counters.subscriptions_time.close(self.start_micros, now_micros());
 			// See `PublisherStats::drop` for why this is Release.
-			entry.publisher[self.tier.idx()]
-				.subscriptions_closed
-				.fetch_add(1, Ordering::Release);
+			counters.subscriptions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1154,6 +1316,8 @@ impl Drop for PublisherTrack {
 pub struct SubscriberTrack {
 	entry: Option<Arc<BroadcastEntry>>,
 	tier: Tier,
+	/// Subscription open time, microseconds since [`EPOCH`].
+	start_micros: u64,
 }
 
 impl SubscriberTrack {
@@ -1182,10 +1346,10 @@ impl SubscriberTrack {
 impl Drop for SubscriberTrack {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			let counters = &entry.subscriber[self.tier.idx()];
+			counters.subscriptions_time.close(self.start_micros, now_micros());
 			// See `PublisherStats::drop` for why this is Release.
-			entry.subscriber[self.tier.idx()]
-				.subscriptions_closed
-				.fetch_add(1, Ordering::Release);
+			counters.subscriptions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1193,8 +1357,8 @@ impl Drop for SubscriberTrack {
 /// Per-tick work for a single `(side, tier)` slot: build the emitted
 /// `Snapshot` from the raw counters, update the slot's `prev_emitted`, and
 /// hand the snap to `emit` iff the slot is live or changed this tick.
-fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl FnMut(Snapshot)) {
-	let raw = counters.snapshot();
+fn process_slot(counters: &Counters, slot_state: &mut SlotState, now: u64, mut emit: impl FnMut(Snapshot)) {
+	let raw = counters.snapshot(now);
 
 	let snap = Snapshot {
 		announced: raw.announced,
@@ -1207,6 +1371,9 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 		bytes: raw.bytes,
 		frames: raw.frames,
 		groups: raw.groups,
+		announced_seconds: micros_to_seconds(raw.announced_micros),
+		subscriptions_seconds: micros_to_seconds(raw.subscriptions_micros),
+		broadcasts_seconds: micros_to_seconds(raw.broadcasts_micros),
 	};
 
 	// A slot is live while any open counter still exceeds its `*_closed`
@@ -1253,12 +1420,14 @@ struct SessionSlotState {
 fn process_session_slot(
 	counters: &SessionCounters,
 	slot_state: &mut SessionSlotState,
+	now: u64,
 	mut emit: impl FnMut(SessionSnapshot),
 ) {
-	let (sessions, sessions_closed) = counters.snapshot();
+	let (sessions, sessions_closed, micros) = counters.snapshot(now);
 	let snap = SessionSnapshot {
 		sessions,
 		sessions_closed,
+		sessions_seconds: micros_to_seconds(micros),
 	};
 
 	let live = sessions != sessions_closed;
@@ -1421,6 +1590,9 @@ async fn run_publisher(
 			return;
 		};
 
+		// One clock read per tick; every slot's live-tail is computed against it.
+		let now = now_micros();
+
 		// Snapshot the global maps under their locks, then release so the
 		// change-detection + flush pass runs lock-free.
 		let entries: Vec<(PathOwned, Arc<BroadcastEntry>)> = {
@@ -1486,7 +1658,7 @@ async fn run_publisher(
 					let snap_state = gp.local.entry(path.clone()).or_default();
 					for (i, (_track_name, counters, slot_state)) in snap_state.zip_slots(entry).into_iter().enumerate()
 					{
-						process_slot(counters, slot_state, |snap| {
+						process_slot(counters, slot_state, now, |snap| {
 							frames[i].insert(path.as_str().to_string(), snap);
 						});
 					}
@@ -1502,7 +1674,7 @@ async fn run_publisher(
 				if let Some(group_roots) = roots_by_group[tier_idx].get(group) {
 					for &(root, counters) in group_roots {
 						let state = gp.session_local[tier_idx].entry(root.clone()).or_default();
-						process_session_slot(counters, state, |snap| {
+						process_session_slot(counters, state, now, |snap| {
 							session_frames[tier_idx].insert(root.as_str().to_string(), snap);
 						});
 					}
@@ -1556,7 +1728,7 @@ async fn run_publisher(
 /// straight from [`RawCounts`]; `broadcasts` / `broadcasts_closed` are the
 /// per-(broadcast, session) subscription sentinel maintained by
 /// [`SessionBroadcasts`].
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 struct Snapshot {
 	announced: u64,
@@ -1569,15 +1741,22 @@ struct Snapshot {
 	bytes: u64,
 	frames: u64,
 	groups: u64,
+	/// Cumulative broadcast-lifetime seconds through this snapshot, including the
+	/// time still-live spans have been open (see [`DurationCounter`]).
+	announced_seconds: f64,
+	subscriptions_seconds: f64,
+	broadcasts_seconds: f64,
 }
 
 /// What we emit for one root on a session track. `sessions - sessions_closed`
-/// is the live session count for the root.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+/// is the live session count for the root; `sessions_seconds` is the cumulative
+/// connected time, still-connected sessions included.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 struct SessionSnapshot {
 	sessions: u64,
 	sessions_closed: u64,
+	sessions_seconds: f64,
 }
 
 fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
@@ -1987,8 +2166,8 @@ mod tests {
 
 		let entries = stats.shared().entries.lock();
 		let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
-		let pub_ext = entry.publisher[Tier::External.idx()].snapshot();
-		let sub_ext = entry.subscriber[Tier::External.idx()].snapshot();
+		let pub_ext = entry.publisher[Tier::External.idx()].snapshot(now_micros());
+		let sub_ext = entry.subscriber[Tier::External.idx()].snapshot(now_micros());
 		assert_eq!(pub_ext.announced_bytes, 42, "publisher announce bytes accumulate");
 		assert_eq!(pub_ext.bytes, 0, "announce bytes are not payload bytes");
 		assert_eq!(sub_ext.announced_bytes, 7, "subscriber side tracked independently");
@@ -2102,7 +2281,7 @@ mod tests {
 		let raw = || {
 			let entries = stats.shared().entries.lock();
 			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
-			entry.publisher[Tier::External.idx()].snapshot()
+			entry.publisher[Tier::External.idx()].snapshot(now_micros())
 		};
 
 		let r = raw();
@@ -2137,7 +2316,7 @@ mod tests {
 		let raw = || {
 			let entries = stats.shared().entries.lock();
 			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
-			entry.publisher[Tier::External.idx()].snapshot()
+			entry.publisher[Tier::External.idx()].snapshot(now_micros())
 		};
 
 		let s1 = viewer1.subscribe("foo/bar");
@@ -2163,9 +2342,14 @@ mod tests {
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let ext = stats.tier(Tier::External);
 
+		// Just the (open, closed) counts; duration is covered by the
+		// `DurationCounter` unit test.
 		let snap = |root: &str| {
 			let map = stats.shared().sessions[Tier::External.idx()].lock();
-			map.get(&PathOwned::from(root.to_string())).map(|c| c.snapshot())
+			map.get(&PathOwned::from(root.to_string())).map(|c| {
+				let (open, closed, _micros) = c.snapshot(now_micros());
+				(open, closed)
+			})
 		};
 
 		let a1 = ext.session("acme");
@@ -2180,6 +2364,45 @@ mod tests {
 		drop(b1);
 		assert_eq!(snap("acme"), Some((2, 2)));
 		assert_eq!(snap("globex"), Some((1, 1)));
+	}
+
+	#[test]
+	fn duration_counter_accrues_open_and_closed_spans() {
+		let d = DurationCounter::default();
+
+		// No guards: zero regardless of `now`.
+		assert_eq!(d.micros(0, 1_000), 0);
+
+		// One guard opens at t=100us. While open it contributes `now - start`,
+		// so the running total advances with time without waiting for close.
+		d.open(100);
+		assert_eq!(d.micros(1, 100), 0, "just opened");
+		assert_eq!(d.micros(1, 500), 400, "open tail = now - start");
+
+		// A second concurrent guard opens at t=200us; open tails sum.
+		d.open(200);
+		assert_eq!(d.micros(2, 500), 400 + 300);
+
+		// First guard closes at t=600us: its 500us lifetime moves into `accrued`;
+		// the still-open second guard keeps contributing its tail.
+		d.close(100, 600);
+		assert_eq!(d.micros(1, 600), 500 + 400, "accrued(500) + open tail(600-200)");
+
+		// Second guard closes at t=900us: everything accrued, no open tail left,
+		// and the total is frozen no matter how far `now` advances.
+		d.close(200, 900);
+		assert_eq!(d.micros(0, 10_000), 500 + 700, "both lifetimes accrued");
+		assert_eq!(d.open_start_micros.load(Relaxed), 0, "open_start nets to zero");
+	}
+
+	#[test]
+	fn duration_counter_clamps_read_skew() {
+		// If a snapshot observes `open_start` from a just-opened guard before the
+		// live count reflects it, the open tail would go negative; it clamps to
+		// zero rather than underflowing (the accepted slight-bias tradeoff).
+		let d = DurationCounter::default();
+		d.open(1_000);
+		assert_eq!(d.micros(0, 500), 0, "open=0 but open_start set => clamped");
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -128,9 +128,13 @@ RUST_LOG=moq_relay=trace moq-relay relay.toml
 
 ### Metrics
 
-Metrics (Prometheus format) are planned but not yet implemented.
+The relay exposes host-level counters in Prometheus format at `/metrics` on the
+internal listener (`MOQ_INTERNAL_LISTEN`), including cumulative connection,
+broadcast, and viewer time (`*_seconds_total`) for time-based billing. For
+per-broadcast and per-root detail (and the matching `*_seconds` fields), the
+relay also publishes a live [`.stats` broadcast](/bin/relay/config#stats).
 
-Current visibility:
+Additional visibility:
 
 - Check logs for connection count
 - Use [HTTP endpoints](/bin/relay/http) for track inspection

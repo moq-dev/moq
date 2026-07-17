@@ -145,6 +145,21 @@ fn render_metrics(snap: &moq_net::StatsSnapshot) -> String {
 		}
 	};
 
+	// Same shape, but for a float-valued (seconds) counter.
+	let counter_f64 = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::CounterTotals) -> f64| {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, role, totals) in &traffic {
+			let _ = writeln!(
+				out,
+				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
+				tier.as_str(),
+				role.as_str(),
+				field(totals)
+			);
+		}
+	};
+
 	counter(
 		&mut out,
 		"moq_relay_bytes_total",
@@ -181,6 +196,24 @@ fn render_metrics(snap: &moq_net::StatsSnapshot) -> String {
 		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
 		|c| c.broadcasts_closed,
 	);
+	counter_f64(
+		&mut out,
+		"moq_relay_broadcast_seconds_total",
+		"Cumulative broadcast-lifetime seconds, still-live broadcasts included.",
+		|c| c.announced_seconds,
+	);
+	counter_f64(
+		&mut out,
+		"moq_relay_subscription_seconds_total",
+		"Cumulative track-subscription seconds, still-live subscriptions included.",
+		|c| c.subscriptions_seconds,
+	);
+	counter_f64(
+		&mut out,
+		"moq_relay_viewer_seconds_total",
+		"Cumulative viewer seconds per distinct (broadcast, session), still-live viewers included.",
+		|c| c.broadcasts_seconds,
+	);
 
 	// Sessions are per-tier only (no role), so they don't fit the helper above.
 	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
@@ -204,6 +237,19 @@ fn render_metrics(snap: &moq_net::StatsSnapshot) -> String {
 			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
 			tier.as_str(),
 			sessions.sessions_closed
+		);
+	}
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_session_seconds_total Cumulative connected-session seconds, still-connected sessions included."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_session_seconds_total counter");
+	for (tier, sessions) in &snap.sessions() {
+		let _ = writeln!(
+			out,
+			"moq_relay_session_seconds_total{{tier=\"{}\"}} {}",
+			tier.as_str(),
+			sessions.sessions_seconds
 		);
 	}
 
@@ -249,6 +295,18 @@ mod tests {
 		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
+		);
+		assert!(
+			body.contains("# TYPE moq_relay_session_seconds_total counter"),
+			"cumulative session-time metric present:\n{body}"
+		);
+		assert!(
+			body.contains("# TYPE moq_relay_broadcast_seconds_total counter"),
+			"cumulative broadcast-time metric present:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_session_seconds_total{tier=\"\"} "),
+			"session-seconds row for the default tier:\n{body}"
 		);
 	}
 }
