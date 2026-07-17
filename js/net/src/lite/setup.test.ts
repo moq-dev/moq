@@ -93,11 +93,19 @@ test("SETUP carries role alongside probe and path", async () => {
 });
 
 test("Both is the wire default, so it is omitted rather than encoded", async () => {
-	// Both must be the absence of the parameter: an old server that never learned the
-	// parameter has to decode a Both client back to Both.
-	const body = await bytes((w) => new Setup({ role: Role.Both }).encode(w, Version.DRAFT_05));
-	const empty = await bytes((w) => new Setup().encode(w, Version.DRAFT_05));
-	expect(body).toEqual(empty);
+	// Both must be the absence of the parameter, so a server that predates it decodes a
+	// Both client back to Both. Assert the empty bag directly: comparing against another
+	// default-constructed Setup would agree with itself even if we encoded Both.
+	const both = await bytes((w) => new Setup({ role: Role.Both }).encode(w, Version.DRAFT_05));
+	const emptyBag = await bytes(async (w) => {
+		await w.u53(1); // Message size prefix: one byte of body follows
+		await w.u53(0); // parameter count
+	});
+	expect(both).toEqual(emptyBag);
+
+	// A directional role is still encoded, so the check above can actually fail.
+	const publisher = await bytes((w) => new Setup({ role: Role.Publisher }).encode(w, Version.DRAFT_05));
+	expect(publisher.byteLength).toBeGreaterThan(both.byteLength);
 });
 
 test("unknown role falls back to Both", async () => {
