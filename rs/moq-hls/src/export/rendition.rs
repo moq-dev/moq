@@ -166,8 +166,11 @@ impl Rendition {
 		})
 	}
 
-	/// Subscribe to timeline-window changes, for waiting until a playlist is renderable.
-	pub(crate) fn updated(&self) -> tokio::sync::watch::Receiver<u64> {
+	/// Subscribe to timeline-window changes: the value bumps whenever this rendition's
+	/// timeline advances (a new segment closes) or the source ends. A recorder awaits
+	/// this, then reads [`Self::playlist`] to fetch and persist the newly-closed
+	/// segments via [`Self::segment`] before the window evicts them.
+	pub fn updated(&self) -> tokio::sync::watch::Receiver<u64> {
 		self.live.subscribe()
 	}
 
@@ -206,7 +209,7 @@ impl Rendition {
 
 	/// Whether the playlist has anything to serve yet (at least one complete segment, or the
 	/// broadcast already ended).
-	pub(crate) fn playable(&self) -> bool {
+	pub fn playable(&self) -> bool {
 		let window = self.live.window();
 		window.ended || !window.segments.is_empty()
 	}

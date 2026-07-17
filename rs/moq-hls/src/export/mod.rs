@@ -80,11 +80,13 @@ impl Broadcaster {
 		Ok(broadcaster)
 	}
 
-	pub(crate) fn is_closed(&self) -> bool {
+	/// Whether the source broadcast has closed (ended or dropped).
+	pub fn is_closed(&self) -> bool {
 		self.broadcast.is_closed()
 	}
 
-	pub(crate) async fn closed(&self) {
+	/// Resolve once the source broadcast closes. A recorder awaits this to finalize.
+	pub async fn closed(&self) {
 		self.broadcast.closed().await;
 	}
 
@@ -92,6 +94,22 @@ impl Broadcaster {
 	/// video and an audio rendition may share a name without colliding.
 	pub fn rendition(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
 		self.renditions.lock().unwrap().get(&(kind, name.to_string())).cloned()
+	}
+
+	/// Snapshot the current renditions. Unlike [`Self::rendition`] (serve one on
+	/// request), this is for consumers that mirror or RECORD every rendition; pair it
+	/// with [`Self::updated`] to re-enumerate whenever the catalog changes.
+	pub fn renditions(&self) -> Vec<Arc<Rendition>> {
+		self.renditions.lock().unwrap().values().cloned().collect()
+	}
+
+	/// Subscribe to catalog reconciliations. The value is the current rendition count
+	/// and fires on every sync (a rendition added, removed, or reconfigured), so a
+	/// recorder can re-read [`Self::renditions`] and pick up the new set. This is the
+	/// broadcast-level analogue of [`Rendition::updated`] (per-rendition timeline
+	/// changes).
+	pub fn updated(&self) -> watch::Receiver<usize> {
+		self.ready.subscribe()
 	}
 
 	/// Wait until at least one rendition has been discovered, or `timeout` elapses.
