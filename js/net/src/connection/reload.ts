@@ -59,6 +59,12 @@ export class Reload {
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket: WebSocketOptions | undefined;
 
+	/**
+	 * Whether the relay supports broadcast discovery, applied to each connection attempt (not
+	 * reactive). Undefined defers to the default for the URL. See {@link Established.discovery}.
+	 */
+	discovery?: boolean;
+
 	/** Backoff settings for the reconnect loop. */
 	delay: ReloadDelay;
 
@@ -90,6 +96,7 @@ export class Reload {
 		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 30000 };
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
+		this.discovery = props?.discovery;
 
 		this.#delay = this.delay.initial;
 
@@ -128,7 +135,11 @@ export class Reload {
 
 		effect.spawn(async () => {
 			try {
-				const pending = connect(url, { websocket: this.websocket, webtransport: this.webtransport });
+				const pending = connect(url, {
+					websocket: this.websocket,
+					webtransport: this.webtransport,
+					discovery: this.discovery,
+				});
 
 				const connection = await Promise.race([effect.cancel, pending]);
 				if (!connection) {

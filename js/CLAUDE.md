@@ -60,8 +60,8 @@ Networking objects split state from behavior: a plain `XxxState` class holds `Si
 
 Every reactive component in `watch`/`publish` follows one shape (see `publish/src/video/encoder.ts`):
 
-- `readonly in: Readonlys<XxxInput>` — the wired dependencies, built in the constructor with `getter(props?.x ?? default)`. Read-only to consumers: wire another component's `out` straight in (`capture: this.capture`), or pass a `Signal` you keep a handle to. Export the `XxxInput` map so consumers can name it.
-- `readonly out = readonlys(this.#out)` — derived state. The class writes `this.#out.x`; consumers only read. Never hand out a writable `Signal`: it lets a caller forge state behind the owner's back.
+- `readonly in: Readonlys<XxxInput>`: the wired dependencies, built in the constructor with `getter(props?.x ?? default)`. Read-only to consumers: wire another component's `out` straight in (`capture: this.capture`), or pass a `Signal` you keep a handle to. Export the `XxxInput` map so consumers can name it.
+- `readonly out = readonlys(this.#out)`: derived state. The class writes `this.#out.x`; consumers only read. Never hand out a writable `Signal`: it lets a caller forge state behind the owner's back.
 - **Knobs** stay public writable `Signal`s outside both groups (`encoder.config`, `audio.codec`, `device.preferred`). They're live-editable settings the component doesn't derive, and typed `T | Signal<T>` in props via `Signal.from`. `XxxProps = Inputs<XxxInput> & { ...knobs }`.
 - Positional identity (a name, a kind) stays a plain constructor arg, not a signal.
 - When a *parent* legitimately produces one of a child's outputs, give the child a method that returns a dispose handle (`Device.capture(deviceId)`), rather than exposing the backing `Signal`.
