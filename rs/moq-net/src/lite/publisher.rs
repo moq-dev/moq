@@ -12,7 +12,7 @@ use crate::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	util::{MaybeBoxedExt, MaybeSendBox},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
 use super::Version;
@@ -69,14 +69,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub async fn run(self) -> Result<(), Error> {
 		// `origin::Consumer` and friends are cheap to clone (shared handles), so each control
-		// stream gets its own task and they all make progress independently.
+		// stream gets its own child future and they all make progress independently.
 		let this = Arc::new(self);
+		let mut tasks = TaskSet::owned();
 
 		loop {
-			let stream = Stream::accept(&this.session, this.version).await?;
+			let stream = tasks.drive(Stream::accept(&this.session, this.version)).await?;
 
 			let this = this.clone();
-			web_async::spawn(async move {
+			tasks.push(async move {
 				if let Err(err) = this.handle(stream).await {
 					tracing::warn!(%err, "control stream error");
 				}
@@ -221,9 +222,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			std::collections::HashMap::new();
 
 		// Lite06+: announce ids. Every `active` we send implicitly assigns the next
-		// per-stream ordinal, and `ended`/`restart` reference the id instead of
-		// repeating the path. Keyed by suffix; only announces that actually hit the
-		// wire get an id (filtered ones were never seen by the peer).
+		// per-stream ordinal, and `ended` references the id instead of repeating the
+		// path. Keyed by suffix; only announces that actually hit the wire get an id
+		// (filtered ones were never seen by the peer).
 		let mut next_announce_id: u64 = 0;
 		let mut announce_ids: std::collections::HashMap<crate::PathOwned, u64> = std::collections::HashMap::new();
 
@@ -239,16 +240,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
+				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
 						.to_owned();
 					let absolute = origin.absolute(&path).to_owned();
 
-					// Lite01/02 only carries the set of active paths, so a restart is
-					// indistinguishable from an active here.
-					if event.broadcast().is_some() {
+					if broadcast.is_some() {
 						tracing::debug!(broadcast = %absolute, "announce");
 						let guard = stats.broadcast(&absolute).publisher();
 						stats_guards.entry(absolute).or_insert(guard);
@@ -280,14 +279,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
-				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
+				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
 						.to_owned();
 					let absolute = origin.absolute(&path).to_owned();
 
-					match event.broadcast() {
+					match broadcast {
 						Some(broadcast) => {
 							let hops = broadcast.route().hops;
 							// Watch even the announces we filter below: a later route update
@@ -396,15 +395,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					stream.writer.finish()?;
 					return stream.writer.closed().await;
 				}
-				Op::Announce(Some(crate::announce::Update { path, event, .. })) => {
+				Op::Announce(Some(crate::announce::Update { path, broadcast })) => {
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
 						.to_owned();
 					let absolute = origin.absolute(&path).to_owned();
 
-					match event {
-						announce::Event::Active(active) => {
+					match broadcast {
+						Some(active) => {
 							let route = active.route();
 							if lite::restart_supported(version) {
 								// Watch even if filtered below: a route update can cross
@@ -443,7 +442,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
 								.await?;
 						}
-						announce::Event::Ended => {
+						None => {
 							tracing::debug!(broadcast = %absolute, "unannounce");
 							// A watched entry with `sent: None` means the peer holds no live
 							// advertisement (a route-filter retract already sent its Ended);
@@ -643,7 +642,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.encode(&lite::TrackInfo {
 				priority: info.priority,
 				ordered: info.ordered,
-				cache: info.cache,
+				latency_max: info.latency_max,
 				timescale: info.timescale,
 			})
 			.await?;
@@ -717,7 +716,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let subscription = crate::track::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
-			stale: subscribe.max_latency,
+			latency_max: subscribe.max_latency,
 			group_start: subscribe.start_group,
 			group_end: subscribe.end_group,
 		};
@@ -1062,7 +1061,7 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 }
 
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
-/// field is either small or already Arc-backed) for each spawned serve_group task
+/// field is either small or already Arc-backed for each in-flight serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
 /// watch::Receiver.
 #[derive(Clone)]
@@ -1132,7 +1131,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 									.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: group.sequence }))
 									.await?;
 							}
-							self.spawn_serve(group, &mut tasks);
+							self.queue_serve(group, &mut tasks);
 						}
 						Recv::Datagram(datagram) => self.serve_datagram(datagram),
 						Recv::Boundary(group) => {
@@ -1170,7 +1169,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					let _ = track.update(crate::track::Subscription {
 						priority: upd.priority,
 						ordered: upd.ordered,
-						stale: upd.max_latency,
+						latency_max: upd.max_latency,
 						group_start: upd.start_group,
 						group_end: upd.end_group,
 						..Default::default()
@@ -1184,7 +1183,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	fn spawn_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
+	fn queue_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 

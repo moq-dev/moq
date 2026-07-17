@@ -89,11 +89,11 @@ pub struct MoqAudioDecoderOutput {
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
-	/// [`MoqBroadcastConsumer::subscribe_media`](crate::consumer::MoqBroadcastConsumer::subscribe_media)'s
-	/// `max_latency_ms`: when a group stalls and a newer group is more
-	/// than this far ahead, the consumer skips. `None` keeps the
-	/// moq-mux default of zero (skip aggressively). Named `_max` to
-	/// leave room for a future `latency_min_ms` (jitter buffer).
+	/// [`MoqSubscription::latency_max_ms`](crate::consumer::MoqSubscription::latency_max_ms):
+	/// when a group stalls and a newer group is more than this far ahead,
+	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
+	/// aggressively). Named `_max` to leave room for a future
+	/// `latency_min_ms` (jitter buffer).
 	pub latency_max_ms: Option<u64>,
 }
 

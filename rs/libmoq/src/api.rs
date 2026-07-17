@@ -131,10 +131,11 @@ pub struct moq_track_info {
 	/// Groups may always arrive out-of-order (or not at all) over the network.
 	pub ordered: bool,
 
-	/// How long the relay should cache past groups, in milliseconds.
-	pub cache_ms: u64,
-	/// Whether `cache_ms` should override the default cache setting.
-	pub cache_valid: bool,
+	/// Maximum age of a non-latest group before the publisher evicts it, in milliseconds.
+	/// The publisher-side half of `moq_subscription.latency_max_ms`.
+	pub latency_max_ms: u64,
+	/// Whether `latency_max_ms` should override the default.
+	pub latency_max_valid: bool,
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
@@ -152,8 +153,8 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
-		if info.cache_valid {
-			out = out.with_cache(std::time::Duration::from_millis(info.cache_ms));
+		if info.latency_max_valid {
+			out = out.with_latency_max(std::time::Duration::from_millis(info.latency_max_ms));
 		}
 		if info.timescale_valid {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
@@ -176,8 +177,9 @@ pub struct moq_subscription {
 	/// Groups may always arrive out-of-order (or not at all) over the network.
 	pub ordered: bool,
 
-	/// How long to wait for an older group once a newer group has arrived, in milliseconds.
-	pub stale_ms: u64,
+	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
+	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
+	pub latency_max_ms: u64,
 
 	/// First group to deliver.
 	pub group_start: u64,
@@ -195,7 +197,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
 			.with_ordered(subscription.ordered)
-			.with_stale(std::time::Duration::from_millis(subscription.stale_ms));
+			.with_latency_max(std::time::Duration::from_millis(subscription.latency_max_ms));
 		if subscription.group_start_valid {
 			out = out.with_group_start(subscription.group_start);
 		}

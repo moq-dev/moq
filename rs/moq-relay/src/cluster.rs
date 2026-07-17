@@ -627,7 +627,7 @@ impl Cluster {
 		loop {
 			tokio::select! {
 				ann = announced.next() => {
-					let Some(moq_net::announce::Update { path: relative, event, .. }) = ann else { return; };
+					let Some(moq_net::announce::Update { path: relative, broadcast }) = ann else { return; };
 					let peer = relative.as_str();
 					// Skip self and any peer we lose the tiebreaker to; that side
 					// dials us instead, so each pair forms a single session.
@@ -636,7 +636,7 @@ impl Cluster {
 					}
 					let peer = peer.to_owned();
 					let key = canonicalize_peer_key(&peer);
-					match event.broadcast() {
+					match broadcast {
 						Some(_) => {
 							if dialed.contains(&key) {
 								// Already dialed (possibly via another source). Mark gossip as
@@ -1202,10 +1202,10 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration broadcast must be visible on the origin.
-		let moq_net::announce::Update { path, event, .. } =
+		let moq_net::announce::Update { path, broadcast } =
 			watcher.try_next().expect("self-registration must be published");
 		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
-		assert!(event.broadcast().is_some());
+		assert!(broadcast.is_some());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to

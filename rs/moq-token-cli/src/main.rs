@@ -171,15 +171,14 @@ fn main() -> anyhow::Result<()> {
 		} => {
 			let key = read_key(&key)?;
 
-			let payload = moq_token::Claims {
-				root,
-				publish,
-				subscribe,
-				expires,
-				issued,
-			};
+			let payload = moq_token::Claims::default()
+				.with_root(root)
+				.with_publish(publish)
+				.with_subscribe(subscribe)
+				.with_expires(expires)
+				.with_issued(issued);
 
-			let token = key.encode(&payload)?;
+			let token = key.sign(&payload)?;
 			println!("{token}");
 		}
 
@@ -189,7 +188,7 @@ fn main() -> anyhow::Result<()> {
 			}
 			let key = read_key(&key)?;
 			let token = read_token(&token)?;
-			let payload = key.decode(&token)?;
+			let payload = key.verify(&token)?;
 
 			println!("{payload:#?}");
 		}

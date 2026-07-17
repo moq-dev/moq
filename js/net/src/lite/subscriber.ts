@@ -446,7 +446,7 @@ export class Subscriber {
 			timescale: Time.Timescale(info.timescale),
 			// Publisher Max Latency rides on the wire, so the local retention window
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			cache: info.cache,
+			latencyMax: info.latencyMax,
 			priority: info.priority,
 			ordered: info.ordered,
 		};
@@ -588,7 +588,7 @@ export class Subscriber {
 			const current = track.subscriptionSignal.peek()?.priority;
 			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.subscriptionSignal.next(), stopped]);
+				const next = await Promise.race([track.subscriptionSignal.changed(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -755,7 +755,7 @@ export class Subscriber {
 	async #peerProbeLevel(peerSetup: Signal<Setup | undefined>): Promise<ProbeLevel> {
 		let setup = peerSetup.peek();
 		while (setup === undefined) {
-			setup = await peerSetup.next();
+			setup = await peerSetup.changed();
 		}
 		return setup.probe;
 	}

@@ -52,30 +52,53 @@ target_include_directories(moq INTERFACE ${RUST_TARGET_DIR}/include)
 # after object files in the link command (linker order matters for static libs)
 target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
-# Link required system frameworks on macOS. The media frameworks and the C++
-# runtime cover the bundled moq-video (AVFoundation and ScreenCaptureKit
-# capture, VideoToolbox codecs) and openh264.
-if(APPLE)
-    target_link_options(moq INTERFACE
-        "LINKER:-framework,CoreFoundation" "LINKER:-framework,Foundation"
-        "LINKER:-framework,Security" "LINKER:-framework,CoreServices"
-        "LINKER:-framework,CoreMedia" "LINKER:-framework,CoreVideo"
-        "LINKER:-framework,AVFoundation" "LINKER:-framework,VideoToolbox"
-        "LINKER:-framework,ScreenCaptureKit"
-    )
-    target_link_libraries(moq INTERFACE c++)
-endif()
+# System libraries Rust std/deps pull in. When the staticlib is linked into a
+# C/C++ target by an external linker, cargo can't inject these itself. build.rs
+# reads the same files for moq.pc, so the two never drift.
+#
+# Reads native-libs/<platform>.txt into MOQ_NATIVE_LIBS: `framework:Foo` becomes
+# a linker framework flag, anything else a plain library name.
+function(moq_read_native_libs out_var)
+    if(APPLE)
+        set(_platform "apple")
+    elseif(WIN32)
+        set(_platform "windows")
+    else()
+        set(_platform "linux")
+    endif()
 
-# System libraries Rust std/deps pull in on Windows (from
-# `cargo rustc -- --print native-static-libs`). When the staticlib is linked
-# into a C/C++ target by an external linker, cargo can't inject these itself.
-# Keep in sync with the find_package config in cmake/moq-config.cmake.in.
-if(WIN32)
-    target_link_libraries(
-        moq
-        INTERFACE ntdll userenv ws2_32 bcrypt dbghelp advapi32 legacy_stdio_definitions
-    )
-endif()
+    set(_file "${CMAKE_CURRENT_SOURCE_DIR}/native-libs/${_platform}.txt")
+    file(STRINGS "${_file}" _lines)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+
+    set(_libs "")
+    foreach(_line IN LISTS _lines)
+        string(STRIP "${_line}" _line)
+        if(_line STREQUAL "" OR _line MATCHES "^#")
+            continue()
+        endif()
+        if(_line MATCHES "^framework:(.+)$")
+            list(APPEND _libs "-framework ${CMAKE_MATCH_1}")
+        else()
+            list(APPEND _libs "${_line}")
+        endif()
+    endforeach()
+
+    set(${out_var} "${_libs}" PARENT_SCOPE)
+endfunction()
+
+moq_read_native_libs(MOQ_NATIVE_LIBS)
+target_link_libraries(moq INTERFACE ${MOQ_NATIVE_LIBS})
+
+# Same list, quoted for substitution into cmake/moq-config.cmake.in below.
+# nix/overlay.nix substitutes that template itself and formats this identically.
+set(MOQ_NATIVE_LIBS_QUOTED "")
+foreach(_lib IN LISTS MOQ_NATIVE_LIBS)
+    if(MOQ_NATIVE_LIBS_QUOTED)
+        string(APPEND MOQ_NATIVE_LIBS_QUOTED " ")
+    endif()
+    string(APPEND MOQ_NATIVE_LIBS_QUOTED "\"${_lib}\"")
+endforeach()
 
 if(BUILD_RUST_LIB)
     add_dependencies(moq rust_build)

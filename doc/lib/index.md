@@ -63,4 +63,4 @@ cgo bindings with prebuilt static libraries per platform. Published as [`github.
 - **Go service or tooling** → [Go](/lib/go/)
 - **Anything else with a C ABI** → [C](/lib/c/)
 
-Every binding uses the same wire protocol, so a publisher in Python can be consumed by a Swift subscriber. See the [binding parity audit](/lib/parity) for the local APIs exposed in each language.
+Every binding uses the same wire protocol, so a publisher in Python can be consumed by a Swift subscriber.

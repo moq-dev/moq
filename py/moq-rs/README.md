@@ -148,7 +148,7 @@ client = moq.Client(
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `await .subscribe_catalog() → CatalogConsumer`
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
-  - `await .subscribe_media(name, track, max_latency_ms=10000, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
+  - `await .subscribe_media(name, track, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.

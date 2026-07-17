@@ -498,8 +498,8 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		ordered: true,
-		cache_ms: 0,
-		cache_valid: false,
+		latency_max_ms: 0,
+		latency_max_valid: false,
 		timescale: 0,
 		timescale_valid: false,
 	};
@@ -513,7 +513,7 @@ fn publish_track_invalid_broadcast() {
 	let subscription = moq_subscription {
 		priority: 1,
 		ordered: true,
-		stale_ms: 0,
+		latency_max_ms: 0,
 		group_start: 0,
 		group_start_valid: false,
 		group_end: 0,
@@ -529,8 +529,8 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		ordered: false,
-		cache_ms: 0,
-		cache_valid: false,
+		latency_max_ms: 0,
+		latency_max_valid: false,
 		timescale: 0,
 		timescale_valid: true,
 	};
@@ -544,8 +544,8 @@ fn raw_track_options_preserve_ordering_priority() {
 	let mut info = moq_track_info {
 		priority: 0,
 		ordered: false,
-		cache_ms: 0,
-		cache_valid: false,
+		latency_max_ms: 0,
+		latency_max_valid: false,
 		timescale: 0,
 		timescale_valid: false,
 	};
@@ -557,7 +557,7 @@ fn raw_track_options_preserve_ordering_priority() {
 	let mut subscription = moq_subscription {
 		priority: 0,
 		ordered: false,
-		stale_ms: 0,
+		latency_max_ms: 0,
 		group_start: 0,
 		group_start_valid: false,
 		group_end: 0,
@@ -766,8 +766,8 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		ordered: false,
-		cache_ms: 1_000,
-		cache_valid: true,
+		latency_max_ms: 1_000,
+		latency_max_valid: true,
 		timescale: 1_000_000,
 		timescale_valid: true,
 	};
@@ -790,7 +790,7 @@ fn raw_track_subscription_options_and_update() {
 	let subscription = moq_subscription {
 		priority: 5,
 		ordered: true,
-		stale_ms: 25,
+		latency_max_ms: 25,
 		group_start: 1,
 		group_start_valid: true,
 		group_end: 1,

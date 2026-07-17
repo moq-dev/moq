@@ -114,9 +114,9 @@ The JWT payload contains these claims:
 
 | Claim | Description |
 |-------|-------------|
-| `root` | Base path for publish/subscribe permissions |
-| `pub` | Suffix appended to root for publish permission |
-| `sub` | Suffix appended to root for subscribe permission |
+| `root` | Base path for publish/subscribe permissions. Optional, defaulting to the top-level path |
+| `put` | Suffix, or list of suffixes, appended to root for publish permission |
+| `get` | Suffix, or list of suffixes, appended to root for subscribe permission |
 | `exp` | Expiration time (Unix timestamp) |
 | `iat` | Issued-at time (Unix timestamp) |
 
@@ -124,18 +124,19 @@ The `exp` claim is enforced for the whole session, not just at connect time. The
 
 ### Path Matching
 
-The `root` claim sets a base path. The `pub` and `sub` claims are suffixes:
+The `root` claim sets a base path. The `put` and `get` claims are suffixes:
 
 ```text
-Full publish path = root + "/" + pub
-Full subscribe path = root + "/" + sub
+Full publish path = root + "/" + put
+Full subscribe path = root + "/" + get
 ```
 
-An empty suffix (`""`) allows access to anything under the root.
+An empty suffix (`""`) allows access to anything under the root. Suffixes match on
+path boundaries, so `foo` grants `foo` and `foo/bar` but never `foobar`.
 
 **Examples:**
 
-| root | pub | sub | Can publish | Can subscribe |
+| root | put | get | Can publish | Can subscribe |
 |------|-----|-----|-------------|---------------|
 | `demo` | `my-stream` | `""` | `demo/my-stream` | `demo/*` |
 | `rooms/123` | `alice` | `""` | `rooms/123/alice` | `rooms/123/*` |

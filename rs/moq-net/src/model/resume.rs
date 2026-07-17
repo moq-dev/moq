@@ -165,6 +165,10 @@ impl Producer {
 	/// Bounds are enforced when reading: a previous segment's session may keep
 	/// delivering past its new cap (the switch races the network) and those groups
 	/// are simply never surfaced.
+	// Production callers go through `takeover`; this is the entry point an explicit
+	// wire-driven boundary (a future manual-splice surface) would use, and the
+	// boundary tests drive it directly.
+	#[cfg_attr(not(test), expect(dead_code))]
 	pub fn switch(
 		&mut self,
 		track: impl super::origin_impl::Consume<track::Consumer>,
@@ -1187,7 +1191,9 @@ mod test {
 
 		// Polling only datagrams must still resolve the subscription.
 		assert!(
-			kio::wait(|waiter| sub.poll_recv_datagram(waiter)).now_or_never().is_none(),
+			kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+				.now_or_never()
+				.is_none(),
 			"no datagram yet"
 		);
 		track_a.append_datagram(Timestamp::ZERO, b"d0".as_ref()).unwrap();

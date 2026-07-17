@@ -85,14 +85,30 @@ impl KeySet {
 		self.keys.iter().find(|key| key.operations.contains(operation)).cloned()
 	}
 
-	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
+	/// Sign the claims with the first key in the set that supports signing.
+	pub fn sign(&self, payload: &Claims) -> crate::Result<String> {
 		let key = self
 			.find_supported_key(&KeyOperation::Sign)
 			.ok_or(KeyError::NoSigningKey)?;
-		key.encode(payload)
+		key.sign(payload)
 	}
 
+	#[doc(hidden)]
+	#[deprecated(note = "renamed to KeySet::sign")]
+	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
+		self.sign(payload)
+	}
+
+	#[doc(hidden)]
+	#[deprecated(note = "renamed to KeySet::verify")]
 	pub fn decode(&self, token: &str) -> crate::Result<Claims> {
+		self.verify(token)
+	}
+
+	/// Verify a token with the key matching its `kid` header, returning its claims.
+	///
+	/// A token without a `kid` is accepted only when the set holds exactly one key.
+	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
 		let header = jsonwebtoken::decode_header(token)?;
 
 		let key = match header.kid {
@@ -109,7 +125,7 @@ impl KeySet {
 			}
 		}?;
 
-		key.decode(token)
+		key.verify(token)
 	}
 }
 
@@ -287,7 +303,7 @@ mod tests {
 		};
 		let claims = create_test_claims();
 
-		let token = set.encode(&claims).unwrap();
+		let token = set.sign(&claims).unwrap();
 		assert!(!token.is_empty());
 	}
 
@@ -300,7 +316,7 @@ mod tests {
 		};
 		let claims = create_test_claims();
 
-		let result = set.encode(&claims);
+		let result = set.sign(&claims);
 		assert!(result.is_err());
 		assert!(result.unwrap_err().to_string().contains("cannot find signing key"));
 	}
@@ -313,8 +329,8 @@ mod tests {
 		};
 		let claims = create_test_claims();
 
-		let token = set.encode(&claims).unwrap();
-		let decoded = set.decode(&token).unwrap();
+		let token = set.sign(&claims).unwrap();
+		let decoded = set.verify(&token).unwrap();
 
 		assert_eq!(decoded.root, claims.root);
 	}
@@ -326,14 +342,14 @@ mod tests {
 		let claims = create_test_claims();
 
 		// Encode using the key directly
-		let token = key.encode(&claims).unwrap();
+		let token = key.sign(&claims).unwrap();
 
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
 
 		// Decode using the set
-		let decoded = set.decode(&token).unwrap();
+		let decoded = set.verify(&token).unwrap();
 		assert_eq!(decoded.root, claims.root);
 	}
 
@@ -348,9 +364,9 @@ mod tests {
 
 		let claims = create_test_claims();
 		// Encode with one of the keys directly
-		let token = set.keys[0].encode(&claims).unwrap();
+		let token = set.keys[0].sign(&claims).unwrap();
 
-		let result = set.decode(&token);
+		let result = set.verify(&token);
 		assert!(result.is_err());
 		assert!(result.unwrap_err().to_string().contains("missing kid"));
 	}
@@ -368,9 +384,9 @@ mod tests {
 		};
 
 		let claims = create_test_claims();
-		let token = set1.encode(&claims).unwrap();
+		let token = set1.sign(&claims).unwrap();
 
-		let result = set2.decode(&token);
+		let result = set2.verify(&token);
 		assert!(result.is_err());
 		assert!(result.unwrap_err().to_string().contains("cannot find key with kid 1"));
 	}

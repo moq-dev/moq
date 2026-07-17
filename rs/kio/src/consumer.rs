@@ -3,19 +3,14 @@ use std::{
 	task::Poll,
 };
 
-use crate::{
-	Counts, Mut, State, Weak,
-	lock::*,
-	producer::{Producer, Ref},
-	waiter::*,
-};
+use crate::{Counts, State, lock::*, producer::Ref, waiter::*, weak::ConsumerWeak};
 
 /// The consuming side of a shared state channel.
 ///
 /// Consumers have read-only access to the shared value and are notified when
 /// a producer modifies it. Cloning a consumer increments the consumer reference
 /// count. When the last consumer is dropped, the consumer-count waiters
-/// (e.g. [`Producer::unused`]) are notified.
+/// (e.g. [`Producer::unused`](crate::Producer::unused)) are notified.
 #[derive(Debug)]
 pub struct Consumer<T> {
 	pub(crate) state: Lock<State<T>>,
@@ -79,43 +74,10 @@ impl<T> Consumer<T> {
 		crate::wait(move |waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Upgrade to a Producer, returning `None` if the state is already closed.
-	pub fn produce(&self) -> Option<Producer<T>> {
-		// Increment first to prevent the last Producer::drop from
-		// closing the state between our check and the return.
-		self.counts.producers.fetch_add(1, Ordering::Relaxed);
-
-		{
-			let state = self.state.lock();
-			if state.closed {
-				self.counts.producers.fetch_sub(1, Ordering::Relaxed);
-				return None;
-			}
-		}
-
-		Some(Producer {
-			state: self.state.clone(),
-			counts: self.counts.clone(),
-		})
-	}
-
 	/// Get read-only access to the shared state.
 	pub fn read(&self) -> Ref<'_, T> {
 		Ref {
 			state: self.state.lock(),
-		}
-	}
-
-	/// Acquire mutable access to the shared state.
-	///
-	/// Returns `Ok(Mut)` if the channel is open, or `Err(Ref)` with
-	/// read-only access if closed. Only locks once.
-	pub fn write(&self) -> Result<Mut<'_, T>, Ref<'_, T>> {
-		let state = self.state.lock();
-		if state.closed {
-			Err(Ref { state })
-		} else {
-			Ok(Mut::new(state))
 		}
 	}
 
@@ -129,12 +91,13 @@ impl<T> Consumer<T> {
 		self.state.is_clone(&other.state)
 	}
 
-	/// Create a [`Weak`] reference to this state.
+	/// Create a [`ConsumerWeak`] reference to this state.
 	///
 	/// Does not affect ref counts, so it won't prevent auto-close when all
-	/// producers are dropped.
-	pub fn weak(&self) -> Weak<T> {
-		Weak {
+	/// producers are dropped. The weak can only mint more consumers, never a
+	/// producer, so read-only access stays read-only.
+	pub fn weak(&self) -> ConsumerWeak<T> {
+		ConsumerWeak {
 			state: self.state.clone(),
 			counts: self.counts.clone(),
 		}

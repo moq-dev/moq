@@ -1,4 +1,4 @@
-use crate::{announce, group, origin, track};
+use crate::{group, origin, track};
 use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -10,6 +10,7 @@ use crate::{
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
+	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use super::{Message, Version};
@@ -45,20 +46,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
-	pub fn handle_stream(&self, id: u64, mut data: bytes::Bytes, stream: Stream<S, Version>) -> Result<(), Error> {
+	pub fn handle_stream(
+		&self,
+		id: u64,
+		mut data: bytes::Bytes,
+		stream: Stream<S, Version>,
+	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let this = self.clone();
-		match id {
+		let task = match id {
 			ietf::Subscribe::ID => {
 				let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe");
-				web_async::spawn(async move {
+				async move {
 					if let Err(err) = this.run_subscribe_stream(stream, msg).await {
 						tracing::debug!(%err, "subscribe stream error");
 					}
-				});
+				}
+				.maybe_boxed()
 			}
 			ietf::Fetch::ID => {
 				let msg = ietf::Fetch::decode_msg(&mut data, this.version)?;
@@ -66,11 +73,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received fetch");
-				web_async::spawn(async move {
+				async move {
 					if let Err(err) = this.run_fetch_stream(stream, msg).await {
 						tracing::debug!(%err, "fetch stream error");
 					}
-				});
+				}
+				.maybe_boxed()
 			}
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
 			// to the same request_id + namespace; the legacy Subscribe Options field
@@ -89,21 +97,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
-				web_async::spawn(async move {
+				async move {
 					if let Err(err) = this.run_subscribe_namespace_stream(stream, msg).await {
 						tracing::debug!(%err, "subscribe_namespace stream error");
 					}
-				});
+				}
+				.maybe_boxed()
 			}
 			ietf::TrackStatus::ID => {
 				tracing::warn!("TrackStatus not supported");
+				async {}.maybe_boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for publisher");
 				return Err(Error::UnexpectedStream);
 			}
-		}
-		Ok(())
+		};
+		Ok(task)
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -515,17 +525,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				next = announced.next() => next,
 			};
 
-			let Some(crate::announce::Update { path, event, .. }) = next else {
+			let Some(crate::announce::Update { path, broadcast }) = next else {
 				break;
 			};
 
 			let suffix = path.to_owned();
 
-			match event {
-				announce::Event::Active(_) => {
+			match broadcast {
+				Some(_) => {
 					self.announce_namespace(suffix, &mut namespace_streams).await?;
 				}
-				announce::Event::Ended => {
+				None => {
 					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
 				}
 			}
@@ -686,8 +696,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let mut announced = origin.announced();
 
 				// Send initial NAMESPACE messages for currently active namespaces.
-				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
-					if event.broadcast().is_some() {
+				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
+					if broadcast.is_some() {
 						let suffix = path
 							.strip_prefix(&prefix)
 							.expect("origin returned invalid path")
@@ -704,7 +714,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						biased;
 						res = stream.reader.closed() => return res,
 					next = announced.next() => {
-						let Some(crate::announce::Update { path, event, .. }) = next else {
+						let Some(crate::announce::Update { path, broadcast }) = next else {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
 						};
@@ -712,13 +722,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 						let absolute = origin.absolute(&path).to_owned();
 
-						match event {
-							announce::Event::Active(_) => {
+						match broadcast {
+							Some(_) => {
 								tracing::debug!(broadcast = %absolute, "namespace");
 								stream.writer.encode(&ietf::Namespace::ID).await?;
 								stream.writer.encode(&ietf::Namespace { suffix }).await?;
 							}
-							announce::Event::Ended => {
+							None => {
 								tracing::debug!(broadcast = %absolute, "namespace_done");
 								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
 								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;

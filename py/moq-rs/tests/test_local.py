@@ -112,7 +112,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, 1_000_000)
@@ -146,7 +146,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = await announcement.broadcast.subscribe_media(track_name, video, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, video)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, 0)
@@ -171,7 +171,7 @@ async def test_multiple_frames_ordering():
         catalog = await announcement.broadcast.catalog()
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
-        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
@@ -243,7 +243,7 @@ def test_publish_lifecycle():
 async def test_publish_track_info_and_subscription():
     """Raw track published with explicit TrackInfo, consumed with a Subscription."""
     broadcast = moq.BroadcastProducer()
-    info = moq.TrackInfo(priority=5, cache_ms=2_000)
+    info = moq.TrackInfo(priority=5, latency_max_ms=2_000)
     track = broadcast.publish_track("status", info)
 
     consumer = track.consume(moq.Subscription(priority=3))
@@ -345,7 +345,7 @@ async def test_dynamic_track_request_can_publish_media():
     # publish_media_on_track accepts the request (at the media timescale), which is what
     # unblocks subscribe_media, so run the subscribe concurrently until then.
     subscribe = asyncio.create_task(
-        consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()), 10_000)
+        consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()))
     )
 
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)

@@ -13,11 +13,13 @@ mod origin_impl;
 
 mod bytes;
 mod datagram;
+mod requests;
 pub(crate) mod resume;
 mod subscription;
 mod time;
 mod weak_cache;
 
+pub(crate) use requests::Requests;
 pub(crate) use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
@@ -39,7 +41,7 @@ pub mod origin {
 /// Subscribing to broadcast (un)announcements from an origin.
 pub mod announce {
 	pub use super::origin_impl::{
-		AnnounceConsumer as Consumer, AnnounceProducer as Producer, Announced as Event, OriginAnnounce as Update,
+		AnnounceConsumer as Consumer, AnnounceProducer as Producer, OriginAnnounce as Update,
 	};
 }
 

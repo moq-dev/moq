@@ -91,7 +91,7 @@ func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
 }
 
 // Abort fails the request with an application error code.
-func (r *BroadcastRequest) Abort(errorCode int32) error {
+func (r *BroadcastRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }
 

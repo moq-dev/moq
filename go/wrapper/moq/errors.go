@@ -39,7 +39,6 @@ var (
 	ErrReject           = ffi.ErrMoqErrorReject
 	ErrAlreadyResponded = ffi.ErrMoqErrorAlreadyResponded
 	ErrCodec            = ffi.ErrMoqErrorCodec
-	ErrInvalidErrorCode = ffi.ErrMoqErrorInvalidErrorCode
 	ErrUnauthorized     = ffi.ErrMoqErrorUnauthorized
 	ErrForbidden        = ffi.ErrMoqErrorForbidden
 	ErrNotFound         = ffi.ErrMoqErrorNotFound

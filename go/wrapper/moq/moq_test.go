@@ -276,7 +276,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, 10_000, nil)
+	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,12 +409,11 @@ func TestJSONTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshotOptions := moq.JSONSnapshotOptions{DeltaRatio: 8, Compression: true}
-	snapshot, err := broadcast.PublishJSONSnapshot("status", snapshotOptions)
+	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{DeltaRatio: 8, Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot("status", snapshotOptions)
+	snapshotConsumer, err := consumer.SubscribeJSONSnapshot("status", moq.JSONSubscribeOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,12 +433,11 @@ func TestJSONTracks(t *testing.T) {
 		t.Fatalf("snapshot = %s", *value)
 	}
 
-	streamOptions := moq.JSONStreamOptions{Compression: true}
-	stream, err := broadcast.PublishJSONStream("events", streamOptions)
+	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	streamConsumer, err := consumer.SubscribeJSONStream("events", streamOptions)
+	streamConsumer, err := consumer.SubscribeJSONStream("events", moq.JSONSubscribeOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +564,7 @@ func TestDynamicTrackRequestCanPublishMedia(t *testing.T) {
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := consumer.SubscribeMedia("requested-audio", moq.LegacyContainer(), 10_000, nil)
+		media, err := consumer.SubscribeMedia("requested-audio", moq.LegacyContainer(), nil)
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 

@@ -156,7 +156,7 @@ Moq.connect("https://relay.example.com").use { moq ->
             track.writeFrame(payload = "ready".encodeToByteArray(), timestampUs = 20_000u)
             track.finish()
         } else {
-            request.abort(404)
+            request.abort(404u)
         }
     }
 }
@@ -196,7 +196,7 @@ dynamic.requestedBroadcasts().collect { request ->
         request.accept(broadcast)
         track.writeFrame("ready".encodeToByteArray(), timestampUs = 0u)
     } else {
-        request.abort(404)
+        request.abort(404u)
     }
 }
 ```

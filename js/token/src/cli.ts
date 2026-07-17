@@ -2,9 +2,9 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
-import type { Claims } from "./claims.ts";
+import { authorize, type Claims } from "./claims.ts";
 import { generate } from "./generate.ts";
 import type { Key, PublicKey } from "./key.ts";
 import { load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
@@ -84,7 +84,7 @@ program
 	.command("verify")
 	.description("Verify a token from stdin, writing the payload to stdout")
 	.requiredOption("--key <path>", "Path to the key file")
-	.option("--root <root>", "Root path to verify against", "")
+	.addOption(new Option("--root <root>", "Path to authorize the token against").hideHelp())
 	.action(async (options) => {
 		try {
 			const keyEncoded = readFileSync(options.key, "utf-8");
@@ -100,7 +100,10 @@ program
 			// Read token from stdin
 			const token = readFileSync(0, "utf-8").trim();
 
-			const claims = await verify(key, token, options.root);
+			const claims = await verify(key, token);
+			if (options.root !== undefined) {
+				authorize(claims, options.root);
+			}
 			console.log(JSON.stringify(claims, null, 2));
 		} catch (error) {
 			console.error("Error verifying token:", error instanceof Error ? error.message : error);

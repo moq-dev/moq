@@ -1,0 +1,11 @@
+# Native libraries an external linker must pass when it links moq.lib on Windows.
+# See apple.txt for the format and the regeneration command.
+
+# std / rustls
+ntdll
+userenv
+ws2_32
+bcrypt
+dbghelp
+advapi32
+legacy_stdio_definitions

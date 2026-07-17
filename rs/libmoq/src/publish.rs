@@ -222,12 +222,15 @@ impl Publish {
 	}
 
 	/// Finish a raw track. No more groups or frames can be written.
+	///
+	/// [`Self::track_finish_at`] declares the boundary ahead of time, so this keeps that
+	/// boundary and only releases the handle.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
-		match track.finish() {
-			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
-			Err(err) => Err(err.into()),
+		if track.final_sequence().is_none() {
+			track.finish()?;
 		}
+		Ok(())
 	}
 
 	/// Declare a raw track's exclusive final group sequence.

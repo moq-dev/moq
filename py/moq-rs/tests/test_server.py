@@ -52,7 +52,7 @@ async def test_server_client_roundtrip():
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await announcement.broadcast.subscribe_media(track_name, audio, 10_000)
+                    media_consumer = await announcement.broadcast.subscribe_media(track_name, audio)
 
                     payload = b"hello over the wire"
                     media.write_frame(payload, 1_000_000)
@@ -209,6 +209,10 @@ async def test_route_changed_observes_update():
     """
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
+        # The first hop identifies the original publisher; keeping it stable
+        # across the update below makes the restart an in-place route change
+        # rather than a broadcast replacement.
+        broadcast.set_route(moq.Route(hops=[42], cost=0))
         server.publish("routed", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
@@ -227,14 +231,16 @@ async def test_route_changed_observes_update():
                     # First call yields the current route (via a fresh access each time).
                     first = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
                     assert first is not None
-                    assert 42 not in first.hops
+                    assert 42 in first.hops
+                    assert 77 not in first.hops
 
-                    # The publisher advertises a new route; the shared cursor
-                    # observes the update rather than replaying the old route.
-                    broadcast.set_route(moq.Route(hops=[42], cost=0))
+                    # The publisher advertises a longer chain behind the same first
+                    # hop; the shared cursor observes the update rather than
+                    # replaying the old route.
+                    broadcast.set_route(moq.Route(hops=[42, 77], cost=0))
                     updated = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
                     assert updated is not None
-                    assert 42 in updated.hops
+                    assert 77 in updated.hops
 
                     # Once the broadcast ends, the watch ends cleanly with None.
                     broadcast.finish()

@@ -15,11 +15,14 @@ pub struct Subscription {
 	/// out-of-order (or not at all) over the network. Defaults to `false`; the
 	/// aggregate is ordered only when every live subscriber asks for it.
 	pub ordered: bool,
-	/// How long to wait for a group before skipping it once a newer group has
-	/// arrived. `Duration::ZERO` skips immediately (e.g. group 8 arriving means
-	/// group 7 is skipped); a larger value tolerates that much reordering before
-	/// giving up on the older group.
-	pub stale: Duration,
+	/// The maximum age of a non-latest group before it is skipped. `Duration::ZERO`
+	/// skips immediately (e.g. group 8 arriving means group 7 is skipped); a larger
+	/// value tolerates that much reordering before giving up on the older group.
+	///
+	/// This is the `Subscriber Max Latency` on the wire, enforced by the publisher's
+	/// cache. Receivers that buffer (e.g. a jitter buffer) enforce the same budget
+	/// locally, and a group is skipped once either measure exceeds it.
+	pub latency_max: Duration,
 	/// First group to deliver, or `None` to start at the latest group.
 	pub group_start: Option<u64>,
 	/// Last group to deliver (inclusive), or `None` for no end.
@@ -31,7 +34,7 @@ impl Default for Subscription {
 		Self {
 			priority: 0,
 			ordered: false,
-			stale: Duration::ZERO,
+			latency_max: Duration::ZERO,
 			group_start: None,
 			group_end: None,
 		}
@@ -52,9 +55,10 @@ impl Subscription {
 		self
 	}
 
-	/// Set how long to wait for a group before skipping it, returning `self` for chaining.
-	pub fn with_stale(mut self, stale: Duration) -> Self {
-		self.stale = stale;
+	/// Set the maximum age of a non-latest group before it is skipped, returning
+	/// `self` for chaining.
+	pub fn with_latency_max(mut self, latency_max: Duration) -> Self {
+		self.latency_max = latency_max;
 		self
 	}
 
@@ -82,7 +86,7 @@ impl Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			ordered: self.ordered && combined.ordered,
-			stale: self.stale.max(combined.stale),
+			latency_max: self.latency_max.max(combined.latency_max),
 			group_start: min_some(self.group_start, combined.group_start),
 			group_end: max_unbounded(self.group_end, combined.group_end),
 		};

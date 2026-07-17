@@ -505,10 +505,11 @@ async fn serve_announced(
 	let mut broadcasts = Vec::new();
 
 	while let Some(moq_net::announce::Update {
-		path: suffix, event, ..
+		path: suffix,
+		broadcast,
 	}) = announced.try_next()
 	{
-		if event.broadcast().is_some() {
+		if broadcast.is_some() {
 			broadcasts.push(suffix);
 		}
 	}

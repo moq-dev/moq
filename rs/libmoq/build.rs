@@ -29,24 +29,44 @@ fn main() {
 	if let Ok(template) = fs::read_to_string(&pc_in) {
 		let target = env::var("TARGET").unwrap();
 		let profile = env::var("PROFILE").unwrap();
-		let libs_private = if target.contains("apple") {
-			concat!(
-				"-framework CoreFoundation -framework Security -framework CoreServices ",
-				"-framework Foundation -framework AVFoundation -framework CoreMedia ",
-				"-framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -lc++"
-			)
-		} else if target.contains("windows") {
-			"-lws2_32 -lbcrypt -luserenv -lntdll"
-		} else {
-			"-ldl -lm -lpthread"
-		};
+		let libs_private = native_libs(&crate_dir, &target);
 
 		let content = template
 			.replace("@VERSION@", &version)
-			.replace("@LIBS_PRIVATE@", libs_private)
+			.replace("@LIBS_PRIVATE@", &libs_private)
 			.replace("@PROFILE@", &profile);
 		fs::write(&pc_out, content).expect("Failed to write pkg-config file");
 	}
+}
+
+/// Read the platform's `native-libs/` list and format it for pkg-config `Libs.private`.
+///
+/// CMakeLists.txt reads the same files, so the two stay in sync by construction.
+fn native_libs(crate_dir: &str, target: &str) -> String {
+	let platform = if target.contains("apple") {
+		"apple"
+	} else if target.contains("windows") {
+		"windows"
+	} else {
+		"linux"
+	};
+
+	let path = PathBuf::from(crate_dir)
+		.join("native-libs")
+		.join(format!("{}.txt", platform));
+	println!("cargo:rerun-if-changed={}", path.display());
+
+	let list = fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+
+	list.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty() && !line.starts_with('#'))
+		.map(|entry| match entry.strip_prefix("framework:") {
+			Some(framework) => format!("-framework {}", framework),
+			None => format!("-l{}", entry),
+		})
+		.collect::<Vec<_>>()
+		.join(" ")
 }
 
 fn target_dir() -> PathBuf {

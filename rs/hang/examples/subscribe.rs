@@ -42,13 +42,9 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 // Subscribe to a broadcast and read media frames.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
-	let moq_net::announce::Update {
-		path, event: broadcast, ..
-	} = consumer.announced().next().await.context("origin closed")?;
+	let moq_net::announce::Update { path, broadcast } = consumer.announced().next().await.context("origin closed")?;
 
-	let broadcast = broadcast
-		.broadcast()
-		.with_context(|| format!("broadcast unannounced: {path}"))?;
+	let broadcast = broadcast.with_context(|| format!("broadcast unannounced: {path}"))?;
 
 	tracing::info!(%path, "broadcast announced");
 

@@ -341,7 +341,6 @@ class BroadcastConsumer:
         self,
         name: str,
         track: Video | Audio | Container,
-        max_latency_ms: int = 10000,
         subscription: Subscription | None = None,
     ) -> MediaConsumer:
         """Subscribe to a media track, delivering frames in decode order.
@@ -350,11 +349,13 @@ class BroadcastConsumer:
         ``catalog.video[name]``), whose ``container`` describes how to parse the
         bitstream, or a :class:`Container` directly. Pass a bare container for the
         dynamic flow, where you subscribe before the catalog exists.
-        ``max_latency_ms`` bounds buffering before a stalled GoP is skipped.
-        ``subscription`` tunes delivery priority, group ordering priority, and group range; omit for defaults.
+        ``subscription`` tunes delivery priority, group ordering priority, group
+        range, and the latency budget; omit for defaults. Raise
+        :attr:`Subscription.latency_max_ms` to buffer instead of skipping a
+        stalled group.
         """
         container = track if isinstance(track, Container) else track.container
-        return MediaConsumer(await self._inner.subscribe_media(name, container, max_latency_ms, subscription))
+        return MediaConsumer(await self._inner.subscribe_media(name, container, subscription))
 
     async def subscribe_audio(
         self,

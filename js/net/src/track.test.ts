@@ -65,7 +65,7 @@ test("a subscriber update is forwarded to the producer's update signal", async (
 
 	// The wire layer watches the producer's signal to emit SUBSCRIBE_UPDATE.
 	expect(producer.subscriptionSignal.peek()).toBeUndefined();
-	const next = producer.subscriptionSignal.next();
+	const next = producer.subscriptionSignal.changed();
 	track.update({ priority: 7 });
 	expect((await next)?.priority).toBe(7);
 });

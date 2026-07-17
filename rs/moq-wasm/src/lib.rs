@@ -71,7 +71,13 @@ impl Session {
 		let origin = moq_net::Origin::random().produce();
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
-		let inner = client.connect(transport).await.map_err(js_err)?;
+		let (inner, driver) = client.connect(transport).await.map_err(js_err)?;
+		// The session only makes progress while its driver runs. The driver holds no
+		// session clone, so dropping this `Session` still closes the transport, which
+		// in turn ends the spawned task.
+		web_async::spawn(async move {
+			let _ = driver.await;
+		});
 		Ok(Session { inner, consumer })
 	}
 

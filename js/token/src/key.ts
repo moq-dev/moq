@@ -189,6 +189,12 @@ function loadKey(jwk: string): Key | PublicKey {
 	return key;
 }
 
+/**
+ * Sign the claims with this key, returning the encoded token.
+ *
+ * `iat` is written only when the claims carry one, so an unset field stays off the
+ * wire rather than being stamped with the current time.
+ */
 export async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
@@ -206,32 +212,29 @@ export async function sign(key: Key, claims: Claims): Promise<string> {
 			typ: "JWT",
 			...(key.kid && { kid: key.kid }),
 		})
-		.setIssuedAt()
 		.sign(joseKey);
 
 	return jwt;
 }
 
-export async function verify(key: PublicKey | SymmetricKey, token: string, path: string): Promise<Claims> {
+/**
+ * Verify a token's signature with this key and return its claims.
+ *
+ * Rejects an expired token (the `exp` claim). Scoping the claims to a connection path
+ * is a separate step; see {@link authorize}.
+ */
+export async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
 	ensureOperationSupported(key, "verify");
 	const joseKey = await importJoseKey(key);
 	const { payload } = await jose.jwtVerify(token, joseKey, {
 		algorithms: [key.alg],
 	});
 
-	let claims: Claims;
 	try {
-		claims = ClaimsSchema.parse(payload);
+		return ClaimsSchema.parse(payload);
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-
-	// Validate path matches
-	if (claims.root !== path) {
-		throw new Error("Token path does not match provided path");
-	}
-
-	return claims;
 }
 
 function parseKeyWithLegacyFallback(data: unknown): Key {

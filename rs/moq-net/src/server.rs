@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, StatsHandle, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream},
 	ietf, lite, setup,
 };
@@ -66,12 +66,13 @@ impl Server {
 		self
 	}
 
-	/// Perform the MoQ handshake as a server, returning the established [`Session`].
+	/// Perform the MoQ handshake as a server, returning the [`Session`] and the
+	/// [`Driver`] that runs its protocol work.
 	///
 	/// Convenience wrapper over [`accept_request`](Self::accept_request) that
 	/// completes the handshake immediately. Use `accept_request` when you need to
 	/// inspect the client's advertised path before deciding what to serve.
-	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
+	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<(Session, Driver), Error> {
 		self.accept_request(session).await?.ok().await
 	}
 
@@ -349,8 +350,9 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self.inner.as_mut().expect("request already responded")
 	}
 
-	/// Accept the session, completing the handshake.
-	pub async fn ok(mut self) -> Result<Session, Error> {
+	/// Accept the session, returning the [`Session`] and the [`Driver`] that runs
+	/// its protocol work.
+	pub async fn ok(mut self) -> Result<(Session, Driver), Error> {
 		let RequestInner { server, handshake } = self.inner.take().expect("request already responded");
 
 		let (session, mut stream, version, request_id_max) = match handshake {
@@ -361,7 +363,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			} => {
 				// The client's SETUP was read in `accept_request`; hand the stream back
 				// for GOAWAY. A server never advertises a path, hence `None`.
-				ietf::start(
+				let protocol = ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -374,10 +376,10 @@ impl<S: web_transport_trait::Session> Request<S> {
 					Some(peer_setup),
 				)?;
 				tracing::debug!(?version, "connected");
-				return Ok(Session::new(session, version.into(), None));
+				return Ok(Session::new(session, version.into(), None, protocol));
 			}
 			Handshake::LiteBare { session, version } => {
-				let (recv_bw, _connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					None,
 					server.publish,
@@ -387,7 +389,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 					lite::Setup::default(),
 					None,
 				)?;
-				return Ok(Session::new(session, version.into(), recv_bw));
+				return Ok(Session::new(
+					session,
+					version.into(),
+					start.recv_bandwidth,
+					start.driver,
+				));
 			}
 			Handshake::LiteSetup {
 				session,
@@ -400,7 +407,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					path: None,
 					role: lite::Role::Both,
 				};
-				let (recv_bw, _connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					None,
 					server.publish,
@@ -410,7 +417,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 					our_setup,
 					Some(client_setup),
 				)?;
-				return Ok(Session::new(session, version.into(), recv_bw));
+				return Ok(Session::new(
+					session,
+					version.into(),
+					start.recv_bandwidth,
+					start.driver,
+				));
 			}
 			Handshake::Legacy {
 				session,
@@ -437,11 +449,11 @@ impl<S: web_transport_trait::Session> Request<S> {
 		};
 		stream.writer.encode(&server_setup).await?;
 
-		let recv_bw = match version {
+		let (recv_bw, protocol) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
-				let (recv_bw, _connecting) = lite::start(
+				let start = lite::start(
 					session.clone(),
 					Some(stream),
 					server.publish,
@@ -451,12 +463,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 					lite::Setup::default(),
 					None,
 				)?;
-				recv_bw
+				(start.recv_bandwidth, start.driver)
 			}
 			Version::Ietf(v) => {
 				let stream = stream.with_version(v);
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				ietf::start(
+				let protocol = ietf::start(
 					session.clone(),
 					Some(stream),
 					request_id_max,
@@ -468,11 +480,11 @@ impl<S: web_transport_trait::Session> Request<S> {
 					None,
 					None,
 				)?;
-				None
+				(None, protocol)
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw))
+		Ok(Session::new(session, version, recv_bw, protocol))
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.

@@ -11,7 +11,7 @@ use crate::origin::MoqRoute;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, unordered, default cache, microsecond timescale).
+/// (priority 0, unordered, default latency budget, microsecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
@@ -21,9 +21,11 @@ pub struct MoqTrackInfo {
 	/// out-of-order (or not at all) over the network. Defaults to false.
 	#[uniffi(default = false)]
 	pub ordered: bool,
-	/// How long the relay should cache past groups, in milliseconds. Null uses the default.
+	/// Maximum age of a non-latest group before the publisher evicts it, in
+	/// milliseconds. Null uses the default. This is the publisher-side half of
+	/// [`MoqSubscription::latency_max_ms`](crate::consumer::MoqSubscription::latency_max_ms).
 	#[uniffi(default = None)]
-	pub cache_ms: Option<u64>,
+	pub latency_max_ms: Option<u64>,
 	/// Per-frame timescale in ticks per second. Null uses microseconds.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
@@ -37,8 +39,8 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
-		if let Some(ms) = info.cache_ms {
-			out = out.with_cache(std::time::Duration::from_millis(ms));
+		if let Some(ms) = info.latency_max_ms {
+			out = out.with_latency_max(std::time::Duration::from_millis(ms));
 		}
 		if let Some(ticks) = info.timescale {
 			let scale =
@@ -59,12 +61,12 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	type Error = MoqError;
 
 	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let cache_ms = u64::try_from(info.cache.as_millis())
-			.map_err(|_| MoqError::Codec("track cache duration overflow".into()))?;
+		let latency_max_ms = u64::try_from(info.latency_max.as_millis())
+			.map_err(|_| MoqError::Codec("track latency_max duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
 			ordered: info.ordered,
-			cache_ms: Some(cache_ms),
+			latency_max_ms: Some(latency_max_ms),
 			timescale: Some(info.timescale.as_u64()),
 		})
 	}
@@ -413,7 +415,7 @@ impl MoqBroadcastProducer {
 	///
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing. `info` sets
-	/// track properties (priority, cache, timescale); omit for defaults.
+	/// track properties (priority, latency_max, timescale); omit for defaults.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
@@ -530,9 +532,8 @@ impl MoqGroupRequest {
 	}
 
 	/// Reject the fetch with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		self.take()?.reject(moq_net::Error::App(error_code));
 		Ok(())
 	}
@@ -599,9 +600,8 @@ impl MoqTrackRequest {
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
 		Ok(())
@@ -722,27 +722,26 @@ impl MoqTrackProducer {
 	}
 
 	/// Abort this track with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let mut guard = self.inner.lock().unwrap();
 		let mut track = guard.take().ok_or(MoqError::Closed)?;
 		track.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
 
-	/// Release this producer after declaring the track's final sequence.
+	/// Release this producer, ending the track at the live edge.
 	///
-	/// When [`finish_at`](Self::finish_at) already declared a future boundary,
-	/// this preserves that boundary instead of replacing it with the current edge.
+	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
+	/// that boundary and only releases the producer.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut track = guard.take().ok_or(MoqError::Closed)?;
-		match track.finish() {
-			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
-			Err(err) => Err(err.into()),
+		if track.final_sequence().is_none() {
+			track.finish()?;
 		}
+		Ok(())
 	}
 
 	/// Declare the exclusive final group sequence, possibly ahead of the live edge.
@@ -803,9 +802,8 @@ impl MoqGroupProducer {
 	}
 
 	/// Abort this group with an application error code.
-	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let mut guard = self.inner.lock().unwrap();
 		let mut group = guard.take().ok_or(MoqError::Closed)?;
 		group.abort(moq_net::Error::App(error_code))?;

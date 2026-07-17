@@ -438,7 +438,7 @@ export class Publisher {
 				ordered: info.ordered,
 				// Publisher Max Latency: the publisher's retention bound, advertised so
 				// relays re-serve with the same window.
-				cache: info.cache,
+				latencyMax: info.latencyMax,
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#runGroup` emits each frame converted to it.
 				timescale: info.timescale,

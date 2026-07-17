@@ -44,17 +44,17 @@ public final class BroadcastConsumer: Sendable {
     }
 
     /// Subscribe to a media track, delivering frames in decode order. `container`
-    /// comes from the catalog; `maxLatencyMs` bounds buffering before skipping a GoP.
-    /// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
+    /// comes from the catalog. `subscription` tunes delivery priority, group ordering
+    /// priority, group range, and the latency budget; omit for defaults. Raise
+    /// `Subscription.latencyMaxMs` to buffer instead of skipping a stalled group.
     public func subscribeMedia(
         name: String,
         container: Container,
-        maxLatencyMs: UInt64,
         subscription: Subscription? = nil
     ) async throws -> MediaConsumer {
         MediaConsumer(
             try await ffi.subscribeMedia(
-                name: name, container: container, maxLatencyMs: maxLatencyMs, subscription: subscription))
+                name: name, container: container, subscription: subscription))
     }
 
     /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
