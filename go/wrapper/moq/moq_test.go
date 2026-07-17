@@ -93,7 +93,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer trackConsumer.Cancel()
 
 	payload := []byte("served dynamically")
-	if err := track.WriteFrame(payload, 0); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := trackConsumer.ReadFrame(ctx)
@@ -121,7 +121,7 @@ func TestPublishMediaLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := media.WriteFrame([]byte("opus frame"), 1000); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), TimestampUs: 1000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := media.Finish(); err != nil {
@@ -153,7 +153,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cached.WriteFrame([]byte("cached"), 0); err != nil {
+	if err := cached.WriteFrame(moq.Frame{Payload: []byte("cached"), TimestampUs: 0}); err != nil {
 		t.Fatal(err)
 	}
 	if err := cached.Finish(); err != nil {
@@ -194,7 +194,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame([]byte("archive"), request.Sequence()*20_000); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence()*20_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -234,9 +234,12 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := origin.Announce("live", broadcast); err != nil {
+	announce, err := origin.Announce("live", broadcast)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// The announcement lives as long as this handle, so keep it past the reads below.
+	defer announce.Unannounce()
 
 	consumer := origin.Consume()
 	announced, err := consumer.Announced("")
@@ -283,7 +286,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	defer mediaConsumer.Cancel()
 
 	payload := []byte("opus audio payload data")
-	if err := media.WriteFrame(payload, 1_000_000); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 1_000_000}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -317,7 +320,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	if err := track.WriteFrame([]byte("hello"), 12_345); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("hello"), TimestampUs: 12_345}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -341,7 +344,7 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer groupConsumer.Cancel()
-	if err := group.WriteFrame([]byte("group"), 23_456); err != nil {
+	if err := group.WriteFrame(moq.Frame{Payload: []byte("group"), TimestampUs: 23_456}); err != nil {
 		t.Fatal(err)
 	}
 	if err := group.Finish(); err != nil {
@@ -409,7 +412,7 @@ func TestJSONTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{DeltaRatio: 8, Compression: true})
+	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +512,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte("hello dynamic track")
-	if err := track.WriteFrame(payload, 0); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -608,7 +611,7 @@ func TestDynamicTrackRequestCanPublishMedia(t *testing.T) {
 	defer mediaConsumer.Cancel()
 
 	payload := []byte("dynamic opus frame")
-	if err := media.WriteFrame(payload, 20_000); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 20_000}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -534,9 +534,11 @@ pub(crate) async fn accept(
 		// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
 		// deliberately absent from `moq_net::ALPNS`.
 		alpn if alpns.contains(&alpn) => {
-			if host.is_empty() {
-				return Err(Error::MissingServerName);
-			}
+			// Raw QUIC carries no in-band request URL like WebTransport's CONNECT, so the TLS
+			// SNI is the only authority the client can offer, and it's optional. A client dialing
+			// a bare IP sends no SNI (RFC 6066 forbids IP literals), leaving `host` empty; the
+			// resulting hostless `moqt://` routes to the root path, exactly like a URL-less stream
+			// transport. `url()` returns `None` for the raw variant either way.
 			let host_str = if host.contains(':') {
 				format!("[{}]", host)
 			} else {

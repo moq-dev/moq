@@ -351,17 +351,26 @@ export class Subscriber {
 			// drain them (we don't drive delivery off the resolved range) so the FIN is
 			// observed. Older drafts just wait for the stream to close.
 			const closed = supportsTrackStream(this.version) ? this.#drainResponses(stream) : stream.reader.closed;
-			const waits: PromiseLike<unknown>[] = [closed, producer.closed];
-			switch (this.version) {
-				case Version.DRAFT_01:
-				case Version.DRAFT_02:
-					break;
-				default:
-					waits.push(this.#runPriorityUpdates(id, broadcast, producer, msg, stream));
-					break;
-			}
+			const priorityUpdates =
+				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
+					? undefined
+					: this.#runPriorityUpdates(id, broadcast, producer, msg, stream);
 
-			await Promise.race(waits);
+			// Terminal conditions (stream end, track close, a failed priority update) settle at most
+			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
+			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
+			if (priorityUpdates !== undefined) terminal.push(priorityUpdates);
+			const done = Promise.race(terminal);
+
+			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
+			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
+			// down (e.g. a quickly unmuted tile) resumes on the same subscription.
+			const idle = Symbol("idle");
+			for (;;) {
+				const reason = await Promise.race([done, producer.unused().then(() => idle)]);
+				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
+				break;
+			}
 
 			producer.close();
 			stream.close();
@@ -514,8 +523,11 @@ export class Subscriber {
 				throw err;
 			}
 
+			// Mint this caller's reader before starting the pump, so the group has demand when the
+			// pump begins watching it (an abandoned fetch cancels once every reader has left).
+			const consumer = group.mirror();
 			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
-			return group.mirror();
+			return consumer;
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
@@ -528,8 +540,23 @@ export class Subscriber {
 		try {
 			let prevTs = 0n;
 
+			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
+			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
+			// demand, not by the stream ending. `closed` and `unused` are watched across frames as
+			// stable promises (not re-subscribed to the signals each frame); the unused check is
+			// level-triggered, so a coalesced fetch that arrives before we cancel re-arms and resumes.
+			const idle = Symbol("idle");
+			const closed = Promise.resolve<Error | null>(group.closed);
+			let unused = group.unused().then(() => idle);
 			for (;;) {
-				const done = await Promise.race([stream.reader.done(), group.closed]);
+				const done = await Promise.race([stream.reader.done(), closed, unused]);
+				if (done === idle) {
+					if (!group.isClosed && group.used.peek()) {
+						unused = group.unused().then(() => idle);
+						continue;
+					}
+					break;
+				}
 				if (done !== false) break;
 
 				prevTs += unzigzag(await stream.reader.u62());

@@ -9,6 +9,7 @@ from .client import Client, connect
 from .errors import is_auth, is_shutdown
 from .log import log_level
 from .origin import (
+    Announce,
     Announced,
     AnnouncedBroadcast,
     Announcement,
@@ -58,6 +59,7 @@ from .types import (
     Dimensions,
     FetchGroupOptions,
     Frame,
+    MediaFrame,
     Subscription,
     TrackInfo,
     Video,
@@ -65,6 +67,7 @@ from .types import (
 )
 
 __all__ = [
+    "Announce",
     "Announced",
     "AnnouncedBroadcast",
     "Announcement",
@@ -90,6 +93,7 @@ __all__ = [
     "Dimensions",
     "Error",
     "Frame",
+    "MediaFrame",
     "FetchGroupOptions",
     "GroupConsumer",
     "GroupRequest",

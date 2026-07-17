@@ -6,14 +6,18 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
+/// How a track's frames are packaged, as advertised in the catalog.
 #[derive(Clone, uniffi::Enum)]
-pub enum Container {
+pub enum MoqContainer {
+	/// The legacy hang container.
 	Legacy,
+	/// CMAF (fMP4), carrying the initialization segment.
 	Cmaf { init: Vec<u8> },
+	/// LOC, the low-overhead container.
 	Loc,
 }
 
-impl From<hang::catalog::Container> for Container {
+impl From<hang::catalog::Container> for MoqContainer {
 	fn from(container: hang::catalog::Container) -> Self {
 		match container {
 			hang::catalog::Container::Legacy => Self::Legacy,
@@ -23,12 +27,12 @@ impl From<hang::catalog::Container> for Container {
 	}
 }
 
-impl From<Container> for hang::catalog::Container {
-	fn from(container: Container) -> Self {
+impl From<MoqContainer> for hang::catalog::Container {
+	fn from(container: MoqContainer) -> Self {
 		match container {
-			Container::Legacy => Self::Legacy,
-			Container::Cmaf { init } => Self::Cmaf { init: init.into() },
-			Container::Loc => Self::Loc,
+			MoqContainer::Legacy => Self::Legacy,
+			MoqContainer::Cmaf { init } => Self::Cmaf { init: init.into() },
+			MoqContainer::Loc => Self::Loc,
 		}
 	}
 }
@@ -55,7 +59,7 @@ pub struct MoqVideo {
 	pub display_aspect: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
 	pub framerate: Option<f64>,
-	pub container: Container,
+	pub container: MoqContainer,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -65,18 +69,38 @@ pub struct MoqAudio {
 	pub sample_rate: u32,
 	pub channel_count: u32,
 	pub bitrate: Option<u64>,
-	pub container: Container,
+	pub container: MoqContainer,
 }
 
-/// A media frame.
-#[derive(uniffi::Record)]
+/// A payload and the time it should be presented.
+///
+/// The unit of both writing and raw reading: every producer write takes one of these, and a
+/// raw (non-media) read returns one. Media reads return a [`MoqMediaFrame`] instead, which
+/// adds the codec-derived keyframe flag.
+#[derive(Clone, uniffi::Record)]
 pub struct MoqFrame {
+	/// The frame payload.
 	pub payload: Vec<u8>,
+	/// Presentation timestamp in microseconds.
+	#[uniffi(default = 0)]
 	pub timestamp_us: u64,
+}
+
+/// A [`MoqFrame`] plus the codec metadata a media track carries.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqMediaFrame {
+	/// The frame payload.
+	pub payload: Vec<u8>,
+	/// Presentation timestamp in microseconds.
+	pub timestamp_us: u64,
+	/// Whether this frame can be decoded without any earlier frame.
 	pub keyframe: bool,
 }
 
-/// A best-effort raw track datagram.
+/// A best-effort raw track datagram, as received.
+///
+/// Send one with [`append_datagram`](crate::producer::MoqTrackProducer::append_datagram), which
+/// takes a [`MoqFrame`] and assigns the sequence number for you.
 #[derive(uniffi::Record)]
 pub struct MoqDatagram {
 	/// Per-track sequence number, shared with groups.

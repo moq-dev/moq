@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.8...moq-audio-v0.0.9) - 2026-07-16
+
+### Added
+
+- *(moq-mux)* cut(end) as the group boundary ([#2270](https://github.com/moq-dev/moq/pull/2270))
+
 ## [0.0.8](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.7...moq-audio-v0.0.8) - 2026-07-09
 
 ### Other

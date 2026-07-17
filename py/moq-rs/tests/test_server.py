@@ -25,7 +25,7 @@ async def test_server_client_roundtrip():
         # Publish a broadcast on the server side.
         broadcast = moq.BroadcastProducer()
         media = broadcast.publish_media("opus", opus_head())
-        server.announce("hello", broadcast)
+        _announce = server.announce("hello", broadcast)
 
         # Auto-accept incoming sessions in the background so the handshake
         # completes from the server side. Hold references so the sessions
@@ -34,7 +34,7 @@ async def test_server_client_roundtrip():
 
         async def accept_loop() -> None:
             async for request in server:
-                sessions.append(await request.ok())
+                sessions.append(await request.accept())
 
         accept_task = asyncio.create_task(accept_loop())
 
@@ -79,7 +79,7 @@ async def test_server_request_close():
 
         async def reject_loop() -> None:
             async for request in server:
-                await request.close(403)
+                await request.reject(403)
 
         reject_task = asyncio.create_task(reject_loop())
         try:
@@ -108,20 +108,20 @@ async def test_cert_fingerprints_after_listen():
         assert all(c in "0123456789abcdef" for c in fps[0])
 
 
-async def test_request_double_ok_returns_already_responded():
-    """Calling ok() twice on the same request raises AlreadyResponded."""
+async def test_request_double_accept_returns_already_responded():
+    """Calling accept() twice on the same request raises AlreadyResponded."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         sessions: list = []
 
         async def accept_once() -> None:
             async for request in server:
-                sessions.append(await request.ok())
-                # Second ok() must fail; MoqError is an Exception at runtime,
+                sessions.append(await request.accept())
+                # A second accept() must fail; MoqError is an Exception at runtime,
                 # UniFFI's static rebind hides that from pyright.
                 with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                    await request.ok()
+                    await request.accept()
                 with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                    await request.close(403)
+                    await request.reject(403)
                 break
 
         accept_task = asyncio.create_task(accept_once())
@@ -145,7 +145,7 @@ async def test_serve_helper_accepts_clients():
     """Server.serve() accepts incoming sessions and holds them automatically."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.announce("via-serve", broadcast)
+        _announce = server.announce("via-serve", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -170,7 +170,7 @@ async def test_announcement_hops_over_wire():
     """An announcement received over the wire exposes its relay hop chain as a list of ints."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.announce("with-hops", broadcast)
+        _announce = server.announce("with-hops", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:

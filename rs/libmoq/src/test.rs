@@ -697,7 +697,7 @@ fn raw_track_datagram_publish_consume() {
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(
-		unsafe { moq_publish_track_datagram(track, 120_000, payload.as_ptr(), payload.len(), &mut sequence) },
+		unsafe { moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), 120_000, &mut sequence) },
 		0
 	);
 

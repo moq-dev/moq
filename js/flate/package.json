@@ -16,7 +16,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"pako": "^3.0.0"
+		"pako": "^3.0.1"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3.14",

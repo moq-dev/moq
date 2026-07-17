@@ -20,7 +20,7 @@ async def publish(url: str, broadcast_name: str, track_name: str, tls_verify: bo
     track = broadcast.publish_track(track_name)
 
     async with moq.Client(url, tls_verify=tls_verify) as client:
-        client.announce(broadcast_name, broadcast)
+        _announce = client.announce(broadcast_name, broadcast)
         print(f"publishing {broadcast_name!r} track={track_name!r} at {url}")
 
         while True:

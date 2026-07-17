@@ -22,6 +22,7 @@ import uniffi.moq.MoqGroupRequest
 import uniffi.moq.MoqJsonSnapshotConsumer
 import uniffi.moq.MoqJsonStreamConsumer
 import uniffi.moq.MoqMediaConsumer
+import uniffi.moq.MoqMediaFrame
 import uniffi.moq.MoqOriginConsumer
 import uniffi.moq.MoqOriginDynamic
 import uniffi.moq.MoqTrackConsumer
@@ -59,7 +60,7 @@ suspend fun MoqBroadcastConsumer.catalog(): MoqCatalog {
 }
 
 /** Stream of decoded media frames in decode order. */
-fun MoqMediaConsumer.frames(): Flow<MoqFrame> = flow {
+fun MoqMediaConsumer.frames(): Flow<MoqMediaFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)

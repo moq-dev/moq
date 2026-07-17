@@ -18,6 +18,7 @@ type (
 	Datagram           = ffi.MoqDatagram
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame
+	MediaFrame         = ffi.MoqMediaFrame
 	FetchGroupOptions  = ffi.MoqFetchGroupOptions
 	OriginOptions      = ffi.MoqOriginOptions
 	Subscription       = ffi.MoqSubscription
@@ -27,10 +28,10 @@ type (
 
 	// Container selects how subscribed media frames are demuxed. Build one with
 	// LegacyContainer, CmafContainer, or LocContainer.
-	Container       = ffi.Container
-	ContainerLegacy = ffi.ContainerLegacy
-	ContainerCmaf   = ffi.ContainerCmaf
-	ContainerLoc    = ffi.ContainerLoc
+	Container       = ffi.MoqContainer
+	ContainerLegacy = ffi.MoqContainerLegacy
+	ContainerCmaf   = ffi.MoqContainerCmaf
+	ContainerLoc    = ffi.MoqContainerLoc
 )
 
 // LegacyContainer selects the legacy hang container for a media subscription.

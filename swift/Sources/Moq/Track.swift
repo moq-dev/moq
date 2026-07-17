@@ -36,8 +36,8 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     }
 
     /// The publisher-side properties learned during subscription.
-    public func info() async throws -> TrackInfo {
-        try await ffi.info()
+    public func info() throws -> TrackInfo {
+        try ffi.info()
     }
 
     /// Change this subscriber's delivery preferences.
@@ -150,16 +150,16 @@ public final class TrackProducer: Sendable {
     }
 
     /// Write a single-frame group with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
-        try ffi.writeFrame(payload: payload, timestampUs: timestampUs)
+    public func writeFrame(_ payload: Data, timestampUs: UInt64 = 0) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
     }
 
     /// Send a best-effort datagram and return its sequence number.
     ///
     /// `timestampUs` is the presentation timestamp in microseconds. Payloads are
     /// capped at 1200 bytes. There is no stream fallback.
-    public func appendDatagram(timestampUs: UInt64, payload: Data) throws -> UInt64 {
-        try ffi.appendDatagram(timestampUs: timestampUs, payload: payload)
+    public func appendDatagram(_ payload: Data, timestampUs: UInt64 = 0) throws -> UInt64 {
+        try ffi.appendDatagram(frame: Frame(payload: payload, timestampUs: timestampUs))
     }
 
     /// Abort the track with an application error code, failing active consumers.
@@ -198,8 +198,8 @@ public final class GroupProducer: Sendable {
     }
 
     /// Write a frame with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
-        try ffi.writeFrame(payload: payload, timestampUs: timestampUs)
+    public func writeFrame(_ payload: Data, timestampUs: UInt64 = 0) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
     }
 
     /// Mark the group complete. No more frames can be written.

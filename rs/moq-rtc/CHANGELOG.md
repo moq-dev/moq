@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/moq-dev/moq/compare/moq-rtc-v0.1.4...moq-rtc-v0.1.5) - 2026-07-17
+
+### Fixed
+
+- *(moq-rtc)* handle IPv4-mapped peers on a dual-stack socket ([#2327](https://github.com/moq-dev/moq/pull/2327))
+
 ## [0.1.4](https://github.com/moq-dev/moq/compare/moq-rtc-v0.1.3...moq-rtc-v0.1.4) - 2026-07-15
 
 ### Fixed

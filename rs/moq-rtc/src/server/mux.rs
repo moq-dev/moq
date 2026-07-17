@@ -133,6 +133,9 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 				continue;
 			}
 		};
+		// A dual-stack bind reports IPv4 peers as `::ffff:a.b.c.d`; unmap before
+		// this address becomes a registry key or reaches ICE (see crate::net).
+		let src = crate::net::canonical(src);
 		let data = &buf[..len];
 
 		// Fast path: a source we've already paired with a session.
@@ -183,4 +186,73 @@ fn local_ufrag(data: &[u8]) -> Option<String> {
 		return None;
 	}
 	msg.split_username().map(|(local, _remote)| local.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+	use std::time::Duration;
+
+	use str0m::ice::{StunMessage, TransId};
+
+	use super::*;
+
+	/// SHA1-HMAC for a STUN MESSAGE-INTEGRITY, matching what str0m signs with.
+	fn sha1_hmac(key: &[u8], payloads: &[&[u8]]) -> [u8; 20] {
+		use aws_lc_rs::hmac;
+
+		let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+		let mut ctx = hmac::Context::with_key(&key);
+		for payload in payloads {
+			ctx.update(payload);
+		}
+		let mut out = [0u8; 20];
+		out.copy_from_slice(ctx.sign().as_ref());
+		out
+	}
+
+	/// Forge the STUN binding request a peer opens an ICE session with, addressed
+	/// to the session holding `creds`. Signed with that session's password, which
+	/// is what str0m authenticates an inbound request against.
+	fn binding_request(creds: &IceCreds) -> Vec<u8> {
+		let username = format!("{}:peer", creds.ufrag);
+		let msg = StunMessage::binding_request(&username, TransId::new(), true, 0, 0, false);
+		let mut buf = vec![0u8; 1024];
+		let len = msg
+			.to_bytes(Some(creds.pass.as_bytes()), &mut buf, sha1_hmac)
+			.expect("serialize binding request");
+		buf.truncate(len);
+		buf
+	}
+
+	/// An IPv4 peer reaching a dual-stack (`[::]`) mux must route to its session
+	/// with its source unmapped to the `V4` it really is. Without the
+	/// canonicalization the source stays `::ffff:127.0.0.1`, which pairs the peer
+	/// against the wrong-family ICE host candidate.
+	#[tokio::test]
+	async fn dual_stack_mux_routes_an_ipv4_peer_with_a_canonical_source() {
+		let bind = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+		let advertise = [
+			SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+			SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+		];
+		let mux = Mux::bind(bind, &advertise).await.expect("dual-stack bind");
+		let port = mux.socket.local_addr().unwrap().port();
+		let (creds, mut rx, _registration) = mux.register();
+
+		// Dial the mux over IPv4, which a dual-stack socket accepts as v4-mapped.
+		let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let peer_addr = peer.local_addr().unwrap();
+		peer.send_to(&binding_request(&creds), (Ipv4Addr::LOCALHOST, port))
+			.await
+			.expect("IPv4 peer must reach a dual-stack mux");
+
+		let (_data, src) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+			.await
+			.expect("the demux must route the IPv4 peer's binding request")
+			.expect("session inbox stayed open");
+
+		assert_eq!(src, peer_addr, "an IPv4 peer's source must arrive unmapped");
+		assert!(src.is_ipv4());
+	}
 }

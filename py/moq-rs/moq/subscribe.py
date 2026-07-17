@@ -28,6 +28,7 @@ from .types import (
     Datagram,
     FetchGroupOptions,
     Frame,
+    MediaFrame,
     Subscription,
     TrackInfo,
     Video,
@@ -35,7 +36,7 @@ from .types import (
 
 
 class MediaConsumer:
-    """Wraps MoqMediaConsumer as an async iterator of Frame."""
+    """Wraps MoqMediaConsumer as an async iterator of MediaFrame."""
 
     def __init__(self, inner: MoqMediaConsumer) -> None:
         self._inner = inner
@@ -49,7 +50,7 @@ class MediaConsumer:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> Frame:
+    async def __anext__(self) -> MediaFrame:
         frame = await self._inner.next()
         if frame is None:
             raise StopAsyncIteration
@@ -172,9 +173,9 @@ class TrackConsumer:
         """
         return await self._inner.recv_datagram()
 
-    async def info(self) -> TrackInfo:
+    def info(self) -> TrackInfo:
         """Return the publisher-side track properties."""
-        return await self._inner.info()
+        return self._inner.info()
 
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences."""
@@ -307,7 +308,8 @@ class BroadcastConsumer:
 
         Yields parsed Python objects. Pass the same ``compression`` the producer used.
         """
-        config = MoqJsonSnapshotConfig(delta_ratio=0, compression=compression)
+        # delta_ratio is producer-only, so leave it at its default here.
+        config = MoqJsonSnapshotConfig(compression=compression)
         return JsonSnapshotConsumer(await self._inner.subscribe_json_snapshot(name, config))
 
     async def subscribe_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamConsumer:
@@ -362,7 +364,8 @@ class BroadcastConsumer:
 
         ``catalog_audio`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by
-        ``catalog.audio[name]``). Use ``output.latency_max_ms`` to
+        ``catalog.audio[name]``). Only Opus tracks are currently supported.
+        Use ``output.latency_max_ms`` to
         control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)

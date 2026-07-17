@@ -6,7 +6,7 @@ import warnings
 
 from moq_ffi import MoqClient
 
-from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
+from .origin import Announce, Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 from .subscribe import BroadcastConsumer
@@ -15,7 +15,8 @@ from .subscribe import BroadcastConsumer
 class Client:
     """High-level MoQ client with automatic origin wiring.
 
-    In simple mode (no origin provided), creates an internal origin automatically:
+    In simple mode (no origin provided), both sides share one origin, so a broadcast
+    announced here is also discoverable here:
 
         async with Client("https://relay.example.com") as client:
             async for ann in client.announced():
@@ -54,16 +55,12 @@ class Client:
         self._tls_key = tls_key
         self._bind = bind
 
-        # If neither origin is provided, create a shared internal one.
-        if publish is None and subscribe is None:
-            self._origin = OriginProducer()
-            self._publish_origin = self._origin
-            self._consume_origin = self._origin
-        else:
-            self._origin = None
-            self._publish_origin = publish
-            self._consume_origin = subscribe
+        # With neither side given, moq-ffi wires one shared origin to both, so a broadcast
+        # announced here is discoverable via announced() (loopback).
+        self._publish_origin = publish
+        self._consume_origin = subscribe
 
+        self._publisher: OriginProducer | None = None
         self._consumer: OriginConsumer | None = None
         self._inner: MoqClient | None = None
         self._session: Session | None = None
@@ -93,14 +90,15 @@ class Client:
 
         self._session = Session(await self._inner.connect(self._url))
 
-        # Create consumer from whichever origin handles consuming.
-        origin = self._consume_origin or self._publish_origin
-        if origin is not None:
-            self._consumer = origin.consume()
+        # The session always exposes both sides, wired from the origins above or
+        # auto-created, so publishing and discovery always have somewhere to go.
+        self._publisher = self._session.publisher()
+        self._consumer = self._session.consumer()
 
         return self
 
     async def __aexit__(self, *exc) -> None:
+        self._publisher = None
         self._consumer = None
         if self._session is not None:
             self._session.shutdown()
@@ -110,36 +108,41 @@ class Client:
             self._inner = None
         self._session = None
 
-    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
-        """Advertise ``broadcast`` at ``path`` so subscribers can discover it."""
-        origin = self._publish_origin
-        if origin is None:
-            raise RuntimeError("no publish origin configured")
-        origin.announce(path, broadcast)
+    def announce(self, path: str, broadcast: BroadcastProducer) -> Announce:
+        """Advertise ``broadcast`` at ``path`` so subscribers can discover it.
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+        Hold the returned :class:`Announce` for as long as the broadcast should stay
+        discoverable; unannouncing it removes the path.
+        """
+        return self._require_publisher().announce(path, broadcast)
+
+    def publish(self, path: str, broadcast: BroadcastProducer) -> Announce:
         warnings.warn(
             "Client.publish() is deprecated; use Client.announce() instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        self.announce(path, broadcast)
+        return self.announce(path, broadcast)
 
     def announced(self, prefix: str = "") -> Announced:
-        if self._consumer is None:
-            raise RuntimeError("no consume origin configured")
-        return self._consumer.announced(prefix)
+        return self._require_consumer().announced(prefix)
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        if self._consumer is None:
-            raise RuntimeError("no consume origin configured")
-        return self._consumer.announced_broadcast(path)
+        return self._require_consumer().announced_broadcast(path)
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
         """Request a broadcast by path, resolving as soon as it can be served."""
+        return await self._require_consumer().request_broadcast(path)
+
+    def _require_publisher(self) -> OriginProducer:
+        if self._publisher is None:
+            raise RuntimeError("not connected; use the client as an async context manager")
+        return self._publisher
+
+    def _require_consumer(self) -> OriginConsumer:
         if self._consumer is None:
-            raise RuntimeError("no consume origin configured")
-        return await self._consumer.request_broadcast(path)
+            raise RuntimeError("not connected; use the client as an async context manager")
+        return self._consumer
 
     @property
     def session(self) -> Session | None:

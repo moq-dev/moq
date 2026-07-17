@@ -31,7 +31,7 @@ public final class CatalogConsumer: AsyncSequence, Sendable {
 
 /// Read side of a media track. Iterating yields decoded frames in decode order.
 public final class MediaConsumer: AsyncSequence, Sendable {
-    public typealias Element = Frame
+    public typealias Element = MediaFrame
 
     let ffi: MoqMediaConsumer
 
@@ -40,7 +40,7 @@ public final class MediaConsumer: AsyncSequence, Sendable {
     }
 
     /// The next frame, or `nil` once the track ends or is closed.
-    public func next() async throws -> Frame? {
+    public func next() async throws -> MediaFrame? {
         try await ffi.next()
     }
 
@@ -49,7 +49,7 @@ public final class MediaConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
-    public func makeAsyncIterator() -> AsyncThrowingStream<Frame, Swift.Error>.Iterator {
+    public func makeAsyncIterator() -> AsyncThrowingStream<MediaFrame, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.next()
         }.makeAsyncIterator()
@@ -80,8 +80,11 @@ public final class MediaProducer: Sendable {
     }
 
     /// Write a frame with the given presentation timestamp (microseconds).
-    public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
-        try ffi.writeFrame(payload: payload, timestampUs: timestampUs)
+    ///
+    /// The importer derives keyframe status from the bitstream, so only the payload and its
+    /// timestamp cross the boundary.
+    public func writeFrame(_ payload: Data, timestampUs: UInt64 = 0) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
     }
 
     /// Finish the track and finalize encoding.

@@ -28,7 +28,7 @@ obs_properties_t *MoQService::Properties()
 	return ppts;
 }
 
-void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *audio_settings)
+void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *)
 {
 	/*
      This function is called to apply custom encoder settings specific to this service.
@@ -39,12 +39,7 @@ void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *au
 
 	// Example:
 	if (video_settings) {
-		obs_data_set_int(video_settings, "bf", 0);
 		obs_data_set_bool(video_settings, "repeat_headers", true);
-	}
-
-	if (audio_settings) {
-		obs_data_set_int(audio_settings, "bf", 0);
 	}
 }
 

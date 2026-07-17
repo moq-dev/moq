@@ -24,8 +24,29 @@ public final class OriginProducer: Sendable {
     }
 
     /// Announce a broadcast under the given path so subscribers can find it.
-    public func announce(path: String, broadcast: BroadcastProducer) throws {
-        try ffi.announce(path: path, broadcast: broadcast.ffi)
+    ///
+    /// Hold the returned `Announce` for as long as the broadcast should stay discoverable;
+    /// unannouncing it (or releasing it) removes the path. Closing the broadcast does not.
+    @discardableResult
+    public func announce(path: String, broadcast: BroadcastProducer) throws -> Announce {
+        Announce(try ffi.announce(path: path, broadcast: broadcast.ffi))
+    }
+}
+
+/// A live announcement, returned by `OriginProducer.announce`.
+///
+/// The publish-side guard keeping one broadcast announced. (The subscribe-side `Announced` is
+/// the unrelated stream of announcements arriving from a remote.)
+public final class Announce: Sendable {
+    let ffi: MoqAnnounce
+
+    init(_ ffi: MoqAnnounce) {
+        self.ffi = ffi
+    }
+
+    /// Unannounce the broadcast, removing it from the origin. Idempotent.
+    public func unannounce() {
+        ffi.unannounce()
     }
 }
 

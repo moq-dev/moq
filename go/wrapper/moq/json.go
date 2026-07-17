@@ -8,12 +8,26 @@ import (
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
 
+// DefaultDeltaRatio is used when [JSONSnapshotOptions.DeltaRatio] is nil. Go has no field
+// defaults, so unlike the other bindings this restates the `#[uniffi(default = 8)]` on
+// moq-ffi's MoqJsonSnapshotConfig (itself pinned to moq-json's default by a Rust test).
+const DefaultDeltaRatio uint32 = 8
+
 // JSONSnapshotOptions configures publishing a lossy latest-value JSON track.
 type JSONSnapshotOptions struct {
-	// DeltaRatio controls how aggressively deltas replace full snapshots. Zero disables deltas.
-	DeltaRatio uint32
+	// DeltaRatio controls how aggressively deltas replace full snapshots. Nil uses
+	// [DefaultDeltaRatio]; a pointer to zero disables deltas entirely.
+	DeltaRatio *uint32
 	// Compression enables group-scoped DEFLATE and must match on the consumer.
 	Compression bool
+}
+
+// deltaRatio resolves the configured ratio, falling back to the shared default.
+func (o JSONSnapshotOptions) deltaRatio() uint32 {
+	if o.DeltaRatio == nil {
+		return DefaultDeltaRatio
+	}
+	return *o.DeltaRatio
 }
 
 // JSONStreamOptions configures publishing a lossless append-log JSON track.
@@ -125,7 +139,7 @@ func (b *BroadcastProducer) PublishJSONSnapshot(
 	options JSONSnapshotOptions,
 ) (*JSONSnapshotProducer, error) {
 	inner, err := b.inner.PublishJsonSnapshot(name, ffi.MoqJsonSnapshotConfig{
-		DeltaRatio:  options.DeltaRatio,
+		DeltaRatio:  options.deltaRatio(),
 		Compression: options.Compression,
 	})
 	if err != nil {
