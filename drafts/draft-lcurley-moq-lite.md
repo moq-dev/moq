@@ -958,7 +958,7 @@ A value of 0 means the track ended before producing any groups.
 The subscriber MUST NOT wait for any group at or after this sequence.
 
 This field is encoded as a plain absolute sequence and is used as-is; it is **not** the `absolute + 1` form used by `Group Start`/`Group End` in SUBSCRIBE, which decode by subtracting 1.
-The two are easily confused, because a track whose last delivered group is `N` sends `N + 1` here, the same number SUBSCRIBE would carry for an inclusive bound of `N`.
+The two are easily confused, because a track whose highest delivered group is `N` sends `N + 1` here, the same number SUBSCRIBE would carry for an inclusive bound of `N`.
 They differ in why: SUBSCRIBE offsets by 1 only so that 0 can mean "absent", whereas this field has no absent case and 0 already means "no groups at all".
 
 SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups below this sequence that it cannot deliver, and FINs the stream only once every group below this sequence has been accounted for.
