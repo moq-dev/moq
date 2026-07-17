@@ -308,6 +308,9 @@ export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
 /**
  * A value or an existing readable for it: the argument form accepted by {@link getter}
  * and, per-field, by {@link Inputs}. Mirrors the `T | Signal<T>` shape of {@link Signal.from}.
+ *
+ * The readable must be a `Signal`, `Computed`, or `Once`; {@link getter} throws on any other
+ * implementation of {@link Getter} because it can't subscribe to one without leaking.
  */
 export type GetterInit<T> = T | Getter<T>;
 

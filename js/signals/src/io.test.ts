@@ -78,6 +78,19 @@ test("a Computed wired into an in stays live under an effect", async () => {
 	computed.close();
 });
 
+test("getter passes through a Signal from an older package version", () => {
+	// Older versions brand Signal but not the readable, so getter() must still accept the
+	// signal brand alone. Symbol.for shares the brand across copies of the package.
+	const old = {
+		[Symbol.for("@moq/signals")]: true,
+		peek: () => 3,
+		changed: (() => {}) as Getter<number>["changed"],
+		subscribe: () => () => {},
+	};
+
+	expect(getter(old as unknown as Getter<number>)).toBe(old);
+});
+
 test("getter throws on a foreign readable instead of freezing it", () => {
 	// Quacks like a Getter but carries no brand: wrapping it would silently never update.
 	const foreign: Getter<number> = {
