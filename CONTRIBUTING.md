@@ -34,8 +34,6 @@ Keep the body short and structured, not narrated:
 
 Skip file-by-file narration of the diff; the diff already says that.
 
-LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) ends with the agent model, e.g. `(Written by GPT-5)`. Keep the marker when editing a body you authored, so reviewers still know it wasn't human-written.
-
 ### Keep the title and description fresh
 
 When pushing additional commits to an existing PR, check whether the title and description still describe the change accurately. They often go stale during review iterations: a flag gets renamed, an API gets reshaped, an extra fix lands. A stale title/body means a misleading entry in `git log` forever. Update with `gh pr edit <num> --title "..." --body "..."` whenever the scope shifts, watching for:
@@ -43,6 +41,12 @@ When pushing additional commits to an existing PR, check whether the title and d
 - Flags, file names, or public APIs renamed in later commits but still referenced by their old name in the body.
 - Summary bullets describing behavior the latest commits have changed or removed.
 - The test-plan checklist lagging behind newly added tests.
+
+## AI Attribution
+
+Every piece of LLM-authored prose posted to GitHub ends with the agent model, e.g. `(Written by GPT-5)`. That covers PR descriptions, issue bodies, review summaries, review replies, and any comment on a PR, issue, or discussion. Keep the marker when editing a body you authored, so readers still know it wasn't human-written.
+
+The marker never goes in the codebase itself: no code comments, doc comments, or `/doc` pages (see Comment Conventions in [CLAUDE.md](CLAUDE.md)). GitHub prose is read once, in context, by someone deciding how much to trust it; source markers just rot in place. Commits are the other exception: attribution belongs in a `Co-Authored-By:` trailer, not a marker in the body.
 
 ## Reviews
 
