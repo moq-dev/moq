@@ -270,6 +270,11 @@ impl Resolved {
 	}
 
 	/// Whether the config asks to turn GSO off, which not every backend can honor.
+	///
+	/// Only the quiche and iroh backends consult this, to reject a GSO-off request
+	/// they can't satisfy; quinn and noq toggle GSO directly. A default build
+	/// compiles neither, so the method is intentionally unused there.
+	#[cfg_attr(not(any(feature = "quiche", feature = "iroh")), allow(dead_code))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}
