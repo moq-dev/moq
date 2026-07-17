@@ -200,6 +200,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
+			client: true,
 			url,
 			quic: session,
 			control: stream,
@@ -275,6 +276,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
+			client: true,
 			url,
 			quic: session,
 			control: stream,
@@ -294,6 +296,7 @@ async function handshakeAlpn(url: URL, session: WebTransport, version: Ietf.Ietf
 	const controlStream = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
+		client: true,
 		url,
 		quic: session,
 		control: controlStream,

@@ -51,6 +51,7 @@ async function acceptAlpn(transport: WebTransport, url: URL, version: Ietf.IetfV
 	const controlStream = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
+		client: false,
 		url,
 		quic: transport,
 		control: controlStream,
@@ -89,6 +90,7 @@ async function acceptSetup(transport: WebTransport, url: URL, version: Ietf.Ietf
 	const maxRequestId = 42069n;
 
 	return new Ietf.Connection({
+		client: false,
 		url,
 		quic: transport,
 		control: stream,
@@ -140,6 +142,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	} else if (Object.values(Ietf.Version).includes(selectedVersion as Ietf.Version)) {
 		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
+			client: false,
 			url,
 			quic: transport,
 			control: stream,

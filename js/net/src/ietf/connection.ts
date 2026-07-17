@@ -58,12 +58,16 @@ export class Connection implements Established {
 		control,
 		maxRequestId,
 		version,
+		client,
 	}: {
 		url: URL;
 		quic: WebTransport;
 		control: Stream;
 		maxRequestId: bigint;
 		version: IetfVersion;
+		// True if we initiated the session (connect), false if we accepted it. Selects
+		// the even/odd request-ID space per moq-transport.
+		client: boolean;
 	}) {
 		this.url = url;
 		this.version = versionName(version);
@@ -71,11 +75,11 @@ export class Connection implements Established {
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {
-			this.#session = new NativeSession(quic, version);
+			this.#session = new NativeSession(quic, version, client);
 			// v17+: control/setup stream only carries GoAway
 			void this.#runGoAway(control, version);
 		} else {
-			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId);
+			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client);
 			this.#session = adapter;
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {
