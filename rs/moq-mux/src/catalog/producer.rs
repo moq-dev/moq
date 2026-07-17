@@ -346,7 +346,7 @@ fn emit<E: CatalogExt>(
 
 	let msf = to_msf(&catalog.media());
 	if let Ok(mut group) = msf_track.append_group() {
-		let _ = group.write_frame(moq_net::Timestamp::now(), msf.to_string().expect("invalid MSF catalog"));
+		let _ = group.write_frame(moq_net::Timestamp::now(), msf.to_json().expect("invalid MSF catalog"));
 		let _ = group.finish();
 	}
 }
