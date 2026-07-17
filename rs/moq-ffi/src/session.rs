@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use moq_net::Session;
 use url::Url;
 
 use crate::error::MoqError;
@@ -278,7 +277,7 @@ impl From<moq_net::ConnectionStats> for MoqConnectionStats {
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Option<moq_net::Session>,
-	closed: Task<Session>,
+	closed: Task<moq_net::Session>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
 }
@@ -312,7 +311,7 @@ impl Drop for MoqSession {
 		// clone lives in the `closed` task and is released after this guard, off-runtime.
 		// Close-once dedup then makes that trailing drop a no-op.
 		if let Some(session) = self.inner.take() {
-			session.close(moq_net::Error::Cancel);
+			session.abort(moq_net::Error::Cancel);
 		}
 	}
 }
@@ -331,7 +330,7 @@ impl MoqSession {
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::RUNTIME.enter();
 		if let Some(inner) = &self.inner {
-			inner.clone().close(moq_net::Error::Remote(code));
+			inner.abort(moq_net::Error::Remote(code));
 		}
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.

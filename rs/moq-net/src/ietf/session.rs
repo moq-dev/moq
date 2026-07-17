@@ -4,6 +4,7 @@ use crate::{
 	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
 use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
@@ -28,8 +29,8 @@ pub fn start<S: web_transport_trait::Session>(
 	// server that gated on the client's path via [`accept_setup`]). It becomes the
 	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
-) -> Result<(), Error> {
-	web_async::spawn(async move {
+) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
@@ -38,56 +39,62 @@ pub fn start<S: web_transport_trait::Session>(
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {
-					return session.close(Error::ProtocolViolation.to_code(), "setup stream required");
+					let err = Error::ProtocolViolation;
+					session.close(err.to_code(), "setup stream required");
+					return Err(err);
 				};
 				let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), tx, control.clone(), version);
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version);
+				let (tasks, task_set) = TaskSet::new();
+				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version, tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
 				let sub_ns_adapter = adapter.clone();
 
 				tokio::select! {
-									Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
-									Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
-									Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
-									Err(err) = publisher.run() => Err(err),
-									Err(err) = async {
-				let stream = match version {
-											Version::Draft16 => {
-												let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-												Stream {
-													writer: crate::coding::Writer::new(send, version),
-													reader: crate::coding::Reader::new(recv, version),
-												}
-											}
-											_ => Stream::open(&sub_ns_adapter, version).await?,
-										};
-										if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-										tracing::warn!(%err, "subscribe_namespace failed, continuing without");
-									}
-									Ok(())
-									} => Err(err),
+					Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
+					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
+					Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
+					Err(err) = publisher.run() => Err(err),
+					_ = task_set.run() => Ok(()),
+					Err(err) = async {
+						let stream = match version {
+							Version::Draft16 => {
+								let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+								Stream {
+									writer: crate::coding::Writer::new(send, version),
+									reader: crate::coding::Reader::new(recv, version),
 								}
+							}
+							_ => Stream::open(&sub_ns_adapter, version).await?,
+						};
+						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+						}
+						Ok(())
+					} => Err(err),
+				}
 			}
 			_ => {
-				// Spawn SETUP sender (keeps stream alive for GOAWAY).
-				web_async::spawn({
+				// Send SETUP and keep the stream alive for GOAWAY.
+				let setup = {
 					let session = session.clone();
 					async move {
 						if let Err(err) = run_setup(session, version, path).await {
 							tracing::warn!(%err, "setup send error");
 						}
+						std::future::pending::<()>().await;
 					}
-				});
+				};
 
 				let control = Control::new(None, client);
 				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version);
+				let (tasks, task_set) = TaskSet::new();
+				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version, tasks);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();
@@ -103,22 +110,24 @@ pub fn start<S: web_transport_trait::Session>(
 				};
 
 				tokio::select! {
-									Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
-									Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
-									Err(err) = publisher.run() => Err(err),
-									Err(err) = goaway => Err(err),
-									Err(err) = async {
-				let stream = Stream::open(&sub_ns_session, version).await?;
-										if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-											tracing::warn!(%err, "subscribe_namespace failed, continuing without");
-										}
-										Ok(())
-									} => Err(err),
-								}
+					Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
+					Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
+					Err(err) = publisher.run() => Err(err),
+					Err(err) = goaway => Err(err),
+					_ = setup => Ok(()),
+					_ = task_set.run() => Ok(()),
+					Err(err) = async {
+						let stream = Stream::open(&sub_ns_session, version).await?;
+						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+						}
+						Ok(())
+					} => Err(err),
+				}
 			}
 		};
 
-		match res {
+		match &res {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
 				session.close(1, "");
@@ -132,9 +141,12 @@ pub fn start<S: web_transport_trait::Session>(
 				session.close(0, "");
 			}
 		}
-	});
 
-	Ok(())
+		res
+	}
+	.maybe_boxed();
+
+	Ok(driver)
 }
 
 /// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
@@ -216,17 +228,18 @@ async fn run_unis<S: web_transport_trait::Session>(
 	version: Version,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
+	let mut tasks = TaskSet::owned();
 
 	loop {
-		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
+		let recv = tasks.drive(session.accept_uni()).await.map_err(Error::from_transport)?;
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
-		let kind: u64 = reader.decode_peek().await?;
+		let kind: u64 = tasks.drive(reader.decode_peek()).await?;
 
 		// v17+: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
 		// We accept it in the background without blocking, since there are no
 		// extensions that require waiting on the SETUP before proceeding.
 		if kind == setup::SETUP_V17 {
-			web_async::spawn(async move {
+			tasks.push(async move {
 				// Decode and discard the unified SETUP message.
 				if let Err(err) = reader.decode::<setup::Setup>().await {
 					tracing::warn!(%err, "setup decode error");
@@ -242,9 +255,9 @@ async fn run_unis<S: web_transport_trait::Session>(
 			continue;
 		}
 
-		// Group data — spawn a handler for each stream.
+		// Poll one child handler for each group stream.
 		let mut sub = subscriber.clone();
-		web_async::spawn(async move {
+		tasks.push(async move {
 			let mut reader = reader.with_version(version);
 			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
 				tracing::debug!(%err, "uni stream error");
@@ -282,12 +295,19 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 	mut subscriber: Subscriber<S>,
 	version: Version,
 ) -> Result<(), Error> {
+	let mut tasks = TaskSet::owned();
 	loop {
-		let mut stream = Stream::accept(&session, version).await?;
+		let mut stream = tasks.drive(Stream::accept(&session, version)).await?;
 
-		let id: u64 = stream.reader.decode().await?;
-		let size: u16 = stream.reader.decode().await?;
-		let data = stream.reader.read_exact(size as usize).await?;
+		let header = tasks
+			.drive(async {
+				let id: u64 = stream.reader.decode().await?;
+				let size: u16 = stream.reader.decode().await?;
+				let data = stream.reader.read_exact(size as usize).await?;
+				Ok::<_, Error>((id, data))
+			})
+			.await;
+		let (id, data) = header?;
 
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
@@ -297,11 +317,11 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeNamespaceLegacy::ID
 			| ietf::TrackStatus::ID => {
-				publisher.handle_stream(id, data, stream)?;
+				tasks.push(publisher.handle_stream(id, data, stream)?);
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				subscriber.handle_stream(id, data, stream)?;
+				tasks.push(subscriber.handle_stream(id, data, stream)?);
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");

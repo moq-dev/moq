@@ -3,11 +3,18 @@ use crate::{
 	Error, Origin, StatsHandle, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
 use super::{
 	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
 };
+
+pub(crate) struct SessionStart {
+	pub recv_bandwidth: Option<bandwidth::Consumer>,
+	pub connecting: Connecting,
+	pub driver: MaybeSendBox<'static, Result<(), Error>>,
+}
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
 /// the session, so the caller can inspect the advertised path (and gate on it) before
@@ -64,7 +71,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	peer_setup: Option<Setup>,
-) -> Result<(Option<bandwidth::Consumer>, Connecting), Error> {
+) -> Result<SessionStart, Error> {
 	let recv_bw = bandwidth::Producer::new();
 
 	let recv_bw_consumer = match version {
@@ -112,12 +119,13 @@ pub fn start<S: web_transport_trait::Session>(
 		peer_setup_slot.set(setup);
 	}
 	let peer_setup = peer_setup_slot;
+	let (tasks, task_set) = TaskSet::new();
 
 	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
 	// a failure here just means the peer falls back to "no capabilities" for us.
 	if version.has_setup_stream() {
 		let session = session.clone();
-		web_async::spawn(async move {
+		tasks.push(async move {
 			if let Err(err) = send_setup(&session, our_setup, version).await {
 				tracing::debug!(%err, "failed to send setup");
 			}
@@ -137,16 +145,17 @@ pub fn start<S: web_transport_trait::Session>(
 		stats,
 		version,
 		peer_setup,
+		tasks,
 	});
 
-	web_async::spawn(async move {
+	let driver = async move {
 		let res = tokio::select! {
 			Err(res) = run_session(setup_stream) => Err(res),
 			res = publisher.run() => res,
-			res = subscriber.run(sub_connecting) => res,
+			res = subscriber.run(sub_connecting, task_set) => res,
 		};
 
-		match res {
+		match &res {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
 				session.close(1, "");
@@ -160,9 +169,16 @@ pub fn start<S: web_transport_trait::Session>(
 				session.close(0, "");
 			}
 		}
-	});
 
-	Ok((recv_bw_consumer, connecting))
+		res
+	}
+	.maybe_boxed();
+
+	Ok(SessionStart {
+		recv_bandwidth: recv_bw_consumer,
+		connecting,
+		driver,
+	})
 }
 
 /// Open a unidirectional Setup Stream, send our single SETUP message, and FIN.

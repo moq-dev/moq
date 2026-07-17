@@ -9,7 +9,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use crate::util::{MaybeBoxedExt, MaybeSendBox};
+use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks};
 
 use crate::{
 	AsPath, Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Timescale, Timestamp, bandwidth,
@@ -42,6 +42,8 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
+	/// Driver-owned scope for broadcast and track handlers.
+	pub tasks: Tasks,
 }
 
 #[derive(Clone)]
@@ -71,6 +73,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	tasks: Tasks,
 }
 
 #[derive(Clone)]
@@ -102,6 +105,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			tasks: config.tasks,
 		}
 	}
 
@@ -110,7 +114,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
 	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
 	/// open and hang `connect()`.
-	pub async fn run(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
+	pub async fn run(self, connecting: Option<ConnectingProducer>, tasks: TaskSet) -> Result<(), Error> {
 		let bw = self.clone();
 		let dg = self.clone();
 		tokio::select! {
@@ -118,17 +122,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			res = self.run_uni() => res,
 			Err(err) = bw.run_recv_bandwidth() => Err(err),
 			Err(err) = dg.run_datagrams() => Err(err),
+			_ = tasks.run() => Ok(()),
 		}
 	}
 
 	async fn run_uni(self) -> Result<(), Error> {
+		let mut tasks = TaskSet::owned();
 		loop {
-			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
+			let stream = tasks
+				.drive(self.session.accept_uni())
+				.await
+				.map_err(Error::from_transport)?;
 
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			web_async::spawn(async move {
+			tasks.push(async move {
 				if let Err(err) = this.run_uni_stream(stream).await {
 					tracing::debug!(%err, "error running uni stream");
 				}
@@ -230,7 +239,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// dashboard sees on the origin.
 
 		// `connecting` is a local (a param), not a `self` field, so the `self.clone()` that
-		// start_announce uses to spawn long-lived broadcast tasks doesn't carry the producer
+		// start_announce uses for long-lived broadcast tasks doesn't carry the producer
 		// (which would keep the channel open for the broadcast's lifetime). Dropping it marks
 		// this prefix connected; on an early error it drops via scope exit, so a failed prefix
 		// can't hang connect().
@@ -497,15 +506,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Publish into the origin. An error means the path is outside our scope, so don't announce
-		// or spawn a server for it. Reflections are already filtered above.
+		// or start a server for it. Reflections are already filtered above.
 		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
 			return Ok(false);
 		};
 
 		producers.insert(path.clone(), publish);
 
-		// Run the broadcast in the background until all consumers are dropped.
-		web_async::spawn(self.clone().run_broadcast(path, dynamic));
+		// Run the broadcast under the connection driver until all consumers are dropped.
+		self.tasks.push(self.clone().run_broadcast(path, dynamic));
 
 		Ok(true)
 	}
@@ -534,16 +543,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: broadcast::Dynamic) {
 		// Serve track requests until every consumer of the broadcast is gone.
+		let mut tracks = TaskSet::owned();
 		loop {
-			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
-					Ok(request) => request,
-					Err(err) => {
-						tracing::debug!(%err, "broadcast closed");
-						break;
+			let next = tracks
+				.drive(async {
+					tokio::select! {
+						request = broadcast.requested_track() => Some(request),
+						_ = self.session.closed() => None,
 					}
-				},
-				_ = self.session.closed() => break,
+				})
+				.await;
+
+			let request = match next {
+				Some(Ok(request)) => request,
+				Some(Err(err)) => {
+					tracing::debug!(%err, "broadcast closed");
+					break;
+				}
+				// Session gone.
+				None => break,
 			};
 
 			let name = request.name().to_string();
@@ -563,7 +581,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// One task per track serves its lone subscription and any number of
 			// fetches concurrently, then lingers before tearing the upstream down.
-			web_async::spawn(serve.run(request));
+			tracks.push(serve.run(request));
 		}
 	}
 
@@ -1115,11 +1133,19 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		Ok(())
 	}
 
+	/// Open the SUBSCRIBE control stream and send the request.
+	async fn open_subscribe(&self, msg: &lite::Subscribe<'_>) -> Result<Stream<S, Version>, Error> {
+		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
+		stream.writer.encode(&lite::ControlType::Subscribe).await?;
+		stream.writer.encode(msg).await?;
+		Ok(stream)
+	}
+
 	/// Open the upstream SUBSCRIBE and start routing groups into the producer.
 	///
 	/// On Lite05+ the producer already exists (accepted from TRACK_INFO) and the
-	/// subscription is accepted implicitly. On older drafts this waits for the first
-	/// SUBSCRIBE_OK and promotes the pending request to a producer.
+	/// subscription is accepted implicitly. On older drafts this promotes the pending
+	/// request to a producer, then confirms with the first SUBSCRIBE_OK.
 	async fn establish(
 		&self,
 		track: &mut Option<Track>,
@@ -1142,10 +1168,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
-		stream.writer.encode(&lite::ControlType::Subscribe).await?;
-		stream.writer.encode(&msg).await?;
-
 		let producer = if self.subscriber.version.has_track_stream() {
 			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
 			let Some(Track::Active(producer)) = track.as_ref() else {
@@ -1153,25 +1175,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			};
 			producer.clone()
 		} else {
-			// Older drafts: the first SUBSCRIBE_OK promotes the pending request. Bail if
-			// the broadcast dies meanwhile.
-			let resp = tokio::select! {
-				err = self.broadcast.closed() => return Err(err),
-				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp?,
-			};
-			if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
-				return Err(Error::ProtocolViolation);
-			}
-
-			// Accept with defaults: pre-lite-05 carries no timescale, and the cache
-			// window falls back to the model default.
+			// Older drafts promote the pending request themselves. Accept with defaults
+			// (pre-lite-05 carries no timescale, and the cache window falls back to the
+			// model default), which needs nothing from SUBSCRIBE_OK.
 			let Some(Track::Pending(request)) = track.take() else {
 				unreachable!("establish called without a pending track");
 			};
 			let mut producer = request.accept(track::Info::default());
 			// The accepted producer starts with a fresh subscription cursor, so its first
-			// poll would re-report the subscription we just sent as a "change". Prime it
-			// now (the params are already on the wire) so only genuine later changes fire.
+			// poll would re-report the subscription we're about to send as a "change".
+			// Prime it now so only genuine later changes fire.
 			let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
 			*track = Some(Track::Active(producer.clone()));
 			producer
@@ -1182,6 +1195,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
 		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
 
+		// Register before the SUBSCRIBE hits the wire. `id` is live the moment the peer
+		// reads it, and a publisher may serve its first group immediately, so a late
+		// insert races the group stream: `recv_group` would find no entry and drop it,
+		// stalling the track forever.
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -1190,6 +1207,36 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				timescale,
 			},
 		);
+
+		let mut stream = match self.open_subscribe(&msg).await {
+			Ok(stream) => stream,
+			Err(err) => {
+				self.subscriber.subscribes.lock().remove(&id);
+				return Err(err);
+			}
+		};
+
+		if !self.subscriber.version.has_track_stream() {
+			// Older drafts: the first SUBSCRIBE_OK confirms it. Bail if the broadcast
+			// dies meanwhile.
+			let resp = tokio::select! {
+				err = self.broadcast.closed() => Err(err),
+				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp,
+			};
+
+			let ok = match resp {
+				Ok(resp) => matches!(resp, lite::SubscribeResponse::Ok(_)),
+				Err(err) => {
+					self.subscriber.subscribes.lock().remove(&id);
+					return Err(err);
+				}
+			};
+
+			if !ok {
+				self.subscriber.subscribes.lock().remove(&id);
+				return Err(Error::ProtocolViolation);
+			}
+		}
 
 		*sub = Sub::Active(SubStream {
 			stream,

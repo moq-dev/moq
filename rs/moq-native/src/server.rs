@@ -1037,7 +1037,8 @@ impl Request {
 
 	/// Accept the session, starting the MoQ session loops.
 	pub async fn ok(self) -> crate::Result<Session> {
-		Ok(request_into!(self.kind, request => request.ok().await?))
+		let pair = request_into!(self.kind, request => request.ok().await?);
+		Ok(crate::spawn_session(pair))
 	}
 
 	/// Returns the network transport carrying this session.

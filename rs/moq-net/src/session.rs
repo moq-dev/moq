@@ -1,8 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+	future::Future,
+	pin::Pin,
+	sync::Arc,
+	task::{Context, Poll},
+	time::Duration,
+};
 
 use web_transport_trait::Stats;
 
-use crate::{Error, Version, bandwidth, util::MaybeSendBox};
+use crate::{
+	Error, Version, bandwidth,
+	util::{MaybeBoxedExt, MaybeSendBox},
+};
 
 /// A snapshot of connection statistics for a [`Session`].
 ///
@@ -45,70 +54,23 @@ pub struct ConnectionStats {
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
-/// Created via:
-/// - [`crate::Client::connect`] for clients.
-/// - [`crate::Server::accept`] for servers.
+/// Returned by [`crate::Client::connect`] and [`crate::Server::accept`], paired with
+/// the [`Driver`] that runs its protocol work. Nothing is spawned behind your back:
+/// the session makes no progress unless its driver is polled.
+///
+/// Like every handle in this library, the lifecycle is reference counted: clones
+/// share the connection, the transport closes when the last clone drops, and
+/// [`abort`](Self::abort) closes it explicitly with an error. The [`Driver`] holds
+/// no `Session` clone, so handing it to an executor never keeps the session alive.
 #[derive(Clone)]
 pub struct Session {
-	session: Arc<SessionShared>,
+	shared: Arc<SessionShared>,
 	version: Version,
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 }
 
-// Close-once state shared by every clone: the transport closes when [`Session::close`]
-// is first called, or when the last clone drops, whichever comes first.
-struct SessionShared {
-	inner: Box<dyn SessionInner>,
-	closed: std::sync::atomic::AtomicBool,
-}
-
-impl SessionShared {
-	fn close(&self, code: u32, reason: &str) {
-		if !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-			self.inner.close(code, reason);
-		}
-	}
-}
-
-impl Drop for SessionShared {
-	fn drop(&mut self) {
-		self.close(Error::Cancel.to_code(), "dropped");
-	}
-}
-
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(
-		session: S,
-		version: Version,
-		recv_bandwidth: Option<bandwidth::Consumer>,
-	) -> Self {
-		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
-		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
-			let producer = bandwidth::Producer::new();
-			let consumer = producer.consume();
-
-			let session = session.clone();
-			web_async::spawn(async move {
-				run_send_bandwidth(&session, producer).await;
-			});
-
-			Some(consumer)
-		} else {
-			None
-		};
-
-		Self {
-			session: Arc::new(SessionShared {
-				inner: Box::new(session),
-				closed: std::sync::atomic::AtomicBool::new(false),
-			}),
-			version,
-			send_bandwidth,
-			recv_bandwidth,
-		}
-	}
-
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
@@ -133,64 +95,258 @@ impl Session {
 	/// This is a cheap, non-blocking read of the underlying transport's counters; see
 	/// [`ConnectionStats`] for which metrics each backend reports.
 	pub fn stats(&self) -> ConnectionStats {
-		let mut stats = self.session.inner.stats();
+		let mut stats = self.shared.inner.stats();
 		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
 		stats
 	}
 
-	/// Close the underlying transport session.
-	///
-	/// The close state is shared across clones: the first close wins, and the
-	/// transport also closes automatically when the last clone drops.
-	pub fn close(&self, err: Error) {
-		self.session.close(err.to_code(), err.to_string().as_ref());
+	/// Close the transport with an explicit error, instead of waiting for the last
+	/// clone to drop. Idempotent: the first close wins.
+	pub fn abort(&self, err: Error) {
+		self.shared.close(err.to_code(), err.to_string().as_ref());
 	}
 
 	/// Block until the transport session is closed.
 	pub async fn closed(&self) -> Result<(), Error> {
-		let err = self.session.inner.closed().await;
+		let err = self.shared.inner.closed().await;
 		Err(Error::Transport(err))
 	}
 }
 
-/// Polls the QUIC congestion controller for estimated send rate.
+/// The future driving a [`Session`]'s protocol state.
 ///
-/// Exits as soon as the session closes so we don't pin the underlying connection
-/// after the wrapping [`Session`] is dropped.
-async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: bandwidth::Producer) {
-	tokio::select! {
-		_ = session.closed() => {}
-		_ = producer.closed() => {}
-		_ = run_send_bandwidth_inner(session, &producer) => {}
+/// Poll it for the lifetime of the session, either by `.await`ing it (typically
+/// spawned on an executor) or by stepping [`poll`](Self::poll) from inside another
+/// [`kio`]-style poll function. It holds no [`Session`] clone, so it never keeps
+/// the session alive: once the last session clone drops (or [`Session::abort`]
+/// fires), the transport closes and the driver finishes on its own. Dropping the
+/// driver cancels the protocol work without closing the session. It resolves when
+/// the session ends, and keeps returning that same result if polled again.
+///
+/// Driving still requires a tokio runtime with a time driver; see the crate-level
+/// Async docs.
+pub struct Driver {
+	protocol: MaybeSendBox<'static, Result<(), Error>>,
+	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
+	// the driver: the protocol owns the teardown. `None` once finished (or when the
+	// transport reports no send-rate estimate), since a completed future must not be
+	// polled again.
+	maintenance: Option<MaybeSendBox<'static, ()>>,
+	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
+	// result) doesn't re-poll a finished future.
+	result: Option<Result<(), Error>>,
+	// Retains the previous poll's waiter so its kio registrations stay live until
+	// the next poll replaces it (same dance as `kio::wait`).
+	waiter: Option<kio::Waiter>,
+}
+
+impl Driver {
+	/// Drive the protocol one step, registering `waiter` for the next wakeup.
+	///
+	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing it
+	/// into their own [`kio`]-style poll functions.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(result) = &self.result {
+			return Poll::Ready(result.clone());
+		}
+
+		if let Some(maintenance) = &mut self.maintenance
+			&& waiter.poll_future(maintenance.as_mut()).is_ready()
+		{
+			self.maintenance = None;
+		}
+
+		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
+		self.result = Some(result.clone());
+		// The session is over; release the maintenance future now rather than on
+		// Drop, since it holds a transport clone.
+		self.maintenance = None;
+		Poll::Ready(result)
+	}
+
+	/// Drive the session until `ready` resolves, so `connect` can block on the
+	/// initial announce set.
+	///
+	/// A session that dies first still resolves `ready`: the connecting producers
+	/// live inside the driver, so its completion drops them (waking `ready`) and
+	/// releases the barrier. The error isn't lost, it's cached for whoever drives
+	/// the session next.
+	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) {
+		let mut ready = std::pin::pin!(ready);
+		kio::wait(|waiter| {
+			if waiter.poll_future(ready.as_mut()).is_ready() {
+				return Poll::Ready(());
+			}
+			let _ = self.poll(waiter);
+			Poll::Pending
+		})
+		.await
 	}
 }
 
-/// Toggles between waiting for a consumer and polling stats while one exists.
-/// Returns when the producer channel errors (closed by the consumer side).
-async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, producer: &bandwidth::Producer) {
+impl Future for Driver {
+	type Output = Result<(), Error>;
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let this = &mut *self;
+		// Replacing drops the previous waiter, keeping this one live until the next
+		// poll so any kio registrations it made survive (see `kio::wait`).
+		let waiter = kio::Waiter::new(cx.waker().clone());
+		let result = this.poll(&waiter);
+		this.waiter = Some(waiter);
+		result
+	}
+}
+
+// Close-once state shared by every [`Session`] clone: the first close wins,
+// whether it comes from an [`Session::abort`], the protocol teardown, or the
+// last clone dropping.
+struct SessionShared {
+	inner: Box<dyn SessionInner>,
+	closed: std::sync::atomic::AtomicBool,
+}
+
+impl SessionShared {
+	fn close(&self, code: u32, reason: &str) {
+		if !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+			self.inner.close(code, reason);
+		}
+	}
+}
+
+impl Drop for SessionShared {
+	fn drop(&mut self) {
+		self.close(Error::Cancel.to_code(), "dropped");
+	}
+}
+
+impl Session {
+	pub(super) fn new<S: web_transport_trait::Session>(
+		session: S,
+		version: Version,
+		recv_bandwidth: Option<bandwidth::Consumer>,
+		protocol: MaybeSendBox<'static, Result<(), Error>>,
+	) -> (Self, Driver) {
+		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
+			let producer = bandwidth::Producer::new();
+			let consumer = producer.consume();
+
+			let mut monitor = SendBandwidth::new(session.clone(), producer);
+			let maintenance = async move { kio::wait(|waiter| monitor.poll(waiter)).await }.maybe_boxed();
+
+			(Some(consumer), Some(maintenance))
+		} else {
+			(None, None)
+		};
+
+		let session = Self {
+			shared: Arc::new(SessionShared {
+				inner: Box::new(session),
+				closed: std::sync::atomic::AtomicBool::new(false),
+			}),
+			version,
+			send_bandwidth,
+			recv_bandwidth,
+		};
+		let driver = Driver {
+			protocol,
+			maintenance,
+			result: None,
+			waiter: None,
+		};
+
+		(session, driver)
+	}
+}
+
+/// Samples the QUIC congestion controller's estimated send rate while anyone is
+/// consuming it, pausing when nobody is.
+///
+/// Finishes as soon as the transport or the producer channel closes, so it doesn't
+/// pin the underlying connection after the wrapping [`Session`] is dropped.
+struct SendBandwidth<S> {
+	session: S,
+	producer: bandwidth::Producer,
+	// The transport close, boxed once so it can be re-polled each step.
+	closed: MaybeSendBox<'static, ()>,
+	mode: SendBandwidthMode,
+}
+
+enum SendBandwidthMode {
+	/// No consumers; sampling is paused.
+	Idle,
+	/// At least one consumer; sample when the sleep elapses.
+	Polling { sleep: MaybeSendBox<'static, ()> },
+}
+
+impl<S: web_transport_trait::Session> SendBandwidth<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-	loop {
-		if producer.used().await.is_err() {
-			return;
+	fn new(session: S, producer: bandwidth::Producer) -> Self {
+		let closed = {
+			let session = session.clone();
+			async move {
+				session.closed().await;
+			}
+		}
+		.maybe_boxed();
+
+		Self {
+			session,
+			producer,
+			closed,
+			mode: SendBandwidthMode::Idle,
+		}
+	}
+
+	/// Sample the current estimate, arming the next sleep. Errors when the
+	/// producer channel is closed.
+	fn sample(&mut self) -> Result<(), Error> {
+		let bitrate = self.session.stats().estimated_send_rate();
+		self.producer.set(bitrate)?;
+		self.mode = SendBandwidthMode::Polling {
+			sleep: web_async::time::sleep(Self::POLL_INTERVAL).maybe_boxed(),
+		};
+		Ok(())
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if waiter.poll_future(self.closed.as_mut()).is_ready() {
+			return Poll::Ready(());
 		}
 
-		let mut interval = web_async::time::interval(POLL_INTERVAL);
 		loop {
-			tokio::select! {
-				biased;
-				res = producer.unused() => {
-					if res.is_err() {
-						return;
+			match &mut self.mode {
+				SendBandwidthMode::Idle => {
+					match self.producer.poll_used(waiter) {
+						// A consumer appeared: sample immediately, then on the interval.
+						Poll::Ready(Ok(())) => {}
+						Poll::Ready(Err(_)) => return Poll::Ready(()),
+						Poll::Pending => return Poll::Pending,
 					}
-					// No more consumers, pause polling.
-					break;
+					if self.sample().is_err() {
+						return Poll::Ready(());
+					}
 				}
-				_ = interval.tick() => {
-					let bitrate = session.stats().estimated_send_rate();
-					if producer.set(bitrate).is_err() {
-						return;
+				SendBandwidthMode::Polling { sleep } => {
+					// Pause before sampling: checked first, like the old biased select.
+					match self.producer.poll_unused(waiter) {
+						Poll::Ready(Ok(())) => {
+							self.mode = SendBandwidthMode::Idle;
+							continue;
+						}
+						Poll::Ready(Err(_)) => return Poll::Ready(()),
+						Poll::Pending => {}
 					}
+
+					if waiter.poll_future(sleep.as_mut()).is_pending() {
+						return Poll::Pending;
+					}
+					if self.sample().is_err() {
+						return Poll::Ready(());
+					}
+					// Loop so the fresh sleep registers the waiter.
 				}
 			}
 		}

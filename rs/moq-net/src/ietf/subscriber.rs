@@ -11,6 +11,7 @@ use crate::{
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	origin, track,
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
 use super::{Message, Version};
@@ -98,6 +99,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// of colliding on an empty chain.
 	session_origin: crate::Origin,
 	state: Lock<State>,
+	tasks: Tasks,
 	version: Version,
 }
 
@@ -122,7 +124,14 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: origin::Producer, control: Control, stats: StatsHandle, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Producer,
+		control: Control,
+		stats: StatsHandle,
+		version: Version,
+		tasks: Tasks,
+	) -> Self {
 		let broadcasts = stats.subscriber_broadcasts();
 		Self {
 			session,
@@ -132,6 +141,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			broadcasts,
 			session_origin: crate::Origin::random(),
 			state: Default::default(),
+			tasks,
 			version,
 		}
 	}
@@ -250,20 +260,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
-	pub fn handle_stream(&mut self, id: u64, mut data: bytes::Bytes, stream: Stream<S, Version>) -> Result<(), Error> {
+	pub fn handle_stream(
+		&mut self,
+		id: u64,
+		mut data: bytes::Bytes,
+		stream: Stream<S, Version>,
+	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let mut this = self.clone();
-		match id {
+		let task = match id {
 			ietf::Publish::ID => {
 				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish");
-				web_async::spawn(async move {
+				async move {
 					if let Err(err) = this.run_publish_stream(stream, msg).await {
 						tracing::debug!(%err, "publish stream error");
 					}
-				});
+				}
+				.maybe_boxed()
 			}
 			ietf::PublishNamespace::ID => {
 				let msg = ietf::PublishNamespace::decode_msg(&mut data, this.version)?;
@@ -271,18 +287,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
-				web_async::spawn(async move {
+				async move {
 					if let Err(err) = this.run_publish_namespace_stream(stream, msg).await {
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
-				});
+				}
+				.maybe_boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for subscriber");
 				return Err(Error::UnexpectedStream);
 			}
-		}
-		Ok(())
+		};
+		Ok(task)
 	}
 
 	/// Handle an incoming PUBLISH_NAMESPACE on its bidi stream.
@@ -549,7 +566,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a
-				// consumer can call subscribe_track() before the spawned
+				// consumer can call subscribe_track() before the driver-owned
 				// run_broadcast bumps the counter and get NotFound (mirrors the
 				// note in lite::Subscriber).
 				let dynamic = broadcast.dynamic();
@@ -566,7 +583,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
 				let this = self.clone();
-				web_async::spawn(async move {
+				self.tasks.push(async move {
 					// stop_announce is the authoritative remover: it drops the entry (and
 					// its producer) once the announce refcount hits zero, which is what
 					// makes run_broadcast exit. Removing here too would let a stale task
@@ -656,23 +673,32 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
+		let mut subscribes = TaskSet::owned();
 		loop {
-			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
-					Ok(request) => request,
-					Err(err) => {
-						tracing::debug!(%err, "broadcast closed");
-						break;
+			let next = subscribes
+				.drive(async {
+					tokio::select! {
+						request = broadcast.requested_track() => Some(request),
+						_ = self.session.closed() => None,
 					}
-				},
-				_ = self.session.closed() => break,
+				})
+				.await;
+
+			let request = match next {
+				Some(Ok(request)) => request,
+				Some(Err(err)) => {
+					tracing::debug!(%err, "broadcast closed");
+					break;
+				}
+				// Session gone.
+				None => break,
 			};
 
 			let mut this = self.clone();
 
 			let path = path.to_owned();
 			let broadcast = broadcast.clone();
-			web_async::spawn(async move {
+			subscribes.push(async move {
 				this.run_subscribe(path, broadcast, request).await;
 			});
 		}
