@@ -12,7 +12,7 @@ use crate::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	util::{MaybeBoxedExt, MaybeSendBox, Race, TaskSet, race2},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
 use super::Version;
@@ -117,9 +117,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
-			match race2(stream.reader.closed(), interval.tick()).await {
-				Race::First(res) => return res,
-				Race::Second(_) => {}
+			// Tick the probe interval, bailing as soon as the peer closes its side.
+			let closed = {
+				let mut closed = std::pin::pin!(stream.reader.closed());
+				let mut tick = std::pin::pin!(interval.tick());
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+						return Poll::Ready(Some(res));
+					}
+					waiter.poll_future(tick.as_mut()).map(|_| None)
+				})
+				.await
+			};
+			if let Some(res) = closed {
+				return res;
 			}
 
 			let Some(bitrate) = session.stats().estimated_send_rate() else {
@@ -336,73 +347,82 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Send updates as they arrive. Closure wins the race so a dead peer can't
 		// stall on a busy announce feed.
 		loop {
-			match race2(stream.reader.closed(), announced.next()).await {
-				Race::First(res) => return res,
-				Race::Second(next) => {
-					let Some(crate::announce::Update { path, broadcast }) = next else {
-						stream.writer.finish()?;
-						return stream.writer.closed().await;
+			let next = {
+				let mut closed = std::pin::pin!(stream.reader.closed());
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+						return Poll::Ready(Err(res));
+					}
+					announced.poll_next(waiter).map(Ok)
+				})
+				.await
+			};
+			let next = match next {
+				Ok(next) => next,
+				Err(res) => return res,
+			};
+			let Some(crate::announce::Update { path, broadcast }) = next else {
+				stream.writer.finish()?;
+				return stream.writer.closed().await;
+			};
+
+			let suffix = path
+				.strip_prefix(&prefix)
+				.expect("origin returned invalid path")
+				.to_owned();
+			let absolute = origin.absolute(&path).to_owned();
+
+			match broadcast {
+				Some(active) => {
+					let info = active.info();
+					let Some(hops) =
+						Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute)
+					else {
+						continue;
 					};
-
-					let suffix = path
-						.strip_prefix(&prefix)
-						.expect("origin returned invalid path")
-						.to_owned();
-					let absolute = origin.absolute(&path).to_owned();
-
-					match broadcast {
-						Some(active) => {
-							let info = active.info();
-							let Some(hops) =
-								Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute)
-							else {
-								continue;
-							};
-							tracing::debug!(broadcast = %absolute, "announce");
-							let bs = stats.broadcast(&absolute);
-							// Count the broadcast name length, not the encoded message size, so
-							// stats don't penalize the broadcast for hop/framing overhead.
-							bs.publisher_announced_bytes(absolute.as_str().len() as u64);
-							let prev = stats_guards.insert(absolute.clone(), bs.publisher());
-							debug_assert!(prev.is_none(), "origin announced a path that was already active");
-							if version.has_announce_id() {
-								let prev = announce_ids.insert(suffix.clone(), next_announce_id);
-								debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
-								next_announce_id += 1;
-							}
-							stream
-								.writer
-								.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
-								.await?;
+					tracing::debug!(broadcast = %absolute, "announce");
+					let bs = stats.broadcast(&absolute);
+					// Count the broadcast name length, not the encoded message size, so
+					// stats don't penalize the broadcast for hop/framing overhead.
+					bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+					let prev = stats_guards.insert(absolute.clone(), bs.publisher());
+					debug_assert!(prev.is_none(), "origin announced a path that was already active");
+					if version.has_announce_id() {
+						let prev = announce_ids.insert(suffix.clone(), next_announce_id);
+						debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
+						next_announce_id += 1;
+					}
+					stream
+						.writer
+						.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+						.await?;
+				}
+				None => {
+					tracing::debug!(broadcast = %absolute, "unannounce");
+					stats_guards.remove(&absolute);
+					if version.has_announce_id() {
+						// Retract by id; nothing to send if the announce was filtered and
+						// the peer never saw it (an unknown id is a protocol violation).
+						if let Some(id) = announce_ids.remove(&suffix) {
+							stats
+								.broadcast(&absolute)
+								.publisher_announced_bytes(absolute.as_str().len() as u64);
+							stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
 						}
-						None => {
-							tracing::debug!(broadcast = %absolute, "unannounce");
-							stats_guards.remove(&absolute);
-							if version.has_announce_id() {
-								// Retract by id; nothing to send if the announce was filtered and
-								// the peer never saw it (an unknown id is a protocol violation).
-								if let Some(id) = announce_ids.remove(&suffix) {
-									stats
-										.broadcast(&absolute)
-										.publisher_announced_bytes(absolute.as_str().len() as u64);
-									stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
-								}
-							} else {
-								// Count the name length whether or not a guard is held: the Ended
-								// message is sent even for announces we filtered out above.
-								stats
-									.broadcast(&absolute)
-									.publisher_announced_bytes(absolute.as_str().len() as u64);
-								// An ended announce doesn't need hops; the receiver matches on path only.
-								stream
-									.writer
-									.encode(&lite::AnnounceBroadcast::Ended {
-										suffix,
-										hops: OriginList::new(),
-									})
-									.await?;
-							}
-						}
+					} else {
+						// Count the name length whether or not a guard is held: the Ended
+						// message is sent even for announces we filtered out above.
+						stats
+							.broadcast(&absolute)
+							.publisher_announced_bytes(absolute.as_str().len() as u64);
+						// An ended announce doesn't need hops; the receiver matches on path only.
+						stream
+							.writer
+							.encode(&lite::AnnounceBroadcast::Ended {
+								suffix,
+								hops: OriginList::new(),
+							})
+							.await?;
 					}
 				}
 			}

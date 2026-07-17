@@ -1,5 +1,5 @@
 use crate::{group, origin, stats, track};
-use std::collections::HashMap;
+use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::SendStream;
@@ -9,7 +9,7 @@ use crate::{
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
-	util::{MaybeBoxedExt, MaybeSendBox, Race, Race3, race2, race3},
+	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use super::{Message, Version};
@@ -184,15 +184,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.await?;
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
-		let res = match race3(
-			self.run_track(track, request_id, track_stats),
-			stream.reader.closed(),
-			self.session.closed(),
-		)
-		.await
-		{
-			Race3::First(res) => res,
-			Race3::Second(_) | Race3::Third(_) => Ok(()),
+		let res = {
+			let mut serve = std::pin::pin!(self.run_track(track, request_id, track_stats));
+			let mut reader_closed = std::pin::pin!(stream.reader.closed());
+			let mut session_closed = std::pin::pin!(self.session.closed());
+			kio::wait(|waiter| {
+				if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
+					return Poll::Ready(res);
+				}
+				if waiter.poll_future(reader_closed.as_mut()).is_ready()
+					|| waiter.poll_future(session_closed.as_mut()).is_ready()
+				{
+					return Poll::Ready(Ok(()));
+				}
+				Poll::Pending
+			})
+			.await
 		};
 
 		// Send PublishDone
@@ -339,9 +346,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats.group();
 
 		loop {
-			let frame = match race2(stream.closed(), group.next_frame()).await {
-				Race::First(_) => return Err(Error::Cancel),
-				Race::Second(frame) => frame,
+			// Wait for the next frame, bailing if the peer closes the stream first.
+			let frame = {
+				let mut closed = std::pin::pin!(stream.closed());
+				kio::wait(|waiter| {
+					if waiter.poll_future(closed.as_mut()).is_ready() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					group.poll_next_frame(waiter)
+				})
+				.await
 			};
 
 			let mut frame = match frame? {
@@ -370,9 +384,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			} else {
 				// Stream each chunk of the frame.
 				loop {
-					let chunk = match race2(stream.closed(), frame.read_chunk()).await {
-						Race::First(_) => return Err(Error::Cancel),
-						Race::Second(chunk) => chunk,
+					let chunk = {
+						let mut closed = std::pin::pin!(stream.closed());
+						kio::wait(|waiter| {
+							if waiter.poll_future(closed.as_mut()).is_ready() {
+								return Poll::Ready(Err(Error::Cancel));
+							}
+							frame.poll_read_chunk(waiter)
+						})
+						.await
 					};
 
 					match chunk? {
@@ -528,9 +548,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut announced = self.origin.announced();
 
 		loop {
-			let next = match race2(self.session.closed(), announced.next()).await {
-				Race::First(_) => return Ok(()),
-				Race::Second(next) => next,
+			// Wait for the next (un)announce, bailing once the session dies.
+			let next = {
+				let mut closed = std::pin::pin!(self.session.closed());
+				kio::wait(|waiter| {
+					if waiter.poll_future(closed.as_mut()).is_ready() {
+						return Poll::Ready(None);
+					}
+					announced.poll_next(waiter).map(Some)
+				})
+				.await
+			};
+			let Some(next) = next else {
+				return Ok(());
 			};
 
 			let Some(crate::announce::Update { path, broadcast }) = next else {
@@ -716,34 +746,44 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				}
 
-				// Stream updates
+				// Stream updates, bailing if the peer closes its side first.
 				loop {
-					match race2(stream.reader.closed(), announced.next()).await {
-						Race::First(res) => return res,
-						Race::Second(next) => {
-							let Some(crate::announce::Update { path, broadcast }) = next else {
-								stream.writer.finish()?;
-								return stream.writer.closed().await;
-							};
-
-							let suffix = path
-								.strip_prefix(&prefix)
-								.expect("origin returned invalid path")
-								.to_owned();
-							let absolute = origin.absolute(&path).to_owned();
-
-							match broadcast {
-								Some(_) => {
-									tracing::debug!(broadcast = %absolute, "namespace");
-									stream.writer.encode(&ietf::Namespace::ID).await?;
-									stream.writer.encode(&ietf::Namespace { suffix }).await?;
-								}
-								None => {
-									tracing::debug!(broadcast = %absolute, "namespace_done");
-									stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-									stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
-								}
+					let next = {
+						let mut closed = std::pin::pin!(stream.reader.closed());
+						kio::wait(|waiter| {
+							if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+								return Poll::Ready(Err(res));
 							}
+							announced.poll_next(waiter).map(Ok)
+						})
+						.await
+					};
+					let next = match next {
+						Ok(next) => next,
+						Err(res) => return res,
+					};
+
+					let Some(crate::announce::Update { path, broadcast }) = next else {
+						stream.writer.finish()?;
+						return stream.writer.closed().await;
+					};
+
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let absolute = origin.absolute(&path).to_owned();
+
+					match broadcast {
+						Some(_) => {
+							tracing::debug!(broadcast = %absolute, "namespace");
+							stream.writer.encode(&ietf::Namespace::ID).await?;
+							stream.writer.encode(&ietf::Namespace { suffix }).await?;
+						}
+						None => {
+							tracing::debug!(broadcast = %absolute, "namespace_done");
+							stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+							stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
 						}
 					}
 				}

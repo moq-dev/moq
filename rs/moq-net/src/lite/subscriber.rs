@@ -9,7 +9,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use crate::util::{MaybeBoxedExt, MaybeSendBox, Race, Race3, TaskSet, Tasks, err_only, race2, race3};
+use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks, err_only};
 
 use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
@@ -422,22 +422,30 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(());
 			}
 
-			match race2(bandwidth.unused(), self.run_probe_stream(bandwidth)).await {
-				Race::First(res) => {
-					if res.is_err() {
-						return Ok(());
+			// Race the last consumer leaving against the probe stream ending.
+			let unused = {
+				let mut probe = std::pin::pin!(self.run_probe_stream(bandwidth));
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = bandwidth.poll_unused(waiter) {
+						return Poll::Ready(Some(res));
 					}
-					// Loop back: a new consumer may arrive later.
-				}
-				Race::Second(res) => {
-					match res {
-						Ok(()) => tracing::debug!("probe stream closed"),
-						Err(err) => tracing::warn!(%err, "probe stream error"),
+					if let Poll::Ready(res) = waiter.poll_future(probe.as_mut()) {
+						match res {
+							Ok(()) => tracing::debug!("probe stream closed"),
+							Err(err) => tracing::warn!(%err, "probe stream error"),
+						}
+						return Poll::Ready(None);
 					}
-					// Stream ended (peer FIN'd or errored). Don't hammer an
-					// uncooperative peer; give up for the rest of the session.
-					return Ok(());
-				}
+					Poll::Pending
+				})
+				.await
+			};
+			match unused {
+				// Loop back: a new consumer may arrive later.
+				Some(Ok(())) => {}
+				// The channel closed, or the stream ended (peer FIN'd or errored).
+				// Don't hammer an uncooperative peer; give up for the rest of the session.
+				Some(Err(_)) | None => return Ok(()),
 			}
 		}
 	}
@@ -566,10 +574,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			let next = tracks
 				.drive(async {
-					match race2(broadcast.requested_track(), self.session.closed()).await {
-						Race::First(request) => Some(request),
-						Race::Second(_) => None,
-					}
+					let mut closed = std::pin::pin!(self.session.closed());
+					kio::wait(|waiter| {
+						if waiter.poll_future(closed.as_mut()).is_ready() {
+							return Poll::Ready(None);
+						}
+						broadcast.poll_requested_track(waiter).map(Some)
+					})
+					.await
 				})
 				.await;
 
@@ -666,15 +678,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// The timescale came from TRACK_INFO (read before this subscription was even
 		// registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
 
-		let res = match race3(
-			track.closed(),
-			group.closed(),
-			self.run_group(stream, group.clone(), track_stats.clone(), timescale),
-		)
-		.await
-		{
-			Race3::First(err) | Race3::Second(err) => Err(err),
-			Race3::Third(res) => res,
+		let res = {
+			let mut serve = std::pin::pin!(self.run_group(stream, group.clone(), track_stats.clone(), timescale));
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = track.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				if let Poll::Ready(err) = group.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				waiter.poll_future(serve.as_mut())
+			})
+			.await
 		};
 
 		match res {
@@ -1076,9 +1091,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			})
 			.await?;
 
-		let info = match race2(self.broadcast.closed(), stream.reader.decode::<lite::TrackInfo>()).await {
-			Race::First(err) => return Err(err),
-			Race::Second(info) => info?,
+		let info = {
+			let mut decode = std::pin::pin!(stream.reader.decode::<lite::TrackInfo>());
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = self.broadcast.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				waiter.poll_future(decode.as_mut())
+			})
+			.await?
 		};
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
@@ -1258,14 +1279,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		if !self.subscriber.version.has_track_stream() {
 			// Older drafts: the first SUBSCRIBE_OK confirms it. Bail if the broadcast
 			// dies meanwhile.
-			let resp = match race2(
-				self.broadcast.closed(),
-				stream.reader.decode::<lite::SubscribeResponse>(),
-			)
-			.await
-			{
-				Race::First(err) => Err(err),
-				Race::Second(resp) => resp,
+			let resp = {
+				let mut decode = std::pin::pin!(stream.reader.decode::<lite::SubscribeResponse>());
+				kio::wait(|waiter| {
+					if let Poll::Ready(err) = self.broadcast.poll_closed(waiter) {
+						return Poll::Ready(Err(err));
+					}
+					waiter.poll_future(decode.as_mut())
+				})
+				.await
 			};
 
 			let ok = match resp {

@@ -848,8 +848,12 @@ impl Producer {
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.abort_reason()
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Poll until the track is closed or aborted; ready with the cause.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.

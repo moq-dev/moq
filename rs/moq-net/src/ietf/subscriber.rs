@@ -11,7 +11,7 @@ use crate::{
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	origin, stats, track,
-	util::{MaybeBoxedExt, MaybeSendBox, Race, Race3, TaskSet, Tasks, race2, race3},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
 use super::{Message, Version};
@@ -104,18 +104,21 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 }
 
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
-	let resolved = kio::wait(move |waiter| {
-		aliases
-			.poll(waiter, |aliases| match aliases.get(&alias) {
-				Some(request_id) => Poll::Ready(*request_id),
-				None => Poll::Pending,
-			})
-			.map(|result| result.map_err(|_| Error::Dropped))
-	});
-	match race2(resolved, web_async::time::sleep(TRACK_ALIAS_TIMEOUT)).await {
-		Race::First(request_id) => request_id,
-		Race::Second(()) => Err(Error::NotFound),
-	}
+	let mut timeout = std::pin::pin!(web_async::time::sleep(TRACK_ALIAS_TIMEOUT));
+	kio::wait(|waiter| {
+		let resolved = aliases.poll(waiter, |aliases| match aliases.get(&alias) {
+			Some(request_id) => Poll::Ready(*request_id),
+			None => Poll::Pending,
+		});
+		if let Poll::Ready(result) = resolved {
+			return Poll::Ready(result.map_err(|_| Error::Dropped));
+		}
+		if waiter.poll_future(timeout.as_mut()).is_ready() {
+			return Poll::Ready(Err(Error::NotFound));
+		}
+		Poll::Pending
+	})
+	.await
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
@@ -672,10 +675,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			let next = subscribes
 				.drive(async {
-					match race2(broadcast.requested_track(), self.session.closed()).await {
-						Race::First(request) => Some(request),
-						Race::Second(_) => None,
-					}
+					let mut closed = std::pin::pin!(self.session.closed());
+					kio::wait(|waiter| {
+						if waiter.poll_future(closed.as_mut()).is_ready() {
+							return Poll::Ready(None);
+						}
+						broadcast.poll_requested_track(waiter).map(Some)
+					})
+					.await
 				})
 				.await;
 
@@ -787,16 +794,38 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// lifetime. It drops (releasing `broadcasts_closed`) when this fn returns.
 		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
-		match race3(track.unused(), broadcast.closed(), stream.reader.closed()).await {
-			Race3::First(_) => {
+		// One event ends the subscription: the last consumer leaving, the broadcast
+		// dying, or the subscribe stream closing.
+		enum End {
+			Unused,
+			BroadcastClosed(Error),
+			StreamClosed(Result<(), Error>),
+		}
+
+		let end = {
+			let mut closed = std::pin::pin!(stream.reader.closed());
+			kio::wait(|waiter| {
+				if track.poll_unused(waiter).is_ready() {
+					return Poll::Ready(End::Unused);
+				}
+				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+					return Poll::Ready(End::BroadcastClosed(err));
+				}
+				waiter.poll_future(closed.as_mut()).map(End::StreamClosed)
+			})
+			.await
+		};
+
+		match end {
+			End::Unused => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
-			Race3::Second(err) => {
+			End::BroadcastClosed(err) => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "broadcast closed");
 				let _ = track.abort(err);
 			}
-			Race3::Third(res) => match res {
+			End::StreamClosed(res) => match res {
 				Ok(()) => {
 					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe complete");
 					let _ = track.finish();
@@ -891,15 +920,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
-		let res = match race3(
-			track.closed(),
-			producer.closed(),
-			self.run_group(group, stream, producer.clone(), track_stats.clone()),
-		)
-		.await
-		{
-			Race3::First(err) | Race3::Second(err) => Err(err),
-			Race3::Third(res) => res,
+		let res = {
+			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone(), track_stats.clone()));
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = track.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				if let Poll::Ready(err) = producer.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				waiter.poll_future(serve.as_mut())
+			})
+			.await
 		};
 
 		match res {

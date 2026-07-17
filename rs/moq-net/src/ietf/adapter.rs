@@ -10,7 +10,6 @@ use crate::{
 	Error, PathOwned,
 	coding::{Decode, Encode, Reader, Writer},
 	ietf::{self, RequestId},
-	util::{Race, race2},
 };
 
 use super::{Control, Message, Version};
@@ -49,17 +48,20 @@ impl<T> Queue<T> {
 	/// Dequeue the next message, waiting while the queue is open and empty.
 	/// Returns `None` once the queue is closed and drained.
 	async fn pop(&self) -> Option<T> {
-		let mut state = self
-			.0
-			.wait(|state| {
+		kio::wait(|waiter| self.poll_pop(waiter)).await
+	}
+
+	/// Poll for the next message; ready with `None` once closed and drained.
+	fn poll_pop(&self, waiter: &kio::Waiter) -> Poll<Option<T>> {
+		self.0
+			.poll(waiter, |state| {
 				if state.messages.is_empty() && !state.closed {
 					Poll::Pending
 				} else {
 					Poll::Ready(())
 				}
 			})
-			.await;
-		state.messages.pop_front()
+			.map(|mut state| state.messages.pop_front())
 	}
 
 	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
@@ -498,9 +500,18 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		reader: Reader<S::RecvStream, Version>,
 		writer: Writer<S::SendStream, Version>,
 	) -> Result<(), Error> {
-		match race2(self.run_read(reader), self.run_write(writer)).await {
-			Race::First(res) | Race::Second(res) => res,
-		}
+		let mut read = std::pin::pin!(self.run_read(reader));
+		let mut write = std::pin::pin!(self.run_write(writer));
+		kio::wait(|waiter| {
+			if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
+				return Poll::Ready(res);
+			}
+			if let Poll::Ready(res) = waiter.poll_future(write.as_mut()) {
+				return Poll::Ready(res);
+			}
+			Poll::Pending
+		})
+		.await
 	}
 
 	/// Writer task: drains the queue and writes to the control stream.
@@ -771,16 +782,25 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
 		match self.version {
 			// v16: SubscribeNamespace uses real bidi streams, so race both sources.
-			Version::Draft16 => match race2(self.shared.incoming.pop(), self.inner.accept_bi()).await {
-				Race::First(result) => match result {
-					Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-					None => Err(crate::Error::Closed),
-				},
-				Race::Second(result) => match result {
-					Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
-					Err(_) => Err(crate::Error::Closed),
-				},
-			},
+			Version::Draft16 => {
+				let mut accept = std::pin::pin!(self.inner.accept_bi());
+				kio::wait(|waiter| {
+					if let Poll::Ready(result) = self.shared.incoming.poll_pop(waiter) {
+						return Poll::Ready(match result {
+							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+							None => Err(crate::Error::Closed),
+						});
+					}
+					if let Poll::Ready(result) = waiter.poll_future(accept.as_mut()) {
+						return Poll::Ready(match result {
+							Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
+							Err(_) => Err(crate::Error::Closed),
+						});
+					}
+					Poll::Pending
+				})
+				.await
+			}
 			// v14/v15: Only virtual streams from control stream.
 			_ => match self.shared.incoming.pop().await {
 				Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),

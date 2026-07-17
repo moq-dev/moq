@@ -327,8 +327,13 @@ impl Dynamic {
 
 	/// Block until the broadcast is closed (every producer dropped), returning the cause.
 	pub async fn closed(&self) -> Error {
-		self.alive.closed().await;
-		Error::Dropped
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Poll until the broadcast closes; ready with the cause (always [`Error::Dropped`],
+	/// since a broadcast only ends by every producer dropping).
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.alive.poll_closed(waiter).map(|()| Error::Dropped)
 	}
 
 	/// Return true if this is the same broadcast instance.
