@@ -80,9 +80,9 @@ export class Connection implements Established {
 	 * peer's authorization grants the direction it intends to use.
 	 *
 	 * `undefined` until the peer's SETUP arrives, and forever on pre-lite-05 versions, which
-	 * carry no in-band role. A peer that omits the parameter, or sends a value we don't
-	 * recognize, reports {@link Role.Both}. Only a client sends a role, so this stays
-	 * `undefined` on a connection we opened.
+	 * carry no in-band role. {@link Role.Both} is the absence of the parameter, so it is what
+	 * a peer reports when it declines to declare a direction, sends a value we don't
+	 * recognize, or is a server (which never sends one).
 	 */
 	get peerRole(): Getter<Role | undefined> {
 		return this.#peerRole;
