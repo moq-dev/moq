@@ -12,41 +12,44 @@
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
 //! name address distinct resources.
 //!
-//! By default every request is served. Pass an [`Authorizer`] via
-//! [`Server::with_authorizer`] to gate access per request (token, cookie, or
-//! signed URL); a denied request is rejected before the origin is touched.
+//! Every request is served. To gate access, wrap [`Server::router`] in your own
+//! [`axum`] middleware. It runs before routing, so a rejected request never reaches
+//! the origin, but it also sees the raw request URI rather than the path parameters
+//! axum decodes for the handlers. The broadcast is the first segment, still
+//! percent-encoded: `/li%76e/master.m3u8` serves the broadcast `live`. Decode a
+//! segment before matching it against a policy, or a name can be encoded past the
+//! check.
+//!
+//! ```no_run
+//! use axum::http::StatusCode;
+//! use axum::middleware::{self, Next};
+//! use axum::extract::Request;
+//! use axum::response::Response;
+//!
+//! async fn gate(req: Request, next: Next) -> Result<Response, StatusCode> {
+//!     match req.headers().get("authorization") {
+//!         Some(token) if token == "secret" => Ok(next.run(req).await),
+//!         _ => Err(StatusCode::UNAUTHORIZED),
+//!     }
+//! }
+//!
+//! # fn build(server: moq_hls::Server) -> axum::Router {
+//! server.router().layer(middleware::from_fn(gate))
+//! # }
+//! ```
 
 mod routes;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::http::{HeaderMap, StatusCode};
 
 use crate::export::{Broadcaster, Config};
 
 /// How long to wait for a requested broadcast to be announced by the relay.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Per-request authorization for the HLS endpoints. Return `Err(status)` to deny
-/// a request; the server never touches the origin for a denied request. A closure
-/// `Fn(&str, &HeaderMap, Option<&str>) -> Result<(), StatusCode>` implements this.
-pub trait Authorizer: Send + Sync + 'static {
-	/// `broadcast` is the requested broadcast path, `headers` the request headers
-	/// (Authorization / Cookie), `query` the raw query string (token / signed-URL schemes).
-	fn authorize(&self, broadcast: &str, headers: &HeaderMap, query: Option<&str>) -> Result<(), StatusCode>;
-}
-
-impl<F> Authorizer for F
-where
-	F: Fn(&str, &HeaderMap, Option<&str>) -> Result<(), StatusCode> + Send + Sync + 'static,
-{
-	fn authorize(&self, broadcast: &str, headers: &HeaderMap, query: Option<&str>) -> Result<(), StatusCode> {
-		self(broadcast, headers, query)
-	}
-}
 
 /// HLS export HTTP server. Cheap to clone (shared inner).
 #[derive(Clone)]
@@ -58,49 +61,22 @@ struct Inner {
 	origin: moq_net::origin::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
-	/// Optional per-request authorizer, set at most once via [`Server::with_authorizer`];
-	/// unset allows every request. On the shared inner so a clone or an
-	/// already-handed-out router sees it too (no auth-bypass from call ordering).
-	auth: OnceLock<Arc<dyn Authorizer>>,
 }
 
 impl Server {
-	/// Build a server reading broadcasts from `origin`. Every request is allowed;
-	/// call [`with_authorizer`](Self::with_authorizer) to gate access.
+	/// Build a server reading broadcasts from `origin`. Every request is served;
+	/// gate access by layering middleware onto [`router`](Self::router).
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
-				auth: OnceLock::new(),
 			}),
 		}
 	}
 
-	/// Gate every request through `auth`, rejecting a denied request before the server
-	/// touches the origin. The authorizer lives on the shared inner, so every clone of
-	/// this server and its router enforces it regardless of call order. Set at most
-	/// once; a second call is ignored.
-	pub fn with_authorizer(self, auth: impl Authorizer) -> Self {
-		let _ = self.inner.auth.set(Arc::new(auth));
-		self
-	}
-
-	/// Authorize a request, allowing it when no authorizer is configured.
-	pub(crate) fn authorize(
-		&self,
-		broadcast: &str,
-		headers: &HeaderMap,
-		query: Option<&str>,
-	) -> Result<(), StatusCode> {
-		match self.inner.auth.get() {
-			Some(auth) => auth.authorize(broadcast, headers, query),
-			None => Ok(()),
-		}
-	}
-
-	/// The axum router for the HLS endpoints.
+	/// The axum router for the HLS endpoints, ready to nest or wrap in middleware.
 	pub fn router(&self) -> Router {
 		routes::router(self.clone())
 	}
@@ -163,6 +139,54 @@ async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcas
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Mirrors the middleware example in this module's docs, which `doctest = false`
+	/// keeps out of the compiler's reach. Paused time skips the allowed request's
+	/// RESOLVE_TIMEOUT wait for a broadcast that never arrives.
+	#[tokio::test(start_paused = true)]
+	async fn router_middleware_gates_requests() {
+		use axum::body::Body;
+		use axum::extract::Request;
+		use axum::http::{StatusCode, header};
+		use axum::middleware::{self, Next};
+		use axum::response::Response;
+		use tower::ServiceExt;
+
+		async fn gate(req: Request, next: Next) -> Result<Response, StatusCode> {
+			match req.headers().get(header::AUTHORIZATION) {
+				Some(token) if token == "secret" => Ok(next.run(req).await),
+				_ => Err(StatusCode::UNAUTHORIZED),
+			}
+		}
+
+		// An origin with no broadcasts: a request that reaches the handlers 404s after
+		// RESOLVE_TIMEOUT, so a 401 proves the middleware rejected it first.
+		let origin = moq_net::Origin::random().produce();
+		let server = Server::new(origin.consume(), Config::default());
+		let app = server.router().layer(middleware::from_fn(gate));
+
+		let denied = app
+			.clone()
+			.oneshot(Request::builder().uri("/live/master.m3u8").body(Body::empty()).unwrap())
+			.await
+			.unwrap();
+		assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+		let allowed = app
+			.oneshot(
+				Request::builder()
+					.uri("/live/master.m3u8")
+					.header(header::AUTHORIZATION, "secret")
+					.body(Body::empty())
+					.unwrap(),
+			)
+			.await
+			.unwrap();
+		assert_eq!(allowed.status(), StatusCode::NOT_FOUND);
+		// Pin the 404 to our handler: an unmatched route would also 404, but without
+		// the no-store that not_found() sets, so a broken URI can't fake this pass.
+		assert_eq!(allowed.headers()[header::CACHE_CONTROL], "no-store");
+	}
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = moq_net::Origin::random().produce();
