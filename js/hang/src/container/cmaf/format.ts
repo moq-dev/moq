@@ -15,7 +15,7 @@ export class Format implements ContainerFormat {
 	/** Decode one CMAF fragment into its media frames. */
 	decode(frame: Uint8Array): Frame[] {
 		return decodeDataSegment(frame, this.#init).map((s) => ({
-			data: s.data,
+			payload: s.data,
 			timestamp: s.timestamp as Time.Micro,
 			keyframe: s.keyframe,
 			duration: s.duration as Time.Micro,

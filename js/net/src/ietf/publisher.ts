@@ -231,7 +231,7 @@ export class Publisher {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					const obj = new Frame({ payload: frame.data, timestamp: frame.timestamp });
+					const obj = new Frame({ payload: frame.payload, timestamp: frame.timestamp });
 					await obj.encode(stream, header.flags, this.#session.version);
 				}
 

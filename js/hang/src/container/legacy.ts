@@ -18,7 +18,7 @@ export class Format implements ContainerFormat {
 		// empty chunk to a decoder -- a publisher emitting these must not break us.
 		if (data.byteLength === 0) return [];
 
-		return [{ data, timestamp: timestamp as Time.Micro, keyframe: false }];
+		return [{ payload: data, timestamp: timestamp as Time.Micro, keyframe: false }];
 	}
 }
 
@@ -78,7 +78,7 @@ export class Producer {
 		}
 
 		this.#group?.writeFrame({
-			data: encodeFrame(data, timestamp),
+			payload: encodeFrame(data, timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 	}

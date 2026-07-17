@@ -496,7 +496,7 @@ export class Subscriber {
 				const frame = await Frame.decode(stream, group.flags, this.#session.version);
 				if (frame.payload === undefined) break;
 
-				producer.writeFrame({ data: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
+				producer.writeFrame({ payload: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
 			}
 
 			producer.close();

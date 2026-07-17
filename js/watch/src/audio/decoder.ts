@@ -288,7 +288,7 @@ export class Decoder {
 				this.sync.received(timestamp, "audio");
 
 				this.#out.stats.update((stats) => ({
-					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
+					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
@@ -297,7 +297,7 @@ export class Decoder {
 
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",
-					data: frame.data,
+					data: frame.payload,
 					timestamp: frame.timestamp,
 				});
 
@@ -367,7 +367,7 @@ export class Decoder {
 				this.sync.received(timestamp, "audio");
 
 				this.#out.stats.update((stats) => ({
-					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
+					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
@@ -378,7 +378,7 @@ export class Decoder {
 				decoder.decode(
 					new EncodedAudioChunk({
 						type: frame.keyframe ? "key" : "delta",
-						data: frame.data,
+						data: frame.payload,
 						timestamp: frame.timestamp,
 					}),
 				);

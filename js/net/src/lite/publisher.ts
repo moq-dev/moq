@@ -511,8 +511,8 @@ export class Publisher {
 			await stream.u62(zigzag(ts - prevTs));
 			prevTs = ts;
 
-			await stream.u53(frame.data.byteLength);
-			await stream.write(frame.data);
+			await stream.u53(frame.payload.byteLength);
+			await stream.write(frame.payload);
 		}
 	}
 
@@ -540,8 +540,8 @@ export class Publisher {
 						prevTs = ts;
 					}
 
-					await stream.u53(frame.data.byteLength);
-					await stream.write(frame.data);
+					await stream.u53(frame.payload.byteLength);
+					await stream.write(frame.payload);
 				}
 
 				stream.close();

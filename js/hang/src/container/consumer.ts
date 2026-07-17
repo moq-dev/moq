@@ -162,11 +162,11 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 
-				const decoded = this.#format.decode(next.data);
+				const decoded = this.#format.decode(next.payload);
 
 				for (const sample of decoded) {
 					const frame: Frame = {
-						data: sample.data,
+						payload: sample.payload,
 						timestamp: sample.timestamp,
 						// Protocol invariant: groups always start at a keyframe.
 						// For index 0, we enforce this regardless of what the format reports.

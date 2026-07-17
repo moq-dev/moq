@@ -20,9 +20,9 @@ export const MAX_GROUP_FRAMES = 1024;
  */
 export interface Frame {
 	/** The frame payload. */
-	data: Uint8Array;
+	payload: Uint8Array;
 	/**
-	 * Presentation timestamp. Required: for data with no presentation time of its own
+	 * Presentation timestamp. Required: for a payload with no presentation time of its own
 	 * (a JSON catalog, control state) pass {@link Timestamp.now} explicitly.
 	 */
 	timestamp: Timestamp;
@@ -65,14 +65,14 @@ class GroupState {
 function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek()) throw new Error("group is closed");
 
-	state.cacheBytes += frame.data.byteLength;
+	state.cacheBytes += frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 
 		while (frames.length > MAX_GROUP_FRAMES || state.cacheBytes > MAX_GROUP_CACHE_BYTES) {
 			const evicted = frames.shift();
 			if (!evicted) break;
-			state.cacheBytes -= evicted.data.byteLength;
+			state.cacheBytes -= evicted.payload.byteLength;
 			state.offset++;
 		}
 	});
@@ -146,7 +146,7 @@ export class Producer {
 
 	/** Write a string as a single UTF-8 encoded frame, stamped with {@link Timestamp.now}. */
 	writeString(str: string) {
-		this.writeFrame({ data: new TextEncoder().encode(str), timestamp: Timestamp.now() });
+		this.writeFrame({ payload: new TextEncoder().encode(str), timestamp: Timestamp.now() });
 	}
 
 	/** Write a value as a single JSON-encoded frame, stamped with {@link Timestamp.now}. */
@@ -156,7 +156,7 @@ export class Producer {
 
 	/** Write a boolean as a single one-byte frame, stamped with {@link Timestamp.now}. */
 	writeBool(bool: boolean) {
-		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
+		this.writeFrame({ payload: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
 
 	/** True once the group has been closed. */
@@ -216,7 +216,7 @@ export class Consumer {
 		const frame = frames.shift();
 		if (!frame) return undefined;
 
-		this.#state.cacheBytes -= frame.data.byteLength;
+		this.#state.cacheBytes -= frame.payload.byteLength;
 		return { sequence: this.#state.total.peek() - frames.length - 1, frame };
 	}
 
@@ -251,7 +251,7 @@ export class Consumer {
 	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		return { sequence: read.sequence, data: read.frame.data, timestamp: read.frame.timestamp };
+		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
@@ -291,7 +291,7 @@ export class Consumer {
 			if (this.#state.offset > 0) throw new CacheFull();
 
 			const read = this.#readBufferedFrame();
-			if (read) return { sequence: read.sequence, data: read.frame.data, timestamp: read.frame.timestamp };
+			if (read) return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -304,7 +304,7 @@ export class Consumer {
 	/** Reads the next frame and decodes its payload as a UTF-8 string. */
 	async readString(): Promise<string | undefined> {
 		const frame = await this.readFrame();
-		return frame ? new TextDecoder().decode(frame.data) : undefined;
+		return frame ? new TextDecoder().decode(frame.payload) : undefined;
 	}
 
 	/** Reads the next frame and parses its payload as JSON. */
@@ -316,7 +316,7 @@ export class Consumer {
 	/** Reads the next frame and decodes its payload as a one-byte boolean. */
 	async readBool(): Promise<boolean | undefined> {
 		const frame = await this.readFrame();
-		return frame ? frame.data[0] === 1 : undefined;
+		return frame ? frame.payload[0] === 1 : undefined;
 	}
 
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */

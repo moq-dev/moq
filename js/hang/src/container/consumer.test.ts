@@ -37,7 +37,7 @@ test("LegacyFormat decodes a valid frame", () => {
 
 	expect(result).toHaveLength(1);
 	expect(result[0].timestamp).toBe(timestamp);
-	expect(result[0].data).toEqual(payload);
+	expect(result[0].payload).toEqual(payload);
 	expect(result[0].keyframe).toBe(false);
 });
 
@@ -92,7 +92,7 @@ test("CmafFormat decodes a valid keyframe segment", () => {
 	const result = format.decode(segment);
 
 	expect(result).toHaveLength(1);
-	expect(result[0].data).toEqual(new Uint8Array([0xca, 0xfe]));
+	expect(result[0].payload).toEqual(new Uint8Array([0xca, 0xfe]));
 	expect(result[0].timestamp).toBe(0 as Time.Micro);
 	expect(result[0].keyframe).toBe(true);
 });
@@ -147,7 +147,7 @@ function encodeLegacy(timestamp: Time.Micro): Uint8Array {
 function writeGroupWithLegacyFrames(track: Track.Producer, sequence: number, timestamps: Time.Micro[]) {
 	const group = new Group.Producer(sequence);
 	for (const ts of timestamps) {
-		group.writeFrame({ data: encodeLegacy(ts), timestamp: Time.Timestamp.now() });
+		group.writeFrame({ payload: encodeLegacy(ts), timestamp: Time.Timestamp.now() });
 	}
 	group.close();
 	track.writeGroup(group);
@@ -203,9 +203,9 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	const multiFormat: ContainerFormat = {
 		decode(_frame: Uint8Array): Frame[] {
 			return [
-				{ data: new Uint8Array([1]), timestamp: 0 as Time.Micro, keyframe: false },
-				{ data: new Uint8Array([2]), timestamp: 33_000 as Time.Micro, keyframe: false },
-				{ data: new Uint8Array([3]), timestamp: 66_000 as Time.Micro, keyframe: false },
+				{ payload: new Uint8Array([1]), timestamp: 0 as Time.Micro, keyframe: false },
+				{ payload: new Uint8Array([2]), timestamp: 33_000 as Time.Micro, keyframe: false },
+				{ payload: new Uint8Array([3]), timestamp: 66_000 as Time.Micro, keyframe: false },
 			];
 		},
 	};
@@ -214,8 +214,8 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	const consumer = new Consumer(track.subscribe(), { format: multiFormat, latency: 500 as Time.Milli });
 
 	const group = new Group.Producer(0);
-	group.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // first MoQ frame → 3 samples
-	group.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // second MoQ frame → 3 samples
+	group.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // first MoQ frame → 3 samples
+	group.writeFrame({ payload: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // second MoQ frame → 3 samples
 	group.close();
 	track.writeGroup(group);
 	track.close();
@@ -234,7 +234,7 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 	const truncatingFormat: ContainerFormat = {
 		decode(frame: Uint8Array): Frame[] {
 			if (frame[0] === 0xff) throw new Error("truncated");
-			return [{ data: frame, timestamp: frame[0] as Time.Micro, keyframe: false }];
+			return [{ payload: frame, timestamp: frame[0] as Time.Micro, keyframe: false }];
 		},
 	};
 
@@ -243,15 +243,15 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 
 	// Group.Producer 0: 2 valid frames then a tail-truncating error.
 	const g0 = new Group.Producer(0);
-	g0.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
-	g0.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() });
-	g0.writeFrame({ data: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
 	g0.close();
 	track.writeGroup(g0);
 
 	// Group.Producer 1 decodes cleanly.
 	const g1 = new Group.Producer(1);
-	g1.writeFrame({ data: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
+	g1.writeFrame({ payload: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
 	g1.close();
 	track.writeGroup(g1);
 
@@ -431,7 +431,7 @@ test("Consumer handles empty decode result without deadlock", async () => {
 		decode(_frame: Uint8Array): Frame[] {
 			callCount++;
 			if (callCount === 1) return []; // empty result
-			return [{ data: new Uint8Array([1]), timestamp: 33_000 as Time.Micro, keyframe: false }];
+			return [{ payload: new Uint8Array([1]), timestamp: 33_000 as Time.Micro, keyframe: false }];
 		},
 	};
 
@@ -439,8 +439,8 @@ test("Consumer handles empty decode result without deadlock", async () => {
 	const consumer = new Consumer(track.subscribe(), { format: emptyThenValid, latency: 500 as Time.Milli });
 
 	const group = new Group.Producer(0);
-	group.writeFrame({ data: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // empty decode
-	group.writeFrame({ data: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // valid decode
+	group.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // empty decode
+	group.writeFrame({ payload: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // valid decode
 	group.close();
 	track.writeGroup(group);
 	track.close();
@@ -466,7 +466,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 
 	const group = new Group.Producer(0);
 	group.writeFrame({
-		data: encodeDataSegment({
+		payload: encodeDataSegment({
 			data: new Uint8Array([0xca, 0xfe]),
 			timestamp: 0,
 			duration: 3000,
@@ -476,7 +476,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 		timestamp: Time.Timestamp.now(),
 	});
 	group.writeFrame({
-		data: encodeDataSegment({
+		payload: encodeDataSegment({
 			data: new Uint8Array([0xbe, 0xef]),
 			timestamp: 3000,
 			duration: 3000,
@@ -520,7 +520,7 @@ const durationFormat: ContainerFormat = {
 	decode(frame: Uint8Array): Frame[] {
 		return [
 			{
-				data: frame,
+				payload: frame,
 				timestamp: (frame[0] * 1000) as Time.Micro,
 				duration: 33_000 as Time.Micro,
 				keyframe: false,
@@ -536,11 +536,11 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 
 	// Group.Producer 0: one frame at ts=0 lasting 33ms, never closed (stalled).
 	const g0 = new Group.Producer(0);
-	g0.writeFrame({ data: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
 
 	// Group.Producer 1: closed, starts exactly where group 0's frame ends.
 	const g1 = new Group.Producer(1);
-	g1.writeFrame({ data: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
+	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
 
 	track.writeGroup(g0);
@@ -559,7 +559,7 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 		decode(frame: Uint8Array): Frame[] {
 			return [
 				{
-					data: frame,
+					payload: frame,
 					timestamp: (frame[0] * 1000) as Time.Micro,
 					duration: 10_000 as Time.Micro,
 					keyframe: false,
@@ -574,10 +574,10 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	// Group.Producer 0 stays open and later receives a second frame; nothing covers the gap,
 	// so that late frame must survive rather than being skipped.
 	const g0 = new Group.Producer(0);
-	g0.writeFrame({ data: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.now() });
 
 	const g1 = new Group.Producer(1);
-	g1.writeFrame({ data: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
+	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
 
 	track.writeGroup(g0);
@@ -585,7 +585,7 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 
 	// Let the consumer settle on group 0, then extend it before closing.
 	await new Promise((resolve) => setTimeout(resolve, 20));
-	g0.writeFrame({ data: new Uint8Array([20]), timestamp: Time.Timestamp.now() });
+	g0.writeFrame({ payload: new Uint8Array([20]), timestamp: Time.Timestamp.now() });
 	g0.close();
 	track.close();
 
