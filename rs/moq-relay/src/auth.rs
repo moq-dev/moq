@@ -1057,7 +1057,7 @@ impl Auth {
 			// claims.root is the token's own root (a vanity name OR a pid); it is
 			// checked against the ORIGINAL connection path below, not the alias, so
 			// a vanity token matches a vanity URL and a pid token matches a pid URL.
-			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+			key.verify(token).map_err(|_| AuthError::DecodeFailed)?
 		} else {
 			let public = resp.public.unwrap_or_default();
 			if public.subscribe.is_empty() && public.publish.is_empty() {
@@ -1065,12 +1065,10 @@ impl Auth {
 			}
 			// Anonymous access: anchor the public claims at the connection path so
 			// the overlap check below is a no-op; routing still lands on the alias.
-			moq_token::Claims {
-				root: params.path.clone(),
-				subscribe: public.subscribe,
-				publish: public.publish,
-				..Default::default()
-			}
+			moq_token::Claims::default()
+				.with_root(params.path.clone())
+				.with_subscribe(public.subscribe)
+				.with_publish(public.publish)
 		};
 
 		// Check the token root against the ORIGINAL connection path (vanity or
@@ -1106,7 +1104,7 @@ impl Auth {
 			let key = resolver.resolve(header.kid.as_deref()).await?;
 
 			// Verify the token with the resolved key
-			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+			key.verify(token).map_err(|_| AuthError::DecodeFailed)?
 		} else if !self.public.is_empty() {
 			// No JWT. Use public access (static prefixes + optional API).
 			let root = Path::new(&params.path);
@@ -1115,23 +1113,19 @@ impl Auth {
 			// direction (request is under a public prefix, or request is a parent of one).
 			let overlaps = |p: &Path| root.has_prefix(p) || p.has_prefix(&root);
 			if self.public.subscribe.iter().any(&overlaps) || self.public.publish.iter().any(overlaps) {
-				moq_token::Claims {
-					root: "".to_string(),
-					subscribe: self.public.subscribe.iter().map(|p| p.to_string()).collect(),
-					publish: self.public.publish.iter().map(|p| p.to_string()).collect(),
-					..Default::default()
-				}
+				moq_token::Claims::default()
+					.with_root("")
+					.with_subscribe(self.public.subscribe.iter().map(|p| p.to_string()))
+					.with_publish(self.public.publish.iter().map(|p| p.to_string()))
 			} else if let Some((base, client)) = &self.public.api {
 				// No static overlap. Response paths are relative to the namespace.
 				let namespace = root.to_string();
 				let url = base.join(&namespace)?;
 				let response = Self::fetch_public_response(client, &url).await?;
-				moq_token::Claims {
-					root: namespace,
-					subscribe: response.subscribe,
-					publish: response.publish,
-					..Default::default()
-				}
+				moq_token::Claims::default()
+					.with_root(namespace)
+					.with_subscribe(response.subscribe)
+					.with_publish(response.publish)
 			} else {
 				return Err(AuthError::ExpectedToken);
 			}
@@ -1144,19 +1138,19 @@ impl Auth {
 
 	/// Reduce verified `claims` into an [`AuthToken`].
 	///
-	/// The token root must overlap `check_root` (the ORIGINAL connection path the
-	/// client dialed, e.g. a vanity name), and the permission prefixes are re-based
-	/// against that overlap; a token whose root sits outside the path is rejected.
-	/// The resulting `AuthToken.root` is anchored at `route_root` (the `--auth-api`
-	/// alias, i.e. the canonical pid), so broadcasts live under the stable pid on
-	/// the backbone and survive vanity-name changes. `route_root` is `check_root`
-	/// with only its leading segment swapped to the pid (same depth), so the rebased
-	/// relative prefixes anchor unchanged. The standalone path passes the same value
-	/// for both (no alias). Shared by the standalone and `--auth-api` paths.
+	/// [`Claims::authorize`](moq_token::Claims::authorize) does the overlap check and
+	/// rebases the permission prefixes against `check_root` (the ORIGINAL connection
+	/// path the client dialed, e.g. a vanity name); a token whose root sits outside
+	/// that path is rejected. The resulting `AuthToken.root` is anchored at
+	/// `route_root` (the `--auth-api` alias, i.e. the canonical pid), so broadcasts
+	/// live under the stable pid on the backbone and survive vanity-name changes.
+	/// `route_root` is `check_root` with only its leading segment swapped to the pid
+	/// (same depth), so the rebased relative prefixes anchor unchanged. The standalone
+	/// path passes the same value for both (no alias). Shared by the standalone and
+	/// `--auth-api` paths.
 	fn finalize(check_root: &str, route_root: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
 		let root = Path::new(check_root);
 		let route_root = Path::new(route_root);
-		let claims_root = Path::new(&claims.root);
 		let depth = |path: &Path<'_>| {
 			if path.is_empty() {
 				0
@@ -1169,48 +1163,18 @@ impl Auth {
 			return Err(AuthError::IncorrectRoot);
 		}
 
-		// The URL path and the token root must overlap:
-		// - URL extends root (e.g. URL="/demo/room", root="demo") so suffix narrows permissions
-		// - URL is parent of root (e.g. URL="/", root="demo") so prefix widens permission paths
-		let (suffix, prefix) = if let Some(suffix) = root.strip_prefix(&claims_root) {
-			(suffix, Path::new(""))
-		} else if let Some(prefix) = claims_root.strip_prefix(&root) {
-			(Path::new(""), prefix)
-		} else {
-			return Err(AuthError::IncorrectRoot);
-		};
+		// A token that grants nothing here is indistinguishable from one aimed at
+		// another root, so both reduce to IncorrectRoot.
+		let permissions = claims.authorize(check_root).map_err(|_| AuthError::IncorrectRoot)?;
 
-		let scope = |paths: Vec<String>| -> PathPrefixes {
-			paths
-				.into_iter()
-				.filter_map(|p| {
-					let p = prefix.join(&p);
-					if p.is_empty() {
-						return Some(p);
-					}
-					if let Some(remaining) = p.strip_prefix(&suffix) {
-						Some(remaining.into_owned())
-					} else if suffix.has_prefix(&p) {
-						Some(Path::new("").into_owned())
-					} else {
-						None
-					}
-				})
-				.collect()
-		};
-
-		let subscribe = scope(claims.subscribe);
-		let publish = scope(claims.publish);
-
-		// Reject connections that end up with no permissions after reduction.
-		if subscribe.is_empty() && publish.is_empty() {
-			return Err(AuthError::IncorrectRoot);
-		}
+		// authorize() returns paths already normalized and relative to check_root,
+		// which route_root matches in depth.
+		let rebase = |paths: Vec<String>| -> PathPrefixes { paths.iter().map(|p| Path::new(p).to_owned()).collect() };
 
 		Ok(AuthToken {
 			root: route_root.to_owned(),
-			subscribe,
-			publish,
+			subscribe: rebase(permissions.subscribe),
+			publish: rebase(permissions.publish),
 			tier: Tier::default(),
 			expires: claims.expires,
 		})
@@ -1379,13 +1343,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe([""])
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1419,14 +1381,12 @@ mod tests {
 			.as_secs()
 			+ 3600;
 		let expires = std::time::UNIX_EPOCH + std::time::Duration::from_secs(want);
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["alice".into()],
-			expires: Some(expires),
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe([""])
+			.with_publish(["alice"])
+			.with_expires(expires);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1454,13 +1414,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe([""])
+			.with_publish([""]);
+		let token = key.sign(&claims)?;
 
 		let result = auth
 			.verify(&AuthParams {
@@ -1485,13 +1443,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["bob".into()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe(["bob"])
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1518,13 +1474,8 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec![],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/123").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1550,13 +1501,8 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec![],
-			publish: vec!["bob".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/123").with_publish(["bob"]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1582,13 +1528,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe([""])
+			.with_publish([""]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1616,13 +1560,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe([""])
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1650,13 +1592,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["bob".into()],
-			publish: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe(["bob"])
+			.with_publish([""]);
+		let token = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -1684,13 +1624,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["bob".into()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe(["bob"])
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -1730,13 +1668,11 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["users/bob/screen".into()],
-			publish: vec!["users/alice/camera".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe(["users/bob/screen"])
+			.with_publish(["users/alice/camera"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -1776,13 +1712,10 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["alice".into()],
-			publish: vec![],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -1795,13 +1728,10 @@ mod tests {
 		assert_eq!(verified.subscribe, vec!["".as_path()]);
 		assert_eq!(verified.publish, vec![]);
 
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec![],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -1827,12 +1757,8 @@ mod tests {
 		.await?;
 
 		let key = create_test_key_with_kid("nonexistent");
-		let claims = moq_token::Claims {
-			root: "test".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("test").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		let result = auth
 			.verify(&AuthParams {
@@ -1892,12 +1818,8 @@ mod tests {
 		.await?;
 
 		// Sign with key-1
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token1 = key1.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token1 = key1.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -1909,12 +1831,8 @@ mod tests {
 		assert_eq!(verified.root, "room/1".as_path());
 
 		// Sign with key-2
-		let claims = moq_token::Claims {
-			root: "room/2".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token2 = key2.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/2").with_subscribe([""]);
+		let token2 = key2.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -1965,12 +1883,8 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "test".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("test").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		let result = auth
 			.verify(&AuthParams {
@@ -2034,13 +1948,11 @@ mod tests {
 		.await?;
 
 		// JWT tokens should still work normally
-		let claims = moq_token::Claims {
-			root: "secret".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let jwt = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("secret")
+			.with_subscribe([""])
+			.with_publish(["alice"]);
+		let jwt = key.sign(&claims)?;
 
 		let token = auth
 			.verify(&AuthParams {
@@ -2068,13 +1980,11 @@ mod tests {
 		.await?;
 
 		// Token with root="demo", connecting to "/"
-		let claims = moq_token::Claims {
-			root: "demo".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("demo")
+			.with_subscribe([""])
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -2104,13 +2014,11 @@ mod tests {
 		.await?;
 
 		// Token with root="room/123", connecting to "/room"
-		let claims = moq_token::Claims {
-			root: "room/123".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["alice".into()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("room/123")
+			.with_subscribe([""])
+			.with_publish(["alice"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -2140,13 +2048,11 @@ mod tests {
 		.await?;
 
 		// Token with root="demo", connecting to "/other"
-		let claims = moq_token::Claims {
-			root: "demo".to_string(),
-			subscribe: vec!["".to_string()],
-			publish: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("demo")
+			.with_subscribe([""])
+			.with_publish([""]);
+		let token = key.sign(&claims)?;
 
 		let result = auth
 			.verify(&AuthParams {
@@ -2172,13 +2078,8 @@ mod tests {
 		.await?;
 
 		// Token with root="", subscribe=["demo"] — only demo/ is accessible
-		let claims = moq_token::Claims {
-			root: "".to_string(),
-			subscribe: vec!["demo".to_string()],
-			publish: vec![],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("").with_subscribe(["demo"]);
+		let token = key.sign(&claims)?;
 
 		// Connecting to /other should fail — no permissions remain after filtering
 		let result = auth
@@ -2425,12 +2326,8 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -2455,12 +2352,8 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
 				path: "/room/1".into(),
@@ -2484,12 +2377,8 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
 				path: "/room/1".into(),
@@ -2511,12 +2400,8 @@ api = "https://api.example.com/access"
 		.await?;
 
 		let key = create_test_key_with_kid("test-key");
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
 				path: "/room/1".into(),
@@ -2541,12 +2426,8 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
 				path: "/room/1".into(),
@@ -2577,12 +2458,8 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		for _ in 0..2 {
 			auth.verify(&AuthParams {
@@ -2859,12 +2736,8 @@ api = "https://api.example.com/access"
 		})
 		.await?;
 
-		let claims = moq_token::Claims {
-			root: "room/1".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = fx.key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("room/1").with_subscribe([""]);
+		let token = fx.key.sign(&claims)?;
 		let verified = auth_with_identity
 			.verify(&AuthParams {
 				path: "/room/1".into(),
@@ -3104,12 +2977,8 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "demo/room".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("demo/room").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -3142,12 +3011,8 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let claims = moq_token::Claims {
-			root: "demo".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("demo").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -3182,13 +3047,11 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 
-		let claims = moq_token::Claims {
-			root: "kixelated".to_string(),
-			publish: vec!["hello-world".to_string()],
-			subscribe: vec!["hello-world".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default()
+			.with_root("kixelated")
+			.with_publish(["hello-world"])
+			.with_subscribe(["hello-world"]);
+		let token = key.sign(&claims)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -3341,12 +3204,8 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let claims = moq_token::Claims {
-			root: "unknown".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		};
-		let token = key.encode(&claims)?;
+		let claims = moq_token::Claims::default().with_root("unknown").with_subscribe([""]);
+		let token = key.sign(&claims)?;
 		let verified = auth
 			.verify(&AuthParams {
 				path: "/unknown".into(),
@@ -3371,11 +3230,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let token = key.encode(&moq_token::Claims {
-			root: "x7k2qp".to_string(),
-			subscribe: vec!["".to_string()],
-			..Default::default()
-		})?;
+		let token = key.sign(&moq_token::Claims::default().with_root("x7k2qp").with_subscribe([""]))?;
 		let result = auth
 			.verify(&AuthParams {
 				path: "/demo".into(),

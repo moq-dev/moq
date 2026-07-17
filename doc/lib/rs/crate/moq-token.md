@@ -116,12 +116,17 @@ For the TypeScript equivalent, see [`js/token/examples/sign-and-verify.ts`](http
 
 | Claim | Type | Description |
 |-------|------|-------------|
-| `root` | string | Root path for all operations |
-| `put` | `string \| string[]?` | Publishing permission paths |
-| `get` | `string \| string[]?` | Subscription permission paths |
-| `cluster` | bool? | Cluster node flag |
+| `root` | string? | Root path for all operations, defaulting to the top-level path |
+| `put` | `string \| string[]?` | Publishing permission paths, relative to `root` |
+| `get` | `string \| string[]?` | Subscription permission paths, relative to `root` |
 | `exp` | number? | Expiration (Unix timestamp) |
 | `iat` | number? | Issued at (Unix timestamp) |
+
+A token is checked in two steps. `Key::verify` checks the signature and expiry, then
+`Claims::authorize` scopes the claims to the path a client dialed, returning the
+publish/subscribe prefixes relative to it. The relay does both; `authorize` is
+available on its own so an auth service can apply the same rules. The TypeScript
+[`@moq/token`](/lib/js/@moq/token) package mirrors this API.
 
 ## Integration with moq-relay
 

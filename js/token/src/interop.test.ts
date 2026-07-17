@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { authorize } from "./claims.ts";
 import { generate } from "./generate.ts";
 import { load, loadPublic, sign, verify } from "./key.ts";
 
@@ -18,6 +19,12 @@ describe("Rust-generated fixtures", () => {
 	// cargo run --bin moq-token -- sign --key /tmp/rust-hs256.jwk --root demo --publish alice --subscribe bob
 	const RUST_HS256_TOKEN =
 		"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1dCI6WyJhbGljZSJdLCJnZXQiOlsiYm9iIl19.eyOkZtTtj_MDkLF4Eu11cygb7B_6DyP-6e0TtwVE4UE";
+
+	// A token scoped to the root path. Rust skips serializing an empty `root`, so the
+	// claims arrive with no `root` field at all.
+	// cargo run --bin moq-token -- sign --key /tmp/rust-hs256.jwk --publish alice --subscribe bob
+	const RUST_HS256_TOKEN_EMPTY_ROOT =
+		"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJwdXQiOlsiYWxpY2UiXSwiZ2V0IjpbImJvYiJdfQ.AFQ0rWFDFhOMumIItAaVjg5O6e-55D9f73aw-0s46ks";
 
 	// cargo run --bin moq-token -- generate --algorithm EdDSA --out /tmp/rust-eddsa-private.jwk --public /tmp/rust-eddsa-public.jwk
 	const RUST_EDDSA_PRIVATE_KEY = JSON.stringify({
@@ -52,16 +59,27 @@ describe("Rust-generated fixtures", () => {
 
 	test("verify Rust HS256 token", async () => {
 		const key = load(RUST_HS256_KEY);
-		const claims = await verify(key, RUST_HS256_TOKEN, "demo");
+		const claims = await verify(key, RUST_HS256_TOKEN);
 		expect(claims.root).toBe("demo");
 		expect(claims.put).toEqual(["alice"]);
 		expect(claims.get).toEqual(["bob"]);
 	});
 
+	test("verify Rust HS256 token scoped to the root path", async () => {
+		const key = load(RUST_HS256_KEY);
+		const claims = await verify(key, RUST_HS256_TOKEN_EMPTY_ROOT);
+		expect(claims.root).toBe("");
+		expect(claims.put).toEqual(["alice"]);
+		expect(claims.get).toEqual(["bob"]);
+
+		// An empty root grants its prefixes wherever the connection lands.
+		expect(authorize(claims, "alice")).toEqual({ subscribe: [], publish: [""] });
+	});
+
 	test("sign with Rust HS256 key and verify roundtrip", async () => {
 		const key = load(RUST_HS256_KEY);
 		const token = await sign(key, { root: "js-test", put: ["pub1"], get: ["sub1"] });
-		const claims = await verify(key, token, "js-test");
+		const claims = await verify(key, token);
 		expect(claims.root).toBe("js-test");
 		expect(claims.put).toEqual(["pub1"]);
 		expect(claims.get).toEqual(["sub1"]);
@@ -81,14 +99,14 @@ describe("Rust-generated fixtures", () => {
 		const privateKey = load(RUST_EDDSA_PRIVATE_KEY);
 		const publicKey = loadPublic(RUST_EDDSA_PUBLIC_KEY);
 		const token = await sign(privateKey, { root: "js-eddsa", put: ["test"] });
-		const claims = await verify(publicKey, token, "js-eddsa");
+		const claims = await verify(publicKey, token);
 		expect(claims.root).toBe("js-eddsa");
 		expect(claims.put).toEqual(["test"]);
 	});
 
 	test("verify Rust EdDSA token with public key", async () => {
 		const key = loadPublic(RUST_EDDSA_PUBLIC_KEY);
-		const claims = await verify(key, RUST_EDDSA_TOKEN, "room");
+		const claims = await verify(key, RUST_EDDSA_TOKEN);
 		expect(claims.root).toBe("room");
 		expect(claims.put).toEqual(["stream1", "stream2"]);
 		expect(claims.get).toEqual(["feed1"]);
@@ -111,19 +129,20 @@ describe("wrong key rejects token", () => {
 
 	test("different HS256 key rejects Rust token", async () => {
 		const wrongKey = await generate("HS256");
-		await expect(verify(wrongKey, RUST_HS256_TOKEN, "demo")).rejects.toThrow();
+		await expect(verify(wrongKey, RUST_HS256_TOKEN)).rejects.toThrow();
 	});
 
-	test("wrong root path rejects token", async () => {
+	test("unrelated path is not authorized by the token", async () => {
 		const key = load(RUST_HS256_KEY);
-		await expect(verify(key, RUST_HS256_TOKEN, "wrong-root")).rejects.toThrow();
+		const claims = await verify(key, RUST_HS256_TOKEN);
+		expect(() => authorize(claims, "wrong-root")).toThrow();
 	});
 
 	test("tampered token is rejected", async () => {
 		const key = load(RUST_HS256_KEY);
 		// Flip a character in the signature
 		const tampered = RUST_HS256_TOKEN.slice(0, -1) + (RUST_HS256_TOKEN.at(-1) === "A" ? "B" : "A");
-		await expect(verify(key, tampered, "demo")).rejects.toThrow();
+		await expect(verify(key, tampered)).rejects.toThrow();
 	});
 
 	test("EdDSA token rejected by HS256 key", async () => {
@@ -131,11 +150,11 @@ describe("wrong key rejects token", () => {
 		// cargo run --bin moq-token -- sign --key /tmp/rust-eddsa-private.jwk --root room --publish stream1 --publish stream2 --subscribe feed1
 		const eddsaToken =
 			"eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1dCI6WyJzdHJlYW0xIiwic3RyZWFtMiJdLCJnZXQiOlsiZmVlZDEiXX0.jezhAgTHQHdYkc15CBZP8zPKKJ0z5oVRwON4wPHeQ6xvIhoM5IkCs_4YRCEoG74t99pdVTQrwAMNrlfKm2O6DA";
-		await expect(verify(key, eddsaToken, "room")).rejects.toThrow();
+		await expect(verify(key, eddsaToken)).rejects.toThrow();
 	});
 
 	test("garbage token is rejected", async () => {
 		const key = load(RUST_HS256_KEY);
-		await expect(verify(key, "not-a-jwt", "demo")).rejects.toThrow();
+		await expect(verify(key, "not-a-jwt")).rejects.toThrow();
 	});
 });
