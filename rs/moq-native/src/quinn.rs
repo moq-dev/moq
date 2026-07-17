@@ -555,7 +555,7 @@ impl QuinnRequest {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());
 				Ok(())
 			}
-			QuinnRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			QuinnRequest::WebTransport { request, .. } => request.reject(status).await,
 		}
 	}
 }

@@ -555,7 +555,7 @@ impl NoqRequest {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());
 				Ok(())
 			}
-			NoqRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			NoqRequest::WebTransport { request, .. } => request.reject(status).await,
 		}
 	}
 }

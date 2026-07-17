@@ -2,9 +2,9 @@ use crate::error::KeyError;
 use crate::{Algorithm, EllipticCurve, Key, KeyOperation, KeyType, RsaPublicKey};
 use aws_lc_rs::encoding::AsBigEndian;
 use aws_lc_rs::signature::KeyPair;
-use p256::elliptic_curve::generic_array::typenum::Unsigned;
+use p256::elliptic_curve::array::typenum::Unsigned;
 use p256::elliptic_curve::point::PointCompression;
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint};
+use p256::elliptic_curve::sec1::{FromSec1Point, ModulusSize, ToSec1Point};
 use p256::elliptic_curve::{Curve, CurveArithmetic, SecretKey};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 
@@ -88,7 +88,7 @@ fn generate_rsa_key(size: usize) -> crate::Result<KeyType> {
 fn generate_ec_key<C>(curve: EllipticCurve) -> crate::Result<KeyType>
 where
 	C: Curve + CurveArithmetic + PointCompression,
-	C::AffinePoint: ToEncodedPoint<C> + FromEncodedPoint<C>,
+	C::AffinePoint: ToSec1Point<C> + FromSec1Point<C>,
 	C::FieldBytesSize: ModulusSize,
 {
 	let mut bytes = vec![0u8; C::FieldBytesSize::to_usize()];
@@ -100,7 +100,7 @@ where
 		}
 	};
 
-	let point = secret.public_key().to_encoded_point(false);
+	let point = secret.public_key().to_sec1_point(false);
 
 	let x = point.x().ok_or(KeyError::MissingEcX)?.to_vec();
 	let y = point.y().ok_or(KeyError::MissingEcY)?.to_vec();

@@ -544,7 +544,7 @@ impl QuicheRequest {
 				let _: () = connection.close(status.as_u16().into(), status.as_str());
 				Ok(())
 			}
-			QuicheRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			QuicheRequest::WebTransport { request, .. } => request.reject(status).await,
 		}
 	}
 }
