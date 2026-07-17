@@ -1167,6 +1167,13 @@ impl Drop for Producer {
 fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: &kio::Waiter) -> Option<Subscription> {
 	let mut combined = None;
 	for sub in subs.iter() {
+		// A closed consumer means the subscriber dropped: it holds no live demand.
+		// `Consumer::poll` evaluates the closure before the closed flag, so it would
+		// still replay the final value into the aggregate; skip it explicitly so a
+		// departed subscriber can't keep the aggregate pinned to its last request.
+		if sub.is_closed() {
+			continue;
+		}
 		if let Poll::Ready(Ok(sub)) = sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
 			combined = Some(sub);
 		}
@@ -1178,6 +1185,10 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined: Option<Subscription> = None;
 	for sub in subs.read().iter() {
+		// Skip dropped subscribers, matching `combined_subscription`.
+		if sub.is_closed() {
+			continue;
+		}
 		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
 			combined = Some(merged);
 		}
@@ -2472,6 +2483,38 @@ mod test {
 		let aggregate = producer.subscription().expect("expected an active subscription");
 		assert_eq!(aggregate.priority, 7);
 		assert!(!aggregate.ordered);
+	}
+
+	#[test]
+	fn dropped_subscriber_leaves_no_ghost_in_aggregate() {
+		// Regression (#2351): a departed subscriber must not keep contributing its
+		// last subscription to the aggregate. When it did, a relay's linger loop
+		// never observed the track going idle, and an identical viewer reconnecting
+		// within the linger window was reset when the stale timer fired.
+		let mut producer = track_producer("test", None);
+		let a = producer.subscribe(Subscription::default().with_priority(5));
+
+		// Prime the change cursor: the aggregate currently has one subscriber.
+		let waiter = kio::Waiter::noop();
+		assert!(
+			matches!(producer.poll_subscription_changed(&waiter), Poll::Ready(Ok(Some(_)))),
+			"one live subscriber should aggregate to Some",
+		);
+
+		// The only subscriber leaves.
+		drop(a);
+
+		// The aggregate must report the drop to None, not the ghost's last value.
+		assert!(
+			matches!(producer.poll_subscription_changed(&waiter), Poll::Ready(Ok(None))),
+			"a dropped subscriber must not linger in the aggregate",
+		);
+
+		// And the snapshot used by the linger loop must agree.
+		assert!(
+			producer.subscription().is_none(),
+			"snapshot must exclude a dropped subscriber",
+		);
 	}
 
 	#[tokio::test]
