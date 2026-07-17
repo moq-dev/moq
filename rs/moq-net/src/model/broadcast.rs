@@ -548,13 +548,24 @@ impl Dynamic {
 }
 
 /// Subscribe to arbitrary broadcast/tracks.
-#[derive(Clone)]
 pub struct Consumer {
 	info: Arc<Info>,
 	state: kio::Consumer<BroadcastState>,
-	// The route epoch last yielded by `route_updated`, so each consumer clone
+	// The route epoch last yielded by `route_changed`, so each consumer clone
 	// observes the current route first and every change after it exactly once.
 	route_seen: Option<u64>,
+}
+
+impl Clone for Consumer {
+	fn clone(&self) -> Self {
+		Self {
+			info: self.info.clone(),
+			state: self.state.clone(),
+			// Reset the cursor so the clone observes the current route first,
+			// even if the original already drained `route_changed`.
+			route_seen: None,
+		}
+	}
 }
 
 impl Consumer {
@@ -918,6 +929,33 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
+	}
+
+	// Cloning a `Consumer` resets its route cursor: a clone that inherited the
+	// original's `route_seen` would skip the initial-value delivery that
+	// `route_changed` promises.
+	#[tokio::test]
+	async fn route_clone_observes_current_route() {
+		let mut producer = Info::new().produce();
+		let mut consumer = producer.consume();
+
+		// Drain the initial route, then a change.
+		consumer.route_changed().await.unwrap();
+		let route = Route::new().with_cost(7);
+		producer.set_route(route.clone()).unwrap();
+		assert_eq!(consumer.route_changed().await.unwrap(), route);
+
+		// The original is fully drained: no update pending.
+		assert!(consumer.route_changed().now_or_never().is_none());
+
+		// A clone starts fresh, yielding the current route immediately.
+		let mut clone = consumer.clone();
+		let seen = clone
+			.route_changed()
+			.now_or_never()
+			.expect("clone should observe the current route immediately")
+			.unwrap();
+		assert_eq!(seen, route);
 	}
 
 	// Cloning a `Dynamic` and dropping the clone must not flip

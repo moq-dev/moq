@@ -292,6 +292,7 @@ An ANNOUNCE_START makes the broadcast available; a subsequent ANNOUNCE_END makes
 
 A publisher SHOULD advertise only the best path it knows for each broadcast.
 If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send an ANNOUNCE_RESTART referencing the advertisement's Announce ID: the new announcement atomically replaces the prior one (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
+The first entry of the reconstructed path identifies the original publisher (see [ANNOUNCE_START](#announce-start)); a restart that preserves it is an alternate route to the same broadcast, while one that changes it replaces the broadcast entirely (see [ANNOUNCE_RESTART](#announce-restart)).
 A publisher MUST NOT keep multiple current advertisements for the same broadcast on the same stream — each broadcast has at most one current advertisement at a time, and a second ANNOUNCE_START for an already-available path is a protocol violation (use ANNOUNCE_RESTART).
 A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the advertisement with the shortest total path length (see [ANNOUNCE_START](#announce-start)).
 
@@ -335,7 +336,9 @@ A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher p
 The subscriber sends a TRACK message containing the broadcast path and track name.
 The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
 The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO and reuse it across every SUBSCRIBE and FETCH for that track rather than requesting it again.
-When the track was discovered via an announcement, the cached value is tied to that advertisement: if the broadcast is re-announced (an ANNOUNCE_RESTART that atomically replaces the prior advertisement), the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale may have changed.
+When the track was discovered via an announcement, the cached value is tied to the broadcast's original publisher, identified by the first entry of the advertisement's reconstructed path (see [ANNOUNCE_RESTART](#announce-restart)).
+A re-announce that preserves the first entry is a route change for the same broadcast, and the cached TRACK_INFO remains valid.
+If the first entry changed, the broadcast was replaced: the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale may have changed.
 If FRAME messages cannot be decoded against the cached TRACK_INFO (for example a malformed delta or payload after a missed re-announcement), the subscriber MUST reset the affected stream with a protocol violation and re-request TRACK_INFO.
 A subscriber that reached the track without an advertisement (e.g. a path known out of band) has no such invalidation signal; it MAY re-request TRACK_INFO whenever it needs to confirm freshness (for example on a new session). A stale cache only risks misparsing frames from a changed track, so the subscriber that cannot observe re-announcements SHOULD NOT cache TRACK_INFO beyond a single connection.
 
@@ -732,6 +735,7 @@ A unique identifier for each relay in the path from the origin publisher, ordere
 The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK as `Hop ID`.
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list (since that ID is no longer implicit downstream) and then send its own `Hop ID` in the ANNOUNCE_OK it sends to the downstream subscriber.
 The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`).
+The first entry of the reconstructed path (the first Hop ID, or the ANNOUNCE_OK `Hop ID` when the list is empty) identifies the original publisher of the broadcast; ANNOUNCE_RESTART uses it to distinguish a route change from a replacement (see [ANNOUNCE_RESTART](#announce-restart)).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
 
 
@@ -760,6 +764,16 @@ Announce IDs are never reused within a stream; a broadcast that is announced aga
 A publisher sends an ANNOUNCE_RESTART message to atomically replace a previously started broadcast, referencing its Announce ID.
 The advertisement is replaced in place (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
 The Hop ID list MAY differ from the original (e.g. after a relay failover or upstream restart).
+
+The first entry of the reconstructed path identifies the original publisher (see [ANNOUNCE_START](#announce-start)), and it determines what the restart means:
+
+- The first entry is unchanged: the same publisher's broadcast is reachable over a different route.
+  The broadcast's content and track properties are continuous, so cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions on the new route at a group boundary instead of resubscribing.
+- The first entry changed: a different publisher replaced the broadcast at this path.
+  The subscriber MUST treat it as a new broadcast: cached TRACK_INFO MUST be discarded, and existing subscriptions do not carry over (the group sequences and track set of the new broadcast are unrelated to the old one).
+
+The first entry only identifies the publisher, not a particular broadcast instance: a publisher that restarts its own broadcast (same path, new content) is indistinguishable from a route change.
+A future extension may add an explicit epoch to announcements to make that case detectable.
 
 ~~~
 ANNOUNCE_RESTART Message {
@@ -1111,6 +1125,7 @@ The `Message Length` describes the payload size on the wire.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
 - ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_RESTART; a second ANNOUNCE_START for an already-available path is now a protocol violation.
+- Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

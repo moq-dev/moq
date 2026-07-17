@@ -445,7 +445,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						}
 						announce::Event::Ended => {
 							tracing::debug!(broadcast = %absolute, "unannounce");
-							watched.remove(&suffix);
+							// A watched entry with `sent: None` means the peer holds no live
+							// advertisement (a route-filter retract already sent its Ended);
+							// repeating the Ended would be a spurious wire message. Pre-watch
+							// versions never populate `watched`, so they keep sending the
+							// Ended even for announces filtered above.
+							let retracted = watched.remove(&suffix).is_some_and(|entry| entry.sent.is_none());
 							stats_guards.remove(&absolute);
 							if version.has_announce_id() {
 								// Retract by id; nothing to send if the announce was filtered and
@@ -456,9 +461,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 										.publisher_announced_bytes(absolute.as_str().len() as u64);
 									stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
 								}
-							} else {
-								// Count the name length whether or not a guard is held: the Ended
-								// message is sent even for announces we filtered out above.
+							} else if !retracted {
 								stats
 									.broadcast(&absolute)
 									.publisher_announced_bytes(absolute.as_str().len() as u64);
@@ -494,18 +497,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						// peer updates its route in place instead of re-resolving.
 						(Some(hops), Some(_)) => {
 							tracing::debug!(broadcast = %absolute, "reannounce");
-							stats
-								.broadcast(&absolute)
-								.publisher_announced_bytes(absolute.as_str().len() as u64);
-							entry.sent = Some(hops.clone());
 							if version.has_announce_id() {
-								let id = *announce_ids.get(&suffix).expect("announced path without an id");
+								// The id exists for every live advertisement; a panic here would
+								// silently kill the announce loop (the peer keeps stale routes),
+								// so a bookkeeping bug degrades to a skipped restart instead.
+								let Some(id) = announce_ids.get(&suffix).copied() else {
+									debug_assert!(false, "announced path without an announce id");
+									tracing::warn!(broadcast = %absolute, "restart without an announce id; skipping");
+									continue;
+								};
+								stats
+									.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
+								entry.sent = Some(hops.clone());
 								stream
 									.writer
 									.encode(&lite::AnnounceBroadcast::Restart { id, hops })
 									.await?;
 							} else {
 								// Lite05: a duplicate ANNOUNCE for a live path is the restart.
+								stats
+									.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
+								entry.sent = Some(hops.clone());
 								stream
 									.writer
 									.encode(&lite::AnnounceBroadcast::Active { suffix, hops })

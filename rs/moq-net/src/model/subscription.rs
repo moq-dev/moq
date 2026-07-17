@@ -95,7 +95,8 @@ impl Subscription {
 	}
 }
 
-fn min_some(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+/// The lower of two optional bounds, treating `None` as unbounded.
+pub(super) fn min_some(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
 		(Some(a), None) | (None, Some(a)) => Some(a),

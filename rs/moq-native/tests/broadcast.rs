@@ -828,10 +828,11 @@ async fn broadcast_route_migration() {
 
 /// A publisher-side route change re-advertises downstream as a restart.
 ///
-/// The publisher updates its broadcast's route (a new hop chain, as if its own
-/// upstream failed over); the subscriber observes the new chain on the same
-/// broadcast handle via `route_changed`, with zero announce events and an
-/// uninterrupted subscription.
+/// The publisher updates its broadcast's route with a longer chain behind the
+/// same first hop (the original publisher, as if an intermediate relay failed
+/// over); the subscriber observes the new chain on the same broadcast handle
+/// via `route_changed`, with zero announce events and an uninterrupted
+/// subscription.
 async fn route_reannounce_test(version: Option<&str>) {
 	use moq_net::Timestamp;
 
@@ -842,6 +843,15 @@ async fn route_reannounce_test(version: Option<&str>) {
 	let mut info = moq_net::broadcast::Info::new();
 	info.origin = origin.info();
 	let mut producer = info.produce();
+	// The original publisher: the first hop of every advertised chain. Keeping
+	// it stable across the update is what makes the restart an in-place route
+	// change rather than a broadcast replacement.
+	let publisher_hop = Origin::new(0x4444).unwrap();
+	let mut initial_hops = moq_net::OriginList::new();
+	initial_hops.push(publisher_hop).unwrap();
+	producer
+		.set_route(moq_net::broadcast::Route::new().with_hops(initial_hops))
+		.expect("set initial route");
 	let mut track = producer.create_track("video", None).expect("create track");
 	{
 		let mut group = track
@@ -910,9 +920,11 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
 
-	// The publisher re-advertises with a synthetic upstream hop.
+	// The publisher re-advertises: the same original publisher, reached through
+	// a new intermediate relay.
 	let mut hops = moq_net::OriginList::new();
-	hops.push(Origin::new(0x4444).unwrap()).unwrap();
+	hops.push(publisher_hop).unwrap();
+	hops.push(Origin::new(0x5555).unwrap()).unwrap();
 	route_producer
 		.set_route(moq_net::broadcast::Route::new().with_hops(hops))
 		.expect("update route");
@@ -924,8 +936,8 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("route dropped");
 	assert_ne!(initial, updated, "route must change");
 	assert!(
-		updated.hops.iter().any(|h| h.id() == 0x4444),
-		"the new chain must carry the advertised hop"
+		updated.hops.iter().any(|h| h.id() == 0x5555),
+		"the new chain must carry the added hop"
 	);
 
 	// ...with no announce churn, and the subscription keeps flowing.
@@ -958,6 +970,129 @@ async fn broadcast_route_reannounce() {
 #[tokio::test]
 async fn broadcast_route_reannounce_lite_06() {
 	route_reannounce_test(Some("moq-lite-06-wip")).await;
+}
+
+/// A restart whose first hop changed replaces the broadcast outright.
+///
+/// The chain's first hop identifies the original publisher; advertising a
+/// different one means the path now carries different content, so the
+/// subscriber observes a real Ended + Active (a fresh broadcast) instead of an
+/// in-place route update.
+async fn route_replaced_test(version: Option<&str>) {
+	use moq_net::Timestamp;
+	use moq_net::announce::Event;
+
+	let version: Option<moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
+
+	// ── publisher (server) ──────────────────────────────────────────
+	let origin = Origin::random().produce();
+	let mut info = moq_net::broadcast::Info::new();
+	info.origin = origin.info();
+	let mut producer = info.produce();
+	let mut hops_a = moq_net::OriginList::new();
+	hops_a.push(Origin::new(0x1111).unwrap()).unwrap();
+	producer
+		.set_route(moq_net::broadcast::Route::new().with_hops(hops_a))
+		.expect("set initial route");
+	let mut track = producer.create_track("video", None).expect("create track");
+	{
+		let mut group = track
+			.create_group(moq_net::group::Info { sequence: 0 })
+			.expect("create group");
+		group.write_frame(Timestamp::ZERO, b"g0".as_ref()).expect("write frame");
+		group.finish().expect("finish group");
+	}
+	let publish = origin
+		.publish_broadcast("test", producer.consume())
+		.expect("publish broadcast");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	if let Some(v) = version {
+		server_config.version = vec![v];
+	}
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("local addr");
+
+	let mut route_producer = producer.clone();
+
+	let handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&origin).ok().await?;
+		let _producer = producer;
+		let _publish = publish;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	if let Some(v) = version {
+		client_config.version = vec![v];
+	}
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "test");
+	let broadcast = event.broadcast().expect("expected announce");
+	let mut sub = broadcast
+		.track("video")
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_stale(Duration::from_secs(10)))
+		.await
+		.expect("subscribe failed");
+	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
+
+	// A different first hop: a different original publisher took the path over.
+	let mut hops_b = moq_net::OriginList::new();
+	hops_b.push(Origin::new(0x2222).unwrap()).unwrap();
+	route_producer
+		.set_route(moq_net::broadcast::Route::new().with_hops(hops_b))
+		.expect("update route");
+
+	// The subscriber observes the swap as a real unannounce + fresh announce.
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "test");
+	assert!(matches!(event, Event::Ended), "expected the old broadcast to end");
+	let moq_net::announce::Update { path, event, .. } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "test");
+	let replacement = event.broadcast().expect("expected the replacement announce");
+
+	// The replacement is a fresh broadcast serving the same session's content.
+	let mut sub = replacement
+		.track("video")
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_stale(Duration::from_secs(10)))
+		.await
+		.expect("subscribe to the replacement failed");
+	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
+
+	drop(session);
+	handle.await.expect("server panicked").expect("server failed");
+}
+
+/// Publisher replacement on the default version (lite-05: a duplicate ANNOUNCE).
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_route_replaced() {
+	route_replaced_test(None).await;
+}
+
+/// Publisher replacement on lite-06 (an explicit ANNOUNCE_RESTART by id).
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_route_replaced_lite_06() {
+	route_replaced_test(Some("moq-lite-06-wip")).await;
 }
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────

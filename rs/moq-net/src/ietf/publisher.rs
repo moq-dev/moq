@@ -685,9 +685,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			_ => {
 				let mut announced = origin.announced();
 
-				// Send initial NAMESPACE messages for currently active namespaces
 				// Send initial NAMESPACE messages for currently active namespaces.
-				// A restart is indistinguishable from an active here (the namespace is present).
 				while let Some(crate::announce::Update { path, event, .. }) = announced.try_next() {
 					if event.broadcast().is_some() {
 						let suffix = path
