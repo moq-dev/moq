@@ -449,7 +449,7 @@ mod test {
 	use std::task::Poll;
 
 	use bytes::Bytes;
-	use hang::catalog::{Audio, AudioCodec, AudioConfig, Container, H264, Video, VideoConfig};
+	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
 
@@ -624,17 +624,9 @@ mod test {
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio0".to_string(), audio_config);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			audio: Audio {
-				renditions: audio_renditions,
-			},
-		};
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
+		catalog.audio.renditions = audio_renditions;
 
 		let msf = to_msf(&catalog);
 
@@ -684,15 +676,8 @@ mod test {
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0.m4s".to_string(), video_config);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
-		};
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
 
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];
@@ -726,15 +711,8 @@ mod test {
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0.m4s".to_string(), video_config);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
-		};
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
 
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];
@@ -766,17 +744,9 @@ mod test {
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio0".to_string(), audio_config);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			audio: Audio {
-				renditions: audio_renditions,
-			},
-		};
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
+		catalog.audio.renditions = audio_renditions;
 
 		let msf = to_msf(&catalog);
 
@@ -815,15 +785,8 @@ mod test {
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0".to_string(), video_config);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
-		};
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
 
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];
@@ -844,15 +807,8 @@ mod test {
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0".to_string(), video_config);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
-		};
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
 
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];

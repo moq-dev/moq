@@ -59,30 +59,20 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	video_config.framerate = Some(30.0);
 	video_config.container = hang::catalog::Container::Legacy;
 
-	// Create a map of video renditions
-	// Multiple renditions allow the viewer to choose based on their capabilities
-	let mut renditions = std::collections::BTreeMap::new();
-	renditions.insert(video_track.to_string(), video_config);
-
 	// Create the catalog describing our video track.
-	let catalog = hang::catalog::Catalog {
-		video: hang::catalog::Video {
-			renditions,
-			display: None,
-			rotation: None,
-			flip: None,
-		},
-		..Default::default()
-	};
+	// Multiple renditions allow the viewer to choose based on their capabilities.
+	let mut catalog = hang::catalog::Catalog::default();
+	catalog.video.insert(video_track, video_config)?;
 
 	// Publish the catalog as a "catalog.json" track in the broadcast.
 	let mut catalog_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 	let mut group = catalog_track.append_group()?;
-	group.write_frame(moq_net::Timestamp::now(), catalog.to_string()?)?;
+	group.write_frame(moq_net::Timestamp::now(), catalog.to_json()?)?;
 	group.finish()?;
 
 	// Actually create the media track now.
-	let track = broadcast.create_track(video_track, None)?;
+	// track_info() pins the microsecond timescale that the legacy container encodes with.
+	let track = broadcast.create_track(video_track, hang::container::track_info())?;
 
 	Ok(track)
 }

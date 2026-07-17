@@ -179,7 +179,7 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.lock().video.insert("video", video).unwrap();
 
-		let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+		let info = hang::container::track_info();
 		let mut track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
@@ -199,7 +199,7 @@ mod tests {
 						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
 						payload,
 					};
-					frame.encode(&mut group).unwrap();
+					frame.write_to(&mut group).unwrap();
 				}
 			}
 			group.finish().unwrap();
@@ -232,7 +232,7 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.lock().video.insert("video", video).unwrap();
 
-		let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+		let info = hang::container::track_info();
 		let mut track = broadcast.create_track("video", info).unwrap();
 
 		let source = Source {
@@ -264,7 +264,7 @@ mod tests {
 							timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
 							payload,
 						};
-						frame.encode(&mut group).unwrap();
+						frame.write_to(&mut group).unwrap();
 					}
 				}
 				group.finish().unwrap();

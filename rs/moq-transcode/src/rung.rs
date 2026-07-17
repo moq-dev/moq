@@ -76,7 +76,7 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.dynamic();
-	let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+	let info = hang::container::track_info();
 	let mut producer = request.accept(info);
 
 	let result = tokio::select! {
@@ -351,7 +351,7 @@ async fn transcode_group_inner(
 fn write(output: &mut moq_net::group::Producer, packets: Vec<(moq_net::Timestamp, Bytes)>) -> Result<(), Error> {
 	for (timestamp, payload) in packets {
 		let frame = hang::container::Frame { timestamp, payload };
-		frame.encode(output)?;
+		frame.write_to(output)?;
 	}
 	Ok(())
 }

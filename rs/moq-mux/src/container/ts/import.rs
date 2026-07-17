@@ -642,10 +642,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
-	let track = broadcast.unique_track(
-		".ts",
-		moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-	)?;
+	let track = broadcast.unique_track(".ts", hang::container::track_info())?;
 
 	let mut guard = catalog.lock();
 	let Some(mpegts) = guard.mpegts_mut() else {
