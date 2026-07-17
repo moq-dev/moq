@@ -86,6 +86,7 @@ struct moq_source {
 	bool reconnect_in_progress;       // True while reconnect is happening
 	int32_t origin;
 	int32_t session;
+	int32_t request;
 	int32_t consume;
 	int32_t catalog_handle;
 	int32_t video_track;
@@ -140,6 +141,16 @@ struct subscription_ref {
 	subscription_ref(const subscription_ref &) = delete;
 	subscription_ref &operator=(const subscription_ref &) = delete;
 };
+
+// user_data for a single moq_origin_request. The generation must travel with the
+// request rather than live on ctx: a reconnect can issue a new request while an
+// older one still has a delivery in flight, and a single slot on ctx would let
+// that stale delivery read the new generation and pass the staleness check.
+// Allocated before the request exists and freed by its terminal on_broadcast.
+struct broadcast_request {
+	struct moq_source *ctx;
+	uint32_t gen;
+};
 } // namespace
 
 // Forward declarations
@@ -150,6 +161,7 @@ static void moq_source_get_defaults(obs_data_t *settings);
 
 // MoQ callbacks
 static void on_session_status(void *user_data, int32_t code);
+static void on_broadcast(void *user_data, int32_t broadcast);
 static void on_catalog(void *user_data, int32_t catalog);
 static void on_video_frame(void *user_data, int32_t frame_id);
 
@@ -179,6 +191,7 @@ static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
 	ctx->reconnect_in_progress = false;
 	ctx->origin = -1;
 	ctx->session = -1;
+	ctx->request = -1;
 	ctx->consume = -1;
 	ctx->catalog_handle = -1;
 	ctx->video_track = -1;
@@ -635,6 +648,32 @@ static void moq_source_reconnect(struct moq_source *ctx)
 	pthread_mutex_unlock(&ctx->mutex);
 }
 
+// Tear down the consume-path handles after a failure to reach playable media,
+// leaving the source disconnected so the next update/reconnect starts clean.
+//
+// NOTE: Caller must hold ctx->mutex when calling this function.
+static void moq_source_abort_consume_locked(struct moq_source *ctx, uint32_t expected_gen)
+{
+	// A newer generation already owns these handles; leave them alone.
+	if (ctx->generation != expected_gen)
+		return;
+
+	if (ctx->consume >= 0) {
+		moq_consume_close(ctx->consume);
+		ctx->consume = -1;
+	}
+
+	if (ctx->session >= 0) {
+		moq_session_close(ctx->session);
+		ctx->session = -1;
+	}
+
+	if (ctx->origin >= 0) {
+		moq_origin_close(ctx->origin);
+		ctx->origin = -1;
+	}
+}
+
 // Called after session is connected successfully
 static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_gen)
 {
@@ -648,73 +687,121 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 	// Capture values while holding mutex
 	int32_t origin = ctx->origin;
 	char *broadcast_copy = bstrdup(ctx->broadcast);
+
+	// Pre-account for the request before handing ctx to libmoq, so its reference
+	// is in place the instant the request exists (see the note on
+	// subscription_ref). Undone below only if creation fails.
+	ctx->refs++;
 	pthread_mutex_unlock(&ctx->mutex);
 
-	// Consume broadcast by path
-	int32_t consume = moq_origin_consume(origin, broadcast_copy, strlen(broadcast_copy));
-	if (consume < 0) {
-		LOG_ERROR("Failed to consume broadcast '%s': %d", broadcast_copy, consume);
+	struct broadcast_request *req = (struct broadcast_request *)bzalloc(sizeof(struct broadcast_request));
+	req->ctx = ctx;
+	req->gen = expected_gen;
+
+	// Resolve the broadcast by path against what is announced now plus any
+	// dynamic fallback, failing if neither can serve it. libmoq copies the path,
+	// so it need not outlive this call, and delivers the broadcast handle
+	// asynchronously to on_broadcast.
+	int32_t request = moq_origin_request(origin, broadcast_copy, strlen(broadcast_copy), on_broadcast, req);
+	if (request < 0) {
+		LOG_ERROR("Failed to request broadcast '%s': %d", broadcast_copy, request);
 		bfree(broadcast_copy);
-		// Failed to consume - clean up session/origin
+		// No request was created, so no terminal will fire to free either of these.
+		bfree(req);
 		pthread_mutex_lock(&ctx->mutex);
-		if (ctx->generation == expected_gen) {
-			if (ctx->session >= 0) {
-				moq_session_close(ctx->session);
-				ctx->session = -1;
-			}
-			if (ctx->origin >= 0) {
-				moq_origin_close(ctx->origin);
-				ctx->origin = -1;
-			}
-		}
+		if (--ctx->refs == 0)
+			pthread_cond_broadcast(&ctx->refs_zero);
+		moq_source_abort_consume_locked(ctx, expected_gen);
 		pthread_mutex_unlock(&ctx->mutex);
 		moq_source_blank_video(ctx);
 		return;
 	}
 
+	LOG_INFO("Requesting broadcast: %s", broadcast_copy);
+	bfree(broadcast_copy);
+
+	// The request now exists and will deliver a terminal on_broadcast (<= 0) that
+	// releases the reference added above. Store the handle so disconnect can
+	// close it, which makes that terminal fire promptly.
 	pthread_mutex_lock(&ctx->mutex);
-	// Verify generation hasn't changed while we were waiting
-	if (ctx->generation != expected_gen) {
+	if (ctx->generation == expected_gen && !ctx->shutting_down.load()) {
+		ctx->request = request;
 		pthread_mutex_unlock(&ctx->mutex);
-		LOG_INFO("Generation changed during consume setup, cleaning up");
-		moq_consume_close(consume);
-		bfree(broadcast_copy);
+	} else {
+		// Stale or shutting down: close it; its terminal releases the reference.
+		pthread_mutex_unlock(&ctx->mutex);
+		moq_origin_request_close(request);
+	}
+}
+
+// Receives the broadcast resolved by moq_origin_request: a positive handle once
+// served, then exactly once more with a terminal code (0 = finished, including
+// after moq_origin_request_close; < 0 = could not be served). The terminal is the
+// last touch of user_data, so it both frees the request context and releases the
+// request's lifetime reference via subscription_ref.
+static void on_broadcast(void *user_data, int32_t broadcast)
+{
+	struct broadcast_request *req = (struct broadcast_request *)user_data;
+	struct moq_source *ctx = req->ctx;
+	uint32_t expected_gen = req->gen;
+
+	// Hold the request's reference for the callback's lifetime; release it when
+	// this is the terminal callback (broadcast <= 0).
+	subscription_ref ref(ctx, broadcast <= 0);
+
+	// The terminal is libmoq's last touch of user_data, so the request context
+	// dies with it. Everything below reads the copies taken above instead.
+	if (broadcast <= 0)
+		bfree(req);
+
+	pthread_mutex_lock(&ctx->mutex);
+
+	// A terminated request must not be closed again: drop the handle, but only
+	// while this generation still owns it.
+	if (broadcast <= 0 && ctx->generation == expected_gen)
+		ctx->request = -1;
+
+	if (ctx->shutting_down.load() || ctx->generation != expected_gen) {
+		pthread_mutex_unlock(&ctx->mutex);
+		// A delivered handle is ours even when we no longer want it.
+		if (broadcast > 0)
+			moq_consume_close(broadcast);
+		LOG_INFO("Skipping stale broadcast (generation mismatch or shutting down)");
 		return;
 	}
-	ctx->consume = consume;
-	pthread_mutex_unlock(&ctx->mutex);
+
+	if (broadcast == 0) {
+		// We closed the request (disconnect/reconnect/destroy); nothing to do.
+		pthread_mutex_unlock(&ctx->mutex);
+		LOG_DEBUG("Broadcast request finished (generation %u)", expected_gen);
+		return;
+	}
+
+	if (broadcast < 0) {
+		LOG_ERROR("Failed to resolve broadcast '%s': %d", ctx->broadcast, broadcast);
+		moq_source_abort_consume_locked(ctx, expected_gen);
+		pthread_mutex_unlock(&ctx->mutex);
+		moq_source_blank_video(ctx);
+		return;
+	}
+
+	ctx->consume = broadcast;
 
 	// Pre-account for the catalog subscription before handing ctx to libmoq, so
 	// its reference is in place the instant the subscription exists (see the
 	// note on subscription_ref). Undone below only if creation fails.
-	pthread_mutex_lock(&ctx->mutex);
 	ctx->refs++;
 	pthread_mutex_unlock(&ctx->mutex);
 
 	// Subscribe to catalog updates
-	int32_t catalog_handle = moq_consume_catalog(consume, on_catalog, ctx);
+	int32_t catalog_handle = moq_consume_catalog(broadcast, on_catalog, ctx);
 	if (catalog_handle < 0) {
-		LOG_ERROR("Failed to subscribe to catalog for '%s': %d", broadcast_copy, catalog_handle);
-		bfree(broadcast_copy);
-		// Failed to get catalog - clean up
+		LOG_ERROR("Failed to subscribe to catalog: %d", catalog_handle);
 		pthread_mutex_lock(&ctx->mutex);
 		// No subscription was created, so no terminal will fire; undo the ref.
 		if (--ctx->refs == 0)
 			pthread_cond_broadcast(&ctx->refs_zero);
-		if (ctx->generation == expected_gen) {
-			if (ctx->consume >= 0) {
-				moq_consume_close(ctx->consume);
-				ctx->consume = -1;
-			}
-			if (ctx->session >= 0) {
-				moq_session_close(ctx->session);
-				ctx->session = -1;
-			}
-			if (ctx->origin >= 0) {
-				moq_origin_close(ctx->origin);
-				ctx->origin = -1;
-			}
-		}
+		moq_source_abort_consume_locked(ctx, expected_gen);
 		pthread_mutex_unlock(&ctx->mutex);
 		moq_source_blank_video(ctx);
 		return;
@@ -728,15 +815,13 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 	pthread_mutex_lock(&ctx->mutex);
 	if (ctx->generation == expected_gen && !ctx->shutting_down.load()) {
 		ctx->catalog_handle = catalog_handle;
+		LOG_INFO("Consuming broadcast: %s", ctx->broadcast);
 		pthread_mutex_unlock(&ctx->mutex);
 	} else {
 		// Stale or shutting down: close it; its terminal releases the reference.
 		pthread_mutex_unlock(&ctx->mutex);
 		moq_consume_catalog_close(catalog_handle);
 	}
-
-	LOG_INFO("Consuming broadcast: %s", broadcast_copy);
-	bfree(broadcast_copy);
 }
 
 // NOTE: Caller must hold ctx->mutex when calling this function.
@@ -756,6 +841,13 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 	if (ctx->catalog_handle >= 0) {
 		moq_consume_catalog_close(ctx->catalog_handle);
 		ctx->catalog_handle = -1;
+	}
+
+	// An unresolved request still owes a terminal on_broadcast; closing it makes
+	// that fire (with 0) instead of leaving it pending until the source dies.
+	if (ctx->request >= 0) {
+		moq_origin_request_close(ctx->request);
+		ctx->request = -1;
 	}
 
 	if (ctx->consume >= 0) {
