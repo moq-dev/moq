@@ -11,6 +11,7 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
+import { unlockOnGesture } from "./unlock";
 
 export type DecoderInput = {
 	// Enable to download the audio track.
@@ -172,11 +173,15 @@ export class Decoder {
 	}
 
 	#runEnabled(effect: Effect): void {
-		const values = effect.getAll([this.in.enabled, this.#out.context]);
-		if (!values) return;
-		const [_, context] = values;
+		const enabled = effect.get(this.in.enabled);
+		if (!enabled) return;
 
-		context.resume();
+		const context = effect.get(this.#out.context);
+		if (!context) return;
+
+		// The context is built at page load (see #runWorklet), before any user gesture, so it
+		// must be started from a real interaction. See unlockOnGesture.
+		unlockOnGesture(effect, context);
 
 		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
 	}
