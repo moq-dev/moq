@@ -43,9 +43,8 @@ pub fn start<S: web_transport_trait::Session>(
 					session.close(err.to_code(), "setup stream required");
 					return Err(err);
 				};
-				let (tx, rx) = futures::channel::mpsc::unbounded();
 				let control = Control::new(request_id_max, client);
-				let adapter = ControlStreamAdapter::new(session.clone(), tx, control.clone(), version);
+				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
 				let (tasks, task_set) = TaskSet::new();
@@ -57,7 +56,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); the task set draining is the one clean exit.
-				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer, rx)));
+				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer)));
 				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), version)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
