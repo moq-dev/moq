@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { authorize, type Claims } from "./claims.ts";
+import { authorize, type Claims, ClaimsSchema } from "./claims.ts";
 
 // These cases mirror the Rust moq-token crate's claims::tests one-for-one, so both
 // sides stay pinned to the same authorization semantics.
@@ -7,6 +7,18 @@ import { authorize, type Claims } from "./claims.ts";
 function claims(root: string, get: string[], put: string[]): Claims {
 	return { root, get, put };
 }
+
+test("claims granting nothing are rejected, matching Rust's useless-token rule", () => {
+	// An empty list grants nothing, so the Rust crate refuses to verify such a token
+	// ("no publish or subscribe allowed; token is useless"). Presence alone is not enough.
+	expect(() => ClaimsSchema.parse({ root: "demo", put: [] })).toThrow();
+	expect(() => ClaimsSchema.parse({ root: "demo", put: [], get: [] })).toThrow();
+	expect(() => ClaimsSchema.parse({ root: "demo" })).toThrow();
+
+	// A grant of "" is the root itself, which is a real grant.
+	expect(ClaimsSchema.parse({ root: "demo", put: [""] }).put).toEqual([""]);
+	expect(ClaimsSchema.parse({ root: "demo", get: "" }).get).toBe("");
+});
 
 test("authorize - path equals root", () => {
 	const permissions = authorize(claims("room/123", [""], ["alice"]), "room/123");

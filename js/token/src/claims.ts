@@ -7,6 +7,12 @@
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
 
+/** A `put`/`get` claim is one path or many; normalize it to a list. */
+function list(claim: string | string[] | undefined): string[] {
+	if (claim === undefined) return [];
+	return typeof claim === "string" ? [claim] : claim;
+}
+
 /**
  * The JWT claims structure for moq-token.
  *
@@ -27,8 +33,11 @@ export const ClaimsSchema = z
 		iat: z.optional(z.number()),
 	})
 	.check(
-		z.refine((data) => data.put !== undefined || data.get !== undefined, {
-			message: "Either put or get must be specified",
+		// Emptiness, not just presence: `put: []` grants nothing, and the Rust crate
+		// rejects such a token as useless. Checking `!== undefined` here would mint
+		// tokens that Rust then refuses to verify.
+		z.refine((data) => list(data.put).length > 0 || list(data.get).length > 0, {
+			message: "Either put or get must grant at least one path",
 		}),
 	);
 
@@ -49,12 +58,6 @@ export interface Permissions {
 	subscribe: string[];
 	/** Paths the holder may publish to, relative to the authorized path. */
 	publish: string[];
-}
-
-/** A `put`/`get` claim is one path or many; normalize it to a list. */
-function list(claim: string | string[] | undefined): string[] {
-	if (claim === undefined) return [];
-	return typeof claim === "string" ? [claim] : claim;
 }
 
 /**
