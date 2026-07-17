@@ -125,8 +125,8 @@ fn consumer_churn_does_not_wake_value_or_closed() {
 	assert!(matches!(value_fut.as_mut().poll(&mut value_cx), Poll::Pending));
 	assert!(matches!(closed_fut.as_mut().poll(&mut closed_cx), Poll::Pending));
 
-	// A real value change still wakes the value waiter. `wait` now hands back a
-	// writable `Mut` on success, so just match `Ok(_)`.
+	// A real value change still wakes the value waiter. `wait` hands back a writable
+	// `Mut` on success, so just match `Ok(_)`.
 	*producer.write().ok().expect("open") = 99;
 	assert!(value_waker.count() >= 1, "value change did not wake the value waiter");
 	assert!(matches!(value_fut.as_mut().poll(&mut value_cx), Poll::Ready(Ok(_))));

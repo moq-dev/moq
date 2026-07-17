@@ -838,23 +838,22 @@ impl Producer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
+		self.abort_reason()
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
+	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
@@ -1266,23 +1265,22 @@ impl Demand {
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
+		self.abort_reason()
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
+	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
@@ -1437,7 +1435,7 @@ impl Subscribing {
 	}
 }
 
-impl kio::Future for Subscribing {
+impl kio::Pollable for Subscribing {
 	type Output = Result<Subscriber>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1460,7 +1458,7 @@ impl Querying {
 	}
 }
 
-impl kio::Future for Querying {
+impl kio::Pollable for Querying {
 	type Output = Result<Info>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1561,7 +1559,7 @@ pub struct Fetching {
 	result: Option<kio::Consumer<FetchOutcome>>,
 }
 
-impl kio::Future for Fetching {
+impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -3206,10 +3204,10 @@ mod test {
 
 		// A cache miss isn't in `peek_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
-		// wrapper to the inner `Fetching` (a `kio::Future`).
+		// wrapper to the inner `Fetching` (a `kio::Pollable`).
 		assert!(consumer.peek_group(5).is_none());
 		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -3308,7 +3306,7 @@ mod test {
 		// carrying the higher of the two priorities.
 		let first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
 		let second = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Future::poll(&*first, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -3357,7 +3355,7 @@ mod test {
 
 		// The rejected attempt is gone: a retry starts a fresh one.
 		let retry = consumer.fetch_group(5, None);
-		assert!(kio::Future::poll(&*retry, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*retry, &kio::Waiter::noop()).is_pending());
 		let req = dynamic
 			.requested_group()
 			.now_or_never()
@@ -3374,7 +3372,7 @@ mod test {
 
 		// Queued but never popped: the last handler leaving fails it fast.
 		let pending = consumer.fetch_group(5, None);
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 		drop(dynamic);
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
@@ -3644,7 +3642,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(3, None);
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());

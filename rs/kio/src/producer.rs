@@ -4,7 +4,7 @@ use std::{
 	task::Poll,
 };
 
-use crate::{Counts, State, consumer::Consumer, lock::*, waiter::*, weak::ProducerWeak};
+use crate::{Closed, Counts, State, consumer::Consumer, lock::*, waiter::*, weak::ProducerWeak};
 
 /// The producing side of a shared state channel.
 ///
@@ -131,13 +131,17 @@ impl<T> Producer<T> {
 
 	/// Wait until the read-only predicate holds, then acquire write access.
 	///
-	/// The async sibling of [`poll`](Self::poll): returns `Ok(Mut)` once `f`
-	/// returns [`Poll::Ready`], or `Err(Ref)` if the channel closes first.
-	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Ref<'_, T>>
+	/// The async sibling of [`poll`](Self::poll): returns `Ok(Mut)` once `f` returns
+	/// [`Poll::Ready`], or [`Closed`] if the channel closes first. The `Ok` guard is the
+	/// write access you asked for, so it's yours to hold; the `Err` case hands back no
+	/// guard at all. Call [`read`](Self::read) if you need the final state.
+	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Closed>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
 	{
-		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
+		// The `Ref` is dropped here inside the closure, releasing the lock before the
+		// caller ever sees the error.
+		crate::wait(move |waiter| self.poll(waiter, &mut f).map(|res| res.map_err(|_| Closed))).await
 	}
 
 	/// Wait until the channel is closed.
@@ -159,11 +163,11 @@ impl<T> Producer<T> {
 
 	/// Wait until all consumers have been dropped.
 	///
-	/// Returns `Ok(())` when no consumers remain, or `Err(Ref)` if the channel closes first.
-	pub async fn unused(&self) -> Result<(), Ref<'_, T>> {
+	/// Returns `Ok(())` when no consumers remain, or [`Closed`] if the channel closes first.
+	pub async fn unused(&self) -> Result<(), Closed> {
 		match crate::wait(move |waiter| self.poll_unused(waiter)).await {
 			Some(()) => Ok(()),
-			None => Err(self.read()),
+			None => Err(Closed),
 		}
 	}
 
@@ -192,11 +196,11 @@ impl<T> Producer<T> {
 
 	/// Wait until at least one consumer exists.
 	///
-	/// Returns `Ok(())` when a consumer is created, or `Err(Ref)` if the channel closes first.
-	pub async fn used(&self) -> Result<(), Ref<'_, T>> {
+	/// Returns `Ok(())` when a consumer is created, or [`Closed`] if the channel closes first.
+	pub async fn used(&self) -> Result<(), Closed> {
 		match crate::wait(move |waiter| self.poll_used(waiter)).await {
 			Some(()) => Ok(()),
-			None => Err(self.read()),
+			None => Err(Closed),
 		}
 	}
 

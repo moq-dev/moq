@@ -3,7 +3,7 @@ use std::{
 	task::Poll,
 };
 
-use crate::{Counts, State, lock::*, producer::Ref, waiter::*, weak::ConsumerWeak};
+use crate::{Closed, Counts, State, lock::*, producer::Ref, waiter::*, weak::ConsumerWeak};
 
 /// The consuming side of a shared state channel.
 ///
@@ -59,14 +59,18 @@ impl<T> Consumer<T> {
 
 	/// Wait for the closure to return [`Poll::Ready`], re-polling on each state change.
 	///
-	/// Returns `Ok(R)` when the closure returns [`Poll::Ready`], or `Err(Ref)` with
-	/// read-only access to the final state if the channel closes first.
-	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Ref<'_, T>>
+	/// Returns `Ok(R)` when the closure returns [`Poll::Ready`], or [`Closed`] if the
+	/// channel closes first. Unlike [`poll`](Self::poll) this hands back no [`Ref`], so
+	/// no lock guard can be held across a later `.await`; call [`read`](Self::read) if
+	/// you need the final state.
+	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Closed>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<R> + Unpin,
 		R: Unpin,
 	{
-		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
+		// The `Ref` is dropped here inside the closure, releasing the lock before the
+		// caller ever sees the result.
+		crate::wait(move |waiter| self.poll(waiter, &mut f).map(|res| res.map_err(|_| Closed))).await
 	}
 
 	/// Wait until the channel is closed.
@@ -132,5 +136,34 @@ impl<T> Clone for Consumer<T> {
 			state: self.state.clone(),
 			counts: self.counts.clone(),
 		}
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use crate::{Closed, Producer};
+	use std::task::Poll;
+
+	/// `wait` reports closure as a plain [`Closed`], holding no lock once it returns:
+	/// the caller can bind the error, `.await` again, and still reach the final state.
+	#[tokio::test]
+	async fn wait_reports_closure_without_holding_the_lock() {
+		let producer = Producer::new(0u32);
+		let consumer = producer.consume();
+
+		// Never satisfied, so the wait can only end via closure.
+		let never = |v: &crate::Ref<'_, u32>| if **v == 99 { Poll::Ready(()) } else { Poll::Pending };
+
+		producer.close().ok().expect("open");
+
+		let err = consumer.wait(never).await.expect_err("closed");
+		assert_eq!(err, Closed);
+
+		// Awaiting while the error is still bound would deadlock if `Err` carried a
+		// guard. The final state stays reachable through `read()`.
+		tokio::task::yield_now().await;
+		assert_eq!(err, Closed);
+		assert_eq!(*consumer.read(), 0);
+		assert!(consumer.is_closed());
 	}
 }

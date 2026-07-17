@@ -410,15 +410,17 @@ impl Producer {
 	/// Block until the group is closed or aborted.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.abort_reason()
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
+	fn abort_reason(&self) -> Error {
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
 

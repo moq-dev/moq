@@ -1305,7 +1305,7 @@ impl Requesting {
 	}
 }
 
-impl kio::Future for Requesting {
+impl kio::Pollable for Requesting {
 	type Output = Result<broadcast::Consumer, Error>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
