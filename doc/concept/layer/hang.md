@@ -28,7 +28,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
         "description": "0164001fffe100196764001fac2484014016ec0440000003004000000c23c60c9201000568ee32c8b0",
         "codedWidth": 1280,
         "codedHeight": 720,
-        "container": "legacy"
+        "container": { "kind": "legacy" }
       }
     }
   },
@@ -39,7 +39,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
         "sampleRate": 44100,
         "numberOfChannels": 2,
         "bitrate": 283637,
-        "container": "legacy"
+        "container": { "kind": "legacy" }
       }
     }
   }

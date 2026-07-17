@@ -264,7 +264,7 @@ mod tests {
 	use moq_net::Timestamp;
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
-	/// born from their broadcast (no public `TrackProducer::new`).
+	/// born from their broadcast (no public `track::Producer::new`).
 	fn track_producer(
 		name: impl Into<std::sync::Arc<str>>,
 		info: impl Into<Option<moq_net::track::Info>>,

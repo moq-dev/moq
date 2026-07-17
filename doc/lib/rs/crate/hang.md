@@ -112,7 +112,7 @@ Groups are aligned with natural boundaries:
 - Usually 1 second of audio
 - Independent decoding
 
-See the [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) for grouping with `OrderedProducer`.
+See the [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) for grouping with `moq_mux::container::Producer`.
 
 ## Prioritization
 
@@ -126,7 +126,7 @@ This is handled automatically based on frame metadata.
 
 ## CLI Tool
 
-The `moq-cli` package provides a command-line tool (binary name: `moq-cli`):
+The `moq-cli` package provides a command-line tool (binary name: `moq`):
 
 ```bash
 # Install
