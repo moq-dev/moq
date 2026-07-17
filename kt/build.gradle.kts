@@ -7,10 +7,18 @@
 // their own version. Declaring them once at the root with `apply false` puts
 // them on one shared classpath; the modules then request them by id alone and
 // choose whether to apply.
+//
+// The Android plugin has to be declared here too, even though its version is
+// pinned in settings.gradle.kts. Once Kotlin resolves from the root classloader,
+// AGP declared only in a module lands on a child one that Kotlin can't see, and
+// applying it fails with "Can't infer current AndroidGradlePluginVersion". Only
+// the Android-enabled build hits that, so it fails in CI but not a default local
+// `just kt check`.
 
 plugins {
     kotlin("multiplatform") version "2.0.21" apply false
     kotlin("plugin.serialization") version "2.0.21" apply false
+    id("com.android.library") apply false
     id("com.vanniktech.maven.publish") version "0.30.0" apply false
 }
 
