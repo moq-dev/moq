@@ -6,6 +6,27 @@ import { Producer as TrackProducer } from "./track.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+test("used reflects subscriber demand and unused resolves when the last one leaves", async () => {
+	const producer = new TrackProducer("test");
+
+	// No subscribers: no demand.
+	expect(producer.used.peek()).toBe(false);
+
+	const a = producer.subscribe();
+	const b = producer.subscribe();
+	expect(producer.used.peek()).toBe(true);
+
+	// Closing one of two keeps demand, so unused() stays pending.
+	a.close();
+	expect(producer.used.peek()).toBe(true);
+
+	// Closing the last subscriber drops demand; unused() resolves. The consumer wire awaits this
+	// to tear an idle upstream down.
+	b.close();
+	await producer.unused();
+	expect(producer.used.peek()).toBe(false);
+});
+
 test("appendDatagram shares the group sequence counter", () => {
 	const producer = new TrackProducer("test");
 	const ts = Timestamp.fromMillis(10);

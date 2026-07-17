@@ -500,6 +500,54 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	server.close();
 }
 
+async function waitUntil(predicate: () => boolean): Promise<void> {
+	for (let i = 0; i < 200; i++) {
+		if (predicate()) return;
+		await sleep(5);
+	}
+	throw new Error("condition not met within timeout");
+}
+
+// Closing the last subscriber to a track tears the wire subscription down, so the publisher stops
+// serving it (the muted-watch-tile case in #2355) instead of sending groups to a reader that left.
+async function runSubscriberTeardown(protocol: string, version?: number) {
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, version !== undefined ? { version } : undefined),
+	]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const video = broadcast.createTrack("video");
+	video.writeString("hello");
+
+	const remote = client.consume(Path.from("test"));
+	const sub = remote.track("video").subscribe();
+	expect(await sub.readString()).toBe("hello");
+
+	// The publisher now has a live downstream reader for the track.
+	await waitUntil(() => video.used.peek());
+
+	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
+	// publisher rather than the relay serving groups to nobody.
+	sub.close();
+	await waitUntil(() => !video.used.peek());
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+}
+
+test("integration: lite subscriber teardown on last unsubscribe", async () => {
+	await runSubscriberTeardown(Lite.ALPN_06_WIP);
+});
+
+test("integration: ietf subscriber teardown on last unsubscribe", async () => {
+	await runSubscriberTeardown(Ietf.ALPN.DRAFT_17);
+});
+
 test("integration: lite consume dedup", async () => {
 	await runConsumeDedup(Lite.ALPN_05);
 });

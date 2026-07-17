@@ -280,8 +280,19 @@ export class Subscriber {
 		}
 
 		try {
-			// Wait for stream close (= PublishDone) or track close (= local unsubscribe)
-			await Promise.race([stream.reader.closed, producer.closed]);
+			// Terminal conditions settle at most once (stream close = PublishDone, track close =
+			// local unsubscribe); race them once so the demand loop doesn't re-subscribe each pass.
+			const done = Promise.race([stream.reader.closed, producer.closed]);
+
+			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
+			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
+			// down resumes on the same stream.
+			const idle = Symbol("idle");
+			for (;;) {
+				const reason = await Promise.race([done, producer.unused().then(() => idle)]);
+				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
+				break;
+			}
 
 			// For v14-v16: send Unsubscribe before closing (removed in v17+)
 			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {

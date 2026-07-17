@@ -250,6 +250,10 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
+	// Whether any subscriber is currently attached. Exposed as {@link used}; the consumer wire
+	// watches it to tear down an idle upstream, and a publisher can watch it for on-demand capture.
+	#used = new Signal<boolean>(false);
+
 	constructor(name: string) {
 		this.name = name;
 	}
@@ -294,6 +298,24 @@ export class Producer {
 		return makeSubscriber(this.name, sink);
 	}
 
+	/**
+	 * Whether the track currently has any subscribers.
+	 *
+	 * Watch it (`effect.get` / `.peek()`) to drive on-demand work: a publisher can start and stop
+	 * capture with demand, and the consumer wire watches it to tear an idle upstream subscription
+	 * down instead of downloading to nobody. Pairs with {@link unused}. Mirrors the Rust `Demand`.
+	 */
+	get used(): Getter<boolean> {
+		return this.#used;
+	}
+
+	/** Resolves once the track has no subscribers (or has closed). Await it to react to demand ending. */
+	async unused(): Promise<void> {
+		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
+			await Signal.race(this.#used, this.#state.closed);
+		}
+	}
+
 	// Register a downstream sink: seed its info, replay the retained window, and (while
 	// the track is open) mirror future groups into it. A late subscriber to a closed
 	// track still drains the buffered groups before seeing the end.
@@ -304,6 +326,7 @@ export class Producer {
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
 			this.#sinks.add(sink);
+			this.#used.set(true);
 
 			// Forward subscription updates from the sink's Subscriber to the producer's own
 			// state, which the wire layer (or the serving application) watches.
@@ -329,6 +352,10 @@ export class Producer {
 				}
 				for (const group of sink.groups.peek()) group.close(abort);
 				dispose();
+
+				// Update demand: once the last subscriber leaves, the consumer wire (watching
+				// {@link unused}) tears the upstream down instead of downloading to nobody.
+				this.#used.set(this.#sinks.size > 0);
 			});
 		}
 
