@@ -88,35 +88,12 @@ export class File {
 
 		effect.cleanup(() => URL.revokeObjectURL(url));
 
-		const canvas = document.createElement("canvas");
-		canvas.width = img.width;
-		canvas.height = img.height;
-		const ctx = canvas.getContext("2d");
-
-		if (!ctx) {
-			throw new Error("Failed to create 2D canvas context");
-		}
-
-		const interval = setInterval(() => {
-			ctx.drawImage(img, 0, 0);
-		}, 1000 / 30);
-
-		effect.cleanup(() => clearInterval(interval));
-
-		const stream = canvas.captureStream(30);
-		const videoTrack = stream.getVideoTracks()[0];
-
-		if (!videoTrack) {
-			throw new Error("Failed to capture video track from canvas stream");
-		}
-
-		effect.set(this.#out.source, { video: videoTrack as VideoStreamTrack }, {});
+		const videoTrack = this.#captureCanvas(img, img.width, img.height, effect);
+		effect.set(this.#out.source, { video: videoTrack }, {});
 	}
 
 	async #decodeMedia(file: globalThis.File, effect: Effect) {
-		const video = document.createElement("video") as HTMLVideoElement & {
-			captureStream(): MediaStream;
-		};
+		const video = document.createElement("video");
 
 		const url = URL.createObjectURL(file);
 		video.src = url;
@@ -125,7 +102,7 @@ export class File {
 
 		await new Promise<void>((resolve, reject) => {
 			video.onloadedmetadata = () => resolve();
-			video.onerror = () => reject(new Error("Failed to load video"));
+			video.onerror = () => reject(new Error(`Failed to load file: ${file.name}`));
 		});
 
 		await video.play();
@@ -135,25 +112,76 @@ export class File {
 			URL.revokeObjectURL(url);
 		});
 
-		const stream = video.captureStream();
-		const videoTrack = stream.getVideoTracks()[0];
-		const audioTrack = stream.getAudioTracks()[0];
+		// Chrome and Firefox can pull live tracks (video and audio) straight off the media element.
+		if (supportsCaptureStream(video)) {
+			const stream = video.captureStream();
+			const videoTrack = stream.getVideoTracks()[0];
+			const audioTrack = stream.getAudioTracks()[0];
 
-		if (!videoTrack && !audioTrack) {
-			throw new Error("Failed to capture any tracks from video element");
+			if (!videoTrack && !audioTrack) {
+				throw new Error("Failed to capture any tracks from file");
+			}
+
+			effect.set(
+				this.#out.source,
+				{
+					video: videoTrack as VideoStreamTrack | undefined,
+					audio: audioTrack ? { track: audioTrack as Audio.StreamTrack, kind: "auto" } : undefined,
+				},
+				{},
+			);
+			return;
 		}
-		effect.set(
-			this.#out.source,
-			{
-				video: videoTrack as VideoStreamTrack,
-				audio: audioTrack ? { track: audioTrack as Audio.StreamTrack, kind: "auto" } : undefined,
-			},
-			{},
-		);
+
+		// WebKit (Safari) doesn't implement HTMLMediaElement.captureStream, so sample the decoded
+		// frames onto a canvas instead (canvas.captureStream is supported everywhere). Audio can't
+		// come along: WebKit only exposes a media element's audio via the Web Audio API, and only
+		// once a microphone permission is granted. So a video file publishes video-only, while an
+		// audio-only file has nothing to fall back to and fails with a clear message.
+		if (video.videoWidth === 0 || video.videoHeight === 0) {
+			throw new Error(
+				`Cannot publish "${file.name}": this browser can't capture audio from files, and this file has no video.`,
+			);
+		}
+
+		console.warn(`Publishing "${file.name}" without audio: this browser can't capture audio from files.`);
+
+		const videoTrack = this.#captureCanvas(video, video.videoWidth, video.videoHeight, effect);
+		effect.set(this.#out.source, { video: videoTrack }, {});
+	}
+
+	// Sample a drawable source onto a canvas at 30fps and return the captured video track. We route
+	// through a canvas because canvas.captureStream is implemented everywhere, unlike the media-element
+	// variant WebKit lacks (see #decodeMedia).
+	#captureCanvas(source: CanvasImageSource, width: number, height: number, effect: Effect): VideoStreamTrack {
+		const canvas = document.createElement("canvas");
+		canvas.width = width;
+		canvas.height = height;
+
+		const ctx = canvas.getContext("2d");
+		if (!ctx) {
+			throw new Error("Failed to create 2D canvas context");
+		}
+
+		effect.interval(() => ctx.drawImage(source, 0, 0), 1000 / 30);
+
+		const stream = canvas.captureStream(30);
+		const videoTrack = stream.getVideoTracks()[0];
+		if (!videoTrack) {
+			throw new Error("Failed to capture video track from canvas stream");
+		}
+
+		return videoTrack as VideoStreamTrack;
 	}
 
 	/** Stop decoding and release the file. */
 	close() {
 		this.#signals.close();
 	}
+}
+
+// HTMLMediaElement.captureStream isn't in the standard DOM typings and WebKit doesn't implement it,
+// so feature-detect it rather than casting unconditionally.
+function supportsCaptureStream(video: HTMLVideoElement): video is HTMLVideoElement & { captureStream(): MediaStream } {
+	return typeof (video as { captureStream?: unknown }).captureStream === "function";
 }
