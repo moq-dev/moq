@@ -1,4 +1,6 @@
-//! Publish raw PCM as encoded audio in a moq broadcast.
+//! Encode raw PCM and publish it as a moq audio track.
+
+use std::time::Duration;
 
 use bytes::Bytes;
 
@@ -6,22 +8,76 @@ use moq_mux::catalog::hang::CatalogExt;
 use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
 
-use crate::codec::{Encoder, EncoderInput, EncoderOutput};
+use super::encoder::{Codec, Config, Encoder, Input};
 use crate::resample::Resampler;
-use crate::{AudioError, Frame};
+use crate::{Error, Frame};
+
+/// Source-agnostic encode knobs for [`Producer`] and `publish_capture`, where
+/// the input PCM layout comes from the caller's frames or the capture source
+/// rather than from these options. For the bring-your-own-PCM
+/// [`Encoder`](super::Encoder), which needs that layout up front, use
+/// [`Config`](super::Config) instead.
+///
+/// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
+/// new knobs can be added without breaking callers.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Options {
+	/// Track name to publish under. `None` derives a unique one from the codec
+	/// (`0.opus`, then `1.opus`, ...), matching how the video side names its
+	/// track. Subscribers find it through the catalog either way.
+	pub track: Option<String>,
+	/// Output codec. Defaults to [`Codec::Opus`].
+	pub codec: Codec,
+	/// Sample rate the codec runs at. `None` snaps the input rate up to the
+	/// nearest rate the codec supports, resampling if that moved it.
+	pub sample_rate: Option<u32>,
+	/// Channel count the codec runs at. `None` matches the input; anything else
+	/// is rejected, since remapping isn't implemented.
+	pub channels: Option<u32>,
+	/// Bitrate in bits per second. `None` lets the codec pick.
+	pub bitrate: Option<u32>,
+	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
+	pub frame_duration: Duration,
+}
+
+impl Default for Options {
+	fn default() -> Self {
+		Self {
+			track: None,
+			codec: Codec::default(),
+			sample_rate: None,
+			channels: None,
+			bitrate: None,
+			frame_duration: Duration::from_millis(20),
+		}
+	}
+}
+
+impl Options {
+	/// The [`Config`] these options describe once `input`'s layout is known.
+	fn config(&self, input: Input) -> Config {
+		Config {
+			input,
+			codec: self.codec,
+			sample_rate: self.sample_rate,
+			channels: self.channels,
+			bitrate: self.bitrate,
+			frame_duration: self.frame_duration,
+		}
+	}
+}
 
 /// Encode raw PCM and publish it as a moq-mux audio track.
 ///
-/// PCM layout (format / sample rate / channel count) is fixed at
-/// construction via [`EncoderInput`]; codec configuration (codec id,
-/// optional output sample rate / channels, bitrate, frame duration)
-/// via [`EncoderOutput`]. Subsequent [`write`](Self::write) calls
-/// just pass payload bytes and a timestamp.
+/// The input PCM layout is fixed at construction via [`Input`]; the codec
+/// settings via [`Options`]. Subsequent [`write`](Self::write) calls just pass a
+/// [`Frame`]: payload bytes and a timestamp.
 ///
-/// The catalog rendition is registered at construction (not on first
-/// write), so a subscriber that opens the catalog before any frames
-/// arrive still sees the track.
-pub struct AudioProducer<E: CatalogExt = ()> {
+/// The catalog rendition is registered at construction (not on first write), so
+/// a subscriber that opens the catalog before any frames arrive still sees the
+/// track.
+pub struct Producer<E: CatalogExt = ()> {
 	encoder: Encoder,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
@@ -36,38 +92,43 @@ pub struct AudioProducer<E: CatalogExt = ()> {
 	epoch_us: Option<u64>,
 }
 
-impl<E: CatalogExt> AudioProducer<E> {
-	/// Build a producer for `name` on `broadcast`, registering the
+impl<E: CatalogExt> Producer<E> {
+	/// Publish a track encoding `input` into `broadcast`, registering its
 	/// rendition in `catalog` immediately.
 	pub fn new(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		name: impl Into<String>,
-		input: EncoderInput,
-		output: EncoderOutput,
-	) -> Result<Self, AudioError> {
-		let encoder = Encoder::new(input, output)?;
+		input: Input,
+		options: &Options,
+	) -> Result<Self, Error> {
+		let encoder = Encoder::new(&options.config(input))?;
+		let input = &encoder.config().input;
 
-		let resampler = if encoder.input().sample_rate == encoder.codec_rate() {
+		let resampler = if input.sample_rate == encoder.codec_rate() {
 			None
 		} else {
 			// Use microsecond precision so 2.5 ms frame_duration (supported by
 			// libopus) doesn't truncate to 2 ms.
-			let chunk_frames = ((encoder.input().sample_rate as u128 * encoder.output().frame_duration.as_micros())
-				/ 1_000_000) as usize;
+			let chunk_frames =
+				((input.sample_rate as u128 * encoder.config().frame_duration.as_micros()) / 1_000_000) as usize;
 			Some(Resampler::new(
-				encoder.input().sample_rate,
+				input.sample_rate,
 				encoder.codec_rate(),
-				encoder.input().channels,
+				input.channels,
 				chunk_frames,
 			)?)
 		};
 
-		let name = name.into();
-		// Audio hang frames carry microsecond timestamps; advertise that on the
-		// track so Lite05 subscribers know what scale to expect and the model
-		// layer accepts Frame::timestamp on append.
-		let track = broadcast.create_track(name.clone(), hang::container::track_info())?;
+		let track = match &options.track {
+			// Audio hang frames carry microsecond timestamps; advertise that on the
+			// track so Lite05 subscribers know what scale to expect and the model
+			// layer accepts Frame::timestamp on append. `unique_track` does the same.
+			Some(name) => broadcast.create_track(name.clone(), hang::container::track_info())?,
+			// Mirrors the video side, which derives a unique name from the codec
+			// rather than making every caller invent one.
+			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec))?,
+		};
+		let name = track.name().to_string();
 		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire);
 
 		let mut catalog_mut = catalog.clone();
@@ -87,6 +148,7 @@ impl<E: CatalogExt> AudioProducer<E> {
 		})
 	}
 
+	/// The name of the published track, which is [`Options::track`] resolved.
 	pub fn track_name(&self) -> &str {
 		&self.track_name
 	}
@@ -109,23 +171,25 @@ impl<E: CatalogExt> AudioProducer<E> {
 		self.pending.clear();
 	}
 
-	/// Push one [`Frame`] of PCM in the format declared in
-	/// [`EncoderInput`]. Encodes and publishes as many packets as the
-	/// input contains; any partial trailing frame is carried to the
-	/// next call.
+	/// Push one [`Frame`] of PCM in the layout declared by [`Input`]. Encodes and
+	/// publishes as many packets as the input contains; any partial trailing
+	/// frame is carried to the next call.
 	///
 	/// The first frame after construction (or [`reset_epoch`](Self::reset_epoch))
-	/// anchors the timeline: its `timestamp_us` becomes the epoch, and emitted
-	/// PTS then advances purely by the running sample count -- subsequent
-	/// frames' timestamps are ignored. So an idle gap is only reflected in the
-	/// PTS if you call [`reset_epoch`](Self::reset_epoch) on resume (which
-	/// re-anchors from the next frame's wall-clock stamp); writing straight
-	/// across a gap without resetting compresses it out.
-	pub fn write(&mut self, frame: &Frame) -> Result<(), AudioError> {
-		let epoch_us = *self.epoch_us.get_or_insert(frame.timestamp_us);
+	/// anchors the timeline: its timestamp becomes the epoch, and emitted PTS
+	/// then advances purely by the running sample count, so subsequent frames'
+	/// timestamps are ignored. An idle gap is only reflected in the PTS if you
+	/// call [`reset_epoch`](Self::reset_epoch) on resume (which re-anchors from
+	/// the next frame's wall-clock stamp); writing straight across a gap without
+	/// resetting compresses it out.
+	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
+		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
+			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
+		let epoch_us = *self.epoch_us.get_or_insert(timestamp_us);
 
-		let input = self.encoder.input();
-		let pcm = input.format.as_interleaved_f32(frame.data.as_ref(), input.channels)?;
+		let input = &self.encoder.config().input;
+		let (format, channels) = (input.format, input.channels);
+		let pcm = format.as_interleaved_f32(frame.data.as_ref(), channels)?;
 		let pcm: Vec<f32> = match self.resampler.as_mut() {
 			Some(r) => r.process(&pcm)?,
 			None => pcm.into_owned(),
@@ -136,7 +200,7 @@ impl<E: CatalogExt> AudioProducer<E> {
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		while self.pending.len() >= frame_samples {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let packet = self.encoder.encode_f32(&chunk)?;
+			let packet = self.encoder.encode(&chunk)?;
 
 			let timestamp = self.timestamp(epoch_us)?;
 			self.frames_produced += self.encoder.frame_size() as u64;
@@ -147,12 +211,12 @@ impl<E: CatalogExt> AudioProducer<E> {
 	}
 
 	/// PTS of the next frame: the epoch plus the samples emitted since it.
-	fn timestamp(&self, epoch_us: u64) -> Result<Timestamp, AudioError> {
+	fn timestamp(&self, epoch_us: u64) -> Result<Timestamp, Error> {
 		let offset_us = (self.frames_produced * 1_000_000) / self.encoder.codec_rate() as u64;
 		Ok(Timestamp::from_micros(epoch_us + offset_us)?)
 	}
 
-	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), AudioError> {
+	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), Error> {
 		// Each audio packet is its own moq-lite group, matching
 		// moq_mux::codec::opus::Import. Opus PLC handles dropped groups.
 		let mux_frame = MuxFrame {
@@ -168,14 +232,14 @@ impl<E: CatalogExt> AudioProducer<E> {
 		Ok(())
 	}
 
-	/// Flush any pending samples (zero-padded to a full frame) and
-	/// finalize the track.
-	pub fn finish(mut self) -> Result<(), AudioError> {
+	/// Flush any pending samples (zero-padded to a full frame) and finalize the
+	/// track.
+	pub fn finish(mut self) -> Result<(), Error> {
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		if !self.pending.is_empty() {
 			self.pending.resize(frame_samples, 0.0);
 			let chunk = std::mem::take(&mut self.pending);
-			let packet = self.encoder.encode_f32(&chunk)?;
+			let packet = self.encoder.encode(&chunk)?;
 			let timestamp = self.timestamp(self.epoch_us.unwrap_or(0))?;
 			self.publish(packet, timestamp)?;
 		}
@@ -190,7 +254,7 @@ impl<E: CatalogExt> AudioProducer<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for AudioProducer<E> {
+impl<E: CatalogExt> Drop for Producer<E> {
 	fn drop(&mut self) {
 		self.catalog.lock().audio.remove(&self.track_name);
 	}
@@ -199,7 +263,7 @@ impl<E: CatalogExt> Drop for AudioProducer<E> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{AudioFormat, EncoderInput, EncoderOutput};
+	use crate::Format;
 
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
 	// `write` of this drains precisely one packet (no resampler, no leftover).
@@ -209,7 +273,7 @@ mod tests {
 			data.extend_from_slice(&0.1f32.to_le_bytes());
 		}
 		Frame {
-			timestamp_us,
+			timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
 			data: data.into(),
 		}
 	}
@@ -224,13 +288,16 @@ mod tests {
 
 		// Input rate == Opus codec rate, so there's no resampler and sample
 		// counts stay exact, making the PTS assertions deterministic.
-		let input = EncoderInput {
-			format: AudioFormat::F32,
+		let input = Input {
+			format: Format::F32,
 			sample_rate: 48_000,
 			channels: 1,
 		};
-		let mut producer =
-			AudioProducer::new(&mut broadcast, catalog, "audio", input, EncoderOutput::default()).unwrap();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 
 		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
@@ -269,5 +336,20 @@ mod tests {
 		// appear in the PTS (otherwise audio drifts behind a wall-clock video track).
 		let pts = published_pts(&[full_frame(0), full_frame(5_000_000)], Some(1)).await;
 		assert_eq!(pts, vec![0, 5_000_000]);
+	}
+
+	/// `Options::track = None` derives a codec-suffixed name rather than making
+	/// the caller invent one, mirroring the video side. Pins the exact name the
+	/// docs promise, and that a second producer doesn't collide with the first.
+	#[tokio::test]
+	async fn default_options_derive_the_track_name() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let first = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &Options::default()).unwrap();
+		assert_eq!(first.track_name(), "0.opus");
+
+		let second = Producer::new(&mut broadcast, catalog, Input::default(), &Options::default()).unwrap();
+		assert_eq!(second.track_name(), "1.opus");
 	}
 }

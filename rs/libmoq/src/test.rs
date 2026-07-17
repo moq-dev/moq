@@ -1495,7 +1495,11 @@ fn video_raw_decode() {
 	let gray = vec![0x80u8; 320 * 240 * 4];
 	let mut frames: Vec<bytes::Bytes> = Vec::new();
 	for i in 0..5 {
-		frames.extend(encoder.encode_rgba(&gray, 320, 240, i == 0).unwrap());
+		frames.extend(
+			encoder
+				.encode_rgba(&gray, moq_video::Size::new(320, 240), i == 0)
+				.unwrap(),
+		);
 	}
 	frames.extend(encoder.finish().unwrap());
 	assert!(!frames.is_empty(), "encoder produced no frames");

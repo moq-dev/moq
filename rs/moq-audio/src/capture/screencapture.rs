@@ -28,7 +28,7 @@ use objc2_screen_capture_kit::{
 };
 use tokio::sync::mpsc;
 
-use crate::AudioError;
+use crate::Error;
 
 /// SCK's audio defaults, used when the caller doesn't pin a format.
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
@@ -50,7 +50,7 @@ struct Buffer {
 }
 
 /// An open system-audio capture, read buffer-by-buffer via [`read`](Self::read).
-pub(super) struct SystemAudio {
+pub(crate) struct SystemAudio {
 	rx: mpsc::UnboundedReceiver<Buffer>,
 	/// The first buffer, captured during [`open`](Self::open) so a missing screen
 	/// recording grant is an error rather than a silent hang.
@@ -70,7 +70,7 @@ impl SystemAudio {
 	}
 
 	/// Open (and start) system audio capture.
-	pub(super) async fn open(sample_rate: Option<u32>, channels: Option<u32>) -> Result<Self, AudioError> {
+	pub(super) async fn open(sample_rate: Option<u32>, channels: Option<u32>) -> Result<Self, Error> {
 		let (sample_rate, channels) = Self::format(sample_rate, channels);
 
 		// The filter picks which audio is captured; a display filter means
@@ -78,9 +78,7 @@ impl SystemAudio {
 		let content = shareable_content().await?;
 		let displays = unsafe { content.displays() };
 		if displays.count() == 0 {
-			return Err(AudioError::Unsupported(
-				"no display to capture system audio from".into(),
-			));
+			return Err(Error::Capture("no display to capture system audio from".into()));
 		}
 		let display = displays.objectAtIndex(0);
 		let excluded = NSArray::<SCWindow>::new();
@@ -110,7 +108,7 @@ impl SystemAudio {
 			let proto = ProtocolObject::from_ref(&*delegate);
 			stream
 				.addStreamOutput_type_sampleHandlerQueue_error(proto, SCStreamOutputType::Audio, Some(&dispatch))
-				.map_err(|e| AudioError::Unsupported(format!("add audio output: {e:?}")))?;
+				.map_err(|e| Error::Capture(format!("add audio output: {e:?}")))?;
 		}
 
 		start_capture(&stream).await?;
@@ -124,12 +122,10 @@ impl SystemAudio {
 		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
 			Ok(Some(buffer)) => buffer,
 			Ok(None) => {
-				return Err(AudioError::Unsupported(
-					"system audio stopped before any samples".into(),
-				));
+				return Err(Error::Capture("system audio stopped before any samples".into()));
 			}
 			Err(_) => {
-				return Err(AudioError::Unsupported(format!(
+				return Err(Error::Capture(format!(
 					"no system audio within {FIRST_BUFFER_TIMEOUT:?} (screen recording permission?)"
 				)));
 			}
@@ -139,7 +135,7 @@ impl SystemAudio {
 		// backend that quietly picked a different layout would hand the encoder
 		// wrong-shaped frames. Fail loudly instead.
 		if pending.channels != channels {
-			return Err(AudioError::Unsupported(format!(
+			return Err(Error::Capture(format!(
 				"system audio delivered {} channels, not the {channels} requested",
 				pending.channels
 			)));
@@ -326,7 +322,7 @@ impl Delegate {
 }
 
 /// Await the async `getShareableContent` to find a display to attach to.
-async fn shareable_content() -> Result<Retained<SCShareableContent>, AudioError> {
+async fn shareable_content() -> Result<Retained<SCShareableContent>, Error> {
 	let (tx, rx) = tokio::sync::oneshot::channel::<Result<SendObj<SCShareableContent>, String>>();
 	let tx = std::sync::Mutex::new(Some(tx));
 	let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -342,16 +338,16 @@ async fn shareable_content() -> Result<Retained<SCShareableContent>, AudioError>
 
 	match tokio::time::timeout(ASYNC_TIMEOUT, rx).await {
 		Ok(Ok(Ok(content))) => Ok(content.0),
-		Ok(Ok(Err(msg))) => Err(AudioError::Unsupported(format!("shareable content: {msg}"))),
-		Ok(Err(_)) => Err(AudioError::Unsupported("shareable content handler dropped".into())),
-		Err(_) => Err(AudioError::Unsupported(
+		Ok(Ok(Err(msg))) => Err(Error::Capture(format!("shareable content: {msg}"))),
+		Ok(Err(_)) => Err(Error::Capture("shareable content handler dropped".into())),
+		Err(_) => Err(Error::Capture(
 			"timed out listing shareable content (screen recording permission?)".into(),
 		)),
 	}
 }
 
 /// Await the async `startCapture`, surfacing any error.
-async fn start_capture(stream: &SCStream) -> Result<(), AudioError> {
+async fn start_capture(stream: &SCStream) -> Result<(), Error> {
 	let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
 	let tx = std::sync::Mutex::new(Some(tx));
 	let handler = RcBlock::new(move |error: *mut NSError| {
@@ -364,9 +360,9 @@ async fn start_capture(stream: &SCStream) -> Result<(), AudioError> {
 
 	match tokio::time::timeout(ASYNC_TIMEOUT, rx).await {
 		Ok(Ok(None)) => Ok(()),
-		Ok(Ok(Some(msg))) => Err(AudioError::Unsupported(format!("start system audio: {msg}"))),
-		Ok(Err(_)) => Err(AudioError::Unsupported("start-capture handler dropped".into())),
-		Err(_) => Err(AudioError::Unsupported("timed out starting system audio".into())),
+		Ok(Ok(Some(msg))) => Err(Error::Capture(format!("start system audio: {msg}"))),
+		Ok(Err(_)) => Err(Error::Capture("start-capture handler dropped".into())),
+		Err(_) => Err(Error::Capture("timed out starting system audio".into())),
 	}
 }
 

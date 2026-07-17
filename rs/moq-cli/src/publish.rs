@@ -104,7 +104,7 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub software: bool,
 
-	/// Capture a microphone, by the name `moq devices` reports. Bare
+	/// Capture a microphone, by the id `moq devices` reports. Bare
 	/// `--microphone`, or no audio source flag, opens the default input.
 	#[arg(long, num_args = 0..=1, group = "audio-source")]
 	pub microphone: Option<Option<String>>,
@@ -200,7 +200,7 @@ enum Source {
 	Capture {
 		catalog: moq_mux::catalog::Producer,
 		video: Option<(moq_video::capture::Config, moq_video::encode::Options)>,
-		audio: Option<(moq_audio::capture::Config, moq_audio::EncoderOutput)>,
+		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options)>,
 	},
 }
 
@@ -340,8 +340,8 @@ impl Publish {
 					let broadcast = self.broadcast.clone();
 					async move {
 						match audio {
-							Some((config, output)) => {
-								moq_audio::capture::publish_capture(broadcast, catalog, config, "audio", output, clock)
+							Some((config, encode)) => {
+								moq_audio::encode::publish_capture(broadcast, catalog, config, encode, clock)
 									.await
 									.map_err(anyhow::Error::from)
 							}
@@ -419,11 +419,13 @@ impl CaptureArgs {
 		config
 	}
 
-	fn audio_encode(&self) -> moq_audio::EncoderOutput {
-		moq_audio::EncoderOutput {
-			bitrate: self.audio_bitrate,
-			..Default::default()
-		}
+	/// The audio counterpart to [`video_encode`](Self::video_encode). `track` is
+	/// left unset so the name derives from the codec, the way the video side
+	/// names its track; consumers find it through the catalog either way.
+	fn audio_encode(&self) -> moq_audio::encode::Options {
+		let mut options = moq_audio::encode::Options::default();
+		options.bitrate = self.audio_bitrate;
+		options
 	}
 }
 

@@ -105,7 +105,7 @@ fn encoder_thread(
 
 		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match enc.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
+		match enc.encode_rgba(&msg.rgba, moq_video::Size::new(WIDTH, HEIGHT), keyframe) {
 			Ok(packets) => {
 				if let Err(e) = producer.publish(packets, msg.ts) {
 					// Publish only fails once the track/broadcast is gone, which

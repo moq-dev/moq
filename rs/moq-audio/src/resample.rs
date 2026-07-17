@@ -9,7 +9,7 @@ use rubato::{
 	Async, FixedAsync, Resampler as RubatoTrait, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
-use crate::AudioError;
+use crate::Error;
 
 /// Sample-rate converter over interleaved `f32` PCM.
 pub struct Resampler {
@@ -29,9 +29,9 @@ impl Resampler {
 	/// `chunk_frames` is rubato's fixed input window size (per call to
 	/// the underlying resampler). The wrapper buffers caller input until
 	/// it has at least one chunk.
-	pub fn new(input_rate: u32, output_rate: u32, channels: u32, chunk_frames: usize) -> Result<Self, AudioError> {
+	pub fn new(input_rate: u32, output_rate: u32, channels: u32, chunk_frames: usize) -> Result<Self, Error> {
 		if chunk_frames == 0 {
-			return Err(AudioError::Unsupported("chunk_frames must be > 0".into()));
+			return Err(Error::Unsupported("chunk_frames must be > 0".into()));
 		}
 
 		let params = SincInterpolationParameters {
@@ -69,9 +69,9 @@ impl Resampler {
 	///
 	/// Returns whatever the resampler can produce given the input and
 	/// the chunk size; remaining samples are buffered for the next call.
-	pub fn process(&mut self, samples: &[f32]) -> Result<Vec<f32>, AudioError> {
+	pub fn process(&mut self, samples: &[f32]) -> Result<Vec<f32>, Error> {
 		if samples.len() % self.channels != 0 {
-			return Err(AudioError::Misaligned {
+			return Err(Error::Misaligned {
 				got: samples.len(),
 				expected: samples.len().next_multiple_of(self.channels),
 			});
@@ -117,7 +117,7 @@ mod tests {
 	#[test]
 	fn rejects_zero_chunk_frames() {
 		let r = Resampler::new(48_000, 48_000, 2, 0);
-		assert!(matches!(r, Err(AudioError::Unsupported(_))));
+		assert!(matches!(r, Err(Error::Unsupported(_))));
 	}
 
 	#[test]
