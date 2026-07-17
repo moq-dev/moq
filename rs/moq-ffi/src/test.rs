@@ -649,6 +649,98 @@ async fn server_client_roundtrip() {
 	server.cancel();
 }
 
+/// A cleanly finished broadcast ends its tracks rather than aborting them.
+///
+/// Finishing a track and then the broadcast that owns it sends those two events
+/// on separate streams, so a subscriber can see the broadcast go away before the
+/// track's FIN arrives. The subscription still ends cleanly: the publisher said
+/// "done", not "failed", and the track's data had already been delivered.
+///
+/// Regressing this is quiet and expensive. Every consumer of a well behaved
+/// publisher sees an error at the end of an ordinary session, and no amount of
+/// politeness on the publisher's side avoids it.
+#[tokio::test]
+async fn json_stream_ends_cleanly_when_broadcast_finishes() {
+	let server_origin = MoqOriginProducer::new();
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_publish(Some(server_origin.clone()));
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.ok().await.expect("handshake failed")
+	});
+
+	let client_origin = MoqOriginProducer::new();
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_consume(Some(client_origin.clone()));
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	let config = MoqJsonStreamConfig { compression: true };
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let producer = broadcast.publish_json_stream("events".into(), config.clone()).unwrap();
+	server_origin.publish("hello".into(), &broadcast).unwrap();
+
+	let consumer = client_origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for announcement")
+		.unwrap()
+		.expect("expected an announcement");
+	let sub = announcement
+		.broadcast()
+		.subscribe_json_stream("events".into(), config)
+		.unwrap();
+
+	// Drain a record first, so the subscription is fully established over the
+	// wire before anything is finished.
+	producer.append(r#"{"n":0}"#.into()).unwrap();
+	let first = tokio::time::timeout(TIMEOUT, sub.next())
+		.await
+		.expect("timed out waiting for the first record")
+		.expect("first record errored")
+		.expect("expected a record");
+	assert_eq!(
+		serde_json::from_str::<serde_json::Value>(&first).unwrap(),
+		serde_json::json!({ "n": 0 })
+	);
+
+	// The polite shutdown: finish the track, then the broadcast that owns it.
+	producer.finish().unwrap();
+	broadcast.finish().unwrap();
+
+	let end = tokio::time::timeout(TIMEOUT, sub.next())
+		.await
+		.expect("timed out waiting for end of stream");
+	assert!(matches!(end, Ok(None)), "expected a clean end of stream, got {end:?}");
+
+	session.shutdown();
+	server_session.cancel(0);
+	server.cancel();
+}
+
 #[tokio::test]
 async fn server_set_bind_validates() {
 	let server = MoqServer::new();

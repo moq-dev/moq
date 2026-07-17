@@ -403,7 +403,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let msg = lite::Subscribe {
 			id,
 			broadcast: path.as_path(),
-			track: (&track.name).into(),
+			// Owned so the subscribe future below doesn't borrow the track we finish.
+			track: track.name.clone().into(),
 			priority: track.priority,
 			ordered: true,
 			max_latency: std::time::Duration::ZERO,
@@ -411,27 +412,44 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe started");
+		// Owned because `run_track` holds a `&mut self` borrow below.
+		let log_path = self.log_path(&path).to_string();
 
-		tokio::select! {
-			_ = track.unused() => {
-				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe cancelled");
-				let _ = track.abort(Error::Cancel);
+		tracing::info!(id, broadcast = %log_path, track = %track.name, "subscribe started");
+
+		let mut run = std::pin::pin!(self.run_track(msg));
+		let mut unannounced = false;
+
+		let res = loop {
+			tokio::select! {
+				_ = track.unused() => {
+					tracing::info!(id, broadcast = %log_path, track = %track.name, "subscribe cancelled");
+					let _ = track.abort(Error::Cancel);
+					return;
+				}
+				// An unannounce doesn't decide this track's fate. It travels on the
+				// announce stream while the track's data has its own, so it can arrive
+				// before the FIN of a track the publisher already finished. Aborting
+				// here would turn that clean end into an error no publisher could
+				// avoid. The publisher ends this subscribe stream either way, so let
+				// it say what actually happened.
+				err = broadcast.closed(), if !unannounced => {
+					tracing::info!(id, broadcast = %log_path, track = %track.name, %err, "broadcast closed");
+					unannounced = true;
+				}
+				res = &mut run => break res,
 			}
-			err = broadcast.closed() => {
-				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "broadcast closed");
+		};
+
+		match res {
+			Ok(()) => {
+				tracing::info!(id, broadcast = %log_path, track = %track.name, "subscribe complete");
+				let _ = track.finish();
+			}
+			Err(err) => {
+				tracing::warn!(id, broadcast = %log_path, track = %track.name, %err, "subscribe error");
 				let _ = track.abort(err);
 			}
-			res = self.run_track(msg) => match res {
-				Ok(()) => {
-					tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe complete");
-					let _ = track.finish();
-				}
-				Err(err) => {
-					tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "subscribe error");
-					let _ = track.abort(err);
-				}
-			},
 		}
 	}
 
