@@ -52,15 +52,15 @@ pub struct InternalConfig {
 }
 
 /// The internal (ops) service: a plain-HTTP server over the node's stats
-/// aggregator ([`moq_net::stats::Producer`]).
+/// registry ([`moq_net::stats::Registry`]).
 pub struct Internal {
 	config: InternalConfig,
-	stats: moq_net::stats::Producer,
+	stats: moq_net::stats::Registry,
 }
 
 impl Internal {
-	/// Create the service from its config and the node's stats handle.
-	pub fn new(config: InternalConfig, stats: moq_net::stats::Producer) -> Self {
+	/// Create the service from its config and the node's stats registry.
+	pub fn new(config: InternalConfig, stats: moq_net::stats::Registry) -> Self {
 		Self { config, stats }
 	}
 
@@ -111,7 +111,7 @@ async fn serve_health() -> Response {
 /// exporter for those, per the relay's separation of concerns. Returns the
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
-async fn serve_metrics(State(stats): State<moq_net::stats::Producer>) -> Response {
+async fn serve_metrics(State(stats): State<moq_net::stats::Registry>) -> Response {
 	let body = render_metrics(&stats.snapshot());
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
@@ -129,8 +129,8 @@ fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
 	let mut out = String::new();
 
 	// One HELP/TYPE header followed by a (tier, role) row per active tier for a
-	// counter selected out of `TrafficTotals` by `field`.
-	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::stats::TrafficTotals) -> u64| {
+	// counter selected out of `Traffic` by `field`.
+	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::stats::Traffic) -> u64| {
 		let _ = writeln!(out, "# HELP {name} {help}");
 		let _ = writeln!(out, "# TYPE {name} counter");
 		for (tier, role, totals) in &traffic {
@@ -216,15 +216,11 @@ mod tests {
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a
 	/// HELP/TYPE header per metric and a labeled line carrying the live counter
 	/// value, summed across broadcasts.
-	#[tokio::test]
-	async fn metrics_render_exposition() {
-		use moq_net::{
-			Origin,
-			stats::{Config, Producer, Tier},
-		};
+	#[test]
+	fn metrics_render_exposition() {
+		use moq_net::stats::{Registry, Tier};
 
-		let origin = Origin::random().produce();
-		let stats = Producer::new(Config::new().with_origin(origin));
+		let stats = Registry::new(None);
 
 		let track = stats
 			.tier(Tier::default())

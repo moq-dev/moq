@@ -22,6 +22,7 @@ members = [
     "rs/moq-rtc",
     "rs/moq-rtmp",
     "rs/moq-srt",
+    "rs/moq-stats",
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-transcode",
@@ -51,6 +52,7 @@ default-members = [
     "rs/moq-rtc",
     "rs/moq-rtmp",
     "rs/moq-srt",
+    "rs/moq-stats",
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-transcode",
@@ -82,6 +84,7 @@ moq-nvenc = { version = "0.0.1", path = "rs/moq-nvenc" }
 moq-rtc = { version = "0.1.4", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.1.3", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.1.2", path = "rs/moq-srt" }
+moq-stats = { version = "0.1.0", path = "rs/moq-stats" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 # default-features off (the hardware codecs) on moq-transcode and moq-video so
 # each consumer opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a

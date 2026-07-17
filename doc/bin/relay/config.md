@@ -233,6 +233,15 @@ a session track:
 | `sessions.json`             | default-tier connected sessions, keyed by root |
 | `<tier>/sessions.json`     | named-tier connected sessions, keyed by root |
 
+Each track also has a compressed sibling with a `.z` suffix (e.g.
+`publisher.json.z`) carrying the same data for a fraction of the bytes. It's
+encoded by [moq-json](https://docs.rs/moq-json): each group starts with a full
+snapshot and continues with RFC 7396 merge-patch deltas, all DEFLATE-compressed
+in one shared window. Read it with the
+[moq-stats](https://docs.rs/moq-stats) consumer (or `moq-json` directly), not
+as raw JSON frames; the plain `.json` tracks remain one full JSON object per
+frame.
+
 The default-tier tracks always exist (emitting `{}` while idle). A named tier's
 tracks are created the first time traffic routes to that label, so cluster
 fan-out shows up under `internal/*` (the default trusted-peer label) and never in
@@ -318,9 +327,9 @@ which guarantees the emitted snapshot never shows `closed > open` even
 under concurrent bumps (it can momentarily show an inflated *open* count,
 which is logically valid).
 
-Frames for any one `(tier, role)` are skipped when the JSON is
-byte-identical to the last emitted frame; new subscribers still pick up
-a baseline immediately via track-latest semantics.
+Frames for any one `(tier, role)` are skipped when nothing changed since
+the last emitted frame; new subscribers still pick up a baseline
+immediately via track-latest semantics.
 
 Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
 `--stats-prefix`, `--stats-interval`, `--stats-node`, `--stats-depth`) and

@@ -60,8 +60,10 @@ async fn main() -> anyhow::Result<()> {
 		.with_cache(cache)
 		.with_client(client)
 		.with_client_tls(config.client.tls.build()?);
+	// Keep the producer alive for the whole run: its publish task stops when
+	// the last clone drops. The cluster only needs the counter registry.
 	let stats = config.stats.build(cluster.origin.clone());
-	let cluster = cluster.with_stats(stats);
+	let cluster = cluster.with_stats(stats.registry().clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 	// /metrics + /health, separate from the customer-facing web server. No-op

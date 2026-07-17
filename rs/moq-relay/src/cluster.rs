@@ -330,8 +330,8 @@ pub struct ClusterConfig {
 /// hop list carried on each broadcast (see [`moq_net::broadcast::Info::hops`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
-/// a [`stats::Producer`](moq_net::stats::Producer) aggregator with the `with_*`
-/// builder methods. A cluster without a client can serve local sessions but cannot
+/// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
+/// methods. A cluster without a client can serve local sessions but cannot
 /// dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
@@ -347,12 +347,12 @@ pub struct Cluster {
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: origin::Producer,
 
-	/// Stats aggregator. One instance per relay; sessions pick a billing tier via
-	/// [`stats::Producer::tier`](moq_net::stats::Producer::tier) at acceptance time
+	/// Stats registry. One instance per relay; sessions pick a billing tier via
+	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
 	/// (default tier for JWT/public, `internal` for mTLS / cluster peers, or any label
 	/// the auth API returns) so traffic classes land in separate counter sets. Defaults
-	/// to a no-op aggregator until [`with_stats`](Self::with_stats) is called.
-	pub stats: moq_net::stats::Producer,
+	/// to a disabled (no-op) registry until [`with_stats`](Self::with_stats) is called.
+	pub stats: moq_net::stats::Registry,
 }
 
 impl Cluster {
@@ -380,7 +380,7 @@ impl Cluster {
 			client: None,
 			client_tls: None,
 			origin,
-			stats: moq_net::stats::Producer::default(),
+			stats: moq_net::stats::Registry::disabled(),
 		})
 	}
 
@@ -415,12 +415,14 @@ impl Cluster {
 		self
 	}
 
-	/// Attach a stats aggregator. Replaces the default no-op aggregator.
+	/// Attach a stats registry. Replaces the default disabled registry.
 	///
-	/// Build the value with [`StatsConfig::build`](crate::StatsConfig::build),
-	/// passing [`Self::origin`] so the aggregator publishes through the same
-	/// origin cluster peers read from.
-	pub fn with_stats(mut self, stats: moq_net::stats::Producer) -> Self {
+	/// Build a publishing `moq_stats::Producer` with
+	/// [`StatsConfig::build`](crate::StatsConfig::build) (passing
+	/// [`Self::origin`] so it publishes through the same origin cluster peers
+	/// read from) and pass its registry here; keep the producer alive for as
+	/// long as the cluster runs.
+	pub fn with_stats(mut self, stats: moq_net::stats::Registry) -> Self {
 		self.stats = stats;
 		self
 	}

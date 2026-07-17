@@ -1,7 +1,8 @@
 //! Relay-side stats configuration.
 //!
-//! The actual aggregator lives in [`moq_net::stats::Producer`]; this module just
-//! holds the relay-specific config knobs.
+//! The counter collection lives in [`moq_net::stats::Registry`] and the
+//! publishing task in [`moq_stats::Producer`]; this module just holds the
+//! relay-specific config knobs.
 
 use std::time::Duration;
 
@@ -12,15 +13,13 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for the relay's stats publishing.
 ///
-/// Set `enabled = true` to attach a [`moq_net::stats::Producer`] aggregator to every
-/// session the relay accepts (and every cluster dial). The aggregator
-/// publishes a single `<prefix>/node/<node>` broadcast (or `<prefix>/node`
-/// when [`Self::node`] is unset) on the cluster origin. Each frame is a
-/// JSON map of broadcast path to a cumulative counter snapshot; an entry
-/// surfaces while the broadcast is live (any open counter exceeds its
-/// `*_closed` counterpart) and on the tick its snapshot changes, then is
-/// dropped once fully closed. See `moq_net::stats` for the per-field
-/// semantics.
+/// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
+/// the relay accepts (and every cluster dial). The producer publishes a single
+/// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
+/// unset) on the cluster origin. Each broadcast carries plain `.json` tracks
+/// (a JSON map of broadcast path to a cumulative counter snapshot per frame)
+/// plus compressed `.json.z` siblings; see `moq_stats` for the wire format and
+/// per-field semantics.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -70,32 +69,34 @@ pub struct StatsConfig {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_net::stats::Config::depth`].
+	/// stats. See [`moq_stats::Config::depth`].
 	#[arg(long = "stats-depth", env = "MOQ_STATS_DEPTH")]
 	pub depth: Option<usize>,
 }
 
 impl StatsConfig {
-	/// Build a [`moq_net::stats::Producer`] aggregator from this config, publishing on
-	/// `origin`.
+	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
 	///
-	/// Returns a no-op aggregator when [`Self::enabled`] is false, so the relay can
-	/// attach the result unconditionally.
-	pub fn build(&self, origin: origin::Producer) -> moq_net::stats::Producer {
+	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can
+	/// attach the result unconditionally. Hand the producer's
+	/// [`registry`](moq_stats::Producer::registry) to the cluster and keep the
+	/// producer itself alive for as long as the relay runs (its publish task
+	/// stops when the last clone drops).
+	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
 		if !self.enabled.unwrap_or(false) {
-			return moq_net::stats::Producer::default();
+			return moq_stats::Producer::new(moq_stats::Config::new());
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth.unwrap_or(0);
 		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, "stats publishing enabled");
-		let config = moq_net::stats::Config::new()
+		let config = moq_stats::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
-		moq_net::stats::Producer::new(config)
+		moq_stats::Producer::new(config)
 	}
 }
