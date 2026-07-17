@@ -11,6 +11,7 @@ mod error;
 mod generate;
 mod key;
 mod key_id;
+mod path;
 mod set;
 
 pub use algorithm::*;

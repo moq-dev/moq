@@ -11,9 +11,14 @@ JWT token generation and verification for MoQ in browsers.
 
 `@moq/token` provides:
 
-- Generate signing keys (HMAC, RSA, ECDSA, EdDSA)
+- Generate signing keys (HMAC, RSA, ECDSA, EdDSA), individually or as a JWK Set
 - Sign and verify JWT tokens
+- Authorize a connection path against a token's claims
 - Compatible with moq-relay authentication and `moq-token`
+
+The API mirrors the Rust [`moq-token`](/lib/rs/crate/moq-token) crate: `sign` and `verify`
+handle the signature, and `authorize` scopes the verified claims to the path a client
+dialed. Tokens mint and validate identically on both sides.
 
 ## Installation
 
@@ -29,10 +34,9 @@ For a complete working example covering key loading, signing, and verification, 
 
 | Claim | Type | Description |
 |-------|------|-------------|
-| `root` | string | Root path for operations |
-| `put` | `string \| string[]?` | Publishing permission paths |
-| `get` | `string \| string[]?` | Subscription permission paths |
-| `cluster` | boolean? | Cluster node flag |
+| `root` | string? | Root path for operations, defaulting to the top-level path |
+| `put` | `string \| string[]?` | Publishing permission paths, relative to `root` |
+| `get` | `string \| string[]?` | Subscription permission paths, relative to `root` |
 | `exp` | number? | Expiration timestamp |
 | `iat` | number? | Issued at timestamp |
 
@@ -48,7 +52,7 @@ bun run @moq/token generate --key root.jwk
 bun run @moq/token sign --key root.jwk --root "rooms/123" --publish alice
 
 # Verify a token from stdin
-bun run @moq/token verify --key root.jwk --root "rooms/123" < token.jwt
+bun run @moq/token verify --key root.jwk < token.jwt
 ```
 
 ## Security Considerations

@@ -61,7 +61,7 @@ export class Producer<T> {
 		}
 
 		const data = this.#encoder ? this.#encoder.frame(payload) : payload;
-		this.#group.writeFrame({ data, timestamp: Time.Timestamp.now() });
+		this.#group.writeFrame({ payload: data, timestamp: Time.Timestamp.now() });
 	}
 
 	/** Finish the track, closing the group. */
@@ -107,7 +107,7 @@ export class Consumer<T> {
 				continue;
 			}
 
-			const plain = this.#decoder ? this.#decoder.frame(frame.data) : frame.data;
+			const plain = this.#decoder ? this.#decoder.frame(frame.payload) : frame.payload;
 			return JSON.parse(new TextDecoder().decode(plain));
 		}
 	}

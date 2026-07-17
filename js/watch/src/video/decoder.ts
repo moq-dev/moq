@@ -383,14 +383,14 @@ class DecoderTrack {
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
-					data: frame.data,
+					data: frame.payload,
 					timestamp: frame.timestamp,
 				});
 
 				// Track both frame count and bytes received for stats in the UI
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.data.byteLength,
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
 				// Track decode buffer: frames sent to decoder but not yet rendered
@@ -467,7 +467,7 @@ class DecoderTrack {
 				// Track stats
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.data.byteLength,
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
 				// Track decode buffer
@@ -488,7 +488,7 @@ class DecoderTrack {
 				decoder.decode(
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
-						data: frame.data,
+						data: frame.payload,
 						timestamp: frame.timestamp,
 					}),
 				);

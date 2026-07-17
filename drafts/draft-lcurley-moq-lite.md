@@ -939,7 +939,7 @@ If it is strictly greater, the groups in between are unavailable and will not be
 A subscriber that requested the latest group (`Group Start` = 0) learns the resolved sequence here.
 
 ## SUBSCRIBE_END {#subscribe-end}
-A SUBSCRIBE_END message is sent by the publisher to signal that no group after a given sequence will be produced.
+A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
 
 ~~~
 SUBSCRIBE_END Message {
@@ -953,10 +953,15 @@ SUBSCRIBE_END Message {
 Set to 0x1 to indicate a SUBSCRIBE_END message.
 
 **Group**:
-The absolute sequence number of the last group that may be delivered (inclusive).
-This is a plain absolute sequence, **not** the `absolute + 1` form used by `Group Start`/`Group End` in SUBSCRIBE.
-The subscriber MUST NOT wait for any group after this sequence.
-SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups at or below this sequence that it cannot deliver, and FINs the stream only once every group up to this sequence has been accounted for.
+The exclusive end of the range: the absolute sequence number of the first group that will never be delivered.
+A value of 0 means the track ended before producing any groups.
+The subscriber MUST NOT wait for any group at or after this sequence.
+
+This field is encoded as a plain absolute sequence and is used as-is; it is **not** the `absolute + 1` form used by `Group Start`/`Group End` in SUBSCRIBE, which decode by subtracting 1.
+The two are easily confused, because a track whose highest delivered group is `N` sends `N + 1` here, the same number SUBSCRIBE would carry for an inclusive bound of `N`.
+They differ in why: SUBSCRIBE offsets by 1 only so that 0 can mean "absent", whereas this field has no absent case and 0 already means "no groups at all".
+
+SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups below this sequence that it cannot deliver, and FINs the stream only once every group below this sequence has been accounted for.
 
 ## SUBSCRIBE_DROP
 A SUBSCRIBE_DROP message is sent by the publisher on the Subscribe Stream when groups cannot be served.
@@ -1107,6 +1112,7 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+- Corrected SUBSCRIBE_END `Group` to an exclusive bound: the first sequence that will never be delivered, with 0 meaning no groups were produced. It was previously specified as the inclusive last group, which could not distinguish an empty track from one whose only group was 0.
 - Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_RESTART (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
 - ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating the broadcast path.

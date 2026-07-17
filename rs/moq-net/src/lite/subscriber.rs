@@ -988,7 +988,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					if let lite::SubscribeResponse::End(end) = &msg
 						&& let Some(Track::Active(producer)) = track.as_mut()
 					{
-						let _ = producer.finish_at(end.group);
+						// finish_at rejects a boundary at or below the live edge, which is what a
+						// peer sending an inclusive bound looks like once the final group has
+						// already arrived. Don't abort: the stream FIN still finishes the track,
+						// so this only costs the early boundary. Warn anyway, since it's our only
+						// signal that a peer disagrees about the encoding.
+						if let Err(err) = producer.finish_at(end.group) {
+							tracing::warn!(track = %self.name, group = end.group, %err, "invalid subscribe end");
+						}
 					} else {
 						tracing::debug!(track = %self.name, ?msg, "subscribe response");
 					}

@@ -125,16 +125,6 @@ export interface FetchGroupOptions {
 }
 
 /**
- * Subscriber-side preferences for a subscription.
- *
- * @public
- */
-export interface SubscribeOptions {
-	/** Delivery priority for this subscription. Higher values are served first when constrained. Defaults to `0`. */
-	priority?: number;
-}
-
-/**
  * The per-track operations a lazy {@link Consumer} delegates to the broadcast it came from.
  *
  * Implemented by `broadcast.Producer` / `broadcast.Consumer` (and the wire-layer subclasses
@@ -640,7 +630,7 @@ export class Subscriber {
 	 */
 	async readFrame(): Promise<Frame | undefined> {
 		const next = await this.readFrameSequence();
-		return next ? { data: next.data, timestamp: next.timestamp } : undefined;
+		return next ? { payload: next.payload, timestamp: next.timestamp } : undefined;
 	}
 
 	/**
@@ -664,7 +654,7 @@ export class Subscriber {
 					return {
 						group: groups[0].sequence,
 						frame: next.sequence,
-						data: next.data,
+						payload: next.payload,
 						timestamp: next.timestamp,
 					};
 				}
@@ -688,7 +678,12 @@ export class Subscriber {
 			}
 			const next = group.tryReadFrameSequence();
 			if (next)
-				return { group: group.sequence, frame: next.sequence, data: next.data, timestamp: next.timestamp };
+				return {
+					group: group.sequence,
+					frame: next.sequence,
+					payload: next.payload,
+					timestamp: next.timestamp,
+				};
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -712,7 +707,7 @@ export class Subscriber {
 	async readString(): Promise<string | undefined> {
 		const next = await this.readFrame();
 		if (!next) return undefined;
-		return new TextDecoder().decode(next.data);
+		return new TextDecoder().decode(next.payload);
 	}
 
 	/** Reads the next frame and parses it as JSON. */
@@ -726,9 +721,9 @@ export class Subscriber {
 	async readBool(): Promise<boolean | undefined> {
 		const next = await this.readFrame();
 		if (!next) return undefined;
-		const data = next.data;
-		if (data.byteLength !== 1 || !(data[0] === 0 || data[0] === 1)) throw new Error("invalid bool frame");
-		return data[0] === 1;
+		const payload = next.payload;
+		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
+		return payload[0] === 1;
 	}
 
 	/**

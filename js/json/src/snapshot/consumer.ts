@@ -55,7 +55,7 @@ export class Consumer<T> {
 			let value: T | undefined;
 			let advanced = false;
 			for (let frame = this.#group.tryReadFrame(); frame !== undefined; frame = this.#group.tryReadFrame()) {
-				value = this.#apply(frame.data);
+				value = this.#apply(frame.payload);
 				advanced = true;
 			}
 			if (advanced) return value;
@@ -78,7 +78,7 @@ export class Consumer<T> {
 				continue;
 			}
 
-			return this.#apply(frame.data);
+			return this.#apply(frame.payload);
 		}
 	}
 

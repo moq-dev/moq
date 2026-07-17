@@ -110,10 +110,10 @@ Each Subscription consists of a few properties:
 
 - **Track Priority**: A value between 0 and 255. Tracks with higher priority will be delivered first.
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
-- **Group Timeout**: The maximum duration to keep old groups in cache/transit. Defaults to 30 seconds.
+- **Subscriber Max Latency**: The maximum age of a non-latest group before it is skipped. Defaults to zero, so stale groups are skipped immediately.
 
-The publisher also keeps old groups around for a best-effort **cache** window so relays and late subscribers can still fetch them.
-This is a local hint rather than a guarantee carried on the wire, and a subscriber's Group Timeout is bounded by it: a group can't be waited for longer than it's actually kept around.
+The publisher also keeps old groups around for a best-effort **Publisher Max Latency** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
+The subscriber's maximum latency is bounded by this window: a group can't be waited for longer than it's actually kept around.
 
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:

@@ -22,7 +22,7 @@ async function firstFrame(track: Track.Subscriber): Promise<Uint8Array> {
 	if (!group) throw new Error("expected a group");
 	const frame = await group.readFrame();
 	if (!frame) throw new Error("expected a frame");
-	return frame.data;
+	return frame.payload;
 }
 
 // Count the groups a (finished) track published, draining each so the reads terminate.
@@ -110,7 +110,7 @@ test("compressed deltas reuse the window", async () => {
 	if (!delta) throw new Error("expected a delta");
 
 	const rawDelta = enc.encode(JSON.stringify({ echo: phrase }));
-	expect(delta.data.length).toBeLessThan(rawDelta.length / 2);
+	expect(delta.payload.length).toBeLessThan(rawDelta.length / 2);
 });
 
 test("compression shrinks a repetitive frame", async () => {

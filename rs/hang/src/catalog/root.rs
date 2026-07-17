@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Video};
+use crate::catalog::{Audio, PRIORITY, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -85,7 +85,7 @@ impl Catalog {
 	/// The subscription preferences used for the catalog track (high priority so
 	/// it preempts media tracks).
 	pub fn default_subscription() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_priority(100)
+		moq_net::track::Subscription::default().with_priority(PRIORITY.catalog)
 	}
 }
 

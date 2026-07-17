@@ -537,7 +537,7 @@ export class Subscriber {
 				const size = await stream.reader.u53();
 				const payload = await stream.reader.read(size);
 				if (!payload) break;
-				group.writeFrame({ data: payload, timestamp });
+				group.writeFrame({ payload, timestamp });
 			}
 
 			group.close();
@@ -666,7 +666,7 @@ export class Subscriber {
 				const payload = await stream.read(size);
 				if (!payload) break;
 
-				producer.writeFrame({ data: payload, timestamp });
+				producer.writeFrame({ payload, timestamp });
 			}
 
 			producer.close();
