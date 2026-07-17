@@ -548,6 +548,37 @@ test("integration: ietf subscriber teardown on last unsubscribe", async () => {
 	await runSubscriberTeardown(Ietf.ALPN.DRAFT_17);
 });
 
+// A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
+// fetch must cancel the FETCH stream rather than wait for a stream end that never comes.
+test("integration: lite fetch teardown when the reader abandons an open group", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const video = broadcast.createTrack("video");
+	const group = video.appendGroup(); // deliberately left open: an indefinite group.
+	group.writeString("hello");
+
+	const remote = client.consume(Path.from("test"));
+	const fetched = await remote.track("video").fetchGroup(group.sequence);
+	expect(await fetched.readString()).toBe("hello");
+
+	// The publisher is now serving the still-open group.
+	await waitUntil(() => group.used.peek());
+
+	// Abandoning the fetch cancels the FETCH stream, so the publisher stops serving instead of
+	// pumping an open group to a reader that left.
+	fetched.close();
+	await waitUntil(() => !group.used.peek());
+
+	group.close();
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: lite consume dedup", async () => {
 	await runConsumeDedup(Lite.ALPN_05);
 });

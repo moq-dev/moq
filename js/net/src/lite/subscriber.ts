@@ -523,8 +523,11 @@ export class Subscriber {
 				throw err;
 			}
 
+			// Mint this caller's reader before starting the pump, so the group has demand when the
+			// pump begins watching it (an abandoned fetch cancels once every reader has left).
+			const consumer = group.mirror();
 			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
-			return group.mirror();
+			return consumer;
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
@@ -537,8 +540,22 @@ export class Subscriber {
 		try {
 			let prevTs = 0n;
 
+			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
+			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
+			// demand, not by the stream ending. `unused` is a one-shot watched across frames (so it
+			// isn't re-subscribed per frame); the check is level-triggered, so a coalesced fetch that
+			// arrives before we cancel re-arms it and resumes on the same stream.
+			const idle = Symbol("idle");
+			let unused = group.unused().then(() => idle);
 			for (;;) {
-				const done = await Promise.race([stream.reader.done(), group.closed]);
+				const done = await Promise.race([stream.reader.done(), group.closed, unused]);
+				if (done === idle) {
+					if (!group.isClosed && group.used.peek()) {
+						unused = group.unused().then(() => idle);
+						continue;
+					}
+					break;
+				}
 				if (done !== false) break;
 
 				prevTs += unzigzag(await stream.reader.u62());

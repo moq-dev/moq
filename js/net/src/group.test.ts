@@ -4,6 +4,27 @@ import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();
 
+test("used reflects mirror demand and unused resolves when the last reader leaves", async () => {
+	const producer = new Producer(0);
+
+	// No mirror readers: no demand.
+	expect(producer.used.peek()).toBe(false);
+
+	const a = producer.mirror();
+	const b = producer.mirror();
+	expect(producer.used.peek()).toBe(true);
+
+	// Closing one of two keeps demand, so unused() stays pending.
+	a.close();
+	expect(producer.used.peek()).toBe(true);
+
+	// Closing the last reader drops demand; unused() resolves. Fetch coalescing awaits this to
+	// cancel a download that everyone has abandoned (a group may never end on its own).
+	b.close();
+	await producer.unused();
+	expect(producer.used.peek()).toBe(false);
+});
+
 function pair(sequence: number) {
 	const producer = new Producer(sequence);
 	return { producer, consumer: producer.consume() };
