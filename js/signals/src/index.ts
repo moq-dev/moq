@@ -13,8 +13,14 @@ type Subscriber<T> = (value: T) => void;
 // @ts-ignore - Some environments don't recognize import.meta.env
 const DEV = typeof import.meta.env !== "undefined" && import.meta.env?.MODE !== "production";
 
-// Symbol to identify Signal instances across different package versions
+// Symbols to identify our instances across different package versions.
+// SIGNAL_BRAND is Signal only (it implies a write side); GETTER_BRAND is every readable we ship.
 const SIGNAL_BRAND = Symbol.for("@moq/signals");
+const GETTER_BRAND = Symbol.for("@moq/signals.getter");
+
+function branded(value: unknown, brand: symbol): boolean {
+	return typeof value === "object" && value !== null && brand in value;
+}
 
 /** Read side of a signal: peek the current value and subscribe to changes. */
 export interface Getter<T> {
@@ -32,8 +38,8 @@ export interface Getter<T> {
 
 /** Write side of a signal: replace or transform the current value. */
 export interface Setter<T> {
-	/** Replaces the value, or transforms it via a function of the previous value. */
-	set(value: T | ((prev: T) => T)): void;
+	/** Replaces the value. A function is stored as-is; use {@link update} to transform. */
+	set(value: T): void;
 	/** Transforms the value via a function of the previous value. */
 	update(fn: (prev: T) => T): void;
 }
@@ -58,8 +64,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#hasCapturedOldValue = false;
 	#forceNotify = false;
 
-	// Brand to identify this as a Signal across package instances
+	// Brands to identify this as a Signal (and a readable) across package instances.
 	readonly [SIGNAL_BRAND] = true;
+	readonly [GETTER_BRAND] = true;
 
 	constructor(value: T) {
 		this.#value = value;
@@ -68,19 +75,13 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	/** Returns the value if it's already a Signal, otherwise wraps it in a new Signal. */
 	static from<T>(value: T | Signal<T>): Signal<T> {
 		// Use brand check instead of instanceof to work across package instances
-		if (typeof value === "object" && value !== null && SIGNAL_BRAND in value) {
+		if (branded(value, SIGNAL_BRAND)) {
 			return value as Signal<T>;
 		}
-		return new Signal(value);
+		return new Signal(value as T);
 	}
 
 	/** Returns the current value without subscribing. */
-	get(): T {
-		return this.#value;
-	}
-
-	/** Returns the current value without subscribing. */
-	// TODO rename to `get` once we've ported everything
 	peek(): T {
 		return this.#value;
 	}
@@ -88,6 +89,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	/**
 	 * Sets the current value, notifying subscribers if it changed.
 	 * Pass `notify` true to always notify or false to never notify.
+	 * A function is stored as the value; use {@link update} to transform instead.
 	 */
 	set(value: T, notify?: boolean): void {
 		// Capture old value before the first set in this microtask.
@@ -191,11 +193,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		});
 	}
 
-	/** Resolves with the next value, once the signal changes. */
-	next(): Promise<T> {
-		return this.changed();
-	}
-
 	/** Calls `fn` with the current value now, and again every time it changes. */
 	watch(fn: Subscriber<T>): Dispose {
 		const dispose = this.subscribe(fn);
@@ -236,6 +233,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 export class Once<T> implements GetPromise<T> {
 	#signal = new Signal<T | undefined>(undefined);
 
+	// Brand to identify this as a readable across package instances.
+	readonly [GETTER_BRAND] = true;
+
 	/** Settle the value. Throws if it has already settled. */
 	set(value: T): void {
 		if (this.#signal.peek() !== undefined) {
@@ -275,47 +275,78 @@ export class Once<T> implements GetPromise<T> {
 }
 
 type SetterType<S> = S extends Setter<infer T> ? T : never;
+
+/** The value type a {@link Getter} yields, e.g. `number` for `Getter<number>`. */
 export type GetterType<G> = G extends Getter<infer T> ? T : never;
 
-// A record of named signals, used to group a component's `in` or `out` signals.
+/** A record of named signals, used to group a component's `in` or `out` signals. */
 export type SignalMap = Record<string, Getter<unknown>>;
 
-// A read-only view over a SignalMap: every entry collapses to its Getter and the
-// record itself is readonly. Consumers can peek/subscribe but can neither call set()
-// nor swap a signal out, so the owning component keeps sole write access.
+/**
+ * A read-only view over a {@link SignalMap}: every entry collapses to its {@link Getter} and the
+ * record itself is readonly. Consumers can peek/subscribe but can neither call `set()`
+ * nor swap a signal out, so the owning component keeps sole write access.
+ */
 export type Readonlys<T extends SignalMap> = {
 	readonly [K in keyof T]: Getter<GetterType<T[K]>>;
 };
 
-// Re-type a record of Signals as read-only Getters. This is the identity function at
-// runtime; it only narrows the static type. Keep the original (writable) reference
-// private for the component to set, and expose the result as the public `out`.
-//
-//   readonly #out = { status: new Signal("offline") };
-//   readonly out = readonlys(this.#out); // status is now a Getter to callers
+/**
+ * Re-types a record of Signals as read-only {@link Getter}s. This is the identity function at
+ * runtime; it only narrows the static type. Keep the original (writable) reference
+ * private for the component to set, and expose the result as the public `out`.
+ *
+ * ```ts
+ * readonly #out = { status: new Signal("offline") };
+ * readonly out = readonlys(this.#out); // status is now a Getter to callers
+ * ```
+ */
 export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
 	return signals as unknown as Readonlys<T>;
 }
 
-// A value or an existing readable for it: the argument form accepted by `getter()`
-// and, per-field, by `Inputs`. Mirrors the `T | Signal<T>` shape of `Signal.from`.
+/**
+ * A value or an existing readable for it: the argument form accepted by {@link getter}
+ * and, per-field, by {@link Inputs}. Mirrors the `T | Signal<T>` shape of {@link Signal.from}.
+ */
 export type GetterInit<T> = T | Getter<T>;
 
-// Build a read-only Getter from a value or an existing readable. The read-only
-// counterpart to `Signal.from`: a branded Signal (including the result of `readonlys`)
-// is reused as-is, so one component's `out` can be wired straight into another's
-// `in`; any other value is wrapped in a fresh Signal. The brand check means a
-// hand-rolled Getter that isn't backed by a Signal would be treated as a value.
+/**
+ * Builds a read-only {@link Getter} from a value or an existing readable. The read-only
+ * counterpart to {@link Signal.from}: a `Signal`, `Computed`, or `Once` (including the result
+ * of {@link readonlys}) is reused as-is, so one component's `out` can be wired straight into
+ * another's `in`; any other value is wrapped in a fresh `Signal`.
+ *
+ * Throws on a readable this package didn't create, since wrapping it would silently
+ * freeze it into a constant.
+ */
 export function getter<T>(value: GetterInit<T>): Getter<T> {
-	if (typeof value === "object" && value !== null && SIGNAL_BRAND in value) {
+	if (branded(value, GETTER_BRAND) || branded(value, SIGNAL_BRAND)) {
 		return value as Getter<T>;
 	}
+
+	if (getterShaped(value)) {
+		throw new Error("getter() requires a Signal, Computed, or Once; a foreign readable would become a constant");
+	}
+
 	return new Signal(value as T);
 }
 
-// Derive a component's constructor argument from its `in` map: every entry becomes
-// optional and accepts a raw value, a Signal, or another component's `out` Getter
-// (the `getter()` contract). Removes the hand-written, drift-prone argument interface.
+// A readable we didn't make: it would be wrapped as a value and never update, so callers get an
+// error instead of a component that silently never sees a change.
+function getterShaped(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const maybe = value as Partial<Getter<unknown>>;
+	return (
+		typeof maybe.peek === "function" && typeof maybe.subscribe === "function" && typeof maybe.changed === "function"
+	);
+}
+
+/**
+ * Derives a component's constructor argument from its `in` map: every entry becomes
+ * optional and accepts a raw value, a Signal, or another component's `out` Getter
+ * (the {@link getter} contract). Removes the hand-written, drift-prone argument interface.
+ */
 export type Inputs<I extends SignalMap> = { [K in keyof I]?: GetterInit<GetterType<I[K]>> };
 
 // Excludes common falsy values from a type
@@ -800,6 +831,9 @@ export class Effect {
 export class Computed<T> implements Getter<T | undefined> {
 	#signal = new Signal<T | undefined>(undefined);
 	#effect: Effect;
+
+	// Brand to identify this as a readable across package instances.
+	readonly [GETTER_BRAND] = true;
 
 	/** Creates a computed that derives its value from `fn`, rerunning when dependencies change. */
 	constructor(fn: (effect: Effect) => T) {
