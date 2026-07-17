@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as base64 from "@hexagon/base64";
 import { exportJWK, generateKeyPair } from "jose";
 import type { Algorithm } from "./algorithm.ts";
-import type { Claims } from "./claims.ts";
+import { authorize, type Claims } from "./claims.ts";
 import { type Key, load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
 
 // Helper function to encode JSON to base64url
@@ -155,7 +155,7 @@ test("sign - key doesn't support signing", async () => {
 test("verify - successful verification", async () => {
 	const key = load(encodeJwk(testKey));
 	const token = await sign(key, testClaims);
-	const claims = await verify(key, token, testClaims.root);
+	const claims = await verify(key, token);
 
 	expect(claims.root).toBe(testClaims.root);
 	expect(claims.put).toBe(testClaims.put);
@@ -171,7 +171,7 @@ test("verify - key doesn't support verification", async () => {
 
 	await expect(
 		(async () => {
-			await verify(key, "some.jwt.token", "test-path");
+			await verify(key, "some.jwt.token");
 		})(),
 	).rejects.toThrow();
 });
@@ -181,7 +181,7 @@ test("verify - invalid token format", async () => {
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid-token", "test-path");
+			await verify(key, "invalid-token");
 		})(),
 	).rejects.toThrow();
 });
@@ -197,7 +197,7 @@ test("verify - expired token", async () => {
 
 	await expect(
 		(async () => {
-			await verify(key, token, expiredClaims.root);
+			await verify(key, token);
 		})(),
 	).rejects.toThrow();
 });
@@ -210,7 +210,7 @@ test("verify - token without exp field", async () => {
 
 	const key = load(encodeJwk(testKey));
 	const token = await sign(key, claimsWithoutExp);
-	const claims = await verify(key, token, claimsWithoutExp.root);
+	const claims = await verify(key, token);
 
 	expect(claims.root).toBe("test-path");
 	expect(claims.put).toBe("test-pub");
@@ -243,7 +243,7 @@ test("round-trip - sign and verify", async () => {
 	};
 
 	const token = await sign(key, originalClaims);
-	const verifiedClaims = await verify(key, token, originalClaims.root);
+	const verifiedClaims = await verify(key, token);
 
 	expect(verifiedClaims.root).toBe(originalClaims.root);
 	expect(verifiedClaims.put).toBe(originalClaims.put);
@@ -252,15 +252,16 @@ test("round-trip - sign and verify", async () => {
 	expect(verifiedClaims.iat).toBe(originalClaims.iat);
 });
 
-test("verify - path mismatch", async () => {
+test("verify - ignores the path, which authorize() checks instead", async () => {
 	const key = load(encodeJwk(testKey));
 	const token = await sign(key, testClaims);
 
-	await expect(
-		(async () => {
-			await verify(key, token, "different-path");
-		})(),
-	).rejects.toThrow();
+	// Verification is signature-only, so a token for an unrelated path still decodes...
+	const claims = await verify(key, token);
+	expect(claims.root).toBe(testClaims.root);
+
+	// ...and is rejected only once authorized against that path.
+	expect(() => authorize(claims, "different-path")).toThrow();
 });
 
 test("sign - invalid claims without pub or sub", async () => {
@@ -324,7 +325,7 @@ test("different algorithms - HS384", async () => {
 
 	const key = load(encodeJwk(hs384Key));
 	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(key, token, testClaims.root);
+	const verifiedClaims = await verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
 	expect(verifiedClaims.put).toBe(testClaims.put);
@@ -341,7 +342,7 @@ test("different algorithms - HS512", async () => {
 
 	const key = load(encodeJwk(hs512Key));
 	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(key, token, testClaims.root);
+	const verifiedClaims = await verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
 	expect(verifiedClaims.put).toBe(testClaims.put);
@@ -366,7 +367,7 @@ test("RS256 algorithm - static sign and verify", async () => {
 		"eyJhbGciOiJSUzI1NiIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJSU0EiLCJuIjoiMmstRjBzbmtpLTBCYjF5VkVSaUNNSGV1UUhzZzBKVzcyTHZVWUNCdGZ4eHhCT29GSDJOTWxCaHpMSG9DbUNoeXlDS1I0UHFXZHVqYmtKUEUzd0VyNnJjWS05bWxmRXJkYzFIcHYxRU1qYVQ1ZXNkcm95TEZlSm04NzVJRWI0TlJ1XzZpRFpfdnpNSEY3dURyN2gzQzNnN3ZaaHFNd3dIb3MzN3k2Y3MzelAwdFBCaGVndmZzQ2Mzbi04YURwQUw0Ulo2S2dDVDl0eFlyZEZOdlViLURCd3IxWDlOc3ZUS3ozYncxUl9YTzVYRl81OW9qUXoxSU1QbHJzVEtjb09ZMjN1a2F3RnFjSGdqQVBZa1RHbWZQR01FSmF0QVROMkNLcjVfZGxJTjNfRmFmLWkwNEs0RnlqWGJJWDB6WnVBVWVxS291UGFTZXc1UXZidm1WYWg4MEJRIiwiZSI6IkFRQUIiLCJkIjoiTXJGWWo5UFZ3REF1cng4LWRoUE0xMWhUSENIN1FyUWlSSGVKSHpFb2UtV3MwTWxPbXpWQnFQbnNkSjE0VU1ERHRubGdpbTlsMVFMSlNVOG0zZW0xdXZEOVdpMzE0V0M0XzNnNzRQTF9DVDBQdVZUcFI1NWhZRm5DcDVhdWRQNTNVa0lVZXpseVE0ZVRZSjdWNmhyN0R2bEUyZDY4Wk9QaWx4dVphSFNKNW8xTjB6eU1fOF9zdEdQZFRzaGNWUTlJUnV5SGhXWTZjX1hJZ0RUczBYcW0wY1dieG5EdjNWZVlGQkRxNnJXRW0zSk1uWDY0UGtpYzUtZC1hel9DNWc5RzZZaVQwU3NFeXFnV3ZPa3FXb3ZTdjlOZDhxeURGaWR2QVFkWE52R2dOMkFETkRKZ1kwVzY2a3NMZjR6Y0I3VC1jai1rbUtleGZ0LUZnLVQ4WnB1d0FRIiwicCI6IjYtWFFDRWJXNURwVzkxWFBzREZyck5ON1ZDMWZLaFZvTjlCQ2ZOOTNmTExqbG92Z3lLOE0tT3N3VTRRd0ZJdTZSLXVHdlByMHk2Q0NnTDgxeHFqY3haQ2pMa003bTNESFo3UjV2Z1RUZDNkWUFnbmNjMmlBZ2Uyamh3eG5tUWlMYTVYVU5mMEY0bXdIeFl0a2hZWTdPZk1EMmo5R1ZVZUFFeml4Ym1GSDFnVSIsInEiOiI3T29LMUx0S0NNZmlrczJpN29xRXhJX21OUjBEWmZzOG9UWmNqX1pwWlJrSWowOEJ4cEhYTGk5a2J5VUg2dnZtWXhacFRuSDgzaF9SQXc1SGpyYVAzb0J5Q3QtMy1falczeUV6aTh0OTJKaGtRVkJLT3BnNldaQlNJSWNWM05sNjRzUm96OEVyamJVelM3bWdFVjREaGd3TUJWUDlCTVg2WmoxT0drR3FSZ0UiLCJkcCI6InhvS1g4NzhaS3VubE1USW5HaEFjbWsxRkpXc2hBQnNQbnBoRXV5eWFNbmVmaVpxZ1NJRDJtNm5lLXdqc0pQNElmbWsyODJVRUJ5OUZZdTZGWkczSml2X1NNaVlselFLMDZ4STJ1Szc2X1RlUy1mUXViWGZ0WEdrTUNhTm9zcUU4SWdidGs1a2ZFSkQwWVVxU0JzTVVxQWxXbnB4TXBZc0x2aUVoUHNfaVViayIsImRxIjoiZnBJblNUSHFRcml2ZHFqQUpGc0N4WlR2YzI3VnN2VV9sZzFaOUZ1OFFSUFh1LUNFM1Zack5MU0RIdElVNGRqRVpDbkVCdkhsRzdLNTByMGRROFNMSmw5UERqb3ByRWRzWEhiN2RfTTJmN0lpMWJZVWdpdHotUWVlcU53aXRRUEhvRUU0a2Mzcy05OVQwV0FSZ1ZYTjRoNnJpV2t1b3c4MlVNcnQ0QjgyM2dFIiwicWkiOiJMck9IeTl2akt0SXdvc0RNcmVZck9yR0tEOG5FS2I4QjZPM21DQ2o4MldCRklBUUoyZm05bExQeElnNjlLalR0eEdEcnRSVXoybldKS003aE43OWhsQUZpdnlUZG1vYURHVU1nTDdaTXBSNEpTM2FJY25QYmNrQVlqcFExSWxTLTJaYTVxdEVGSV9senFsT3dITjVHajZ4UVU4WHM5OVZQeHlGYTBUUWR5ZGMifQ";
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
+	const verifiedClaims = await verify(toPublicKey(key), token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
@@ -375,7 +376,7 @@ test("RSA algorithms - sign and verify", async () => {
 		const { privateEncoded } = await generateAsymmetricKeyPair(alg);
 		const key = load(privateEncoded);
 		const token = await sign(key, testClaims);
-		const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
+		const verifiedClaims = await verify(toPublicKey(key), token);
 		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
@@ -386,7 +387,7 @@ test("RSA public keys verify but cannot sign", async () => {
 	const publicKey = loadPublic(publicEncoded);
 
 	const token = await sign(privateKey, testClaims);
-	const claims = await verify(publicKey, token, testClaims.root);
+	const claims = await verify(publicKey, token);
 	expect(claims.root).toBe(testClaims.root);
 
 	await expect(
@@ -402,7 +403,7 @@ test("PS256 algorithm - static sign and verify", async () => {
 		"eyJhbGciOiJQUzI1NiIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJSU0EiLCJuIjoiNDdiRHNqQmdiMVUyRlF1OG9keDZQY3I5aDFXSmlIV1FOQ2xhNzR1THFDR185VFQ0Y0xNRlJ5V1N0bDZXT2NzYjV3NnB2X3RNb3JkcG5fS3pUeDlZTGxXa2RKMlFDazZhZWxEcWtjMHR4azNwb3VVcjMyMTRMSWppaXctaUtXQ1M0bC1kMFFZOHJaa3IxYXVLUHNoUXJGdUV0WVFPY3hCajF2T2E4S0Q5YXFGTmV3cWs1WUh2Y0xIU0sxRC16SUFpTG5nbWo2OW5IYWoyNHZxS09KaURzUG4xR3FfaVBxQ2swMklOUVAwaFNvRzVUWUN1TGk3bkxrMm91TjVsQV9lRW9JNjBBOE5hWFdrZFVkWDl1UnY1c3RzMlRBX3RobGl5bWhfLXd2a2haWnl4TzVVVU5TSDZnZG5LRUlYRWh1MGRYVDRjWERfN1lrclUyTUw5cm91cnpRIiwiZSI6IkFRQUIiLCJkIjoiVTVhT1JZV2VrSi10NTVIVVgzSW9hVEJ2V2xOYTFmMlp2cHdEcG5VS0FlREpyd0FQeG9iZ2hCcFZ2WjRBOVJ3S2xRbDc1RjRoNW9UX1A5aC1XNmY4M1oxUWJnSThrcHdCOXE1blBMZ2RlbksxTmJkOElGcjF4eHRFVlptYWhDZlFJMHJJQ3FlSWRJMEtXemZKMm52N3FSazdJTXBsNTNUM3dUclJBRTJJV0xCRjcwSnVYZW1lcnVRcFBiMDhRVVVZRkM0dm5kWFpLUms0QUJYd2RPT2VlRXNPUThjVW9Fbk91NjRTMFliR2hoaVJNdHVJUjMzNG8xNDRucXR0b0E4RTBYTHFHRDRaTGxjUEZrNC1GUlh4Y3VsNlpOQmxlNWl3NEstd2hHcG5BUVQxdkc3Q21yRUd2Q09hbmZiczBNWGliUDNSZFBjZ2F2U0dmNDlRal9mX1hRIiwicCI6Ii05cEhmVGtuaXlmTHlDejNCYUIzcklCeE5WTjRBaTdtMmxUNXduVHRYWVg2VHhscS1lM0NtNXlnWGozZ3E0SGdfaG9ILTVjQVVCYTV5ZXJsOWFPbkpjQ09Ua0VmcmtBLTdmOFMxeUtKc0xrWU5Cc2hQdlpkcGpzNkZaUERNemhwTUpscEpDUlZXdVo3MHBuSDIwWTBfMXhXTzh2Q2hlallYVC1ZQURFaHFncyIsInEiOiI1M2E1bE9vRkpkaWs2WXlNSFpwT1dfcFlLTnVJelF4eGxrbjc0U2dSdlN1V3hZYkxMOXFqQjN3YnpPQkxfcUlseWNFRC1JRVdlYlVsYnhfUzAwTUZvSFB6b2ZlM2NJUjRDR0h1OVF5S3FQNlZSTUsyQmlGcUs5MS1Ja09ENnF2S3BSREFjQ0ZHcjdTZ1NWSndNd3NmSjl2WmoweGp2QXdZeHRWTjcydEJBSWMiLCJkcCI6Ikx6NmxSb0pnUHFSNmY5U2Zpaml0LW5nbHhJRWg5QmJrUzNUQlhZOGRyX3VnRnhLSGxOYmJPT0hLMjZMejhIaHV3bndUbjBpV1VHX1M3bVBZTzVvMWtzbHFhSmVpMzhkQmh0ZmdxdWJadVlNZlhUYnhwNlFEc1ZsTzdobEg5dVhRSmNQQmkzd2RYdTM1c0dvVXFiZWozWHR1MmN6QmN1bFpIVFQteUpwdTNEMCIsImRxIjoiZno5UTVTSUdkSGoycUlLZzRRRmN4TW9MUDJMNWdTaXZKVjFGQU5JamRta0pPVXhTVmR1UHR1U3U3LUg3UldCa185YUIxVk02Uk95bVNNSXBDQVdYaVU5VmlCeUVGM0pyX3NmQU02MlNhVGVVWGpuaEVkdTYzNlNqM0RoYnhGNXZTSEctS2FiUmtuVHRqWUdwdHhZTktiOS1pbjRIY25FQUNnZG9FaEJYcXU4IiwicWkiOiJuWmc0YzMwRVJKejZGS3ZOa2FXNkNmaFYyNVRmdVZkNlNOaksyUlZfZUpXczItZ2FPdDA3M2NsMEoybUN0d1RGY19BZ2g0S3VvSkJqV2hvbjFGREdnVmp6M3lyTWgxWDR5MnEyMi1PVnpOaE1ienVEdk9pNDU4Vk5uX3dJbUhCc0RBVU9EclBlR085YTJ3MVRaUjZyWXJzTml0LWJfajFWODJOSlgyajdVZW8ifQ";
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
+	const verifiedClaims = await verify(toPublicKey(key), token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
@@ -411,7 +412,7 @@ test("RSA-PSS algorithms - sign and verify", async () => {
 		const { privateEncoded } = await generateAsymmetricKeyPair(alg);
 		const key = load(privateEncoded);
 		const token = await sign(key, testClaims);
-		const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
+		const verifiedClaims = await verify(toPublicKey(key), token);
 		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
@@ -421,7 +422,7 @@ test("EC algorithms - sign and verify", async () => {
 		const { privateEncoded } = await generateAsymmetricKeyPair(alg);
 		const key = load(privateEncoded);
 		const token = await sign(key, testClaims);
-		const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
+		const verifiedClaims = await verify(toPublicKey(key), token);
 		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
@@ -431,7 +432,7 @@ test("EdDSA algorithm - sign and verify", async () => {
 	const privateKey = load(privateEncoded);
 	const publicKey = loadPublic(publicEncoded);
 	const token = await sign(privateKey, testClaims);
-	const verifiedClaims = await verify(publicKey, token, testClaims.root);
+	const verifiedClaims = await verify(publicKey, token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
@@ -441,7 +442,7 @@ test("EdDSA algorithm - static sign and verify", async () => {
 		"eyJhbGciOiJFZERTQSIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6Imd4cXVxMDlJUE4xVHl1TG1nTnNqZmo2NWtoa05OWndKVmp1MEEtUmQ0dkEiLCJkIjoiU1NFSHBIeTFUNHJaemhua3dpVVFlUGV1TUh2MWpLUGlxRzRsbFhyQV91cyJ9";
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
+	const verifiedClaims = await verify(toPublicKey(key), token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
@@ -453,7 +454,7 @@ test("EdDSA algorithm - verify with private key fails", async () => {
 	const token = await sign(key, testClaims);
 	await expect(
 		(async () => {
-			await verify(key, token, testClaims.root);
+			await verify(key, token);
 		})(),
 	).rejects.toThrow();
 });
@@ -466,12 +467,12 @@ test("asymmetric cross-algorithm verification fails", async () => {
 	const psPublicKey = loadPublic(psPublic);
 	const token = await sign(rsKey, testClaims);
 
-	const verifiedClaims = await verify(rsPublicKey, token, testClaims.root);
+	const verifiedClaims = await verify(rsPublicKey, token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 
 	await expect(
 		(async () => {
-			await verify(psPublicKey, token, testClaims.root);
+			await verify(psPublicKey, token);
 		})(),
 	).rejects.toThrow();
 });
@@ -492,7 +493,7 @@ test("cross-algorithm verification fails", async () => {
 
 	await expect(
 		(async () => {
-			await verify(hs384Key, token, testClaims.root);
+			await verify(hs384Key, token);
 		})(),
 	).rejects.toThrow();
 });
@@ -580,24 +581,22 @@ test("sign - no kid in header when not present", async () => {
 	expect(header.typ).toBe("JWT");
 });
 
-test("sign - sets issued at timestamp", async () => {
+test("sign - writes iat only when the claims carry one", async () => {
 	const key = load(encodeJwk(testKey));
-	const claimsWithoutIat: Claims = {
-		root: "test-path",
-		put: "test-pub",
+
+	const decodePayload = (token: string) => {
+		const [, payloadB64] = token.split(".");
+		const payloadBuffer = base64.toArrayBuffer(payloadB64, true); // true for urlSafe
+		return JSON.parse(new TextDecoder().decode(payloadBuffer));
 	};
 
-	const beforeSign = Math.floor(Date.now() / 1000);
-	const token = await sign(key, claimsWithoutIat);
-	const afterSign = Math.floor(Date.now() / 1000);
+	// Unset stays off the wire, matching the Rust crate rather than stamping now().
+	const withoutIat = await sign(key, { root: "test-path", put: "test-pub" });
+	expect(decodePayload(withoutIat).iat).toBeUndefined();
 
-	// Decode the payload to verify iat is set
-	const [, payloadB64] = token.split(".");
-	const payloadBuffer = base64.toArrayBuffer(payloadB64, true); // true for urlSafe
-	const payload = JSON.parse(new TextDecoder().decode(payloadBuffer));
-
-	expect(payload.iat >= beforeSign).toBeTruthy();
-	expect(payload.iat <= afterSign).toBeTruthy();
+	// A caller-supplied iat is preserved exactly.
+	const withIat = await sign(key, { root: "test-path", put: "test-pub", iat: 1700000000 });
+	expect(decodePayload(withIat).iat).toBe(1700000000);
 });
 
 test("verify - malformed token parts", async () => {
@@ -605,19 +604,19 @@ test("verify - malformed token parts", async () => {
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid", "test-path");
+			await verify(key, "invalid");
 		})(),
 	).rejects.toThrow();
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid.token", "test-path");
+			await verify(key, "invalid.token");
 		})(),
 	).rejects.toThrow();
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid.token.signature.extra", "test-path");
+			await verify(key, "invalid.token.signature.extra");
 		})(),
 	).rejects.toThrow();
 });
@@ -636,7 +635,7 @@ test("verify - invalid payload structure", async () => {
 
 	await expect(
 		(async () => {
-			await verify(key, invalidToken, "test-path");
+			await verify(key, invalidToken);
 		})(),
 	).rejects.toThrow();
 });
@@ -648,6 +647,6 @@ test("verify - claims validation during verification", async () => {
 	const token = await sign(key, { root: "test-path", put: "/absolute-pub" });
 
 	// Test that valid tokens pass verification
-	const verifiedClaims = await verify(key, token, "test-path");
+	const verifiedClaims = await verify(key, token);
 	expect(verifiedClaims.root).toBe("test-path");
 });
