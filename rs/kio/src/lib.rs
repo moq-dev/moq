@@ -31,7 +31,7 @@ pub mod tokio;
 mod tests;
 
 pub use consumer::Consumer;
-pub use pollable::{Awaitable, Pollable};
+pub use pollable::{Pending, Pollable};
 pub use producer::{Mut, Producer, Ref};
 pub use shared::Shared;
 pub use waiter::{Waiter, WaiterList, wait};

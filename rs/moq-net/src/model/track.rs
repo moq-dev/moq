@@ -1302,17 +1302,17 @@ impl Consumer {
 
 	/// Open a live subscription.
 	///
-	/// Registers the subscription on the track and returns a [`kio::Awaitable`] that resolves to the
+	/// Registers the subscription on the track and returns a [`kio::Pending`] that resolves to the
 	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Awaitable<Subscribing> {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
 		// Register the subscription if the track is live. If it is already closed, the returned
 		// future resolves to the abort error via `Subscribing::poll_ok`.
 		register_subscription(self.state.read(), &subscription);
 
-		kio::Awaitable::new(Subscribing {
+		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
@@ -1328,7 +1328,7 @@ impl Consumer {
 
 	/// Fetching a single past group, without holding a live subscription.
 	///
-	/// Returns a [`kio::Awaitable`] that resolves to the [`group::Consumer`]:
+	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
 	/// immediately if the group is cached, otherwise once a [`Dynamic`] serves
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
 	/// or `group::Fetch::default()`.
@@ -1337,7 +1337,7 @@ impl Consumer {
 	/// (past the final sequence, or no [`Dynamic`] on the track), or the track's abort error
 	/// if it's already closed. Concurrent fetches for the same sequence coalesce onto one
 	/// handler request.
-	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Awaitable<Fetching> {
+	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
 		let mut result = None;
 
@@ -1372,7 +1372,7 @@ impl Consumer {
 			}
 		}
 
-		kio::Awaitable::new(Fetching {
+		kio::Pending::new(Fetching {
 			state: self.state.clone(),
 			fetch,
 			sequence,
@@ -1380,15 +1380,15 @@ impl Consumer {
 		})
 	}
 
-	pub fn info(&self) -> kio::Awaitable<Querying> {
-		kio::Awaitable::new(Querying {
+	pub fn info(&self) -> kio::Pending<Querying> {
+		kio::Pending::new(Querying {
 			state: self.state.clone(),
 		})
 	}
 }
 
 /// The pollable state of a [`Consumer::subscribe`]; awaited via the
-/// [`kio::Awaitable`] wrapper, whose `DerefMut` exposes [`Self::update`].
+/// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
 pub struct Subscribing {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
@@ -1434,7 +1434,7 @@ impl kio::Pollable for Subscribing {
 }
 
 /// The pollable state of a [`Consumer::info`]; awaited via the
-/// [`kio::Awaitable`] wrapper.
+/// [`kio::Pending`] wrapper.
 pub struct Querying {
 	state: kio::Consumer<TrackState>,
 }
@@ -1538,7 +1538,7 @@ impl Drop for GroupRequest {
 
 /// The pollable state of a [`Consumer::fetch_group`].
 ///
-/// Awaited via the [`kio::Awaitable`] wrapper; resolves to the
+/// Awaited via the [`kio::Pending`] wrapper; resolves to the
 /// [`group::Consumer`] once the group lands in the track's cache (already present,
 /// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
 pub struct Fetching {
