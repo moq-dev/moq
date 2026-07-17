@@ -38,10 +38,10 @@ export interface Info {
  * Thrown by a frame read when the reader fell behind the group's eviction window: frames
  * it had not yet read were dropped to stay under the cache cap, so the stream has a gap.
  */
-export class CacheFull extends Error {
+export class Lagged extends Error {
 	constructor() {
-		super("group cache full: frames were evicted before being read");
-		this.name = "CacheFull";
+		super("lagged: frames were evicted before being read");
+		this.name = "Lagged";
 	}
 }
 
@@ -53,7 +53,7 @@ class GroupState {
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Frames evicted from the front by the cache cap. A reader that had not consumed
-	// them has a gap, so its next read throws CacheFull rather than skipping silently.
+	// them has a gap, so its next read throws Lagged rather than skipping silently.
 	offset = 0;
 	cacheBytes = 0;
 
@@ -271,7 +271,7 @@ export class Consumer {
 	 */
 	async readFrame(): Promise<Frame | undefined> {
 		for (;;) {
-			if (this.#state.offset > 0) throw new CacheFull();
+			if (this.#state.offset > 0) throw new Lagged();
 
 			const read = this.#readBufferedFrame();
 			if (read) return read.frame;
@@ -290,7 +290,7 @@ export class Consumer {
 	 */
 	async readFrameSequence(): Promise<({ sequence: number } & Frame) | undefined> {
 		for (;;) {
-			if (this.#state.offset > 0) throw new CacheFull();
+			if (this.#state.offset > 0) throw new Lagged();
 
 			const read = this.#readBufferedFrame();
 			if (read) return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };

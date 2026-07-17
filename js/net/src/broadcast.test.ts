@@ -1,6 +1,6 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { CacheFull, MAX_GROUP_FRAMES } from "./group.ts";
+import { Lagged, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -156,7 +156,7 @@ test("a late subscriber replays the cached window", async () => {
 	expect(await late.readString()).toBe("later");
 });
 
-test("a read throws CacheFull on a gap, then resyncs to the next group", async () => {
+test("a read throws Lagged on a gap, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 	const sub = broadcast.track("video").subscribe();
@@ -174,7 +174,7 @@ test("a read throws CacheFull on a gap, then resyncs to the next group", async (
 
 	// The reader hits the gap in group 0 (error, not a silent skip), then the next
 	// read resyncs from group 1.
-	expect(sub.readFrame()).rejects.toBeInstanceOf(CacheFull);
+	expect(sub.readFrame()).rejects.toBeInstanceOf(Lagged);
 	expect(await sub.readString()).toBe("ok");
 });
 
