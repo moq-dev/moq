@@ -10,7 +10,10 @@ pub enum Error {
 	#[error(transparent)]
 	Decode(#[from] coding::DecodeError),
 
-	// TODO move to a ConnectError
+	/// Version negotiation failed, or the negotiated version lacks a requested feature
+	/// (e.g. a FETCH against a version without fetch support). Mostly a connect-time
+	/// error, but the feature-gap case can surface mid-session, so it can't simply move
+	/// to a connect-only error type.
 	#[error("unsupported versions")]
 	Version,
 
@@ -42,7 +45,13 @@ pub enum Error {
 	#[error("old")]
 	Old,
 
-	// The application closes the stream with a code.
+	/// An application-chosen close code. Bounded to `u16` and offset past the library's
+	/// reserved range (`+ 64`) on the wire by [`Self::to_code`], so app codes never
+	/// collide with protocol ones.
+	///
+	/// The width asymmetry with [`Self::Remote`] is deliberate: `App` is a code *this*
+	/// side chooses to send, while `Remote` carries a raw code *received* off the wire
+	/// that didn't map to a known variant, which can be any `u32`.
 	#[error("app code={0}")]
 	App(u16),
 
@@ -78,6 +87,8 @@ pub enum Error {
 	#[error("invalid role")]
 	InvalidRole,
 
+	/// The peer offered an ALPN this endpoint doesn't recognize, so no version could be
+	/// negotiated. A connect-time error.
 	#[error("unknown ALPN: {0}")]
 	UnknownAlpn(String),
 
@@ -87,9 +98,12 @@ pub enum Error {
 	#[error("closed")]
 	Closed,
 
-	/// The cached frame has been evicted due to the group size limit.
-	#[error("cache full")]
-	CacheFull,
+	/// The reader fell behind the group's byte budget: the frame it wanted was dropped
+	/// to keep the group under its size limit. Named from the consumer's side (nothing is
+	/// "full"); distinct from [`Self::Evicted`], which drops a whole group under the
+	/// pool's memory pressure.
+	#[error("lagged")]
+	Lagged,
 
 	/// A frame declared a payload size larger than the receiver accepts.
 	#[error("frame too large")]
@@ -138,7 +152,7 @@ impl Error {
 			Self::UnknownAlpn(_) => 21,
 			Self::Dropped => 24,
 			Self::Closed => 25,
-			Self::CacheFull => 26,
+			Self::Lagged => 26,
 			Self::FrameTooLarge => 27,
 			// 28 is reserved (was per-frame decompression, removed in draft-05).
 			Self::TimestampMismatch => 29,
@@ -166,3 +180,23 @@ impl web_transport_trait::Error for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// The wire codes are a stable contract with every other implementation, so a variant
+	// rename (e.g. CacheFull -> Lagged) must not shift them. Pin the load-bearing ones.
+	#[test]
+	fn to_code_is_stable() {
+		assert_eq!(Error::Cancel.to_code(), 0);
+		assert_eq!(Error::Version.to_code(), 9);
+		assert_eq!(Error::UnknownAlpn(String::new()).to_code(), 21);
+		assert_eq!(Error::Lagged.to_code(), 26);
+		assert_eq!(Error::Evicted.to_code(), 31);
+		// App codes sit past the reserved library range; Remote is the raw received code.
+		assert_eq!(Error::App(0).to_code(), 64);
+		assert_eq!(Error::App(404).to_code(), 468);
+		assert_eq!(Error::Remote(468).to_code(), 468);
+	}
+}

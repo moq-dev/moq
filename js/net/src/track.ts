@@ -5,7 +5,7 @@
  */
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
-import { CacheFull, type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer, Lagged } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 
@@ -647,7 +647,7 @@ export class Subscriber {
 					// The reader fell behind this group's eviction window. Drop it and
 					// signal the gap; the next read resyncs from the following group.
 					groups.shift()?.close();
-					throw new CacheFull();
+					throw new Lagged();
 				}
 				const next = groups[0].tryReadFrameSequence();
 				if (next) {
@@ -674,7 +674,7 @@ export class Subscriber {
 				// Fell behind this group's eviction window. Drop it and signal the gap;
 				// the next read resyncs from the following group.
 				groups.shift()?.close();
-				throw new CacheFull();
+				throw new Lagged();
 			}
 			const next = group.tryReadFrameSequence();
 			if (next)

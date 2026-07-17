@@ -117,7 +117,7 @@ impl GroupState {
 	/// in-flight tail (streamed). Used by [`Consumer::poll_next_frame`].
 	fn poll_frame_source(&self, index: usize) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
 		if index < self.offset {
-			return Poll::Ready(Err(Error::CacheFull));
+			return Poll::Ready(Err(Error::Lagged));
 		}
 		let local = index - self.offset;
 		if let Some(f) = self.frames.get(local) {
@@ -618,7 +618,7 @@ impl Consumer {
 		let prefetch = &mut self.prefetch;
 		let res = self.state.poll(waiter, |state| {
 			if index < state.offset {
-				return Poll::Ready(Err(Error::CacheFull));
+				return Poll::Ready(Err(Error::Lagged));
 			}
 			// `local` can run past the buffered count when frames were cleared or evicted out
 			// from under us (abort, unfinished drop, an eviction gap); clamp so `range` never
@@ -911,9 +911,9 @@ mod test {
 		producer.write_frame(Timestamp::ZERO, big).unwrap();
 
 		let mut consumer = producer.consume();
-		// First frame was evicted, next_frame should return CacheFull.
+		// First frame was evicted, next_frame should return Lagged.
 		let result = consumer.next_frame().now_or_never().unwrap();
-		assert!(matches!(result, Err(crate::Error::CacheFull)));
+		assert!(matches!(result, Err(crate::Error::Lagged)));
 	}
 
 	#[test]
