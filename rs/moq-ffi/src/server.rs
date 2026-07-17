@@ -153,11 +153,7 @@ impl MoqServer {
 			.server
 			.as_ref()
 			.ok_or_else(|| MoqError::Bind("not listening; call listen() first".into()))?;
-		let info_handle = server.tls_info();
-		let info = info_handle
-			.read()
-			.map_err(|err| MoqError::Bind(format!("tls info lock poisoned: {err}")))?;
-		Ok(info.fingerprints.clone())
+		Ok(server.certificates().fingerprints())
 	}
 
 	/// Cancel any in-flight `listen()` or `accept()` call.

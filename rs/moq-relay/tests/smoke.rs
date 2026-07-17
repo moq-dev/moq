@@ -48,7 +48,7 @@ async fn build_web(port: u16, ws: bool) -> Web {
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
-	// moq_native::Server is needed for `tls_info`, even though we never
+	// moq_native::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
 	// unused UDP port that we ignore.
 	let mut server_config = moq_native::ServerConfig::default();
@@ -60,7 +60,7 @@ async fn build_web(port: u16, ws: bool) -> Web {
 	web_config.ws = ws;
 	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
-	Web::new(auth, cluster, server.tls_info(), web_config)
+	Web::new(auth, cluster, server.certificates(), web_config)
 }
 
 fn free_tcp_port() -> u16 {

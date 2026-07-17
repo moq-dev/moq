@@ -50,14 +50,18 @@ pub struct ClientConfig {
 	#[arg(id = "client-version", long = "client-version", env = "MOQ_CLIENT_VERSION")]
 	pub version: Vec<moq_net::Version>,
 
+	/// TLS trust and client-certificate settings (`--client-tls-*`).
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: crate::tls::Client,
 
+	/// Retry pacing for [`Client::reconnect`] (`--client-backoff-*`).
 	#[command(flatten)]
 	#[serde(default)]
 	pub backoff: Backoff,
 
+	/// WebSocket fallback settings (`--client-websocket-*`), used when QUIC is
+	/// blocked.
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
@@ -65,6 +69,7 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
+	/// Build the [`Client`] this config describes.
 	pub fn init(self) -> crate::Result<Client> {
 		Client::new(self)
 	}
@@ -119,12 +124,15 @@ pub struct Client {
 	#[cfg(feature = "quiche")]
 	quiche: Option<crate::quiche::QuicheClient>,
 	#[cfg(feature = "iroh")]
-	iroh: Option<web_transport_iroh::iroh::Endpoint>,
+	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
 	iroh_addrs: Vec<std::net::SocketAddr>,
 }
 
 impl Client {
+	/// Build a client from its config.
+	///
+	/// Errors if no transport feature is compiled in.
 	#[cfg(not(any(
 		feature = "noq",
 		feature = "quinn",
@@ -139,7 +147,7 @@ impl Client {
 		))
 	}
 
-	/// Create a new client
+	/// Build a client from its config, binding the QUIC socket up front.
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -196,9 +204,13 @@ impl Client {
 		})
 	}
 
+	/// Dial `iroh://` URLs through the given Iroh endpoint.
+	///
+	/// Required before [`connect`](Self::connect) can serve an `iroh://` URL;
+	/// without it those dials fail with [`crate::Error::IrohDisabled`].
 	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: Option<web_transport_iroh::iroh::Endpoint>) -> Self {
-		self.iroh = iroh;
+	pub fn with_iroh(mut self, iroh: crate::iroh::Endpoint) -> Self {
+		self.iroh = Some(iroh);
 		self
 	}
 
@@ -212,11 +224,13 @@ impl Client {
 		self
 	}
 
+	/// Publish the given origin to every session this client opens.
 	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
+	/// Subscribe to the peer's broadcasts, ingesting them into the given origin.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
 		self
@@ -268,6 +282,9 @@ impl Client {
 		Some(self.with_subscriber(origin).reconnect(url))
 	}
 
+	/// Dial the given URL and complete the MoQ handshake.
+	///
+	/// Errors if no transport feature is compiled in.
 	#[cfg(not(any(
 		feature = "noq",
 		feature = "quinn",
@@ -283,6 +300,12 @@ impl Client {
 		))
 	}
 
+	/// Dial the given URL and complete the MoQ handshake.
+	///
+	/// The scheme picks the transport, and `https://` races QUIC against the
+	/// WebSocket fallback so a blocked UDP path still connects. The session's
+	/// protocol driver is spawned on the current tokio runtime; the session
+	/// closes once the last returned handle drops.
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",

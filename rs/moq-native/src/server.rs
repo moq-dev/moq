@@ -2,12 +2,11 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
+#[cfg(feature = "iroh")]
+use crate::iroh;
 use crate::{Error, QuicBackend};
 use moq_net::Session;
-use std::sync::{Arc, RwLock};
 use url::Url;
-#[cfg(feature = "iroh")]
-use web_transport_iroh::iroh;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -35,14 +34,14 @@ pub struct ServerConfig {
 	#[cfg(feature = "tcp")]
 	#[command(flatten)]
 	#[serde(default)]
-	pub tcp: TcpConfig,
+	pub tcp: crate::tcp::Config,
 
 	/// Plaintext qmux Unix-socket listener (`--server-unix-bind`) with an optional
 	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
 	#[cfg(all(feature = "uds", unix))]
 	#[command(flatten)]
 	#[serde(default)]
-	pub unix: UnixConfig,
+	pub unix: crate::unix::Config,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
@@ -66,104 +65,15 @@ pub struct ServerConfig {
 	#[arg(id = "server-version", long = "server-version", env = "MOQ_SERVER_VERSION")]
 	pub version: Vec<moq_net::Version>,
 
+	/// The certificates to serve and the roots that authenticate mTLS clients
+	/// (`--server-tls-*`).
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: crate::tls::Server,
 }
 
-/// Plaintext-TCP qmux listener settings (no TLS, no UDP).
-///
-/// TCP carries no peer identity, so it must only be reachable from trusted
-/// clients. Bind it to loopback or a private interface; a non-loopback bind
-/// logs a warning but is allowed.
-#[cfg(feature = "tcp")]
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct TcpConfig {
-	/// Bind a plaintext qmux TCP listener on this address.
-	#[arg(long = "server-tcp-bind", id = "server-tcp-bind", env = "MOQ_SERVER_TCP_BIND")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub bind: Option<net::SocketAddr>,
-}
-
-/// Plaintext Unix-socket qmux listener settings, with an optional
-/// peer-credential allowlist.
-#[cfg(all(feature = "uds", unix))]
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct UnixConfig {
-	/// Bind a plaintext qmux Unix-socket listener at this path.
-	#[arg(long = "server-unix-bind", id = "server-unix-bind", env = "MOQ_SERVER_UNIX_BIND")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub bind: Option<PathBuf>,
-
-	/// Peer-credential allowlist. `None` (the default) enforces nothing, so the
-	/// socket's filesystem permissions are the only gate.
-	#[command(flatten)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub allow: Option<UnixAllow>,
-}
-
-/// Peer-credential allowlist for a `unix://` listener.
-///
-/// The kernel reports the connecting process's credentials. Each populated list
-/// constrains the corresponding credential (AND across the three, OR within
-/// each); all empty means no check.
-#[cfg(all(feature = "uds", unix))]
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct UnixAllow {
-	/// Allowed peer user IDs. Empty means any uid.
-	#[arg(
-		long = "server-unix-allow-uid",
-		env = "MOQ_SERVER_UNIX_ALLOW_UID",
-		value_delimiter = ','
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub uid: Vec<u32>,
-
-	/// Allowed peer group IDs. Empty means any gid.
-	#[arg(
-		long = "server-unix-allow-gid",
-		env = "MOQ_SERVER_UNIX_ALLOW_GID",
-		value_delimiter = ','
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub gid: Vec<u32>,
-
-	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
-	/// whose PID the platform doesn't report.
-	#[arg(
-		long = "server-unix-allow-pid",
-		env = "MOQ_SERVER_UNIX_ALLOW_PID",
-		value_delimiter = ','
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub pid: Vec<i32>,
-}
-
-#[cfg(all(feature = "uds", unix))]
-impl UnixAllow {
-	/// Whether any field is populated (i.e. the allowlist enforces something).
-	fn is_empty(&self) -> bool {
-		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
-	}
-
-	/// Whether `cred` satisfies every populated field (AND across fields, OR
-	/// within a field). A required pid is unsatisfiable when the platform
-	/// reports none.
-	fn permits(&self, cred: &crate::unix::PeerCred) -> bool {
-		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
-		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
-		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
-		uid_ok && gid_ok && pid_ok
-	}
-}
-
 impl ServerConfig {
+	/// Build the [`Server`] this config describes, binding its listeners.
 	pub fn init(self) -> crate::Result<Server> {
 		Server::new(self)
 	}
@@ -223,6 +133,10 @@ pub struct Server {
 }
 
 impl Server {
+	/// Build a server from its config, binding the QUIC socket up front.
+	///
+	/// The stream (`tcp`/`unix`) listeners bind lazily on the first
+	/// [`accept`](Self::accept), since they need a runtime.
 	pub fn new(config: ServerConfig) -> crate::Result<Self> {
 		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
 
@@ -314,22 +228,25 @@ impl Server {
 	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
 	/// use `qmux::Session::accept()` with your own HTTP framework instead.
 	#[cfg(feature = "websocket")]
-	pub fn with_websocket(mut self, websocket: Option<crate::websocket::Listener>) -> Self {
-		self.websocket = websocket;
+	pub fn with_websocket(mut self, websocket: crate::websocket::Listener) -> Self {
+		self.websocket = Some(websocket);
 		self
 	}
 
+	/// Also accept sessions over the given Iroh endpoint.
 	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: Option<iroh::Endpoint>) -> Self {
-		self.iroh = iroh;
+	pub fn with_iroh(mut self, iroh: iroh::Endpoint) -> Self {
+		self.iroh = Some(iroh);
 		self
 	}
 
+	/// Publish the given origin to every session this server accepts.
 	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
+	/// Subscribe to every session's broadcasts, ingesting them into the given origin.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
 		self
@@ -386,22 +303,29 @@ impl Server {
 		Ok(())
 	}
 
-	// Return the SHA256 fingerprints of all our certificates.
-	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
+	/// A live handle to the certificates this server is serving.
+	///
+	/// Use it to publish the SHA-256 fingerprints of a generated certificate at
+	/// `/certificate.sha256`, which an `http://` client pins to reach a
+	/// self-signed server. The handle tracks cert hot reloads, so hold it rather
+	/// than the values it returns.
+	///
+	/// Empty when no TLS-bearing backend is configured (e.g. a stream-only server).
+	pub fn certificates(&self) -> crate::tls::Certificates {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
-			return noq.tls_info();
+			return noq.certificates();
 		}
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
-			return quinn.tls_info();
+			return quinn.certificates();
 		}
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
-			return quiche.tls_info();
+			return quiche.certificates();
 		}
 		// No QUIC backend (e.g. a stream-only `--server-bind`): no certificates.
-		Arc::new(RwLock::new(crate::tls::Info::empty()))
+		crate::tls::Certificates::empty()
 	}
 
 	#[cfg(not(any(
@@ -412,6 +336,9 @@ impl Server {
 		feature = "tcp",
 		all(feature = "uds", unix)
 	)))]
+	/// Returns the next partially established session.
+	///
+	/// Panics: no transport feature is compiled in, so nothing can be accepted.
 	pub async fn accept(&mut self) -> Option<Request> {
 		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
 	}
@@ -584,11 +511,17 @@ impl Server {
 		}
 	}
 
+	/// The Iroh endpoint from [`with_iroh`](Self::with_iroh), if one was set.
 	#[cfg(feature = "iroh")]
 	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
 		self.iroh.as_ref()
 	}
 
+	/// The address the QUIC listener bound to, useful when the config asked for
+	/// port 0.
+	///
+	/// Errors with [`Error::NoBackend`] on a stream-only server, which has no
+	/// QUIC listener.
 	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
@@ -606,11 +539,17 @@ impl Server {
 		Err(Error::NoBackend("no QUIC listener configured"))
 	}
 
+	/// The address the WebSocket listener from
+	/// [`with_websocket`](Self::with_websocket) bound to, if one was set.
 	#[cfg(feature = "websocket")]
 	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
 		self.websocket.as_ref().and_then(|ws| ws.local_addr().ok())
 	}
 
+	/// Close every listener, giving in-flight connections a moment to see the
+	/// shutdown.
+	///
+	/// [`accept`](Self::accept) calls this for you on Ctrl-C.
 	pub async fn close(&mut self) {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_mut() {
@@ -683,7 +622,7 @@ struct StreamListeners {
 	binds: Vec<StreamBind>,
 	versions: moq_net::Versions,
 	#[cfg(all(feature = "uds", unix))]
-	unix_allow: Option<UnixAllow>,
+	unix_allow: Option<crate::unix::Allow>,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
 	tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -693,7 +632,7 @@ impl StreamListeners {
 	fn new(
 		binds: Vec<StreamBind>,
 		versions: moq_net::Versions,
-		#[cfg(all(feature = "uds", unix))] unix_allow: Option<UnixAllow>,
+		#[cfg(all(feature = "uds", unix))] unix_allow: Option<crate::unix::Allow>,
 	) -> Self {
 		Self {
 			binds,
@@ -783,7 +722,7 @@ fn spawn_tcp_loop(
 fn spawn_unix_loop(
 	listener: crate::unix::Listener,
 	versions: moq_net::Versions,
-	allow: Option<UnixAllow>,
+	allow: Option<crate::unix::Allow>,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
@@ -1082,36 +1021,10 @@ impl Request {
 		self.identity.clone()
 	}
 
-	/// Whether the peer presented a valid client certificate during the handshake.
+	#[doc(hidden)]
 	#[deprecated(note = "use `peer_identity` instead")]
 	pub fn has_peer_certificate(&self) -> bool {
 		self.peer_identity().is_some()
-	}
-}
-
-/// Server ID for QUIC-LB support.
-#[serde_with::serde_as]
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
-
-impl ServerId {
-	#[allow(dead_code)]
-	pub(crate) fn len(&self) -> usize {
-		self.0.len()
-	}
-}
-
-impl std::fmt::Debug for ServerId {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("QuicLbServerId").field(&hex::encode(&self.0)).finish()
-	}
-}
-
-impl std::str::FromStr for ServerId {
-	type Err = hex::FromHexError;
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		hex::decode(s).map(Self)
 	}
 }
 
@@ -1126,6 +1039,37 @@ mod tests {
 		assert_eq!(Transport::WebSocket.as_str(), "websocket");
 		assert_eq!(Transport::Tcp.as_str(), "tcp");
 		assert_eq!(Transport::Unix.as_str(), "unix");
+	}
+
+	/// Building the endpoint needs a runtime, and `certificates()` must stay
+	/// readable without one (no guard escapes to the caller).
+	#[cfg(feature = "quinn")]
+	#[tokio::test]
+	async fn certificates_expose_generated_fingerprints() {
+		let mut config = ServerConfig {
+			bind: Some("[::]:0".to_string()),
+			..Default::default()
+		};
+		config.tls.generate = vec!["localhost".into()];
+
+		let certs = config.init().expect("server init").certificates();
+		let fingerprints = certs.fingerprints();
+		assert_eq!(fingerprints.len(), 1, "one generated certificate");
+		// Hex-encoded SHA-256.
+		assert_eq!(fingerprints[0].len(), 64);
+		assert!(fingerprints[0].chars().all(|c| c.is_ascii_hexdigit()));
+	}
+
+	/// A stream-only server has no TLS backend, so there's nothing to pin. This
+	/// must report empty rather than panic.
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn certificates_are_empty_without_a_tls_backend() {
+		let mut config = ServerConfig::default();
+		config.unix.bind = Some(PathBuf::from("/tmp/moq-native-certificates-test.sock"));
+
+		let server = config.init().expect("server init");
+		assert!(server.certificates().fingerprints().is_empty());
 	}
 
 	#[test]

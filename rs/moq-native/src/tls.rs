@@ -1,3 +1,13 @@
+//! TLS trust, certificates, and keys, split by role.
+//!
+//! [`Client`] (`--client-tls-*`) picks who to trust: system roots, custom roots,
+//! a pinned SHA-256 fingerprint, or nothing at all. [`Server`] (`--server-tls-*`)
+//! supplies the certificate chain to serve, loaded from disk or self-signed on
+//! startup, and optionally the roots that authenticate mTLS clients.
+//!
+//! Certificates loaded from disk are watched and hot reloaded, so rotating them
+//! needs no restart. [`Certificates`] reads the current set back out.
+
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -20,78 +30,103 @@ use std::sync::RwLock;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A certificate file couldn't be opened, usually a bad path or permissions.
 	#[error("failed to open certificate file")]
 	Open(#[source] std::io::Error),
 
+	/// A certificate or key file was opened but couldn't be read to the end.
 	#[error("failed to read file")]
 	ReadFile(#[source] std::io::Error),
 
+	/// A file's contents aren't valid PEM certificates.
 	#[error("failed to read certificates")]
 	Read(#[source] rustls::pki_types::pem::Error),
 
+	/// A file's contents aren't a valid PEM private key.
 	#[error("failed to parse private key")]
 	Key(#[source] rustls::pki_types::pem::Error),
 
+	/// A PEM file parsed cleanly but held no certificates.
 	#[error("no certificates found")]
 	Empty,
 
+	/// A root PEM file parsed cleanly but held no certificates, so it would trust nothing.
 	#[error("no roots found in {}", .0.display())]
 	EmptyRoots(PathBuf),
 
+	/// Nothing is configured that could ever verify a server certificate.
 	#[error(
 		"no trusted roots: provide --client-tls-root, enable --client-tls-system-roots, or use --client-tls-fingerprint / --client-tls-disable-verify"
 	)]
 	NoRoots,
 
+	/// A configured fingerprint isn't valid hex.
 	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256)")]
 	Fingerprint(#[source] hex::FromHexError),
 
+	/// A configured fingerprint is valid hex but the wrong size for a SHA-256 digest.
 	#[error("invalid TLS fingerprint length: expected 32 bytes (SHA-256), got {0}")]
 	FingerprintLength(usize),
 
+	/// Fingerprint pinning was combined with CA roots. Pinning bypasses the chain, so one of
+	/// the two would be silently ignored.
 	#[error(
 		"--client-tls-fingerprint cannot be combined with --client-tls-root or --client-tls-system-roots: fingerprint pinning bypasses CA verification"
 	)]
 	FingerprintWithRoots,
 
+	/// A root certificate parsed as PEM but rustls rejected it as a trust anchor.
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
+	/// The JNI call in [`init_android`] failed, so the platform verifier is unavailable.
 	#[cfg(target_os = "android")]
 	#[error("failed to initialize the Android platform verifier")]
 	AndroidInit(#[source] jni::errors::Error),
 
+	/// rustls rejected the mTLS client certificate and key, e.g. they don't match.
 	#[error("failed to configure client certificate")]
 	ClientAuth(#[source] rustls::Error),
 
+	/// Only one half of the mTLS client identity was given; it needs both a cert and a key.
 	#[error("both --client-tls-cert and --client-tls-key must be provided")]
 	IncompleteClientAuth,
 
+	/// The server was given a different number of certificates than keys. They pair by index.
 	#[error("must provide both cert and key")]
 	CertKeyCountMismatch,
 
+	/// The server has no certificate to serve: no cert/key pair and no hostnames to generate one for.
 	#[error("must provide at least one cert/key pair or generate entry")]
 	NoCertSource,
 
+	/// A server cert/key pair was paired up by index but the key isn't the certificate's.
 	#[error("private key {} doesn't match certificate {}", key.display(), cert.display())]
 	KeyMismatch {
+		/// Path of the private key file.
 		key: PathBuf,
+		/// Path of the certificate file it was paired with.
 		cert: PathBuf,
+		/// Why rustls says the two don't match.
 		#[source]
 		source: rustls::Error,
 	},
 
+	/// A rustls error with no more specific context, e.g. building a config.
 	#[error(transparent)]
 	Rustls(#[from] rustls::Error),
 
+	/// The mTLS client-certificate verifier couldn't be built from the configured roots.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
+	/// Generating a self-signed certificate failed.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	#[error(transparent)]
 	Rcgen(#[from] rcgen::Error),
 
+	/// The crate was built without a crypto provider, so no TLS is possible.
 	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
 	NoCryptoProvider,
 }
@@ -694,22 +729,54 @@ impl PeerIdentity {
 	}
 }
 
-/// TLS certificate information including fingerprints.
-#[derive(Debug)]
-pub struct Info {
+/// The certificates a server is currently serving.
+#[derive(Debug, Default)]
+pub(crate) struct Info {
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
-	pub fingerprints: Vec<String>,
+	pub(crate) fingerprints: Vec<String>,
 }
 
-impl Info {
-	/// An empty certificate set, used when no TLS-bearing backend is configured.
+/// A live handle to the certificates a [`crate::Server`] is serving.
+///
+/// Cheap to clone, and every read reflects the latest hot reload of the files on
+/// disk, so a caller can build one at startup and hold it for the process
+/// lifetime. Obtained from [`crate::Server::certificates`].
+#[derive(Clone, Debug)]
+pub struct Certificates {
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	info: Arc<RwLock<Info>>,
+}
+
+impl Certificates {
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	pub(crate) fn new(info: Arc<RwLock<Info>>) -> Self {
+		Self { info }
+	}
+
+	/// An empty set, used when no TLS-bearing backend is configured.
 	pub(crate) fn empty() -> Self {
 		Self {
 			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-			certs: Vec::new(),
-			fingerprints: Vec::new(),
+			info: Arc::new(RwLock::new(Info::default())),
 		}
+	}
+
+	/// The SHA-256 fingerprints of the certificates being served right now, hex
+	/// encoded, one per certificate and in configuration order.
+	///
+	/// Empty when the server has no TLS-bearing backend. Re-read this per use
+	/// rather than caching it: a cert rotation on disk changes the values.
+	pub fn fingerprints(&self) -> Vec<String> {
+		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+		{
+			// A panicking writer can't leave the cert list half-updated (it is
+			// replaced wholesale), so a poisoned lock is still safe to read.
+			let info = self.info.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+			info.fingerprints.clone()
+		}
+		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+		Vec::new()
 	}
 }
 
@@ -1014,10 +1081,7 @@ pub(crate) struct ServeCerts {
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			info: Arc::new(RwLock::new(Info {
-				certs: Vec::new(),
-				fingerprints: Vec::new(),
-			})),
+			info: Arc::new(RwLock::new(Info::default())),
 			provider,
 		}
 	}

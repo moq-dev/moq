@@ -15,6 +15,24 @@ use url::Url;
 /// negotiated) since there's no TLS ALPN to carry it.
 const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 
+/// Plaintext-TCP qmux listener settings (no TLS, no UDP).
+///
+/// Flattened onto [`crate::ServerConfig::tcp`]. TCP carries no peer identity, so
+/// the listener must only be reachable from trusted clients. Bind it to loopback
+/// or a private interface; a non-loopback bind logs a warning but is allowed.
+// The derived arg group is named after the struct, so it needs an explicit id to
+// stay unique across the flattened sections.
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[group(id = "server-tcp")]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct Config {
+	/// Bind a plaintext qmux TCP listener on this address.
+	#[arg(long = "server-tcp-bind", id = "server-tcp-bind", env = "MOQ_SERVER_TCP_BIND")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<net::SocketAddr>,
+}
+
 /// Errors specific to the plain-TCP qmux transport.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

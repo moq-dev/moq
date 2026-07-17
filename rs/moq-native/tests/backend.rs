@@ -294,7 +294,7 @@ async fn iroh_connect() {
 	let mut server = server_config
 		.init()
 		.expect("failed to init server")
-		.with_iroh(Some(server_endpoint));
+		.with_iroh(server_endpoint);
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
@@ -315,7 +315,7 @@ async fn iroh_connect() {
 	let client = client_config
 		.init()
 		.expect("failed to init client")
-		.with_iroh(Some(client_endpoint))
+		.with_iroh(client_endpoint)
 		.with_iroh_addrs(server_addrs);
 
 	let url: url::Url = format!("iroh://{server_endpoint_id}").parse().unwrap();

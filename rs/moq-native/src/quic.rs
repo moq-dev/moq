@@ -12,7 +12,34 @@
 use std::net;
 use std::time::Duration;
 
-use crate::ServerId;
+/// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
+///
+/// Parsed from, and serialized as, a hex string. Its length must match the load
+/// balancer's configured server-ID length.
+#[serde_with::serde_as]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
+
+impl ServerId {
+	#[allow(dead_code)]
+	pub(crate) fn len(&self) -> usize {
+		self.0.len()
+	}
+}
+
+impl std::fmt::Debug for ServerId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("ServerId").field(&hex::encode(&self.0)).finish()
+	}
+}
+
+impl std::str::FromStr for ServerId {
+	type Err = hex::FromHexError;
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		hex::decode(s).map(Self)
+	}
+}
 
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
